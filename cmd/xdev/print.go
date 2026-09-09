@@ -103,7 +103,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- agent ---
 	hooks := &printHooks{store: store}
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, Model: modelName}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -170,6 +170,21 @@ func buildProvider(name string, pc *config.ProviderConfig) (ai.Provider, error) 
 	default:
 		return nil, fmt.Errorf("provider %q: unsupported api %q", name, pc.API)
 	}
+}
+
+// modelWindow resolves the context window for one provider/model pair
+// (0 when the model is undiscovered — compaction stays disabled then).
+func modelWindow(cfg *config.Config, provider, model string) int {
+	pc, ok := cfg.Providers[provider]
+	if !ok {
+		return 0
+	}
+	for _, m := range pc.Models {
+		if m.ID == model {
+			return m.ContextWindow
+		}
+	}
+	return 0
 }
 
 // openSession resumes the latest session in cwd (--continue) or starts a new
@@ -291,5 +306,8 @@ func (h *printHooks) OnToolResultMessage(msg *ai.Message) {
 }
 
 func (h *printHooks) OnTurnEnd(reason ai.StopReason, err error) {}
+func (h *printHooks) OnCompaction(tokensBefore int64) {
+	fmt.Fprintf(os.Stderr, "\n[context compacted at ~%d tokens]\n", tokensBefore)
+}
 
 var _ = filepath.Join

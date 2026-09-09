@@ -13,7 +13,7 @@
 
 ## Status
 
-**M4 TUI runs (2026-09-09).** `xdev tui` opens the interactive Grok-CLI-styled interface: streaming assistant output, tool-call blocks with live status, dimmed thinking, ↑/↓ token counters, spinner, prompt history, Esc-cancel, Ctrl+C quit, groknight/grokday themes (auto by terminal polarity). M0–M3 print mode is unchanged (`xdev "prompt"`, `--continue` resume, omp session interop). Boot RSS 11.6 MB against the <100 MB hard budget. Remaining M4 polish (markdown rendering, vim mode, blocking cards) tracked in issue #5.
+**M4 TUI + M5 resilience run (2026-09-10).** `xdev tui` is daily-drivable (streaming markdown-aware output, tool-call blocks, dimmed thinking, themes, Esc/Ctrl+C) and the conversation now survives across turns — history is rebuilt from the session store on every submit (tmux-verified). M5 core landed: typed provider errors (`ai.HTTPError`) with an auth/transient/overflow taxonomy, a transient pre-content retry ladder (500ms→8s, jittered), and threshold + overflow compaction (store-anchored `compaction` entries that `buildContext` replays) — a gateway blip retries, a full window compacts instead of dying. M0–M3 print mode unchanged (`xdev "prompt"`, `--continue` resume, omp session interop). Boot RSS 11.6 MB against the <100 MB hard budget. Remaining M5 tails (promotion ladder, failover chains, partial-stream retain+continue) tracked in issue #6; remaining M4 polish in issue #5.
 
 - [docs/PRD.md](docs/PRD.md) — product requirements and scope.
 - [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md) — the full architecture research and rebuild blueprint this project is based on.

@@ -46,7 +46,7 @@ func wirePost(ctx context.Context, hc *http.Client, url string, headers map[stri
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
-		return nil, fmt.Errorf("%s: HTTP %d: %s", api, resp.StatusCode, wireErrBody(resp.Body))
+		return nil, &HTTPError{API: api, Status: resp.StatusCode, Body: wireErrBody(resp.Body)}
 	}
 	return resp, nil
 }
