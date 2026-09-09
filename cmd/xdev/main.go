@@ -73,7 +73,22 @@ Flags:
 			prompt = args[0]
 		}
 		if prompt == "" && !*continueLast {
-			// Read prompt from stdin (pipe usage).
+			if stdinIsTerminal() {
+				// Bare interactive invocation: open the TUI.
+				code, err := runTUI(printOptions{
+					Model:        *model,
+					ContinueLast: *continueLast,
+					SystemPrompt: *systemPrompt,
+					AppendSystem: *appendSystemPrompt,
+					MaxTokens:    *maxTokens,
+				}, *themeName)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "xdev:", err)
+					os.Exit(2)
+				}
+				os.Exit(code)
+			}
+			// Pipe usage: read the prompt from stdin.
 			buf := make([]byte, 0, 4096)
 			tmp := make([]byte, 4096)
 			for {
@@ -104,4 +119,14 @@ Flags:
 			os.Exit(code)
 		}
 	}
+}
+
+// stdinIsTerminal reports whether stdin is an interactive TTY (as opposed
+// to a pipe or file feeding a prompt).
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
