@@ -20,6 +20,7 @@ func main() {
 	continueLast := fs.Bool("continue", false, "continue the most recent session in this directory")
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
+	themeName := fs.String("theme", "", "TUI theme: groknight | grokday (default: auto)")
 	maxTurns := fs.Int("max-turns", 32, "max agent turns per run")
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
@@ -29,7 +30,7 @@ func main() {
 Usage:
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
-  xdev tui                     interactive TUI (lands in M4)
+  xdev tui                     interactive TUI (Grok-CLI look)
 
 Flags:
 `, version)
@@ -49,9 +50,18 @@ Flags:
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
-		// M4: the frame-plan TUI. print mode is the MVP driver.
-		fmt.Fprintln(os.Stderr, "xdev: TUI lands in M4; use print mode for now: xdev -p \"prompt\"")
-		os.Exit(2)
+		code, err := runTUI(printOptions{
+			Model:        *model,
+			ContinueLast: *continueLast,
+			SystemPrompt: *systemPrompt,
+			AppendSystem: *appendSystemPrompt,
+			MaxTokens:    *maxTokens,
+		}, *themeName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(code)
 	}
 
 	switch mode {
