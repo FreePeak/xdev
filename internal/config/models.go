@@ -1,0 +1,178 @@
+// Package config loads xdev configuration: providers/models (models.yml),
+// settings, and env layering. The models.yml schema matches omp's
+// (baseUrl/apiKey/api/models/discovery) so existing provider files port over.
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// DataDir returns the xdev agent data directory (~/.xdev/agent).
+func DataDir() string {
+	if v := os.Getenv("XDEV_AGENT_DIR"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".xdev/agent"
+	}
+	return filepath.Join(home, ".xdev", "agent")
+}
+
+// DiscoveryConfig selects dynamic model listing.
+type DiscoveryConfig struct {
+	Type     string `yaml:"type"` // "openai-models-list" is the MVP value
+	InjectV1 bool   `yaml:"injectV1,omitempty"`
+}
+
+// ModelConfig is one statically pinned model entry.
+type ModelConfig struct {
+	ID            string `yaml:"id"`
+	Name          string `yaml:"name,omitempty"`
+	Reasoning     bool   `yaml:"reasoning,omitempty"`
+	ContextWindow int    `yaml:"contextWindow,omitempty"`
+	MaxTokens     int    `yaml:"maxTokens,omitempty"`
+	// BaseURL/APIKey/Headers override the provider-level values per model.
+	BaseURL string            `yaml:"baseUrl,omitempty"`
+	APIKey  string            `yaml:"apiKey,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty"`
+}
+
+// ProviderConfig is one provider block in models.yml.
+type ProviderConfig struct {
+	BaseURL   string            `yaml:"baseUrl"`
+	APIKey    string            `yaml:"apiKey,omitempty"`
+	API       string            `yaml:"api"`
+	Headers   map[string]string `yaml:"headers,omitempty"`
+	Discovery *DiscoveryConfig  `yaml:"discovery,omitempty"`
+	Models    []ModelConfig     `yaml:"models,omitempty"`
+}
+
+// Config is the parsed models.yml.
+type Config struct {
+	Providers    map[string]*ProviderConfig `yaml:"providers"`
+	DefaultModel string                     `yaml:"defaultModel,omitempty"` // "provider/model"
+}
+
+// Resolve expands ${VAR} references in s against the process environment.
+// A missing variable expands to the empty string.
+func Resolve(s string) string {
+	if s == "" || !strings.Contains(s, "$") {
+		return s
+	}
+	return os.Expand(s, func(k string) string {
+		if v, ok := os.LookupEnv(k); ok {
+			return v
+		}
+		return ""
+	})
+}
+
+var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// LoadModels parses one models.yml file with ${VAR} expansion applied to
+// string values (baseUrl, apiKey, header values).
+func LoadModels(path string) (*Config, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	dec := yaml.NewDecoder(strings.NewReader(expandEnvYAML(string(raw))))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]*ProviderConfig{}
+	}
+	return &cfg, nil
+}
+
+// LoadModelsLayered loads global then project models.yml, later wins.
+// Missing files are skipped silently.
+func LoadModelsLayered() (*Config, error) {
+	cfg := &Config{Providers: map[string]*ProviderConfig{}}
+	paths := []string{
+		filepath.Join(DataDir(), "models.yml"),
+		".xdev/models.yml",
+	}
+	for _, p := range paths {
+		c, err := LoadModels(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		for k, v := range c.Providers {
+			cfg.Providers[k] = v
+		}
+		if c.DefaultModel != "" {
+			cfg.DefaultModel = c.DefaultModel
+		}
+	}
+	return cfg, nil
+}
+
+// ParseModelRef splits "provider/model" into its two halves.
+func ParseModelRef(ref string) (provider, model string, err error) {
+	i := strings.Index(ref, "/")
+	if i <= 0 || i == len(ref)-1 {
+		return "", "", fmt.Errorf("invalid model reference %q: want \"provider/model\"", ref)
+	}
+	return ref[:i], ref[i+1:], nil
+}
+
+// DefaultModelRef returns cfg.DefaultModel if set, else the first provider's
+// first pinned model, else "".
+func (c *Config) DefaultModelRef() string {
+	if c.DefaultModel != "" {
+		return c.DefaultModel
+	}
+	// Deterministic: prefer common keys, else first sorted provider.
+	for _, k := range []string{"onegw", "router", "anthropic", "openai"} {
+		if p, ok := c.Providers[k]; ok && len(p.Models) > 0 {
+			return k + "/" + p.Models[0].ID
+		}
+	}
+	keys := sortedKeys(c.Providers)
+	for _, k := range keys {
+		if len(c.Providers[k].Models) > 0 {
+			return k + "/" + c.Providers[k].Models[0].ID
+		}
+	}
+	return ""
+}
+
+func sortedKeys(m map[string]*ProviderConfig) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+// expandEnvYAML replaces ${VAR} occurrences in scalar YAML values.
+// It operates on the raw text; only quoted or plain scalars containing the
+// pattern are touched, which is safe because keys never match the pattern.
+func expandEnvYAML(s string) string {
+	return envRef.ReplaceAllStringFunc(s, func(m string) string {
+		k := m[2 : len(m)-1]
+		if v, ok := os.LookupEnv(k); ok {
+			return v
+		}
+		return ""
+	})
+}

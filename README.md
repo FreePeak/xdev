@@ -13,10 +13,30 @@
 
 ## Status
 
-**Pre-M0 — planning phase. xdev does not exist yet.** There is no binary, no install, and no code; what you see here is the blueprint. Work is tracked in the milestone roadmap below, which targets full omp feature parity (model roles, commands, memory, subagents, advisor, prewalk, themes/color, skills, hub, hooks) — the parity breakdown lives in [docs/PRD.md](docs/PRD.md) and [docs/research/parity-*.md](docs/research/).
+**MVP runs (2026-09-09).** M0–M3 are complete in `print` mode: `xdev "prompt"` streams a real coding task end-to-end (read/write/edit/bash tools, JSONL session persistence, `--continue` resume), boot RSS is 11.3 MB against the <100 MB hard budget, and the session core round-trips real omp session files (interop-tested). The TUI (M4, visual target: the Grok CLI) is the next milestone. Work is tracked in the milestone roadmap below; the parity breakdown lives in [docs/PRD.md](docs/PRD.md) and [docs/research/parity-*.md](docs/research/).
 
 - [docs/PRD.md](docs/PRD.md) — product requirements and scope.
 - [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md) — the full architecture research and rebuild blueprint this project is based on.
+
+## Quickstart (print mode)
+
+```bash
+go build -o xdev ./cmd/xdev
+
+# ~/.xdev/agent/models.yml — OpenAI-compatible gateway (env-expanded):
+# providers:
+#   onegw:
+#     baseUrl: http://127.0.0.1:8080/v1
+#     apiKey: ${ONEGW_KEY}
+#     api: openai-completions
+#     models: [{ id: free, name: Free, contextWindow: 1000000 }]
+# defaultModel: onegw/free
+
+xdev "create a hello.py that prints hello world, then run it"
+xdev -continue "now add tests"   # resume the latest session in this cwd
+xdev -model onegw/dev "..."      # explicit provider/model
+# hard RSS backstop defaults to 100MB; set XDEV_MEMLIMIT to override
+```
 
 ## Planned module layout
 

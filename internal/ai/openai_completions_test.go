@@ -1,0 +1,213 @@
+package ai
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// completionsFrames is a happy-path stream: text then a tool call, usage on
+// the final chunk with empty choices.
+var completionsFrames = [][2]string{
+	{"", `{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"He"}}]}`},
+	{"", `{"id":"c1","choices":[{"index":0,"delta":{"content":"llo"}}]}`},
+	{"", `{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":"}}]}}]}`},
+	{"", `{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"/tmp/x\"}"}}]}}]}`},
+	{"", `{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`},
+	{"", `{"id":"c1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":30},"completion_tokens_details":{"reasoning_tokens":7}}}`},
+	{"", `[DONE]`},
+}
+
+func TestOpenAICompletionsHappyPath(t *testing.T) {
+	srv, body := newStreamServer(t, completionsFrames...)
+	p := NewOpenAICompletionsProvider("router", srv.URL, "sk-test", nil, nil)
+	ch, err := p.Stream(context.Background(), StreamRequest{
+		System:   "be brief",
+		Model:    "free",
+		Messages: []Message{{Role: RoleUser, Content: []Block{TextBlock{Text: "hi"}}}},
+		Tools:    []ToolDef{{Name: "read", Description: "read a file", Parameters: []byte(`{"type":"object"}`)}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	evs := collectEvents(t, ch)
+	assertOrder(t, evs,
+		EventStart, EventTextStart, EventTextDelta, EventTextDelta, EventTextEnd,
+		EventToolcallStart, EventToolcallDelta, EventToolcallDelta, EventToolcallEnd,
+		EventDone,
+	)
+	if evs[0].Provider != "router" || evs[0].API != APIOpenAICompletions || evs[0].Model != "free" {
+		t.Fatalf("start event = %+v", evs[0])
+	}
+	if d := evs[3].Delta; d != "llo" {
+		t.Fatalf("text delta = %q", d)
+	}
+	if s := evs[3].Snapshot; s != "Hello" {
+		t.Fatalf("text snapshot = %q", s)
+	}
+
+	done := evs[len(evs)-1]
+	if done.Type != EventDone || done.StopReason != StopReasonStop {
+		t.Fatalf("done = %+v", done)
+	}
+	// Usage numbers: input excludes cacheRead, total includes it.
+	if done.Usage == nil || done.Usage.Input != 70 || done.Usage.Output != 20 ||
+		done.Usage.CacheRead != 30 || done.Usage.TotalTokens != 120 ||
+		done.Usage.ReasoningTokens != 7 {
+		t.Fatalf("usage = %+v", done.Usage)
+	}
+	msg := done.Message
+	if msg == nil || msg.Role != RoleAssistant {
+		t.Fatalf("message = %+v", msg)
+	}
+	if msg.Provider != "router" || msg.API != APIOpenAICompletions || msg.Model != "free" {
+		t.Fatalf("message meta = %v/%v/%v", msg.Provider, msg.API, msg.Model)
+	}
+	if msg.ResponseID != "c1" || msg.StopReason != StopReasonStop {
+		t.Fatalf("message id/stop = %v/%v", msg.ResponseID, msg.StopReason)
+	}
+	if len(msg.Content) != 2 {
+		t.Fatalf("content blocks = %d", len(msg.Content))
+	}
+	if txt, ok := msg.Content[0].(TextBlock); !ok || txt.Text != "Hello" {
+		t.Fatalf("block 0 = %#v", msg.Content[0])
+	}
+	tc, ok := msg.Content[1].(ToolCallBlock)
+	if !ok || tc.ID != "call_1" || tc.Name != "read" || tc.StreamIndex != 0 {
+		t.Fatalf("block 1 = %#v", msg.Content[1])
+	}
+	if string(tc.Arguments) != `{"path":"/tmp/x"}` {
+		t.Fatalf("arguments = %s", tc.Arguments)
+	}
+	if tc.PartialArgs != `{"path":"/tmp/x"}` {
+		t.Fatalf("partial args = %s", tc.PartialArgs)
+	}
+	if msg.TTFTMS < 0 || msg.DurationMS < 0 {
+		t.Fatalf("timings = %v/%v", msg.TTFTMS, msg.DurationMS)
+	}
+
+	// Request body: system message, string contents, tool shape, options.
+	req := decodeJSON(t, body.get(t))
+	if jstr(t, req, "model") != "free" || jpath(req, "stream") != true {
+		t.Fatalf("model/stream = %v", req)
+	}
+	if jpath(req, "stream_options", "include_usage") != true {
+		t.Fatalf("stream_options = %v", jpath(req, "stream_options"))
+	}
+	if jstr(t, req, "messages", 0, "role") != "system" ||
+		jstr(t, req, "messages", 0, "content") != "be brief" {
+		t.Fatalf("system message = %v", jpath(req, "messages", 0))
+	}
+	if jstr(t, req, "messages", 1, "role") != "user" ||
+		jstr(t, req, "messages", 1, "content") != "hi" {
+		t.Fatalf("user message = %v", jpath(req, "messages", 1))
+	}
+	if jstr(t, req, "tools", 0, "type") != "function" ||
+		jstr(t, req, "tools", 0, "function", "name") != "read" ||
+		jstr(t, req, "tools", 0, "function", "parameters", "type") != "object" {
+		t.Fatalf("tools = %v", req["tools"])
+	}
+}
+
+func TestOpenAICompletionsThinking(t *testing.T) {
+	frames := [][2]string{
+		{"", `{"id":"c2","choices":[{"index":0,"delta":{"reasoning_content":"let me"}}]}`},
+		{"", `{"id":"c2","choices":[{"index":0,"delta":{"reasoning":" think"}}]}`},
+		{"", `{"id":"c2","choices":[{"index":0,"delta":{"content":"answer"}}]}`},
+		{"", `{"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`},
+		{"", `[DONE]`},
+	}
+	srv, body := newStreamServer(t, frames...)
+	p := NewOpenAICompletionsProvider("router", srv.URL, "", nil, nil)
+	ch, err := p.Stream(context.Background(), StreamRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: []Block{TextBlock{Text: "q"}}}},
+		Thinking: &ThinkingBudget{Tokens: 4096},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	evs := collectEvents(t, ch)
+	assertOrder(t, evs,
+		EventStart, EventThinkingStart, EventThinkingDelta, EventThinkingDelta,
+		EventThinkingEnd, EventTextStart, EventTextDelta, EventTextEnd, EventDone,
+	)
+	done := evs[len(evs)-1]
+	th, ok := done.Message.Content[0].(ThinkingBlock)
+	if !ok || th.Thinking != "let me think" || th.ThinkingSignature != "reasoning_content" {
+		t.Fatalf("thinking block = %#v", done.Message.Content[0])
+	}
+	if jstr(t, decodeJSON(t, body.get(t)), "reasoning_effort") != "medium" {
+		t.Fatalf("reasoning_effort mismatch")
+	}
+}
+
+func TestOpenAICompletionsToolResultRoundTrip(t *testing.T) {
+	srv, body := newStreamServer(t, completionsFrames...)
+	p := NewOpenAICompletionsProvider("router", srv.URL, "", nil, nil)
+	_, err := p.Stream(context.Background(), StreamRequest{
+		Model: "m",
+		Messages: []Message{
+			{Role: RoleAssistant, Content: []Block{
+				TextBlock{Text: "on it"},
+				ToolCallBlock{ID: "call_1", Name: "read", Arguments: json.RawMessage(`{"path":"/tmp/x"}`)},
+			}},
+			{Role: RoleToolResult, ToolCallID: "call_1", ToolName: "read", Content: []Block{TextBlock{Text: "1:x"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	req := decodeJSON(t, body.get(t))
+	// Assistant: content null, tool_calls with raw arguments string.
+	if jpath(req, "messages", 0, "content") != nil {
+		t.Fatalf("assistant content = %v, want null", jpath(req, "messages", 0, "content"))
+	}
+	if jstr(t, req, "messages", 0, "tool_calls", 0, "id") != "call_1" ||
+		jstr(t, req, "messages", 0, "tool_calls", 0, "type") != "function" ||
+		jstr(t, req, "messages", 0, "tool_calls", 0, "function", "name") != "read" ||
+		jstr(t, req, "messages", 0, "tool_calls", 0, "function", "arguments") != `{"path":"/tmp/x"}` {
+		t.Fatalf("tool_calls = %v", jpath(req, "messages", 0, "tool_calls"))
+	}
+	// Tool result: role tool with tool_call_id.
+	if jstr(t, req, "messages", 1, "role") != "tool" ||
+		jstr(t, req, "messages", 1, "tool_call_id") != "call_1" ||
+		jstr(t, req, "messages", 1, "content") != "1:x" {
+		t.Fatalf("tool message = %v", jpath(req, "messages", 1))
+	}
+}
+
+func TestOpenAICompletionsNoFinishReason(t *testing.T) {
+	srv, _ := newStreamServer(t,
+		[2]string{"", `{"id":"c3","choices":[{"index":0,"delta":{"content":"partial"}}]}`},
+		[2]string{"", `[DONE]`},
+	)
+	p := NewOpenAICompletionsProvider("router", srv.URL, "", nil, nil)
+	ch, err := p.Stream(context.Background(), StreamRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	evs := collectEvents(t, ch)
+	if evs[len(evs)-1].Type != EventError {
+		t.Fatalf("last event = %v, want error", evs[len(evs)-1].Type)
+	}
+}
+
+func TestOpenAICompletionsHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"bad key"}}`))
+	}))
+	defer srv.Close()
+	p := NewOpenAICompletionsProvider("router", srv.URL, "", nil, nil)
+	ch, err := p.Stream(context.Background(), StreamRequest{Model: "m"})
+	if err == nil || ch != nil {
+		t.Fatalf("Stream err = %v, ch = %v; want error + nil channel", err, ch)
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "bad key") {
+		t.Fatalf("error = %v, want status + snippet", err)
+	}
+}
