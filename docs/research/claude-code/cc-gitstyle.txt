@@ -1,0 +1,75 @@
+ time it appears","In the test plan, state what you actually verified and how \u2014 the command you ran and the behavior you observed, in 1-2 lines; name anything left unverified. Never emit a checklist of unchecked TODO boxes","When supporting artifacts from this work exist \u2014 the issue or ticket this addresses, a design doc, screenshots or recordings captured while verifying \u2014 link them instead of re-describing them. Never fabricate or guess a URL, and only link what the repo's readers can access"],ues="Repo PR template (empty if none)",LUe="untrusted_repo_pr_template",str=[".github/pull_request_template.md",".github/PULL_REQUEST_TEMPLATE.md","PULL_REQUEST_TEMPLATE.md","docs/pull_request_template.md"];function ltr(e){return`${e==="check_repo"?`If the repo has a PR template (${str.join(", ")} \u2014 read whichever exists)`:`If the <${LUe}> block in the context above is non-empty`}, mirror its section headings instead of the default Summary/Test plan and fill them in from your changes \u2014 treat
+</${LUe}>`}function WWt(e){if(!lK())return"";return(e===null?jpt:[...jpt,ltr(e)]).map((r)=>`
+   - ${r}`).join("")}function g7n(){if(!lK())return"";return`
+   - Write for a reader with zero context who was not part of this session: say what the change is in plain words before any mechanism or implementation detail
+   - One idea per sentence; one fact per bullet; define project- or team-specific shorthand the first time it appears
+   - Short beats complete: after one pass the reader should know what the change does and what to check`}function ctr(){if(!lK())return"";return`# Writing commit messages and PR descriptions
+Write for a reader with zero context who was not part of this session:
+- Say what the change is in plain words before any mechanism or implementation detail
+- One idea per sentence; one fact per bullet; no nested clauses or stacked parentheticals
+- Define project- or team-specific shorthand the first time it appears
+- Short beats complete: after one pass the reader should know what the change does and what to check
+For PR descriptions additionally:
+${[...jpt,ltr("check_repo")].map((e)=>`- ${e}`).join(`
+`)}`}function PEe(){return lK()?"<1-2 plain sentences: what this change does and why>":"<1-3 bullet points>"}function OEe(){return lK()?"<1-2 lines: what you verified and how (commands run, behavior observed); note anything unverified>":"[Bulleted markdown checklist of TODOs for testing the pull request...]"}function Ptr(e){return null}function Ope(){return Fwe()}var Wpt="Communication: Output text directly (NOT echo/printf)";function BUe(){let e=Ei(),t=()=>(fb()||Rz())&&rzt();if(nQ())return e.bashFirstDescriptionTrimmedCompiledOnly??=t(),e.bashFirstDescriptionTrimmedCompiledOnly;return e.bashFirstDescriptionTrimmed??=t(),e.bashFirstDescriptionTrimmed}function GJ(){return x4e()}function Itr(){if(a.platform!=="win32")return null;let e="This tool runs Git Bash (POSIX sh), not cmd.exe or PowerShell. Use Unix shell syntax: `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`.";if(!Bk())return e;return`${e} Do not use PowerShell here-strings (\`@'\u2026'@\`) or backtick continuation here \u20
+- End git commit messages with:
+   ${o}`:".",I="- Only commit when the user explicitly asks. When staging, prefer "+'naming specific files over "git add -A"/"git add ." \u2014 never commit '+"files that likely contain secrets (.env, credentials).";return`# Committing changes with git
+Only create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:
+You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. The numbered steps below indicate which commands should be batched in parallel.
+- NEVER run destructive git commands (push --force, reset --hard, checkout ., restore ., clean -f, branch -D) unless the user explicitly requests these actions. Taking unauthorized destructive actions is unhelpful and can result in lost work, so it's best to ONLY run these commands when given direct instructions 
+- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
+- NEVER run force push to main/master, warn the user if they request it
+- CRITICAL: Always create NEW commits rather than amending, unless the user explicitly requests a git amend. When a pre-commit hook fails, the commit did NOT happen \u2014 so --amend would modify the PREVIOUS commit, which may result in destroying work or losing previous changes. Instead, after hook failure, fix the issue, re-stage, and create a NEW commit
+- When staging files, prefer adding specific files by name rather than using "git add -A" or "git add .", which can accidentally include sensitive files (.env, credentials) or large binaries
+- NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive
+1. Run the following bash commands in parallel, each using the ${qe} tool:
+  - Run a git status command to see all untracked files. IMPORTANT: Never use the -uall flag as it can cause memory issues on large repos.
+  - Run a git diff command to see both staged and unstaged changes that will be committed.
+  - Run a git log command to see recent commit messages, so that you can follow this repository's commit message style.
+2. Analyze all staged changes (both previously staged and newly added) and draft a commit message:
+  - Summarize the nature of the changes (eg. new feature, enhancement to an existing feature, bug fix, refactoring, test, docs, etc.). Ensure the message accurately reflects the changes and their purpose (i.e. "add" means a wholly new feature, "update" means an enhancement to an existing feature, "fix" means a bug fix, etc.).
+  - Do not commit files that likely contain secrets (.env, credentials.json, etc). Warn the user if they specifically request to commit those files
+  - Draft a concise (1-2 sentences) commit message that focuses on the "why" rather than the "what"
+  - Ensure it accurately reflects the changes and their purpose
+3. Run the following commands in parallel:
+   - Add relevant untracked files to the staging area.
+   - Create the commit with a message${C}
+   - Run git status after the commit completes to verify success.
+   Note: git status depends on the commit completing, so run it sequentially after the commit.
+4. If the commit fails due to pre-commit hook: fix the issue and create a NEW commit
+- NEVER run additional commands to read or explore code, besides git bash commands
+- NEVER use the ${r} or ${mt} tools
+- DO NOT push to the remote repository unless the user explicitly asks you to do so
+- IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.
+- IMPORTANT: Do not use --no-edit with git rebase commands, as the --no-edit flag is not a valid option for git rebase.
+- If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit
+- In order to ensure good formatting, ALWAYS pass the commit message via a HEREDOC, a la this example:
+Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
+IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
+1. Run the following bash commands in parallel using the ${qe} tool, in order to understand the current state of the branch since it diverged from the main branch:
+   - Run a git status command to see all untracked files (never use -uall flag)
+   - Run a git diff command to see both staged and unstaged changes that will be committed
+   - Check if the current branch tracks a remote branch and is up to date with the remote, so you know if you need to push to the remote
+   - Run a git log command and \`git diff [base-branch]...HEAD\` to understand the full commit history for the current branch (from the time it diverged from the base branch)
+2. Analyze all changes that will be included in the pull request, making sure to look at all relevant commits (NOT just the latest commit, but ALL commits that will be included in the pull request!!!), and draft a pull request title and summary:
+   - Keep the PR title short (under 70 characters)
+   - Use the description/body for details, not the title
+3. Run the following commands in parallel:
+   - Create new branch if needed
+   - Push to remote with -u flag if needed
+   - Create PR using gh pr create with the format below. Use a HEREDOC to pass the body to ensure correct formatting.
+gh pr create --title "the pr title" --body "$(cat <<'EOF'
+- DO NOT use the ${r} or ${mt} tools
+- Return the PR URL when you're done, so the user can see it
+- View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments${_?`
+${_}`:""}`}async function pes(e){let t=GDe(e);if(!qle())return"";let{commit:r,pr:o}=await xpt(),d=[r?`- End git commit messages with:
+${r}`:null,o?`- End PR bodies with:
+${o}`:null].filter(Boolean).join(`
+`),p=Dtr("bash_lean"),_=null;return`# Git
+- Interactive flags (\`-i\`, e.g. \`git rebase -i\`, \`git add -i\`) are not supported in this environment.
+- Use the \`gh\` CLI for GitHub operations (PRs, issues, API).
+- Commit or push only when the user asks. If on the default branch, branch first.${d?`
+${_}`:""}`}async function mes(e,t,r){let o=Otr()!==null,d=await pes(e),p=r??BUe(),_=[],E=Ptr(t);if(E!==null)_.push(`- ${E}`);else if(!p){let U=ky()?"`cat`, `head`, `tail`, `sed`, `awk`, or `echo`":"`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";_.push(`- IMPORTANT: Avoid using this tool to run ${U} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.`)}let C="- Working directory persists between calls, but prefer absolute paths \u2014 `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",I=[];if(o){let U="- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.";if(QI())U+=" Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a 
+`)}function Wtr(){return}async function qtr(e,t,r=[],o,d){if(ZE({model:e,leanPrompt:o}))return mes(t,r,d);let p=ky(),_=[...p?[]:[`File search: Use ${co} (NOT find or ls)`,`Content search: Use ${ro} (NOT grep or rg)`],`Read files: Use ${tt} (NOT cat/head/tail)`,`Edit files: Use ${Bt} (NOT sed/awk)`,`Write files: Use ${Mn} (NOT echo >/cat <<EOF)`,Wpt],E=p?"`cat`, `head`, `tail`, `sed`, `awk`, or `echo`":"`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`",C=["Prefer to create a new commit rather than amending an existing commit.","Before running destructive operations (e.g., git reset --hard, git push --force, git checkout --), consider whether there is a safer alternative that achieves the same goal. Only use destructive operations when they are truly the best approach.","Never skip hooks (--no-verify) or bypass signing (--no-gpg-sign, -c commit.gpgsign=false) unless the user has explicitly asked for it. If a hook fails, investigate and fix the underlying issue."],I=!Dl(),D=["Do not sleep between
+`)}import{randomBytes as ges}from"crypto";var hes=new Set(["command_name","word","string","raw_string","number","concatenation"]),Xtr="\x00BACKSLASH\x00",Qtr="\x00PLUS\x00",Jtr="\x00QUESTION\x00",Ztr="\x00PIPE\x00",onr="\x00LPAREN\x00",lnr="\x00RPAREN\x00",yes=new RegExp(Xtr,"g"),_es=new RegExp(Qtr,"g"),bes=new RegExp(Jtr,"g"),Ses=new RegExp(Ztr,"g"),kes=new RegExp(onr,"g"),wes=new RegExp(lnr,"g");function Yne(e){let t=e.trim();if(Ive(t))return null;let o=nb()?.parse(t)?.children.filter((ve)=>ve.type!=="comment")??[];if(o.length!==1||o[0].type!=="command"||o[0].children.some((ve)=>!hes.has(ve.type)))return null;let d=vy(t);if(d[0]!=="sed")return null;let p=d.slice(1),_=!1,E=!1,C=null,I=null,D=0;while(D<p.length){let ve=p[D];if(ve==="-i"||ve==="--in-place"){if(_=!0,D++,D<p.length){let Me=p[D];if(typeof Me==="string"&&!Me.startsWith("-")&&(Me===""||Me.startsWith(".")))D++}continue}if(ve.startsWith("-i")){_=!0,D++;continue}if(ve==="-E"||ve==="-r"||ve==="--regexp-extended"){E=!0,D++;continue}if(ve==="-e"||ve===
+`,Ces=new Set(["command_substitution","simple_expansion","string"]),cnr=200

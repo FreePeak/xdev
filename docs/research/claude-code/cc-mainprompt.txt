@@ -1,0 +1,196 @@
+Read queued notifications
+You are Claude Code, Anthropic's official CLI for Claude.
+You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.
+You are a Claude agent, built on Anthropic's Claude Agent SDK.
+x-anthropic-billing-header:
+As you answer the user's questions, you can use the following context:
+      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+Workers also have access to MCP tools from connected MCP servers: 
+Your bare assistant text does NOT reach the user. Your comms tools are the only channel to them: every turn must end in a comms-tool call (reply, react, or an explicit no-reply), and "tell the user" below always means a comms-tool call.0
+post a one-line "launched X" via your comms tool
+<\s*\/\s*system-reminder\s*>
+&lt;/system-reminder&gt;#
+<(?=\s*(?:\/\s*)?system-reminder\b)
+" above) and has not changed on disk. Use that content instead of re-reading.</system-reminder>
+Reads a file from the local filesystem.
+- `file_path` must be an absolute path.
+ Reads PDFs via the `pages` parameter (e.g. "1-5", max 20 pages/request; required for PDFs over 10 pages).
+ Reads Jupyter notebooks (.ipynb) as cells with outputs.
+- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.
+Reads a file from the local filesystem. You can access any file directly by using this tool.
+Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+- The file_path parameter must be an absolute path, not a relative path
+- By default, it reads up to .
+ lines starting from the beginning of the file
+- This tool allows Claude Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as Claude Code is a multimodal LLM.
+- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: "1-5"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.
+- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.
+- This tool can only read files, not directories. To list files in a directory, use the registered shell tool.
+- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.
+- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
+Search the web. Returns result blocks with titles and URLs. US-only.
+- Allows Claude to search the web and use the results to inform responses
+- Provides up-to-date information for current events and recent data
+- Returns search result information formatted as search result blocks, including links as markdown hyperlinks
+- Use this tool for accessing information beyond Claude's knowledge cutoff
+- Searches are performed automatically within a single API call
+CRITICAL REQUIREMENT - You MUST follow this:
+  - After answering the user's question, you MUST include a "Sources:" section at the end of your response
+  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)
+  - This is MANDATORY - never skip including sources in your response
+    - [Source Title 1](https://example.com/1)
+    - [Source Title 2](https://example.com/2)
+  - Domain filtering is supported to include or block specific websites
+  - Web search is only available in the US
+IMPORTANT - Use the correct year in search queries:
+  - The current month is 
+. You MUST use this year when searching for recent information, documentation, or current events.
+  - Example: If the user asks for "latest React docs", search for "React documentation" with the current year, NOT last year
+Content search built on ripgrep. Prefer this over `grep`/`rg` via 
+A powerful search tool built on ripgrep
+ for search tasks. NEVER invoke `grep` or `rg` as a 
+ tool has been optimized for correct permissions and access.
+  - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
+  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
+  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
+ tool (if available) for open-ended searches requiring multiple rounds
+  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
+  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`
+CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS
+- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.
+- Responses are cached for 
+IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.
+- Fetches content from a specified URL and processes it using an AI model
+- Takes a URL and a prompt as input
+- Fetches the URL content, converts HTML to markdown
+- Processes the content with the prompt using a small, fast model
+- Returns the model's response about the content
+- Use this tool when you need to retrieve and analyze web content
+  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions.
+  - The URL must be a fully-formed valid URL
+  - HTTP URLs will be automatically upgraded to HTTPS
+  - The prompt should describe what information you want to extract from the page
+  - This tool is read-only and does not modify any files
+  - Results may be summarized if the content is very large
+  - Includes a self-cleaning cache (entries expire after 
+) for faster responses when repeatedly accessing the same URL
+  - When a URL redirects to a different host, the tool will inform you and provide the redirect URL in a special format. You should then make a new WebFetch request with the redirect URL to fetch the content.
+  - For GitHub URLs, prefer using the gh CLI via Bash instead (e.g., gh pr view, gh issue view, gh api).
+Provide a concise response based on the content above. Include relevant details, code examples, and documentation excerpts as needed.
+Provide a concise response based only on the content above. In your response:
+- If this is an existing file, you MUST use the 
+ tool first to read the file's contents. This tool will fail if you did not read the file first.O
+- If this is an existing file outside the working directory, you MUST use the 
+ tool first to read the file's contents. This tool will fail if you did not.M
+ Overwriting an existing file outside the working directory that you haven't 
+ Overwriting an existing file you haven't 
+Writes a file to the local filesystem, overwriting if one exists.
+When to use: creating a new file, or fully replacing one you've already 
+ For partial changes, use 
+Writes a file to the local filesystem.
+- This tool will overwrite the existing file if there is one at the provided path.
+the API only accepts an object-rooted tool input schema, so every request would be rejected
+no output can satisfy this schema, so StructuredOutput validation would fail on every attempt
+one property or item sub-schema admits no value, so any output that fills it in fails validation
+the root schema must declare type: 'object' (the API rejects any other root type for a tool input schema); wrap arrays or primitives in an object property
+required_property_forbidden
+ but its const value does not have that type, so no value can satisfy itQ
+ has a const value that is not one of its enum values, so no value can satisfy it
+, so no value can satisfy it
+ required properties but maxProperties 
+$async schemas are not supported>
+Cannot destructure property 'Ajv' from null or undefined value
+tengu_structured_output_strict_schema
+Strict structured-output schema derivation failed, falling back to non-strict: 
+tengu_structured_output_schema_lint
+/$bunfs/root/chunk-3cp5w2m6.js
+Wait for MCP servers that are still connecting and whose tools are not
+yet in your tool list. Pass `servers` to wait for specific ones, or omit#
+it to wait for all pending servers.
+If the user's request needs tools from a still-connecting server, call this
+tool to wait for it. Once it connects, its tools become callable inside
+the REPL environment (this surface routes MCP tools through the REPLI
+rather than advertising them as top-level tools). Returns ready=true when
+servers are ready, ready=false if they failed to connect, need
+authentication, or are disabled.K
+tool to wait for it. Once it connects, its tools will be added to your tool
+list and you can use them directly. Returns ready=true when servers are
+ready, ready=false if they failed to connect, need authentication, or are
+You do not need to ask the user for confirmation to use this tool.
+The refreshed tools become callable inside the REPL environment (this surface routes MCP tools through the REPL rather than advertising them as top-level tools).
+Re-queries the tool list of connected MCP servers and updates the set of available tools, reporting which tools were added or removed.
+MCP servers normally push a notification when their tool list changes, but that notification can be missed (connection hiccups, a device announcing while the notification stream was down). Use this tool to re-sync when the available tools may be out of date. Good triggers:
+- The user says a device or app is now open or connected (e.g. "my desktop IS open", "I just started the app") after a tool call failed with device-not-connected or the expected tools are missing.
+- A tool you expect an MCP server to provide is absent from your available tools.
+- A server's tools look stale after its connection recovered.
+- Refresh all connected servers: `RefreshMcpTools` with no arguments
+- Refresh one server: `RefreshMcpTools({ server: "myserver" })`
+CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS(
+CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION
+Cannot destructure property 'isScratchpadEnabled' from null or undefined value
+/$bunfs/root/chunk-gve67s30.js
+Cannot destructure property 'isPluginSkillToolAdvertised' from null or undefined value
+tengu_coordinator_mode_switched
+coordinator_session_mode_match
+Entered coordinator mode to match resumed session.
+Exited coordinator mode to match resumed session.
+Workers spawned via the "
+ tool have access to these tools:
+ pages are HTML: when you delegate a report, write-up, or other page for the user to read or share, ask the worker to author an `.html` page and publish it with 
+ tools, plus MCP tools from configured MCP servers.
+ Workers can fan out further via 
+Workers have access to standard tools, MCP tools from configured MCP servers, and project skills via the 
+ tool. Delegate skill invocations that need worker tools (e.g. /commit, /verify) to workers by including "Use the /<name> skill" in the worker prompt.
+** - Load a skill's full instructions inline (read-only: the instructions load, but no shell, hooks, permission grants, or fork run). Read skills to inform how you reply, triage, and coordinate. Execution happens in workers: hand the skill to one ("Use the /<name> skill" in its prompt) when following it needs 
+` to discover them; reach one via `
+** (if available) - Run a multi-step subagent pipeline; prefer it over hand-orchestrating 
+ calls when a matching workflow exists
+- The model parameter is ignored on this session. Do not set it./
+Every message you send is to the user.
+** - Continue an existing worker (send a follow-up to its `to` agent ID)
+** - Stop a running worker
+- Do not use one worker to check on another. Workers will notify you when they are done.
+- Do not use workers to trivially report file contents or run commands. Give them higher-level tasks.
+- Continue workers whose work is complete via 
+briefly tell the user what you launched
+Worker results arrive as **user-role messages** containing `<task-notification>` XML, delivered as harness input, normally inside a `<system-reminder>` that opens with `
+ tool's launch result. Stopped workers can be continued with 
+// Launched a worker to refactor auth to use JWT
+({ task_id: "agent-x7q" })
+// Continue with corrected instructions
+({ prompt: "Based on your findings, fix the auth bug", ... })
+) with synthesized spec | Worker already has the files in context AND now gets a clear plan |
+| Research was broad but implementation is narrow | **Spawn fresh** (
+) with synthesized spec | Avoid dragging along exploration noise; focused context is cleaner |
+| Correcting a failure or extending recent work | **Continue** | Worker has the error context and knows what it just tried |
+| Verifying code a different worker just wrote | **Spawn fresh** | Verifier should see the code with fresh eyes, not carry implementation assumptions |
+| First implementation attempt used the wrong approach entirely | **Spawn fresh** | Wrong-approach context pollutes the retry; clean slate avoids anchoring on the failed path |
+| Completely unrelated task | **Spawn fresh** | No useful context to reuse |
+When continuing a worker with 
+({ description: "Investigate auth bug", subagent_type: "worker", prompt: "Investigate the auth module in src/auth/. Find where null pointer exceptions could occur around session handling and token validation... Report specific file paths, line numbers, and types involved. Do not modify files." })
+Structured output tool result
+Return structured output in the requested format
+Use this tool to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response to provide the structured output.
+Structured output provided successfully
+Output does not match required schema: 
+StructuredOutput schema mismatch: 
+file:///$bunfs/root/chunk-5cgce7xv.js
+The user asked for more questions
+ before answering; this is a request for another round, not an answer.
+Asks the user multiple choice questions to gather information, clarify ambiguity, understand preferences, make decisions or offer them choices.
+Use the optional `preview` field on options when presenting concrete artifacts that users need to visually compare:
+- ASCII mockups of UI layouts or components
+- Code snippets showing different implementations
+Preview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right. Do not use previews for simple preference questions where labels and descriptions suffice. Note: previews are only supported for single-select questions (not multiSelect).
+Use this tool only when you are blocked on a decision that is genuinely the user's to make: one you cannot resolve from the request, the code, or sensible defaults.
+- Users will always be able to select "Other" to provide custom text input
+- Use multiSelect: true to allow multiple answers to be selected for a question
+- If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label
+Plan mode note: To switch into plan mode, use 
+Extended questions (this host renders them):
+- Put the most important question first.
+- Omit "kind" for an ordinary choice question. Use "kind": "text" for an open-ended question (a text box, no options) and "kind": "number" with "min"/"max" (optionally "step", "defaultValue", "unit") for a quantity. Prefer choices whenever the likely answers can be listed.
+- Set multiSelect: true on choice questions unless the options are mutually exclusive (people answering are often still exploring).
+- Optional "title" is one short line above the questions; optional per-question "description" is one helper line. Option descriptions are optional here too: add one only when the label alone would be ambiguous.
+- Do not add "Other" or "Skip" options: the user can always type their own answer or leave a question unanswered. The user can also ask you for more questions; when the result says so, call this tool again with follow-up questions before doing the task.
+file:///$bunfs/root/chunk-t899nada.js
