@@ -277,6 +277,34 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 - **Shell out to `rg`/`fd`/`ast-grep`; no tree-sitter embedding** — embedding tree-sitter means CGO + memory; Go stdlib + subprocesses cover ~90% of the Rust natives; the one natives concept worth re-implementing in-process is the FS-scan shared cache (research IV.7, IV.10).
 - **Product name xdev; research codename `adze` superseded** — the repo name (`FreePeak/xdev`) is authoritative: binary `xdev`, module `github.com/FreePeak/xdev`, data dir `~/.xdev/agent/`; session format remains compatible with omp's.
 
+### 5.1 Claude Code cross-check (adopt / verify / reject)
+
+Claude Code v2.1.263 was studied independently of pi/omp — bundle forensics (verbatim system prompts + tool schemas from the installed binary), the official docs, and design analysis. Full evidence in §6. Verdicts that change or confirm the plan:
+
+**Adopt:**
+- **Microcompact before compaction** (M5) — clear old tool outputs first, summarize only as the second phase; plus a context-high-water warning in the status line and a `/context` per-category budget display.
+- **Hooks exit-code contract** (M11) — CC's `PreToolUse` blocking semantics (exit 2 = block with stderr reason, JSON `updatedInput` mutation, two-stage matcher + `if` permission-syntax pre-filter) is the proven guardrail model; keep execution boring (`sh -c`, stdin JSON).
+- **Subagent yield-only isolation as a contract test** (M11) — a subagent transcript NEVER streams into parent context; only the final yield does. Hub design already implies this; pin it with a test.
+- **Plan mode + ExitPlanMode approval gate** (M14) — read-only mode, plan presentation, explicit approve flow. omp has no equivalent; cheap given the approval tiers.
+- **AskUserQuestion** (M14) — structured mid-task clarification tool (options, multi-select, timeout→recommended) instead of prose questions; xdev's `ask` dialog is the TUI surface.
+- **Checkpoint/rewind** (M13, promoted from SKIP-adjacent) — pre-prompt file snapshots + triple restore (code / conversation / both); CC's most-loved feature. Design JSONL turn-boundary markers from M0 so this stays cheap.
+- **Think-budget keyword ladder** (M5) — `think` < `think hard` < `ultrathink` → provider reasoning budgets; one constant table.
+- **CLAUDE.md as alias** (M10) — AGENTS.md is the standard, but loading `CLAUDE.md` as an alias keeps ecosystem compatibility; `@path` imports, hierarchy, lazy subdirectory loads.
+- **Edit-tool semantics refinement** (M3) — CC's exact-string Edit with uniqueness + read-before-edit staleness gates complements the hashline UX; also adopt the benign-exit-1 command list and output-to-file overflow pattern for `bash`.
+- **Background bash registry** (M3/M13) — `run_in_background`, `/tasks` listing, timeout→background move with explicit notice, output-file-as-result.
+
+**Verify:**
+- TodoWrite-as-tool vs omp's file-based TODO.md — keep the file approach (boring, grep-able); revisit only if state-drift shows in practice.
+- Computed context-budget line in the system prompt (CC hardcodes ~90% of window) — inject the real usable-token number instead.
+- CC's `auto` permission mode (classifier model reviews every action) — pluggable, off-by-default, only if sandbox integrations demand it.
+
+**Reject (with reasons):**
+- Full in-process permission-mode UI — xdev stays YOLO-inside-external-sandbox (pi/omp stance); thin mode concept only.
+- LSP/AST/embedding-memory as built-ins — CC itself proves the "thin layer over the model" philosophy (grep/glob/file tools only); extended infrastructure stays opt-in (M13/MCP).
+- Multi-agent fan-out without caps — CC's own research post cites ~15× token cost for orchestrator-worker research; keep hub depth/width caps (M11) and compaction budgets.
+
+Net: Claude Code **confirms xdev's pi/omp-shaped minimalism** (it lacks LSP/AST/memory-DB too) while contributing five features omp lacks entirely: microcompact, ExitPlanMode gate, AskUserQuestion, checkpoints/rewind, and the hooks blocking contract.
+
 ## 6. Links
 
 - [README.md](../README.md) — project overview.
@@ -285,7 +313,11 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 - [docs/research/parity-session-ux.md](research/parity-session-ux.md) — slash commands, lifecycle, context files, keybindings parity spec.
 - [docs/research/parity-knowledge-ui.md](research/parity-knowledge-ui.md) — memory, skills, theme, TUI chrome parity spec.
 - [docs/research/parity-tools-providers.md](research/parity-tools-providers.md) — tool inventory, model roles, auth, approval, LSP, plugins parity spec.
+- [docs/research/claude-code/cc-bundle-forensics.md](research/claude-code/cc-bundle-forensics.md) — local Claude Code 2.1.263 install forensics (bundle, prompts, session JSONL).
+- [docs/research/claude-code/cc-mainprompt.txt](research/claude-code/cc-mainprompt.txt) — verbatim main system prompt + tool descriptions extract (plus cc-compact.txt, cc-enterplan.txt, cc-gitstyle.txt, cc-explore.txt, cc-envvars.txt).
+- [docs/research/claude-code/cc-official-docs.md](research/claude-code/cc-official-docs.md) — official-docs study (tools, hooks, subagents, skills, memory, permission modes, checkpoints, headless, MCP, settings, compaction) with per-feature verdicts.
+- [docs/research/claude-code/cc-design-decisions.md](research/claude-code/cc-design-decisions.md) — design-decision analysis vs pi/omp minimalism with adopt/verify/reject mapping.
 
 ---
 
-*Last updated: 2026-09-09 (extended to full omp feature-parity scope; added M9-M14)*
+*Last updated: 2026-09-09 (Claude Code cross-check added: §5.1 verdicts + research evidence in docs/research/claude-code/)*
