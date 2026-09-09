@@ -306,7 +306,7 @@ Claude Code v2.1.263 was studied independently of pi/omp — bundle forensics (v
 - **Background bash registry** (M3/M13) — `run_in_background`, `/tasks` listing, timeout→background move with explicit notice, output-file-as-result.
 
 **Verify:**
-- TodoWrite-as-tool vs omp's file-based TODO.md — keep the file approach (boring, grep-able); revisit only if state-drift shows in practice.
+- RESOLVED by primary-source research (2026-09-09): omp v18 ships a full `todo` tool (9 ops, 5 statuses, transcript-persisted) — the "file-based TODO.md" question is settled. Port omp's todo engine as CORE in M3 (see omp-todos-internals.md); TODO.md survives only as export/import surface in M10.
 - Computed context-budget line in the system prompt (CC hardcodes ~90% of window) — inject the real usable-token number instead.
 - CC's `auto` permission mode (classifier model reviews every action) — pluggable, off-by-default, only if sandbox integrations demand it.
 

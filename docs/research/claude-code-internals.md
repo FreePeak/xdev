@@ -642,23 +642,23 @@ All 19+ built-in tools, extracted from binary constants and string analysis:
 ### #9 M8 memory audit
 - **No additions needed.**
 
-### #10 M10 model roles / auth / config
+### #10 (M9) model roles / auth / config
 - **Add**: "Per-agent-type configuration via frontmatter: model, reasoning effort, tool access, `disallowedTools` deny-list. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` env override for global model forcing."
-- **Add**: "Hook event taxonomy: SessionStart, PreToolUse, PostToolUse, SubagentStart, TaskCompleted, FileChanged, UserPromptSubmit, Stop. Each fires shell command with JSON stdin; PreToolUse can block via exit code."
 
-### #11 M11 agent system
+### #12 (M11) agent system
+- **Add**: "Hook event taxonomy: SessionStart, PreToolUse, PostToolUse, SubagentStart, TaskCompleted, FileChanged, UserPromptSubmit, Stop. Each fires shell command with JSON stdin; PreToolUse can block via exit code."
 - **Add**: "In-process teammate system: lead-coordinator + worker teammates. Mailbox-based message passing via `.claude/mailbox/`. Structured frame protocol with schema-validated message types: TaskCompleted, PermissionRequest/Response, PlanApprovalRequest/Response, ShutdownRequest/Approved/Rejected."
 - **Add**: "Cross-session messaging: `SendMessage` tool for inter-session communication on same machine. `crossSessionInbound` setting (accept/hold/off). Permission-mode mismatch handling. Delivery guarantees: held-for-approval, expired, dropped, delivered."
 - **Add**: "InboxPoller: polls teammate inboxes for unread messages; delivers on session idle; handles plan approval responses from team lead."
 
-### #12 M12 knowledge / chrome
+### #13 (M12) knowledge / chrome
 - **No additions needed.**
 
-### #13 M13 extended tools
+### #14 (M13) extended tools
 - **Add**: "Skill tool: dynamic skill loading from frontmatter-defined `.claude/skills/` directory; `buildSkillTools` at runtime; `refreshMcpTools` for re-scan after hook installation."
 - **Add**: "Workflow tool: script-based agent orchestration with resume support (`resumeFromRunId`)."
 
-### #14 M14 v2 modes
+### #15 (M14) v2 modes
 - **Add**: "Plan mode: `EnterPlanMode` switches to read-only exploration; `ExitPlanMode` returns to normal after user approval. Enforced via permission system."
 - **Add**: "Steering interrupts: external tools (IDE, Claude.ai web, admin policies) can inject mid-turn user messages; interrupted assistant message ID tracked for consistency."
 - **Add**: "Session forking: `--fork-session` CLI flag copies another session's transcript as starting point; worktree isolation returns path + branch."
