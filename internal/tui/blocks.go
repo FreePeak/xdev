@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -24,8 +25,10 @@ type Block struct {
 	Kind     BlockKind
 	Text     string
 	ToolName string
-	Status   string // tool blocks: "running", "ok", "error"
-	stream   bool   // assistant still receiving deltas (dim cursor at tail)
+	Status   string        // tool blocks: "running", "ok", "error"
+	stream   bool          // assistant still receiving deltas (dim cursor at tail)
+	Ts       time.Time     // block timestamp (user/assistant, drawn right)
+	thinkDur time.Duration // thinking: frozen at EndThinking
 }
 
 // Width returns the display width of s in cells.

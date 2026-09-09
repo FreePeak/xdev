@@ -76,6 +76,13 @@ const (
 	GrayBright         = "gray_bright"
 	PromptBorder       = "prompt_border"
 	PromptBorderActive = "prompt_border_active"
+	MdHeading1         = "md_heading_h1"
+	MdHeading2         = "md_heading_h2"
+	MdHeading3         = "md_heading_h3"
+	MdCode             = "md_code"    // inline code fg
+	MdCodeBg           = "md_code_bg" // fenced code block background
+	MdMuted            = "md_muted"   // bullets, rules, quotes
+	LinkFg             = "link_fg"
 )
 
 // Theme is a named set of slot colors.
@@ -96,49 +103,66 @@ func (t *Theme) Get(slot string) Color {
 	return Color{0xe5, 0xe5, 0xe5}
 }
 
-// groknightSlots — PROVISIONAL GrokNight palette (see package comment).
+// groknightSlots — exact GrokNight palette from grok-build
+// (crates/codegen/xai-grok-pager-render/src/theme/groknight.rs, 2026-09-09 sync).
+// xAI neutral-gray base + TokyoNight Night accents.
 func groknightSlots() map[string]Color {
 	return map[string]Color{
-		BgBase:             Hex("#0e0e0e"),
-		BgHighlight:        Hex("#1a1a1a"),
-		BgTerminal:         Hex("#0a0a0a"),
-		AccentUser:         Hex("#7D4BC6"), // magenta (user/cursor)
-		AccentAssistant:    Hex("#c8c8c8"),
-		AccentThinking:     Hex("#909090"),
-		AccentTool:         Hex("#0db9d7"), // cyan
-		AccentError:        Hex("#de5971"),
-		AccentSuccess:      Hex("#8fd3a7"),
-		AccentRunning:      Hex("#0db9d7"),
-		TextPrimary:        Hex("#e5e5e5"),
-		TextSecondary:      Hex("#c8c8c8"),
-		GrayDim:            Hex("#444444"),
-		Gray:               Hex("#909090"),
-		GrayBright:         Hex("#c8c8c8"),
-		PromptBorder:       Hex("#444444"),
-		PromptBorderActive: Hex("#7D4BC6"),
+		BgBase:             Hex("#141414"), // BG_STORM, main canvas
+		BgHighlight:        Hex("#242424"), // BG_HIGHLIGHT (user prompt band)
+		BgTerminal:         Hex("#0a0a0a"), // BG, terminal bg
+		AccentUser:         Hex("#c8c8c8"), // accent_user = FG_DARK (neutral, not colored)
+		AccentAssistant:    Hex("#bb9af7"), // MAGENTA
+		AccentThinking:     Hex("#bb9af7"), // MAGENTA
+		AccentTool:         Hex("#787878"), // DARK5
+		AccentError:        Hex("#f7768e"), // RED
+		AccentSuccess:      Hex("#9ece6a"), // GREEN
+		AccentRunning:      Hex("#bb9af7"), // MAGENTA
+		TextPrimary:        Hex("#e1e1e1"), // FG
+		TextSecondary:      Hex("#c8c8c8"), // FG_DARK
+		GrayDim:            Hex("#585858"), // gray_dim
+		Gray:               Hex("#6c6c6c"), // COMMENT
+		GrayBright:         Hex("#787878"), // DARK5
+		PromptBorder:       Hex("#323237"), // prompt_border
+		PromptBorderActive: Hex("#505058"), // prompt_border_active
+		MdHeading1:         Hex("#1abc9c"), // TEAL
+		MdHeading2:         Hex("#7aa2f7"), // BLUE
+		MdHeading3:         Hex("#9d7cd8"), // PURPLE
+		MdCode:             Hex("#3A95AB"), // BLUE1
+		MdCodeBg:           Hex("#1c1c1c"), // rgb(28,28,28)
+		MdMuted:            Hex("#6c6c6c"), // COMMENT
+		LinkFg:             Hex("#7aa6da"),
 	}
 }
 
-// grokdaySlots — light counterpart (provisional).
+// grokdaySlots — exact GrokDay palette from grok-build
+// (crates/codegen/xai-grok-pager-render/src/theme/grokday.rs, 2026-09-09 sync).
 func grokdaySlots() map[string]Color {
 	return map[string]Color{
-		BgBase:             Hex("#fafafa"),
-		BgHighlight:        Hex("#ececec"),
-		BgTerminal:         Hex("#ffffff"),
-		AccentUser:         Hex("#6C3EB2"),
-		AccentAssistant:    Hex("#171717"),
-		AccentThinking:     Hex("#525252"),
-		AccentTool:         Hex("#0F87A2"),
-		AccentError:        Hex("#CD3048"),
-		AccentSuccess:      Hex("#0A8E70"),
-		AccentRunning:      Hex("#0F87A2"),
-		TextPrimary:        Hex("#171717"),
-		TextSecondary:      Hex("#404040"),
-		GrayDim:            Hex("#a3a3a3"),
-		Gray:               Hex("#737373"),
-		GrayBright:         Hex("#404040"),
-		PromptBorder:       Hex("#d4d4d4"),
-		PromptBorderActive: Hex("#6C3EB2"),
+		BgBase:             Hex("#eeeeee"),
+		BgHighlight:        Hex("#dedede"),
+		BgTerminal:         Hex("#f5f5f5"),
+		AccentUser:         Hex("#444444"), // FG_DARK
+		AccentAssistant:    Hex("#7D4BC6"), // MAGENTA
+		AccentThinking:     Hex("#7D4BC6"), // MAGENTA
+		AccentTool:         Hex("#626262"), // DARK5
+		AccentError:        Hex("#cd3048"), // RED
+		AccentSuccess:      Hex("#378E23"), // GREEN
+		AccentRunning:      Hex("#7D4BC6"), // MAGENTA
+		TextPrimary:        Hex("#262626"), // FG
+		TextSecondary:      Hex("#444444"), // FG_DARK
+		GrayDim:            Hex("#a5a5a5"),
+		Gray:               Hex("#767676"), // COMMENT
+		GrayBright:         Hex("#626262"), // DARK5
+		PromptBorder:       Hex("#c8c8cd"),
+		PromptBorderActive: Hex("#a5a5af"),
+		MdHeading1:         Hex("#0A8E70"), // TEAL
+		MdHeading2:         Hex("#2F64D2"), // BLUE
+		MdHeading3:         Hex("#6C3EB2"), // PURPLE
+		MdCode:             Hex("#0F87A2"), // BLUE1
+		MdCodeBg:           Hex("#e4e4e4"), // rgb(228,228,228)
+		MdMuted:            Hex("#767676"), // COMMENT
+		LinkFg:             Hex("#2F64D2"), // BLUE
 	}
 }
 

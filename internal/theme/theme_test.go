@@ -19,15 +19,19 @@ func TestGrokNightIdentity(t *testing.T) {
 	if !th.Dark {
 		t.Fatal("groknight must be dark")
 	}
-	// The accent identity: magenta user, cyan tool.
-	if u := th.Get(AccentUser); u != Hex("#7D4BC6") {
+	// Identity per groknight.rs: neutral user (FG_DARK), gray tool (DARK5),
+	// BG_STORM canvas. Magenta accents live on assistant/thinking/running.
+	if u := th.Get(AccentUser); u != Hex("#c8c8c8") {
 		t.Fatalf("accent_user = %v", u)
 	}
-	if tool := th.Get(AccentTool); tool != Hex("#0db9d7") {
+	if tool := th.Get(AccentTool); tool != Hex("#787878") {
 		t.Fatalf("accent_tool = %v", tool)
 	}
-	if bg := th.Get(BgBase); bg != Hex("#0e0e0e") {
+	if bg := th.Get(BgBase); bg != Hex("#141414") {
 		t.Fatalf("bg_base = %v", bg)
+	}
+	if asst := th.Get(AccentAssistant); asst != Hex("#bb9af7") {
+		t.Fatalf("accent_assistant = %v", asst)
 	}
 }
 
