@@ -27,7 +27,7 @@ func main() {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
-Usage:
+  xdev                         interactive TUI (bare invocation, TTY)
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
   xdev tui                     interactive TUI (Grok-CLI look)
