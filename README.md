@@ -13,7 +13,7 @@
 
 ## Status
 
-**MVP runs (2026-09-09).** M0–M3 are complete in `print` mode: `xdev "prompt"` streams a real coding task end-to-end (read/write/edit/bash tools, JSONL session persistence, `--continue` resume), boot RSS is 11.3 MB against the <100 MB hard budget, and the session core round-trips real omp session files (interop-tested). The TUI (M4, visual target: the Grok CLI) is the next milestone. Work is tracked in the milestone roadmap below; the parity breakdown lives in [docs/PRD.md](docs/PRD.md) and [docs/research/parity-*.md](docs/research/).
+**M4 TUI runs (2026-09-09).** `xdev tui` opens the interactive Grok-CLI-styled interface: streaming assistant output, tool-call blocks with live status, dimmed thinking, ↑/↓ token counters, spinner, prompt history, Esc-cancel, Ctrl+C quit, groknight/grokday themes (auto by terminal polarity). M0–M3 print mode is unchanged (`xdev "prompt"`, `--continue` resume, omp session interop). Boot RSS 11.6 MB against the <100 MB hard budget. Remaining M4 polish (markdown rendering, vim mode, blocking cards) tracked in issue #5.
 
 - [docs/PRD.md](docs/PRD.md) — product requirements and scope.
 - [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md) — the full architecture research and rebuild blueprint this project is based on.
@@ -35,6 +35,8 @@ go build -o xdev ./cmd/xdev
 xdev "create a hello.py that prints hello world, then run it"
 xdev -continue "now add tests"   # resume the latest session in this cwd
 xdev -model onegw/dev "..."      # explicit provider/model
+xdev tui                        # interactive mode (Grok-CLI look)
+xdev tui -theme grokday         # light variant (default: auto)
 # hard RSS backstop defaults to 100MB; set XDEV_MEMLIMIT to override
 ```
 

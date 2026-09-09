@@ -1,0 +1,106 @@
+package tui
+
+import (
+	"strings"
+
+	"github.com/mattn/go-runewidth"
+)
+
+// BlockKind classifies one scrollback block.
+type BlockKind int
+
+const (
+	KindUser BlockKind = iota
+	KindAssistant
+	KindThinking
+	KindTool     // tool call (name + args summary), status-driven
+	KindToolDone // tool result line
+	KindSystem   // harness notices (errors, session info)
+)
+
+// Block is one scrollback entry. Text is the SOURCE; lines are re-wrapped
+// on every draw (reflow on resize for free) with a small per-width cache.
+type Block struct {
+	Kind     BlockKind
+	Text     string
+	ToolName string
+	Status   string // tool blocks: "running", "ok", "error"
+	stream   bool   // assistant still receiving deltas (dim cursor at tail)
+}
+
+// Width returns the display width of s in cells.
+func width(s string) int { return runewidth.StringWidth(s) }
+
+// wrap breaks s into visual lines of at most maxW cells, preserving empty
+// lines. A maxW <= 0 yields one line per source line.
+func wrap(s string, maxW int) []string {
+	if maxW <= 0 {
+		return strings.Split(s, "\n")
+	}
+	var out []string
+	for _, para := range strings.Split(s, "\n") {
+		if para == "" {
+			out = append(out, "")
+			continue
+		}
+		line := strings.TrimRight(para, " \t")
+		if width(line) <= maxW {
+			out = append(out, line)
+			continue
+		}
+		// Word wrap; hard-break words longer than maxW.
+		for width(line) > maxW {
+			cut := maxW
+			for cut > 1 && width(line[:cut]) > maxW {
+				cut--
+			}
+			if sp := strings.LastIndexAny(line[:cut], " \t"); sp > 0 {
+				cut = sp
+			}
+			out = append(out, strings.TrimRight(line[:cut], " \t"))
+			line = strings.TrimLeft(line[cut:], " ")
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// toolSummary renders the one-line tool-call summary: name(args-preview).
+func toolSummary(b *Block, maxW int) string {
+	preview := strings.Join(strings.Fields(b.Text), " ")
+	if maxW > 3 && len(preview) > maxW*2 {
+		preview = preview[:maxW*2] + "…"
+	}
+	s := "⟨" + b.ToolName + "⟩"
+	if preview != "" {
+		s += " " + preview
+	}
+	switch b.Status {
+	case "running":
+		s += " …"
+	case "error":
+		s += " [error]"
+	}
+	return s
+}
+
+// blockAccent picks the rail/accent slot for a block.
+func (b *Block) accentSlot() string {
+	switch b.Kind {
+	case KindUser:
+		return "accent_user"
+	case KindThinking:
+		return "accent_thinking"
+	case KindTool, KindToolDone:
+		return "accent_tool"
+	case KindSystem:
+		if strings.Contains(strings.ToLower(b.Text), "error") {
+			return "accent_error"
+		}
+		return "accent_success"
+	default:
+		return "accent_assistant"
+	}
+}
