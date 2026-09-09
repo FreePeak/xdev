@@ -47,7 +47,7 @@ type App struct {
 	keyq      chan tcell.Event
 	dirty     chan struct{}
 	quitCh    chan struct{}
-	lineCache map[blockKey][]string
+	lineCache map[blockKey][]line
 }
 
 type blockKey struct {
@@ -57,6 +57,7 @@ type blockKey struct {
 	tlen   int
 	tool   string
 	status string
+	stream bool
 }
 
 // New creates the App over an initialized screen.
@@ -70,7 +71,7 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		keyq:      make(chan tcell.Event, 64),
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),
-		lineCache: map[blockKey][]string{},
+		lineCache: map[blockKey][]line{},
 	}
 }
 
@@ -82,7 +83,7 @@ func (a *App) SetHandlers(onSend func(text string), onCancel, onQuit func()) {
 // Invalidate clears the render cache (resize, theme change).
 func (a *App) Invalidate() {
 	a.mu.Lock()
-	a.lineCache = map[blockKey][]string{}
+	a.lineCache = map[blockKey][]line{}
 	a.mu.Unlock()
 	a.poke()
 }
@@ -92,7 +93,7 @@ func (a *App) Invalidate() {
 // AddUserBlock appends a user prompt block.
 func (a *App) AddUserBlock(text string) {
 	a.mu.Lock()
-	a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: text})
+	a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: text, Ts: time.Now()})
 	a.offset = 0
 	a.mu.Unlock()
 	a.poke()
@@ -112,7 +113,7 @@ func (a *App) BeginAssistant() {
 	a.mu.Lock()
 	a.st.Running = true
 	if n := len(a.blocks); n == 0 || a.blocks[n-1].Kind != KindAssistant || !a.blocks[n-1].stream {
-		a.blocks = append(a.blocks, &Block{Kind: KindAssistant, stream: true})
+		a.blocks = append(a.blocks, &Block{Kind: KindAssistant, stream: true, Ts: time.Now()})
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -142,7 +143,7 @@ func (a *App) EndAssistant() {
 // BeginThinking adds a dim thinking block (collapsed while streaming).
 func (a *App) BeginThinking() {
 	a.mu.Lock()
-	a.blocks = append(a.blocks, &Block{Kind: KindThinking, stream: true})
+	a.blocks = append(a.blocks, &Block{Kind: KindThinking, stream: true, Ts: time.Now()})
 	a.mu.Unlock()
 	a.poke()
 }
@@ -160,12 +161,14 @@ func (a *App) AppendThinking(delta string) {
 	a.poke()
 }
 
-// EndThinking closes the last streaming thinking block.
+// EndThinking closes the last streaming thinking block, freezing its
+// duration for the "Thought for Xs" header.
 func (a *App) EndThinking() {
 	a.mu.Lock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		if a.blocks[i].Kind == KindThinking && a.blocks[i].stream {
 			a.blocks[i].stream = false
+			a.blocks[i].thinkDur = time.Since(a.blocks[i].Ts)
 			break
 		}
 	}
@@ -300,7 +303,7 @@ func (a *App) handleKey(ev tcell.Event) {
 		if r, ok := ev.(*tcell.EventResize); ok {
 			a.mu.Lock()
 			a.width, a.height = r.Size()
-			a.lineCache = map[blockKey][]string{}
+			a.lineCache = map[blockKey][]line{}
 			a.mu.Unlock()
 		}
 		return
@@ -387,13 +390,13 @@ func (a *App) totalLinesLocked() int {
 	w := a.contentWidth()
 	n := 0
 	for i := range a.blocks {
-		n += len(a.blockLinesLocked(i, a.blocks[i], w)) + 1 // separator
+		n += len(a.blockLines(i, a.blocks[i], w)) + 1 // separator
 	}
 	return n
 }
 
 func (a *App) viewportLinesLocked() int {
-	return a.height - 3 // scrollback + status + editor
+	return a.height - 4 // scrollback + composer(2) + shortcuts
 }
 
 // contentWidth is the scrollback text width (rail + padding removed).
@@ -405,16 +408,63 @@ func (a *App) contentWidth() int {
 	return w
 }
 
-// blockLinesLocked renders a block to visual lines (cached per width/state).
-func (a *App) blockLinesLocked(i int, b *Block, w int) []string {
-	key := blockKey{idx: i, kind: b.Kind, width: w, tlen: len(b.Text), tool: b.ToolName, status: b.Status}
+// blockLines renders a block to styled visual lines (cached per width/state).
+func (a *App) blockLines(i int, b *Block, w int) []line {
+	key := blockKey{idx: i, kind: b.Kind, width: w, tlen: len(b.Text), tool: b.ToolName, status: b.Status, stream: b.stream}
 	if lines, ok := a.lineCache[key]; ok {
 		return lines
 	}
-	var lines []string
+	var lines []line
 	switch b.Kind {
+	case KindUser:
+		// Grok user prompt: ❯ prefix, text_primary body, bg-highlight band
+		// across the full row; continuation lines indent past the prefix.
+		band := a.cellColor(a.th.Get(theme.BgHighlight))
+		pfxSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
+		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+		text := strings.TrimRight(b.Text, "\n")
+		wrapped := wrap(text, max(10, w-2))
+		for j, wl := range wrapped {
+			ln := line{bg: band}
+			if j == 0 {
+				ln.runs = append(ln.runs, cell{text: "❯ ", style: pfxSt})
+			} else {
+				ln.runs = append(ln.runs, cell{text: "  ", style: pfxSt})
+			}
+			ln.runs = append(ln.runs, cell{text: wl, style: bodySt})
+			lines = append(lines, ln)
+		}
+		if text == "" {
+			ln := textline("❯ ", pfxSt)
+			ln.bg = band
+			lines = append(lines, ln)
+		}
+	case KindThinking:
+		// Grok thinking.rs: "Thinking…" (running, with braille spinner) or
+		// "Thought for Xs" (done). Muted bold; body hidden (collapsed).
+		var hdr string
+		if b.stream {
+			hdr = "⠹ Thinking…"
+		} else if b.thinkDur > 0 {
+			hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
+		} else {
+			hdr = "Thought"
+		}
+		lines = append(lines, textline(hdr, stThinkingHdr(a, b.stream)))
 	case KindTool:
-		lines = wrap(toolSummary(b, w), w)
+		fg := theme.AccentTool
+		switch b.Status {
+		case "running":
+			fg = theme.AccentRunning
+		case "error":
+			fg = theme.AccentError
+		case "ok":
+			fg = theme.AccentSuccess
+		}
+		// ◈ bullet colored by state; name+args in secondary text.
+		ln := textline("◈ "+toolSummary(b, w), tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))))
+		ln.runs[0].style = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
+		lines = append(lines, ln)
 	case KindToolDone:
 		prev := strings.Join(strings.Fields(b.Text), " ")
 		if prev == "" {
@@ -423,17 +473,37 @@ func (a *App) blockLinesLocked(i int, b *Block, w int) []string {
 		if len(prev) > w*3 {
 			prev = prev[:w*3] + "…"
 		}
-		lines = wrap("↳ "+prev, w)
+		lines = append(lines, textline("↳ "+prev, a.mdStyle().muted))
+	case KindSystem:
+		fg := theme.Gray
+		if strings.Contains(strings.ToLower(b.Text), "error") || strings.Contains(strings.ToLower(b.Text), "canceled") {
+			fg = theme.AccentError
+		}
+		lines = append(lines, textline(strings.TrimRight(b.Text, "\n"), tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))).Italic(true)))
+	case KindAssistant:
+		for _, ln := range a.renderMarkdown(b.Text, w) {
+			lines = append(lines, wrapLine(ln, w)...)
+		}
+		if b.stream && len(lines) > 0 {
+			last := &lines[len(lines)-1]
+			last.runs = append(last.runs, cell{text: "▍", style: a.mdStyle().muted})
+		}
 	default:
-		lines = wrap(strings.TrimRight(b.Text, "\n"), w)
-		if b.stream && (b.Kind == KindThinking || b.Kind == KindAssistant) {
-			if n := len(lines); n > 0 {
-				lines[n-1] += " ▍"
-			}
+		for _, ln := range a.renderMarkdown(b.Text, w) {
+			lines = append(lines, wrapLine(ln, w)...)
 		}
 	}
 	a.lineCache[key] = lines
 	return lines
+}
+
+// stThinkingHdr styles the thinking header: muted bold, per grok thinking.rs.
+func stThinkingHdr(a *App, running bool) tcell.Style {
+	fg := a.th.Get(theme.Gray)
+	if running {
+		fg = a.th.Get(theme.AccentThinking)
+	}
+	return tcell.StyleDefault.Foreground(a.cellColor(fg)).Bold(true)
 }
 
 // --- drawing ---
@@ -442,81 +512,55 @@ func (a *App) draw() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := a.scr
-	s.Clear()
 	w, h := a.width, a.height
+	s.Clear()
 
-	// Layout: scrollback rows [0, h-3), status line h-2, editor h-1.
-	vp := h - 3
+	// Grok layout: scrollback rows [0, h-4), blank row, composer box (2
+	// rows: input + info divider), shortcuts row at the bottom.
+	vp := h - 4
 	if vp < 1 {
 		vp = 1
 	}
 	contentW := a.contentWidth()
 
-	// Flatten block lines into (text, style, railStyle) rows.
 	type row struct {
-		text  string
+		ln    line
 		rail  string
-		style tcell.Style
 		railS tcell.Style
+		ts    string // right-aligned timestamp (first row of user/assistant)
 	}
 	var rows []row
 	for i := range a.blocks {
 		b := a.blocks[i]
-		lines := a.blockLinesLocked(i, b, contentW)
-		var st tcell.Style
+		lines := a.blockLines(i, b, contentW)
 		var railCh string
 		var railS tcell.Style
 		switch b.Kind {
 		case KindUser:
-			st = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
-			for j, ln := range lines {
-				prefix := "  "
-				if j == 0 {
-					prefix = "❯ "
-				}
-				rows = append(rows, row{text: prefix + ln, style: st})
-			}
-			rows = append(rows, row{text: "", style: st})
-			continue
+			railCh = "" // user rows carry their own ❯ band, no rail
 		case KindThinking:
-			st = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-			railCh = "│"
-			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-		case KindTool:
-			railCh = "│"
-			fg := a.th.Get(theme.AccentTool)
-			if b.Status == "running" {
-				fg = a.th.Get(theme.AccentRunning)
-			}
-			if b.Status == "error" {
-				fg = a.th.Get(theme.AccentError)
-			}
-			st = tcell.StyleDefault.Foreground(a.cellColor(fg)).Bold(b.Status != "running")
-			railS = tcell.StyleDefault.Foreground(a.cellColor(fg))
-		case KindToolDone:
-			st = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-			railCh = " "
-			railS = st
+			railCh = "┃"
+			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
+		case KindTool, KindToolDone:
+			railCh = "┃"
+			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
 		case KindSystem:
-			fg := a.th.Get(theme.Gray)
-			if strings.Contains(strings.ToLower(b.Text), "error") || strings.Contains(b.Text, "canceled") {
-				fg = a.th.Get(theme.AccentError)
-			}
-			st = tcell.StyleDefault.Foreground(a.cellColor(fg)).Italic(true)
-			railCh = " "
-			railS = st
+			railCh = "┃"
+			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
 		default: // assistant
-			railCh = "│"
-			st = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+			railCh = "┃"
 			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant)))
 		}
-		for _, ln := range lines {
-			rows = append(rows, row{text: ln, rail: railCh, style: st, railS: railS})
+		for j, ln := range lines {
+			r := row{ln: ln, rail: railCh, railS: railS}
+			if j == 0 && !b.Ts.IsZero() && (b.Kind == KindUser || b.Kind == KindAssistant) {
+				r.ts = b.Ts.Format("3:04 PM")
+			}
+			rows = append(rows, r)
 		}
-		rows = append(rows, row{text: "", style: st, rail: " ", railS: railS}) // separator
+		rows = append(rows, row{}) // separator
 	}
 
-	// Viewport: show rows[offset .. offset+vp) from the bottom.
 	start := len(rows) - vp - a.offset
 	if start < 0 {
 		start = 0
@@ -526,62 +570,76 @@ func (a *App) draw() {
 		end = len(rows)
 	}
 	for y, r := range rows[start:end] {
-		// Rail column.
+		if r.ln.bg != 0 {
+			// Band row (user prompt / code fence): fill the full width so
+			// the band reads as one continuous row (grok semantic band).
+			for bx := 0; bx < w; bx++ {
+				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
+			}
+		}
+		x := 3 // rail(1) + pad(2); user bands start their runs at x=0
+		if r.ln.bg != 0 && len(r.ln.runs) > 0 && r.ln.runs[0].text == "❯ " {
+			x = 0
+		}
 		if r.rail != "" {
 			drawText(s, 0, y, r.rail, r.railS)
 		}
-		// Content, indented under the rail (user prompts flush-left).
-		x := 2
-		if r.rail == "" && r.text != "" && strings.HasPrefix(r.text, "❯") {
-			x = 0
+		for _, run := range r.ln.runs {
+			drawText(s, x, y, run.text, run.style)
+			x += width(run.text)
 		}
-		drawText(s, x, y, r.text, r.style)
+		// Right-aligned dim timestamp (grok draws these on first rows).
+		if r.ts != "" {
+			tsSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+			if r.ln.bg != 0 {
+				tsSt = tsSt.Background(r.ln.bg)
+			}
+			drawText(s, w-width(r.ts)-2, y, r.ts, tsSt)
+		}
 	}
 
-	// Scroll indicator when scrolled up.
 	if a.offset > 0 {
 		hint := fmt.Sprintf("▲ %d", a.offset)
 		drawText(s, w-len(hint)-1, 0, hint,
 			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))))
 	}
 
-	a.drawStatus(h - 2)
-	a.drawEditor(h - 1)
+	a.drawComposer(h - 3)
+	a.drawShortcuts(h - 1)
 	s.Show()
 }
 
-func (a *App) drawStatus(y int) {
-	a.st.spinnerIdx = a.st.spinnerIdx % len(spinnerFrames) // safety
-	sp := ""
-	if a.st.Running {
-		sp = " " + spinnerFrames[a.st.spinnerIdx]
+// drawComposer renders the grok prompt box: rounded border, ❯ prefix,
+// editor text, blinking block cursor; model info line on the bottom border.
+func (a *App) drawComposer(yTop int) {
+	w := a.width
+	if w < 6 || yTop < 1 {
+		return
 	}
-	left := fmt.Sprintf(" %s · %s · ↑%s ↓%s tokens%s",
-		a.st.Model, shortID(a.st.SessionID),
-		humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut), sp)
-	st := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-	drawText(a.scr, 0, y, left, st)
+	border := a.th.Get(theme.PromptBorderActive)
+	bs := tcell.StyleDefault.Foreground(a.cellColor(border))
+	ms := a.mdStyle()
 
-	hint := "Enter send · Esc cancel · Ctrl+C quit "
-	drawText(a.scr, a.width-width(hint), y, hint,
-		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
-}
+	// Top border: ╭────╮ (1-cell inset on each side, like grok's box).
+	drawText(a.scr, 1, yTop-1, "╭", bs)
+	for x := 2; x < w-2; x++ {
+		a.scr.SetContent(x, yTop-1, '─', nil, bs)
+	}
+	drawText(a.scr, w-2, yTop-1, "╮", bs)
 
-// drawEditor renders the prompt line. Caller (draw) holds a.mu.
-func (a *App) drawEditor(y int) {
+	// Input row: │ ❯ text…│
+	a.scr.SetContent(1, yTop, '│', nil, bs)
+	a.scr.SetContent(w-2, yTop, '│', nil, bs)
+	drawText(a.scr, 3, yTop, "❯ ", tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true))
+
 	text := a.ed.Text()
 	cur := a.ed.cur
-
-	prompt := "❯ "
-	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
-	textStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
-
-	drawText(a.scr, 0, y, prompt, promptStyle)
-	// Render the tail of the buffer that fits (long drafts scroll).
-	avail := a.width - width(prompt) - 1
+	avail := w - 7 // inner: border(1)+pad(1)+prefix(2)+right pad(2)+border(1)
+	if avail < 2 {
+		avail = 2
+	}
 	vis := []rune(text)
 	if width(text) > avail {
-		// Keep the cursor visible: show the window ending at cursor.
 		start := cur
 		shown := 0
 		for start > 0 && shown < avail-3 {
@@ -594,11 +652,59 @@ func (a *App) drawEditor(y int) {
 			cur = len(vis)
 		}
 	}
-	drawText(a.scr, width(prompt), y, string(vis), textStyle)
+	drawText(a.scr, 5, yTop, string(vis), ms.body)
 
-	// Cursor position within the visible window.
-	cx := width(prompt) + width(string(vis[:min(cur, len(vis))]))
-	a.scr.ShowCursor(cx, y)
+	// Info divider bottom border: ╰─ model · ⠋ ───────────╯
+	info := " " + a.st.Model
+	if a.st.Running {
+		a.st.spinnerIdx = a.st.spinnerIdx % len(spinnerFrames)
+		info += " · " + spinnerFrames[a.st.spinnerIdx]
+	}
+	drawText(a.scr, 1, yTop+1, "╰", bs)
+	for x := 2; x < w-2; x++ {
+		a.scr.SetContent(x, yTop+1, '─', nil, bs)
+	}
+	if info != " " {
+		drawText(a.scr, 2, yTop+1, info, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+	}
+	drawText(a.scr, w-2, yTop+1, "╯", bs)
+
+	// Cursor: blinking block at the editor position.
+	cx := 5 + width(string(vis[:min(cur, len(vis))]))
+	a.scr.ShowCursor(min(cx, w-3), yTop)
+}
+
+// drawShortcuts renders the bottom hint row: bold keys, gray labels,
+// dim │ separators (grok shortcuts_bar.rs).
+func (a *App) drawShortcuts(y int) {
+	keyStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
+	lblStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+	sepStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+
+	type hint struct{ key, label string }
+	hints := []hint{
+		{"Enter", "send"},
+		{"Esc", "cancel"},
+		{"Ctrl+C", "quit"},
+	}
+	x := 2
+	for i, hh := range hints {
+		if i > 0 {
+			drawText(a.scr, x, y, "  │  ", sepStyle)
+			x += 5
+		}
+		drawText(a.scr, x, y, hh.key, keyStyle)
+		x += width(hh.key)
+		drawText(a.scr, x, y, ":", lblStyle)
+		x++
+		drawText(a.scr, x, y, hh.label, lblStyle)
+		x += width(hh.label)
+	}
+	// Right-aligned token counter (status_line style: muted segments).
+	if a.st.TokensIn > 0 || a.st.TokensOut > 0 {
+		right := fmt.Sprintf("↑%s │ ↓%s", humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut))
+		drawText(a.scr, a.width-width(right)-2, y, right, lblStyle)
+	}
 }
 
 // drawText writes s at (x, y); wide runes handled by tcell.
