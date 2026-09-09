@@ -211,6 +211,29 @@ func TestBuildContextCompactionNullKept(t *testing.T) {
 	}
 }
 
+func TestBuildContextEntryIDsAlignWithMessages(t *testing.T) {
+	kept := "44444444"
+	entries := []Entry{
+		userMsg("11111111", "", "dropped 1"),
+		asstMsg("22222222", "11111111", "dropped 2"),
+		mkCompaction("33333333", "22222222", "summary text", &kept),
+		userMsg("44444444", "33333333", "kept A"),
+		asstMsg("55555555", "44444444", "kept B"),
+	}
+	r := ctx(t, entries, "55555555")
+	// EntryIDs is parallel to Messages: "" for the synthesized summary,
+	// the source entry id for every store-backed message.
+	wantIDs := []string{"", "44444444", "55555555"}
+	if len(r.EntryIDs) != len(r.Messages) {
+		t.Fatalf("EntryIDs len %d != Messages len %d", len(r.EntryIDs), len(r.Messages))
+	}
+	for i, want := range wantIDs {
+		if r.EntryIDs[i] != want {
+			t.Fatalf("EntryIDs[%d] = %q, want %q", i, r.EntryIDs[i], want)
+		}
+	}
+}
+
 func TestBuildContextBranchSummaryAsUserMessage(t *testing.T) {
 	entries := []Entry{
 		userMsg("11111111", "", "hi"),

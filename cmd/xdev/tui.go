@@ -125,13 +125,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 	}
-	// Seed the live conversation with resumed messages so the next turn
-	// carries full history.
-	var live []ai.Message
-	if len(store.Entries()) > 0 {
-		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
-			live = res.Messages
+	// Live conversation is the store: user/assistant/toolResult messages
+	// are persisted by the hooks and Agent.persist, so each submit rebuilds
+	// history from the store (compaction entries replay correctly through
+	// BuildContext). Seeding from a separate slice went stale and dropped
+	// assistant turns (conversation amnesia).
+	rebuildHistory := func() []ai.Message {
+		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		if err != nil {
+			return nil
 		}
+		return res.Messages
 	}
 
 	baseCtx, baseCancel := context.WithCancel(context.Background())
@@ -157,7 +161,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Attribution: "user",
 				UserTS:      time.Now().UnixMilli(),
 			}
-			live = append(live, msg)
 			sessMu.Unlock()
 			if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
 				logx.Errorf("persist user message: %v", err)
@@ -168,14 +171,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				defer running.Store(false)
 				app.SetRunning(true)
 				ag := &agent.Agent{
-					Provider:  prov,
-					Tools:     reg,
-					Hooks:     &tuiHooks{ts: ts},
-					MaxTokens: opts.MaxTokens,
-					Model:     modelName,
+					Provider:   prov,
+					Tools:      reg,
+					Hooks:      &tuiHooks{ts: ts},
+					MaxTokens:  opts.MaxTokens,
+					Model:      modelName,
+					Store:      store,
+					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 				}
 				sessMu.Lock()
-				hist := append([]ai.Message(nil), live...)
+				hist := rebuildHistory() // store mirror is authoritative
 				sessMu.Unlock()
 				_, err := ag.Run(ctx, sys, hist)
 				app.EndAssistant()
@@ -274,6 +279,9 @@ func (h *tuiHooks) OnToolResultMessage(msg *ai.Message) {
 }
 
 func (h *tuiHooks) OnTurnEnd(reason ai.StopReason, err error) {}
+func (h *tuiHooks) OnCompaction(tokensBefore int64) {
+	h.ts.app.AddSystemBlock(fmt.Sprintf("· context compacted (~%d tokens)", tokensBefore))
+}
 
 // config2Load is a tiny alias so tui.go shares print.go's loader.
 func config2Load() (*config.Config, error) { return config.LoadModelsLayered() }

@@ -14,6 +14,10 @@ type SystemPrompt struct {
 type ContextResult struct {
 	System   string
 	Messages []ai.Message
+	// EntryIDs is parallel to Messages: the store entry id each message
+	// came from, or "" for synthesized messages (compaction summaries).
+	// Compaction anchors firstKeptEntryId through it.
+	EntryIDs []string
 	Model    string
 	// TokensBefore approximates the consumed context as the sum of usage
 	// totals across the path (MVP approximation).
@@ -131,7 +135,13 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 	// follow the assistant message that issued the call).
 	seenCalls := map[string]bool{}
 	var out []ai.Message
+	// entryIDs is parallel to out: source entry per message ("" for
+	// synthesized messages such as compaction summaries).
+	var entryIDs []string
 	out = append(out, summaries...)
+	for range summaries {
+		entryIDs = append(entryIDs, "")
+	}
 	for _, e := range chain {
 		switch t := e.(type) {
 		case *MessageEntry:
@@ -147,13 +157,16 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 					}
 				}
 				out = append(out, m)
+				entryIDs = append(entryIDs, e.Envelope().ID)
 			case ai.RoleToolResult:
 				if m.ToolCallID != "" && !seenCalls[m.ToolCallID] {
 					continue // orphan result: no prior assistant issued the call
 				}
 				out = append(out, m)
+				entryIDs = append(entryIDs, e.Envelope().ID)
 			default:
 				out = append(out, m)
+				entryIDs = append(entryIDs, e.Envelope().ID)
 			}
 			if u := m.Usage; u != nil {
 				tokens += u.TotalTokens
@@ -165,6 +178,7 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 					Role:    ai.RoleUser,
 					Content: []ai.Block{ai.TextBlock{Text: txt}},
 				})
+				entryIDs = append(entryIDs, e.Envelope().ID)
 			}
 		}
 	}
@@ -172,6 +186,7 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 	return &ContextResult{
 		System:       sys.Text,
 		Messages:     out,
+		EntryIDs:     entryIDs,
 		Model:        model,
 		TokensBefore: tokens,
 	}, nil

@@ -17,7 +17,8 @@ if [[ -n "$MODEL" ]]; then
 fi
 
 echo "== running: $PROMPT =="
-/tmp/xdev-smoke "${ARGS[@]}" "$PROMPT"
+# Empty-array expansion must survive `set -u` on macOS bash 3.2.
+/tmp/xdev-smoke ${ARGS[@]+"${ARGS[@]}"} "$PROMPT"
 
 echo
 echo "== session files written =="
