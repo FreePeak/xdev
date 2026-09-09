@@ -593,16 +593,16 @@ Recommendations:
 - **#3 (M2 session core)** — todo state replay acceptance: `getLatestTodoPhasesFromEntries`
   backward scan preferring `user_todo_edit` custom entries over non-error `todo` tool-result
   `details.phases`; `syncFromBranch` on session init / branch switch / rewind / session switch.
-- **#6 (M6 RPC)** — `get_state` response must include `todoPhases`.
+- **#7 (M6 RPC)** — `get_state` response must include `todoPhases`.
 - **#5 (M4 TUI)** — todo renderer acceptance: phased `I. Name` display sanitization (raw names stay
   lookup keys), collapsed cap 8 + `… N more active todos` summary, display-only HUD auto-clear
   (`tasks.todoClearDelay`), no timer-driven mutation of canonical phases.
-- **#10 (M10 session UX)** — `/todo` command verbs (show/edit/copy/expand/collapse/export/import/
+- **#11 (M10 session UX)** — `/todo` command verbs (show/edit/copy/expand/collapse/export/import/
   append/start/done/drop/rm/help), fuzzy task/phase matching, markdown round-trip with
   `[ ]`/`[/]`/`[x]`/`[-]`/`[!]` (+`>`/`~` aliases) and `<!-- blocker: … -->`, `user_todo_edit`
   persistence, and the manual-edit `<system-reminder>` with do-not-recreate language on removals.
-- **#11 (M11 agent system)** — acceptance: `todo` absent from subagent tool sets except
+- **#12 (M11 agent system)** — acceptance: `todo` absent from subagent tool sets except
   prewalk-armed children (`isParentOwnedTool` semantics).
-- **#12 (M12 knowledge/chrome) / docs** — settings schema: `todo.enabled` (true), `todo.reminders`
+- **#13 (M12 knowledge/chrome) / docs** — settings schema: `todo.enabled` (true), `todo.reminders`
   (true), `todo.remindersMax` (3), `todo.eager` (`default|preferred|always`, default), plus the
   boolean→enum migration pattern for `todo.eager`/`todo.remindersMax` legacy renames.
