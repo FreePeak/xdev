@@ -9,10 +9,11 @@
 - **YOLO by default.** No permission theater. The read-data + execute-code + network trifecta cannot be contained by prompting or pattern rules; containment belongs to external sandboxing (containers, micro-VMs), not the agent. The harness documents sandbox patterns instead of building security theater.
 - **Sessions are append-only JSONL trees with a mutable leaf pointer.** Nothing is ever mutated or deleted — branching moves a pointer, context is reconstructed by walking parent links, and the format is inspectable and post-processable with ordinary tools.
 - **Bounded everything.** Queues, buffers, session windows, and output sinks are all bounded; backpressure is a feature, not a bug. A runaway turn degrades into "compact now" instead of an OOM kill.
+- **Full-parity ambition.** Everything omp does daily — model roles, slash/custom commands, AGENTS.md hierarchy, subagents + hub, advisor watchdog, prewalk, memory, skills, themes/color — rebuilt with the same bounded-memory discipline.
 
 ## Status
 
-**Pre-M0 — planning phase. xdev does not exist yet.** There is no binary, no install, and no code; what you see here is the blueprint. Work is tracked in the milestone roadmap below.
+**Pre-M0 — planning phase. xdev does not exist yet.** There is no binary, no install, and no code; what you see here is the blueprint. Work is tracked in the milestone roadmap below, which targets full omp feature parity (model roles, commands, memory, subagents, advisor, prewalk, themes/color, skills, hub, hooks) — the parity breakdown lives in [docs/PRD.md](docs/PRD.md) and [docs/research/parity-*.md](docs/research/).
 
 - [docs/PRD.md](docs/PRD.md) — product requirements and scope.
 - [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md) — the full architecture research and rebuild blueprint this project is based on.
@@ -65,6 +66,12 @@ Hard target: worst case **<100 MB RSS** (~30–70 MB estimated in normal use).
 | M6 | RPC mode (wire-compatible-ish) + subagents + MCP client | embedders can drive it |
 | M7 | Ext subprocess protocol + FS-scan cache + AST shell-out | parity with omp daily workflow |
 | M8 | Memory hardening audit, fuzzing, cross-platform builds, packaging | <100 MB RSS verified under worst-case transcript |
+| M9 | Model roles + provider/auth layer: roles (`@smol`/`:effort`), models.yml, credential chain, 4 wire transports, Claude/Codex OAuth, config layering + `xdev config` | role aliases resolve across sessions; OAuth login works; config precedence tests pass |
+| M10 | Session UX: slash commands, lifecycle (`/new` `/fork` `--continue`), AGENTS.md hierarchy + imports, system-prompt files, keybindings | continue/resume/fork workflow works; custom markdown commands expand; AGENTS.md reaches context |
+| M11 | Agent system: task agents, hub messaging/processes, hooks, advisor watchdog, prewalk, plan mode | parent spawns scoped subagent steered back via hub; advisor steers; prewalk switches model after first edit |
+| M12 | Knowledge & chrome: memory backend + `/memory`, skills (`skill://`), theme engine, TUI chrome (status line, overlays) | memory summary injects at start; `/skill:` expands; theme live-reloads with all 66 tokens enforced |
+| M13 | Extended tools: eval kernel, notebook, web_search, github, ast-grep, browser, checkpoint/rewind, secrets redaction, LSP, MCP extensions | eval cell persists state; web_search/github/ast-grep answer real queries |
+| M14 | v2 modes & polish: vibe mode, E2E-encrypted collab, multi-provider discovery, profiles, `/export` `/share`, goal mode | vibe session completes delegated multi-worker task; collab guest mirrors host |
 
 ## Name
 

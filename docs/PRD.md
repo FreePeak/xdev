@@ -27,6 +27,10 @@ Derived from the [omp/pi Go-rebuild architecture research](research/2026-09-09-o
 - No tree-sitter embedding (CGO + memory); AST work shells out to the `ast-grep` binary when present.
 - No in-tree Git library; shell out to `git` (no go-git for v1).
 - No built-in LSP server management beyond opt-in-lazy launch: `gopls`/`rust-analyzer` start only when the `lsp` tool is used (omp's `lsp.lazy` default, research IV.10).
+- No desktop control (`computer`), full DAP debugging, OMP-native `security_scan`, `tts`, or `generate_image` — per-OS native code or cloud-only dependencies with no daily-driver coding value (parity research: docs/research/parity-tools-providers.md).
+- No embedded local tiny models (ONNX/MLX workers for titles/memory) — heavy native dependency; the online path only (research IV.10).
+- No omp ecosystem services: `auth-broker`/`gateway`, `browser-relay`, `mnemopi` backend, `collab-web`, `metaharness`, `robomp`, `omp-stats`, `omptype`, `edit-benchmark` companion packages (parity research: docs/research/parity-tools-providers.md §E).
+- No `sharpshooter` memory backend — niche; xdev ships the local two-phase memory pipeline instead (parity research: docs/research/parity-knowledge-ui.md).
 
 ## 2. Scope
 
@@ -41,6 +45,11 @@ Derived from the [omp/pi Go-rebuild architecture research](research/2026-09-09-o
 - **MCP client** — official Go SDK (`github.com/modelcontextprotocol/go-sdk`), stdio/HTTP transports, `list_changed` notifications, per-server enable/disable, tool filtering (e.g. browser-automation servers filtered when a built-in browser exists). MCP stays optional — pi ships without it for a reason (context poisoning; CLI tools beat MCP when equivalents exist).
 - **Ext subprocess protocol** — extension = any executable speaking JSONL on stdio: capability handshake (tools, commands, event subscriptions, renderers as declarative specs) → event frames (`tool_call` may block/revise fail-closed; `tool_result` may patch) → runtime action requests (steer/followUp/aside, register provider). Per-event timeout + SIGKILL.
 - **Subagents** — same session core with restricted tool sets (no ambient MCP/extensions/LSP), structured `outputSchema` (permissive/strict), a `yield` tool, artifact handoff; child = same binary in `print`/`rpc` mode or in-process goroutine sessions with their own `SessionStore`.
+- **Model roles, providers, auth & config layering** — `modelRoles` record with `@role` aliases and `:effort` suffixes; per-provider `models.yml` (baseUrl/apiKey/auth/headers/discovery/overrides); credential resolution chain (CLI flag → models.yml → stored OAuth → /login key → env + `.env` layering); Claude Pro/Max + Codex OAuth (PKCE S256, refresh, quota-aware rotation); settings layering engine + `xdev config` CLI; env framework (process env → project `.env` → agent `.env`); approval modes always-ask|write|yolo + per-tool approval record + `bash.patterns` (docs/research/parity-tools-providers.md).
+- **Session UX** — slash commands (native markdown discovery project+user, quote-aware `$1..$n`/`$@`/`$ARGUMENTS` expansion, unknown-command fall-through); lifecycle `/new` `/fresh` `/clear` `/drop` `/fork`; `--continue`/`--resume` + picker + `switchSession` runtime; `/tree` `/branch`; context files (AGENTS.md/CLAUDE.md hierarchy, `@path` imports) + SYSTEM.md/APPEND_SYSTEM.md variants + `--system-prompt` flags; keybindings remap; `/dump` transcript (docs/research/parity-session-ux.md).
+- **Agent system** — task-agent discovery (markdown+frontmatter, first-wins merge), spawn policy (allowlist, depth guard, plan-mode read-only children), model precedence; `hub` tool (messaging, jobs, process supervision) + Agent Hub TUI roster; hooks event bus with fail-closed `tool_call`/`tool_result` interception; advisor/watchdog steering; prewalk big→`@smol` model handoff; magic keywords (`ultrathink`/`orchestrate`/`workflowz`); plan mode + `xd://propose`/`xd://resolve` finalization (docs/research/parity-agent-system.md).
+- **Knowledge & chrome** — memory backend seam + local backend (extraction → smol consolidation → MEMORY.md + learned.md) + `memory://` read seam; skills (SKILL.md discovery, `skill://` protocol, `/skill:` commands, managed skills); `learn` tool; theme engine (66-token JSON themes, vars, color detection, dark/light auto, symbol presets, live reload); TUI chrome (status-line/HUD segments, overlays, custom tool renderers) (docs/research/parity-knowledge-ui.md).
+- **Extended tools & ecosystems (demand-driven)** — eval kernel (py persistent NDJSON cells), notebook virtual text, `web_search`, `github` tool, `ast_grep`/`ast_edit`, browser via chromedp, checkpoint/rewind, custom subprocess tools, MCP config extensions, LSP tool + `lsp-config`, secrets redaction, context promotion, marketplace/plugin manager; v2 modes: vibe (director + workers), collab (E2E encrypted), multi-provider discovery, profiles (docs/research/parity-tools-providers.md).
 
 ### Out of scope (research IV.10)
 
@@ -50,6 +59,78 @@ Derived from the [omp/pi Go-rebuild architecture research](research/2026-09-09-o
 - Marketplace / complex theme / composer-shape systems until demand exists.
 - Built-in LSP server management — opt-in-lazy only.
 - `go-git` — shell out to `git`.
+
+### Feature-parity matrix
+
+Classes per docs/research/parity-*.md scout reports (CORE = required for parity, NICE = demand-driven, SKIP = documented non-goal). Milestones reference the §4 roadmap.
+
+| Feature | omp doc | Class | xdev milestone |
+|---|---|---|---|
+| Model roles (`modelRoles`, `@role` aliases, `:effort`) | models.md | CORE | M9 |
+| Per-provider `models.yml` (baseUrl/apiKey/auth/headers/discovery/overrides) | models.md | CORE | M9 |
+| Credential resolution chain (CLI → models.yml → OAuth → /login → env) | models.md | CORE | M9 |
+| Claude Pro/Max + Codex OAuth (PKCE S256, refresh, quota rotation) | models.md | CORE | M9 |
+| Wire transports v1: anthropic-messages, openai-completions, openai-responses, google-generative-ai | models.md | CORE | M1 + M9 |
+| Wire transports v2: azure, bedrock, vertex, gemini-cli, codex-OAuth | models.md | NICE | M14 |
+| Settings layering engine (defaults ← global ← project ← `--config`) + `xdev config` CLI | config.md | CORE | M9 |
+| Env framework (process env → project `.env` → agent `.env`) | config.md | CORE | M9 |
+| Approval modes always-ask\|write\|yolo + per-tool approval + `bash.patterns` | approval-mode.md | CORE | M3 + M9 |
+| Secrets redaction (`secrets.yml`, reversible `$$HASH$$` placeholders) | secrets.md | NICE | M13 |
+| Slash commands (native markdown discovery, `$1..$n`/`$@`/`$ARGUMENTS`) | slash-command-internals.md | CORE | M10 |
+| CLI surface (modes, flags; `--continue`/`--resume`/`--fork`/`--print`/`--rpc`) | cli.md | CORE | M10 |
+| Keybindings remap (`keybindings.yml`) + `/hotkeys` | keybindings.md | CORE | M10 |
+| Lifecycle `/new` `/fresh` `/clear` `/drop` `/fork` | session-operations.md | CORE | M10 |
+| `--continue` breadcrumb + `--resume` + picker + `switchSession` runtime | session-operations.md | CORE | M10 |
+| `/tree` `/branch` selectors + labels/filters (data model: M2) | session-operations.md | NICE | M10 |
+| Context files (AGENTS.md/CLAUDE.md hierarchy, `@path` imports) | context-files.md | CORE | M10 |
+| Third-party context files (`.cursorrules` etc.) | context-files.md | NICE | M10 |
+| SYSTEM.md/APPEND_SYSTEM.md + `--system-prompt`/`--append-system-prompt` | system-prompts.md | CORE | M10 |
+| TITLE_SYSTEM.md/PERSONALITY.md | system-prompts.md | NICE | M10 |
+| `/dump` text transcript | tui.md | CORE | M10 |
+| `/export` HTML + `/share` E2E-encrypted | tui.md | NICE | M14 |
+| Task agents (markdown discovery, first-wins merge, spawn policy, depth guard) | agent.md | CORE | M11 |
+| Hub tool (messaging/jobs/processes) | agent-hub.md | CORE | M11 |
+| Agent Hub TUI roster (status/model/activity/cost, steer, kill) | agent-hub.md | CORE | M11 |
+| Agent Hub inspector | agent-hub.md | NICE | M11 |
+| Hooks event bus (lifecycle events, fail-closed `tool_call`/`tool_result`, subprocess hooks) | hooks.md | CORE | M11 |
+| Embedded-JS hooks | hooks.md | NICE | M11 |
+| Advisor/watchdog (per-delta constraint steering, nit→aside/concern→interrupt/blocker→steer) | watchdog.md | CORE | M11 |
+| WATCHDOG.md guidance + WATCHDOG.yml advisor roster | watchdog.md | NICE | M11 |
+| Prewalk (one-shot big→`@smol` handoff, `--prewalk`, `/prewalk`) | prewalk.md | CORE | M11 |
+| Magic keywords (`ultrathink`/`orchestrate`/`workflowz`) | prompt-extensions.md | CORE | M11 |
+| Plan mode + `xd://propose`/`xd://resolve` finalization | plan-mode.md | CORE | M11 |
+| Vibe mode (director + worker subagents, tiered fast\|good) | vibe.md | NICE | M14 |
+| Collab (E2E AES-256-GCM WS relay, host-authoritative, guest replica) | collab.md | NICE | M14 |
+| Memory local backend (extraction → consolidation → MEMORY.md/learned.md) | memory.md | CORE | M12 |
+| `memory://` read seam + `/memory` view\|stats\|clear | memory.md | CORE | M12 |
+| Mnemopi SQLite-FTS5 backend + `recall`/`retain`/`reflect`/`memory_edit` tools | memory.md | NICE | M13 |
+| `learn` tool + managed skills | skills.md | CORE | M12 |
+| Skills (SKILL.md discovery, `skill://` protocol, `/skill:` commands) | skills.md | CORE | M12 |
+| Theme engine (66-token themes, vars, color detection, symbol presets, live reload) | theme.md | CORE | M12 |
+| Status-line/HUD theming + spinner frames + overlays/ask picker | tui.md | CORE | M12 |
+| Custom tool renderers (`renderCall`/`renderResult`) + Component contract | tui.md | NICE | M12 |
+| Kitty inline images | tui.md | NICE | M13 |
+| Eval kernel py (persistent NDJSON subprocess cells) | eval.md | CORE | M13 |
+| Eval kernel js | eval.md | NICE | M13 |
+| Notebook `.ipynb` virtual text | notebook.md | NICE | M13 |
+| `web_search` (provider chain, 2–3 adapters) | web-search.md | NICE | M13 |
+| `github` tool via `gh` shell-out | github.md | NICE | M13 |
+| `ast_grep`/`ast_edit` via `sg` binary | ast-tools.md | NICE | M13 |
+| Browser (chromedp CDP) | browser.md | NICE | M13 |
+| Checkpoint/rewind (branch pointers + report entry) | checkpoint.md | NICE | M13 |
+| Custom tools (subprocess TS/JS modules) | custom-tools.md | NICE | M13 |
+| LSP tool + `lsp-config` (lazy launch, rootMarkers autodetect) | lsp-config.md | NICE | M13 |
+| Marketplace + plugin manager | marketplace.md | NICE | M13 |
+| MCP config extensions (imports from claude/codex/gemini/cursor, `!command` secrets, per-server timeout) | mcp-config.md | CORE | M6 + M13 |
+| `computer` desktop control | computer-use.md | SKIP | — (skipped) |
+| Full DAP debug driver | debug.md | SKIP | — (skipped) |
+| `security_scan` (OMP-native + Codex cloud) | security-scan.md | SKIP | — (skipped) |
+| `tts` text-to-speech | tts.md | SKIP | — (skipped) |
+| `generate_image` cloud providers | generate-image.md | SKIP | — (skipped) |
+| Local ONNX tiny models (titles/memory workers) | local-models.md | SKIP | — (skipped) |
+| `auth-broker`/`gateway` + `browser-relay` | auth-broker-gateway.md | SKIP | — (skipped) |
+| User-facing companion packages (omp-stats, mnemopi, metaharness, robomp, …) | packages.md | SKIP | — (skipped) |
+| `sharpshooter` memory backend | memory.md | SKIP | — (skipped) |
 
 ## 3. Architecture (HLD summary)
 
@@ -176,6 +257,14 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 | M6 | RPC mode (wire-compatible-ish) + subagents + MCP client | embedders can drive it | Not started | [#7](https://github.com/FreePeak/xdev/issues/7) |
 | M7 | Ext subprocess protocol + FS-scan cache + AST shell-out | parity with omp daily workflow | Not started | [#8](https://github.com/FreePeak/xdev/issues/8) |
 | M8 | Memory hardening audit, fuzzing, cross-platform builds, packaging | <100 MB RSS verified under worst-case transcript | Not started | [#9](https://github.com/FreePeak/xdev/issues/9) |
+| M9 | Model roles, providers, auth & config layering — `modelRoles` record (default/smol/slow/vision/plan/commit/tiny/task/advisor; `@role` aliases; `:effort` suffix); `models.yml` per-provider config; credential resolution chain (CLI `--api-key` → models.yml → stored OAuth → /login key → env + `.env` layering); wire-transport catalog completed to 4 v1 transports; Claude Pro/Max + Codex OAuth (PKCE S256, refresh, quota-aware rotation); settings layering engine (deep-merge objects, wholesale-replace scalars/arrays) + `xdev config` CLI; env framework (process env → project `.env` → agent `.env`); approval modes always-ask\|write\|yolo + per-tool approval record + `bash.patterns` | Role aliases resolve across session/subagents; OAuth login works; config precedence tests pass | Not started | [M9](https://github.com/FreePeak/xdev/issues/10) |
+| M10 | Session UX: commands, lifecycle, context files, prompts, keybindings — slash commands (native markdown discovery project+user, quote-aware `$1..$n`/`$@`/`$ARGUMENTS` expansion, unknown fall-through); lifecycle `/new` `/fresh` `/clear` `/drop` `/fork` (fork = new file + parentSession header); `--continue` breadcrumb (TTY/pane-keyed) + `--resume` + picker + `switchSession` runtime (hooks, rollback, model/tier restore); `/tree` `/branch` selectors + labels/filters; context files (AGENTS.md/CLAUDE.md hierarchy, depth dedup, `@path` imports); SYSTEM.md/APPEND_SYSTEM.md/TITLE_SYSTEM.md/PERSONALITY.md + `--system-prompt`/`--append-system-prompt`; keybindings remap + `/hotkeys`; `/dump` | Continue/resume/fork/branch/clear workflow works; custom markdown commands expand; AGENTS.md + imports reach context | Not started | [M10](https://github.com/FreePeak/xdev/issues/11) |
+| M11 | Agent system: task agents, hub, hooks, advisor, prewalk, plan mode — task-agent discovery (markdown+frontmatter, first-wins merge project→user→extension→bundled, invalid skipped w/ warning); spawn policy (allowlist, `task.maxRecursionDepth=2` depth guard, plan-mode read-only children, blocked self-recursion); model precedence (task > frontmatter > parent); hub tool (messaging/jobs/processes) + Agent Hub TUI roster; hooks event bus (session/agent/turn/tool lifecycle; fail-closed interception; command-style subprocess hooks); advisor/watchdog (per-delta steering, nit→aside/concern→interrupt/blocker→steer, NFKC guard, cooldown); prewalk (big→`@smol` handoff gated on todo, `--prewalk`/`/prewalk`); magic keywords (ultrathink/orchestrate/workflowz); plan mode + `xd://propose`/`xd://resolve` | Parent spawns scoped subagent steering back via hub; advisor steers on concern; prewalk switches model after first edit | Not started | [M11](https://github.com/FreePeak/xdev/issues/12) |
+| M12 | Knowledge & chrome: memory, skills, theme, TUI — memory backend seam + local backend (two-phase: extraction → smol consolidation → MEMORY.md + learned.md; lease+heartbeat; bounded caps) + `memory://` read seam + `/memory`; skills (SKILL.md discovery native+custom+managed first-wins, `skill://` protocol, `/skill:` commands); `learn` tool (+ managed-skill create/update w/ authored-shadowing conflict); theme engine (66-token JSON themes REQUIRED-complete, vars resolution, hex/256/terminal colors, truecolor/256 detection, auto dark/light via OSC 11, symbol presets, box-drawing overrides, live reload w/ last-good fallback); TUI chrome (themed status-line/HUD + spinner, overlay/dialog components incl. ask picker, custom tool renderers) | Memory summary+lessons inject at session start; `/skill:` expands; theme live-reloads with all 66 tokens enforced | Not started | [M12](https://github.com/FreePeak/xdev/issues/13) |
+| M13 | Extended tools & ecosystems — eval kernel (py subprocess NDJSON persistent-state cells); notebook `.ipynb` virtual text; `web_search` (provider chain, 2–3 adapters); `github` tool via `gh`; `ast_grep`/`ast_edit` via `sg`; browser via chromedp CDP; checkpoint/rewind (branch pointers + report entry); custom tools via subprocess; MCP config extensions (imports, `!command` secrets, per-server timeout/enable); LSP tool + `lsp-config` (lazy launch, rootMarkers); secrets redaction (reversible `$$HASH$$`); context promotion; marketplace/plugin manager | Eval cell persists state; web_search/github/ast-grep answer real queries | Not started | [M13](https://github.com/FreePeak/xdev/issues/14) |
+| M14 | v2 modes & distribution polish — vibe mode (director session, `vibe_spawn`/`send`/`wait`/`kill`/`status` over worker subagents, tiered fast\|good); collab (E2E AES-256-GCM WS relay, host-authoritative, guest replica, view-only links); multi-provider command/skill/context discovery (claude/codex/opencode roots + toggles); profiles (user-base relocation); `/export` HTML + `/share`; goal mode; ask-dialog headless-timeout policy | Vibe session completes delegated multi-worker task; collab guest mirrors host session | Not started | [M14](https://github.com/FreePeak/xdev/issues/15) |
+
+**Execution order:** M0→M7 as numbered; M9→M12 (the parity-CORE milestones) next; M13/M14 are demand-driven and can interleave after their CORE prerequisites. M8 (issue #9) re-runs as the **final release gate** once M9–M12 land, re-verifying the <100 MB RSS budget against the full feature set.
 
 ## 5. Key decisions
 
@@ -192,7 +281,11 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 
 - [README.md](../README.md) — project overview.
 - [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](research/2026-09-09-omp-pi-architecture-go-rebuild.md) — full architecture research and rebuild blueprint (authoritative source for every design point summarized above).
+- [docs/research/parity-agent-system.md](research/parity-agent-system.md) — task agents, hub, hooks, advisor, prewalk parity spec.
+- [docs/research/parity-session-ux.md](research/parity-session-ux.md) — slash commands, lifecycle, context files, keybindings parity spec.
+- [docs/research/parity-knowledge-ui.md](research/parity-knowledge-ui.md) — memory, skills, theme, TUI chrome parity spec.
+- [docs/research/parity-tools-providers.md](research/parity-tools-providers.md) — tool inventory, model roles, auth, approval, LSP, plugins parity spec.
 
 ---
 
-*Last updated: 2026-09-09 (initial PRD derived from omp/pi Go-rebuild research)*
+*Last updated: 2026-09-09 (extended to full omp feature-parity scope; added M9-M14)*
