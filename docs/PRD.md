@@ -56,7 +56,7 @@ Derived from the [omp/pi Go-rebuild architecture research](research/2026-09-09-o
 - `stats.db`-scale sidecar databases — keep stats in a tiny rollup table.
 - In-process extension loading — replaced by the subprocess protocol.
 - Rust N-API natives — Go stdlib + subprocesses cover ~90%; the FS-scan shared cache is the one concept worth re-implementing (M7).
-- Marketplace / complex theme / composer-shape systems until demand exists.
+- Marketplace and composer-shape systems until demand exists (theme engine itself is now IN scope — M12 CORE; marketplace/plugin manager is the M13 tail).
 - Built-in LSP server management — opt-in-lazy only.
 - `go-git` — shell out to `git`.
 
