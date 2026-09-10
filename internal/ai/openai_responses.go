@@ -186,6 +186,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req StreamRequest)
 	sctx, cancel := context.WithCancel(ctx)
 	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/responses", p.headers(), body, APIOpenAIResponses)
 	if err != nil {
+		cancel() // no goroutine will own it on this path
 		return nil, err
 	}
 	ch := make(chan Event, 64)
