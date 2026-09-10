@@ -210,8 +210,8 @@ func (a *App) AddToolBlock(name, argsPreview string) {
 }
 
 // FinishTool marks the last running tool block done (ok/error) and appends
-// a one-line result preview.
-func (a *App) FinishTool(name string, isErr bool, resultPreview string) {
+// the tool-result block carrying the full (sink-windowed) output.
+func (a *App) FinishTool(name string, isErr bool, output, dur string) {
 	a.mu.Lock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
@@ -224,11 +224,7 @@ func (a *App) FinishTool(name string, isErr bool, resultPreview string) {
 			break
 		}
 	}
-	kind := KindToolDone
-	if isErr {
-		kind = KindSystem
-	}
-	a.blocks = append(a.blocks, &Block{Kind: kind, ToolName: name, Text: resultPreview})
+	a.blocks = append(a.blocks, &Block{Kind: KindToolDone, ToolName: name, Text: output, Dur: dur, Err: isErr})
 	a.mu.Unlock()
 	a.poke()
 }
@@ -614,14 +610,49 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		ln.runs[0].style = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
 		lines = append(lines, ln)
 	case KindToolDone:
-		prev := strings.Join(strings.Fields(b.Text), " ")
-		if prev == "" {
-			prev = "(no output)"
+		hdrSt := a.mdStyle().muted
+		st := a.mdStyle().muted
+		state := "ok"
+		if b.Err {
+			state = "error"
+			hdrSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+			st = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
 		}
-		if len(prev) > w*3 {
-			prev = prev[:w*3] + "…"
+		hdr := "↳ " + state
+		if b.Dur != "" {
+			hdr += " (" + b.Dur + ")"
 		}
-		lines = append(lines, textline("↳ "+prev, a.mdStyle().muted))
+		lines = append(lines, textline(hdr, hdrSt))
+		// Body: the tool output as the model saw it (the tool layer bounds
+		// it: bash 16KB head+tail per stream, 8MB combined kill cap). The
+		// render window below keeps the resident line cache bounded (PRD
+		// row budget): ponytail ceiling — beyond head+tail rows the full
+		// text is only in the session JSONL, upgrade path is fold/expand.
+		body := strings.TrimRight(b.Text, "\n")
+		if body == "" {
+			if !b.Err {
+				lines = append(lines, textline("(no output)", a.mdStyle().muted))
+			}
+			break
+		}
+		const maxHeadRows, maxTailRows = 200, 50
+		rows := wrap(body, max(10, w-2))
+		draw := func(wl string) {
+			lines = append(lines, textline("  "+wl, st))
+		}
+		if len(rows) > maxHeadRows+maxTailRows+1 {
+			for _, wl := range rows[:maxHeadRows] {
+				draw(wl)
+			}
+			lines = append(lines, textline(fmt.Sprintf("  … %d rows elided (full output in the session log) …", len(rows)-maxHeadRows-maxTailRows), a.mdStyle().muted))
+			for _, wl := range rows[len(rows)-maxTailRows:] {
+				draw(wl)
+			}
+		} else {
+			for _, wl := range rows {
+				draw(wl)
+			}
+		}
 	case KindSystem:
 		fg := theme.Gray
 		if strings.Contains(strings.ToLower(b.Text), "error") || strings.Contains(strings.ToLower(b.Text), "canceled") {

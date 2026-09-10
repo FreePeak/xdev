@@ -26,6 +26,8 @@ type Block struct {
 	Text     string
 	ToolName string
 	Status   string        // tool blocks: "running", "ok", "error"
+	Dur      string        // tool result blocks: formatted duration
+	Err      bool          // tool result blocks: error result
 	stream   bool          // assistant still receiving deltas (dim cursor at tail)
 	Ts       time.Time     // block timestamp (user/assistant, drawn right)
 	thinkDur time.Duration // thinking: frozen at EndThinking

@@ -287,6 +287,9 @@ func (h *printHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.
 		status = "error"
 	}
 	fmt.Fprintf(os.Stderr, "← %s [%s, %s]\n", call.Name, status, dur.Round(time.Millisecond))
+	if strings.TrimSpace(res.Text) != "" {
+		fmt.Fprintln(os.Stderr, res.Text)
+	}
 }
 
 // OnMessageEnd persists the assistant message (persistence on message_end only).

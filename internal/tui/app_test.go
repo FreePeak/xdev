@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -127,7 +128,7 @@ func TestStreamingBlocksAndTools(t *testing.T) {
 	app.AppendThinking("pondering")
 	app.EndThinking()
 	app.AddToolBlock("read", `{"path":"a.txt"}`)
-	app.FinishTool("read", false, "1:hi (3ms)")
+	app.FinishTool("read", false, "1:hi\n2:there", "3ms")
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -140,8 +141,63 @@ func TestStreamingBlocksAndTools(t *testing.T) {
 	if app.blocks[2].Status != "ok" {
 		t.Fatalf("tool status = %q", app.blocks[2].Status)
 	}
-	if app.blocks[3].Kind != KindToolDone {
+	if app.blocks[3].Kind != KindToolDone || app.blocks[3].Text != "1:hi\n2:there" {
 		t.Fatalf("result block = %+v", app.blocks[3])
+	}
+}
+
+// TestToolResultRendersFullOutput pins the fix for "bash output not
+// printed fully": the KindToolDone render must show every body line
+// (not a flattened 200-char preview) and cap huge outputs with the
+// head+tail row window, never a silent middle cut.
+func TestToolResultRendersFullOutput(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.FinishTool("bash", false, "line-one\nline-two\nline-three", "5ms")
+	app.mu.Lock()
+	// Fit by scrolling up: the block is taller than the viewport but the
+	// render (blockLines) is what we assert on; drain a draw first.
+	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	app.mu.Unlock()
+	scr.Sync()
+
+	var got []string
+	for _, ln := range lines {
+		if len(ln.runs) == 1 {
+			got = append(got, ln.runs[0].text)
+		}
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"↳ ok (5ms)", "line-one", "line-two", "line-three"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("tool result render missing %q; got:\n%s", want, joined)
+		}
+	}
+}
+
+// TestToolResultRowWindow pins the bounded-render ceiling: outputs with
+// more rows than the window must keep the first 200 + last 50 rows and
+// announce the elided middle.
+func TestToolResultRowWindow(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var b strings.Builder
+	for i := 1; i <= 400; i++ {
+		fmt.Fprintf(&b, "row-%03d\n", i)
+	}
+	app.FinishTool("bash", false, strings.TrimSuffix(b.String(), "\n"), "9ms")
+	app.mu.Lock()
+	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	app.mu.Unlock()
+	if len(lines) != 200+50+1+1 { // head + tail + elision marker + header
+		t.Fatalf("windowed render = %d lines, want 252", len(lines))
+	}
+	if lines[1].runs[0].text != "  row-001" {
+		t.Fatalf("first body line = %q", lines[1].runs[0].text)
+	}
+	if lines[len(lines)-1].runs[0].text != "  row-400" {
+		t.Fatalf("last body line = %q", lines[len(lines)-1].runs[0].text)
+	}
+	if !strings.Contains(lines[201].runs[0].text, "rows elided") {
+		t.Fatalf("elision marker missing: %q", lines[201].runs[0].text)
 	}
 }
 
