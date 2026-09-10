@@ -117,8 +117,9 @@ func dispatch(app CommandAPI, input string) bool {
 		app.SendPrompt(ExpandArgs(mc.Template, raw))
 		return true
 	}
-	app.AddSystemBlock(fmt.Sprintf("unknown command: /%s — type /help", name))
-	return true
+	// Unknown name: not consumed — the caller submits it as literal prompt
+	// text (issue #11: "/foo" is never rejected).
+	return false
 }
 
 // Session lifecycle runs through SessionOps (the store lives in cmd);

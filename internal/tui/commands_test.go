@@ -95,7 +95,6 @@ func TestDispatchBuiltins(t *testing.T) {
 		{input: "/quit", quit: 1},
 		{input: "/q", quit: 1},
 		{input: "/help", wantSub: "commands:"},
-		{input: "/unknowncmd", wantSub: "unknown command: /unknowncmd — type /help"},
 	}
 	for _, tt := range tests {
 		f := &fakeAPI{fail: tt.wantFail}
@@ -119,7 +118,7 @@ func TestDispatchBuiltins(t *testing.T) {
 }
 
 func TestDispatchPlainText(t *testing.T) {
-	for _, in := range []string{"hello world", "/1abc", "/NEW", "", "  ", "/"} {
+	for _, in := range []string{"hello world", "/1abc", "/NEW", "", "  ", "/", "/unknowncmd"} {
 		f := &fakeAPI{}
 		if dispatch(f, in) {
 			t.Errorf("dispatch(%q) consumed input, want plain-text pass-through", in)
@@ -127,6 +126,18 @@ func TestDispatchPlainText(t *testing.T) {
 		if len(f.blocks) != 0 || f.quit != 0 {
 			t.Errorf("dispatch(%q) had side effects: %+v", in, f)
 		}
+	}
+}
+
+// Unknown slash names are NOT consumed: they fall through as literal
+// prompt text (issue #11).
+func TestDispatchUnknownFallsThrough(t *testing.T) {
+	f := &fakeAPI{}
+	if dispatch(f, "/unknowncmd") {
+		t.Fatal("dispatch consumed an unknown command; must fall through")
+	}
+	if len(f.blocks) != 0 {
+		t.Fatalf("unexpected blocks: %q", f.blocks)
 	}
 }
 
