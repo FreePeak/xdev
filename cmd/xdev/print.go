@@ -91,6 +91,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	hooks := &printHooks{store: store}
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName)}
+	applyPolicy(ag, settings)
 
 	// Extension processes (optional): their tools join the registry and the
 	// manager becomes the agent's fail-closed policy interceptor; runtime
@@ -377,6 +378,33 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 		return "", "", fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml, set defaultModel, or pass -model provider/model")
 	}
 	return ref, "", nil
+}
+
+// applyPolicy attaches the configured approval policy to an agent. Print
+// and RPC are unattended: a rule that resolves to "prompt" therefore
+// refuses (the agent loop's Approve==nil contract). The TUI will surface a
+// blocking card when M12's dialog chrome lands; until then it behaves the
+// same way, which is fail-safe rather than fail-open.
+// agentPolicy resolves the approval policy for a freshly built agent.
+func agentPolicy() tool.ApprovalPolicy {
+	pol, err := lastSettings().Policy()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		return tool.ApprovalPolicy{}
+	}
+	return pol
+}
+
+func applyPolicy(ag *agent.Agent, settings *config.Settings) {
+	if settings == nil {
+		return
+	}
+	pol, err := settings.Policy()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		return
+	}
+	ag.Policy = pol
 }
 
 // childModel resolves the @task role for subagents (M9: roles resolve

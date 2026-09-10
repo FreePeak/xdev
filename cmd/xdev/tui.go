@@ -350,6 +350,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 					Failovers:  failoverChain(cfg, provName, modelName),
 					Intercept:  exts, // fail-closed policy must hold in the daily-driver mode too
+					Policy:     agentPolicy(),
 				}
 				// Extension actions steer the live run: this agent is the
 				// target until the next submit replaces it.
