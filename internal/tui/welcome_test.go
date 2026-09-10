@@ -221,21 +221,27 @@ func TestAppWelcomeMatrixLogo(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	app.draw()
 
-	// The block-art top row is present (a common left edge for the
-	// ragged-width rows is pinned by the art strings themselves).
+	// Every block-art row must start at the same column: the rows are
+	// ragged-width, so per-line centering would wobble them (the bug
+	// this test pins). Rain glyphs never include '█', so the first '█'
+	// per row is always logo art.
 	prim, w, _ := scr.GetContents()
-	found := false
+	firstX, rows := -1, 0
 	for y := 0; y*w < len(prim); y++ {
-		var row strings.Builder
-		for x := 0; x < w && y*w+x < len(prim); x++ {
-			row.WriteString(string(prim[y*w+x].Runes))
-		}
-		if strings.Contains(row.String(), "██╗  ██╗") {
-			found = true
+		for x := 0; x < w; x++ {
+			if rs := prim[y*w+x].Runes; len(rs) > 0 && rs[0] == '█' {
+				rows++
+				if firstX == -1 {
+					firstX = x
+				} else if x != firstX {
+					t.Fatalf("logo row %d starts at x=%d, want %d (common left edge)", y, x, firstX)
+				}
+				break
+			}
 		}
 	}
-	if !found {
-		t.Fatal("XDEV block logo top row not drawn")
+	if rows < 5 {
+		t.Fatalf("expected the 6-row block art, saw %d art rows", rows)
 	}
 	if !gridContains(scr, "01111000") {
 		t.Fatal("binary tagline missing")
