@@ -247,6 +247,10 @@ func newToolRegistry(cwd string, prov ai.Provider, modelName string) *tool.Regis
 		tool.NewWriteTool(),
 		tool.NewEditTool(),
 		tool.NewBashTool(cwd),
+		&tool.GrepTool{CWD: cwd},
+		&tool.GlobTool{CWD: cwd},
+		&tool.ASTGrepTool{CWD: cwd},
+		&tool.ASTEditTool{CWD: cwd},
 	} {
 		reg.Register(t)
 	}
@@ -263,6 +267,10 @@ func newToolRegistry(cwd string, prov ai.Provider, modelName string) *tool.Regis
 			tool.NewWriteTool(),
 			tool.NewEditTool(),
 			tool.NewBashTool(cwd),
+			&tool.GrepTool{CWD: cwd},
+			&tool.GlobTool{CWD: cwd},
+			&tool.ASTGrepTool{CWD: cwd},
+			&tool.ASTEditTool{CWD: cwd},
 		},
 	})
 	return reg

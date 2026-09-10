@@ -66,7 +66,14 @@ func writeBytesAtomic(path string, data []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Single choke point for every in-repo write (write tool, edit tool,
+	// snapshot restore): the shared scan cache must not serve a listing
+	// that predates this change.
+	SharedFSCache().Invalidate(path)
+	return nil
 }
 
 // resolvePath returns the absolute path with symlinks resolved for targets

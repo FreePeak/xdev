@@ -128,6 +128,9 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		return Result{}, fmt.Errorf("bash: %w", execErr)
 	}
 	res.Details.Workdir = workdir
+	// A command can create, delete, or rename anything below the cwd, so
+	// the scan cache cannot be updated incrementally — drop it wholesale.
+	SharedFSCache().InvalidateAll()
 	return Result{Text: res.Text, Details: res.Details, IsError: res.IsError}, nil
 }
 
