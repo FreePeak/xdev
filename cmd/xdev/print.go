@@ -166,6 +166,8 @@ func buildProvider(name string, pc *config.ProviderConfig) (ai.Provider, error) 
 		return ai.NewOpenAIResponsesProvider(name, baseURL, apiKey, headers, hc), nil
 	case ai.APIAnthropicMessages:
 		return ai.NewAnthropicProvider(name, baseURL, apiKey, headers, hc), nil
+	case ai.APIGoogleGenerativeAI:
+		return ai.NewGoogleGenAIProvider(name, baseURL, apiKey, headers, hc), nil
 	default:
 		return nil, fmt.Errorf("provider %q: unsupported api %q", name, pc.API)
 	}
