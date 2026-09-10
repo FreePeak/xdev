@@ -13,6 +13,22 @@ import (
 // DefaultLimitBytes is the hard worst-case ceiling: 100 MB.
 const DefaultLimitBytes = 100 << 20
 
+// ApplyFrom sets the process memory limit from an already-resolved value
+// (layered settings), letting XDEV_MEMLIMIT still override it. n<=0 keeps
+// the default.
+func ApplyFrom(n int64) int64 {
+	if v := strings.TrimSpace(os.Getenv("XDEV_MEMLIMIT")); v != "" {
+		if parsed, err := ParseBytes(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	if n <= 0 {
+		n = DefaultLimitBytes
+	}
+	debug.SetMemoryLimit(n)
+	return n
+}
+
 // Apply sets debug.SetMemoryLimit from XDEV_MEMLIMIT ("100MB", "512KB",
 // bare bytes) or falls back to DefaultLimitBytes. Returns the applied limit.
 func Apply() int64 {
