@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -246,5 +247,148 @@ func TestThresholdCompactionBetweenTurns(t *testing.T) {
 	}
 	if len(res.Messages) == 0 || !strings.Contains(res.Messages[0].Text(), "summary of past") {
 		t.Fatalf("rebuilt context does not start with the summary: %+v", res.Messages)
+	}
+}
+
+// ladderAgent wires an agent with a primary provider plus backup targets,
+func ladderAgent(t *testing.T, primary *fakeProvider, backups ...*fakeProvider) (*Agent, *session.Store) {
+	t.Helper()
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	s := session.OpenMem("test", "t")
+	hooks := TurnHooksFunc{
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a := &Agent{Provider: primary, Tools: reg, Hooks: hooks, Store: s, Retry: RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond}}
+	for i, b := range backups {
+		a.Failovers = append(a.Failovers, FailoverTarget{Provider: b, Model: fmt.Sprintf("backup%d", i+1), ContextWindow: 1_000_000})
+	}
+	return a, s
+}
+
+func TestOverflowPromotesBeforeCompaction(t *testing.T) {
+	// Overflow on the primary promotes to the bigger-window target; the
+	// turn succeeds WITHOUT a compaction entry — promotion owns recovery
+	// while a bigger window exists (PRD M5: promotion before compaction).
+	primary := &fakeProvider{calls: []fakeScript{
+		{err: &ai.HTTPError{API: "a", Status: 400, Body: "maximum context length exceeded"}},
+	}}
+	backup := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{textEvent("done on big model"), doneEvent("done on big model")}},
+	}}
+	a, s := ladderAgent(t, primary, backup)
+	a.Compaction.ContextWindow = 1000
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "done on big model" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if a.Model != "backup1" {
+		t.Fatalf("model after promotion = %q, want backup1", a.Model)
+	}
+	if len(backup.gotReqs) != 1 {
+		t.Fatalf("backup stream calls = %d, want 1", len(backup.gotReqs))
+	}
+	for _, e := range s.Entries() {
+		if _, ok := e.(*session.CompactionEntry); ok {
+			t.Fatal("compaction must not run while promotion is available")
+		}
+	}
+	// The switch is mirrored into the session store.
+	changed := false
+	for _, e := range s.Entries() {
+		if mc, ok := e.(*session.ModelChangeEntry); ok && mc.Model == "fake/backup1" {
+			changed = true
+		}
+	}
+	if !changed {
+		t.Fatal("no model_change entry persisted on promotion")
+	}
+}
+
+func TestPromotionLadderExhaustsThenCompacts(t *testing.T) {
+	// Overflow on the primary AND on the promoted model: the ladder
+	// tops out and compaction owns recovery, on the promoted target.
+	primary := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{textEvent("first reply"), doneEvent("first reply")}},
+		{events: []ai.Event{textEvent("second reply"), doneEvent("second reply")}},
+		{err: &ai.HTTPError{API: "a", Status: 400, Body: "maximum context length exceeded"}},
+	}}
+	backup := &fakeProvider{calls: []fakeScript{
+		{err: &ai.HTTPError{API: "b", Status: 400, Body: "prompt is too long"}},
+		{events: []ai.Event{textEvent("summary: did things"), doneEvent("summary: did things")}},
+		{events: []ai.Event{textEvent("done after compaction"), doneEvent("done after compaction")}},
+	}}
+	a, s := ladderAgent(t, primary, backup)
+	a.Compaction = CompactionConfig{ContextWindow: 0, KeepRecentTokens: 2}
+	for _, turn := range []string{"first", "second"} {
+		if _, err := a.Run(context.Background(), "sys", submitHistory(t, s, turn)); err != nil {
+			t.Fatalf("run %s: %v", turn, err)
+		}
+	}
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "third"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "done after compaction" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	compacted := false
+	for _, e := range s.Entries() {
+		if _, ok := e.(*session.CompactionEntry); ok {
+			compacted = true
+		}
+	}
+	if !compacted {
+		t.Fatal("no compaction entry after the ladder topped out")
+	}
+}
+
+func TestFailoverAfterRetryLadderDrains(t *testing.T) {
+	// Pre-content 500s drain the retry ladder, then the run fails over
+	// to the next chain target instead of surfacing.
+	primary := &fakeProvider{calls: []fakeScript{
+		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
+		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
+	}}
+	backup := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{textEvent("ok on backup"), doneEvent("ok on backup")}},
+	}}
+	a, s := ladderAgent(t, primary, backup)
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "ok on backup" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(primary.gotReqs) != 2 {
+		t.Fatalf("primary calls = %d, want 2 (first + 1 retry)", len(primary.gotReqs))
+	}
+	if len(backup.gotReqs) != 1 {
+		t.Fatalf("backup calls = %d, want 1", len(backup.gotReqs))
+	}
+}
+
+func TestFailoverChainExhaustedSurfaces(t *testing.T) {
+	// Every target drains its ladder: the last error surfaces.
+	primary := &fakeProvider{calls: []fakeScript{
+		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
+		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
+	}}
+	backup := &fakeProvider{calls: []fakeScript{
+		{err: &ai.HTTPError{API: "b", Status: 500, Body: "boom"}},
+		{err: &ai.HTTPError{API: "b", Status: 500, Body: "boom"}},
+	}}
+	a, s := ladderAgent(t, primary, backup)
+	_, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err == nil {
+		t.Fatal("expected error after the chain exhausted")
+	}
+	if len(primary.gotReqs) != 2 || len(backup.gotReqs) != 2 {
+		t.Fatalf("calls primary=%d backup=%d, want 2/2", len(primary.gotReqs), len(backup.gotReqs))
 	}
 }
