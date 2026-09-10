@@ -66,15 +66,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- tools ---
-	reg := tool.NewRegistry()
-	for _, t := range []tool.Tool{
-		tool.NewReadTool(),
-		tool.NewWriteTool(),
-		tool.NewEditTool(),
-		tool.NewBashTool(cwd),
-	} {
-		reg.Register(t)
-	}
+	reg := newToolRegistry(cwd, prov, modelName)
 
 	// --- system prompt ---
 	sys := opts.SystemPrompt
@@ -102,6 +94,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			logx.Errorf("session close: %v", cerr)
 		}
 	}()
+	wireTaskParent(reg, store)
 
 	// --- agent ---
 	hooks := &printHooks{store: store}
@@ -189,6 +182,47 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 	return 0
 }
 
+// newToolRegistry builds the core four tools plus the parent-facing task
+// tool (M6 subagents). ChildTools deliberately excludes the task tool, so
+// a child can never spawn grandchildren (structural depth guard).
+func newToolRegistry(cwd string, prov ai.Provider, modelName string) *tool.Registry {
+	reg := tool.NewRegistry()
+	for _, t := range []tool.Tool{
+		tool.NewReadTool(),
+		tool.NewWriteTool(),
+		tool.NewEditTool(),
+		tool.NewBashTool(cwd),
+	} {
+		reg.Register(t)
+	}
+	reg.Register(&agent.TaskTool{
+		Provider: prov,
+		Model:    modelName,
+		CWD:      cwd,
+		// Children live in their own subtree: session.List(config.DataDir())
+		// must never surface them to --continue/--resume.
+		DataDir: filepath.Join(config.DataDir(), "subagents"),
+		System:  agent.SubagentSystemPromptBase,
+		ChildTools: []tool.Tool{
+			tool.NewReadTool(),
+			tool.NewWriteTool(),
+			tool.NewEditTool(),
+			tool.NewBashTool(cwd),
+		},
+	})
+	return reg
+}
+
+// wireTaskParent stamps the parent session id onto the registry's task
+// tool once the store exists (lineage for post-hoc inspection).
+func wireTaskParent(reg *tool.Registry, store *session.Store) {
+	if t, ok := reg.Get(agent.TaskToolName); ok {
+		if tt, ok := t.(*agent.TaskTool); ok {
+			tt.ParentSessionID = store.ID()
+		}
+	}
+}
+
 // failoverChain builds the M5 resilience chain from models.yml: every
 // other pinned model, biggest window first (outage failover walks the
 // chain in order; overflow promotion picks the smallest window that
@@ -245,8 +279,8 @@ func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, er
 		metas, err := session.List(config.DataDir())
 		if err == nil {
 			for _, m := range metas {
-				if m.CWD != cwd {
-					continue
+				if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
+					continue // subagent children are never user continuations
 				}
 				if s, err := session.Open(m.Path); err == nil {
 					return s, nil

@@ -254,3 +254,96 @@ func TestScanPathsParallelBounded(t *testing.T) {
 		t.Fatalf("scanned %d, want 30", len(metas))
 	}
 }
+
+// TestListRecordsParentSession: children (subagent/fork headers carrying
+// parentSession) are visible to callers so resume paths can skip them.
+func TestListRecordsParentSession(t *testing.T) {
+	dir := t.TempDir()
+	bucket := filepath.Join(dir, "sessions", EncodeCWDBucket("/proj"))
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := OpenMem("/proj", "user session")
+	rootPath, err := root.EnsureOnDisk(filepath.Join(bucket, "root.jsonl"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	child := OpenMem("/proj", "subagent: worker")
+	if _, err := child.EnsureOnDisk(filepath.Join(bucket, "child.jsonl"),
+		Options{ParentSession: root.ID()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	metas, err := listWithCache(dir, newStatCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]SessionMeta{}
+	for _, m := range metas {
+		byPath[m.Path] = m
+	}
+	if got := byPath[rootPath].ParentSession; got != "" {
+		t.Fatalf("root parentSession = %q, want empty", got)
+	}
+	var childMeta SessionMeta
+	for _, m := range metas {
+		if strings.Contains(m.Path, "child.jsonl") {
+			childMeta = m
+		}
+	}
+	if childMeta.ID != child.ID() {
+		t.Fatalf("child meta not found: %+v", metas)
+	}
+	if childMeta.ParentSession != root.ID() {
+		t.Fatalf("child parentSession = %q, want %q", childMeta.ParentSession, root.ID())
+	}
+}
+
+// TestListDistinguishesForkFromSubagent pins the resume-path contract:
+// forks carry parentSession but stay "auto" (user sessions ARE resumable);
+// subagent children stamp titleSource "subagent" and must be skipped.
+func TestListDistinguishesForkFromSubagent(t *testing.T) {
+	dir := t.TempDir()
+	bucket := filepath.Join(dir, "sessions", EncodeCWDBucket("/proj"))
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string, cfg func(*Store)) string {
+		st := OpenMem("/proj", name)
+		cfg(st)
+		path, err := st.EnsureOnDisk(filepath.Join(bucket, name+".jsonl"), Options{ParentSession: "parent-id"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	forkPath := mk("fork", func(st *Store) {})
+	childPath := mk("child", func(st *Store) { st.SetTitleSourceSubagent() })
+
+	metas, err := listWithCache(dir, newStatCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]SessionMeta{}
+	for _, m := range metas {
+		byPath[m.Path] = m
+	}
+	if got := byPath[forkPath].TitleSource; got != TitleSourceAuto {
+		t.Fatalf("fork titleSource = %q, want auto (forks are resumable)", got)
+	}
+	if got := byPath[forkPath].ParentSession; got != "parent-id" {
+		t.Fatalf("fork parentSession = %q", got)
+	}
+	if got := byPath[childPath].TitleSource; got != TitleSourceSubagent {
+		t.Fatalf("child titleSource = %q, want subagent (must be skipped by resume)", got)
+	}
+}

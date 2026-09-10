@@ -80,6 +80,11 @@ func resolveResumeID(cwd, query string) (string, error) {
 		if m.CWD != cwd {
 			continue
 		}
+		// The "" (newest) form must resolve a user session, never a
+		// subagent child; an explicit prefix may still address one.
+		if q == "" && m.TitleSource == session.TitleSourceSubagent {
+			continue
+		}
 		if q == "" || strings.HasPrefix(strings.ToLower(m.ID), q) {
 			return m.Path, nil
 		}

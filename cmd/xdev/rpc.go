@@ -49,15 +49,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		return 2, err
 	}
 
-	reg := tool.NewRegistry()
-	for _, t := range []tool.Tool{
-		tool.NewReadTool(),
-		tool.NewWriteTool(),
-		tool.NewEditTool(),
-		tool.NewBashTool(cwd),
-	} {
-		reg.Register(t)
-	}
+	reg := newToolRegistry(cwd, prov, modelName)
 
 	sys := opts.SystemPrompt
 	if sys == "" {
@@ -79,6 +71,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		return 2, fmt.Errorf("session: %w", err)
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
+	wireTaskParent(reg, store)
 
 	h := &rpcHandler{
 		cwd: cwd, sys: sys, reg: reg, cfg: cfg,
@@ -215,6 +208,7 @@ func (h *rpcHandler) NewSession() error {
 	old := h.store
 	h.store = s
 	h.agent.Store = s
+	wireTaskParent(h.reg, s)
 	if cerr := old.Close(); cerr != nil {
 		logx.Errorf("previous session close: %v", cerr)
 	}

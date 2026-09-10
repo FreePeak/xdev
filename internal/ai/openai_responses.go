@@ -196,7 +196,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req StreamRequest)
 		defer close(ch)
 		p.stream(sctx, resp.Body, model, ch, start)
 	}()
-	return withWatchdog(sctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
+	return withWatchdog(ctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
 
 // openaiRespToolCallState accumulates one function_call by output index.

@@ -41,6 +41,7 @@ type Store struct {
 	leaf        string // "" while the session is empty
 	headerSeen  bool   // session header line consumed during load
 	manualTitle bool   // title came from a manual rename, not auto-generated
+	subagent    bool   // child session: titleSource stamps "subagent", never user-resumable
 
 	w           *bufio.Writer
 	f           *os.File
@@ -57,6 +58,10 @@ type Options struct {
 	// StrictFsync fsyncs after every append (paranoid durability). Without
 	// it, appends Flush the bufio writer only — omp's pragmatic model.
 	StrictFsync bool
+	// ParentSession stamps parentSession into the materialized header
+	// (subagent children; empty for roots). Resume paths use it to keep
+	// child sessions out of the user's --continue/--resume candidates.
+	ParentSession string
 }
 
 // OpenMem creates a brand-new memory-only session. Nothing touches the file
@@ -206,6 +211,14 @@ func (s *Store) Title() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.title
+}
+
+// SetTitleSourceSubagent marks this store as a subagent child. The marker
+// reaches disk with the next materialized title slot/header write.
+func (s *Store) SetTitleSourceSubagent() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subagent = true
 }
 
 // SetTitle updates the in-memory title. The on-disk title slot is only
@@ -484,12 +497,12 @@ func (s *Store) ensureOnDiskLocked(path string, opts Options) (string, error) {
 	if s.headerTS.IsZero() {
 		s.headerTS = updated
 	}
-	if err := write(MarshalTitleSlot(s.title, titleSource(s.manualTitle), updated)); err != nil {
+	if err := write(MarshalTitleSlot(s.title, s.titleSourceFor(), updated)); err != nil {
 		return "", err
 	}
 	if err := write(MarshalHeader(SessionHeader{
-		Version: 3, ID: s.id, Timestamp: s.headerTS,
-		CWD: s.cwd, Title: s.title, TitleSource: titleSource(s.manualTitle),
+		Version: 3, ID: s.id, Timestamp: s.headerTS, ParentSession: opts.ParentSession,
+		CWD: s.cwd, Title: s.title, TitleSource: s.titleSourceFor(),
 	})); err != nil {
 		return "", err
 	}
@@ -527,6 +540,14 @@ func titleSource(manual bool) string {
 		return TitleSourceManual
 	}
 	return TitleSourceAuto
+}
+
+// titleSourceFor resolves the slot/header source for this store's flags.
+func (s *Store) titleSourceFor() string {
+	if s.subagent {
+		return TitleSourceSubagent
+	}
+	return titleSource(s.manualTitle)
 }
 
 // Close flushes and releases the underlying file. A latched error rethrows.

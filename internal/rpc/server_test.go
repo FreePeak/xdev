@@ -62,7 +62,9 @@ func (f *fakeHandler) NewSession() error {
 	return nil
 }
 
-func (f *fakeHandler) State() protocol.State { return protocol.State{SessionID: "sess-1", Running: false} }
+func (f *fakeHandler) State() protocol.State {
+	return protocol.State{SessionID: "sess-1", Running: false}
+}
 
 func (f *fakeHandler) SetModel(model string) error {
 	f.mu.Lock()
