@@ -44,20 +44,16 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, fmt.Errorf("load config: %w", err)
 	}
-	modelRef := opts.Model
-	if modelRef == "" {
-		modelRef = os.Getenv("XDEV_MODEL")
-	}
-	if modelRef == "" {
-		modelRef = cfg.DefaultModelRef()
-	}
-	if modelRef == "" {
-		return 2, fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml or pass --model provider/model")
+	settings := lastSettings()
+	modelRef, effortRef, err := resolveModel(opts.Model, cfg, settings)
+	if err != nil {
+		return 2, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
 		return 2, err
 	}
+	_ = effortRef
 	pc, ok := cfg.Providers[provName]
 	if !ok {
 		return 2, fmt.Errorf("unknown provider %q (have: %v)", provName, providerKeys(cfg))
@@ -68,7 +64,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- tools ---
-	reg := newToolRegistry(cwd, prov, modelName)
+	reg := newToolRegistry(cwd, prov, provName, modelName, settings)
 
 	// MCP servers (optional; absent config = nothing happens).
 	mgr := attachMCP(context.Background(), reg, true)
@@ -313,7 +309,7 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 // newToolRegistry builds the core four tools plus the parent-facing task
 // tool (M6 subagents). ChildTools deliberately excludes the task tool, so
 // a child can never spawn grandchildren (structural depth guard).
-func newToolRegistry(cwd string, prov ai.Provider, modelName string) *tool.Registry {
+func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings) *tool.Registry {
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{
 		tool.NewReadTool(),
@@ -329,7 +325,7 @@ func newToolRegistry(cwd string, prov ai.Provider, modelName string) *tool.Regis
 	}
 	reg.Register(&agent.TaskTool{
 		Provider: prov,
-		Model:    modelName,
+		Model:    childModel(settings, provName, modelName),
 		CWD:      cwd,
 		// Children live in their own subtree: session.List(config.DataDir())
 		// must never surface them to --continue/--resume.
@@ -347,6 +343,59 @@ func newToolRegistry(cwd string, prov ai.Provider, modelName string) *tool.Regis
 		},
 	})
 	return reg
+}
+
+// lastSettings returns the layered settings main() resolved for this run
+// (main owns loading so every mode sees the same layering).
+func lastSettings() *config.Settings { return loadedSettings }
+
+// resolveModel applies the M9 precedence: explicit value (flag, already
+// merged over settings.defaultModel by main) → XDEV_MODEL → @role
+// expansion → models.yml default. It returns the resolved provider/model
+// and the effort the role pinned ("" = none).
+func resolveModel(explicit string, cfg *config.Config, settings *config.Settings) (string, string, error) {
+	ref := explicit
+	if ref == "" {
+		ref = os.Getenv("XDEV_MODEL")
+	}
+	if ref == "" && settings != nil && settings.DefaultModel != "" {
+		ref = settings.DefaultModel
+	}
+	if strings.HasPrefix(ref, "@") && settings != nil {
+		rr, err := config.ResolveModelRef(settings, ref)
+		if err != nil {
+			return "", "", err
+		}
+		return rr.Ref, rr.Effort, nil
+	}
+	if ref == "" {
+		ref = cfg.DefaultModelRef()
+	}
+	if ref == "" {
+		return "", "", fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml, set defaultModel, or pass -model provider/model")
+	}
+	return ref, "", nil
+}
+
+// childModel resolves the @task role for subagents (M9: roles resolve
+// across session and children). An unconfigured or role-ineligible @task
+// (it names the same provider/model as the parent, or it fails to resolve)
+// keeps the parent's model: the parent asked for a worker, not a specific
+// switch. A different provider requires rebuilding that provider, which
+// newToolRegistry does through the same models.yml entry.
+func childModel(settings *config.Settings, provName, modelName string) string {
+	if settings == nil || len(settings.ModelRoles) == 0 {
+		return modelName
+	}
+	rr, err := config.ResolveModelRef(settings, "@task")
+	if err != nil || rr.Role == "" {
+		return modelName
+	}
+	p, m, err := config.ParseModelRef(rr.Ref)
+	if err != nil || p != provName {
+		return modelName // cross-provider children need their own client
+	}
+	return m
 }
 
 // wireTaskParent stamps the parent session id onto the registry's task
