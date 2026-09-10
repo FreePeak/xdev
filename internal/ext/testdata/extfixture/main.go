@@ -105,6 +105,16 @@ func main() {
 		case f.Event == "tool_call" && mode == "revise":
 			emit(frame{Type: "response", ID: f.ID, Allow: true,
 				Revise: json.RawMessage(`{"command":"echo REVISED"}`)})
+		case f.Event == "command":
+			var in struct {
+				Command string `json:"command"`
+				Args    string `json:"arguments"`
+			}
+			_ = json.Unmarshal(f.Payload, &in)
+			txt, _ := json.Marshal(map[string]any{
+				"text": "pong from the extension (" + in.Command + " " + in.Args + ")",
+			})
+			emit(frame{Type: "response", ID: f.ID, Allow: true, Patch: txt})
 		case f.Event == "tool_result":
 			emit(frame{Type: "response", ID: f.ID, Allow: true,
 				Patch: json.RawMessage(`{"text":"patched by ext","isError":false}`)})

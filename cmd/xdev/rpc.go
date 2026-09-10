@@ -81,7 +81,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 
 	// Extension processes: tools join the registry, and the manager is the
 	// agent's fail-closed policy interceptor; actions steer the live run.
-	if exts := attachExtensions(context.Background(), reg, h.agent.Steer); exts != nil {
+	if exts := attachExtensions(context.Background(), reg, h.agent.Steer, h.agent.FollowUp); exts != nil {
 		h.agent.Intercept = exts
 		defer exts.Close()
 	}

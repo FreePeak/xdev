@@ -6,10 +6,17 @@ import (
 )
 
 // suggestion is one dropdown row (mirrors grok's SuggestionRow).
+// suggestion kinds: the dropdown serves slash commands and @-file paths.
+const (
+	kindCommand = iota
+	kindPath
+)
+
 type suggestion struct {
-	Name        string // with leading '/' for display
+	Name        string // command names carry a leading '/' for display
 	Description string
-	Tag         string // "markdown" for discovered commands, "" for built-ins
+	Tag         string // "markdown"/"path"; "" for built-ins
+	kind        int
 }
 
 // slashMenu is the autocomplete dropdown model for slash commands
@@ -17,6 +24,7 @@ type suggestion struct {
 // fuzzy match with consecutive-character scoring — enough for a ≤50-item
 // command list).
 type slashMenu struct {
+	menuState
 	items   []suggestion
 	match   []int // indices into items, ranked
 	sel     int   // selection within match
@@ -29,10 +37,29 @@ func newSlashMenu() *slashMenu {
 	return &slashMenu{visible: maxVisibleSuggestions}
 }
 
+// pathPrefix is the composer text before the `@` token, so accepting a path
+// replaces just that token instead of clobbering the sentence.
+type menuState struct {
+	pathPrefix string
+}
+
+// openPaths (re)builds the dropdown from a candidate list for @-completion.
+func (m *slashMenu) openPaths(prefix, query string, items []suggestion) {
+	m.menuState.pathPrefix = prefix
+	m.items = items
+	m.query(query)
+}
+
 // open (re)builds the item list from built-ins + discovered markdown
-// commands and runs the query. An empty query shows everything.
-func (m *slashMenu) open(query string, cwd string) {
+// commands and runs the query. An empty query shows everything. Command
+// mode resets the path-token state so the two menus never mix.
+func (m *slashMenu) open(query string, cwd string, ext ...map[string]string) {
+	m.menuState.pathPrefix = ""
 	m.items = nil
+	var extCommands map[string]string
+	if len(ext) > 0 {
+		extCommands = ext[0]
+	}
 	for _, c := range builtinCommands() {
 		m.items = append(m.items, suggestion{
 			Name: "/" + c.Name, Description: c.Description,
@@ -41,6 +68,11 @@ func (m *slashMenu) open(query string, cwd string) {
 	for _, mc := range DiscoverCommands(cwd) {
 		m.items = append(m.items, suggestion{
 			Name: "/" + mc.Name, Description: mc.Description, Tag: "markdown",
+		})
+	}
+	for name, desc := range extCommands {
+		m.items = append(m.items, suggestion{
+			Name: "/" + name, Description: desc, Tag: "extension",
 		})
 	}
 	m.query(query)

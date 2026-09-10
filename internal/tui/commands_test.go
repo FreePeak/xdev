@@ -15,6 +15,9 @@ type fakeAPI struct {
 	sent                          []string
 	dir                           string
 	fail                          string // method name that returns an error
+
+	extCalls []string
+	extErr   error
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -202,6 +205,37 @@ func TestAppCommandHook(t *testing.T) {
 }
 
 // Stub implementations for the extended CommandAPI surface.
+func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
+	f.extCalls = append(f.extCalls, name+" "+args)
+	return "ext output: " + name, f.extErr
+}
+
 func (f *fakeAPI) ForkSession() error               { return nil }
 func (f *fakeAPI) DumpSession() error               { return nil }
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
+
+// TestExtensionCommandDispatch routes "/server:cmd args" to the extension
+// runner and prints its output as a system block — the consumer that makes
+// announced commands more than handshake metadata.
+func TestExtensionCommandDispatch(t *testing.T) {
+	app := &fakeAPI{}
+	if !dispatch(app, "/policy:ping --now") {
+		t.Fatal("extension command was not consumed")
+	}
+	if len(app.extCalls) != 1 || app.extCalls[0] != "policy:ping --now" {
+		t.Fatalf("ext calls = %v", app.extCalls)
+	}
+	if len(app.blocks) != 1 || !strings.Contains(app.blocks[0], "ext output: policy:ping") {
+		t.Fatalf("output not surfaced: %v", app.blocks)
+	}
+}
+
+// TestExtensionCommandErrorSurfaces: a failing extension command reports
+// through the system block rather than vanishing.
+func TestExtensionCommandErrorSurfaces(t *testing.T) {
+	app := &fakeAPI{extErr: errors.New("extension offline")}
+	dispatch(app, "/policy:ping")
+	if len(app.blocks) != 1 || !strings.Contains(app.blocks[0], "extension offline") {
+		t.Fatalf("error not surfaced: %v", app.blocks)
+	}
+}

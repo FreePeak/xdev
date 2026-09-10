@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -26,12 +27,17 @@ type SessionOps struct {
 	Resume           func(query string) error
 }
 
+// ExtensionCommand runs one "/ext:cmd" and returns its output. Wired by
+// cmd from the extension manager; nil when no extensions are loaded.
+type ExtensionCommand func(name, args string) (string, error)
+
 // CommandAPI is the app surface commands need. All methods are safe to call
 // from the key thread (same mutators the UI already uses).
 type CommandAPI interface {
 	NewSession() error
 	ClearSession() error
 	DropSession() error
+	RunExtensionCommand(name, args string) (string, error)
 	ForkSession() error
 	DumpSession() error
 	ResumeSession(query string) error
@@ -92,12 +98,23 @@ func isCommandName(name string) bool {
 	if name == "" || name[0] < 'a' || name[0] > 'z' {
 		return false
 	}
+	colons := 0
 	for _, r := range name[1:] {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+		case r == ':':
+			// Extension-qualified commands are "/server:cmd"; one colon,
+			// never leading or trailing (each side must be a name).
+			colons++
+			if colons > 1 {
+				return false
+			}
 		default:
 			return false
 		}
+	}
+	if strings.HasSuffix(name, ":") || strings.Contains(name, "::") {
+		return false
 	}
 	return true
 }
@@ -119,6 +136,15 @@ func dispatch(app CommandAPI, input string) bool {
 		}
 		if err := c.Fn(app, raw); err != nil {
 			app.AddSystemBlock("error: " + err.Error())
+		}
+		return true
+	}
+	if strings.Contains(name, ":") {
+		// Extension command ("/server:cmd args").
+		if out, err := app.RunExtensionCommand(name, raw); err != nil {
+			app.AddSystemBlock("error: " + err.Error())
+		} else {
+			app.AddSystemBlock(out)
 		}
 		return true
 	}
@@ -161,6 +187,26 @@ func (a *App) DropSession() error {
 // CommandDir returns the cwd markdown commands are discovered from
 // ("" = none).
 func (a *App) CommandDir() string { return a.commandDir }
+
+// SetExtensionCommands installs the "/server:cmd" roster (for the dropdown)
+// and the runner invoked when one is submitted. Pass nil to disable.
+func (a *App) SetExtensionCommands(desc map[string]string, run ExtensionCommand) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.extCommands = desc
+	a.extRun = run
+}
+
+// RunExtensionCommand implements CommandAPI.
+func (a *App) RunExtensionCommand(name, args string) (string, error) {
+	a.mu.Lock()
+	run := a.extRun
+	a.mu.Unlock()
+	if run == nil {
+		return "", errors.New("no extensions loaded")
+	}
+	return run(name, args)
+}
 
 // SetCommandDir points markdown command discovery at cwd.
 func (a *App) SetCommandDir(cwd string) { a.commandDir = cwd }

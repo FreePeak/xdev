@@ -597,6 +597,36 @@ func (m *Manager) Tools() []tool.Tool {
 	return out
 }
 
+// RunCommand invokes one extension slash command ("/ext:cmd args"). The
+// extension answers with a patch payload whose text is what the host
+// should print. Names are "extension:command" as announced.
+func (m *Manager) RunCommand(ctx context.Context, qualified, args string) (string, error) {
+	server, cmd, found := strings.Cut(qualified, ":")
+	if !found {
+		return "", fmt.Errorf("ext: command %q is not extension-qualified", qualified)
+	}
+	for _, x := range m.list() {
+		if x.Name != server {
+			continue
+		}
+		reply, err := x.sendEvent(ctx, "command", map[string]any{"command": cmd, "arguments": args})
+		if err != nil {
+			return "", err
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if len(reply.Patch) > 0 {
+			_ = json.Unmarshal(reply.Patch, &payload)
+		}
+		if payload.Text == "" {
+			return "", fmt.Errorf("ext: %s returned no output for %s", qualified, cmd)
+		}
+		return payload.Text, nil
+	}
+	return "", fmt.Errorf("ext: no extension named %q", server)
+}
+
 // Commands returns extension-announced slash commands (extension:name).
 func (m *Manager) Commands() map[string]string {
 	out := map[string]string{}

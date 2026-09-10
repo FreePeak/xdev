@@ -41,13 +41,17 @@ type App struct {
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops        *SessionOps // session lifecycle, wired by cmd (nil → notices)
-	cwdLabel   string      // welcome top bar (last two path components)
-	branch     string      // git branch for the welcome top bar ("" when none)
-	commandDir string      // markdown command discovery root
-	onSend     func(text string)
-	onCancel   func()
-	onQuit     func()
+	ops         *SessionOps       // session lifecycle, wired by cmd (nil → notices)
+	cwdLabel    string            // welcome top bar (last two path components)
+	branch      string            // git branch for the welcome top bar ("" when none)
+	commandDir  string            // markdown command discovery root
+	pathRoot    string            // @-completion root (empty disables the menu)
+	pathScan    func() []string   // shared FS-scan cache-backed file source
+	extCommands map[string]string // "/server:cmd" -> description
+	extRun      ExtensionCommand
+	onSend      func(text string)
+	onCancel    func()
+	onQuit      func()
 
 	keyq      chan tcell.Event
 	dirty     chan struct{}
@@ -410,12 +414,29 @@ func (a *App) handleKey(ev tcell.Event) {
 		case tcell.KeyTab:
 			a.mu.Lock()
 			if sel, ok := a.smenu.selected(); ok {
+				text := sel.Name
+				next := ""
+				if sel.kind == kindPath {
+					// Replace only the @token: the user's sentence stays.
+					text = a.smenu.pathPrefix + "@" + sel.Name + " "
+					next = text
+				} else {
+					next = strings.TrimPrefix(sel.Name, "/")
+				}
 				a.ed.Reset()
-				for _, r := range sel.Name {
+				for _, r := range text {
 					a.ed.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 				}
 				a.ed.HandleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone))
-				a.smenu.open(strings.TrimPrefix(sel.Name, "/"), a.commandDir)
+				if sel.kind == kindPath {
+					if prefix, q, ok := pathToken(next); ok {
+						a.smenu.openPaths(prefix, q, a.pathCandidates(q))
+					} else {
+						a.smenu = nil
+					}
+				} else {
+					a.smenu.open(next, a.commandDir, a.extCommands)
+				}
 			}
 			a.mu.Unlock()
 			a.poke()
@@ -521,14 +542,23 @@ func (a *App) handleKey(ev tcell.Event) {
 // (no space yet). A closing menu keeps the current text untouched.
 func (a *App) syncSlashMenu() {
 	text := a.ed.Text()
-	if !strings.HasPrefix(text, "/") || strings.ContainsAny(text, " \t\n") {
-		a.smenu = nil
+	if strings.HasPrefix(text, "/") && !strings.ContainsAny(text, " \t\n") {
+		if a.smenu == nil {
+			a.smenu = newSlashMenu()
+		}
+		a.smenu.open(text[1:], a.commandDir, a.extCommands)
 		return
 	}
-	if a.smenu == nil {
-		a.smenu = newSlashMenu()
+	if a.pathScan != nil {
+		if prefix, query, ok := pathToken(text); ok {
+			if a.smenu == nil {
+				a.smenu = newSlashMenu()
+			}
+			a.smenu.openPaths(prefix, query, a.pathCandidates(query))
+			return
+		}
 	}
-	a.smenu.open(text[1:], a.commandDir)
+	a.smenu = nil
 }
 
 // scroll moves the viewport n lines toward older (down=false) or newer
