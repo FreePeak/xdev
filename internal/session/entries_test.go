@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -257,4 +258,19 @@ func MarshalMust(t *testing.T, e Entry) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestHeaderParentSessionRoundTrip: forks carry parentSession; roots omit it.
+func TestHeaderParentSessionRoundTrip(t *testing.T) {
+	h := SessionHeader{Version: 3, ID: "child", ParentSession: "parent",
+		Timestamp: time.Now(), CWD: "/w", Title: "fork", TitleSource: TitleSourceAuto}
+	line := MarshalHeader(h)
+	got, ok := ParseHeader(line[:len(line)-1])
+	if !ok || got.ParentSession != "parent" {
+		t.Fatalf("parent round-trip failed: ok=%v parent=%q", ok, got.ParentSession)
+	}
+	root := SessionHeader{Version: 3, ID: "root", Timestamp: time.Now(), CWD: "/w", Title: "t", TitleSource: TitleSourceAuto}
+	if bytes.Contains(MarshalHeader(root), []byte("parentSession")) {
+		t.Fatal("root header must omit parentSession")
+	}
 }

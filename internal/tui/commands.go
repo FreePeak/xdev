@@ -13,7 +13,7 @@ type Command struct {
 	Name        string
 	Aliases     []string
 	Description string
-	Fn          func(app CommandAPI) error
+	Fn          func(app CommandAPI, args string) error
 }
 
 // SessionOps holds the session lifecycle operations. The session store
@@ -21,6 +21,9 @@ type Command struct {
 // notices instead of new store machinery in the TUI.
 type SessionOps struct {
 	New, Clear, Drop func() error
+	Fork             func() error
+	Dump             func() (string, error)
+	Resume           func(query string) error
 }
 
 // CommandAPI is the app surface commands need. All methods are safe to call
@@ -29,6 +32,9 @@ type CommandAPI interface {
 	NewSession() error
 	ClearSession() error
 	DropSession() error
+	ForkSession() error
+	DumpSession() error
+	ResumeSession(query string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
 	CommandDir() string
@@ -41,15 +47,21 @@ type CommandAPI interface {
 func builtinCommands() []Command {
 	return []Command{
 		{Name: "new", Description: "start a fresh session",
-			Fn: func(app CommandAPI) error { return app.NewSession() }},
+			Fn: func(app CommandAPI, args string) error { return app.NewSession() }},
 		{Name: "clear", Description: "reset context in place (history kept on disk)",
-			Fn: func(app CommandAPI) error { return app.ClearSession() }},
+			Fn: func(app CommandAPI, args string) error { return app.ClearSession() }},
 		{Name: "drop", Description: "delete the session file and start fresh",
-			Fn: func(app CommandAPI) error { return app.DropSession() }},
+			Fn: func(app CommandAPI, args string) error { return app.DropSession() }},
+		{Name: "fork", Description: "branch the session into a new file",
+			Fn: func(app CommandAPI, args string) error { return app.ForkSession() }},
+		{Name: "dump", Description: "export the transcript to markdown",
+			Fn: func(app CommandAPI, args string) error { return app.DumpSession() }},
+		{Name: "resume", Description: "resume a session by id prefix",
+			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
 		{Name: "help", Description: "show available commands",
-			Fn: func(app CommandAPI) error { app.AddSystemBlock(helpText(builtinCommands())); return nil }},
+			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(builtinCommands())); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
-			Fn: func(app CommandAPI) error { app.Quit(); return nil }},
+			Fn: func(app CommandAPI, args string) error { app.Quit(); return nil }},
 	}
 }
 
@@ -105,7 +117,7 @@ func dispatch(app CommandAPI, input string) bool {
 		if c.Name != name && !slices.Contains(c.Aliases, name) {
 			continue
 		}
-		if err := c.Fn(app); err != nil {
+		if err := c.Fn(app, raw); err != nil {
 			app.AddSystemBlock("error: " + err.Error())
 		}
 		return true

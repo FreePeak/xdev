@@ -81,10 +81,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	// Session.
-	store, err := openSession(cwd, opts.ContinueLast)
+	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
+	saveBreadcrumb(store.Path())
 	defer func() {
 		_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 		_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
@@ -151,13 +152,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	ts := &tuiSession{store: store, app: app, model: modelName, api: prov.API(), provider: provName}
 
+	var swapStoreTo func(*session.Store) error
+
 	// swapStore closes the current session and opens a fresh one (issue #11).
 	// drop=true deletes the old file first. The transcript clears and the
 	// live hooks/agent point at the new store (single source of truth: the
 	// captured `store` variable, which all closures re-read).
 	swapStore := func(drop bool) error {
 		old := store
-		ns, err := openSession(cwd, false)
+		ns, err := openSession(cwd, false, "")
 		if err != nil {
 			return err
 		}
@@ -176,12 +179,79 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return nil
 	}
 
+	// swapStoreTo adopts an already-open store (fork/resume): replays its
+	// transcript and points hooks/agent at it.
+	swapStoreTo = func(ns *session.Store) error {
+		old := store
+		store = ns
+		ts.store = ns
+		app.Reset()
+		saveBreadcrumb(ns.Path())
+		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
+			for _, m := range res.Messages {
+				switch m.Role {
+				case ai.RoleUser:
+					if txt := m.Text(); txt != "" {
+						app.AddUserBlock(txt)
+					}
+				case ai.RoleAssistant:
+					if txt := m.Text(); txt != "" {
+						app.AddAssistantBlock(txt)
+					}
+				}
+			}
+		}
+		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
+		_ = old
+		return nil
+	}
+
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh. All refuse while a
 	app.SetLocation(cwd)
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
+		Fork: func() error {
+			if running.Load() {
+				return fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			// A fresh session lives memory-only until its first
+			// assistant message — materialize it so the fork has a
+			// source file to copy.
+			if store.Path() == "" {
+				if _, err := store.EnsureOnDisk(
+					session.SessionFilePath(config.DataDir(), cwd, time.Now(), store.ID()), session.Options{}); err != nil {
+					return err
+				}
+			}
+			fork, err := session.ForkSession(store.Path(),
+				session.SessionFilePath(config.DataDir(), cwd, time.Now(), session.NewSessionID()), "")
+			if err != nil {
+				return err
+			}
+			return swapStoreTo(fork)
+		},
+		Dump: func() (string, error) {
+			return dumpSession(store)
+		},
+		Resume: func(query string) error {
+			if running.Load() {
+				return fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			if query == "" {
+				return fmt.Errorf("usage: /resume <session-id-prefix>")
+			}
+			path, err := resolveResumeID(cwd, query)
+			if err != nil {
+				return err
+			}
+			resumed, err := session.Open(path)
+			if err != nil {
+				return err
+			}
+			return swapStoreTo(resumed)
+		},
 		New: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")

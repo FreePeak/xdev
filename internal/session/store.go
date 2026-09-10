@@ -556,6 +556,9 @@ func (s *Store) Close() error {
 
 // newUUID returns a random RFC 4122 version-4 UUID string (crypto/rand; no
 // external dependency).
+// NewSessionID mints a fresh session uuid (exported for fork callers).
+func NewSessionID() string { return newUUID() }
+
 func newUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

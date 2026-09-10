@@ -455,26 +455,29 @@ func ParseTitleSlot(line []byte) (string, bool) {
 }
 
 // SessionHeader is line 2 of a session file.
-// Wire: {"type":"session","version":3,"id":<uuid>,"timestamp":...,"cwd":...,
-//
-//	"title":...,"titleSource":"auto"}.
+// Wire: {"type":"session","version":3,"id":<uuid>,"parentSession":<uuid>,
+// "timestamp":...,"cwd":...,"title":...,"titleSource":"auto"}.
+// ParentSession is set on forks/branches ("" for root sessions; omitted
+// on the wire).
 type SessionHeader struct {
-	Version     int
-	ID          string
-	Timestamp   time.Time
-	CWD         string
-	Title       string
-	TitleSource string
+	Version       int
+	ID            string
+	ParentSession string
+	Timestamp     time.Time
+	CWD           string
+	Title         string
+	TitleSource   string
 }
 
 type sessionHeaderWire struct {
-	Type        string   `json:"type"`
-	Version     int      `json:"version"`
-	ID          string   `json:"id"`
-	Timestamp   wireTime `json:"timestamp"`
-	CWD         string   `json:"cwd"`
-	Title       string   `json:"title"`
-	TitleSource string   `json:"titleSource"`
+	Type          string   `json:"type"`
+	Version       int      `json:"version"`
+	ID            string   `json:"id"`
+	ParentSession string   `json:"parentSession,omitempty"`
+	Timestamp     wireTime `json:"timestamp"`
+	CWD           string   `json:"cwd"`
+	Title         string   `json:"title"`
+	TitleSource   string   `json:"titleSource"`
 }
 
 // MarshalHeader renders the session header line (trailing newline included).
@@ -482,7 +485,7 @@ func MarshalHeader(h SessionHeader) []byte {
 	w := sessionHeaderWire{
 		Type: "session", Version: 3,
 		ID: h.ID, Timestamp: wireTime(h.Timestamp), CWD: h.CWD,
-		Title: h.Title, TitleSource: h.TitleSource,
+		Title: h.Title, TitleSource: h.TitleSource, ParentSession: h.ParentSession,
 	}
 	if w.Version == 0 {
 		w.Version = 3
@@ -507,5 +510,6 @@ func ParseHeader(line []byte) (SessionHeader, bool) {
 	return SessionHeader{
 		Version: w.Version, ID: w.ID, Timestamp: time.Time(w.Timestamp),
 		CWD: w.CWD, Title: w.Title, TitleSource: w.TitleSource,
+		ParentSession: w.ParentSession,
 	}, true
 }
