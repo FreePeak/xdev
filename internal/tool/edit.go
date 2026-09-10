@@ -33,7 +33,7 @@ func (t *EditTool) Name() string { return "edit" }
 
 // Description implements Tool.
 func (t *EditTool) Description() string {
-	return "Edit a file with ordered line operations applied in sequence; each op's line numbers refer to the file state after the previous op. Ops: {\"op\":\"PUT\",\"range\":{\"start\":N,\"end\":M},\"lines\":[\"+new line\",...]} replaces lines N..M (1-based, inclusive; {\"line\":N} is single-line shorthand) with the body — each body string is the final line content prefixed with \"+\" (send \"++x\" for a literal leading \"+\"; an empty body deletes the range). {\"op\":\"CUT\",\"range\":{\"start\":N,\"end\":M}} deletes the range. {\"op\":\"MV\",\"dest\":\"path\"} moves the file (applied after line ops). One out-of-range op fails the whole edit and writes nothing. Read the file first: line numbers must come from observed content, never guessed."
+	return "Ordered line ops on one file; each op's line numbers refer to the state AFTER the previous op. PUT replaces a range or anchors an insert (<N before, >N after, N* = the block starting at N); body rows are final content already prefixed \"+\", so a literal leading \"-\"/\"+\" must be doubled. CUT deletes, MV renames, REM removes. Numbers come from a fresh read; unanchorable ops are rejected."
 }
 
 // Parameters implements Tool.

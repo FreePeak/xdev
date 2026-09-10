@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/FreePeak/xdev/internal/tool"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,25 @@ func TestBuildSystemPromptCapsRemoteDescriptions(t *testing.T) {
 			if len([]rune(line)) > MaxToolDescriptionChars+len("chatty: ")+1 {
 				t.Fatalf("line longer than the cap: %d runes", len([]rune(line)))
 			}
+		}
+	}
+}
+
+// TestBundledToolsFitTheCap guards against silent clipping: a CORE tool
+// whose description exceeds MaxToolDescriptionChars would lose its
+// semantics for every provider call, and the budget tests still pass
+// either way. Bundled prose must fit by design.
+func TestBundledToolsFitTheCap(t *testing.T) {
+	reg := tool.NewRegistry()
+	for _, td := range []tool.Tool{
+		tool.NewReadTool(), tool.NewWriteTool(), tool.NewEditTool(), tool.NewBashTool(t.TempDir()),
+	} {
+		reg.Register(td)
+	}
+	for _, d := range reg.Defs() {
+		if n := len([]rune(d.Description)); n > MaxToolDescriptionChars {
+			t.Fatalf("core tool %q has a %d-char description (cap %d): it is silently clipped in the prompt",
+				d.Name, n, MaxToolDescriptionChars)
 		}
 	}
 }
