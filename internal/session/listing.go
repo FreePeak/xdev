@@ -19,6 +19,11 @@ type SessionMeta struct {
 	Timestamp time.Time // session header timestamp
 	SizeBytes int64
 	ModTime   time.Time
+	// ParentSession is non-empty for forks and subagent children (lineage).
+	ParentSession string
+	// TitleSource is the title-slot source ("auto"/"manual"/"subagent").
+	// Resume paths skip "subagent" — a child is never a user continuation.
+	TitleSource string
 }
 
 // EncodeCWDBucket maps a canonical cwd path to its session-bucket name:
@@ -163,8 +168,9 @@ func statPath(path string, cache *statCache) (SessionMeta, bool) {
 
 	meta := SessionMeta{Path: path, SizeBytes: fi.Size(), ModTime: fi.ModTime()}
 	if len(lines) > 0 {
-		if title, ok := ParseTitleSlot([]byte(lines[0])); ok {
+		if title, src, ok := ParseTitleSlotSource([]byte(lines[0])); ok {
 			meta.Title = title
+			meta.TitleSource = src
 		}
 	}
 	// Header is line 2 when line 1 was a slot, else line 1.
@@ -176,6 +182,7 @@ func statPath(path string, cache *statCache) (SessionMeta, bool) {
 			meta.ID = h.ID
 			meta.CWD = h.CWD
 			meta.Timestamp = h.Timestamp
+			meta.ParentSession = h.ParentSession
 			if meta.Title == "" {
 				meta.Title = h.Title
 			}

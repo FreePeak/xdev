@@ -397,10 +397,14 @@ func mustMarshal(v any) json.RawMessage {
 // body.
 const TitleSlotWidth = 256
 
-// TitleSourceAuto / TitleSourceManual are the title slot "source" values.
+// Title-source values for the fixed-width title slot. Auto = generated,
+// manual = user rename, subagent = child session owned by another agent
+// (resume paths skip these: a child is never a user continuation; forks
+// stay "auto" and carry parentSession instead).
 const (
-	TitleSourceAuto   = "auto"
-	TitleSourceManual = "manual"
+	TitleSourceAuto     = "auto"
+	TitleSourceManual   = "manual"
+	TitleSourceSubagent = "subagent"
 )
 
 // titleSlotWire is the line-1 shape WITHOUT the pad field; MarshalTitleSlot
@@ -444,14 +448,22 @@ func MarshalTitleSlot(title, source string, updatedAt time.Time) []byte {
 // ParseTitleSlot decodes line 1 (without newline). Returns ("", false) when
 // the line is not a title slot.
 func ParseTitleSlot(line []byte) (string, bool) {
+	title, _, ok := ParseTitleSlotSource(line)
+	return title, ok
+}
+
+// ParseTitleSlotSource decodes line 1 including its source field ("auto" /
+// "manual" / "subagent") — resume paths use it to skip child sessions.
+func ParseTitleSlotSource(line []byte) (title, source string, ok bool) {
 	var aux struct {
-		Type  string `json:"type"`
-		Title string `json:"title"`
+		Type   string `json:"type"`
+		Title  string `json:"title"`
+		Source string `json:"source"`
 	}
 	if err := json.Unmarshal(line, &aux); err != nil || aux.Type != "title" {
-		return "", false
+		return "", "", false
 	}
-	return aux.Title, true
+	return aux.Title, aux.Source, true
 }
 
 // SessionHeader is line 2 of a session file.

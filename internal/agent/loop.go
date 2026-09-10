@@ -166,6 +166,9 @@ func (a *Agent) drainSteering() []Steering {
 // failing the run.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
+	if a.Hooks == nil {
+		a.Hooks = TurnHooksFunc{} // no-op: an unwired agent must not panic mid-turn
+	}
 	var lastAssistant *ai.Message
 	limit := a.effectiveMaxTurns()
 	for turn := 0; turn < limit; turn++ {

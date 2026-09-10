@@ -57,15 +57,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	// Tools + system prompt (shared with print mode).
-	reg := tool.NewRegistry()
-	for _, t := range []tool.Tool{
-		tool.NewReadTool(),
-		tool.NewWriteTool(),
-		tool.NewEditTool(),
-		tool.NewBashTool(cwd),
-	} {
-		reg.Register(t)
-	}
+	reg := newToolRegistry(cwd, prov, modelName)
 	sys := opts.SystemPrompt
 	if sys == "" {
 		sys = agent.SystemPromptBase
@@ -86,6 +78,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return 2, fmt.Errorf("session: %w", err)
 	}
 	saveBreadcrumb(store.Path())
+	wireTaskParent(reg, store)
 	defer func() {
 		_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 		_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
@@ -186,6 +179,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		old := store
 		store = ns
 		ts.store = ns
+		wireTaskParent(reg, ns)
 		app.Reset()
 		saveBreadcrumb(ns.Path())
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {

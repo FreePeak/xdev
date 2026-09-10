@@ -94,6 +94,11 @@ func Classify(err error) ErrClass {
 	// Transport-level failures: classify from the message.
 	msg := err.Error()
 	switch {
+	case errors.Is(err, ErrWatchdogAborted):
+		// Watchdog expiry cancels the STREAM's context only; the agent's
+		// own ctx is untouched, so the M5 ladder (retry → failover,
+		// retain-and-continue for partials) owns recovery.
+		return ClassTransient
 	case bodyIndicatesOverflow(msg):
 		return ClassContextOverflow
 	case streamStallRe.MatchString(msg),

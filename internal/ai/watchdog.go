@@ -20,16 +20,21 @@ var (
 )
 
 // ErrWatchdogAborted wraps every watchdog expiry so callers can tell a
-// stalled stream from other transport errors.
+// stalled stream from other transport errors. It classifies as transient
+// (Classify), so the M5 ladder owns recovery.
 var ErrWatchdogAborted = errors.New("stream watchdog: no progress")
 
 // withWatchdog wraps a stream channel with the first-progress and idle
 // timers. Expiry cancels the stream's request context (killing the HTTP
-// body), emits one error{ErrWatchdogAborted} event, and drains the source
-// channel until close so the upstream goroutine exits. Events may still
-// be relayed while the abort races a fresh event — whichever the select
-// sees first wins, matching omp's turn-recovery semantics.
-func withWatchdog(sctx context.Context, cancel context.CancelFunc, ch <-chan Event, first, idle time.Duration) <-chan Event {
+// body read), emits one error{ErrWatchdogAborted}, and keeps draining the
+// source until close so its goroutine exits.
+//
+// The relay NEVER ends early: the Provider contract promises exactly one
+// terminal done/error event then close, and consumers (agent loop, print,
+// TUI) read to close — so a caller-cancel that raced the source teardown
+// must not swallow the terminal event. Every source event is forwarded
+// verbatim and the channel closes exactly when the source closes.
+func withWatchdog(_ context.Context, cancel context.CancelFunc, ch <-chan Event, first, idle time.Duration) <-chan Event {
 	out := make(chan Event, 64)
 	go func() {
 		defer close(out)

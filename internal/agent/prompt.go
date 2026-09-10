@@ -22,6 +22,16 @@ Rules:
 - Never invent file contents; read before editing. Never leave placeholders or stubs.
 - If blocked by missing information you cannot obtain with tools, say so plainly.`
 
+// SubagentSystemPromptBase is the child's system prompt: same working
+// rules, plus the yield contract that ends the run.
+const SubagentSystemPromptBase = `You are xdev's subagent: you run ONE focused task in the user's repository and report back to the agent that spawned you.
+
+Rules:
+- Work only inside the current working directory unless given an absolute path elsewhere.
+- Never invent file contents; read before editing. Never leave placeholders or stubs.
+- Finish by calling the yield tool exactly once, as your last action, with the result the caller asked for.
+- Your transcript is not visible to the caller — put everything it needs into the yield result.`
+
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.
 const MaxContextBytes = 32 << 10
 
