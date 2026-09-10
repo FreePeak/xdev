@@ -21,12 +21,12 @@ import (
 // everything).
 
 // astGrepBinary resolves the CLI, swappable for tests.
-var astGrepBinary = func() (string, error) {
-	if p, err := lookPath("ast-grep"); err == nil {
-		return p, nil
-	}
-	return lookPath("sg") // deprecated alias, still shipped by some installs
-}
+//
+// Only `ast-grep` is probed. The `sg` alias is NOT used: on Debian/Ubuntu
+// /usr/bin/sg belongs to a different package entirely, so falling back to
+// it ran the wrong binary (CI caught it rejecting -p). ast-grep's own
+// releases install both names, so probing `ast-grep` loses nothing real.
+var astGrepBinary = func() (string, error) { return lookPath("ast-grep") }
 
 // DefaultASTMaxMatches caps one AST search/rewrite report.
 const DefaultASTMaxMatches = 200
