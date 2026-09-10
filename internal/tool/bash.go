@@ -157,9 +157,7 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 	cmd := exec.Command(name, argv...)
 	cmd.Env = HardenedEnv()
 	cmd.Dir = workdir
-	if !isWindows() {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	prepareProcessGroup(cmd) // no-op on windows (see kill_windows.go)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return runOutcome{}, fmt.Errorf("stdout pipe: %w", err)
@@ -176,7 +174,7 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 	// Combined 8MB cap: crossing it SIGKILLs the process group once.
 	var combined atomic.Int64
 	var killOnce sync.Once
-	killGroup := func() { killOnce.Do(func() { killProcessGroup(pgid, syscall.SIGKILL) }) }
+	killGroup := func() { killOnce.Do(func() { killProcessGroup(pgid, signalKill) }) }
 	stdoutSink := NewOutputSink(StreamHeadLimit, StreamTailLimit)
 	stderrSink := NewOutputSink(StreamHeadLimit, StreamTailLimit)
 
@@ -185,12 +183,12 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 	go func() {
 		select {
 		case <-ctx.Done():
-			killProcessGroup(pgid, syscall.SIGTERM)
+			killProcessGroup(pgid, signalTerm)
 			timer := time.NewTimer(KillGrace)
 			defer timer.Stop()
 			select {
 			case <-timer.C:
-				killProcessGroup(pgid, syscall.SIGKILL)
+				killProcessGroup(pgid, signalKill)
 			case <-watch:
 			}
 		case <-watch:
