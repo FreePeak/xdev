@@ -46,12 +46,15 @@ type ModelConfig struct {
 
 // ProviderConfig is one provider block in models.yml.
 type ProviderConfig struct {
-	BaseURL   string            `yaml:"baseUrl"`
-	APIKey    string            `yaml:"apiKey,omitempty"`
-	API       string            `yaml:"api"`
-	Headers   map[string]string `yaml:"headers,omitempty"`
-	Discovery *DiscoveryConfig  `yaml:"discovery,omitempty"`
-	Models    []ModelConfig     `yaml:"models,omitempty"`
+	BaseURL string `yaml:"baseUrl"`
+	APIKey  string `yaml:"apiKey,omitempty"`
+	API     string `yaml:"api"`
+	// AuthHeader names where a bearer credential rides (e.g.
+	// "x-api-key"); empty means "Authorization".
+	AuthHeader string            `yaml:"authHeader,omitempty"`
+	Headers    map[string]string `yaml:"headers,omitempty"`
+	Discovery  *DiscoveryConfig  `yaml:"discovery,omitempty"`
+	Models     []ModelConfig     `yaml:"models,omitempty"`
 }
 
 // Config is the parsed models.yml.

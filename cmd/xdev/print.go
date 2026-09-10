@@ -158,7 +158,24 @@ func buildProvider(name string, pc *config.ProviderConfig) (ai.Provider, error) 
 		headers[k] = config.Resolve(v)
 	}
 	baseURL := config.Resolve(pc.BaseURL)
+	// Resolve through the credential chain (cli key → models.yml → stored
+	// oauth/login → env). pc.APIKey is already ${VAR}-expanded; pass it via
+	// a copy so a chain hit from a lower source still works.
+	credReq := config.CredentialRequest{
+		Provider: name, ProviderCfg: pc, CLIKey: cliAPIKey(),
+	}
 	apiKey := config.Resolve(pc.APIKey)
+	if resolved, err := config.ResolveCredential(credReq); err == nil {
+		apiKey = resolved.Value
+	}
+	// An explicit authHeader other than "Authorization" overrides the
+	// adapter's own convention: the key rides that header and the adapter
+	// gets no key, so it cannot also send its default. A silently ignored
+	// authHeader is a confusing 401 waiting for a gateway user.
+	if h := strings.TrimSpace(pc.AuthHeader); h != "" && h != "Authorization" && apiKey != "" {
+		headers[h] = apiKey
+		apiKey = ""
+	}
 	switch pc.API {
 	case ai.APIOpenAICompletions:
 		return ai.NewOpenAICompletionsProvider(name, baseURL, apiKey, headers, hc), nil
@@ -215,6 +232,13 @@ func basePrompt(opts printOptions) string {
 	}
 	return agent.SystemPromptBase
 }
+
+// cliAPIKey holds the -api-key value for the run (set once in main before
+// any provider is built, since buildProvider is called from helpers without
+// flag access).
+var cliKeyValue string
+
+func cliAPIKey() string { return cliKeyValue }
 
 // extensionsDir is <dataDir>/extensions: executables speaking the ext
 // JSONL protocol (PRD §1.5 — extensions are processes, never code).
