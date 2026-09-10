@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -121,12 +120,24 @@ func writeFileFor(path, content string) error {
 // report every matching line (rg's old --max-count 1 capped each file at
 // one match, so the same tool gave different answers on different boxes).
 func TestGrepAgreesWithAndWithoutRipgrep(t *testing.T) {
+	// Both path forms: rg echoes the search root back, so a relative
+	// argument exercises a different code shape than an absolute one.
+	for _, mode := range []string{"abs", "rel"} {
+		t.Run(mode, func(t *testing.T) { testGrepPathAgreement(t, mode) })
+	}
+}
+
+func testGrepPathAgreement(t *testing.T, pathMode string) {
 	dir := t.TempDir()
 	content := "alpha one\nbeta\nalpha two\nalpha three\n"
 	if err := os.WriteFile(filepath.Join(dir, "f.go"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := json.Marshal(map[string]any{"pattern": "alpha", "path": dir})
+	searchPath := dir
+	if pathMode == "rel" {
+		searchPath = "." // relative to the tool's cwd
+	}
+	args, _ := json.Marshal(map[string]any{"pattern": "alpha", "path": searchPath})
 
 	orig := lookPath
 	defer func() { lookPath = orig }()
@@ -148,21 +159,12 @@ func TestGrepAgreesWithAndWithoutRipgrep(t *testing.T) {
 		t.Fatalf("rg: %+v err=%v", withRG, err)
 	}
 
-	linesOf := func(text string) []string {
-		var out []string
-		for _, ln := range strings.Split(strings.TrimSpace(text), "\n") {
-			if i := strings.Index(ln, ":"); i > 0 {
-				out = append(out, ln[:i+2]) // "f.go:1" style prefix
-			}
-		}
-		sort.Strings(out)
-		return out
+	// Compare the WHOLE rendered strings the model reads: comparing only
+	// path+line prefixes is what let a separator difference slip past.
+	if fallback.Text != withRG.Text {
+		t.Fatalf("paths disagree\n--- go ---\n%s\n--- rg ---\n%s", fallback.Text, withRG.Text)
 	}
-	fl, rl := linesOf(fallback.Text), linesOf(withRG.Text)
-	if strings.Join(fl, "|") != strings.Join(rl, "|") {
-		t.Fatalf("paths disagree:\n go: %v\n rg: %v\nfull go:\n%s\nfull rg:\n%s", fl, rl, fallback.Text, withRG.Text)
-	}
-	if len(fl) != 3 {
-		t.Fatalf("expected 3 matches, got %d: %v", len(fl), fl)
+	if n := len(strings.Split(strings.TrimSpace(fallback.Text), "\n")); n != 3 {
+		t.Fatalf("expected 3 matches, got %d:\n%s", n, fallback.Text)
 	}
 }

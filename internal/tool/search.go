@@ -265,15 +265,21 @@ func renderGrep(out, root, cwd string, limit int, toolName string) Result {
 	return Result{Text: text, Details: map[string]any{"tool": toolName}}
 }
 
-// rebaseGrepLine turns "abs/path/file.go:12: text" into
-// "file.go:12: text" relative to cwd, matching the Go fallback's shape.
+// grepLineRe matches ripgrep's `path:line:text` record. The path is
+// non-greedy so a colon inside it cannot swallow the line number.
+var grepLineRe = regexp.MustCompile(`^(.*?):(\d+):(.*)$`)
+
+// rebaseGrepLine renders one rg record in the Go fallback's exact shape:
+// `path:line: text`, with the path relative to cwd. Without the space
+// normalization the model would see a different grep format depending on
+// whether rg happens to be installed — the same divergence class as the
+// per-file cap that --max-count used to introduce.
 func rebaseGrepLine(line, cwd string) string {
-	i := strings.Index(line, ":")
-	if i <= 0 || !strings.HasPrefix(line, "/") {
-		return line
+	m := grepLineRe.FindStringSubmatch(line)
+	if m == nil {
+		return line // a continuation/aggregate line: pass through
 	}
-	path := line[:i]
-	return relDisplay(path, cwd) + line[i:]
+	return relDisplay(filepath.Clean(m[1]), cwd) + ":" + m[2] + ": " + m[3]
 }
 
 func truncateLine(s string, max int) string {
