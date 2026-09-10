@@ -3,6 +3,7 @@ package ext
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -268,5 +269,98 @@ func TestAbsentDirIsNotAnError(t *testing.T) {
 	}
 	if len(m.list()) != 0 {
 		t.Fatal("expected no extensions")
+	}
+}
+
+// TestDeadExtensionIsRetiredNotLatching pins the fail-closed boundary:
+// an unavailable policy extension denies the call it was consulted for,
+// but it must LEAVE the routing chain — otherwise one transient timeout
+// would deny every tool call for the rest of the session, turning the
+// killable-process design into an agent-wide hang.
+func TestDeadExtensionIsRetiredNotLatching(t *testing.T) {
+	dir := writeExtDir(t, "flaky", "hang")
+	m := NewManager()
+	m.EventTimeout = 200 * time.Millisecond
+	t.Cleanup(m.Close)
+	if err := m.Load(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.list()) != 1 {
+		t.Fatal("fixture should load")
+	}
+	// First call: consulted, timed out, denied (fail-closed for that call).
+	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("a timed-out policy extension must deny the call it was asked about")
+	}
+	if n := len(m.list()); n != 0 {
+		t.Fatalf("dead extension still in the chain (%d): denial would latch", n)
+	}
+	// Second call: the dead one can no longer deny anything.
+	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("after retirement the call must proceed, got %v", err)
+	}
+}
+
+// TestErrorResponseKeepsTheExtensionAlive: a well-formed response carrying
+// `error` is the extension ANSWERING about one call, not a broken
+// boundary. Killing it there would discard every later capability.
+func TestErrorResponseKeepsTheExtensionAlive(t *testing.T) {
+	dir := writeExtDir(t, "errs", "errorreply")
+	m := NewManager()
+	t.Cleanup(m.Close)
+	if err := m.Load(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("an errored policy reply must deny that call")
+	}
+	if len(m.list()) != 1 {
+		t.Fatalf("extension died for answering with error; chain=%d", len(m.list()))
+	}
+	// Still usable for the next call (the fixture then allows).
+	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("live extension must keep serving: %v", err)
+	}
+}
+
+// TestConcurrentToolCallsSerializeCleanly pins the shared-reader race: the
+// agent runs up to MaxToolWorkers tool calls at once, and every reply
+// must carry its own request's correlation, with no healthy extension
+// killed by a host-caused race.
+func TestConcurrentToolCallsSerializeCleanly(t *testing.T) {
+	dir := writeExtDir(t, "conc", "revise")
+	m := NewManager()
+	m.EventTimeout = 3 * time.Second
+	t.Cleanup(m.Close)
+	if err := m.Load(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	const n = 12 // > MaxToolWorkers
+	var wg sync.WaitGroup
+	got := make([]string, n)
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out, err := m.ToolCall(context.Background(), "bash",
+				json.RawMessage(`{"command":"echo `+fmt.Sprint(i)+`"}`))
+			got[i], errs[i] = string(out), err
+		}(i)
+	}
+	wg.Wait()
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("call %d: %v", i, errs[i])
+		}
+		// The fixture revises every call identically; a torn or
+		// mis-correlated reply would surface as a different payload or a
+		// killed extension.
+		if !strings.Contains(got[i], "REVISED") {
+			t.Fatalf("call %d got %q (torn/mismatched reply)", i, got[i])
+		}
+	}
+	if len(m.list()) != 1 {
+		t.Fatal("healthy extension was retired by a host-side race")
 	}
 }
