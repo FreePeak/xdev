@@ -80,6 +80,7 @@ func main() {
 		return
 	}
 
+	errCount := 0
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var f frame
@@ -89,6 +90,16 @@ func main() {
 		switch {
 		case f.Type != "event":
 			continue
+		case f.Event == "tool_call" && mode == "errorreply":
+			// First policy question errors (an answer, not a crash);
+			// subsequent ones allow. Proves an error reply keeps the
+			// extension alive and subscribed.
+			if errCount == 0 {
+				errCount++
+				emit(frame{Type: "response", ID: f.ID, Error: "internal: cannot decide"})
+			} else {
+				emit(frame{Type: "response", ID: f.ID, Allow: true})
+			}
 		case f.Event == "tool_call" && mode == "block":
 			emit(frame{Type: "response", ID: f.ID, Allow: false, Reason: "policy: no bash"})
 		case f.Event == "tool_call" && mode == "revise":

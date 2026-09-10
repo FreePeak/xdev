@@ -127,16 +127,30 @@ type Extension struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 
-	mu   sync.Mutex
-	caps Capabilities
-	seq  int
-	dead bool
-	host func(Action)
-	// pending holds frames read while waiting for a specific reply id.
-	pending []Frame
+	mu    sync.Mutex
+	caps  Capabilities
+	seq   int
+	dead  bool
+	host  func(Action)
+	owner *Manager
+
+	// sendMu spans a whole write → correlated-reply round-trip. stdout is
+	// a single bufio.Reader and the agent dispatches up to MaxToolWorkers
+	// tool calls concurrently, so without it two goroutines would race on
+	// the same reader: torn frames, replies matched to the wrong waiter,
+	// and a healthy extension SIGKILLed for a host-caused race.
+	// ponytail: policy checks on one extension serialize (ordering is
+	// arguably desirable); the upgrade path is one dedicated reader
+	// goroutine dispatching to a map of waiters keyed by reply id.
+	sendMu sync.Mutex
 
 	timeout time.Duration
 }
+
+// ErrDead marks an extension that can no longer answer (killed, crashed,
+// or timed out). Callers prune it from the chain rather than treating it
+// as a policy decision.
+var ErrDead = errors.New("ext: dead")
 
 // Manager owns the running extensions.
 type Manager struct {
@@ -230,7 +244,7 @@ func (m *Manager) start(ctx context.Context, name, path string) (*Extension, err
 	}
 	x := &Extension{
 		Name: name, Path: path, cmd: cmd, stdin: stdin,
-		stdout: bufio.NewReader(stdout), timeout: timeout,
+		stdout: bufio.NewReader(stdout), timeout: timeout, owner: m,
 	}
 	if err := x.write(Frame{Type: "hello", Protocol: ProtocolVersion}); err != nil {
 		x.kill()
@@ -351,10 +365,12 @@ func (x *Extension) sendEvent(ctx context.Context, event string, payload any) (F
 	if err != nil {
 		return Frame{}, err
 	}
+	x.sendMu.Lock() // one round-trip at a time: the reader is shared
+	defer x.sendMu.Unlock()
 	x.mu.Lock()
 	if x.dead {
 		x.mu.Unlock()
-		return Frame{}, errors.New("ext: dead")
+		return Frame{}, ErrDead
 	}
 	x.seq++
 	id := fmt.Sprintf("%s-%d", x.Name, x.seq)
@@ -406,7 +422,9 @@ func (x *Extension) sendEvent(ctx context.Context, event string, payload any) (F
 			return Frame{}, r.err
 		}
 		if r.f.Error != "" {
-			x.markDead() // a protocol-level error closes the boundary
+			// A well-formed response carrying `error` is the extension
+			// ANSWERING (declining this one call), not a broken boundary:
+			// honor it for this call and stay subscribed.
 			return r.f, fmt.Errorf("ext: %s: %s", x.Name, r.f.Error)
 		}
 		return r.f, nil
@@ -435,8 +453,15 @@ func (x *Extension) writeLocked(f Frame) error {
 
 func (x *Extension) markDead() {
 	x.mu.Lock()
+	already := x.dead
 	x.dead = true
 	x.mu.Unlock()
+	if !already && x.owner != nil {
+		// A dead extension leaves the routing chain: otherwise one
+		// transient timeout would deny every tool call for the rest of
+		// the session (fail-closed is per-call, not a one-way door).
+		x.owner.retire(x)
+	}
 	x.kill()
 }
 
@@ -604,6 +629,19 @@ func (m *Manager) Renderers() map[string]Renderer {
 func Register(reg *tool.Registry, tools []tool.Tool) {
 	for _, t := range tools {
 		reg.Register(t)
+	}
+}
+
+// retire drops a dead extension from the routing chain (idempotent).
+func (m *Manager) retire(x *Extension) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, e := range m.exts {
+		if e == x {
+			m.exts = append(m.exts[:i], m.exts[i+1:]...)
+			logx.Errorf("ext: %s retired (unavailable for the rest of the session)", x.Name)
+			return
+		}
 	}
 }
 
