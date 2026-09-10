@@ -160,17 +160,83 @@ func TestRunWithToolCall(t *testing.T) {
 	}
 }
 
-func TestRunMaxTurnsGuard(t *testing.T) {
+func TestRunWrapsUpAtTurnLimit(t *testing.T) {
 	callMsg := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
 		Content: []ai.Block{ai.ToolCallBlock{ID: "c", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}}
-	p := &fakeProvider{}
-	for range MaxTurns + 2 {
-		p.calls = append(p.calls, fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, callMsg)}})
+	toolScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, callMsg)}}
+	textScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil,
+		&ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: "wrapped up"}}})}}
+	p := &fakeProvider{calls: []fakeScript{toolScript, toolScript, toolScript, textScript}}
+	a, ends, _ := runAgent(t, p)
+	a.MaxTurns = 3
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
+	if err != nil {
+		t.Fatalf("turn budget must not fail the run, got %v", err)
 	}
-	a, _, _ := runAgent(t, p)
-	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
-	if err == nil || !strings.Contains(err.Error(), "turns") {
-		t.Fatalf("want turn-guard error, got %v", err)
+	if final.Text() != "wrapped up" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if n := len(p.gotReqs); n != 4 {
+		t.Fatalf("stream requests = %d, want 3 budgeted + 1 wrap-up", n)
+	}
+	req := p.gotReqs[3]
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != ai.RoleUser || last.Text() != TurnBudgetPrompt {
+		t.Fatalf("wrap-up prompt missing from last request: %+v", last)
+	}
+	if len(*ends) != 4 {
+		t.Fatalf("message_end hooks = %d, want 4", len(*ends))
+	}
+}
+
+func TestEffectiveMaxTurns(t *testing.T) {
+	if DefaultMaxTurns < 100 {
+		t.Fatalf("DefaultMaxTurns = %d, long tasks would be killed", DefaultMaxTurns)
+	}
+	tests := []struct {
+		name string
+		set  int
+		want int
+	}{
+		{"zero means default", 0, DefaultMaxTurns},
+		{"explicit wins", 5, 5},
+		{"negative means default", -1, DefaultMaxTurns},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &Agent{MaxTurns: tt.set}
+			if got := a.effectiveMaxTurns(); got != tt.want {
+				t.Fatalf("effectiveMaxTurns() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunRunawayToolLoopTerminates(t *testing.T) {
+	// More tool-call scripts than the budget: only the cap can end the run.
+	callMsg := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ToolCallBlock{ID: "c", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}}
+	loop := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, callMsg)}}
+	// Wrap-up also tries a tool call — budget is spent, it must not run.
+	wrap := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, callMsg)}}
+	p := &fakeProvider{calls: []fakeScript{loop, loop, loop, loop, wrap}}
+	a, _, results := runAgent(t, p)
+	a.MaxTurns = 3
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := len(p.gotReqs); n != 4 {
+		t.Fatalf("stream requests = %d, want 4 (wrap-up is the last)", n)
+	}
+	if n := len(*results); n != 3 {
+		t.Fatalf("executed tool calls = %d, want 3 (wrap-up calls must not run)", n)
+	}
+	if final == nil || len(final.ToolCalls()) == 0 {
+		t.Fatalf("wrap-up message with tool calls not returned: %+v", final)
 	}
 }
 

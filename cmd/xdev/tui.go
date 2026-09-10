@@ -148,6 +148,63 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	ts := &tuiSession{store: store, app: app, model: modelName, api: prov.API(), provider: provName}
 
+	// swapStore closes the current session and opens a fresh one (issue #11).
+	// drop=true deletes the old file first. The transcript clears and the
+	// live hooks/agent point at the new store (single source of truth: the
+	// captured `store` variable, which all closures re-read).
+	swapStore := func(drop bool) error {
+		old := store
+		ns, err := openSession(cwd, false)
+		if err != nil {
+			return err
+		}
+		if drop && old.Path() != "" {
+			_ = old.Close()
+			if rmErr := os.Remove(old.Path()); rmErr != nil && !os.IsNotExist(rmErr) {
+				logx.Errorf("drop session file: %v", rmErr)
+			}
+		} else {
+			_ = old.Close()
+		}
+		store = ns
+		ts.store = ns
+		app.Reset()
+		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
+		return nil
+	}
+
+	// Session lifecycle (issue #11): /new swaps in a fresh session file,
+	// /clear resets in place (durable reset_boundary, history kept on
+	// disk), /drop deletes the file and starts fresh. All refuse while a
+	// turn is in flight.
+	app.SetSessionOps(&tui.SessionOps{
+		New: func() error {
+			if !running.CompareAndSwap(false, true) {
+				return fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			defer running.Store(false)
+			return swapStore(false)
+		},
+		Clear: func() error {
+			if running.Load() {
+				return fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			if err := store.ResetLeaf(); err != nil {
+				return err
+			}
+			app.Reset()
+			return nil
+		},
+		Drop: func() error {
+			if !running.CompareAndSwap(false, true) {
+				return fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			defer running.Store(false)
+			return swapStore(true)
+		},
+	})
+	app.SetCommandDir(cwd)
+
 	app.SetHandlers(
 		func(text string) {
 			if !running.CompareAndSwap(false, true) {
@@ -175,6 +232,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Tools:      reg,
 					Hooks:      &tuiHooks{ts: ts},
 					MaxTokens:  opts.MaxTokens,
+					MaxTurns:   opts.MaxTurns,
 					Model:      modelName,
 					Store:      store,
 					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
@@ -195,13 +253,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}()
 		},
 		func() { baseCancel() }, // Esc: abort the in-flight turn (all runs share baseCtx)
+
 		func() { app.Quit() },
 	)
 
-	if opts.MaxTurns != 0 && opts.MaxTurns != 32 {
-		// MaxTurns plumbed via Agent default; per-run override handled above.
-		_ = opts.MaxTurns
-	}
 	app.Run() // blocks until Quit
 	return 0, nil
 }
@@ -244,6 +299,15 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	case ai.EventError:
 		h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error())
 	}
+}
+
+// shortSessionID renders the first 8 chars of a session id (matches the TUI
+// status line convention).
+func shortSessionID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {

@@ -81,8 +81,12 @@ func (h TurnHooksFunc) OnTurnEnd(s ai.StopReason, err error) {
 	}
 }
 
-// MaxTurns bounds one Run against runaway tool loops.
-const MaxTurns = 32
+// DefaultMaxTurns bounds one Run against runaway tool loops.
+const DefaultMaxTurns = 200
+
+// TurnBudgetPrompt is the synthetic user message injected when a Run hits
+// its turn cap: the model gets one wrap-up turn instead of a hard error.
+const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the user can say \"continue\""
 
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
@@ -104,9 +108,18 @@ type Agent struct {
 	Store *session.Store
 	// Compaction configures context maintenance; ContextWindow 0 disables.
 	Compaction CompactionConfig
+	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
+	MaxTurns int
 
 	steerMu  sync.Mutex
 	steering []Steering
+}
+
+func (a *Agent) effectiveMaxTurns() int {
+	if a.MaxTurns > 0 {
+		return a.MaxTurns
+	}
+	return DefaultMaxTurns
 }
 
 // Steering is a queued user message injected at a step boundary.
@@ -138,13 +151,17 @@ func (a *Agent) drainSteering() []Steering {
 	return out
 }
 
-// Run executes turns until the model stops calling tools or MaxTurns.
-// history is the conversation so far (mutable within this run: assistant
-// and toolResult messages are appended as the run progresses).
+// Run executes turns until the model stops calling tools or the turn budget
+// (Agent.MaxTurns, else DefaultMaxTurns) runs out. history is the
+// conversation so far (mutable within this run: assistant and toolResult
+// messages are appended as the run progresses).
+// On budget exhaustion it asks the model for one wrap-up message instead of
+// failing the run.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
 	var lastAssistant *ai.Message
-	for range MaxTurns {
+	limit := a.effectiveMaxTurns()
+	for turn := 0; turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
 			return lastAssistant, ctx.Err()
@@ -193,7 +210,19 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			a.Hooks.OnToolResultMessage(&rm)
 		}
 	}
-	return lastAssistant, fmt.Errorf("agent: exceeded %d turns", MaxTurns)
+	// Budget exhausted: ask for one wrap-up message rather than erroring.
+	// The prompt is persisted so a store rebuild keeps it, and tool calls in
+	// the wrap-up reply are NOT executed (session/context neutralizes the
+	// dangling calls on rebuild — the budget is spent by design).
+	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}}
+	history = append(history, wrap)
+	a.persist(wrap)
+	msg, err := a.oneTurnWithRecovery(ctx, system, history)
+	if err != nil {
+		return lastAssistant, err
+	}
+	a.Hooks.OnMessageEnd(msg)
+	return msg, nil
 }
 
 // turnError marks a failed turn and whether any content event already
