@@ -15,6 +15,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/ext"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/session"
@@ -107,6 +108,15 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	hooks := &printHooks{store: store}
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName)}
 
+	// Extension processes (optional): their tools join the registry and the
+	// manager becomes the agent's fail-closed policy interceptor; runtime
+	// actions steer the live run.
+	exts := attachExtensions(context.Background(), reg, ag.Steer)
+	if exts != nil {
+		ag.Intercept = exts
+		defer exts.Close()
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
@@ -187,6 +197,42 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		}
 	}
 	return 0
+}
+
+// extensionsDir is <dataDir>/extensions: executables speaking the ext
+// JSONL protocol (PRD §1.5 — extensions are processes, never code).
+func extensionsDir() string {
+	return filepath.Join(config.DataDir(), "extensions")
+}
+
+// attachExtensions loads extension processes, registers their tools, and
+// returns the manager for use as the agent's Interceptor. Runtime actions
+// route back into the agent as steering. Failures are logged, never
+// fatal; a broken extension must not block a session.
+func attachExtensions(ctx context.Context, reg *tool.Registry, steer func(text string)) *ext.Manager {
+	mgr := ext.NewManager()
+	mgr.BindHost(func(a ext.Action) {
+		switch a.Action {
+		case "steer", "followUp", "aside":
+			// followUp/aside have no distinct surface until the RPC/TUI
+			// queue is exposed; steering is the nearest behavior.
+			steer(a.Text)
+		default:
+			logx.Debugf("ext: unsupported action %q", a.Action)
+		}
+	})
+	if err := mgr.Load(ctx, extensionsDir()); err != nil {
+		logx.Errorf("ext: %v", err)
+		return nil
+	}
+	tools := mgr.Tools()
+	if len(tools) == 0 && len(mgr.Commands()) == 0 {
+		mgr.Close()
+		return nil
+	}
+	ext.Register(reg, tools)
+	logx.Infof("ext: %d tool(s) from %s", len(tools), extensionsDir())
+	return mgr
 }
 
 // mcpConfigPath is <dataDir>/mcp.yml (absent = MCP off, PRD §2).
