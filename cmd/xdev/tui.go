@@ -310,6 +310,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Model:      modelName,
 					Store:      store,
 					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
+					Failovers:  failoverChain(cfg, provName, modelName),
 				}
 				sessMu.Lock()
 				hist := rebuildHistory() // store mirror is authoritative

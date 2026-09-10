@@ -90,23 +90,69 @@ func TestRetryAuthFailsFast(t *testing.T) {
 	}
 }
 
-func TestRetryPostContentNotRetried(t *testing.T) {
+func TestRetryPostContentRetainsAndContinues(t *testing.T) {
 	// Text deltas streamed, then a transient error: replaying would
-	// double-emit the visible text, so the error surfaces instead.
-	p := &fakeProvider{calls: []fakeScript{{
-		events: []ai.Event{
+	// double-emit the visible text, so the partial is retained and the
+	// turn resumes ONCE (M5 tail retain-and-continue). A second failure
+	// surfaces instead of looping.
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
 			ai.Event{Type: ai.EventTextStart}, textEvent("partial "),
 			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall"}),
-		},
-	}}}
+		}},
+		{events: []ai.Event{
+			textEvent("continued"),
+			doneEvent("continued"),
+		}},
+	}}
+	a, st, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+	msg, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("retain-and-continue must recover: %v", err)
+	}
+	if msg == nil || !strings.Contains(msg.Text(), "continued") {
+		t.Fatalf("final message must be the continuation: %q", msg.Text())
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream calls = %d, want 2 (initial + one continuation)", len(p.gotReqs))
+	}
+	// The partial and the continuation prompt are persisted, so a rebuild
+	// keeps the visible pre-failure text in context.
+	res, err := session.BuildContext(st.Entries(), st.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, m := range res.Messages {
+		joined += m.Text() + "\n"
+	}
+	if !strings.Contains(joined, "partial ") || !strings.Contains(joined, "continued") {
+		t.Fatalf("rebuild must keep partial + continuation:\n%s", joined)
+	}
+}
+
+// TestRetryPostContentSecondFailureSurfaces pins the runaway guard: the
+// retain-and-continue path fires at most once per turn.
+func TestRetryPostContentSecondFailureSurfaces(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("partial "),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall"}),
+		}},
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("more "),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall again"}),
+		}},
+	}}
 	a, _, p := storeAgent(t, p, CompactionConfig{})
 	a.Retry = fastRetry()
 	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
 	if err == nil {
-		t.Fatal("expected post-content error to surface")
+		t.Fatal("second post-content failure must surface")
 	}
-	if len(p.gotReqs) != 1 {
-		t.Fatalf("stream calls = %d, want 1 (post-content must not retry)", len(p.gotReqs))
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream calls = %d, want 2 (no second continuation)", len(p.gotReqs))
 	}
 }
 
