@@ -49,6 +49,12 @@ func TestAppPlainTextStillSends(t *testing.T) {
 	if len(sent) != 1 || sent[0] != "hello there" {
 		t.Fatalf("sent = %q", sent)
 	}
+	// Unknown slash name falls through as literal prompt text (#11).
+	typeRunes(app, "/unknowncmd")
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if len(sent) != 2 || sent[1] != "/unknowncmd" {
+		t.Fatalf("unknown command must reach the agent as text: %q", sent)
+	}
 }
 
 // TestAppScrollKeysThroughRender is the #17 contract at the integration
