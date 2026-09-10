@@ -181,7 +181,8 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, req StreamReques
 	if model == "" {
 		model = p.model
 	}
-	resp, err := wirePost(ctx, p.httpClient, p.baseURL+"/chat/completions", p.headers(), body, APIOpenAICompletions)
+	sctx, cancel := context.WithCancel(ctx)
+	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/chat/completions", p.headers(), body, APIOpenAICompletions)
 	if err != nil {
 		return nil, err
 	}
@@ -189,10 +190,11 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, req StreamReques
 	start := time.Now()
 	go func() {
 		defer resp.Body.Close()
+		defer cancel()
 		defer close(ch)
-		p.stream(ctx, resp.Body, model, ch, start)
+		p.stream(sctx, resp.Body, model, ch, start)
 	}()
-	return ch, nil
+	return withWatchdog(sctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
 
 // openaiToolCallState accumulates one streamed tool call by delta index.
