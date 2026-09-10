@@ -113,7 +113,12 @@ func BuildSystemPrompt(base string, contextFiles string, defs []NamedToolDef) st
 	return b.String()
 }
 
-// MaxToolDescriptionChars bounds any single tool's prompt prose. pi ships 8
+// MaxToolDescriptionChars bounds any single tool's prompt prose.
+//
+// This trims only the redundant `# Tools` recap in the system prompt: the
+// authoritative channel is the native tool schema in StreamRequest.Tools
+// (Agent.toolDefs → registry Defs, uncapped), so capping prompt text loses
+// no semantics. Remote prose is the risk being bounded here. pi ships 8
 // built-ins in ~460-510 tokens, so 400 chars/tool keeps a dozen tools well
 // inside the <1,000-token goal.
 const MaxToolDescriptionChars = 400
