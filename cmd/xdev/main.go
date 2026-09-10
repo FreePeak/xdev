@@ -37,6 +37,8 @@ Flags:
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nMemory limit: %d bytes (XDEV_MEMLIMIT to override)\n", limit)
 	}
+	// NOTE: Go's flag package stops at the first positional arg, so flags
+	// must precede the subcommand: `xdev -continue tui`, not `xdev tui -continue`.
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
