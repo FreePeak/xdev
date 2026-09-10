@@ -260,6 +260,10 @@ func normalizeEditRange(r *editRange, total int) (start, end int, err error) {
 
 // movePath renames src to dst, falling back to copy+delete across devices.
 func movePath(src, dst string) error {
+	defer func() { // both sides of a rename are stale regardless of outcome
+		SharedFSCache().Invalidate(src)
+		SharedFSCache().Invalidate(dst)
+	}()
 	if err := os.Rename(src, dst); err != nil {
 		var linkErr *os.LinkError
 		if errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV) {
