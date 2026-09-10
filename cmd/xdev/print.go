@@ -25,6 +25,7 @@ type printOptions struct {
 	ContinueLast bool
 	SystemPrompt string
 	AppendSystem string
+	ResumePrefix string
 	MaxTurns     int
 	MaxTokens    int
 }
@@ -91,7 +92,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- session ---
-	store, err := openSession(cwd, opts.ContinueLast)
+	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
@@ -190,8 +191,27 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 // openSession resumes the latest session in cwd (--continue) or starts a new
 // one. New sessions auto-persist into the cwd bucket when the first
 // assistant message lands.
-func openSession(cwd string, cont bool) (*session.Store, error) {
+func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
+	if resumePrefix != "" {
+		// Explicit --resume wins over everything: prefix resolution
+		// (case-insensitive startsWith, mtime desc). A prefix that
+		// matches nothing is an error — never a silent new session.
+		path, err := resolveResumeID(cwd, resumePrefix)
+		if err != nil {
+			return nil, err
+		}
+		return session.Open(path)
+	}
 	if cont {
+		// Breadcrumb-first resume (omp parity): the pane's last session wins.
+		if crumb := readBreadcrumb(); crumb != "" {
+			if _, err := os.Stat(crumb); err == nil {
+				if st, err := session.Open(crumb); err == nil {
+					return st, nil
+				}
+			}
+		}
+
 		metas, err := session.List(config.DataDir())
 		if err == nil {
 			for _, m := range metas {

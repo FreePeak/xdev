@@ -200,3 +200,8 @@ func TestAppCommandHook(t *testing.T) {
 		t.Fatalf("plain text after command: blocks=%d kind=%v", n, kind)
 	}
 }
+
+// Stub implementations for the extended CommandAPI surface.
+func (f *fakeAPI) ForkSession() error               { return nil }
+func (f *fakeAPI) DumpSession() error               { return nil }
+func (f *fakeAPI) ResumeSession(query string) error { return nil }

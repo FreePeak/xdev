@@ -18,6 +18,7 @@ func main() {
 	fs := flag.NewFlagSet("xdev", flag.ContinueOnError)
 	model := fs.String("model", "", "model to use (provider/model)")
 	continueLast := fs.Bool("continue", false, "continue the most recent session in this directory")
+	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
 	themeName := fs.String("theme", "", "TUI theme: groknight | grokday (default: auto)")
@@ -55,6 +56,7 @@ Flags:
 		code, err := runTUI(printOptions{
 			Model:        *model,
 			ContinueLast: *continueLast,
+			ResumePrefix: *resumePrefix,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
 			MaxTokens:    *maxTokens,
@@ -110,6 +112,7 @@ Flags:
 		opts := printOptions{
 			Model:        *model,
 			ContinueLast: *continueLast,
+			ResumePrefix: *resumePrefix,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
 			MaxTurns:     *maxTurns,
