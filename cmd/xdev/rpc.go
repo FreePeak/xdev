@@ -73,6 +73,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		Provider: prov, Tools: reg, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
+		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, provName, modelName),
 	}
 

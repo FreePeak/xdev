@@ -91,6 +91,11 @@ const TurnBudgetPrompt = "turn budget reached — wrap up the current step and r
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
 
+// ApprovalFunc asks the user to approve one tool call. It returns the
+// verdict; an implementation with no user available (print mode, a child
+// agent) must return false, which is the safe answer.
+type ApprovalFunc func(call ai.ToolCallBlock, reason string) bool
+
 // Interceptor is the extension policy seam (M7 #8): tool calls may be
 // blocked or revised before execution, results may be patched after. The
 // implementation (internal/ext.Manager) is fail-closed — an extension that
@@ -131,6 +136,10 @@ type Agent struct {
 	// Intercept routes tool calls/results through the extension bus
 	// (nil disables interception).
 	Intercept Interceptor
+	// Policy is the approval configuration; Approve prompts the user when a
+	// decision requires it (nil means an unattended run: prompts deny).
+	Policy  tool.ApprovalPolicy
+	Approve ApprovalFunc
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -550,6 +559,23 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		args = call.Arguments
 	} else if call.PartialArgs != "" {
 		args = json.RawMessage(call.PartialArgs)
+	}
+	// Approval policy: deny/prompt are resolved before anything runs.
+	if dec, err := a.Policy.Decide(call.Name, args); err == nil && dec.Action != tool.ActionAllow {
+		if dec.Action == tool.ActionDeny {
+			res := tool.Result{Text: "tool call denied: " + dec.Reason, IsError: true}
+			a.Hooks.OnToolEnd(call, res, time.Since(started))
+			return toolResultMsg(call, res)
+		}
+		reason := dec.Reason
+		if reason == "" {
+			reason = "approval required for " + call.Name
+		}
+		if a.Approve == nil || !a.Approve(call, reason) {
+			res := tool.Result{Text: "tool call refused by user: " + reason, IsError: true}
+			a.Hooks.OnToolEnd(call, res, time.Since(started))
+			return toolResultMsg(call, res)
+		}
 	}
 	if a.Intercept != nil {
 		// Fail-closed policy gate: a blocked call never executes, and a

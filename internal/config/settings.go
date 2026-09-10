@@ -29,6 +29,10 @@ type Settings struct {
 	MemoryLimit  int64             `yaml:"memoryLimit"`
 	MaxTurns     int               `yaml:"maxTurns"`
 	ModelRoles   map[string]string `yaml:"modelRoles"`
+	// ToolsApproval sets an action per tool (allow|deny|prompt).
+	ToolsApproval map[string]string `yaml:"toolsApproval"`
+	// BashPatterns are ordered command rules, "deny:rm -rf *" style.
+	BashPatterns []string `yaml:"bashPatterns"`
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
 	ModelRolesEffort  map[string]string `yaml:"modelRolesEffort"`
@@ -43,6 +47,7 @@ func defaultSettings() *Settings {
 		MemoryLimit:      100 << 20,
 		MaxTurns:         200,
 		ModelRoles:       map[string]string{},
+		ToolsApproval:    map[string]string{},
 		ModelRolesEffort: map[string]string{},
 	}
 }
@@ -120,6 +125,12 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	for k, v := range layer.ModelRoles {
 		s.ModelRoles[k] = v
+	}
+	for k, v := range layer.ToolsApproval {
+		s.ToolsApproval[k] = v
+	}
+	if layer.BashPatterns != nil {
+		s.BashPatterns = append([]string(nil), layer.BashPatterns...)
 	}
 	for k, v := range layer.ModelRolesEffort {
 		s.ModelRolesEffort[k] = v
