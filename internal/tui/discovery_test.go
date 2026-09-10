@@ -286,6 +286,7 @@ func TestExpandArgsLiteralsPassThrough(t *testing.T) {
 		{"$@[x]", "a b", "$@[x]\n\na b"},         // malformed bracket: literal → fallback
 		{"$@[1", "a b", "$@[1\n\na b"},           // unclosed bracket: literal → fallback
 		{"$@[0]", "a b", "$@[0]\n\na b"},         // 0 is not 1-based: literal → fallback
+		{"$@extra", "a", "aextra"},               // $@ consumes, trailing text kept
 	}
 	for _, tt := range tests {
 		if got := ExpandArgs(tt.template, tt.raw); got != tt.want {
