@@ -41,6 +41,14 @@ type SubagentSpec struct {
 	// ParentSessionID stamps parentSession into the child's header so
 	// resume paths can tell children from user sessions.
 	ParentSessionID string
+	// Policy/Approve inherit the parent's approval posture: a session under
+	// `write` must not gain an unapproved side channel through its children.
+	// The child's `yield` is always allowed — a child that cannot hand back
+	// its result is not a child, it is a hang.
+	Policy  tool.ApprovalPolicy
+	Approve ApprovalFunc
+	// Thinking inherits the parent's resolved role effort.
+	Thinking *ai.ThinkingBudget
 }
 
 // SubagentOutput is the yield payload contract.
@@ -189,6 +197,14 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 	if mt <= 0 {
 		mt = DefaultSubagentMaxTurns
 	}
+	childPolicy := spec.Policy
+	if childPolicy.PerTool == nil {
+		childPolicy.PerTool = map[string]tool.Action{}
+	}
+	// yield is exempt from prompting: it is the handoff mechanism itself.
+	if _, set := childPolicy.PerTool["yield"]; !set {
+		childPolicy.PerTool["yield"] = tool.ActionAllow
+	}
 	ag := &Agent{
 		Provider:  spec.Provider,
 		Tools:     reg,
@@ -197,6 +213,9 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 		Model:     spec.Model,
 		MaxTokens: spec.MaxTokens,
 		MaxTurns:  mt,
+		Policy:    childPolicy,
+		Approve:   spec.Approve,
+		Thinking:  spec.Thinking,
 	}
 
 	user := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: spec.Prompt}}}

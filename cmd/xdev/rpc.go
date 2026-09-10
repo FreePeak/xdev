@@ -29,7 +29,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	modelRef, _, err := resolveModel(opts.Model, cfg, lastSettings())
+	modelRef, effortRef, err := resolveModel(opts.Model, cfg, lastSettings())
 	if err != nil {
 		return 2, err
 	}
@@ -46,7 +46,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		return 2, err
 	}
 
-	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings())
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef))
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
@@ -75,6 +75,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, provName, modelName),
+		Thinking:   effortBudget(effortRef),
 	}
 
 	// Extension processes: tools join the registry, and the manager is the

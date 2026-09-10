@@ -32,6 +32,11 @@ type TaskTool struct {
 	// the resume-path skip keys on titleSource "subagent" instead, since
 	// forks legitimately carry parentSession too).
 	ParentSessionID string
+	// Policy/Approve/Thinking carry the parent's posture into the child so
+	// approval cannot be sideloaded through delegation.
+	Policy   tool.ApprovalPolicy
+	Approve  ApprovalFunc
+	Thinking *ai.ThinkingBudget
 }
 
 // TaskToolName is the tool name the model calls.
@@ -88,6 +93,9 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		CWD: t.CWD, DataDir: t.DataDir, MaxTurns: mt, MaxTokens: t.MaxTokens,
 		Output:          &SubagentOutput{Schema: a.Schema, Strict: a.Strict},
 		ParentSessionID: t.ParentSessionID,
+		Policy:          t.Policy,
+		Approve:         t.Approve,
+		Thinking:        t.Thinking,
 	})
 	if err != nil {
 		return tool.Result{Text: "task: " + err.Error(), IsError: true}, nil

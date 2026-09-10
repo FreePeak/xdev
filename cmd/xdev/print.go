@@ -53,7 +53,6 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	_ = effortRef
 	pc, ok := cfg.Providers[provName]
 	if !ok {
 		return 2, fmt.Errorf("unknown provider %q (have: %v)", provName, providerKeys(cfg))
@@ -64,7 +63,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- tools ---
-	reg := newToolRegistry(cwd, prov, provName, modelName, settings)
+	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef))
 
 	// MCP servers (optional; absent config = nothing happens).
 	mgr := attachMCP(context.Background(), reg, true)
@@ -90,7 +89,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- agent ---
 	hooks := &printHooks{store: store}
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName)}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef)}
 	applyPolicy(ag, settings)
 
 	// Extension processes (optional): their tools join the registry and the
@@ -312,7 +311,10 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 // newToolRegistry builds the core four tools plus the parent-facing task
 // tool (M6 subagents). ChildTools deliberately excludes the task tool, so
 // a child can never spawn grandchildren (structural depth guard).
-func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings) *tool.Registry {
+// thinking is the parent's resolved role effort, forwarded to children so
+// delegation does not silently downgrade (or upgrade) the reasoning budget.
+func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget) *tool.Registry {
+	pol := settingsPolicy(settings)
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{
 		tool.NewReadTool(),
@@ -327,6 +329,8 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		reg.Register(t)
 	}
 	reg.Register(&agent.TaskTool{
+		Policy:   pol,
+		Thinking: thinking,
 		Provider: prov,
 		Model:    childModel(settings, provName, modelName),
 		CWD:      cwd,
@@ -385,6 +389,31 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 // refuses (the agent loop's Approve==nil contract). The TUI will surface a
 // blocking card when M12's dialog chrome lands; until then it behaves the
 // same way, which is fail-safe rather than fail-open.
+// effortBudget turns a resolved role effort into the reasoning budget the
+// adapters translate into their own vocabularies. An unpinned or unknown
+// effort means no thinking requested.
+func effortBudget(effort string) *ai.ThinkingBudget {
+	tokens, ok := config.EffortBudget(effort)
+	if !ok {
+		return nil
+	}
+	return &ai.ThinkingBudget{Tokens: tokens}
+}
+
+// settingsPolicy resolves the approval policy from settings (nil or a bad
+// configuration yields the yolo default, with the error reported).
+func settingsPolicy(settings *config.Settings) tool.ApprovalPolicy {
+	if settings == nil {
+		return tool.ApprovalPolicy{}
+	}
+	pol, err := settings.Policy()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		return tool.ApprovalPolicy{}
+	}
+	return pol
+}
+
 // agentPolicy resolves the approval policy for a freshly built agent.
 func agentPolicy() tool.ApprovalPolicy {
 	pol, err := lastSettings().Policy()
