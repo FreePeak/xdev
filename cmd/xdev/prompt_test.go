@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -51,6 +52,39 @@ const maxPromptTokens = 1000
 // against silent drift: every tool added to the registry lands in the
 // prompt, so this fails the moment the bundled surface outgrows the goal
 // rather than after a dozen tools have shipped.
+// verboseTool simulates a chatty MCP/extension tool whose own
+// documentation would otherwise blow the prompt budget by itself.
+type verboseTool struct{ name string }
+
+func (v verboseTool) Name() string { return v.name }
+func (v verboseTool) Description() string {
+	return strings.Repeat("detailed remote tool documentation. ", 60) // ~2.4 KB
+}
+func (v verboseTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (v verboseTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{}, nil
+}
+
+// TestPromptBudgetWithLateRegistrants measures the surface a real session
+// carries: bundled tools plus extension/MCP tools registering AFTER
+// startup, which the lazy prompt folds in at the next submit. Remote prose
+// must be capped at the choke point so one verbose server cannot bust
+// PRD §1 Goal 4.
+func TestPromptBudgetWithLateRegistrants(t *testing.T) {
+	reg := newToolRegistry(t.TempDir(), nil, "m")
+	for i := range 3 {
+		reg.Register(verboseTool{name: fmt.Sprintf("late_%d", i)})
+	}
+	got := promptFn(basePrompt(printOptions{}), t.TempDir(), reg, "")()
+	if tokens := len([]rune(got)) / 4; tokens >= maxPromptTokens {
+		t.Fatalf("prompt with verbose remote tools is ~%d tokens (budget %d) — the description cap is not holding",
+			tokens, maxPromptTokens)
+	}
+	if !strings.Contains(got, "late_0") {
+		t.Fatal("late-registered tool vanished from the prompt")
+	}
+}
+
 func TestBundledPromptStaysUnderBudget(t *testing.T) {
 	reg := newToolRegistry(t.TempDir(), nil, "m")
 	got := promptFn(basePrompt(printOptions{}), t.TempDir(), reg, "")()
