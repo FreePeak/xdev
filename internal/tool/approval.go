@@ -35,12 +35,16 @@ func (t Tier) String() string {
 type ApprovalMode int
 
 const (
-	// AlwaysAsk prompts for every tool call.
-	AlwaysAsk ApprovalMode = iota
+	// Yolo never prompts (pi philosophy, and the shipped default). It is
+	// deliberately the ZERO value: policy is opt-in through settings, so an
+	// agent built without an explicit mode must behave like the product
+	// default rather than silently start prompting — a strict zero broke
+	// subagents, whose tools (task/yield/grep) are outside the tier table.
+	Yolo ApprovalMode = iota
 	// Write prompts only for TierWrite and TierExec calls.
 	Write
-	// Yolo never prompts (pi philosophy, xdev MVP default).
-	Yolo
+	// AlwaysAsk prompts for every tool call.
+	AlwaysAsk
 )
 
 // Classify maps a tool name to its approval tier. Unknown tools are an

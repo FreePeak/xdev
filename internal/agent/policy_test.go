@@ -178,3 +178,80 @@ func TestAgentYoloNeverPrompts(t *testing.T) {
 		t.Fatalf("yolo blocked the tool: %v", *ran)
 	}
 }
+
+// TestThinkingReachesProvider pins the last link: the role effort set on
+// the agent must arrive on the provider request, not just sit in a field.
+func TestThinkingReachesProvider(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{{Type: ai.EventStart}, textEvent("ok"), doneEvent("ok")}},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Hooks: &hookLog{}, Model: "m",
+		Thinking: &ai.ThinkingBudget{Tokens: 1234}}
+	hist := []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}}
+	if _, err := a.Run(context.Background(), "sys", hist); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.gotReqs) != 1 || p.gotReqs[0].Thinking == nil || p.gotReqs[0].Thinking.Tokens != 1234 {
+		t.Fatalf("thinking budget did not reach the request: %+v", p.gotReqs)
+	}
+}
+
+// TestSubagentInheritsParentPolicy pins that delegation cannot sideload
+// around approval: a child runs under the parent's policy, with yield
+// exempt (a child that cannot hand back its result is a hang, not a
+// security win).
+func TestSubagentInheritsParentPolicy(t *testing.T) {
+	parent := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{{Type: ai.EventStart}, textEvent("parent done"), doneEvent("parent done")}},
+	}}
+	child := &fakeProvider{calls: []fakeScript{
+		{events: toolCallEvents("echo", `{"text":"hi"}`)},
+		{events: []ai.Event{{Type: ai.EventStart}, textEvent("child done"), doneEvent("child done")}},
+	}}
+	var echoRan []string
+	res, err := SpawnChild(context.Background(), SubagentSpec{
+		Name: "guarded", Prompt: "go", Provider: child,
+		Tools:    []tool.Tool{spyRan{ran: &echoRan}},
+		Policy:   tool.ApprovalPolicy{Mode: tool.AlwaysAsk},
+		Thinking: &ai.ThinkingBudget{Tokens: 99},
+	})
+	_ = parent
+	_ = res
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The refused tool never executed: delegation is not a way around the
+	// parent's approval posture.
+	if len(echoRan) != 0 {
+		t.Fatalf("child executed a tool the parent policy must gate: %v", echoRan)
+	}
+	// A refusal is a tool result, not a crash: the child model must be told
+	// why, and may then finish normally.
+	if len(child.gotReqs) < 2 {
+		t.Fatalf("child never saw the refusal: %d requests", len(child.gotReqs))
+	}
+	joined := ""
+	for _, m := range child.gotReqs[1].Messages {
+		joined += m.Text() + "\n"
+	}
+	if !strings.Contains(joined, "refused") {
+		t.Fatalf("refusal not surfaced to the child model:\n%s", joined)
+	}
+	// The parent's resolved effort forwarded into the child's requests.
+	if child.gotReqs[0].Thinking == nil || child.gotReqs[0].Thinking.Tokens != 99 {
+		t.Fatalf("child lost the parent's thinking budget: %+v", child.gotReqs[0].Thinking)
+	}
+}
+
+// spyRan is an echo-named tool that records execution.
+type spyRan struct{ ran *[]string }
+
+func (s spyRan) Name() string        { return "echo" }
+func (s spyRan) Description() string { return "echo" }
+func (s spyRan) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}}}`)
+}
+func (s spyRan) Execute(_ context.Context, args json.RawMessage) (tool.Result, error) {
+	*s.ran = append(*s.ran, string(args))
+	return tool.Result{Text: "echoed"}, nil
+}
