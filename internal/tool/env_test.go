@@ -1,6 +1,9 @@
 package tool
 
 import (
+	"context"
+	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -52,7 +55,7 @@ func TestEnvAlwaysSetInjected(t *testing.T) {
 	joined := strings.Join(env, "\n")
 	for _, want := range []string{
 		"TERM=dumb", "NO_COLOR=1", "GIT_PAGER=cat", "PAGER=cat",
-		"DEBIAN_FRONTEND=noninteractive", "LC_ALL=en_US.UTF-8",
+		"DEBIAN_FRONTEND=noninteractive", "LC_ALL=" + Locale(),
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("always-set var %q missing", want)
@@ -86,7 +89,54 @@ func TestEnvHardeningMatchesFilteredKeys(t *testing.T) {
 			t.Errorf("PATH mangled: %q", kv)
 		}
 	}
-	if len(hardened) != len(environ)-1+len(envAlwaysSet) {
+	if len(hardened) != len(environ)-1+len(envAlwaysSet()) {
 		t.Fatalf("expected SECRET stripped + always-set appended, got %v", hardened)
+	}
+}
+
+// TestLCALLExistsOnThisHost pins the bug the Linux container caught:
+// naming a locale the host has not generated makes bash print
+// "setlocale: LC_ALL: cannot change locale" to the stderr of EVERY
+// command, polluting every tool result. The injected value must exist.
+func TestLCALLExistsOnThisHost(t *testing.T) {
+	got := Locale()
+	if got == "" {
+		t.Fatal("no locale resolved")
+	}
+	out, err := exec.Command("locale", "-a").Output()
+	if err != nil {
+		t.Skipf("cannot enumerate locales on this host: %v", err)
+	}
+	// glibc normalizes locale names (C.UTF-8 == C.utf8 == c.utf8), and
+	// `locale -a` prints one spelling, so compare normalized.
+	norm := func(x string) string {
+		x = strings.ToLower(strings.TrimSpace(x))
+		x = strings.ReplaceAll(x, "-", "")
+		x = strings.ReplaceAll(x, "_", "")
+		return x
+	}
+	have := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		n := strings.TrimSpace(line)
+		have[norm(n)] = true
+		if i := strings.IndexByte(n, '.'); i > 0 {
+			have[norm(n[:i])] = true
+		}
+	}
+	if !have[norm(got)] {
+		t.Fatalf("LC_ALL=%q has no matching locale on this host (bash would warn on every command)", got)
+	}
+}
+
+// TestBashStderrHasNoLocaleWarning is the end-to-end form of the same
+// contract: a plain echo must come back with clean stderr.
+func TestBashStderrHasNoLocaleWarning(t *testing.T) {
+	res, err := NewBashTool(t.TempDir()).Execute(context.Background(),
+		json.RawMessage(`{"command":"echo hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, "setlocale") {
+		t.Fatalf("locale warning leaked into tool output: %q", res.Text)
 	}
 }
