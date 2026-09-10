@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/memlimit"
@@ -12,10 +13,21 @@ import (
 
 var version = "0.1.0-dev"
 
-func main() {
-	limit := memlimit.Apply()
+// repeatable implements flag.Value for overlay paths (`-config a.yml
+// -config b.yml`), whose order is the merge order.
+type repeatable []string
 
+func (r *repeatable) String() string     { return strings.Join(*r, ",") }
+func (r *repeatable) Set(v string) error { *r = append(*r, v); return nil }
+
+// appliedLimit is the process memory limit actually set, for the usage
+// footer (the closure runs before the value exists).
+var appliedLimit int64
+
+func main() {
 	fs := flag.NewFlagSet("xdev", flag.ContinueOnError)
+	configOverlays := repeatable{}
+	fs.Var(&configOverlays, "config", "extra config file layered over the defaults (repeatable)")
 	model := fs.String("model", "", "model to use (provider/model)")
 	continueLast := fs.Bool("continue", false, "continue the most recent session in this directory")
 	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
@@ -32,11 +44,12 @@ func main() {
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
   xdev tui                     interactive TUI (Grok-CLI look)
+  xdev config <sub>            settings: list | get K | set K V | reset K | path
 
 Flags:
 `, version)
 		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nMemory limit: %d bytes (XDEV_MEMLIMIT to override)\n", limit)
+		fmt.Fprintf(os.Stderr, "\nMemory limit: %d bytes (XDEV_MEMLIMIT to override)\n", appliedLimit)
 	}
 	// NOTE: Go's flag package stops at the first positional arg, so flags
 	// must precede the subcommand: `xdev -continue tui`, not `xdev tui -continue`.
@@ -47,9 +60,27 @@ Flags:
 		logx.Enable(logx.LevelDebug)
 	}
 
+	// --- layered settings (M9 #10): defaults ← global ← project ← -config
+	settings, err := settingsFor(configOverlays)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		os.Exit(2)
+	}
+	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
+	// Flag-vs-settings precedence: an explicit flag always wins.
+	if *themeName == "" {
+		*themeName = settings.Theme
+	}
+	if *model == "" {
+		*model = settings.DefaultModel
+	}
+	if *maxTurns == 0 {
+		*maxTurns = settings.MaxTurns
+	}
+
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "version") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -85,6 +116,10 @@ Flags:
 			os.Exit(code)
 		}
 		os.Exit(code)
+	}
+
+	if mode == "config" {
+		os.Exit(runConfig(args, settings))
 	}
 
 	switch mode {
