@@ -55,20 +55,9 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		defer mgr.Close()
 	}
 
-	sys := opts.SystemPrompt
-	if sys == "" {
-		sys = agent.SystemPromptBase
-	}
-	ctxFiles := agent.LoadContextFiles(cwd)
-	defs := reg.Defs()
-	named := make([]agent.NamedToolDef, 0, len(defs))
-	for _, d := range defs {
-		named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
-	}
-	sys = agent.BuildSystemPrompt(sys, ctxFiles, named)
-	if opts.AppendSystem != "" {
-		sys += "\n\n" + opts.AppendSystem
-	}
+	// Recomputed per prompt: async MCP/extension tools must reach the
+	// model that is being told they exist.
+	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
 
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {
@@ -78,7 +67,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	wireTaskParent(reg, store)
 
 	h := &rpcHandler{
-		cwd: cwd, sys: sys, reg: reg, cfg: cfg,
+		cwd: cwd, buildSys: buildSys, reg: reg, cfg: cfg,
 		provName: provName, modelName: modelName,
 		maxTokens: opts.MaxTokens, maxTurns: opts.MaxTurns,
 		store: store,
@@ -88,6 +77,13 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 		Failovers:  failoverChain(cfg, provName, modelName),
+	}
+
+	// Extension processes: tools join the registry, and the manager is the
+	// agent's fail-closed policy interceptor; actions steer the live run.
+	if exts := attachExtensions(context.Background(), reg, h.agent.Steer); exts != nil {
+		h.agent.Intercept = exts
+		defer exts.Close()
 	}
 	defer func() {
 		h.mu.Lock()
@@ -122,7 +118,8 @@ type rpcHandler struct {
 	store *session.Store
 	agent *agent.Agent
 
-	cwd, sys            string
+	cwd                 string
+	buildSys            func() string
 	reg                 *tool.Registry
 	cfg                 *config.Config
 	provName, modelName string
@@ -155,7 +152,7 @@ func (h *rpcHandler) Prompt(id, text string) {
 
 	go func() {
 		defer cancel()
-		msg, err := h.agent.Run(ctx, h.sys, hist)
+		msg, err := h.agent.Run(ctx, h.buildSys(), hist)
 		resp := protocol.Response{Ok: err == nil}
 		if err != nil {
 			resp.Err = err.Error()

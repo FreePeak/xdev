@@ -77,20 +77,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- system prompt ---
-	sys := opts.SystemPrompt
-	if sys == "" {
-		sys = agent.SystemPromptBase
-	}
-	ctxFiles := agent.LoadContextFiles(cwd)
-	defs := reg.Defs()
-	named := make([]agent.NamedToolDef, 0, len(defs))
-	for _, d := range defs {
-		named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
-	}
-	sys = agent.BuildSystemPrompt(sys, ctxFiles, named)
-	if opts.AppendSystem != "" {
-		sys += "\n\n" + opts.AppendSystem
-	}
+	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
+	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
 	// --- session ---
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
@@ -127,7 +115,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	logx.Debugf("print: model=%s session=%s", modelRef, store.Path())
 	started := time.Now()
-	final, err := ag.Run(ctx, sys, history)
+	final, err := ag.Run(ctx, buildSys(), history)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
 		exitCode = 1
@@ -197,6 +185,34 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		}
 	}
 	return 0
+}
+
+// promptFn builds the system prompt from the LIVE registry each time it
+// is called. Tools can register after startup (async MCP, extensions), and
+// a prompt frozen at boot would never mention them — the provider request
+// would advertise tools the model was never told about.
+func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) func() string {
+	ctxFiles := agent.LoadContextFiles(cwd)
+	return func() string {
+		defs := reg.Defs()
+		named := make([]agent.NamedToolDef, 0, len(defs))
+		for _, d := range defs {
+			named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
+		}
+		sys := agent.BuildSystemPrompt(base, ctxFiles, named)
+		if appendSystem != "" {
+			sys += "\n\n" + appendSystem
+		}
+		return sys
+	}
+}
+
+// basePrompt resolves the -system-prompt override.
+func basePrompt(opts printOptions) string {
+	if opts.SystemPrompt != "" {
+		return opts.SystemPrompt
+	}
+	return agent.SystemPromptBase
 }
 
 // extensionsDir is <dataDir>/extensions: executables speaking the ext
