@@ -54,10 +54,9 @@ type App struct {
 	quitCh    chan struct{}
 	lineCache map[blockKey][]line
 
-	// Welcome-screen matrix rain (UI thread; guarded by mu).
-	rain         []rainCol
-	rainW, rainH int
-	rainTick     int
+	// Welcome-screen Game of Life backdrop (UI thread; guarded by mu).
+	life     lifeGrid
+	lifeTick int
 }
 
 type blockKey struct {
@@ -251,6 +250,35 @@ func (a *App) FinishRun() { a.SetRunning(false) }
 // Quit terminates the UI loop.
 func (a *App) Quit() { close(a.quitCh) }
 
+// ForkSession implements CommandAPI by delegating to wired SessionOps.Fork.
+func (a *App) ForkSession() error {
+	if a.ops == nil || a.ops.Fork == nil {
+		return fmt.Errorf("session fork not wired")
+	}
+	return a.ops.Fork()
+}
+
+// DumpSession implements CommandAPI by exporting the transcript.
+func (a *App) DumpSession() error {
+	if a.ops == nil || a.ops.Dump == nil {
+		return fmt.Errorf("session dump not wired")
+	}
+	path, err := a.ops.Dump()
+	if err != nil {
+		return err
+	}
+	a.AddSystemBlock("transcript dumped to " + path)
+	return nil
+}
+
+// ResumeSession implements CommandAPI by swapping to the resumed store.
+func (a *App) ResumeSession(query string) error {
+	if a.ops == nil || a.ops.Resume == nil {
+		return fmt.Errorf("session resume not wired")
+	}
+	return a.ops.Resume(query)
+}
+
 // Reset clears the transcript (used by /clear): all blocks gone, viewport
 // back to follow. Streaming state is untouched — callers must not be
 // running a turn when they call this.
@@ -325,17 +353,18 @@ func (a *App) Run() {
 			if running {
 				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(spinnerFrames)
 			}
-			// Matrix rain on the welcome screen: step every 4th
+			// Game of Life on the welcome screen: step every 4th
 			// 33ms tick (~8fps) and redraw only on those steps,
 			// while it is visible (no blocks, nothing running) —
 			// idle CPU stays near zero between steps.
 			animate := false
 			if !running && len(a.blocks) == 0 {
-				top, bot := 1, a.height-5
-				if bot > top+3 {
-					a.rainTick = (a.rainTick + 1) % 4
-					if a.rainTick == 0 {
-						a.stepRain(a.width, top, bot)
+				top, bot, ok := lifeArea(a.width, a.height)
+				if ok {
+					a.lifeTick = (a.lifeTick + 1) % 4
+					if a.lifeTick == 0 {
+						a.ensureLife(a.width, top, bot)
+						a.stepLife(a.width, top, bot)
 						animate = true
 					}
 				}

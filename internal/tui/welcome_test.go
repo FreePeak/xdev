@@ -217,14 +217,14 @@ func gridContains(scr tcell.SimulationScreen, s string) bool {
 	}
 	return false
 }
-func TestAppWelcomeMatrixLogo(t *testing.T) {
+func TestAppWelcomeLogo(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	app.draw()
 
 	// Every block-art row must start at the same column: the rows are
 	// ragged-width, so per-line centering would wobble them (the bug
-	// this test pins). Rain glyphs never include '█', so the first '█'
-	// per row is always logo art.
+	// this test pins). Life cells use '▓', never '█', so the first
+	// '█' per row is always logo art.
 	prim, w, _ := scr.GetContents()
 	firstX, rows := -1, 0
 	for y := 0; y*w < len(prim); y++ {
@@ -248,44 +248,95 @@ func TestAppWelcomeMatrixLogo(t *testing.T) {
 	}
 }
 
-// TestAppWelcomeRainBounds pins the rain invariant: glyphs only in the
-// content area, never on the top bar or composer rows, and stepping
-// never moves a stream out of bounds (no panic, heads stay in range).
-func TestAppWelcomeRainBounds(t *testing.T) {
+// TestAppWelcomeLifeBounds pins the life-grid invariant: live cells
+// only in the content area (grid bounded by the declared area), and
+// the backdrop is still populated after hundreds of generations —
+// die-out (a blank backdrop) is exactly the failure mode Life on a
+// finite torus has without the mutation sprinkle.
+func TestAppWelcomeLifeBounds(t *testing.T) {
 	app, scr := newTestApp(t, 80, 26)
 	app.draw()
-	// Step 200 ticks — far longer than any trail survives.
+	top, bot, ok := lifeArea(80, 26)
+	if !ok {
+		t.Fatal("life area should fit in an 80x26 terminal")
+	}
+	// Step 200 generations — far past any random soup's burn-in. The
+	// grid must stay within its declared bounds and stay populated:
+	// a die-out (blank backdrop) is exactly the failure mode Life on a
+	// finite torus has without the mutation sprinkle.
 	for range 200 {
-		app.stepRain(80, 1, 21)
+		app.stepLife(80, top, bot)
 	}
 	app.draw()
-
+	if app.life.w != 80 || app.life.h != bot-top+1 {
+		t.Fatalf("life grid = %dx%d, want 80x%d", app.life.w, app.life.h, bot-top+1)
+	}
 	prim, w, _ := scr.GetContents()
 	h := len(prim) / w
-	isRain := func(r rune) bool {
-		return strings.ContainsRune("ｱｲｳｴｵｶｷｸｹｺ0123456789", r)
-	}
+	alive := 0
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			c := prim[y*w+x]
-			if len(c.Runes) == 1 && isRain(c.Runes[0]) {
+			if len(c.Runes) == 1 && c.Runes[0] == lifeGlyph {
+				alive++
 				if y == 0 || y >= h-4 {
-					t.Fatalf("rain glyph %q at protected row %d", c.Runes[0], y)
+					t.Fatalf("life cell at protected row %d", y)
 				}
 			}
 		}
 	}
+	if alive == 0 {
+		t.Fatal("backdrop died out: no live cells after 200 generations")
+	}
 }
 
-// TestRainGlyphsAllNarrow pins the rain alphabet to width-1 runes: a
-// wide glyph (e.g. U+30FB '・') drawn just left of the logo makes
-// tcell drop the logo's SetContent into the wide continuation cell,
-// punching a hole in the art — the flake TestAppWelcomeMatrixLogo
-// used to hit.
-func TestRainGlyphsAllNarrow(t *testing.T) {
-	for _, r := range rainGlyphs {
-		if width(string(r)) != 1 {
-			t.Errorf("rain glyph %q (U+%04X) has width %d, want 1", r, r, width(string(r)))
+// TestLifeGridToroidalWrap pins the wrap rule: a glider leaving one edge
+// re-enters the opposite edge without index panics.
+func TestLifeGridToroidalWrap(t *testing.T) {
+	g := newLifeGrid(4, 4)
+	// Vertical blinker column at x=0.
+	for y := range 4 {
+		g.c[y][0] = true
+	}
+	g.step()
+	// Under B3/S23 a full wrapped column cycles; the grid must stay 4x4.
+	if g.w != 4 || g.h != 4 {
+		t.Fatalf("grid resized to %dx%d", g.w, g.h)
+	}
+	// Toroidal at() must not panic at the far edge.
+	g.at(3, 3)
+	g.at(0, 0)
+}
+
+// TestLifeGlyphNarrow pins the backdrop glyph to width 1: a wide glyph
+// (e.g. U+30FB '・') drawn just left of the logo makes tcell drop the
+// logo's SetContent into the wide continuation cell, punching a hole
+// in the art — the flake TestAppWelcomeLogo used to hit with the rain
+// alphabet.
+func TestLifeGlyphNarrow(t *testing.T) {
+	if width(string(lifeGlyph)) != 1 {
+		t.Errorf("life glyph %q (U+%04X) has width %d, want 1", lifeGlyph, lifeGlyph, width(string(lifeGlyph)))
+	}
+}
+
+// TestLogoOneArtAcrossSizes pins the size-consistency fix: every
+// terminal size that fits the artwork gets the identical 6-row logo —
+// no tier swapping — and sizes that can't fit it get nothing.
+func TestLogoOneArtAcrossSizes(t *testing.T) {
+	for _, sz := range [][2]int{{100, 30}, {80, 24}, {80, 20}, {60, 30}, {120, 50}} {
+		got := logoArt(sz[0], sz[1]-8)
+		if len(got) != len(xdevLogo) {
+			t.Fatalf("logoArt(%d,%d) = %d rows, want the one %d-row logo", sz[0], sz[1], len(got), len(xdevLogo))
+		}
+		for i := range xdevLogo {
+			if got[i] != xdevLogo[i] {
+				t.Fatalf("logoArt(%d,%d) row %d differs between sizes", sz[0], sz[1], i)
+			}
+		}
+	}
+	for _, sz := range [][2]int{{80, 19}, {30, 30}, {10, 5}} {
+		if got := logoArt(sz[0], sz[1]-8); got != nil {
+			t.Fatalf("logoArt(%d,%d) = art, want nil (doesn't fit)", sz[0], sz[1])
 		}
 	}
 }
