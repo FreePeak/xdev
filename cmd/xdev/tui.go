@@ -14,6 +14,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/fscache"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/theme"
@@ -71,14 +72,19 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		agentMu  sync.Mutex
 		curAgent *agent.Agent
 	)
-	exts := attachExtensions(context.Background(), reg, func(text string) {
-		agentMu.Lock()
-		target := curAgent
-		agentMu.Unlock()
-		if target != nil {
-			target.Steer(text)
+	routeToLiveAgent := func(call func(*agent.Agent, string)) func(text string) {
+		return func(text string) {
+			agentMu.Lock()
+			target := curAgent
+			agentMu.Unlock()
+			if target != nil {
+				call(target, text)
+			}
 		}
-	})
+	}
+	exts := attachExtensions(context.Background(), reg,
+		routeToLiveAgent(func(a *agent.Agent, s string) { a.Steer(s) }),
+		routeToLiveAgent(func(a *agent.Agent, s string) { a.FollowUp(s) }))
 	if exts != nil {
 		defer exts.Close()
 	}
@@ -117,6 +123,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer setCursorReset()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	if exts != nil {
+		// The UI callback carries no context: the extension's per-event
+		// timeout is the bound here.
+		app.SetExtensionCommands(exts.Commands(), func(name, args string) (string, error) {
+			return exts.RunCommand(context.Background(), name, args)
+		})
+	}
 
 	// Replay resumed history as read-only blocks (text only).
 	if opts.ContinueLast {
@@ -218,6 +231,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh. All refuse while a
+	// @-file completion runs through the SAME shared FS-scan cache
+	// grep/glob use, so the menu costs one walk per TTL, not per keystroke.
+	app.SetPathCompletion(cwd, func() []string {
+		entries, _, _ := tool.SharedFSCache().Scan(fscache.Options{
+			Roots: []string{cwd}, RespectGitignore: true,
+		})
+		out := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if !e.IsDir && e.Rel != "." {
+				out = append(out, e.Rel)
+			}
+		}
+		return out
+	})
+
 	app.SetLocation(cwd)
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{

@@ -99,7 +99,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// Extension processes (optional): their tools join the registry and the
 	// manager becomes the agent's fail-closed policy interceptor; runtime
 	// actions steer the live run.
-	exts := attachExtensions(context.Background(), reg, ag.Steer)
+	exts := attachExtensions(context.Background(), reg, ag.Steer, ag.FollowUp)
 	if exts != nil {
 		ag.Intercept = exts
 		defer exts.Close()
@@ -228,18 +228,26 @@ func extensionsDir() string {
 // returns the manager for use as the agent's Interceptor. Runtime actions
 // route back into the agent as steering. Failures are logged, never
 // fatal; a broken extension must not block a session.
-func attachExtensions(ctx context.Context, reg *tool.Registry, steer func(text string)) *ext.Manager {
-	mgr := ext.NewManager()
-	mgr.BindHost(func(a ext.Action) {
+// actionRouter turns extension runtime requests into agent steering. The
+// agent exposes both kinds, so followUp is routed distinctly rather than
+// collapsed into steer; `aside` has no loop surface yet (nearest behavior
+// is steer) and `register_provider` needs the M9 provider registry.
+func actionRouter(steer, followUp func(text string)) func(ext.Action) {
+	return func(a ext.Action) {
 		switch a.Action {
-		case "steer", "followUp", "aside":
-			// followUp/aside have no distinct surface until the RPC/TUI
-			// queue is exposed; steering is the nearest behavior.
+		case "steer", "aside":
 			steer(a.Text)
+		case "followUp":
+			followUp(a.Text)
 		default:
 			logx.Debugf("ext: unsupported action %q", a.Action)
 		}
-	})
+	}
+}
+
+func attachExtensions(ctx context.Context, reg *tool.Registry, steer, followUp func(text string)) *ext.Manager {
+	mgr := ext.NewManager()
+	mgr.BindHost(actionRouter(steer, followUp))
 	if err := mgr.Load(ctx, extensionsDir()); err != nil {
 		logx.Errorf("ext: %v", err)
 		return nil
