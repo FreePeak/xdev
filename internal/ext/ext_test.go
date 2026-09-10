@@ -85,8 +85,11 @@ func TestHandshakeAnnouncesCapabilities(t *testing.T) {
 	if len(caps.Commands) != 1 || caps.Commands[0].Name != "ping" {
 		t.Fatalf("commands = %+v", caps.Commands)
 	}
-	if len(caps.Renderers) != 1 || caps.Renderers[0].Kind != "card" {
+	if len(caps.Renderers) != 1 || caps.Renderers[0].Kind != "table" {
 		t.Fatalf("renderers = %+v", caps.Renderers)
+	}
+	if len(caps.Renderers[0].Spec) == 0 {
+		t.Fatal("renderer spec must reach the host")
 	}
 	// Declarative specs and commands surface through the manager.
 	if _, ok := m.Renderers()["ext_policy_greet"]; !ok {
@@ -226,7 +229,9 @@ func TestExtensionToolIsCallableThroughTheRegistry(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
-	if !strings.Contains(res.Text, "hello from the extension") {
+	// The fixture answers with a structured payload the TUI's table
+	// renderer consumes; the tool adapter surfaces it verbatim.
+	if !strings.Contains(res.Text, "greeting") || !strings.Contains(res.Text, "linh") {
 		t.Fatalf("text = %q", res.Text)
 	}
 }
