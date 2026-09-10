@@ -53,6 +53,10 @@ type App struct {
 	dirty     chan struct{}
 	quitCh    chan struct{}
 	lineCache map[blockKey][]line
+
+	// Welcome-screen matrix rain (UI thread; guarded by mu).
+	rain         []rainCol
+	rainW, rainH int
 }
 
 type blockKey struct {
@@ -324,8 +328,18 @@ func (a *App) Run() {
 			if running {
 				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(spinnerFrames)
 			}
+			// Matrix rain on the welcome screen: advance ~8fps only
+			// while it is visible (no blocks, nothing running).
+			animate := false
+			if !running && len(a.blocks) == 0 {
+				top, bot := 1, a.height-5
+				if bot > top+3 {
+					a.stepRain(a.width, top, bot)
+					animate = true
+				}
+			}
 			a.mu.Unlock()
-			if running {
+			if running || animate {
 				a.draw()
 			}
 		}

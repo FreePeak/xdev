@@ -217,3 +217,56 @@ func gridContains(scr tcell.SimulationScreen, s string) bool {
 	}
 	return false
 }
+func TestAppWelcomeMatrixLogo(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	app.draw()
+
+	// The block-art top row is present (a common left edge for the
+	// ragged-width rows is pinned by the art strings themselves).
+	prim, w, _ := scr.GetContents()
+	found := false
+	for y := 0; y*w < len(prim); y++ {
+		var row strings.Builder
+		for x := 0; x < w && y*w+x < len(prim); x++ {
+			row.WriteString(string(prim[y*w+x].Runes))
+		}
+		if strings.Contains(row.String(), "██╗  ██╗") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("XDEV block logo top row not drawn")
+	}
+	if !gridContains(scr, "01111000") {
+		t.Fatal("binary tagline missing")
+	}
+}
+
+// TestAppWelcomeRainBounds pins the rain invariant: glyphs only in the
+// content area, never on the top bar or composer rows, and stepping
+// never moves a stream out of bounds (no panic, heads stay in range).
+func TestAppWelcomeRainBounds(t *testing.T) {
+	app, scr := newTestApp(t, 80, 26)
+	app.draw()
+	// Step 200 ticks — far longer than any trail survives.
+	for range 200 {
+		app.stepRain(80, 1, 21)
+	}
+	app.draw()
+
+	prim, w, _ := scr.GetContents()
+	h := len(prim) / w
+	isRain := func(r rune) bool {
+		return strings.ContainsRune("ｱｲｳｴｵｶｷｸｹｺ0123456789", r)
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := prim[y*w+x]
+			if len(c.Runes) == 1 && isRain(c.Runes[0]) {
+				if y == 0 || y >= h-4 {
+					t.Fatalf("rain glyph %q at protected row %d", c.Runes[0], y)
+				}
+			}
+		}
+	}
+}
