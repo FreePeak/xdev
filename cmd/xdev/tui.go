@@ -175,6 +175,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		store = ns
 		ts.store = ns
 		app.Reset()
+		saveBreadcrumb(ns.Path())
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
 		return nil
 	}

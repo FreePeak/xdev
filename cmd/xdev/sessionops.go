@@ -12,20 +12,32 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 )
 
-// terminalKey identifies the terminal/pane for the --continue breadcrumb
-// (omp parity: pane env vars first, then the TTY device).
+// terminalKey identifies the terminal/pane + directory for the
+// --continue breadcrumb: pane env vars first, then the TTY device,
+// always suffixed with the cwd bucket so a terminal can never adopt
+// another directory's session (omp re-roots per cwd the same way).
 func terminalKey() string {
+	term := "unknown"
 	for _, env := range []string{"ZELLIJ_PANE", "TMUX_PANE", "KITTY_WINDOW_ID", "WEZTERM_PANE", "TERM_SESSION_ID", "WT_SESSION"} {
 		if v := os.Getenv(env); v != "" {
-			return strings.ReplaceAll(strings.ToLower(env+"_"+v), "/", "_")
+			term = strings.ReplaceAll(strings.ToLower(env+"_"+v), "/", "_")
+			break
 		}
 	}
-	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		if tty, err := os.Readlink("/dev/fd/0"); err == nil {
-			return strings.ReplaceAll(tty, "/", "_")
+	if term == "unknown" {
+		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			if tty, err := os.Readlink("/dev/fd/0"); err == nil {
+				term = strings.ReplaceAll(tty, "/", "_")
+			}
 		}
 	}
-	return "unknown"
+	if cwd, err := os.Getwd(); err == nil {
+		if real, err := filepath.EvalSymlinks(cwd); err == nil {
+			cwd = real
+		}
+		term += "__" + strings.ReplaceAll(cwd, "/", "_")
+	}
+	return term
 }
 
 // breadcrumbDir is ~/.xdev/agent/terminal-sessions.
