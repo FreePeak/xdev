@@ -33,20 +33,34 @@ func TestBreadcrumbRoundTrip(t *testing.T) {
 func TestResolveResumeID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := config.DataDir()
-	bucket := filepath.Join(dir, "sessions", "-tmp-resume-test")
-	if err := os.MkdirAll(bucket, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	older := filepath.Join(bucket, session.SessionFilePath(dir, "/tmp/resume-test", now.Add(-time.Hour), "AAAA1111-0000-0000-0000-000000000000"))
-	newer := filepath.Join(bucket, session.SessionFilePath(dir, "/tmp/resume-test", now, "BBBB2222-0000-0000-0000-000000000000"))
+	cwd := "/tmp/resume-test"
+	older := session.SessionFilePath(dir, cwd, now.Add(-time.Hour), "AAAA1111-0000-0000-0000-000000000000")
+	newer := session.SessionFilePath(dir, cwd, now, "BBBB2222-0000-0000-0000-000000000000")
 	for _, p := range []string{older, newer} {
-		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		ts time.Time
+		id string
+	}{{now.Add(-time.Hour), "AAAA1111-0000-0000-0000-000000000000"},
+		{now, "BBBB2222-0000-0000-0000-000000000000"}} {
+		var b strings.Builder
+		b.Write(session.MarshalTitleSlot("sess "+c.id[:4], session.TitleSourceAuto, now))
+		b.Write(session.MarshalHeader(session.SessionHeader{
+			Version: 3, ID: c.id, Timestamp: c.ts, CWD: cwd, Title: "t", TitleSource: session.TitleSourceAuto,
+		}))
+		b.WriteString("\n")
+		if err := os.WriteFile(session.SessionFilePath(dir, cwd, c.ts, c.id), []byte(b.String()), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	cwd := "/tmp/resume-test"
 	// Case-insensitive prefix.
 	got, err := resolveResumeID(cwd, "aaaa")
 	if err != nil || !strings.HasSuffix(got, "AAAA1111-0000-0000-0000-000000000000.jsonl") {
