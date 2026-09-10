@@ -278,7 +278,6 @@ func TestOverflowPromotesBeforeCompaction(t *testing.T) {
 		{events: []ai.Event{textEvent("done on big model"), doneEvent("done on big model")}},
 	}}
 	a, s := ladderAgent(t, primary, backup)
-	a.Compaction.ContextWindow = 1000
 	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
 	if err != nil {
 		t.Fatalf("Run: %v", err)

@@ -6,7 +6,6 @@
 package protocol
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/FreePeak/xdev/internal/ai"
@@ -73,12 +72,13 @@ type Event struct {
 	Delta    string `json:"delta,omitempty"`
 	Snapshot string `json:"snapshot,omitempty"`
 
-	ToolCallID  string          `json:"toolCallId,omitempty"`
-	ToolName    string          `json:"toolName,omitempty"`
-	StreamIndex int             `json:"streamIndex,omitempty"`
-	PartialJSON string          `json:"partialJson,omitempty"`
-	Arguments   json.RawMessage `json:"arguments,omitempty"`
+	ToolCallID  string `json:"toolCallId,omitempty"`
+	ToolName    string `json:"toolName,omitempty"`
+	StreamIndex int    `json:"streamIndex,omitempty"`
+	PartialJSON string `json:"partialJson,omitempty"`
 
+	// done carries the fully materialized assistant message (text, tool
+	// calls, usage); error carries its rendered text.
 	StopReason string      `json:"stopReason,omitempty"`
 	Message    *ai.Message `json:"message,omitempty"`
 	MessageErr string      `json:"error,omitempty"`
