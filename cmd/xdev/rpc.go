@@ -29,12 +29,9 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	modelRef := opts.Model
-	if modelRef == "" {
-		modelRef = cfg.DefaultModelRef()
-	}
-	if modelRef == "" {
-		return 2, fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml or pass --model provider/model")
+	modelRef, _, err := resolveModel(opts.Model, cfg, lastSettings())
+	if err != nil {
+		return 2, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
@@ -49,7 +46,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		return 2, err
 	}
 
-	reg := newToolRegistry(cwd, prov, modelName)
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings())
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()

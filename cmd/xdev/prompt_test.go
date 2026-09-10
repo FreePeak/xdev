@@ -71,7 +71,7 @@ func (v verboseTool) Execute(context.Context, json.RawMessage) (tool.Result, err
 // must be capped at the choke point so one verbose server cannot bust
 // PRD §1 Goal 4.
 func TestPromptBudgetWithLateRegistrants(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "m")
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil)
 	for i := range 3 {
 		reg.Register(verboseTool{name: fmt.Sprintf("late_%d", i)})
 	}
@@ -86,7 +86,7 @@ func TestPromptBudgetWithLateRegistrants(t *testing.T) {
 }
 
 func TestBundledPromptStaysUnderBudget(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "m")
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil)
 	got := promptFn(basePrompt(printOptions{}), t.TempDir(), reg, "")()
 	tokens := len([]rune(got)) / 4
 	if tokens >= maxPromptTokens {

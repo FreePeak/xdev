@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/memlimit"
 )
@@ -19,6 +20,10 @@ type repeatable []string
 
 func (r *repeatable) String() string     { return strings.Join(*r, ",") }
 func (r *repeatable) Set(v string) error { *r = append(*r, v); return nil }
+
+// loadedSettings is the layered configuration main() resolved, shared
+// with the run modes (they need modelRoles/defaultModel).
+var loadedSettings *config.Settings
 
 // appliedLimit is the process memory limit actually set, for the usage
 // footer (the closure runs before the value exists).
@@ -66,6 +71,7 @@ Flags:
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		os.Exit(2)
 	}
+	loadedSettings = settings
 	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
 	// Flag-vs-settings precedence: an explicit flag always wins.
 	if *themeName == "" {

@@ -34,15 +34,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	modelRef := opts.Model
-	if modelRef == "" {
-		modelRef = os.Getenv("XDEV_MODEL")
-	}
-	if modelRef == "" {
-		modelRef = cfg.DefaultModelRef()
-	}
-	if modelRef == "" {
-		return 2, fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml or pass --model provider/model")
+	modelRef, _, err := resolveModel(opts.Model, cfg, lastSettings())
+	if err != nil {
+		return 2, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
@@ -58,7 +52,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	// Tools + system prompt (shared with print mode).
-	reg := newToolRegistry(cwd, prov, modelName)
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings())
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
