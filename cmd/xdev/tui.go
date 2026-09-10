@@ -323,11 +323,7 @@ func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
 }
 
 func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Duration) {
-	preview := strings.Join(strings.Fields(res.Text), " ")
-	if len(preview) > 200 {
-		preview = preview[:200] + "…"
-	}
-	h.ts.app.FinishTool(call.Name, res.IsError, fmt.Sprintf("%s (%s)", preview, dur.Round(time.Millisecond)))
+	h.ts.app.FinishTool(call.Name, res.IsError, res.Text, dur.Round(time.Millisecond).String())
 }
 
 // OnMessageEnd persists the assistant message (persistence on message_end).
