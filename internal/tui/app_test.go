@@ -156,17 +156,20 @@ func TestScrollClamps(t *testing.T) {
 	if total < 20 {
 		t.Fatalf("expected many lines, got %d", total)
 	}
-	app.scroll(-10000)
+	app.scroll(10000, false)
 	app.mu.Lock()
-	off := app.offset
-	maxOK := app.offset <= total
+	off := app.sm.offset
+	maxOK := app.sm.offset <= app.totalLinesLocked()
 	app.mu.Unlock()
 	if off == 0 || !maxOK {
-		t.Fatalf("scroll-up clamp broken: off=%d total=%d", off, total)
+		t.Fatalf("scroll-up clamp broken: off=%d", off)
 	}
-	app.scroll(10000)
+	if app.sm.Following() {
+		t.Fatalf("scroll-up must clear follow")
+	}
+	app.scroll(10000, true)
 	app.mu.Lock()
-	off = app.offset
+	off = app.sm.offset
 	app.mu.Unlock()
 	if off != 0 {
 		t.Fatalf("scroll-down must return to follow: %d", off)

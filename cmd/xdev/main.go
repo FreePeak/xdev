@@ -21,7 +21,7 @@ func main() {
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
 	themeName := fs.String("theme", "", "TUI theme: groknight | grokday (default: auto)")
-	maxTurns := fs.Int("max-turns", 32, "max agent turns per run")
+	maxTurns := fs.Int("max-turns", 0, "max agent turns per run (0 = default 200)")
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
 	fs.Usage = func() {
@@ -56,6 +56,7 @@ Flags:
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
 			MaxTokens:    *maxTokens,
+			MaxTurns:     *maxTurns,
 		}, *themeName)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "xdev:", err)

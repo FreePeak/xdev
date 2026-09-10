@@ -33,16 +33,18 @@ type App struct {
 	th     *theme.Theme
 	mu     sync.Mutex
 	blocks []*Block
-	offset int // lines scrolled up from the live tail (0 = follow)
+	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
 	ed     Editor
 	st     Status
 
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	onSend   func(text string)
-	onCancel func()
-	onQuit   func()
+	ops        *SessionOps // session lifecycle, wired by cmd (nil → notices)
+	commandDir string      // markdown command discovery root
+	onSend     func(text string)
+	onCancel   func()
+	onQuit     func()
 
 	keyq      chan tcell.Event
 	dirty     chan struct{}
@@ -71,6 +73,7 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		keyq:      make(chan tcell.Event, 64),
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),
+		sm:        newScrollModel(),
 		lineCache: map[blockKey][]line{},
 	}
 }
@@ -94,7 +97,6 @@ func (a *App) Invalidate() {
 func (a *App) AddUserBlock(text string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: text, Ts: time.Now()})
-	a.offset = 0
 	a.mu.Unlock()
 	a.poke()
 }
@@ -103,7 +105,6 @@ func (a *App) AddUserBlock(text string) {
 func (a *App) AddSystemBlock(text string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{Kind: KindSystem, Text: text})
-	a.offset = 0
 	a.mu.Unlock()
 	a.poke()
 }
@@ -124,7 +125,6 @@ func (a *App) AppendAssistant(delta string) {
 	a.mu.Lock()
 	if n := len(a.blocks); n > 0 && a.blocks[n-1].Kind == KindAssistant {
 		a.blocks[n-1].Text += delta
-		a.offset = 0
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -181,7 +181,6 @@ func (a *App) EndThinking() {
 func (a *App) AddAssistantBlock(text string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{Kind: KindAssistant, Text: text})
-	a.offset = 0
 	a.mu.Unlock()
 	a.poke()
 }
@@ -190,7 +189,6 @@ func (a *App) AddAssistantBlock(text string) {
 func (a *App) AddToolBlock(name, argsPreview string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{Kind: KindTool, ToolName: name, Text: argsPreview, Status: "running"})
-	a.offset = 0
 	a.mu.Unlock()
 	a.poke()
 }
@@ -215,7 +213,6 @@ func (a *App) FinishTool(name string, isErr bool, resultPreview string) {
 		kind = KindSystem
 	}
 	a.blocks = append(a.blocks, &Block{Kind: kind, ToolName: name, Text: resultPreview})
-	a.offset = 0
 	a.mu.Unlock()
 	a.poke()
 }
@@ -241,6 +238,34 @@ func (a *App) FinishRun() { a.SetRunning(false) }
 
 // Quit terminates the UI loop.
 func (a *App) Quit() { close(a.quitCh) }
+
+// Reset clears the transcript (used by /clear): all blocks gone, viewport
+// back to follow. Streaming state is untouched — callers must not be
+// running a turn when they call this.
+func (a *App) Reset() {
+	a.mu.Lock()
+	a.blocks = nil
+	a.sm = newScrollModel()
+	a.lineCache = map[blockKey][]line{}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetSessionOps wires the session lifecycle (store lives in cmd). Nil ops
+// degrade the /new /clear /drop commands to notices.
+func (a *App) SetSessionOps(ops *SessionOps) { a.ops = ops }
+
+// SendPrompt submits text through the normal send path (markdown commands).
+func (a *App) SendPrompt(text string) {
+	a.mu.Lock()
+	a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: text, Ts: time.Now()})
+	a.sm.Bottom()
+	a.mu.Unlock()
+	if a.onSend != nil {
+		a.onSend(text)
+	}
+	a.poke()
+}
 
 func (a *App) poke() {
 	select {
@@ -326,11 +351,17 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.onCancel()
 		}
 		return
-	case tcell.KeyPgUp:
-		a.scroll(-h / 2)
+	case tcell.KeyPgUp, tcell.KeyCtrlB:
+		a.scroll(h/2, false)
 		return
-	case tcell.KeyPgDn:
-		a.scroll(h / 2)
+	case tcell.KeyPgDn, tcell.KeyCtrlF:
+		a.scroll(h/2, true)
+		return
+	case tcell.KeyHome:
+		a.scrollTo(false)
+		return
+	case tcell.KeyEnd:
+		a.scrollTo(true)
 		return
 	case tcell.KeyCtrlL:
 		a.Invalidate()
@@ -338,23 +369,27 @@ func (a *App) handleKey(ev tcell.Event) {
 	}
 
 	if key.Key() == tcell.KeyUp && !running {
-		a.scroll(-1)
+		a.scroll(1, false)
 		return
 	}
 	if key.Key() == tcell.KeyDown && !running {
-		a.scroll(1)
+		a.scroll(1, true)
 		return
 	}
-
 	// Editor keys. Text is captured BEFORE HandleKey — the editor archives
 	// and resets itself when it reports send.
 	text := strings.TrimSpace(a.ed.Text())
 	send := a.ed.HandleKey(key)
-	a.offset = 0
 	if send {
+		// slash command routing (issue #11): a command is consumed by the
+		// router — no user block, no agent run.
+		if dispatch(a, text) {
+			a.poke()
+			return
+		}
 		a.mu.Lock()
 		a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: text})
-		a.offset = 0
+		a.sm.Bottom()
 		a.mu.Unlock()
 		if a.onSend != nil {
 			a.onSend(text)
@@ -363,23 +398,27 @@ func (a *App) handleKey(ev tcell.Event) {
 	a.poke()
 }
 
-func (a *App) scroll(lines int) {
+// scroll moves the viewport n lines toward older (down=false) or newer
+// (down=true) rows, clamped by the scroll model.
+func (a *App) scroll(n int, down bool) {
 	a.mu.Lock()
-	total := a.totalLinesLocked()
-	vp := a.viewportLinesLocked()
-	if vp < 1 {
-		vp = 1
+	total, vp := a.totalLinesLocked(), a.viewportLinesLocked()
+	if down {
+		a.sm.ScrollDown(n, total, vp)
+	} else {
+		a.sm.ScrollUp(n, total, vp)
 	}
-	maxOff := total - vp
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	a.offset -= lines // scroll-up (negative lines) moves the viewport up
-	if a.offset > maxOff {
-		a.offset = maxOff
-	}
-	if a.offset < 0 {
-		a.offset = 0
+	a.mu.Unlock()
+	a.poke()
+}
+
+// scrollTo jumps to the oldest (down=false) or newest (down=true) row.
+func (a *App) scrollTo(down bool) {
+	a.mu.Lock()
+	if down {
+		a.sm.Bottom()
+	} else {
+		a.sm.Top(a.totalLinesLocked(), a.viewportLinesLocked())
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -561,10 +600,11 @@ func (a *App) draw() {
 		rows = append(rows, row{}) // separator
 	}
 
-	start := len(rows) - vp - a.offset
-	if start < 0 {
-		start = 0
-	}
+	// Feed the new row count through the model every frame: while following
+	// it stays pinned to the tail; while scrolled it preserves the user's
+	// position against streaming output.
+	a.sm.NewContent(len(rows), vp)
+	start := a.sm.Start(len(rows), vp)
 	end := start + vp
 	if end > len(rows) {
 		end = len(rows)
@@ -598,8 +638,8 @@ func (a *App) draw() {
 		}
 	}
 
-	if a.offset > 0 {
-		hint := fmt.Sprintf("▲ %d", a.offset)
+	if up, down := a.sm.Indicator(len(rows), vp); up > 0 || down > 0 {
+		hint := fmt.Sprintf("▲ %d ▼ %d", up, down)
 		drawText(s, w-len(hint)-1, 0, hint,
 			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))))
 	}
