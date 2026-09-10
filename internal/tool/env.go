@@ -2,9 +2,11 @@ package tool
 
 import (
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // envStripRe matches any env var whose key contains a sensitive marker
@@ -22,13 +24,64 @@ var envAlwaysStrip = []string{
 // envAlwaysSet is injected into the child environment unconditionally,
 // making tool output deterministic and non-interactive. It overrides any
 // inherited value of the same key.
-var envAlwaysSet = []string{
-	"TERM=dumb",
-	"NO_COLOR=1",
-	"GIT_PAGER=cat",
-	"PAGER=cat",
-	"DEBIAN_FRONTEND=noninteractive",
-	"LC_ALL=en_US.UTF-8",
+func envAlwaysSet() []string {
+	return []string{
+		"TERM=dumb",
+		"NO_COLOR=1",
+		"GIT_PAGER=cat",
+		"PAGER=cat",
+		"DEBIAN_FRONTEND=noninteractive",
+		"LC_ALL=" + resolveLocale(),
+	}
+}
+
+// preferredLocales are deterministic UTF-8 locales, best first. Naming one
+// that the host has not generated makes bash print
+// "warning: setlocale: LC_ALL: cannot change locale" onto the stderr of
+// EVERY command (observed on a slim Linux container), which pollutes tool
+// output for the model. So the value is chosen from what exists locally,
+// with "C" — always reported by locale -a — as the floor. Nothing is
+// listed after C: an unreachable preference is dead code.
+var preferredLocales = []string{"C.UTF-8", "C"}
+
+var (
+	localeOnce  sync.Once
+	localeValue string
+)
+
+// resolveLocale returns the LC_ALL value for child processes. Probed once
+// per process; a failed probe falls back to the only guaranteed locale.
+func resolveLocale() string {
+	localeOnce.Do(func() {
+		localeValue = "C"
+		out, err := exec.Command("locale", "-a").Output()
+		if err != nil {
+			return
+		}
+		have := map[string]bool{}
+		for _, line := range strings.Split(string(out), "\n") {
+			n := strings.TrimSpace(line)
+			have[n] = true
+			// locale -a prints one spelling and often the bare name too.
+			if i := strings.IndexByte(n, '.'); i > 0 {
+				have[n[:i]] = true
+			}
+			lower := strings.ToLower(n)
+			have[strings.ReplaceAll(lower, "-", "")] = true
+		}
+		normalized := func(x string) string {
+			x = strings.ToLower(x)
+			x = strings.ReplaceAll(x, "-", "")
+			return strings.ReplaceAll(x, "_", "")
+		}
+		for _, want := range preferredLocales {
+			if have[want] || have[normalized(want)] {
+				localeValue = want
+				return
+			}
+		}
+	})
+	return localeValue
 }
 
 // EnvHardening returns the list of env var key names to strip from child
@@ -43,19 +96,23 @@ func EnvHardening() []string {
 // sorted for determinism.
 func HardenedEnv() []string { return HardenedEnvFrom(os.Environ()) }
 
+// Locale is the LC_ALL value child processes receive (probed once).
+func Locale() string { return resolveLocale() }
+
 // HardenedEnvFrom is HardenedEnv over an injected environment (KEY=VALUE
 // entries, as returned by os.Environ). Always-set variables override any
 // inherited value of the same key; keys are sorted for determinism. Pure
 // function (injectable env) so it is directly testable.
 func HardenedEnvFrom(environ []string) []string {
-	alwaysKeys := make(map[string]bool, len(envAlwaysSet))
-	for _, kv := range envAlwaysSet {
+	always := envAlwaysSet()
+	alwaysKeys := make(map[string]bool, len(always))
+	for _, kv := range always {
 		key, _, _ := strings.Cut(kv, "=")
 		alwaysKeys[key] = true
 	}
 
-	out := make([]string, 0, len(environ)+len(envAlwaysSet))
-	seen := make(map[string]bool, len(environ)+len(envAlwaysSet))
+	out := make([]string, 0, len(environ)+len(always))
+	seen := make(map[string]bool, len(environ)+len(always))
 	for _, kv := range environ {
 		key, _, ok := strings.Cut(kv, "=")
 		if !ok || key == "" {
@@ -67,7 +124,7 @@ func HardenedEnvFrom(environ []string) []string {
 		seen[key] = true
 		out = append(out, kv)
 	}
-	out = append(out, envAlwaysSet...)
+	out = append(out, always...)
 	sort.Strings(out)
 	return out
 }
