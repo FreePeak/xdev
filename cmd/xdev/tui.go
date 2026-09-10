@@ -103,6 +103,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err := scr.Init(); err != nil {
 		return 2, fmt.Errorf("tui: init: %w", err)
 	}
+	// Wheel events drive the in-app transcript scroll, not the host
+	// terminal's own scrollback (#17 follow-up, user-reported 2026-09-10).
+	scr.EnableMouse()
 	defer scr.Fini()
 	defer setCursorReset()
 
@@ -176,6 +179,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh. All refuse while a
+	app.SetLocation(cwd)
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		New: func() error {

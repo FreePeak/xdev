@@ -35,12 +35,15 @@ type App struct {
 	blocks []*Block
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
 	ed     Editor
+	smenu  *slashMenu // "/" autocomplete dropdown (nil = closed)
 	st     Status
 
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
 	ops        *SessionOps // session lifecycle, wired by cmd (nil → notices)
+	cwdLabel   string      // welcome top bar (last two path components)
+	branch     string      // git branch for the welcome top bar ("" when none)
 	commandDir string      // markdown command discovery root
 	onSend     func(text string)
 	onCancel   func()
@@ -76,6 +79,14 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		sm:        newScrollModel(),
 		lineCache: map[blockKey][]line{},
 	}
+}
+
+// SetLocation sets the welcome top-bar location (cwd + git branch).
+func (a *App) SetLocation(cwd string) {
+	a.mu.Lock()
+	a.cwdLabel = cwdShort(cwd)
+	a.branch = gitBranch(cwd)
+	a.mu.Unlock()
 }
 
 // SetHandlers wires the send/cancel/quit callbacks.
@@ -331,12 +342,48 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.lineCache = map[blockKey][]line{}
 			a.mu.Unlock()
 		}
+		// Mouse wheel scrolls the in-app transcript (tcell would otherwise
+		// let the host terminal scroll its own pre-launch scrollback).
+		if m, ok := ev.(*tcell.EventMouse); ok {
+			switch m.Buttons() {
+			case tcell.WheelUp:
+				a.scroll(3, false)
+			case tcell.WheelDown:
+				a.scroll(3, true)
+			}
+		}
 		return
 	}
 	a.mu.Lock()
 	running := a.st.Running
 	h := a.height
+	menuOpen := a.smenu != nil && a.smenu.active()
 	a.mu.Unlock()
+
+	// Slash dropdown owns navigation while open (grok slash_dropdown).
+	if menuOpen {
+		switch key.Key() {
+		case tcell.KeyTab:
+			a.mu.Lock()
+			if sel, ok := a.smenu.selected(); ok {
+				a.ed.Reset()
+				for _, r := range sel.Name {
+					a.ed.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+				}
+				a.ed.HandleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone))
+				a.smenu.open(strings.TrimPrefix(sel.Name, "/"), a.commandDir)
+			}
+			a.mu.Unlock()
+			a.poke()
+			return
+		case tcell.KeyEsc: // close without changing the text
+			a.mu.Lock()
+			a.smenu = nil
+			a.mu.Unlock()
+			a.poke()
+			return
+		}
+	}
 
 	switch key.Key() {
 	case tcell.KeyCtrlC, tcell.KeyCtrlD:
@@ -368,22 +415,49 @@ func (a *App) handleKey(ev tcell.Event) {
 		return
 	}
 
-	if key.Key() == tcell.KeyUp && !running {
-		a.scroll(1, false)
-		return
+	// Slash dropdown navigation: while the menu is open the arrows move the
+	// selection (not the transcript), Tab completes the selection into the
+	// editor, and Enter still submits the typed text through dispatch.
+	if menuOpen {
+		switch key.Key() {
+		case tcell.KeyUp:
+			a.mu.Lock()
+			a.smenu.move(-1)
+			a.mu.Unlock()
+			a.poke()
+			return
+		case tcell.KeyDown:
+			a.mu.Lock()
+			a.smenu.move(1)
+			a.mu.Unlock()
+			a.poke()
+			return
+		}
 	}
-	if key.Key() == tcell.KeyDown && !running {
-		a.scroll(1, true)
-		return
+
+	// Empty editor: arrows scroll the transcript. Non-empty: the editor
+	// uses them for history recall.
+	if !running && strings.TrimSpace(a.ed.Text()) == "" && !menuOpen {
+		switch key.Key() {
+		case tcell.KeyUp:
+			a.scroll(1, false)
+			return
+		case tcell.KeyDown:
+			a.scroll(1, true)
+			return
+		}
 	}
+
 	// Editor keys. Text is captured BEFORE HandleKey — the editor archives
 	// and resets itself when it reports send.
 	text := strings.TrimSpace(a.ed.Text())
 	send := a.ed.HandleKey(key)
+	a.syncSlashMenu()
 	if send {
 		// slash command routing (issue #11): a command is consumed by the
 		// router — no user block, no agent run.
 		if dispatch(a, text) {
+			a.smenu = nil // editor reset — the dropdown is moot
 			a.poke()
 			return
 		}
@@ -396,6 +470,21 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 	}
 	a.poke()
+}
+
+// syncSlashMenu opens, re-queries, or closes the "/" dropdown to match the
+// editor text: open only while the first token is still being typed
+// (no space yet). A closing menu keeps the current text untouched.
+func (a *App) syncSlashMenu() {
+	text := a.ed.Text()
+	if !strings.HasPrefix(text, "/") || strings.ContainsAny(text, " \t\n") {
+		a.smenu = nil
+		return
+	}
+	if a.smenu == nil {
+		a.smenu = newSlashMenu()
+	}
+	a.smenu.open(text[1:], a.commandDir)
 }
 
 // scroll moves the viewport n lines toward older (down=false) or newer
@@ -554,6 +643,17 @@ func (a *App) draw() {
 	w, h := a.width, a.height
 	s.Clear()
 
+	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
+	// menu, shortcuts) instead of a blank void.
+	if len(a.blocks) == 0 {
+		a.drawWelcome(s, w, h)
+		a.drawSlashDropdown(h - 3)
+		a.drawComposer(h - 3)
+		a.drawShortcuts(h - 1)
+		s.Show()
+		return
+	}
+
 	// Grok layout: scrollback rows [0, h-4), blank row, composer box (2
 	// rows: input + info divider), shortcuts row at the bottom.
 	vp := h - 4
@@ -637,16 +737,68 @@ func (a *App) draw() {
 			drawText(s, w-width(r.ts)-2, y, r.ts, tsSt)
 		}
 	}
-
+	// Scroll indicator (grok-style ▲n ▼n): rows hidden above/below.
 	if up, down := a.sm.Indicator(len(rows), vp); up > 0 || down > 0 {
 		hint := fmt.Sprintf("▲ %d ▼ %d", up, down)
 		drawText(s, w-len(hint)-1, 0, hint,
 			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))))
 	}
 
+	a.drawSlashDropdown(h - 3)
 	a.drawComposer(h - 3)
 	a.drawShortcuts(h - 1)
 	s.Show()
+}
+
+// drawSlashDropdown renders the "/" autocomplete popup above the composer
+// (grok slash_dropdown.rs): aligned name column + dim description, selected
+// row highlighted. Rows sit on the composer's background so the popup reads
+// as one surface with the prompt box.
+func (a *App) drawSlashDropdown(yComposerTop int) {
+	if a.smenu == nil || !a.smenu.active() {
+		return
+	}
+	rows := a.smenu.rows()
+	if len(rows) == 0 || yComposerTop < len(rows)+1 {
+		return
+	}
+	w := a.width
+	s := a.scr
+	selName, _ := a.smenu.selected()
+	sel := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
+	rowBg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+
+	// Aligned name column (grok: label cap 40, gap 2).
+	nameW := 0
+	for _, r := range rows {
+		nameW = max(nameW, width(r.Name)+width(r.Tag))
+	}
+	nameW = min(nameW+2, 42)
+
+	y := yComposerTop - len(rows) - 2 // popup = rows + 2 border rows
+	drawText(s, 2, y, "╭"+strings.Repeat("─", min(w-4, nameW+44))+"╮",
+		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive))))
+	y++
+	for _, r := range rows {
+		selected := r.Name == selName.Name
+		st := rowBg
+		if selected {
+			st = sel
+		}
+		for x := 2; x < w-2; x++ {
+			s.SetContent(x, y, ' ', nil, st)
+		}
+		nameCol := st.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
+		drawText(s, 4, y, r.Name, nameCol)
+		x := 4 + nameW
+		drawText(s, x, y, r.Description, st.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+		if r.Tag != "" {
+			drawText(s, w-6-width(r.Tag), y, "["+r.Tag+"]", st.Foreground(a.cellColor(a.th.Get(theme.AccentThinking))))
+		}
+		y++
+	}
+	drawText(s, 2, y, "╰"+strings.Repeat("─", min(w-4, nameW+44))+"╯",
+		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive))))
 }
 
 // drawComposer renders the grok prompt box: rounded border, ❯ prefix,
