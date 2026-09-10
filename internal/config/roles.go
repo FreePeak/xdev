@@ -40,7 +40,8 @@ type RoleRef struct {
 // ResolveModelRef expands one user-supplied model string:
 //
 //	""                  → the settings default, else the models.yml default
-//	"@role[:effort]"    → the role's model (+ effort override)
+//	"@role[:effort]"    → the role's model (+ effort override), following
+//	                      chained aliases (`plan: "@slow"`) with a cycle guard
 //	"provider/model"    → literal
 //
 // Unknown roles and bad efforts are errors: silently falling back to the
@@ -53,33 +54,70 @@ func ResolveModelRef(s *Settings, ref string) (RoleRef, error) {
 		}
 		return RoleRef{}, fmt.Errorf("config: no model configured (set defaultModel or pass -model)")
 	}
-	if !strings.HasPrefix(ref, "@") {
-		return RoleRef{Ref: ref}, nil
-	}
-	body := ref[1:]
-	role, effort, hasEffort := strings.Cut(body, ":")
-	if role == "" {
-		return RoleRef{}, fmt.Errorf("config: empty role name in %q", ref)
-	}
-	model, ok := s.ModelRoles[role]
-	if !ok || model == "" {
-		available := make([]string, 0, len(s.ModelRoles))
-		for k := range s.ModelRoles {
-			available = append(available, k)
+	literal, effort, hasEffort := ref, "", false
+	if strings.HasPrefix(ref, "@") {
+		role, eff, has := strings.Cut(ref[1:], ":")
+		if role == "" {
+			return RoleRef{}, fmt.Errorf("config: empty role name in %q", ref)
 		}
-		sort.Strings(available)
-		return RoleRef{}, fmt.Errorf("config: unknown role @%s (configured: %s)", role, strings.Join(available, ", "))
-	}
-	out := RoleRef{Ref: model, Role: role}
-	if hasEffort {
-		if !isEffort(effort) {
-			return RoleRef{}, fmt.Errorf("config: unknown effort %q for @%s (want %s)", effort, role, strings.Join(EffortLevels, "|"))
+		effort, hasEffort = eff, has
+		// A role may point at another role (`plan: "@slow"`), so follow the
+		// chain with a visited set: an alias cycle must be reported, never
+		// resolved by luck of iteration order.
+		literal = ref
+		for seen, depth := map[string]bool{}, 0; strings.HasPrefix(literal, "@"); depth++ {
+			if depth > len(s.ModelRoles)+1 {
+				return RoleRef{}, fmt.Errorf("config: role chain too deep from %q", ref)
+			}
+			name, suffix, hasSuffix := strings.Cut(strings.TrimPrefix(literal, "@"), ":")
+			if name == "" {
+				return RoleRef{}, fmt.Errorf("config: empty role name in %q", literal)
+			}
+			if seen[name] {
+				return RoleRef{}, fmt.Errorf("config: role alias cycle at @%s (from %q)", name, ref)
+			}
+			seen[name] = true
+			target, ok := s.ModelRoles[name]
+			if !ok || target == "" {
+				return RoleRef{}, fmt.Errorf("config: unknown role @%s (configured: %s)", name, configuredRoles(s))
+			}
+			if hasSuffix && !isEffort(suffix) {
+				return RoleRef{}, fmt.Errorf("config: unknown effort %q for @%s (want %s)", suffix, name, strings.Join(EffortLevels, "|"))
+			}
+			if hasSuffix {
+				effort, hasEffort = suffix, true // a chained :effort overrides the outer one
+			} else if effort == "" {
+				if pinned, has := s.ModelRolesEffort[name]; has && isEffort(pinned) {
+					effort = pinned
+				}
+			}
+			literal = strings.TrimSpace(target)
+			if literal == "" {
+				return RoleRef{}, fmt.Errorf("config: role @%s resolves to empty", name)
+			}
 		}
-		out.Effort = effort
-	} else if pinned, has := s.ModelRolesEffort[role]; has && isEffort(pinned) {
-		out.Effort = pinned
+	}
+	if hasEffort && !isEffort(effort) {
+		return RoleRef{}, fmt.Errorf("config: unknown effort %q for %q (want %s)", effort, ref, strings.Join(EffortLevels, "|"))
+	}
+	out := RoleRef{Ref: literal, Effort: effort}
+	if strings.HasPrefix(ref, "@") {
+		out.Role, _, _ = strings.Cut(strings.TrimPrefix(ref, "@"), ":")
 	}
 	return out, nil
+}
+
+// configuredRoles lists the role names for error messages.
+func configuredRoles(s *Settings) string {
+	names := make([]string, 0, len(s.ModelRoles))
+	for k := range s.ModelRoles {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
 
 // IsKnownRole reports whether name is one of the canonical slots (used by

@@ -62,6 +62,11 @@ type ToolCallBlock struct {
 	PartialArgs string          `json:"partialArgs,omitempty"`
 	StreamIndex int             `json:"streamIndex,omitempty"`
 	Intent      string          `json:"intent,omitempty"`
+	// Signature carries a provider reasoning signature tied to this call
+	// (Gemini's thoughtSignature). It persists in the session so a rebuilt
+	// follow-up request can echo it back — Google rejects thinking-enabled
+	// function calls whose signature is not replayed.
+	Signature json.RawMessage `json:"signature,omitempty"`
 }
 
 // ImageSource is an image reference: either a data URL or a blob reference.
