@@ -49,7 +49,7 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "version") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -65,6 +65,24 @@ Flags:
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "xdev:", err)
 			os.Exit(2)
+		}
+		os.Exit(code)
+	}
+
+	if mode == "rpc" {
+		opts := printOptions{
+			Model:        *model,
+			ContinueLast: *continueLast,
+			ResumePrefix: *resumePrefix,
+			SystemPrompt: *systemPrompt,
+			AppendSystem: *appendSystemPrompt,
+			MaxTurns:     *maxTurns,
+			MaxTokens:    *maxTokens,
+		}
+		code, err := runRPC(opts)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(code)
 		}
 		os.Exit(code)
 	}
