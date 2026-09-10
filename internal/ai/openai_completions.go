@@ -184,6 +184,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, req StreamReques
 	sctx, cancel := context.WithCancel(ctx)
 	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/chat/completions", p.headers(), body, APIOpenAICompletions)
 	if err != nil {
+		cancel() // no goroutine will own it on this path
 		return nil, err
 	}
 	ch := make(chan Event, 64)

@@ -225,6 +225,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 	sctx, cancel := context.WithCancel(ctx)
 	resp, err := wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
 	if err != nil {
+		cancel() // no goroutine will own it on this path
 		return nil, err
 	}
 	ch := make(chan Event, 64)
