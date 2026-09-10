@@ -334,7 +334,6 @@ func (a *App) Run() {
 				if ok {
 					a.lifeTick = (a.lifeTick + 1) % 4
 					if a.lifeTick == 0 {
-						a.ensureLife(a.width, top, bot)
 						a.stepLife(a.width, top, bot)
 						animate = true
 					}
