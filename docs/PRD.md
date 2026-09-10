@@ -353,4 +353,4 @@ Net: Claude Code **confirms xdev's pi/omp-shaped minimalism** (it lacks LSP/AST/
 
 ---
 
-*Last updated: 2026-09-10 (known gaps documented: /<command> slash commands non-functional — M10 #11; TUI scrolling missing — P0 #17; agent 32-turn hard stop — P0 #18. All user-reported.)*
+*Last updated: 2026-09-10 (known gaps RESOLVED in c96f3f2 + 5397b42: slash commands — M10 #11 first slice with markdown discovery + expansion + lifecycle /new /clear /drop; TUI scrollback — P0 #17; graceful turn budget — P0 #18. Unknown-command fall-through per spec.)*
