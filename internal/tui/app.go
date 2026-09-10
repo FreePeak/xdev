@@ -250,35 +250,6 @@ func (a *App) FinishRun() { a.SetRunning(false) }
 // Quit terminates the UI loop.
 func (a *App) Quit() { close(a.quitCh) }
 
-// ForkSession implements CommandAPI by delegating to wired SessionOps.Fork.
-func (a *App) ForkSession() error {
-	if a.ops == nil || a.ops.Fork == nil {
-		return fmt.Errorf("session fork not wired")
-	}
-	return a.ops.Fork()
-}
-
-// DumpSession implements CommandAPI by exporting the transcript.
-func (a *App) DumpSession() error {
-	if a.ops == nil || a.ops.Dump == nil {
-		return fmt.Errorf("session dump not wired")
-	}
-	path, err := a.ops.Dump()
-	if err != nil {
-		return err
-	}
-	a.AddSystemBlock("transcript dumped to " + path)
-	return nil
-}
-
-// ResumeSession implements CommandAPI by swapping to the resumed store.
-func (a *App) ResumeSession(query string) error {
-	if a.ops == nil || a.ops.Resume == nil {
-		return fmt.Errorf("session resume not wired")
-	}
-	return a.ops.Resume(query)
-}
-
 // Reset clears the transcript (used by /clear): all blocks gone, viewport
 // back to follow. Streaming state is untouched — callers must not be
 // running a turn when they call this.
