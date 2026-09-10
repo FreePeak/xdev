@@ -353,4 +353,4 @@ Net: Claude Code **confirms xdev's pi/omp-shaped minimalism** (it lacks LSP/AST/
 
 ---
 
-*Last updated: 2026-09-10 (known gaps RESOLVED in c96f3f2 + 5397b42: slash commands — M10 #11 first slice with markdown discovery + expansion + lifecycle /new /clear /drop; TUI scrollback — P0 #17; graceful turn budget — P0 #18. Unknown-command fall-through per spec.)*
+*Last updated: 2026-09-10 (TUI polish shipped in 6996ddf: slash autocomplete dropdown — fuzzy-ranked built-ins + markdown commands, Up/Down/Tab/Esc keys, root cause was dispatch-only-on-Enter with no popup UI ever built; Grok-style welcome screen — 'Xdev' logo, cwd:branch top bar, hotkey menu; mouse wheel now scrolls the in-app transcript (scr.EnableMouse + wheel handler) instead of the host terminal scrollback; scroll indicator ▲n ▼n restored. Earlier: known gaps RESOLVED in c96f3f2 + 5397b42: slash commands — M10 #11 first slice with markdown discovery + expansion + lifecycle /new /clear /drop; TUI scrollback — P0 #17; graceful turn budget — P0 #18. Unknown-command fall-through per spec.)
