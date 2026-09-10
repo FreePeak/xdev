@@ -42,9 +42,10 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y ripgrep fd-find
           sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
-          ast_grep_version=0.45.2
-          curl -fsSL "https://github.com/ast-grep/ast-grep-cli/releases/download/${ast_grep_version}/ast-grep-${ast_grep_version}-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C /usr/local/bin ast-grep
+          ast_grep_version=0.45.3
+          curl -fsSL -o /tmp/ag.zip "https://github.com/ast-grep/ast-grep/releases/download/${ast_grep_version}/app-x86_64-unknown-linux-gnu.zip"
+          unzip -o -q /tmp/ag.zip -d /tmp/ag
+          sudo cp /tmp/ag/ast-grep /usr/local/bin/ast-grep
           ast-grep --version
 
       - name: Test
