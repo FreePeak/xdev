@@ -214,9 +214,12 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 		}(r.src, r.w)
 	}
 
-	waitErr := cmd.Wait()
-	close(watch)
+	// Order matters: os/exec closes StdoutPipe/StderrPipe handles inside
+	// Wait, so Wait must run only AFTER the copiers have seen EOF —
+	// otherwise a concurrent batch truncates mid-flight reads to "".
 	wg.Wait()
+	close(watch)
+	waitErr := cmd.Wait()
 
 	durationMs := time.Since(start).Milliseconds()
 	exitCode, killed := exitStatus(waitErr)
