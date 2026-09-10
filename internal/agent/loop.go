@@ -91,6 +91,17 @@ const TurnBudgetPrompt = "turn budget reached — wrap up the current step and r
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
 
+// Interceptor is the extension policy seam (M7 #8): tool calls may be
+// blocked or revised before execution, results may be patched after. The
+// implementation (internal/ext.Manager) is fail-closed — an extension that
+// dies or times out denies the call unless it opted into fail-open — and
+// never runs foreign code in-process.
+type Interceptor interface {
+	ToolCall(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
+	ToolResult(ctx context.Context, name string, args, result json.RawMessage) json.RawMessage
+	Emit(ctx context.Context, event string, payload any)
+}
+
 // Agent runs turns: provider streaming + tool execution + steering.
 type Agent struct {
 	Provider ai.Provider
@@ -117,6 +128,9 @@ type Agent struct {
 	Compaction CompactionConfig
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
 	MaxTurns int
+	// Intercept routes tool calls/results through the extension bus
+	// (nil disables interception).
+	Intercept Interceptor
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -168,6 +182,9 @@ func (a *Agent) drainSteering() []Steering {
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
 	if a.Hooks == nil {
 		a.Hooks = TurnHooksFunc{} // no-op: an unwired agent must not panic mid-turn
+	}
+	if a.Intercept != nil {
+		a.Intercept.Emit(ctx, "session_start", map[string]any{"model": a.Model})
 	}
 	var lastAssistant *ai.Message
 	limit := a.effectiveMaxTurns()
@@ -534,10 +551,37 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	} else if call.PartialArgs != "" {
 		args = json.RawMessage(call.PartialArgs)
 	}
+	if a.Intercept != nil {
+		// Fail-closed policy gate: a blocked call never executes, and a
+		// revised payload replaces what the model asked for.
+		revised, berr := a.Intercept.ToolCall(ctx, call.Name, args)
+		if berr != nil {
+			res := tool.Result{Text: "tool call blocked: " + berr.Error(), IsError: true}
+			a.Hooks.OnToolEnd(call, res, time.Since(started))
+			return toolResultMsg(call, res)
+		}
+		if len(revised) > 0 {
+			args = revised
+			call.Arguments = revised
+		}
+	}
 	res, err := t.Execute(ctx, args)
 	dur := time.Since(started)
 	if err != nil {
 		res = tool.Result{Text: fmt.Sprintf("tool %q failed: %v", call.Name, err), IsError: true}
+	}
+	if a.Intercept != nil {
+		// Extensions may rewrite the text an already-run tool produced.
+		enc, _ := json.Marshal(map[string]any{"text": res.Text, "isError": res.IsError})
+		if patched := a.Intercept.ToolResult(ctx, call.Name, args, enc); len(patched) > 0 {
+			var p struct {
+				Text    string `json:"text"`
+				IsError bool   `json:"isError"`
+			}
+			if json.Unmarshal(patched, &p) == nil && p.Text != "" {
+				res.Text, res.IsError = p.Text, p.IsError
+			}
+		}
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
 	return toolResultMsg(call, res)
