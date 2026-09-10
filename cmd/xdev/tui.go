@@ -34,7 +34,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	modelRef, _, err := resolveModel(opts.Model, cfg, lastSettings())
+	modelRef, effortRef, err := resolveModel(opts.Model, cfg, lastSettings())
 	if err != nil {
 		return 2, err
 	}
@@ -52,7 +52,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	// Tools + system prompt (shared with print mode).
-	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings())
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef))
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
@@ -349,6 +349,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Store:      store,
 					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 					Failovers:  failoverChain(cfg, provName, modelName),
+					Thinking:   effortBudget(effortRef),
 					Intercept:  exts, // fail-closed policy must hold in the daily-driver mode too
 					Policy:     agentPolicy(),
 				}

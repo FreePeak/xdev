@@ -47,3 +47,24 @@ func TestResolveModelPrecedence(t *testing.T) {
 		t.Fatal("unknown role must error")
 	}
 }
+
+// TestEffortReachesTheBudget pins that ":effort" resolves to a concrete
+// reasoning budget instead of being discarded at the cmd boundary (an
+// earlier revision bound effortRef and then dropped it with `_ =`).
+func TestEffortReachesTheBudget(t *testing.T) {
+	s := &config.Settings{ModelRoles: map[string]string{"smol": "onegw/tiny"}, ModelRolesEffort: map[string]string{"smol": "high"}}
+	_, effort, err := resolveModel("@smol", &config.Config{}, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effort != "high" {
+		t.Fatalf("pinned role effort lost: %q", effort)
+	}
+	bud := effortBudget(effort)
+	if bud == nil || bud.Tokens != config.EffortTokens["high"] {
+		t.Fatalf("budget = %+v", bud)
+	}
+	if effortBudget("") != nil || effortBudget("nonsense") != nil {
+		t.Fatal("no/unknown effort must mean no thinking requested")
+	}
+}
