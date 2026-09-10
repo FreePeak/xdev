@@ -103,3 +103,41 @@ func TestRoleNamesAreTheCanonicalSet(t *testing.T) {
 		t.Fatal("unknown role accepted")
 	}
 }
+
+// TestResolveChainedAliases pins the role grammar: a role may point at
+// another role, effort follows the chain, and cycles are reported rather
+// than resolved by iteration luck.
+func TestResolveChainedAliases(t *testing.T) {
+	s := &Settings{ModelRoles: map[string]string{
+		"plan":    "@slow",
+		"slow":    "onegw/dev",
+		"loop":    "@loop",
+		"mutual":  "@pair",
+		"pair":    "@mutual",
+		"deep":    "@deeper:high",
+		"deeper":  "@deepest",
+		"deepest": "onegw/final",
+	}}
+	if got, err := ResolveModelRef(s, "@plan"); err != nil || got.Ref != "onegw/dev" || got.Role != "plan" {
+		t.Fatalf("chained alias = %+v err=%v", got, err)
+	}
+	// A :effort mid-chain applies.
+	if got, err := ResolveModelRef(s, "@deep"); err != nil || got.Ref != "onegw/final" || got.Effort != "high" {
+		t.Fatalf("chained effort = %+v err=%v", got, err)
+	}
+	for _, bad := range []string{"@loop", "@mutual"} {
+		if _, err := ResolveModelRef(s, bad); err == nil || !strings.Contains(err.Error(), "cycle") {
+			t.Errorf("%s: cycle must be reported, got %v", bad, err)
+		}
+	}
+}
+
+func TestResolveRoleWithInlineEffortBeatsPinned(t *testing.T) {
+	s := &Settings{
+		ModelRoles:       map[string]string{"slow": "onegw/dev"},
+		ModelRolesEffort: map[string]string{"slow": "medium"},
+	}
+	if got, _ := ResolveModelRef(s, "@slow:low"); got.Effort != "low" {
+		t.Fatalf("explicit :effort must override the pinned one, got %q", got.Effort)
+	}
+}

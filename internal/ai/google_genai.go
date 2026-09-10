@@ -45,6 +45,7 @@ func (p *GoogleGenAIProvider) API() string  { return APIGoogleGenerativeAI }
 type googlePart struct {
 	Text           string                 `json:"text,omitempty"`
 	Thought        bool                   `json:"thought,omitempty"`
+	ThoughtSig     json.RawMessage        `json:"thoughtSignature,omitempty"`
 	FunctionCall   *googleCall            `json:"functionCall,omitempty"`
 	FunctionResult *googleFunctionRequest `json:"functionResponse,omitempty"`
 }
@@ -53,6 +54,9 @@ type googleCall struct {
 	ID   string         `json:"id,omitempty"`
 	Name string         `json:"name"`
 	Args map[string]any `json:"args,omitempty"`
+	// ThoughtSig must be replayed with the call once thinking is enabled;
+	// dropping it makes the next request invalid.
+	ThoughtSig json.RawMessage `json:"thoughtSignature,omitempty"`
 }
 
 // googleFunctionRequest carries a tool result back to the model: Gemini has
@@ -169,7 +173,10 @@ func (p *GoogleGenAIProvider) buildRequest(req StreamRequest) ([]byte, error) {
 							return nil, fmt.Errorf("google-generative-ai: tool %s arguments: %w", blk.Name, err)
 						}
 					}
-					parts = append(parts, googlePart{FunctionCall: &googleCall{ID: blk.ID, Name: blk.Name, Args: args}})
+					parts = append(parts, googlePart{
+						ThoughtSig:   blk.Signature,
+						FunctionCall: &googleCall{ID: blk.ID, Name: blk.Name, Args: args, ThoughtSig: blk.Signature},
+					})
 				}
 			}
 			if len(parts) == 0 {
@@ -369,7 +376,7 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 					}
 					toolCalls[idx] = &ToolCallBlock{
 						ID: part.FunctionCall.ID, Name: part.FunctionCall.Name,
-						Arguments: args, StreamIndex: idx,
+						Arguments: args, StreamIndex: idx, Signature: part.ThoughtSig,
 					}
 					order = append(order, idx)
 					emit(Event{Type: EventToolcallStart, ToolCallID: part.FunctionCall.ID, ToolName: part.FunctionCall.Name, StreamIndex: idx})

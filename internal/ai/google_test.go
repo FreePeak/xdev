@@ -204,3 +204,57 @@ func TestGoogleGenAIRequiresModel(t *testing.T) {
 		t.Fatalf("missing model must be a clear error, got %v", err)
 	}
 }
+
+// TestGoogleThoughtSignatureRoundTrip pins a hard Gemini requirement: a
+// functionCall carrying a thoughtSignature must have that signature echoed
+// back on every later request, or the follow-up is rejected once thinking is
+// enabled. The signature must therefore survive the message model (and thus
+// the session JSONL a rebuilt context reads from).
+func TestGoogleThoughtSignatureRoundTrip(t *testing.T) {
+	signed := []string{
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"thinking hard","thought":true,"thoughtSignature":"SigABCD"},{"functionCall":{"id":"fc_9","name":"bash","args":{"command":"ls"}},"thoughtSignature":"SigABCD"}]}}]}`,
+	}
+	srv, _ := newGoogleServer(t, signed)
+	p := NewGoogleGenAIProvider("gemini", srv.URL, "k", nil, nil)
+	evs := collectGoogle(t, p, StreamRequest{
+		Model: "m", Messages: []Message{{Role: RoleUser, Content: []Block{TextBlock{Text: "go"}}}},
+	})
+	last := evs[len(evs)-1]
+	calls := last.Message.ToolCalls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if string(calls[0].Signature) != `"SigABCD"` {
+		t.Fatalf("signature not captured on the call: %+v", calls[0])
+	}
+	// It must survive a JSONL round trip (session persistence path).
+	raw, err := json.Marshal(last.Message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Message
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if got := back.ToolCalls(); len(got) != 1 || string(got[0].Signature) != `"SigABCD"` {
+		t.Fatalf("signature lost through persistence: %s", raw)
+	}
+
+	// Second request replays it.
+	srv2, cap2 := newGoogleServer(t, googleChunks[:1])
+	p2 := NewGoogleGenAIProvider("gemini", srv2.URL, "k", nil, nil)
+	collectGoogle(t, p2, StreamRequest{
+		Model: "m",
+		Messages: []Message{
+			{Role: RoleUser, Content: []Block{TextBlock{Text: "go"}}},
+			{Role: RoleAssistant, Content: []Block{ToolCallBlock{
+				ID: "fc_9", Name: "bash", Arguments: json.RawMessage(`{"command":"ls"}`),
+				Signature: json.RawMessage(`"SigABCD"`),
+			}}},
+			{Role: RoleToolResult, ToolCallID: "fc_9", ToolName: "bash", Content: []Block{TextBlock{Text: "a.go"}}},
+		},
+	})
+	if !strings.Contains(cap2.body, "SigABCD") {
+		t.Fatalf("follow-up request dropped the thoughtSignature: %s", cap2.body)
+	}
+}
