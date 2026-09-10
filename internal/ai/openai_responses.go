@@ -183,7 +183,8 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req StreamRequest)
 	if model == "" {
 		model = p.model
 	}
-	resp, err := wirePost(ctx, p.httpClient, p.baseURL+"/responses", p.headers(), body, APIOpenAIResponses)
+	sctx, cancel := context.WithCancel(ctx)
+	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/responses", p.headers(), body, APIOpenAIResponses)
 	if err != nil {
 		return nil, err
 	}
@@ -191,10 +192,11 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req StreamRequest)
 	start := time.Now()
 	go func() {
 		defer resp.Body.Close()
+		defer cancel()
 		defer close(ch)
-		p.stream(ctx, resp.Body, model, ch, start)
+		p.stream(sctx, resp.Body, model, ch, start)
 	}()
-	return ch, nil
+	return withWatchdog(sctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
 
 // openaiRespToolCallState accumulates one function_call by output index.

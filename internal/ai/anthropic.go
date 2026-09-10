@@ -222,7 +222,8 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 	if model == "" {
 		model = p.model
 	}
-	resp, err := wirePost(ctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
+	sctx, cancel := context.WithCancel(ctx)
+	resp, err := wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -230,10 +231,11 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 	start := time.Now()
 	go func() {
 		defer resp.Body.Close()
+		defer cancel()
 		defer close(ch)
-		p.stream(ctx, resp.Body, model, ch, start)
+		p.stream(sctx, resp.Body, model, ch, start)
 	}()
-	return ch, nil
+	return withWatchdog(sctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
 
 // anthropicBlockState tracks one open content block keyed by stream index.
