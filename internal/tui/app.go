@@ -49,6 +49,7 @@ type App struct {
 	pathScan    func() []string   // shared FS-scan cache-backed file source
 	extCommands map[string]string // "/server:cmd" -> description
 	extRun      ExtensionCommand
+	renderers   map[string]RenderSpec // tool name -> declarative render spec
 	onSend      func(text string)
 	onCancel    func()
 	onQuit      func()
@@ -227,7 +228,15 @@ func (a *App) FinishTool(name string, isErr bool, output, dur string) {
 			break
 		}
 	}
-	a.blocks = append(a.blocks, &Block{Kind: KindToolDone, ToolName: name, Text: output, Dur: dur, Err: isErr})
+	text := output
+	if !isErr && len(a.renderers) > 0 {
+		if spec, ok := a.renderers[name]; ok {
+			if rendered, rok := renderToolOutput(spec, name, output); rok {
+				text = rendered
+			}
+		}
+	}
+	a.blocks = append(a.blocks, &Block{Kind: KindToolDone, ToolName: name, Text: text, Dur: dur, Err: isErr})
 	a.mu.Unlock()
 	a.poke()
 }

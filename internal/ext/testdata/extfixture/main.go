@@ -48,7 +48,7 @@ func main() {
 		"events":   events,
 		"commands": []map[string]string{{"name": "ping", "description": "pong"}},
 		"renderers": []map[string]any{
-			{"tool": "greet", "kind": "card", "spec": map[string]any{"title": "text"}},
+			{"tool": "greet", "kind": "table", "spec": map[string]any{"columns": []string{"greeting", "who"}}},
 		},
 		"tools": []map[string]any{
 			{"name": "greet", "description": "greet someone", "parameters": map[string]any{
@@ -115,12 +115,12 @@ func main() {
 				"text": "pong from the extension (" + in.Command + " " + in.Args + ")",
 			})
 			emit(frame{Type: "response", ID: f.ID, Allow: true, Patch: txt})
-		case f.Event == "tool_result":
+		case f.Event == "tool_result" && mode != "render":
 			emit(frame{Type: "response", ID: f.ID, Allow: true,
 				Patch: json.RawMessage(`{"text":"patched by ext","isError":false}`)})
 		case f.Event == "tool_invoke":
 			emit(frame{Type: "response", ID: f.ID, Allow: true,
-				Patch: json.RawMessage(`{"text":"hello from the extension","isError":false}`)})
+				Patch: json.RawMessage(`{"text":"{\"greeting\":\"hello\",\"who\":\"linh\"}","isError":false}`)})
 		case f.Event == "session_start" && mode == "action":
 			emit(frame{Type: "action", Action: "steer", Text: "extension steering"})
 			emit(frame{Type: "response", ID: f.ID, Allow: true})

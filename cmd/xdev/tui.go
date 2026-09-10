@@ -129,6 +129,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetExtensionCommands(exts.Commands(), func(name, args string) (string, error) {
 			return exts.RunCommand(context.Background(), name, args)
 		})
+		// Declarative render specs (card/table/tree) for extension tools;
+		// anything that fails to parse degrades to plain text in the view.
+		specs := map[string]tui.RenderSpec{}
+		for toolName, r := range exts.Renderers() {
+			specs[toolName] = tui.RenderSpec{Kind: r.Kind, Spec: r.Spec}
+		}
+		app.SetRenderers(specs)
 	}
 
 	// Replay resumed history as read-only blocks (text only).
