@@ -41,7 +41,8 @@ type ServerConfig struct {
 	ExcludeTools []string `yaml:"excludeTools,omitempty"`
 	// IncludeTools, when non-empty, keeps only these tools.
 	IncludeTools []string `yaml:"includeTools,omitempty"`
-	// InitTimeoutSec bounds connect+list per server (default 20).
+	// InitTimeoutSec bounds connect+list per server (default 5: a server
+	// that starts but never answers `initialize` must not stall startup).
 	InitTimeoutSec int `yaml:"initTimeoutSec,omitempty"`
 }
 
@@ -70,6 +71,7 @@ func LoadConfig(path string) (*Config, error) {
 // Manager owns the live sessions and their exported tools.
 type Manager struct {
 	mu       sync.Mutex
+	closed   bool
 	sessions map[string]*mcp.ClientSession
 	tools    []*remoteTool
 }
@@ -93,7 +95,7 @@ func (m *Manager) Connect(ctx context.Context, cfg *Config) (connected int, errs
 		if sc == nil || sc.Disabled {
 			continue
 		}
-		timeout := 20 * time.Second
+		timeout := 5 * time.Second
 		if sc.InitTimeoutSec > 0 {
 			timeout = time.Duration(sc.InitTimeoutSec) * time.Second
 		}
@@ -106,6 +108,13 @@ func (m *Manager) Connect(ctx context.Context, cfg *Config) (connected int, errs
 			continue
 		}
 		m.mu.Lock()
+		if m.closed { // Close raced the connect (async attach at shutdown)
+			m.mu.Unlock()
+			if err := sess.Close(); err != nil {
+				logx.Debugf("mcp: close late session %q: %v", name, err)
+			}
+			continue
+		}
 		m.sessions[name] = sess
 		m.tools = append(m.tools, tools...)
 		m.mu.Unlock()
@@ -174,6 +183,7 @@ func (m *Manager) Tools() []tool.Tool {
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
 	for name, s := range m.sessions {
 		if err := s.Close(); err != nil {
 			logx.Debugf("mcp: close %q: %v", name, err)

@@ -58,7 +58,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	// Tools + system prompt (shared with print mode).
 	reg := newToolRegistry(cwd, prov, modelName)
-	mgr := attachMCP(context.Background(), reg)
+	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
 	}

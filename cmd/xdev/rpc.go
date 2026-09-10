@@ -50,7 +50,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	}
 
 	reg := newToolRegistry(cwd, prov, modelName)
-	mgr := attachMCP(context.Background(), reg)
+	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
 	}
