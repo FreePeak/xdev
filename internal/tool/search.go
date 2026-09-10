@@ -353,8 +353,9 @@ func (t *GlobTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		root = filepath.Join(t.CWD, root)
 	}
 
-	// Fast path: fd.
-	if fd, err := lookPath("fd"); err == nil {
+	// Fast path: fd. Debian/Ubuntu ship the package as `fdfind`, so try
+	// both names before falling back to the cached walk.
+	if fd, err := lookPathFD(); err == nil {
 		if res, ok := t.runFD(ctx, fd, root, a.Pattern, limit); ok {
 			return res, nil
 		}
@@ -440,6 +441,15 @@ func asExitError(err error, target **exec.ExitError) bool {
 		return true
 	}
 	return false
+}
+
+// lookPathFD resolves fd under either name (fd on arch/homebrew, fdfind on
+// Debian/Ubuntu packaging).
+func lookPathFD() (string, error) {
+	if p, err := lookPath("fd"); err == nil {
+		return p, nil
+	}
+	return lookPath("fdfind")
 }
 
 // matchGlob matches a slash path against a glob supporting `**`. The
