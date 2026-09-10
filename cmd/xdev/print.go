@@ -70,7 +70,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	reg := newToolRegistry(cwd, prov, modelName)
 
 	// MCP servers (optional; absent config = nothing happens).
-	mgr := attachMCP(context.Background(), reg)
+	mgr := attachMCP(context.Background(), reg, true)
 	if mgr != nil {
 		defer mgr.Close()
 	}
@@ -195,10 +195,15 @@ func mcpConfigPath() string {
 }
 
 // attachMCP connects configured MCP servers and registers their tools on
-// the parent registry only — children never inherit ambient MCP (PRD
-// M6: subagents run with restricted tool sets). Individual server
-// failures are reported and skipped, never fatal.
-func attachMCP(ctx context.Context, reg *tool.Registry) *mcpclient.Manager {
+// the parent registry only — children never inherit ambient MCP (PRD M6:
+// subagents run with restricted tool sets). Individual server failures are
+// reported and skipped, never fatal.
+//
+// Async by design: a server that starts but never answers `initialize`
+// would otherwise stall startup for its whole timeout budget. Registration
+// happens whenever it lands; the registry is mutex-guarded, and a prompt
+// sent before then simply carries fewer tools (the next turn has them).
+func attachMCP(ctx context.Context, reg *tool.Registry, wait bool) *mcpclient.Manager {
 	cfg, err := mcpclient.LoadConfig(mcpConfigPath())
 	if err != nil {
 		logx.Errorf("mcp config: %v", err)
@@ -208,17 +213,28 @@ func attachMCP(ctx context.Context, reg *tool.Registry) *mcpclient.Manager {
 		return nil
 	}
 	mgr := mcpclient.NewManager()
+	if wait {
+		// One-shot modes (print) must have the tools before the first
+		// turn: connect inline, bounded by the per-server init timeout.
+		finishMCP(mgr, reg, ctx, cfg)
+		return mgr
+	}
+	go finishMCP(mgr, reg, ctx, cfg)
+	return mgr
+}
+
+// finishMCP connects and registers, reporting failures non-fatally.
+func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config) {
 	connected, errs := mgr.Connect(ctx, cfg)
 	for _, e := range errs {
 		fmt.Fprintln(os.Stderr, "xdev: mcp server unavailable —", e)
 	}
 	if connected == 0 {
 		mgr.Close()
-		return nil
+		return
 	}
 	mcpclient.Register(reg, mgr.Tools())
 	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
-	return mgr
 }
 
 // newToolRegistry builds the core four tools plus the parent-facing task
