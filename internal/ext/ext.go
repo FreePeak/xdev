@@ -154,9 +154,10 @@ var ErrDead = errors.New("ext: dead")
 
 // Manager owns the running extensions.
 type Manager struct {
-	mu   sync.Mutex
-	exts []*Extension
-	host func(Action)
+	mu       sync.Mutex
+	exts     []*Extension
+	failures []string // per-extension load errors (never fatal, always reported)
+	host     func(Action)
 	// EventTimeout overrides DefaultEventTimeout.
 	EventTimeout time.Duration
 }
@@ -204,6 +205,9 @@ func (m *Manager) Load(ctx context.Context, dir string) error {
 		x, err := m.start(ctx, name, path)
 		if err != nil {
 			logx.Errorf("ext: %s: %v", name, err)
+			m.mu.Lock()
+			m.failures = append(m.failures, name+": "+err.Error())
+			m.mu.Unlock()
 			continue
 		}
 		m.mu.Lock()
@@ -660,6 +664,16 @@ func Register(reg *tool.Registry, tools []tool.Tool) {
 	for _, t := range tools {
 		reg.Register(t)
 	}
+}
+
+// Failures reports the per-extension load errors from the last Load: a
+// skipped extension is otherwise indistinguishable from one that answered
+// "allow", which makes a platform-specific handshake failure impossible to
+// diagnose from a test failure alone.
+func (m *Manager) Failures() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.failures...)
 }
 
 // retire drops a dead extension from the routing chain (idempotent).

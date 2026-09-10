@@ -165,6 +165,12 @@ func TestCrashedExtensionFailsClosed(t *testing.T) {
 	if err := m.Load(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
+	// Self-diagnosing: a Load-skip and a consult-and-allow both produce
+	// ToolCall→nil, so pin the branch explicitly. If this fires on CI, the
+	// handshake failed on that platform (see Failures text), not the policy.
+	if n := len(m.list()); n != 1 {
+		t.Fatalf("crash fixture did not load (n=%d): %v", n, m.Failures())
+	}
 	_, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "blocked by extension") {
 		t.Fatalf("dead policy extension must fail closed, got %v", err)
