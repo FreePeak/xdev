@@ -62,19 +62,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if mgr != nil {
 		defer mgr.Close()
 	}
-	sys := opts.SystemPrompt
-	if sys == "" {
-		sys = agent.SystemPromptBase
-	}
-	defs := reg.Defs()
-	named := make([]agent.NamedToolDef, 0, len(defs))
-	for _, d := range defs {
-		named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
-	}
-	sys = agent.BuildSystemPrompt(sys, agent.LoadContextFiles(cwd), named)
-	if opts.AppendSystem != "" {
-		sys += "\n\n" + opts.AppendSystem
-	}
+	// Recomputed per submit: MCP and extension processes register tools
+	// after startup, and a boot-frozen prompt would never mention them.
+	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
 
 	// Session.
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
@@ -315,7 +305,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				sessMu.Lock()
 				hist := rebuildHistory() // store mirror is authoritative
 				sessMu.Unlock()
-				_, err := ag.Run(ctx, sys, hist)
+				_, err := ag.Run(ctx, buildSys(), hist)
 				app.EndAssistant()
 				app.FinishRun()
 				if err != nil {
