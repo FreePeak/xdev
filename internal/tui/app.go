@@ -57,6 +57,7 @@ type App struct {
 	// Welcome-screen matrix rain (UI thread; guarded by mu).
 	rain         []rainCol
 	rainW, rainH int
+	rainTick     int
 }
 
 type blockKey struct {
@@ -328,14 +329,19 @@ func (a *App) Run() {
 			if running {
 				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(spinnerFrames)
 			}
-			// Matrix rain on the welcome screen: advance ~8fps only
-			// while it is visible (no blocks, nothing running).
+			// Matrix rain on the welcome screen: step every 4th
+			// 33ms tick (~8fps) and redraw only on those steps,
+			// while it is visible (no blocks, nothing running) —
+			// idle CPU stays near zero between steps.
 			animate := false
 			if !running && len(a.blocks) == 0 {
 				top, bot := 1, a.height-5
 				if bot > top+3 {
-					a.stepRain(a.width, top, bot)
-					animate = true
+					a.rainTick = (a.rainTick + 1) % 4
+					if a.rainTick == 0 {
+						a.stepRain(a.width, top, bot)
+						animate = true
+					}
 				}
 			}
 			a.mu.Unlock()
