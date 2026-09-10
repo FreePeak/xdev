@@ -140,6 +140,9 @@ type Agent struct {
 	// decision requires it (nil means an unattended run: prompts deny).
 	Policy  tool.ApprovalPolicy
 	Approve ApprovalFunc
+	// Thinking requests reasoning on every turn — the resolved ":effort" of
+	// the active model role. nil asks for none.
+	Thinking *ai.ThinkingBudget
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -416,6 +419,7 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		Tools:     a.toolDefs(),
 		MaxTokens: a.MaxTokens,
 		Model:     a.Model,
+		Thinking:  a.Thinking,
 	}
 	a.Hooks.OnStart(req)
 

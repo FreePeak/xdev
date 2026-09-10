@@ -57,12 +57,9 @@ type PolicyRule struct {
 	Action  Action
 }
 
-// ApprovalPolicy is the resolved approval configuration.
-//
-// Note the zero value of its Mode is AlwaysAsk (ApprovalMode's zero, i.e.
-// the STRICTEST setting): an unset policy never runs unattended. Every
-// entry point resolves an explicit mode from settings, where the shipped
-// default is yolo (DefaultApprovalMode).
+// ApprovalPolicy is the resolved approval configuration. Its zero Mode is
+// Yolo — the product default, matching an agent built without a policy
+// (subagent children, tests). Strict modes arrive only via settings.
 type ApprovalPolicy struct {
 	Mode ApprovalMode
 	// PerTool overrides the mode for one tool (allow|deny|prompt).
@@ -84,12 +81,15 @@ type Decision struct {
 //
 //	deny rule > explicit per-tool rule > bash pattern > mode+tier default
 //
-// An unknown tool name is an error (a tool nobody modeled must not silently
-// run), matching Classify's contract.
+// A tool name outside the tier table (grep/glob/ast tools, ext_*/mcp_*)
+// classifies conservatively as TierExec, so dynamically registered tools
+// are subject to the same policy as bash instead of silently exempt — the
+// most destructive assumption is the only safe default for a tool nobody
+// modeled. Decide errors only on malformed policy state.
 func (p ApprovalPolicy) Decide(toolName string, args json.RawMessage) (Decision, error) {
-	tier, err := Classify(toolName, args)
-	if err != nil {
-		return Decision{}, err
+	tier := TierExec // conservative default for unmodeled tools
+	if t, err := Classify(toolName, args); err == nil {
+		tier = t
 	}
 	if toolName == "bash" {
 		cmd := bashCommand(args)

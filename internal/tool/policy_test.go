@@ -15,22 +15,25 @@ func policyBashArgs(t *testing.T, cmd string) json.RawMessage {
 	return raw
 }
 
-func TestPolicyZeroValueIsStrictest(t *testing.T) {
-	// The zero Mode is AlwaysAsk, so an unset policy never runs unattended;
-	// the shipped yolo default is explicit (DefaultApprovalMode).
-	if ModeOf(ApprovalPolicy{}) != AlwaysAsk {
-		t.Fatalf("zero-value mode must be strictest, got %s", ModeOf(ApprovalPolicy{}))
+func TestPolicyZeroValueIsProductDefault(t *testing.T) {
+	// Zero must mean yolo: agents built without an explicit policy (child
+	// sessions, tests) behave like the shipped product, not like a strict
+	// configuration nobody asked for.
+	if ModeOf(ApprovalPolicy{}) != Yolo {
+		t.Fatalf("zero-value mode = %s, want yolo", ModeOf(ApprovalPolicy{}))
 	}
 	var p ApprovalPolicy
 	dec, err := p.Decide("bash", policyBashArgs(t, "rm -rf /"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dec.Action != ActionPrompt {
-		t.Fatalf("zero policy = %s, want prompt", dec.Action)
+	// Yolo is both the zero value and the shipped default, so an unset policy
+	// allows: strictness always arrives explicitly from settings.
+	if dec.Action != ActionAllow {
+		t.Fatalf("zero policy = %s, want allow", dec.Action)
 	}
-	if got := DefaultApprovalMode; got != Yolo {
-		t.Fatalf("shipped default mode = %s", got)
+	if DefaultApprovalMode != Yolo {
+		t.Fatalf("shipped default mode = %s", DefaultApprovalMode)
 	}
 }
 
@@ -169,10 +172,23 @@ func TestPolicyCompoundCommandJudgedConservatively(t *testing.T) {
 	}
 }
 
-func TestPolicyUnknownToolIsAnError(t *testing.T) {
-	p := ApprovalPolicy{}
-	if _, err := p.Decide("mystery_tool", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("an unmodeled tool must error, not default to a tier")
+func TestPolicyUnknownToolIsConservative(t *testing.T) {
+	// A tool outside the tier table (grep/glob/ast, ext_*/mcp_* registrations)
+	// classifies as TierExec so dynamic tools are governed like bash. The
+	// first version propagated Classify's error, which let Decide skip
+	// enforcement — exempting exactly the tools users extend xdev with.
+	dec, err := ApprovalPolicy{Mode: Write}.Decide("mystery_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("unknown tool must resolve, not error: %v", err)
+	}
+	if dec.Action != ActionPrompt {
+		t.Fatalf("unknown tool under write = %s, want prompt", dec.Action)
+	}
+	// bash.patterns are bash-scoped by design; an unmodeled tool is denied
+	// through its per-tool entry, which applies to every registered name.
+	p2 := ApprovalPolicy{Mode: Yolo, PerTool: map[string]Action{"mystery_tool": ActionDeny}}
+	if dec, _ := p2.Decide("mystery_tool", json.RawMessage(`{}`)); dec.Action != ActionDeny {
+		t.Fatalf("per-tool deny must govern unmodeled tools, got %s", dec.Action)
 	}
 }
 
