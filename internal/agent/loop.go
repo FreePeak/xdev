@@ -101,11 +101,18 @@ type Agent struct {
 	// Retry tunes the transient-error backoff ladder; zero value →
 	// DefaultRetryPolicy.
 	Retry RetryPolicy
+	// Failovers is the ordered backup-model chain (M5): overflow promotes
+	// to a bigger window, a drained retry ladder fails over to the next
+	// target. nil disables both ladders.
+	Failovers []FailoverTarget
 	// Model is the provider-specific model id passed as StreamRequest.Model.
 	Model string
 	// Store is the session mirror of record. When set, it feeds compaction
 	// (threshold + overflow) and context rebuilds; nil disables compaction.
 	Store *session.Store
+	// curTarget indexes the active model: 0 = primary Provider/Model,
+	// n ≥ 1 = Failovers[n-1] (see failover.go). Single-goroutine Run.
+	curTarget int
 	// Compaction configures context maintenance; ContextWindow 0 disables.
 	Compaction CompactionConfig
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
@@ -178,11 +185,12 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 
 		// Threshold maintenance: compact before the window overflows.
 		history = a.maybeCompact(ctx, history)
-
-		msg, err := a.oneTurnWithRecovery(ctx, system, history)
+		var hist []ai.Message
+		msg, hist, err := a.oneTurnWithRecovery(ctx, system, history)
 		if err != nil {
 			return lastAssistant, err
 		}
+		history = hist
 		lastAssistant = msg
 
 		if len(msg.ToolCalls()) == 0 {
@@ -217,7 +225,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}}
 	history = append(history, wrap)
 	a.persist(wrap)
-	msg, err := a.oneTurnWithRecovery(ctx, system, history)
+	msg, _, err := a.oneTurnWithRecovery(ctx, system, history)
 	if err != nil {
 		return lastAssistant, err
 	}
@@ -227,12 +235,18 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 
 // turnError marks a failed turn and whether any content event already
 // reached the hooks — replaying such a turn would double-emit it.
+// partial carries the accumulated text/thinking when the stream died
+// mid-content: the retain-and-continue path persists it and resumes the
+// turn instead of replaying (M5 tail). Tool calls are never captured —
+// an unpaired call would make the continuation request invalid.
 type turnError struct {
 	err            error
 	contentEmitted bool
+	partial        *ai.Message
 }
 
 func (e *turnError) Error() string { return e.err.Error() }
+
 func (e *turnError) Unwrap() error { return e.err }
 
 // contentEmitted reports whether the (stream) error fired after visible
@@ -243,46 +257,84 @@ func turnContentEmitted(err error) bool {
 	return errors.As(err, &te) && te.contentEmitted
 }
 
-// oneTurnWithRecovery wraps oneTurn with the recovery ladder (omp
-// TurnRecovery): transient errors backoff-and-retry in place (history is
-// unchanged and nothing was persisted, so replaying is safe); context
-// overflow hands recovery to compaction and retries once on the rebuilt
-// history; auth/bad-request failures surface as-is.
-func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
+// oneTurnWithRecovery wraps oneTurn with the full M5 recovery ladder (omp
+// TurnRecovery): pre-content transient errors backoff-and-retry in place
+// and fail over to the next chain target when the ladder drains; post-
+// content transient errors retain the partial message and continue once
+// (replaying would double-emit the visible content); context overflow
+// promotes to a bigger window first and compacts only at the top of the
+// ladder; auth/bad-request failures surface as-is. The returned history
+// carries everything recovery appended (partials, continuation prompts,
+// compacted rebuilds) so the caller's loop stays consistent.
+func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history []ai.Message) (*ai.Message, []ai.Message, error) {
 	policy := a.Retry
 	if policy.MaxRetries == 0 && policy.BaseDelay == 0 {
 		policy = DefaultRetryPolicy()
 	}
-
-	msg, err := a.oneTurn(ctx, system, history)
-	for attempt := 1; err != nil && attempt <= policy.MaxRetries; attempt++ {
+	attempt, continued, compacted := 0, false, false
+	for {
+		msg, err := a.oneTurn(ctx, system, history)
+		if err == nil {
+			return msg, history, nil
+		}
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
-			// 429/5xx/network/stream stall: retry only when nothing
-			// streamed yet — replaying after visible content would
-			// double-emit it to the hooks (M5 tail: retain-partial +
-			// continuation replaces this).
 			if turnContentEmitted(err) {
-				return nil, err
+				// Retain-and-continue (M5 tail): persist the partial,
+				// follow with a continuation prompt, resume once. Only
+				// text/thinking partials qualify — a tool call without
+				// its result is not a request a provider would accept.
+				var te *turnError
+				if !continued && errors.As(err, &te) && te.partial != nil {
+					history = append(history, *te.partial)
+					a.persist(*te.partial)
+					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}}
+					history = append(history, cont)
+					a.persist(cont)
+					continued = true
+					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
+						return nil, history, serr
+					}
+					continue
+				}
+				return nil, history, err
 			}
+			if attempt >= policy.MaxRetries {
+				// Ladder drained: fail over to the next model-host;
+				// without one the error surfaces.
+				if nxt := a.nextFailoverTarget(); nxt > 0 {
+					a.switchTarget(nxt)
+					attempt = 0
+					continue
+				}
+				return nil, history, err
+			}
+			attempt++
 		case ai.ClassContextOverflow:
-			// Compaction owns recovery; one shot, then give up.
+			// Promotion before compaction (M5 tail): a bigger window may
+			// just fit; each overflow climbs one ladder step. At the top
+			// compaction owns recovery, once.
+			if nxt := a.promotionTarget(); nxt > 0 {
+				a.switchTarget(nxt)
+				continue
+			}
+			if compacted {
+				return nil, history, fmt.Errorf("agent: context overflow unrecoverable: %w", err)
+			}
 			logx.Errorf("context overflow: %v", err)
 			rebuilt := a.recoverOverflow(ctx)
 			if rebuilt == nil {
-				return nil, fmt.Errorf("agent: context overflow unrecoverable: %w", err)
+				return nil, history, fmt.Errorf("agent: context overflow unrecoverable: %w", err)
 			}
-			return a.oneTurn(ctx, system, rebuilt)
+			history, compacted = rebuilt, true
 		default:
-			return nil, err
+			return nil, history, err
 		}
 		if serr := sleepBackoff(ctx, policy.delay(attempt)); serr != nil {
-			return nil, serr
+			return nil, history, serr
 		}
 		logx.Debugf("retry %d/%d after: %v", attempt, policy.MaxRetries, err)
-		msg, err = a.oneTurn(ctx, system, history)
 	}
-	return msg, err
 }
 
 // recoverOverflow forces a compaction (ignoring the threshold — the
@@ -404,7 +456,19 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 				msg = *ev.Message
 			}
 		case ai.EventError:
-			return nil, &turnError{err: fmt.Errorf("agent: stream: %w", ev.Err), contentEmitted: emitted}
+			closeBlock() // flush any open text/thinking into msg.Content
+			te := &turnError{err: fmt.Errorf("agent: stream: %w", ev.Err), contentEmitted: emitted}
+			// Retain-and-continue candidate: accumulated text/thinking
+			// only (tool calls stay out — an unpaired call would make
+			// the continuation request invalid at the provider).
+			if emitted && len(msg.Content) > 0 {
+				partial := msg
+				if partial.Role == "" {
+					partial.Role = ai.RoleAssistant
+				}
+				te.partial = &partial
+			}
+			return nil, te
 		}
 	}
 	msg.StopReason = stop

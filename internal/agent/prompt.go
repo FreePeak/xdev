@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -23,6 +24,61 @@ Rules:
 
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.
 const MaxContextBytes = 32 << 10
+
+// maxImportDepth bounds recursive @path expansion (omp parity: <=5).
+const maxImportDepth = 5
+
+// expandImports resolves `@path` references in content: relative to the
+// importing file (or cwd for absolute/~ paths), <=5 deep, cycles skipped,
+// missing targets left literal. Only line-start or whitespace-preceded
+// `@` tokens expand; `user@host` and emails never match.
+func expandImports(content, baseDir string, budget *int, seen map[string]bool) string {
+	re := regexp.MustCompile(`(^|[\s(])@([\w./~\-]+)`)
+	var expand func(string, string, int) string
+	expand = func(text, dir string, depth int) string {
+		if depth > maxImportDepth {
+			return text
+		}
+		return re.ReplaceAllStringFunc(text, func(m string) string {
+			sep := ""
+			target := m
+			if m[0] != '@' {
+				sep, target = string(m[0]), m[1:]
+			}
+			path := target[1:]
+			var full string
+			switch {
+			case strings.HasPrefix(path, "~/"):
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return m
+				}
+				full = filepath.Join(home, path[2:])
+			case filepath.IsAbs(path):
+				full = path
+			default:
+				full = filepath.Join(dir, path)
+			}
+			full = filepath.Clean(full)
+			if seen[full] || *budget <= 256 {
+				return m // cycle or budget exhausted: leave literal
+			}
+			raw, err := os.ReadFile(full)
+			if err != nil {
+				return m // missing target: literal per spec
+			}
+			seen[full] = true
+			imp := strings.TrimSpace(string(raw))
+			if len(imp) > *budget {
+				imp = imp[:*budget] + "\n… [truncated]"
+			}
+			*budget -= len(imp)
+			return sep + "\n<file path=\"" + target + "\">\n" +
+				expand(imp, filepath.Dir(full), depth+1) + "\n</file>"
+		})
+	}
+	return expand(content, baseDir, 1)
+}
 
 // BuildSystemPrompt assembles the system prompt: base + project context
 // files + tool descriptions. Tool descriptions come last (they are part of
@@ -87,16 +143,19 @@ func LoadContextFiles(cwd string) string {
 
 	var b strings.Builder
 	total := 0
+	seen := map[string]bool{}
 	for _, p := range files {
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		content := strings.TrimSpace(string(raw))
+		remaining := MaxContextBytes - total
+		content := expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen)
+		content = strings.TrimSpace(content)
 		if content == "" {
 			continue
 		}
-		remaining := MaxContextBytes - total
+		remaining = MaxContextBytes - total
 		if remaining < 256 {
 			break // no useful budget left; skip further files entirely
 		}

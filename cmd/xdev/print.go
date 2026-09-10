@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -104,7 +105,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- agent ---
 	hooks := &printHooks{store: store}
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName)}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -186,6 +187,35 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		}
 	}
 	return 0
+}
+
+// failoverChain builds the M5 resilience chain from models.yml: every
+// other pinned model, biggest window first (outage failover walks the
+// chain in order; overflow promotion picks the smallest window that
+// fits). Providers are built eagerly — the HTTP clients stay idle until
+// a failover actually streams.
+func failoverChain(cfg *config.Config, primaryProv, primaryModel string) []agent.FailoverTarget {
+	var out []agent.FailoverTarget
+	names := make([]string, 0, len(cfg.Providers))
+	for k := range cfg.Providers {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, pname := range names {
+		pc := cfg.Providers[pname]
+		prov, err := buildProvider(pname, pc)
+		if err != nil {
+			continue
+		}
+		for _, m := range pc.Models {
+			if pname == primaryProv && m.ID == primaryModel {
+				continue
+			}
+			out = append(out, agent.FailoverTarget{Provider: prov, Model: m.ID, ContextWindow: m.ContextWindow})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ContextWindow > out[j].ContextWindow })
+	return out
 }
 
 // openSession resumes the latest session in cwd (--continue) or starts a new
