@@ -115,6 +115,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	logx.Debugf("print: model=%s session=%s", modelRef, store.Path())
 	started := time.Now()
+	// buildSys() at the call site, never a boot-captured string: extension
+	// and MCP tools register after startup and must be in the prompt the
+	// model is told to use (see TestPromptReflectsLiveRegistry).
 	final, err := ag.Run(ctx, buildSys(), history)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)

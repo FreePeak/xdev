@@ -36,3 +36,32 @@ func TestExpandImports(t *testing.T) {
 		t.Fatalf("cycle expanded root.md twice:\n%s", got)
 	}
 }
+
+// TestBuildSystemPromptCapsRemoteDescriptions pins the choke-point cap:
+// MCP/extension prose arrives at whatever length its author chose and must
+// never land in the prompt whole.
+func TestBuildSystemPromptCapsRemoteDescriptions(t *testing.T) {
+	verbose := strings.Repeat("detailed remote tool documentation. ", 200)
+	got := BuildSystemPrompt("base", "", []NamedToolDef{
+		{Name: "chatty", Description: verbose},
+		{Name: "terse", Description: "short one"},
+	})
+	if strings.Contains(got, verbose) {
+		t.Fatalf("uncapped remote prose landed in the prompt (%d chars)", len(verbose))
+	}
+	if !strings.Contains(got, "chatty:") || !strings.Contains(got, "terse: short one") {
+		t.Fatalf("tools missing from the prompt:\n%s", got)
+	}
+	// Rune-safe cut: the marker terminates the line and no replacement
+	// char is emitted mid-codepoint.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "chatty:") {
+			if !strings.HasSuffix(line, "…") {
+				t.Fatalf("cap marker missing: %q", line)
+			}
+			if len([]rune(line)) > MaxToolDescriptionChars+len("chatty: ")+1 {
+				t.Fatalf("line longer than the cap: %d runes", len([]rune(line)))
+			}
+		}
+	}
+}

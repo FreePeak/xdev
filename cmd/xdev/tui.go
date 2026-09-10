@@ -64,6 +64,25 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 	// Recomputed per submit: MCP and extension processes register tools
 	// after startup, and a boot-frozen prompt would never mention them.
+	// Extension processes: loaded ONCE (handshakes are expensive), their
+	// tools join the live registry so the lazy prompt picks them up, and
+	// each per-submit agent gets the same fail-closed Interceptor.
+	var (
+		agentMu  sync.Mutex
+		curAgent *agent.Agent
+	)
+	exts := attachExtensions(context.Background(), reg, func(text string) {
+		agentMu.Lock()
+		target := curAgent
+		agentMu.Unlock()
+		if target != nil {
+			target.Steer(text)
+		}
+	})
+	if exts != nil {
+		defer exts.Close()
+	}
+
 	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
 
 	// Session.
@@ -301,7 +320,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Store:      store,
 					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 					Failovers:  failoverChain(cfg, provName, modelName),
+					Intercept:  exts, // fail-closed policy must hold in the daily-driver mode too
 				}
+				// Extension actions steer the live run: this agent is the
+				// target until the next submit replaces it.
+				agentMu.Lock()
+				curAgent = ag
+				agentMu.Unlock()
+				defer func() {
+					agentMu.Lock()
+					curAgent = nil
+					agentMu.Unlock()
+				}()
 				sessMu.Lock()
 				hist := rebuildHistory() // store mirror is authoritative
 				sessMu.Unlock()
