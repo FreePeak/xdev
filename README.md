@@ -40,6 +40,43 @@ xdev tui -theme grokday         # light variant (default: auto)
 # hard RSS backstop defaults to 100MB; set XDEV_MEMLIMIT to override
 ```
 
+## Interactive mode
+
+`xdev tui` is the Grok-CLI-styled interactive mode (GrokNight/GrokDay themes).
+
+**Scrollback** — the transcript is fully scrollable; streaming output never
+drags a scrolled viewport (the `▲ n ▼ n` indicator shows hidden rows):
+
+| Keys | Action |
+|---|---|
+| PgUp / PgDn | half-page up / down |
+| Ctrl+B / Ctrl+F | half-page up / down (emacs-style) |
+| ↑ / ↓ | line up / down (while idle) |
+| Home / End | jump to top / back to live |
+
+**Slash commands** — dispatched at input-submit, never sent to the model:
+
+| Command | Action |
+|---|---|
+| `/new` | fresh session file + cleared transcript |
+| `/clear` | reset context in place (durable `reset_boundary`; history kept on disk) |
+| `/drop` | delete the session file and start fresh |
+| `/help` | list commands |
+| `/quit`, `/q` | quit |
+
+Lifecycle commands refuse while a turn is running (Esc cancels first).
+
+**Custom markdown commands** — drop `*.md` files into `<cwd>/.xdev/commands/`
+(project) or `~/.xdev/agent/commands/` (user; project wins on name
+collisions). Optional frontmatter sets `name:`/`description:`; the body is a
+prompt template with quote-aware argument expansion: `$1..$n`, `$@`,
+`$@[start]`, `$@[start:length]`, `$ARGUMENTS`. Unknown `/foo` input falls
+through to the model as ordinary text.
+
+**Turn budget** — `-max-turns N` caps one run (default 200). At the cap the
+agent wraps up gracefully with a status report instead of dying with an
+error; say "continue" to resume.
+
 ## Planned module layout
 
 ```text
