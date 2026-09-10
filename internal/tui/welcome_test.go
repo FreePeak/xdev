@@ -276,3 +276,16 @@ func TestAppWelcomeRainBounds(t *testing.T) {
 		}
 	}
 }
+
+// TestRainGlyphsAllNarrow pins the rain alphabet to width-1 runes: a
+// wide glyph (e.g. U+30FB '・') drawn just left of the logo makes
+// tcell drop the logo's SetContent into the wide continuation cell,
+// punching a hole in the art — the flake TestAppWelcomeMatrixLogo
+// used to hit.
+func TestRainGlyphsAllNarrow(t *testing.T) {
+	for _, r := range rainGlyphs {
+		if width(string(r)) != 1 {
+			t.Errorf("rain glyph %q (U+%04X) has width %d, want 1", r, r, width(string(r)))
+		}
+	}
+}

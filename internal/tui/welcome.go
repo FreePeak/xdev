@@ -63,7 +63,7 @@ func logoArt(height int) []string {
 // rainGlyphs mixes half-width katakana with digits and separators —
 // the classic digital-rain alphabet (all narrow, so no wide-rune
 // handling is needed).
-var rainGlyphs = []rune("ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾗﾘﾙﾚﾛﾜﾝ0123456789:・.=*+-<>|")
+var rainGlyphs = []rune("ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾗﾘﾙﾚﾛﾜﾝ0123456789:･=*+-<>|")
 
 // rainCol is one falling stream: head row y, rows-per-step speed, a
 // glyph per area row, and the fading trail length.
