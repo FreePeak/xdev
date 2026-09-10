@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -74,7 +73,8 @@ func resolveResumeID(cwd, query string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sort.Slice(metas, func(a, b int) bool { return metas[a].ModTime.After(metas[b].ModTime) })
+	// session.List already returns newest-first with a header-timestamp
+	// tiebreak; the scan is ordered, so no second sort here.
 	q := strings.ToLower(query)
 	for _, m := range metas {
 		if m.CWD != cwd {

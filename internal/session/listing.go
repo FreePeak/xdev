@@ -115,7 +115,16 @@ func listWithCache(dataDir string, cache *statCache) ([]SessionMeta, error) {
 	}
 
 	metas := scanPaths(paths, cache)
-	sort.Slice(metas, func(i, j int) bool { return metas[i].ModTime.After(metas[j].ModTime) })
+	// Newest first. ModTime ties (two sessions in one filesystem tick, or
+	// coarse mtime granularity on overlayfs/tmpfs) fall back to the header
+	// timestamp so "most recent session" is deterministic: callers like
+	// --continue must not resolve arbitrarily.
+	sort.Slice(metas, func(i, j int) bool {
+		if !metas[i].ModTime.Equal(metas[j].ModTime) {
+			return metas[i].ModTime.After(metas[j].ModTime)
+		}
+		return metas[i].Timestamp.After(metas[j].Timestamp)
+	})
 	return metas, nil
 }
 
