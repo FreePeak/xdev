@@ -352,4 +352,4 @@ Net: Claude Code **confirms xdev's pi/omp-shaped minimalism** (it lacks LSP/AST/
 
 ---
 
-*Last updated: 2026-09-10 (grok-build deep-dive TUI parity: cloned github.com/xai-org/grok-build, extracted exact GrokNight/GrokDay hex palettes from `groknight.rs`/`grokday.rs` — accent_user corrected from provisional magenta to neutral `#c8c8c8` per source; implemented assistant markdown rendering (h1-h3 colored bold, inline code `#3A95AB`, fenced-code bg band, `•` bullets, `│` quotes, `───` rules, hidden URLs), grok composer box (`╭─╮│╰─╯` + `❯ ` + model info in bottom border), "Thought for Xs" thinking headers, `◈`/`↳` tool rows, user-prompt band, right-aligned timestamps, shortcuts bar; tmux-verified truecolor SGR. M5 MVP (retry/compaction/amnesia fix) landed in parallel. Tails: promotion ladder, failover chains, partial-stream retain+continue; TUI tails in #5: vim mode, blocking cards, history retirement batching, DSR resize, box growth on wrap)*
+*Last updated: 2026-09-10 (known gaps documented: /<command> slash commands non-functional — M10 #11; TUI chat-session scrolling missing — P0 #17. Both user-reported.)*
