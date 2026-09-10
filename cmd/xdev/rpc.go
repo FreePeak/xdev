@@ -50,6 +50,10 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	}
 
 	reg := newToolRegistry(cwd, prov, modelName)
+	mgr := attachMCP(context.Background(), reg)
+	if mgr != nil {
+		defer mgr.Close()
+	}
 
 	sys := opts.SystemPrompt
 	if sys == "" {
@@ -250,6 +254,13 @@ func (h *rpcHandler) SetModel(ref string) error {
 	h.agent.Model = modelName
 	h.agent.Compaction = agent.CompactionConfig{ContextWindow: modelWindow(h.cfg, provName, modelName)}
 	h.agent.Failovers = failoverChain(h.cfg, provName, modelName)
+	// Children must spawn on the current model, not the one captured at
+	// startup.
+	if t, ok := h.reg.Get(agent.TaskToolName); ok {
+		if tt, ok := t.(*agent.TaskTool); ok {
+			tt.Provider, tt.Model = prov, modelName
+		}
+	}
 	_ = h.store.Append(&session.ModelChangeEntry{Model: ref})
 	return nil
 }

@@ -58,6 +58,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	// Tools + system prompt (shared with print mode).
 	reg := newToolRegistry(cwd, prov, modelName)
+	mgr := attachMCP(context.Background(), reg)
+	if mgr != nil {
+		defer mgr.Close()
+	}
 	sys := opts.SystemPrompt
 	if sys == "" {
 		sys = agent.SystemPromptBase
@@ -167,6 +171,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		store = ns
 		ts.store = ns
+		wireTaskParent(reg, ns) // children must link to the ACTIVE session
 		app.Reset()
 		saveBreadcrumb(ns.Path())
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))

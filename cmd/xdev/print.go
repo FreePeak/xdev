@@ -16,6 +16,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
+	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
@@ -67,6 +68,12 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- tools ---
 	reg := newToolRegistry(cwd, prov, modelName)
+
+	// MCP servers (optional; absent config = nothing happens).
+	mgr := attachMCP(context.Background(), reg)
+	if mgr != nil {
+		defer mgr.Close()
+	}
 
 	// --- system prompt ---
 	sys := opts.SystemPrompt
@@ -180,6 +187,38 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		}
 	}
 	return 0
+}
+
+// mcpConfigPath is <dataDir>/mcp.yml (absent = MCP off, PRD §2).
+func mcpConfigPath() string {
+	return filepath.Join(config.DataDir(), "mcp.yml")
+}
+
+// attachMCP connects configured MCP servers and registers their tools on
+// the parent registry only — children never inherit ambient MCP (PRD
+// M6: subagents run with restricted tool sets). Individual server
+// failures are reported and skipped, never fatal.
+func attachMCP(ctx context.Context, reg *tool.Registry) *mcpclient.Manager {
+	cfg, err := mcpclient.LoadConfig(mcpConfigPath())
+	if err != nil {
+		logx.Errorf("mcp config: %v", err)
+		return nil
+	}
+	if len(cfg.Servers) == 0 {
+		return nil
+	}
+	mgr := mcpclient.NewManager()
+	connected, errs := mgr.Connect(ctx, cfg)
+	for _, e := range errs {
+		fmt.Fprintln(os.Stderr, "xdev: mcp server unavailable —", e)
+	}
+	if connected == 0 {
+		mgr.Close()
+		return nil
+	}
+	mcpclient.Register(reg, mgr.Tools())
+	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
+	return mgr
 }
 
 // newToolRegistry builds the core four tools plus the parent-facing task
