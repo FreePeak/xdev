@@ -21,6 +21,15 @@ type repeatable []string
 func (r *repeatable) String() string     { return strings.Join(*r, ",") }
 func (r *repeatable) Set(v string) error { *r = append(*r, v); return nil }
 
+// mustGetwd degrades to "." rather than failing startup for a vanished cwd.
+func mustGetwd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
 // loadedSettings is the layered configuration main() resolved, shared
 // with the run modes (they need modelRoles/defaultModel).
 var loadedSettings *config.Settings
@@ -63,6 +72,13 @@ Flags:
 	}
 	if *verbose {
 		logx.Enable(logx.LevelDebug)
+	}
+
+	// --- dotenv chain (M9 #10): process env → project .env → agent .env.
+	// Runs before anything reads configuration so ${VAR} expansion in
+	// models.yml and credential lookup see these values.
+	for _, key := range config.LoadEnv(mustGetwd()) {
+		logx.Debugf("env: %s set from .env", key)
 	}
 
 	// --- layered settings (M9 #10): defaults ← global ← project ← -config
