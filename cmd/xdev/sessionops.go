@@ -86,7 +86,8 @@ func dumpSession(store *session.Store) (string, error) {
 	fmt.Fprintf(&b, "# xdev transcript — %s\n\n- session: `%s`\n- cwd: `%s`\n- dumped: %s\n\n---\n\n",
 		store.Title(), store.ID(), store.CWD(), time.Now().Format("2006-01-02 15:04"))
 	for _, m := range res.Messages {
-		role := strings.ToUpper(string(m.Role)) + string(m.Role[1:])
+		r := string(m.Role)
+		role := strings.ToUpper(r[:1]) + r[1:]
 		fmt.Fprintf(&b, "## %s\n\n%s\n\n", role, strings.TrimSpace(m.Text()))
 	}
 

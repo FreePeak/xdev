@@ -34,6 +34,7 @@ go build -o xdev ./cmd/xdev
 
 xdev "create a hello.py that prints hello world, then run it"
 xdev -continue "now add tests"   # resume the latest session in this cwd
+xdev -resume 01a0 "pick up where we left off"   # resume by session-id prefix
 xdev -model onegw/dev "..."      # explicit provider/model
 xdev tui                        # interactive mode (Grok-CLI look)
 xdev tui -theme grokday         # light variant (default: auto)
