@@ -104,7 +104,7 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -140,6 +140,25 @@ Flags:
 			os.Exit(code)
 		}
 		os.Exit(code)
+	}
+
+	if mode == "login" || mode == "logout" {
+		cfg, cerr := config.LoadModelsLayered()
+		if cerr != nil {
+			cfg = &config.Config{}
+		}
+		provider := ""
+		if len(args) > 0 {
+			provider = args[0]
+		}
+		if provider == "" {
+			fmt.Fprintln(os.Stderr, "usage: xdev login <provider> | xdev logout <provider>")
+			os.Exit(2)
+		}
+		if mode == "login" {
+			os.Exit(runLogin(provider, cfg))
+		}
+		os.Exit(runLogout(provider))
 	}
 
 	if mode == "config" {

@@ -58,6 +58,18 @@ type ProviderConfig struct {
 	Headers   map[string]string `yaml:"headers,omitempty"`
 	Discovery *DiscoveryConfig  `yaml:"discovery,omitempty"`
 	Models    []ModelConfig     `yaml:"models,omitempty"`
+	// OAuth configures the browser login flow for this provider (xdev login
+	// <provider>). Absent = not an OAuth provider.
+	OAuth *OAuthConfig `yaml:"oauth,omitempty"`
+}
+
+// OAuthConfig is one provider's browser-login flow.
+type OAuthConfig struct {
+	AuthorizeURL string   `yaml:"authorizeUrl"`
+	TokenURL     string   `yaml:"tokenUrl"`
+	ClientID     string   `yaml:"clientId"`
+	Scopes       []string `yaml:"scopes,omitempty"`
+	RedirectPort int      `yaml:"redirectPort,omitempty"`
 }
 
 // Config is the parsed models.yml.

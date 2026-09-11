@@ -51,7 +51,7 @@ func TestCredentialChainReachesTheWire(t *testing.T) {
 
 	providerFor := func(t *testing.T) ai.Provider {
 		t.Helper()
-		p, err := buildProvider("onegw", pc())
+		p, err := buildProvider("onegw", pc(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestAuthHeaderConfigReachesTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := buildProvider("gw", cfg.Providers["gw"])
+	p, err := buildProvider("gw", cfg.Providers["gw"], cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestAuthHeaderDefaultsToBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := buildProvider("gw", cfg.Providers["gw"])
+	p, err := buildProvider("gw", cfg.Providers["gw"], cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

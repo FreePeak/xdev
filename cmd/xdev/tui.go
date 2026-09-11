@@ -46,7 +46,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if !ok {
 		return 2, fmt.Errorf("unknown provider %q (have: %v)", provName, providerKeys(cfg))
 	}
-	prov, err := buildProvider(provName, pc)
+	prov, err := buildProvider(provName, pc, cfg)
 	if err != nil {
 		return 2, err
 	}
