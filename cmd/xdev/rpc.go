@@ -54,7 +54,12 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 
 	// Recomputed per prompt: async MCP/extension tools must reach the
 	// model that is being told they exist.
-	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
+	overrides := agent.LoadSystemPromptOverrides(cwd)
+	appendStr := opts.AppendSystem
+	if appendStr == "" {
+		appendStr = overrides.Append
+	}
+	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, appendStr)
 
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {

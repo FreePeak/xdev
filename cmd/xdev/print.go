@@ -72,7 +72,12 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- system prompt ---
-	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
+	overrides := agent.LoadSystemPromptOverrides(cwd)
+	appendStr := opts.AppendSystem
+	if appendStr == "" {
+		appendStr = overrides.Append
+	}
+	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, appendStr)
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
 	// --- session ---
@@ -287,10 +292,14 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 	}
 }
 
-// basePrompt resolves the -system-prompt override.
-func basePrompt(opts printOptions) string {
+// basePrompt resolves the system prompt base: --system-prompt flag →
+// SYSTEM.md (project, then user) → the built-in default.
+func basePrompt(opts printOptions, cwd string) string {
 	if opts.SystemPrompt != "" {
 		return opts.SystemPrompt
+	}
+	if o := agent.LoadSystemPromptOverrides(cwd); o.System != "" {
+		return o.System
 	}
 	return agent.SystemPromptBase
 }

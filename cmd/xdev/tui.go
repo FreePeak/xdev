@@ -83,7 +83,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		defer exts.Close()
 	}
 
-	buildSys := promptFn(basePrompt(opts), cwd, reg, opts.AppendSystem)
+	overrides := agent.LoadSystemPromptOverrides(cwd)
+	appendStr := opts.AppendSystem
+	if appendStr == "" {
+		appendStr = overrides.Append
+	}
+	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, appendStr)
 
 	// Session.
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
