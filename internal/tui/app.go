@@ -43,7 +43,8 @@ type App struct {
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops           *SessionOps       // session lifecycle, wired by cmd (nil → notices)
+	ops           *SessionOps
+	modelOps      *ModelOps         // session lifecycle, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
 	commandDir    string            // markdown command discovery root
@@ -345,6 +346,9 @@ func (a *App) DumpSession() error {
 }
 
 // ResumeSession implements CommandAPI by swapping to the resumed store.
+// SetModelOps wires the /model command (active state lives in cmd).
+func (a *App) SetModelOps(ops *ModelOps) { a.modelOps = ops }
+
 func (a *App) ResumeSession(query string) error {
 	if a.ops == nil || a.ops.Resume == nil {
 		return fmt.Errorf("session resume not wired")
@@ -367,6 +371,40 @@ func (a *App) Reset() {
 // SetSessionOps wires the session lifecycle (store lives in cmd). Nil ops
 // degrade the /new /clear /drop commands to notices.
 func (a *App) SetSessionOps(ops *SessionOps) { a.ops = ops }
+
+// SwitchModel implements CommandAPI /model: with no argument it prints the
+// current model and the available refs; with an argument it switches.
+func (a *App) SwitchModel(args string) error {
+	if a.modelOps == nil {
+		return fmt.Errorf("model switching not wired")
+	}
+	if strings.TrimSpace(args) == "" {
+		cur := ""
+		if a.modelOps.Current != nil {
+			cur = a.modelOps.Current()
+		}
+		var lines []string
+		if cur != "" {
+			lines = append(lines, "active model: "+cur)
+		}
+		lines = append(lines, "available:")
+		if a.modelOps.List != nil {
+			for _, m := range a.modelOps.List() {
+				lines = append(lines, "  "+m)
+			}
+		}
+		a.AddSystemBlock(strings.Join(lines, "\n"))
+		return nil
+	}
+	if a.modelOps.Set == nil {
+		return fmt.Errorf("model switching not wired")
+	}
+	if err := a.modelOps.Set(strings.TrimSpace(args)); err != nil {
+		return err
+	}
+	a.AddSystemBlock("active model: " + strings.TrimSpace(args))
+	return nil
+}
 
 // SendPrompt submits text through the normal send path (markdown commands).
 func (a *App) SendPrompt(text string) {

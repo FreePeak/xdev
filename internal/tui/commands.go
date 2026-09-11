@@ -27,6 +27,16 @@ type SessionOps struct {
 	Resume           func(query string) error
 }
 
+// ModelOps wires the /model command to the live provider state (lives in
+// cmd). Current reports the active ref; List returns the available refs;
+// Set switches the active model for subsequent turns. nil ops degrade the
+// command to a notice.
+type ModelOps struct {
+	Current func() string
+	List    func() []string
+	Set     func(ref string) error
+}
+
 // ExtensionCommand runs one "/ext:cmd" and returns its output. Wired by
 // cmd from the extension manager; nil when no extensions are loaded.
 type ExtensionCommand func(name, args string) (string, error)
@@ -44,6 +54,7 @@ type CommandAPI interface {
 	ForkSession() error
 	DumpSession() error
 	ResumeSession(query string) error
+	SwitchModel(args string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
 	CommandDir() string
@@ -71,6 +82,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.DumpSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
+		{Name: "model", Description: "show or switch the active model",
+			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "help", Description: "show available commands",

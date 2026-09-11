@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// /model live switch: the submit loop reads this holder instead of the
+	// startup constants, so switching the active model applies to the next
+	// turn. Subagent task tools in `reg` are built once at startup and keep
+	// the initial model (documented ceiling below).
+	modelMu := &sync.Mutex{}
+	live := &struct {
+		prov     ai.Provider
+		model    string
+		provName string
+		effort   string
+	}{prov, modelName, provName, effortRef}
 
 	// Tools + system prompt (shared with print mode).
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef))
@@ -377,6 +389,42 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return swapStore(true)
 		},
 	})
+	// /model: current + available from settings roles, switch by ref.
+	app.SetModelOps(&tui.ModelOps{
+		Current: func() string {
+			modelMu.Lock()
+			defer modelMu.Unlock()
+			return live.provName + "/" + live.model
+		},
+		List: func() []string {
+			return availableModelRefs(lastSettings())
+		},
+		Set: func(ref string) error {
+			nr, ne, err := resolveModel(ref, cfg, lastSettings())
+			if err != nil {
+				return err
+			}
+			nprovName, nmodelName, err := config.ParseModelRef(nr)
+			if err != nil {
+				return err
+			}
+			npc, ok := cfg.Providers[nprovName]
+			if !ok {
+				return fmt.Errorf("unknown provider %q", nprovName)
+			}
+			nprov, err := buildProvider(nprovName, npc, nmodelName, cfg)
+			if err != nil {
+				return err
+			}
+			if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
+				logx.Errorf("model change entry: %v", err)
+			}
+			modelMu.Lock()
+			live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
+			modelMu.Unlock()
+			return nil
+		},
+	})
 	app.SetCommandDir(cwd)
 
 	app.SetHandlers(
@@ -401,17 +449,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				defer cancel()
 				defer running.Store(false)
 				app.SetRunning(true)
+				modelMu.Lock()
+				lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
+				modelMu.Unlock()
 				ag := &agent.Agent{
-					Provider:   prov,
+					Provider:   lp,
 					Tools:      reg,
 					Hooks:      &tuiHooks{ts: ts},
 					MaxTokens:  opts.MaxTokens,
 					MaxTurns:   opts.MaxTurns,
-					Model:      modelName,
+					Model:      lm,
 					Store:      store,
-					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
-					Failovers:  failoverChain(cfg, provName, modelName),
-					Thinking:   effortBudget(effortRef),
+					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm)},
+					Failovers:  failoverChain(cfg, lpn, lm),
+					Thinking:   effortBudget(le),
 					// Intercept set below from exts (only when non-nil).
 					Policy: agentPolicy(),
 				}
@@ -546,4 +597,43 @@ func setCursorColor(c theme.Color) {
 // setCursorReset restores the terminal's default cursor color (OSC 112).
 func setCursorReset() {
 	fmt.Fprint(os.Stdout, "\033]112\033\\")
+}
+
+// availableModelRefs lists the switchable model refs: the settings default,
+// each provider's configured models (from models.yml refs cached in roles),
+// and the @role aliases — the same superset the model flag accepts. Dedup
+// keeps the list stable. ponytail: runtime discovery (network) is not part
+// of this listing; a provider's models that appear only via its discovery
+// endpoint are not enumerated here.
+func availableModelRefs(settings *config.Settings) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	if settings != nil {
+		if settings.DefaultModel != "" {
+			add(settings.DefaultModel)
+		}
+		for _, role := range roleNamesSorted(settings.ModelRoles) {
+			add("@" + role) // /model "@smol" is a valid resolveModel input
+			add(settings.ModelRoles[role])
+		}
+	}
+	// Add each model ref present in any role value (dedup handles repeats).
+	return out
+}
+
+func roleNamesSorted(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
