@@ -50,6 +50,9 @@ type TaskTool struct {
 	// was spawned FOR (spawn-policy check: can this agent spawn its
 	// declared children?).
 	AgentName string
+	// Hub enables background task dispatch (hub tool, research §2). nil
+	// makes background:true fall back to a synchronous spawn.
+	Hub *Hub
 }
 
 // TaskToolName is the tool name the model calls.
@@ -72,7 +75,8 @@ func (t *TaskTool) Parameters() json.RawMessage {
     "name": {"type": "string", "description": "short label for the child session (optional)"},
     "schema": {"type": "object", "description": "JSON Schema the result must satisfy (optional)"},
     "strict": {"type": "boolean", "description": "with schema: grant the child one correction turn on mismatch (default false = accept with a note)"},
-    "max_turns": {"type": "integer", "description": "turn cap for the child (default 30)"}
+    "max_turns": {"type": "integer", "description": "turn cap for the child (default 30)"},
+    "background": {"type": "boolean", "description": "start the child in the background and return a job id immediately (default false = wait for the result)"}
   },
   "required": ["prompt"]
 }`)
@@ -81,12 +85,13 @@ func (t *TaskTool) Parameters() json.RawMessage {
 // Execute spawns the child and renders its handoff for the parent model.
 func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Result, error) {
 	var a struct {
-		Prompt   string          `json:"prompt"`
-		Agent    string          `json:"agent"` // named agent type (optional)
-		Name     string          `json:"name"`  // session label (optional)
-		Schema   json.RawMessage `json:"schema"`
-		Strict   bool            `json:"strict"`
-		MaxTurns int             `json:"max_turns"`
+		Prompt     string          `json:"prompt"`
+		Agent      string          `json:"agent"` // named agent type (optional)
+		Name       string          `json:"name"`  // session label (optional)
+		Schema     json.RawMessage `json:"schema"`
+		Strict     bool            `json:"strict"`
+		MaxTurns   int             `json:"max_turns"`
+		Background bool            `json:"background"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return tool.Result{Text: "task: malformed arguments: " + err.Error(), IsError: true}, nil
@@ -166,6 +171,7 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				Agents:          t.Agents,
 				Depth:           t.Depth + 1,
 				AgentName:       agentArg,
+				Hub:             t.Hub,
 			})
 		}
 	}
@@ -174,7 +180,7 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 	if mt <= 0 {
 		mt = t.MaxTurns
 	}
-	res, err := SpawnChild(ctx, SubagentSpec{
+	spec := SubagentSpec{
 		Name: a.Name, Prompt: a.Prompt, System: agentSystem,
 		Provider: t.Provider, Model: agentModel, Tools: agentTools,
 		CWD: t.CWD, DataDir: t.DataDir, MaxTurns: mt, MaxTokens: t.MaxTokens,
@@ -183,7 +189,21 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		Policy:          t.Policy,
 		Approve:         t.Approve,
 		Thinking:        t.Thinking,
-	})
+	}
+	if a.Background {
+		if t.Hub == nil {
+			return tool.Result{Text: "task: no hub configured — cannot dispatch in the background", IsError: true}, nil
+		}
+		id, err := t.Hub.Start(ctx, spec)
+		if err != nil {
+			return tool.Result{Text: "task: " + err.Error(), IsError: true}, nil
+		}
+		return tool.Result{
+			Text:    "started background job " + id + " (hub wait/jobs/send/cancel to drive it)",
+			Details: map[string]string{"job": id},
+		}, nil
+	}
+	res, err := SpawnChild(ctx, spec)
 	if err != nil {
 		return tool.Result{Text: "task: " + err.Error(), IsError: true}, nil
 	}

@@ -49,6 +49,9 @@ type SubagentSpec struct {
 	Approve ApprovalFunc
 	// Thinking inherits the parent's resolved role effort.
 	Thinking *ai.ThinkingBudget
+	// OnRun (optional) receives the live child Agent just before its run
+	// starts — the hub uses it to expose steering to the parent session.
+	OnRun func(*Agent)
 }
 
 // SubagentOutput is the yield payload contract.
@@ -216,6 +219,9 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 		Policy:    childPolicy,
 		Approve:   spec.Approve,
 		Thinking:  spec.Thinking,
+	}
+	if spec.OnRun != nil {
+		spec.OnRun(ag)
 	}
 
 	user := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: spec.Prompt}}}
