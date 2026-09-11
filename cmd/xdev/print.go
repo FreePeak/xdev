@@ -490,7 +490,10 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	} {
 		reg.Register(t)
 	}
+	// The hub coordinates background subagents for this session (M11 #12).
+	hub := agent.NewHub()
 	reg.Register(&agent.TaskTool{
+		Hub:      hub,
 		Policy:   pol,
 		Thinking: thinking,
 		Provider: prov,
@@ -522,6 +525,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 			return defs
 		}(),
 	})
+	reg.Register(&agent.HubTool{Hub: hub})
 	return reg
 }
 

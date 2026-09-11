@@ -166,9 +166,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetRenderers(specs)
 	}
 
-	// Replay resumed history as read-only blocks (thinking blocks replay
-	// too, gated by the showThinking display toggle).
-	if opts.ContinueLast {
+	// Replay an opened session's history as read-only blocks (thinking
+	// blocks replay too, gated by the showThinking display toggle). The
+	// store, not the flag, decides: --continue and --resume both land a
+	// populated store here, a fresh session has none.
+	if len(store.Entries()) > 0 {
 		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 		}
