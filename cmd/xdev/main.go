@@ -53,6 +53,7 @@ func main() {
 	apiKeyValue := fs.String("api-key", "", "credential for this run only (never persisted)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write")
+	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
 	prewalkInto := fs.String("prewalk-into", "@smol", "prewalk target: model ref or @role (default @smol)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
@@ -219,6 +220,7 @@ Flags:
 			MaxTokens:    *maxTokens,
 			Prewalk:      *prewalkFlag,
 			PrewalkInto:  *prewalkInto,
+			Plan:         *planFlag,
 		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {

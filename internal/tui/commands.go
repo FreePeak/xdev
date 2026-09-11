@@ -47,6 +47,14 @@ type SettingsOps struct {
 	SetThinking func(on bool) error
 }
 
+// PlanOps wires the /plan command to the live plan-mode state (lives in
+// cmd). Get reports the current state; Set toggles it. nil ops degrade
+// the command to a notice.
+type PlanOps struct {
+	Get func() bool
+	Set func(on bool) error
+}
+
 // ExtensionCommand runs one "/ext:cmd" and returns its output. Wired by
 // cmd from the extension manager; nil when no extensions are loaded.
 type ExtensionCommand func(name, args string) (string, error)
@@ -65,6 +73,7 @@ type CommandAPI interface {
 	DumpSession() error
 	ResumeSession(query string) error
 	SwitchModel(args string) error
+	PlanMode(args string) error
 	SettingsView(args string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
@@ -97,6 +106,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings; toggle showThinking on|off",
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit)",
+			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "help", Description: "show available commands",

@@ -56,6 +56,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// startup constants, so switching the active model applies to the next
 	// turn. Subagent task tools in `reg` are built once at startup and keep
 	// the initial model (documented ceiling below).
+	// Plan mode (M11): shared state across submits; the propose reviewer
+	// surfaces the plan in the transcript and stays in read-only until the
+	// user resolves (/plan off to approve, feedback to revise).
+	planMode := &agent.PlanMode{}
 	modelMu := &sync.Mutex{}
 	live := &struct {
 		prov     ai.Provider
@@ -65,7 +69,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}{prov, modelName, provName, effortRef}
 
 	// Tools + system prompt (shared with print mode).
-	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef))
+	// The propose reviewer (TUI): surface the plan and hold the decision
+	// for the user — /plan off resolves accept, any next prompt is the
+	// revision note. Headless runs auto-accept (nil reviewer).
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode)
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
@@ -418,6 +425,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return nil
 		},
 	})
+	// In the TUI, propose HOLDS the decision: the plan shows in the tool
+	// block, the model is told to wait, and the user resolves with /plan
+	// off (approve) or feedback (revise).
+	planMode.Propose = agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
+		return false, "awaiting user review — the user will /plan off to approve or send revision feedback"
+	})
+	app.SetPlanOps(&tui.PlanOps{
+		Get: func() bool { return planMode.Active },
+		Set: func(on bool) error { planMode.Active = on; return nil },
+	})
 	app.SetCommandDir(cwd)
 
 	app.SetHandlers(
@@ -462,6 +479,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				if t := resolvePrewalk(opts, cfg, lastSettings()); t != nil {
 					ag.Prewalk = &agent.Prewalk{Target: *t}
 				}
+				ag.PlanMode = planMode
 				// Extension actions steer the live run: this agent is the
 				// target until the next submit replaces it.
 				agentMu.Lock()

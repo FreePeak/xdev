@@ -49,6 +49,7 @@ type App struct {
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
 	ops           *SessionOps
 	modelOps      *ModelOps         // session lifecycle, wired by cmd (nil → notices)
+	planOps       *PlanOps          // /plan, wired by cmd (nil → notices)
 	settingsOps   *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
@@ -377,6 +378,39 @@ func (a *App) DumpSession() error {
 // ResumeSession implements CommandAPI by swapping to the resumed store.
 // SetModelOps wires the /model command (active state lives in cmd).
 func (a *App) SetModelOps(ops *ModelOps) { a.modelOps = ops }
+
+// SetPlanOps wires the /plan command (plan state lives in cmd).
+func (a *App) SetPlanOps(ops *PlanOps) { a.planOps = ops }
+
+// PlanMode implements CommandAPI /plan: no args toggles, "on"/"off" set
+// explicitly, and every transition announces itself in the transcript.
+func (a *App) PlanMode(args string) error {
+	if a.planOps == nil || a.planOps.Get == nil || a.planOps.Set == nil {
+		return fmt.Errorf("plan mode not wired")
+	}
+	arg := strings.TrimSpace(args)
+	cur := a.planOps.Get()
+	var on bool
+	switch arg {
+	case "":
+		on = !cur
+	case "on":
+		on = true
+	case "off":
+		on = false
+	default:
+		return fmt.Errorf("plan: use /plan, /plan on, or /plan off")
+	}
+	if err := a.planOps.Set(on); err != nil {
+		return err
+	}
+	if on {
+		a.AddSystemBlock("plan mode ON — read-only research; call propose with the plan to exit")
+	} else {
+		a.AddSystemBlock("plan mode OFF — full toolset restored")
+	}
+	return nil
+}
 
 func (a *App) ResumeSession(query string) error {
 	if a.ops == nil || a.ops.Resume == nil {

@@ -36,6 +36,8 @@ type printOptions struct {
 	// defaults to the @smol role.
 	Prewalk     bool
 	PrewalkInto string
+	// Plan starts the run in plan mode (read-only + propose exit).
+	Plan bool
 }
 
 // resolvePrewalk builds the handoff target for a run. Returns nil when
@@ -98,7 +100,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- tools ---
-	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef))
+	planMode := &agent.PlanMode{Active: opts.Plan}
+	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef), planMode)
 
 	// MCP servers (optional; absent config = nothing happens).
 	mgr := attachMCP(context.Background(), reg, true)
@@ -125,7 +128,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- agent ---
 	hooks := &printHooks{store: store, showThinking: settings.ShowThinkingOn()}
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef)}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -481,7 +484,7 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 // a child can never spawn grandchildren (structural depth guard).
 // thinking is the parent's resolved role effort, forwarded to children so
 // delegation does not silently downgrade (or upgrade) the reasoning budget.
-func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget) *tool.Registry {
+func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode) *tool.Registry {
 	pol := settingsPolicy(settings)
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{
@@ -532,6 +535,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		}(),
 	})
 	reg.Register(&agent.HubTool{Hub: hub})
+
 	return reg
 }
 
