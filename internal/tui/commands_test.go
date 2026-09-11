@@ -205,6 +205,8 @@ func TestAppCommandHook(t *testing.T) {
 }
 
 // Stub implementations for the extended CommandAPI surface.
+func (f *fakeAPI) KeyMap() *KeyMap { return DefaultKeyMap() }
+
 func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
 	f.extCalls = append(f.extCalls, name+" "+args)
 	return "ext output: " + name, f.extErr
