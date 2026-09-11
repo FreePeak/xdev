@@ -41,7 +41,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	if !ok {
 		return 2, fmt.Errorf("unknown provider %q", provName)
 	}
-	prov, err := buildProvider(provName, pc, cfg)
+	prov, err := buildProvider(provName, pc, modelName, cfg)
 	if err != nil {
 		return 2, err
 	}
@@ -236,7 +236,7 @@ func (h *rpcHandler) SetModel(ref string) error {
 	if !ok {
 		return fmt.Errorf("unknown provider %q", provName)
 	}
-	prov, err := buildProvider(provName, pc, h.cfg)
+	prov, err := buildProvider(provName, pc, modelName, h.cfg)
 	if err != nil {
 		return err
 	}

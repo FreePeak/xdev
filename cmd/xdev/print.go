@@ -57,7 +57,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if !ok {
 		return 2, fmt.Errorf("unknown provider %q (have: %v)", provName, providerKeys(cfg))
 	}
-	prov, err := buildProvider(provName, pc, cfg)
+	prov, err := buildProvider(provName, pc, modelName, cfg)
 	if err != nil {
 		return 2, err
 	}
@@ -145,7 +145,7 @@ func providerKeys(cfg *config.Config) []string {
 }
 
 // buildProvider constructs the wire adapter for a provider config.
-func buildProvider(name string, pc *config.ProviderConfig, cfg *config.Config) (ai.Provider, error) {
+func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg *config.Config) (ai.Provider, error) {
 	hc := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        8,
@@ -189,6 +189,26 @@ func buildProvider(name string, pc *config.ProviderConfig, cfg *config.Config) (
 	if h := strings.TrimSpace(pc.AuthHeader); h != "" && h != "Authorization" && apiKey != "" {
 		headers[h] = apiKey
 		apiKey = ""
+	}
+
+	// Per-model overrides (models.yml `models[]` entries) are last-wins over
+	// provider-level values: BaseURL/APIKey/Headers each replace their
+	// provider-level counterpart. This is the models.yml merge contract the
+	// issue names — without it, the declared fields are dead weight.
+	for _, m := range pc.Models {
+		if m.ID != modelName {
+			continue
+		}
+		if m.BaseURL != "" {
+			baseURL = config.Resolve(m.BaseURL)
+		}
+		if k := config.Resolve(m.APIKey); k != "" {
+			apiKey = k
+		}
+		for hk, hv := range m.Headers {
+			headers[hk] = config.Resolve(hv)
+		}
+		break
 	}
 	switch pc.API {
 	case ai.APIOpenAICompletions:
@@ -564,7 +584,7 @@ func failoverChain(cfg *config.Config, primaryProv, primaryModel string) []agent
 	sort.Strings(names)
 	for _, pname := range names {
 		pc := cfg.Providers[pname]
-		prov, err := buildProvider(pname, pc, cfg)
+		prov, err := buildProvider(pname, pc, "", cfg)
 		if err != nil {
 			continue
 		}
