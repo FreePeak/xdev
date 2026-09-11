@@ -35,8 +35,12 @@ type Settings struct {
 	BashPatterns []string `yaml:"bashPatterns"`
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
-	ModelRolesEffort  map[string]string `yaml:"modelRolesEffort"`
-	DisabledProviders []string          `yaml:"disabledProviders"`
+	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
+	// Hooks declares shell-command hooks per event (M11 #12):
+	// event -> one command or a list. First block short-circuits,
+	// last-wins for input/result overrides. See internal/hooks.
+	Hooks             map[string]any `yaml:"hooks"`
+	DisabledProviders []string       `yaml:"disabledProviders"`
 	// ShowThinking renders model reasoning output in the transcript. A
 	// nil pointer means "unset in this layer" (the schema default is on);
 	// a plain bool could never express an explicit false through the
@@ -56,6 +60,7 @@ func defaultSettings() *Settings {
 		ModelRoles:       map[string]string{},
 		ToolsApproval:    map[string]string{},
 		ModelRolesEffort: map[string]string{},
+		Hooks:            map[string]any{},
 		ShowThinking:     &show,
 	}
 }
@@ -145,6 +150,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.BashPatterns != nil {
 		s.BashPatterns = append([]string(nil), layer.BashPatterns...)
+	}
+	for k, v := range layer.Hooks {
+		s.Hooks[k] = v
 	}
 	for k, v := range layer.ModelRolesEffort {
 		s.ModelRolesEffort[k] = v
