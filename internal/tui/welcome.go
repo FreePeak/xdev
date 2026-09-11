@@ -47,14 +47,14 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 // size; the only size-dependent choice is whether it fits at all
 // (see logoArt).
 var xdevLogo = []string{
-	"▀███    ▐███▀ ███████▄   ▄████▄  ▄█    █▄",
+	"▀███    ▐███▀ ███████▄   ▄████▄  █▌    ▐█",
 	"  ██▌   ███▀  ██    ▀██ ██    ██ ██    ██",
 	"   ██  ▐██    ██     ██ ██    █▀ ██    ██",
 	"   ▀██▄██▀    ██     ██ ▄██▄▄▄   ██    ██",
-	"   ███▀██▄    ██     ██ ▀▀██▀▀▀  ██    ██",
-	"  ▐██  ▀██    ██     ██ ██    █▄ ██    ██",
-	" ▄██     ██▄  ██    ▄██ ██    ██ ██    ██",
-	"███       ██▄ ███████▀  ████████ ▀██████▀",
+	"   ███▀██▄    ██     ██ ▀▀██▀▀▀   ██  ██",
+	"  ▐██  ▀██    ██     ██ ██    █▄  ██  ██",
+	" ▄██     ██▄  ██    ▄██ ██    ██   ████",
+	"███       ██▄ ███████▀  ████████    ██",
 }
 
 // logoWidth returns the widest art row in cells.
@@ -86,8 +86,8 @@ func logoArt(w, h int) []string {
 // two columns per row leans the band to ~45° on screen (a cell is
 // about twice as tall as wide), ±2 columns is its half-width, and the
 // rest pauses the sweep between passes. The phase advances one column
-// per welcome animation step (~8fps), so a pass takes ~8s with a
-// 2s-ish rest.
+// per 33ms welcome tick (~30fps, see App.Run), so a pass over the
+// 41-cell mark takes ~2.5s including its rest.
 const (
 	sheenSlant = 2
 	sheenHalf  = 2

@@ -735,12 +735,14 @@ func (a *App) Run() {
 			if running {
 				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(spinnerFrames)
 			}
-			// Game of Life on the welcome screen: step every 4th
-			// 33ms tick (~8fps) and redraw only on those steps,
-			// while it is visible (no blocks, nothing running) —
-			// idle CPU stays near zero between steps. The logo
-			// sheen advances on the same cadence, so it animates
-			// every step and Life steps every 4th tick.
+			// Welcome animation. The logo sheen advances one column
+			// per 33ms tick and redraws with it — a smooth sweep at
+			// ~30fps, the cadence omarchy's own About animation runs
+			// at (25ms frames) — while the welcome is visible (no
+			// blocks, nothing running). The Life backdrop still steps
+			// every 4th tick (~8fps), which is all it needs; both
+			// stop once a block exists, so the only idle cost is the
+			// draw itself.
 			animate := false
 			if !running && len(a.blocks) == 0 {
 				gw, top, bot, ok := lifeArea(a.width, a.height)
