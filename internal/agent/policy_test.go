@@ -255,3 +255,22 @@ func (s spyRan) Execute(_ context.Context, args json.RawMessage) (tool.Result, e
 	*s.ran = append(*s.ran, string(args))
 	return tool.Result{Text: "echoed"}, nil
 }
+
+// TestAgentNilInterceptIsSafe pins the TUI crash regression: an Agent with
+// a nil Intercept (typed-nil Manager) must run a full successful turn
+// without panicking. Before the nil-safe guards, Emit on a nil receiver
+// SIGSEGV'd the TUI on every turn when no extensions were installed.
+func TestAgentNilInterceptIsSafe(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: toolCallEvents("bash", `{"command":"echo hi"}`)},
+		{events: []ai.Event{{Type: ai.EventStart}, textEvent("done"), doneEvent("done")}},
+	}}
+	reg := tool.NewRegistry()
+	reg.Register(bashSpy{ran: &[]string{}})
+	a := &Agent{Provider: p, Tools: reg, Hooks: &hookLog{}, Model: "m", Retry: fastRetry()}
+	// Intercept is nil (the zero value) — no extensions, no policy bus.
+	hist := []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}}
+	if _, err := a.Run(context.Background(), "sys", hist); err != nil {
+		t.Fatalf("nil Intercept must not panic: %v", err)
+	}
+}

@@ -3,10 +3,12 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,17 +20,38 @@ import (
 // TestConnectListsAndCalls is the MCP exit criterion: a configured stdio
 // server is connected, its tools are namespaced and callable, and a
 // failing server only logs (never blocks the agent).
+var (
+	binOnce  sync.Once
+	binPath  string
+	binError error
+)
+
+// buildFixtureServer compiles the test MCP server once per binary run.
+func buildFixtureServer(t *testing.T) string {
+	binOnce.Do(func() {
+		dir, derr := os.MkdirTemp("", "mcpfixture")
+		if derr != nil {
+			binError = derr
+			return
+		}
+		binPath = filepath.Join(dir, "mcpserver")
+		build := exec.Command("go", "build", "-o", binPath, "./testdata/mcpserver")
+		if out, err := build.CombinedOutput(); err != nil {
+			binError = fmt.Errorf("build: %v\n%s", err, out)
+		}
+	})
+	if binError != nil {
+		t.Skipf("cannot build test server: %v (%s)", binError, binPath)
+	}
+	return binPath
+}
+
 func TestConnectListsAndCalls(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not on PATH")
 	}
-	// Build this package's test binary once; it doubles as the server.
+	bin := buildFixtureServer(t)
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "mcpserver")
-	build := exec.Command("go", "build", "-o", bin, "./testdata/mcpserver")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Skipf("cannot build test server: %v\n%s", err, out)
-	}
 
 	cfgYAML := `
 servers:

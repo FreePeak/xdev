@@ -248,6 +248,40 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return out
 	})
 
+	app.SetSessionTree(func() string { return store.Tree() })
+	app.SetSessionBranch(func(args string) error {
+		query := strings.TrimSpace(args)
+		if query == "" {
+			return fmt.Errorf("branch: entry-id prefix required")
+		}
+		for _, e := range store.Entries() {
+			env := e.Envelope()
+			if strings.HasPrefix(env.ID, query) {
+				if err := store.Branch(env.ID); err != nil {
+					return fmt.Errorf("branch: %v", err)
+				}
+				// Replay the new branch's transcript into the TUI.
+				if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
+					app.Reset()
+					for _, m := range res.Messages {
+						switch m.Role {
+						case ai.RoleUser:
+							if txt := m.Text(); txt != "" {
+								app.AddUserBlock(txt)
+							}
+						case ai.RoleAssistant:
+							if txt := m.Text(); txt != "" {
+								app.AddAssistantBlock(txt)
+							}
+						}
+					}
+					app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("branch: no entry matching %q", query)
+	})
 	app.SetLocation(cwd)
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
@@ -351,13 +385,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
 					Failovers:  failoverChain(cfg, provName, modelName),
 					Thinking:   effortBudget(effortRef),
-					Intercept:  exts, // fail-closed policy must hold in the daily-driver mode too
-					Policy:     agentPolicy(),
+					// Intercept set below from exts (only when non-nil).
+					Policy: agentPolicy(),
 				}
 				// Extension actions steer the live run: this agent is the
 				// target until the next submit replaces it.
 				agentMu.Lock()
 				curAgent = ag
+				if exts != nil {
+					ag.Intercept = exts
+				}
 				agentMu.Unlock()
 				defer func() {
 					agentMu.Lock()

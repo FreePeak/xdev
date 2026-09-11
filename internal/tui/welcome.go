@@ -32,16 +32,20 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 	return items
 }
 
-// xdevLogo is the one welcome logo: ANSI-shadow "XDev". It renders
-// identically at every terminal size — the only size-dependent choice
-// is whether it fits at all (see logoArt).
+// xdevLogo is the one welcome logo: the figlet "3d" font (the
+// ANSI-shadow family's companion — same solid/shaded block aesthetic,
+// but with genuine lowercase, so the mark actually reads "XDev").
+// It renders identically at every terminal size; the only
+// size-dependent choice is whether it fits at all (see logoArt).
 var xdevLogo = []string{
-	"██╗  ██╗  ██████╗",
-	"██║ ██╔╝  ██╔══██╗",
-	"█████╔╝  ██║  ██║   █████╗   ██║   ██║",
-	"██╔═██╗  ██║  ██║   ██╔══╝   ╚██╗ ██╔╝",
-	"██║  ██╗  ██████╔╝  ███████╗   ╚████╔╝",
-	"╚═╝  ╚═╝  ╚═════╝   ╚══════╝    ╚═══╝",
+	" ██     ██  ███████",
+	"░░██   ██ ░██░░░░██",
+	" ░░██ ██ ░██    ░██   █████  ██    ██",
+	"  ░░███ ░██    ░██  ██░░░██ ░██   ░██",
+	"   ██░██ ░██    ░██ ░███████ ░░██ ░██",
+	"  ██ ░░██ ░██    ██ ░██░░░░  ░░████",
+	" ██   ░░██ ░███████ ░░██████   ░░██",
+	"░░     ░░ ░░░░░░░  ░░░░░░    ░░",
 }
 
 // logoWidth returns the widest art row in cells.
@@ -56,12 +60,12 @@ func logoWidth() int {
 }
 
 // logoArt returns the xdev logo for the given terminal size, or nil
-// when the terminal can't fit it: content shorter than the 6 art rows
-// plus tagline and menu, or narrower than the 38-cell art plus
+// when the terminal can't fit it: content shorter than the 8 art rows
+// plus tagline, gap and menu, or narrower than the 37-cell art plus
 // margins. One logo at every size — no variant swapping, so the
 // artwork never changes shape between terminal sizes.
 func logoArt(w, h int) []string {
-	if h < 12 || w < logoWidth()+4 {
+	if h < 14 || w < logoWidth()+4 {
 		return nil
 	}
 	return xdevLogo

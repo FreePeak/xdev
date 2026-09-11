@@ -38,6 +38,8 @@ type CommandAPI interface {
 	ClearSession() error
 	DropSession() error
 	RunExtensionCommand(name, args string) (string, error)
+	SessionTree() string
+	BranchSession(args string) error
 	KeyMap() *KeyMap
 	ForkSession() error
 	DumpSession() error
@@ -61,6 +63,10 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.DropSession() }},
 		{Name: "fork", Description: "branch the session into a new file",
 			Fn: func(app CommandAPI, args string) error { return app.ForkSession() }},
+		{Name: "tree", Description: "show the session tree",
+			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.SessionTree()); return nil }},
+		{Name: "branch", Description: "switch to an entry by id prefix",
+			Fn: func(app CommandAPI, args string) error { return app.BranchSession(args) }},
 		{Name: "dump", Description: "export the transcript to markdown",
 			Fn: func(app CommandAPI, args string) error { return app.DumpSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
