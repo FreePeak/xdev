@@ -180,10 +180,10 @@ func (a *App) drawLife(s tcell.Screen, left, top int, dense, mid, dim tcell.Styl
 }
 
 // lifeArea returns the backdrop's grid width and row range: a band
-// inset from the screen edges — smaller than the full content area —
-// and skipped entirely on terminals too small to spare it.
+// inset from the screen edges — a slim strip around the centered
+// logo — and skipped entirely on terminals too small to spare it.
 func lifeArea(w, h int) (gw, top, bot int, ok bool) {
-	return w - 12, 2, h - 6, w >= 40 && h >= 16
+	return w - 20, 3, h - 8, w >= 48 && h >= 18
 }
 
 // cwdShort renders the top-bar location: last two path components.
@@ -237,7 +237,7 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	gw, top, bot, ok := lifeArea(w, h)
 	if ok {
 		a.ensureLife(gw, top, bot)
-		a.drawLife(s, 6, top, st(a.th.Get(theme.GrayBright), false), st(grayC, false), st(dimC, false))
+		a.drawLife(s, 10, top, st(a.th.Get(theme.GrayBright), false), st(grayC, false), st(dimC, false))
 	}
 
 	// Logo + menu vertically centered in the content area (the composer
