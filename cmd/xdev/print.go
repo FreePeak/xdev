@@ -473,6 +473,17 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 			&tool.ASTGrepTool{CWD: cwd},
 			&tool.ASTEditTool{CWD: cwd},
 		},
+		// M11 #12: named task agents discovered from markdown files
+		// (.xdev/agents/, ~/.xdev/agent/agents/). The task tool resolves
+		// the "agent" argument against these; a named agent runs with its
+		// own system prompt, tools, and model.
+		Agents: func() []agent.AgentDefinition {
+			defs, warnings := agent.DiscoverAgents(cwd)
+			for _, w := range warnings {
+				fmt.Fprintln(os.Stderr, "warning: "+w)
+			}
+			return defs
+		}(),
 	})
 	return reg
 }
