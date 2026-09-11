@@ -10,6 +10,10 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
+
+	"github.com/FreePeak/xdev/internal/theme"
+	"github.com/FreePeak/xdev/internal/tui"
+	"github.com/gdamore/tcell/v2"
 )
 
 // TestBreadcrumbRoundTrip: save/read keyed by the terminal, overwrite wins.
@@ -97,5 +101,45 @@ func TestDumpSession(t *testing.T) {
 	s := string(data)
 	if !strings.Contains(s, "# xdev transcript") || !strings.Contains(s, "## User") || !strings.Contains(s, "hello dump") {
 		t.Fatalf("dump content incomplete:\n%s", s)
+	}
+}
+
+// TestReplayTranscriptIncludesThinking: resumed/branched sessions must show
+// past reasoning blocks, and the showThinking toggle must gate them the
+// same way it gates fresh turns.
+func TestReplayTranscriptIncludesThinking(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(80, 24)
+	app := tui.New(scr, theme.Load("groknight"), "test/free", "sess")
+
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "question"}}},
+		{Role: ai.RoleAssistant, Content: []ai.Block{
+			ai.ThinkingBlock{Thinking: "pondering deeply"},
+			ai.TextBlock{Text: "answer"},
+		}},
+	}
+	replayTranscript(app, msgs)
+	blocks := app.Blocks()
+	if len(blocks) != 3 || blocks[0].Kind != tui.KindUser || blocks[1].Kind != tui.KindThinking || blocks[2].Kind != tui.KindAssistant {
+		t.Fatalf("replay blocks = %v", blocks)
+	}
+	if blocks[1].Text != "pondering deeply" {
+		t.Fatalf("thinking text = %q", blocks[1].Text)
+	}
+	// Toggle off: replay must drop the thinking block, keep the text.
+	app.Reset()
+	app.SetShowThinking(false)
+	replayTranscript(app, msgs)
+	blocks = app.Blocks()
+	if len(blocks) != 2 || blocks[0].Kind != tui.KindUser || blocks[1].Kind != tui.KindAssistant {
+		t.Fatalf("replay with thinking off = %v", blocks)
+	}
+	if blocks[1].Text != "answer" {
+		t.Fatalf("assistant text = %q", blocks[1].Text)
 	}
 }
