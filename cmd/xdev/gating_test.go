@@ -28,7 +28,7 @@ func providerFrom(t *testing.T, provider, body string) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = buildProvider(provider, cfg.Providers[provider])
+	_, err = buildProvider(provider, cfg.Providers[provider], cfg)
 	return err
 }
 

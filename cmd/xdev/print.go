@@ -57,7 +57,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if !ok {
 		return 2, fmt.Errorf("unknown provider %q (have: %v)", provName, providerKeys(cfg))
 	}
-	prov, err := buildProvider(provName, pc)
+	prov, err := buildProvider(provName, pc, cfg)
 	if err != nil {
 		return 2, err
 	}
@@ -145,7 +145,7 @@ func providerKeys(cfg *config.Config) []string {
 }
 
 // buildProvider constructs the wire adapter for a provider config.
-func buildProvider(name string, pc *config.ProviderConfig) (ai.Provider, error) {
+func buildProvider(name string, pc *config.ProviderConfig, cfg *config.Config) (ai.Provider, error) {
 	hc := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        8,
@@ -161,7 +161,10 @@ func buildProvider(name string, pc *config.ProviderConfig) (ai.Provider, error) 
 	settings := lastSettings()
 	// Chain order: CLI key → models.yml (per-model then provider) → stored
 	// OAuth → /login key → env.
-	credReq := config.CredentialRequest{Provider: name, ProviderCfg: pc, CLIKey: cliAPIKey()}
+	credReq := config.CredentialRequest{
+		Provider: name, ProviderCfg: pc, CLIKey: cliAPIKey(),
+		Refresh: refreshFunc(name, cfg),
+	}
 	resolved, credErr := config.ResolveCredential(credReq)
 	// auth: none — a local server (ollama, lm-studio) is configured by
 	// definition, so it has no credential and that is not an error.
@@ -561,7 +564,7 @@ func failoverChain(cfg *config.Config, primaryProv, primaryModel string) []agent
 	sort.Strings(names)
 	for _, pname := range names {
 		pc := cfg.Providers[pname]
-		prov, err := buildProvider(pname, pc)
+		prov, err := buildProvider(pname, pc, cfg)
 		if err != nil {
 			continue
 		}
