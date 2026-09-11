@@ -148,6 +148,11 @@ type Agent struct {
 	// through the failover machinery (see prewalk.go).
 	Prewalk *Prewalk
 
+	// PlanMode is the read-only sub-state (nil = plain mode). While
+	// active, mutating tools are denied and propose is the exit; see
+	// planmode.go.
+	PlanMode *PlanMode
+
 	// prewalk is the live state machine; Run is single-goroutine, no lock.
 	prewalk prewalkState
 
@@ -211,6 +216,10 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			a.Intercept.Emit(ctx, "agent_end", nil)
 		}
 	}()
+	// Plan mode reminder: teach the read-only shape for this run.
+	if a.PlanMode != nil && a.PlanMode.Active {
+		system += "\n\n" + planModeSystemReminder(a.PlanMode.Note)
+	}
 	// Magic keywords (research §8): standalone prose words in the user's
 	// prompt inject a hidden, user-attributed notice for this turn. The
 	// notice is persisted so a compaction rebuild replays it consistently.
@@ -562,9 +571,20 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 
 func (a *Agent) toolDefs() []ai.ToolDef {
 	defs := a.Tools.Defs()
-	out := make([]ai.ToolDef, 0, len(defs))
+	out := make([]ai.ToolDef, 0, len(defs)+1)
 	for _, d := range defs {
 		out = append(out, ai.ToolDef{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+	}
+	// Plan mode exposes its exit tool only while the sub-state is live —
+	// normal-mode registries never contain propose.
+	if a.PlanMode != nil && a.PlanMode.Active && a.PlanMode.Propose != nil {
+		if d, ok := a.PlanMode.Propose.(interface {
+			Name() string
+			Description() string
+			Parameters() json.RawMessage
+		}); ok {
+			out = append(out, ai.ToolDef{Name: d.Name(), Description: d.Description(), Parameters: d.Parameters()})
+		}
 	}
 	return out
 }
@@ -589,9 +609,19 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 }
 
 func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Message {
-	t, ok := a.Tools.Get(call.Name)
 	started := time.Now()
 	a.Hooks.OnToolStart(call)
+	// The plan-mode exit tool lives outside the registry (it is exposed
+	// only while the sub-state is live), so route it before lookup.
+	if a.PlanMode != nil && a.PlanMode.Active && a.PlanMode.Propose != nil && call.Name == ProposeToolName {
+		res, rerr := a.PlanMode.Propose.Execute(ctx, call.Arguments)
+		if rerr != nil {
+			res = tool.Result{Text: "propose: " + rerr.Error(), IsError: true}
+		}
+		a.Hooks.OnToolEnd(call, res, time.Since(started))
+		return toolResultMsg(call, res)
+	}
+	t, ok := a.Tools.Get(call.Name)
 	if !ok {
 		res := tool.Result{Text: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
@@ -602,6 +632,13 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		args = call.Arguments
 	} else if call.PartialArgs != "" {
 		args = json.RawMessage(call.PartialArgs)
+	}
+	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
+	// to propose while the sub-state is active. Checked before approval —
+	// a read-only run must never reach an approval prompt for a mutation.
+	if denied, blocked := applyPlanMode(a.PlanMode, call); blocked {
+		a.Hooks.OnToolEnd(call, denied, time.Since(started))
+		return toolResultMsg(call, denied)
 	}
 	// Approval policy: deny/prompt are resolved before anything runs.
 	if dec, err := a.Policy.Decide(call.Name, args); err == nil && dec.Action != tool.ActionAllow {

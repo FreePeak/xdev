@@ -150,4 +150,3 @@ func (a *App) drawSelection() {
 		}
 	}
 }
-

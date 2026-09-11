@@ -21,6 +21,7 @@ type fakeAPI struct {
 	extErr   error
 
 	setModel string
+	plan     string
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -323,6 +324,14 @@ func TestExtensionCommandErrorSurfaces(t *testing.T) {
 	if len(app.blocks) != 1 || !strings.Contains(app.blocks[0], "extension offline") {
 		t.Fatalf("error not surfaced: %v", app.blocks)
 	}
+}
+
+func (f *fakeAPI) PlanMode(args string) error {
+	if f.fail == "plan" {
+		return fmt.Errorf("boom")
+	}
+	f.plan = args
+	return nil
 }
 
 func (f *fakeAPI) SwitchModel(args string) error {
