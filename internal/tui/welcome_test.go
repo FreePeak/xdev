@@ -402,3 +402,56 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 		}
 	}
 }
+
+// TestSheenBandGeometry pins the Omarchy-style sheen sweep: every
+// cell lights for part of the period, the band is the declared width,
+// it leans (a row's lit span starts sheenSlant columns later than the
+// row above's), and after the full period the phase repeats exactly.
+func TestSheenBandGeometry(t *testing.T) {
+	rows := len(xdevLogo)
+	lw := logoWidth()
+	period := lw + (rows-1)*sheenSlant + 2*sheenHalf + 1 + sheenRest
+	for row := range rows {
+		for col := range lw {
+			lit := 0
+			first := -1
+			for ph := range period {
+				if sheenInBand(ph, row, col, lw) {
+					if first < 0 {
+						first = ph
+					}
+					lit++
+				}
+			}
+			if lit != 2*sheenHalf+1 {
+				t.Fatalf("cell (%d,%d) lit %d ticks in a period, want band width %d", row, col, lit, 2*sheenHalf+1)
+			}
+			if first < 0 {
+				t.Fatalf("cell (%d,%d) never lit", row, col)
+			}
+		}
+	}
+	// The band leans: cell (r,c) first lights 2 ticks (sheenSlant) after
+	// the cell above it did.
+	for row := 1; row < rows; row++ {
+		for col := range lw {
+			f0, f1 := -1, -1
+			for ph := range period {
+				if sheenInBand(ph, row-1, col, lw) && f0 < 0 {
+					f0 = ph
+				}
+				if sheenInBand(ph, row, col, lw) && f1 < 0 {
+					f1 = ph
+				}
+			}
+			if f0 >= 0 && f1 >= 0 && f1 != f0+sheenSlant {
+				t.Fatalf("lean broken at (%d,%d): first-lit %d vs %d above", row, col, f1, f0)
+			}
+		}
+	}
+	// Periodic: a mid-sweep phase and the same phase one period later
+	// light identical cells.
+	if sheenInBand(30, 3, 20, lw) != sheenInBand(30+period, 3, 20, lw) {
+		t.Fatal("phase must be periodic with the declared period")
+	}
+}
