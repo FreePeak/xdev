@@ -151,8 +151,3 @@ func (a *App) drawSelection() {
 	}
 }
 
-// captureSelRows records the last frame's rendered rows for hit-testing
-// on release. Caller: draw's transcript loop (mu held).
-func (a *App) captureSelRows(sr selRow) {
-	a.selRows = append(a.selRows, sr)
-}
