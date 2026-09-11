@@ -46,11 +46,14 @@ func DefaultKeyMap() *KeyMap {
 	m := &KeyMap{
 		bindings: map[string]string{
 			// Editor / composer. Ctrl+J is the portable newline (every
-			// terminal can send 0x0A); Alt-Enter is the alias some
-			// terminals report for the same keystroke.
+			// terminal can send 0x0A). The aliases are real chords on the
+			// terminals that report them: Alt-Enter via ESC-prefixing,
+			// Shift-Enter via kitty/CSI-u (chordOf marks KeyEnter
+			// shift-eligible); elsewhere they degrade to plain Enter.
 			"Enter":   "submit",
 			"C-j":     "newline",
 			"A-Enter": "newline",
+			"S-Enter": "newline",
 			"Escape":  "cancel",
 			"C-u":     "clear-input",
 			// Quit
@@ -241,8 +244,11 @@ func chordOf(ev *tcell.EventKey) string {
 	if m&tcell.ModCtrl != 0 {
 		parts = append(parts, "C")
 	}
-	if m&tcell.ModShift != 0 && ev.Key() >= tcell.KeyUp && ev.Key() <= tcell.KeyPgDn {
-		parts = append(parts, "S") // Shift only distinguishes arrow/nav keys
+	// Shift distinguishes arrow/nav keys — and Enter on kitty/CSI-u
+	// terminals, which report Shift+Enter as a distinct event. Terminals
+	// that send plain Enter for Shift+Enter degrade to the Enter chord.
+	if m&tcell.ModShift != 0 && ((ev.Key() >= tcell.KeyUp && ev.Key() <= tcell.KeyPgDn) || ev.Key() == tcell.KeyEnter) {
+		parts = append(parts, "S")
 	}
 	if m&tcell.ModAlt != 0 {
 		parts = append(parts, "A")

@@ -27,7 +27,7 @@ func TestChildModelRole(t *testing.T) {
 }
 
 func TestResolveModelPrecedence(t *testing.T) {
-	providerModelCache = map[string][]config.ModelConfig{}
+	resetProviderModelCache()
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
 		// "flag" is in the catalog: resolveModel now validates literal refs
 		// against the merged catalog so a typo fails here instead of 404ing
@@ -62,7 +62,7 @@ func TestResolveModelAcceptance(t *testing.T) {
 	// providerModelCache is keyed by provider name for the whole process:
 	// another test's fixture for the same name must not leak in (and these
 	// discoveries must not leak out).
-	providerModelCache = map[string][]config.ModelConfig{}
+	resetProviderModelCache()
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
 		"onegw": {Models: []config.ModelConfig{{ID: "free"}, {ID: "dev"}}},
 		"empty": {}, // override-only provider: no catalog to validate against
@@ -81,10 +81,12 @@ func TestResolveModelAcceptance(t *testing.T) {
 		{name: "bare id case-insensitive", in: "DEV", wantRef: "onegw/dev"},
 		{name: "effort suffix", in: "onegw/dev:high", wantRef: "onegw/dev", wantEffort: "high"},
 		{name: "bare id with effort", in: "dev:low", wantRef: "onegw/dev", wantEffort: "low"},
-		{name: "unknown suffix stays in the id", in: "onegw/dev:turbo", wantErr: "unknown model"},
+		// The catalog check is advisory for typed refs (gateways serve more
+		// than models.yml pins); the hard guards are bare-id expansion below.
+		{name: "unknown suffix stays in the id", in: "onegw/dev:turbo", wantRef: "onegw/dev:turbo"},
+		{name: "unknown id for a known provider", in: "onegw/nope", wantRef: "onegw/nope"},
 		{name: "unknown bare id", in: "nope", wantErr: "unknown model"},
 		{name: "ambiguous bare id", in: "dup", wantErr: "matches a/dup, b/dup"},
-		{name: "unknown id for a known provider", in: "onegw/nope", wantErr: "configured: free, dev"},
 		{name: "override-only provider skips validation", in: "empty/anything", wantRef: "empty/anything"},
 	}
 	for _, tc := range tests {
