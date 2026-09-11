@@ -36,6 +36,10 @@ type Settings struct {
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
 	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
+	// Advisor runs a background reviewer on the session (M11, research §6).
+	// The reviewer model comes from modelRoles.advisor; without that role
+	// the flag warns and starts disarmed.
+	Advisor bool `yaml:"advisor"`
 	// Hooks declares shell-command hooks per event (M11 #12):
 	// event -> one command or a list. First block short-circuits,
 	// last-wins for input/result overrides. See internal/hooks.

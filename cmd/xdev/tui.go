@@ -60,6 +60,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// surfaces the plan in the transcript and stays in read-only until the
 	// user resolves (/plan off to approve, feedback to revise).
 	planMode := &agent.PlanMode{}
+	// Advisor (M11 #12): a background reviewer when settings.advisor is on
+	// AND modelRoles.advisor resolves. It watches transcript snapshots and
+	// steers into the live run.
+	adv := buildAdvisor(cfg, lastSettings())
+	var advisorOn atomic.Bool
+	advisorOn.Store(adv != nil)
 	modelMu := &sync.Mutex{}
 	live := &struct {
 		prov     ai.Provider
@@ -431,6 +437,42 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	planMode.Propose = agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
 		return false, "awaiting user review — the user will /plan off to approve or send revision feedback"
 	})
+	app.SetAdvisorOps(&tui.AdvisorOps{
+		Enabled: func() bool { return adv != nil },
+		Set: func(on bool) error {
+			if on && adv == nil {
+				return fmt.Errorf("advisor unavailable: set modelRoles.advisor and advisor: true in settings")
+			}
+			advisorOn.Store(on)
+			return nil
+		},
+		Status: func() string {
+			if adv == nil {
+				return "off (no modelRoles.advisor configured)"
+			}
+			if adv.Halted() {
+				return "halted after repeated failures"
+			}
+			if advisorOn.Load() {
+				return "on"
+			}
+			return "off"
+		},
+		Dump: func() string {
+			if adv == nil {
+				return "advisor: none"
+			}
+			notes := adv.Dump()
+			if len(notes) == 0 {
+				return "advisor: no notes from the last review"
+			}
+			var b strings.Builder
+			for _, n := range notes {
+				fmt.Fprintf(&b, "[%s] %s\n", n.Severity, n.Text)
+			}
+			return strings.TrimRight(b.String(), "\n")
+		},
+	})
 	app.SetPlanOps(&tui.PlanOps{
 		Get: func() bool { return planMode.Active },
 		Set: func(on bool) error { planMode.Active = on; return nil },
@@ -459,13 +501,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				defer cancel()
 				defer running.Store(false)
 				app.SetRunning(true)
+				var feedAdvisor func()
 				modelMu.Lock()
 				lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
 				modelMu.Unlock()
 				ag := &agent.Agent{
 					Provider:   lp,
 					Tools:      reg,
-					Hooks:      &tuiHooks{ts: ts},
+					Hooks:      &tuiHooks{ts: ts, feed: feedAdvisor},
 					MaxTokens:  opts.MaxTokens,
 					MaxTurns:   opts.MaxTurns,
 					Model:      lm,
@@ -480,6 +523,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					ag.Prewalk = &agent.Prewalk{Target: *t}
 				}
 				ag.PlanMode = planMode
+				// feedAdvisor hands the reviewer a fresh snapshot after each
+				// assistant message; it never blocks the primary turn.
+				if adv != nil {
+					adv.Primary = ag
+					feedAdvisor = func() {
+						if !advisorOn.Load() {
+							return
+						}
+						sessMu.Lock()
+						snap := rebuildHistory()
+						sessMu.Unlock()
+						go adv.Feed(baseCtx, append([]ai.Message(nil), snap...))
+					}
+				}
 				// Extension actions steer the live run: this agent is the
 				// target until the next submit replaces it.
 				agentMu.Lock()
@@ -530,6 +587,9 @@ type tuiSession struct {
 // tuiHooks implements agent.TurnHooks for the TUI.
 type tuiHooks struct {
 	ts *tuiSession
+	// feed (optional) hands the advisor a fresh transcript snapshot after
+	// each assistant message — the reviewer steers into the live run.
+	feed func()
 }
 
 func (h *tuiHooks) OnStart(req ai.StreamRequest) {}
@@ -586,6 +646,9 @@ func (h *tuiHooks) OnMessageEnd(msg *ai.Message) {
 	}
 	if err := h.ts.store.Append(&session.MessageEntry{Message: *msg}); err != nil {
 		logx.Errorf("persist assistant message: %v", err)
+	}
+	if h.feed != nil {
+		h.feed()
 	}
 }
 
