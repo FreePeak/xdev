@@ -90,6 +90,9 @@ type Theme struct {
 	Name  string
 	Dark  bool
 	Slots map[string]Color
+	// Symbols carries the glyph preset and spinner frames from a custom
+	// JSON theme ("" = unicode default).
+	Symbols Symbols
 }
 
 // Get returns a slot color, falling back to text_primary, then white.
@@ -296,4 +299,31 @@ func CapabilityFromEnv() int {
 		return 8 // assume 256-color baseline
 	}
 	return 4
+}
+
+// Xterm256 converts a 256-color palette index to RGB using the standard
+// xterm palette (16 system colors, a 6x6x6 cube, then the gray ramp).
+func Xterm256(i int) Color {
+	if i < 0 {
+		i = 0
+	}
+	if i > 255 {
+		i = 255
+	}
+	system := [16]Color{
+		{0x00, 0x00, 0x00}, {0x80, 0x00, 0x00}, {0x00, 0x80, 0x00}, {0x80, 0x80, 0x00},
+		{0x00, 0x00, 0x80}, {0x80, 0x00, 0x80}, {0x00, 0x80, 0x80}, {0xc0, 0xc0, 0xc0},
+		{0x80, 0x80, 0x80}, {0xff, 0x00, 0x00}, {0x00, 0xff, 0x00}, {0xff, 0xff, 0x00},
+		{0x00, 0x00, 0xff}, {0xff, 0x00, 0xff}, {0x00, 0xff, 0xff}, {0xff, 0xff, 0xff},
+	}
+	if i < 16 {
+		return system[i]
+	}
+	if i < 232 {
+		n := i - 16
+		lv := [6]uint8{0, 95, 135, 175, 215, 255}
+		return Color{lv[n/36], lv[(n/6)%6], lv[n%6]}
+	}
+	g := uint8(8 + (i-232)*10)
+	return Color{g, g, g}
 }
