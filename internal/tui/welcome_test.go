@@ -221,27 +221,45 @@ func TestAppWelcomeLogo(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	app.draw()
 
-	// Every block-art row must start at the same column: the rows are
-	// ragged-width, so per-line centering would wobble them (the bug
-	// this test pins). Life cells use '▓', never '█', so the first
-	// '█' per row is always logo art.
+	// The art rows are ragged-width, so they must all sit at the same
+	// x on consecutive rows — per-line centering would wobble them
+	// (the bug this test pins). Life cells use '▓', never art glyphs,
+	// so a full-row string match is unambiguous.
 	prim, w, _ := scr.GetContents()
-	firstX, rows := -1, 0
-	for y := 0; y*w < len(prim); y++ {
-		for x := 0; x < w; x++ {
-			if rs := prim[y*w+x].Runes; len(rs) > 0 && rs[0] == '█' {
-				rows++
-				if firstX == -1 {
-					firstX = x
-				} else if x != firstX {
-					t.Fatalf("logo row %d starts at x=%d, want %d (common left edge)", y, x, firstX)
-				}
+	h := len(prim) / w
+	rowStr := func(y int) string {
+		var b strings.Builder
+		for x := range w {
+			if r := prim[y*w+x].Runes; len(r) > 0 {
+				b.WriteRune(r[0])
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+		return b.String()
+	}
+	x0, y0 := -1, -1
+	for i, art := range xdevLogo {
+		x, y := -1, -1
+		for yy := range h {
+			if xx := strings.Index(rowStr(yy), art); xx >= 0 {
+				x, y = xx, yy
 				break
 			}
 		}
-	}
-	if rows < 5 {
-		t.Fatalf("expected the 6-row block art, saw %d art rows", rows)
+		if x < 0 {
+			t.Fatalf("logo row %d (%q) not on screen", i, art)
+		}
+		if i == 0 {
+			x0, y0 = x, y
+			continue
+		}
+		if x != x0 {
+			t.Fatalf("logo row %d at x=%d, want %d (common left edge)", i, x, x0)
+		}
+		if y != y0+i {
+			t.Fatalf("logo row %d at y=%d, want %d (consecutive)", i, y, y0+i)
+		}
 	}
 	if !gridContains(scr, "01111000") {
 		t.Fatal("binary tagline missing")
@@ -348,10 +366,11 @@ func TestLifeGlyphNarrow(t *testing.T) {
 }
 
 // TestLogoOneArtAcrossSizes pins the size-consistency fix: every
-// terminal size that fits the artwork gets the identical 6-row logo —
+// terminal size that fits the artwork gets the identical 8-row logo —
 // no tier swapping — and sizes that can't fit it get nothing.
 func TestLogoOneArtAcrossSizes(t *testing.T) {
-	for _, sz := range [][2]int{{100, 30}, {80, 24}, {80, 20}, {60, 30}, {120, 50}} {
+	fitting := [][2]int{{100, 30}, {80, 24}, {80, 22}, {60, 30}, {120, 50}}
+	for _, sz := range fitting {
 		got := logoArt(sz[0], sz[1]-8)
 		if len(got) != len(xdevLogo) {
 			t.Fatalf("logoArt(%d,%d) = %d rows, want the one %d-row logo", sz[0], sz[1], len(got), len(xdevLogo))
@@ -362,7 +381,7 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 			}
 		}
 	}
-	for _, sz := range [][2]int{{80, 19}, {30, 30}, {10, 5}} {
+	for _, sz := range [][2]int{{80, 21}, {80, 19}, {30, 30}, {10, 5}} {
 		if got := logoArt(sz[0], sz[1]-8); got != nil {
 			t.Fatalf("logoArt(%d,%d) = art, want nil (doesn't fit)", sz[0], sz[1])
 		}

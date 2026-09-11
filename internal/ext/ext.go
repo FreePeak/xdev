@@ -167,6 +167,9 @@ func NewManager() *Manager { return &Manager{} }
 
 // BindHost wires the runtime-action callback (steer/followUp/aside).
 func (m *Manager) BindHost(h func(Action)) {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.host = h
@@ -512,6 +515,9 @@ func (x *Extension) Capabilities() Capabilities {
 
 // Close shuts every extension down.
 func (m *Manager) Close() {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	exts := m.exts
 	m.exts = nil
@@ -525,6 +531,9 @@ func (m *Manager) Close() {
 // Emit fires a fire-and-forget event (session_start, turn_end). Failures
 // are logged only: non-policy events must never stall the loop.
 func (m *Manager) Emit(ctx context.Context, event string, payload any) {
+	if m == nil {
+		return
+	}
 	for _, x := range m.list() {
 		if !x.subscribed(event) {
 			continue
@@ -540,6 +549,9 @@ func (m *Manager) Emit(ctx context.Context, event string, payload any) {
 // timeout/crash DENIES the call unless that extension opted into failOpen.
 // Returns the final arguments or a blocking error.
 func (m *Manager) ToolCall(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	if m == nil {
+		return args, nil
+	}
 	current := args
 	for _, x := range m.list() {
 		if !x.subscribed(EventToolCall) {
@@ -570,6 +582,9 @@ func (m *Manager) ToolCall(ctx context.Context, name string, args json.RawMessag
 // ToolResult lets extensions patch a result. The last patch wins;
 // failures never block (the tool already ran).
 func (m *Manager) ToolResult(ctx context.Context, name string, args, result json.RawMessage) json.RawMessage {
+	if m == nil {
+		return result
+	}
 	out := result
 	for _, x := range m.list() {
 		if !x.subscribed(EventToolResult) {
@@ -589,6 +604,9 @@ func (m *Manager) ToolResult(ctx context.Context, name string, args, result json
 
 // Tools returns extension-registered tools as xdev tools.
 func (m *Manager) Tools() []tool.Tool {
+	if m == nil {
+		return nil
+	}
 	var out []tool.Tool
 	for _, x := range m.list() {
 		x.mu.Lock()
@@ -633,6 +651,9 @@ func (m *Manager) RunCommand(ctx context.Context, qualified, args string) (strin
 
 // Commands returns extension-announced slash commands (extension:name).
 func (m *Manager) Commands() map[string]string {
+	if m == nil {
+		return nil
+	}
 	out := map[string]string{}
 	for _, x := range m.list() {
 		x.mu.Lock()
@@ -647,6 +668,9 @@ func (m *Manager) Commands() map[string]string {
 
 // Renderers returns declarative render specs keyed by tool name.
 func (m *Manager) Renderers() map[string]Renderer {
+	if m == nil {
+		return nil
+	}
 	out := map[string]Renderer{}
 	for _, x := range m.list() {
 		x.mu.Lock()
@@ -671,6 +695,9 @@ func Register(reg *tool.Registry, tools []tool.Tool) {
 // "allow", which makes a platform-specific handshake failure impossible to
 // diagnose from a test failure alone.
 func (m *Manager) Failures() []string {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.failures...)
@@ -690,6 +717,9 @@ func (m *Manager) retire(x *Extension) {
 }
 
 func (m *Manager) list() []*Extension {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]*Extension(nil), m.exts...)

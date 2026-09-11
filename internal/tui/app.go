@@ -43,18 +43,20 @@ type App struct {
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops         *SessionOps       // session lifecycle, wired by cmd (nil → notices)
-	cwdLabel    string            // welcome top bar (last two path components)
-	branch      string            // git branch for the welcome top bar ("" when none)
-	commandDir  string            // markdown command discovery root
-	pathRoot    string            // @-completion root (empty disables the menu)
-	pathScan    func() []string   // shared FS-scan cache-backed file source
-	extCommands map[string]string // "/server:cmd" -> description
-	extRun      ExtensionCommand
-	renderers   map[string]RenderSpec // tool name -> declarative render spec
-	onSend      func(text string)
-	onCancel    func()
-	onQuit      func()
+	ops           *SessionOps       // session lifecycle, wired by cmd (nil → notices)
+	cwdLabel      string            // welcome top bar (last two path components)
+	branch        string            // git branch for the welcome top bar ("" when none)
+	commandDir    string            // markdown command discovery root
+	pathRoot      string            // @-completion root (empty disables the menu)
+	pathScan      func() []string   // shared FS-scan cache-backed file source
+	extCommands   map[string]string // "/server:cmd" -> description
+	extRun        ExtensionCommand
+	renderers     map[string]RenderSpec   // tool name -> declarative render spec
+	sessionTree   func() string           // /tree display
+	sessionBranch func(args string) error // /branch to an entry id
+	onSend        func(text string)
+	onCancel      func()
+	onQuit        func()
 
 	keyq      chan tcell.Event
 	dirty     chan struct{}
@@ -132,6 +134,38 @@ func (a *App) AddUserBlock(text string) {
 // AddSystemBlock appends a harness notice.
 // KeyMap returns the active keybinding map.
 func (a *App) KeyMap() *KeyMap { return a.keyMap }
+
+// SetSessionTree wires the /tree display to the store.
+func (a *App) SetSessionTree(fn func() string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionTree = fn
+}
+
+// SetSessionBranch wires /branch to the store. The callback must rebuild
+// history and replay the transcript (like swapStoreTo) so the user sees the
+// new branch's content.
+func (a *App) SetSessionBranch(fn func(args string) error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionBranch = fn
+}
+
+// SessionTree implements CommandAPI by rendering the store tree.
+func (a *App) SessionTree() string {
+	if a.sessionTree != nil {
+		return a.sessionTree()
+	}
+	return "no session tree available"
+}
+
+// BranchSession implements CommandAPI by switching the leaf pointer.
+func (a *App) BranchSession(args string) error {
+	if a.sessionBranch == nil {
+		return fmt.Errorf("session branch not wired")
+	}
+	return a.sessionBranch(args)
+}
 
 func (a *App) AddSystemBlock(text string) {
 	a.mu.Lock()

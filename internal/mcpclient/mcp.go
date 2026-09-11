@@ -95,7 +95,7 @@ func (m *Manager) Connect(ctx context.Context, cfg *Config) (connected int, errs
 		if sc == nil || sc.Disabled {
 			continue
 		}
-		timeout := 5 * time.Second
+		timeout := 15 * time.Second
 		if sc.InitTimeoutSec > 0 {
 			timeout = time.Duration(sc.InitTimeoutSec) * time.Second
 		}
