@@ -38,14 +38,14 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 // It renders identically at every terminal size; the only
 // size-dependent choice is whether it fits at all (see logoArt).
 var xdevLogo = []string{
-	" ██     ██  ███████",
+	" ██     ██ ████████",
 	"░░██   ██ ░██░░░░██",
-	" ░░██ ██ ░██    ░██   █████  ██    ██",
-	"  ░░███ ░██    ░██  ██░░░██ ░██   ░██",
-	"   ██░██ ░██    ░██ ░███████ ░░██ ░██",
-	"  ██ ░░██ ░██    ██ ░██░░░░  ░░████",
-	" ██   ░░██ ░███████ ░░██████   ░░██",
-	"░░     ░░ ░░░░░░░  ░░░░░░    ░░",
+	" ░░██ ██ ░██░░░░░██   █████  ██    ██",
+	"  ░░███ ░██░░░░░██  ██░░░██ ░██   ░██",
+	"   ██░██ ░██░░░░░██ ░███████ ░░██ ░██",
+	"  ██ ░░██ ░██░░░░██ ░██░░░░  ░░████",
+	" ██   ░░██ ░█████  ░░██████   ░░██",
+	"░░     ░░ ░░░░░░  ░░░░░░    ░░",
 }
 
 // logoWidth returns the widest art row in cells.

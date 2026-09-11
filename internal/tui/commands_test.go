@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,6 +19,8 @@ type fakeAPI struct {
 
 	extCalls []string
 	extErr   error
+
+	setModel string
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -98,6 +101,8 @@ func TestDispatchBuiltins(t *testing.T) {
 		{input: "/quit", quit: 1},
 		{input: "/q", quit: 1},
 		{input: "/help", wantSub: "commands:"},
+		// /model with no args shows the active model + available list.
+		{input: "/model", wantSub: "active model:"},
 	}
 	for _, tt := range tests {
 		f := &fakeAPI{fail: tt.wantFail}
@@ -141,6 +146,24 @@ func TestDispatchUnknownFallsThrough(t *testing.T) {
 	}
 	if len(f.blocks) != 0 {
 		t.Fatalf("unexpected blocks: %q", f.blocks)
+	}
+}
+
+// /model with a ref switches the live model (setModel captured) and
+// confirms with a system block; an error propagates as a block, not a
+// silent no-op.
+func TestDispatchModelSwitch(t *testing.T) {
+	f := &fakeAPI{}
+	if !dispatch(f, "/model onegw/fast-model") {
+		t.Fatal("/model not consumed")
+	}
+	if f.setModel != "onegw/fast-model" {
+		t.Fatalf("setModel = %q", f.setModel)
+	}
+	// The confirmation block is the App's job; the fake only records the
+	// request (so the dispatcher consumed it and routed the ref through).
+	if len(f.blocks) != 0 {
+		t.Fatalf("fake received blocks = %q", f.blocks)
 	}
 }
 
@@ -243,4 +266,16 @@ func TestExtensionCommandErrorSurfaces(t *testing.T) {
 	if len(app.blocks) != 1 || !strings.Contains(app.blocks[0], "extension offline") {
 		t.Fatalf("error not surfaced: %v", app.blocks)
 	}
+}
+
+func (f *fakeAPI) SwitchModel(args string) error {
+	if f.fail == "model" {
+		return fmt.Errorf("boom")
+	}
+	if args == "" {
+		f.AddSystemBlock("active model: fake/fake\navailable:\n  fake/fake")
+	} else {
+		f.setModel = args
+	}
+	return nil
 }
