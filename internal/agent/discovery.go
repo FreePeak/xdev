@@ -140,23 +140,32 @@ func parseAgentFile(path string) (AgentDefinition, error) {
 
 // SpawnPolicy resolves the agent's spawns field to an allowlist.
 type SpawnPolicy struct {
-	AllowAll bool
-	Allow    []string
+	AllowAll bool     // absent or "*": anything goes
+	Allow    []string // CSV/list: only these
+	None     bool     // false or []: nothing
 }
 
-// ResolveSpawnPolicy normalizes the spawns value: "*" allows everything,
-// a CSV/array is the allowlist, empty/absent means cannot spawn.
+// ResolveSpawnPolicy normalizes the spawns value (research §1: `*` / false
+// / CSV): absent = unrestricted (the parent default), "*" = all,
+// false or an empty list = none, CSV/array = the allowlist.
 func (d AgentDefinition) ResolveSpawnPolicy() SpawnPolicy {
-	if d.Spawns == nil {
-		return SpawnPolicy{}
-	}
 	switch v := d.Spawns.(type) {
+	case nil:
+		return SpawnPolicy{AllowAll: true}
 	case string:
 		if v == "*" {
 			return SpawnPolicy{AllowAll: true}
 		}
 		return SpawnPolicy{Allow: splitCSV(v)}
+	case bool:
+		if v {
+			return SpawnPolicy{AllowAll: true}
+		}
+		return SpawnPolicy{None: true}
 	case []any:
+		if len(v) == 0 {
+			return SpawnPolicy{None: true}
+		}
 		var allow []string
 		for _, item := range v {
 			if s, ok := item.(string); ok {
@@ -168,7 +177,7 @@ func (d AgentDefinition) ResolveSpawnPolicy() SpawnPolicy {
 		}
 		return SpawnPolicy{Allow: allow}
 	}
-	return SpawnPolicy{}
+	return SpawnPolicy{AllowAll: true}
 }
 
 func splitCSV(s string) []string {
