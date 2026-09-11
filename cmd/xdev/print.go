@@ -19,6 +19,7 @@ import (
 	hookbus "github.com/FreePeak/xdev/internal/hooks"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/mcpclient"
+	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -148,7 +149,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- system prompt ---
 	overrides := agent.LoadSystemPromptOverrides(cwd)
-	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
+	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
+		tailSystemPrompt(overrides, opts.AppendSystem), buildMemory(settings))
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
 	// --- session ---
@@ -356,6 +358,10 @@ func providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig
 // a prompt frozen at boot would never mention them — the provider request
 // would advertise tools the model was never told about.
 func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) func() string {
+	return promptFnWithMemory(base, cwd, reg, appendSystem, nil)
+}
+
+func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem *memory.Backend) func() string {
 	ctxFiles := agent.LoadContextFiles(cwd)
 	return func() string {
 		defs := reg.Defs()
@@ -366,6 +372,11 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 		sys := agent.BuildSystemPrompt(base, ctxFiles, named)
 		if sb := skillPromptBlock(cwd); sb != "" {
 			sys += "\n\n" + sb
+		}
+		if mem != nil {
+			if gb := mem.GuidanceBlock(); gb != "" {
+				sys += "\n\n" + gb
+			}
 		}
 		if appendSystem != "" {
 			sys += "\n\n" + appendSystem
@@ -530,6 +541,20 @@ func registerURISchemes() {
 	tool.RegisterURIScheme("skill", skills.Resolve)
 }
 
+// buildMemory returns the configured memory backend (nil = off).
+func buildMemory(settings *config.Settings) *memory.Backend {
+	if settings == nil || settings.Memory != "local" {
+		return nil
+	}
+	b := &memory.Backend{Dir: filepath.Join(config.DataDir(), "memory")}
+	if err := b.Ensure(); err != nil {
+		logx.Errorf("memory: cannot create %s, disabling: %v", b.Dir, err)
+		return nil
+	}
+	tool.RegisterURIScheme("memory", b.Read)
+	return b
+}
+
 func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode) *tool.Registry {
 	registerURISchemes()
 	pol := settingsPolicy(settings)
@@ -582,6 +607,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		}(),
 	})
 	reg.Register(&agent.HubTool{Hub: hub})
+	if mem := buildMemory(settings); mem != nil {
+		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
+	}
 
 	return reg
 }

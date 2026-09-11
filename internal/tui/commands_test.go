@@ -23,6 +23,7 @@ type fakeAPI struct {
 	setModel string
 	plan     string
 	advisor  string
+	mem      string
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -325,6 +326,14 @@ func TestExtensionCommandErrorSurfaces(t *testing.T) {
 	if len(app.blocks) != 1 || !strings.Contains(app.blocks[0], "extension offline") {
 		t.Fatalf("error not surfaced: %v", app.blocks)
 	}
+}
+
+func (f *fakeAPI) Memory(args string) error {
+	if f.fail == "memory" {
+		return fmt.Errorf("boom")
+	}
+	f.mem = args
+	return nil
 }
 
 func (f *fakeAPI) Advisor(args string) error {

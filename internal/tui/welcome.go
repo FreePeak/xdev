@@ -303,18 +303,24 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 	}
 
-	// Brand colour with the sheen band riding across it (omarchy
-	// About branding): the assistant accent for the wordmark, Text-
-	// Primary bold for the lit band — the one colored element on an
+	// Brand colour with the sheen riding across it (omarchy About
+	// branding): the assistant accent for the wordmark, and the lit
+	// band inverted — screen-bg ink on a TextPrimary plate — so the
+	// sweep reads as one continuous slab of light instead of broken
+	// bright cells in the art's gaps. The one colored element on an
 	// otherwise monochrome screen, like omarchy's green logo.
 	base := st(a.th.Get(theme.AccentAssistant), false)
+	lit := tcell.StyleDefault.
+		Foreground(a.cellColor(a.th.Get(theme.BgTerminal))).
+		Background(a.cellColor(whiteC))
 	for r, ln := range logo {
 		c := 0
 		for _, rn := range ln {
-			s.SetContent(logoX+c, y+r, rn, nil, base)
+			style := base
 			if sheenInBand(a.sheenPhase, r, c, logoW) {
-				s.SetContent(logoX+c, y+r, rn, nil, st(whiteC, true))
+				style = lit
 			}
+			s.SetContent(logoX+c, y+r, rn, nil, style)
 			c++
 		}
 	}
