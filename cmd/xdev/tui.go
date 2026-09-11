@@ -488,6 +488,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// Intercept set below from exts (only when non-nil).
 					Policy: agentPolicy(),
 				}
+				if t := resolvePrewalk(opts, cfg, lastSettings()); t != nil {
+					ag.Prewalk = &agent.Prewalk{Target: *t}
+				}
 				// Extension actions steer the live run: this agent is the
 				// target until the next submit replaces it.
 				agentMu.Lock()
