@@ -132,7 +132,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}()
 
 	// Screen.
-	th := theme.Load(themeName)
+	th := theme.LoadNamed(themeName, theme.CustomDir())
 	scr, err := tcell.NewScreen()
 	if err != nil {
 		return 2, fmt.Errorf("tui: screen: %w", err)
@@ -491,6 +491,34 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetPlanOps(&tui.PlanOps{
 		Get: func() bool { return planMode.Active },
 		Set: func(on bool) error { planMode.Active = on; return nil },
+	})
+	if themeName != "" {
+		stopWatch := theme.Watch(theme.CustomDir(), themeName, func(nt *theme.Theme) {
+			app.SetTheme(nt)
+		})
+		defer stopWatch()
+	}
+	app.SetThemeOps(&tui.ThemeOps{
+		Current: func() string { return th.Name },
+		List:    func() []string { return theme.AvailableThemes(theme.CustomDir()) },
+		Set: func(name string) error {
+			nt := theme.LoadNamed(name, theme.CustomDir())
+			if nt == nil || (nt.Name != name && name != "") {
+				// LoadNamed falls back on failure; only accept an exact hit
+				// so a typo is reported rather than silently ignored.
+				for _, avail := range theme.AvailableThemes(theme.CustomDir()) {
+					if avail == name {
+						app.SetTheme(nt)
+						th = nt
+						return nil
+					}
+				}
+				return fmt.Errorf("unknown theme %q", name)
+			}
+			app.SetTheme(nt)
+			th = nt
+			return nil
+		},
 	})
 	app.SetCommandDir(cwd)
 

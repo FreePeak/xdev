@@ -52,6 +52,7 @@ type App struct {
 	planOps       *PlanOps          // /plan, wired by cmd (nil → notices)
 	advisorOps    *AdvisorOps       // /advisor, wired by cmd (nil → notices)
 	memoryOps     *MemoryOps        // /memory, wired by cmd (nil → notices)
+	themeOps      *ThemeOps         // /theme, wired by cmd (nil → notices)
 	settingsOps   *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
@@ -386,6 +387,48 @@ func (a *App) SetPlanOps(ops *PlanOps) { a.planOps = ops }
 
 // SetMemoryOps wires the /memory command (the backend lives in cmd).
 func (a *App) SetMemoryOps(ops *MemoryOps) { a.memoryOps = ops }
+
+// SetTheme swaps the palette live (custom-theme reload, /theme switch)
+// and repaints.
+func (a *App) SetTheme(th *theme.Theme) {
+	if th == nil {
+		return
+	}
+	a.mu.Lock()
+	a.th = th
+	a.lineCache = map[blockKey][]line{}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetThemeOps wires the /theme command (theme resolution lives in cmd).
+func (a *App) SetThemeOps(ops *ThemeOps) { a.themeOps = ops }
+
+// Theme implements CommandAPI /theme: list or switch.
+func (a *App) Theme(args string) error {
+	if a.themeOps == nil {
+		return fmt.Errorf("theme switching not wired")
+	}
+	name := strings.TrimSpace(args)
+	if name == "" {
+		lines := []string{"active theme: " + a.themeOps.Current(), "available:"}
+		if a.themeOps.List != nil {
+			for _, t := range a.themeOps.List() {
+				lines = append(lines, "  "+t)
+			}
+		}
+		a.AddSystemBlock(strings.Join(lines, "\n"))
+		return nil
+	}
+	if a.themeOps.Set == nil {
+		return fmt.Errorf("theme switching not wired")
+	}
+	if err := a.themeOps.Set(name); err != nil {
+		return err
+	}
+	a.AddSystemBlock("theme: " + name)
+	return nil
+}
 
 // Memory implements CommandAPI /memory: view|stats|clear.
 func (a *App) Memory(args string) error {

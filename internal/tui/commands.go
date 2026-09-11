@@ -55,6 +55,13 @@ type PlanOps struct {
 	Set func(on bool) error
 }
 
+// ThemeOps wires the /theme command (theme resolution lives in cmd).
+type ThemeOps struct {
+	Current func() string
+	List    func() []string
+	Set     func(name string) error
+}
+
 // MemoryOps wires the /memory command (backend lives in cmd).
 type MemoryOps struct {
 	View  func() string
@@ -91,6 +98,7 @@ type CommandAPI interface {
 	PlanMode(args string) error
 	Advisor(args string) error
 	Memory(args string) error
+	Theme(args string) error
 	SettingsView(args string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
@@ -123,6 +131,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings; toggle showThinking on|off",
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "theme", Description: "show or switch the theme: /theme <name>",
+			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear",
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
