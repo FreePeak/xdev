@@ -38,14 +38,19 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 // the rounded joins; no shaded ░ noise, so the mark reads cleanly at
 // any size.
 //
-// The glyphs are the font's own, drawn here on a fixed 41-cell grid
-// instead of taken at the font's native 49: 49 plus margins needs a
-// 53-column terminal, and a common ~48-column window showed no logo
+// X, D and e are the font's own glyphs, drawn here on a fixed 41-cell
+// grid instead of taken at the font's native 49: 49 plus margins needs
+// a 53-column terminal, and a common ~48-column window showed no logo
 // at all. Every stem sits on one absolute column across all eight
 // rows (the X's arms slide one column per row); nothing is resampled,
-// so no stroke wobbles. It renders identically at every terminal
-// size; the only size-dependent choice is whether it fits at all
-// (see logoArt).
+// so no stroke wobbles.
+//
+// The v is the one deliberate departure: Delta Corps Priest 1 draws v
+// as an open o (identical to its u but for the stem), which reads as
+// "U" at logo size, so here it tapers to a point at the same stroke
+// weight and baseline. It renders identically at every terminal size;
+// the only size-dependent choice is whether it fits at all (see
+// logoArt).
 var xdevLogo = []string{
 	"▀███    ▐███▀ ███████▄   ▄████▄  █▌    ▐█",
 	"  ██▌   ███▀  ██    ▀██ ██    ██ ██    ██",
