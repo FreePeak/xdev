@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // Custom JSON themes (M12, research F4 CORE): user themes live in
@@ -39,13 +41,11 @@ type Symbols struct {
 	Activity      []string          `json:"activity"`
 }
 
-// CustomDir is ~/.xdev/agent/themes.
+// CustomDir is <DataDir>/themes. Like every other data path it goes
+// through config.DataDir so XDEV_AGENT_DIR sandboxes custom themes too
+// (config does not import theme, so no cycle).
 func CustomDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".xdev", "agent", "themes")
+	return filepath.Join(config.DataDir(), "themes")
 }
 
 // LoadCustom reads and validates <dir>/<name>.json. A missing file is
@@ -250,14 +250,18 @@ func (t *Theme) SymbolPreset() string {
 	return t.Symbols.Preset
 }
 
-// AvailableThemes lists built-ins plus customs from dir (customs never
-// shadow a built-in name).
+// AvailableThemes lists "auto" first, then the built-ins, then customs
+// from dir (customs never shadow a built-in name). "auto" is settable —
+// Load resolves it via the env polarity guess — so it is listed whenever
+// both polarity themes exist, keeping /theme auto discoverable and
+// restorable.
 func AvailableThemes(dir string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for name := range Builtins() {
+	b := Builtins()
+	seen := map[string]bool{"auto": true} // "auto" is prepended below; a custom auto.json never duplicates it
+	var builtinNames, customNames []string
+	for name := range b {
 		seen[name] = true
-		out = append(out, name)
+		builtinNames = append(builtinNames, name)
 	}
 	if dir != "" {
 		entries, err := os.ReadDir(dir)
@@ -271,12 +275,20 @@ func AvailableThemes(dir string) []string {
 					continue // built-ins win
 				}
 				seen[name] = true
-				out = append(out, name)
+				customNames = append(customNames, name)
 			}
 		}
 	}
-	sort.Strings(out)
-	return out
+	// Each group sorted, customs strictly after built-ins so the picker
+	// always shows the shipped themes first.
+	sort.Strings(builtinNames)
+	sort.Strings(customNames)
+	var out []string
+	if b["groknight"] != nil && b["grokday"] != nil {
+		out = append(out, "auto")
+	}
+	out = append(out, builtinNames...)
+	return append(out, customNames...)
 }
 
 // LoadNamed resolves a theme by name for rendering: built-ins first,

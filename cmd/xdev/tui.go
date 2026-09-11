@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -118,7 +117,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
-	saveBreadcrumb(store.Path())
+	// The breadcrumb keys --continue for this pane. A fresh session is
+	// memory-only until its first assistant message, so record the
+	// AUTO-PERSIST path: --continue already guards with os.Stat, and a
+	// breadcrumb naming the live session beats silently reopening the
+	// previous one (the /new, /drop defect).
+	saveBreadcrumb(breadcrumbPath(store))
 	wireTaskParent(reg, store)
 	defer func() {
 		modelMu.Lock()
@@ -148,6 +152,67 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer setCursorReset()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	// setLiveModel applies a resolved model everywhere it matters: the live
+	// holder the next submit reads, the status line, and the task tool —
+	// children must spawn on the current model, not the one captured at
+	// startup (the same fix RPC's set_model already makes). Logging the
+	// change to the session is the caller's call: a resume SEEDS from the
+	// log and must not append a duplicate entry.
+	setLiveModel := func(p ai.Provider, pname, mname, effort string) {
+		modelMu.Lock()
+		live.prov, live.model, live.provName, live.effort = p, mname, pname, effort
+		modelMu.Unlock()
+		app.SetStatusModel(pname + "/" + mname)
+		if t, ok := reg.Get(agent.TaskToolName); ok {
+			if tt, ok := t.(*agent.TaskTool); ok {
+				tt.Provider, tt.Model = p, mname
+			}
+		}
+	}
+
+	// buildModel resolves a concrete provider/model to a provider.
+	buildModel := func(ref string) (ai.Provider, string, string, error) {
+		pname, mname, err := config.ParseModelRef(ref)
+		if err != nil {
+			return nil, "", "", err
+		}
+		pc, ok := cfg.Providers[pname]
+		if !ok {
+			return nil, "", "", fmt.Errorf("unknown provider %q (have: %v)", pname, providerKeys(cfg))
+		}
+		np, err := buildProvider(pname, pc, mname, cfg)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return np, pname, mname, nil
+	}
+
+	// seedModelFromSession honors a resumed session's last model_change: the
+	// switch is recorded in the file, and a relaunch that ignored it would
+	// quietly run a different model than the user left. An explicit -model
+	// flag still wins.
+	seedModelFromSession := func(s *session.Store) {
+		if opts.Model != "" || len(s.Entries()) == 0 {
+			return
+		}
+		res, err := session.BuildContext(s.Entries(), s.LeafID(), session.SystemPrompt{})
+		if err != nil || res.Model == "" {
+			return
+		}
+		// History can carry a ref that no longer resolves (a deleted model,
+		// a pre-validation typo): keep the configured model rather than
+		// adopting something that would 404 on the next turn.
+		if _, _, rerr := resolveModel(res.Model, cfg, lastSettings()); rerr != nil {
+			logx.Debugf("resume model %q unusable: %v", res.Model, rerr)
+			return
+		}
+		np, pname, mname, err := buildModel(res.Model)
+		if err != nil {
+			logx.Debugf("resume model %q: %v", res.Model, err)
+			return
+		}
+		setLiveModel(np, pname, mname, "")
+	}
 	// showThinking drives the reasoning display (issue #20); the resolved
 	// layered config is the source of truth at startup.
 	app.SetShowThinking(lastSettings().ShowThinkingOn())
@@ -189,6 +254,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 		}
+		seedModelFromSession(store)
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
 	// are persisted by the hooks and Agent.persist, so each submit rebuilds
@@ -211,7 +277,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// guarded for the UI thread that reads nothing here).
 	var sessMu sync.Mutex
 
-	ts := &tuiSession{store: store, app: app, model: modelName, api: prov.API(), provider: provName}
+	ts := &tuiSession{store: store, app: app}
 
 	var swapStoreTo func(*session.Store) error
 
@@ -237,7 +303,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.store = ns
 		wireTaskParent(reg, ns) // children must link to the ACTIVE session
 		app.Reset()
-		saveBreadcrumb(ns.Path())
+		saveBreadcrumb(breadcrumbPath(ns))
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
 		return nil
 	}
@@ -250,10 +316,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.store = ns
 		wireTaskParent(reg, ns)
 		app.Reset()
-		saveBreadcrumb(ns.Path())
+		saveBreadcrumb(breadcrumbPath(ns))
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 		}
+		seedModelFromSession(ns)
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		_ = old
 		return nil
@@ -277,61 +344,85 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return out
 	})
 
-	app.SetResumeList(func(cwd string) error {
+	// /resume with no argument opens the session picker (recent sessions
+	// in this directory); Enter hands the full id back to Resume, which
+	// resolves by prefix.
+	recentSessions := func() []tui.ResumeOption {
 		metas, err := session.List(config.DataDir())
 		if err != nil {
-			return err
+			return nil
 		}
-		var lines []string
-		count := 0
+		out := make([]tui.ResumeOption, 0, 12)
 		for _, m := range metas {
-			if m.CWD != cwd || m.TitleSource == "subagent" {
+			if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
 				continue
 			}
-			count++
-			msg := fmt.Sprintf("%-8s  %s  (%d entries, last %s)", m.ID[:8], m.Title, len(metas), m.ModTime.Format("Jan 02 15:04"))
-			lines = append(lines, msg)
-			if count >= 12 {
+			// The live session is not a resume target; the row list is
+			// title-led with the id second, since /resume <prefix> takes
+			// the id but the title is what a user recognizes.
+			if m.ID == store.ID() {
+				continue
+			}
+			out = append(out, tui.ResumeOption{
+				ID:     m.ID,
+				Title:  m.Title,
+				Detail: fmt.Sprintf("%s · %s", m.ID[:8], m.ModTime.Format("Jan 02 15:04")),
+			})
+			if len(out) >= 12 {
 				break
 			}
 		}
-		if len(lines) == 0 {
-			app.AddSystemBlock("no other sessions in this directory")
-			return nil
-		}
-		app.AddSystemBlock("sessions in " + cwd + " (use /resume <id-prefix>):\n" + strings.Join(lines, "\n"))
-		return nil
-	})
+		return out
+	}
+
 	app.SetSessionTree(func() string { return store.Tree() })
 	app.SetSessionBranch(func(args string) error {
 		query := strings.TrimSpace(args)
 		if query == "" {
-			return fmt.Errorf("branch: entry-id prefix required")
+			return fmt.Errorf("branch: entry-id prefix required (ids are listed by /tree)")
 		}
+		// Only message entries are branch targets: a leaf on a marker
+		// (model_change, reset boundary) would terminate the context in a
+		// non-message, and prefixes must be unambiguous — first-match-wins
+		// silently picked a different entry than the user meant.
+		var (
+			match   session.Entry
+			matches int
+		)
 		for _, e := range store.Entries() {
-			env := e.Envelope()
-			if strings.HasPrefix(env.ID, query) {
-				if err := store.Branch(env.ID); err != nil {
-					return fmt.Errorf("branch: %v", err)
-				}
-				// Replay the new branch's transcript into the TUI.
-				if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
-					app.Reset()
-					replayTranscript(app, res.Messages)
-					app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
-				}
-				return nil
+			if strings.HasPrefix(e.Envelope().ID, query) {
+				match, matches = e, matches+1
 			}
 		}
-		return fmt.Errorf("branch: no entry matching %q", query)
+		if matches == 0 {
+			return fmt.Errorf("branch: no entry matching %q (entries before the last /clear or compaction are not addressable)", query)
+		}
+		if matches > 1 {
+			return fmt.Errorf("branch: %q matches %d entries — use a longer prefix", query, matches)
+		}
+		env := match.Envelope()
+		if _, ok := match.(*session.MessageEntry); !ok {
+			return fmt.Errorf("branch: %s is a %s entry — /branch switches to a message", env.ID[:8], env.Type)
+		}
+		if err := store.Branch(env.ID); err != nil {
+			return fmt.Errorf("branch: %v", err)
+		}
+		// Replay the new branch's transcript into the TUI.
+		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
+			app.Reset()
+			replayTranscript(app, res.Messages)
+			app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
+		}
+		return nil
 	})
 	app.SetLocation(cwd)
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
-			if running.Load() {
+			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
+			defer running.Store(false)
 			// A fresh session lives memory-only until its first
 			// assistant message — materialize it so the fork has a
 			// source file to copy.
@@ -356,9 +447,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
 			if query == "" {
-				// Show the recent-sessions list like Claude Code's picker
-				// (without the dialog chrome, which is M12).
-				return app.ListSessions(cwd)
+				// Unreachable from the TUI (the picker supplies an id);
+				// kept as a guard for hosts that wire Recent == nil.
+				return fmt.Errorf("resume: session id prefix required")
 			}
 			path, err := resolveResumeID(cwd, query)
 			if err != nil {
@@ -378,15 +469,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return swapStore(false)
 		},
 		Clear: func() error {
-			if running.Load() {
+			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
+			defer running.Store(false)
 			if err := store.ResetLeaf(); err != nil {
 				return err
 			}
 			app.Reset()
+			// The transcript must not go fully blank: draw() renders the
+			// welcome screen whenever there are no blocks, and a command
+			// that answers with nothing reads as if it were swallowed.
+			app.AddSystemBlock("· context cleared — history kept on disk")
 			return nil
 		},
+		Recent: recentSessions,
 		Drop: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
@@ -395,40 +492,57 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return swapStore(true)
 		},
 	})
-	// /model: current + available from settings roles, switch by ref.
+
+	// /model: the interactive selector. Roles tab first (each row sets that
+	// slot), then the concrete model catalog — all models plus one view per
+	// provider, which is what omp's /model shows.
 	app.SetModelOps(&tui.ModelOps{
 		Current: func() string {
 			modelMu.Lock()
 			defer modelMu.Unlock()
 			return live.provName + "/" + live.model
 		},
-		List: func() []string {
-			return availableModelRefs(lastSettings())
+		Views: func() []tui.PickerView {
+			modelMu.Lock()
+			cur := live.provName + "/" + live.model
+			modelMu.Unlock()
+			return modelPickerViews(cfg, lastSettings(), cur, app)
+		},
+		Models: func() []tui.PickerItem {
+			modelMu.Lock()
+			cur := live.provName + "/" + live.model
+			modelMu.Unlock()
+			return modelPickerItems(cfg, lastSettings(), cur)
+		},
+		SetRole: func(role, ref string) error {
+			if !config.IsKnownRole(role) {
+				return fmt.Errorf("unknown role @%s", role)
+			}
+			if err := config.Set(config.GlobalSettingsPath(), "modelRoles."+role, ref); err != nil {
+				return err
+			}
+			// Keep the in-memory layer in sync so the follow-up
+			// "@role" switch resolves without a restart.
+			s := lastSettings()
+			if s.ModelRoles == nil {
+				s.ModelRoles = map[string]string{}
+			}
+			s.ModelRoles[role] = ref
+			return nil
 		},
 		Set: func(ref string) error {
 			nr, ne, err := resolveModel(ref, cfg, lastSettings())
 			if err != nil {
 				return err
 			}
-			nprovName, nmodelName, err := config.ParseModelRef(nr)
-			if err != nil {
-				return err
-			}
-			npc, ok := cfg.Providers[nprovName]
-			if !ok {
-				return fmt.Errorf("unknown provider %q", nprovName)
-			}
-			nprov, err := buildProvider(nprovName, npc, nmodelName, cfg)
+			nprov, nprovName, nmodelName, err := buildModel(nr)
 			if err != nil {
 				return err
 			}
 			if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
 				logx.Errorf("model change entry: %v", err)
 			}
-			modelMu.Lock()
-			live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
-			modelMu.Unlock()
-			app.SetStatusModel(nprovName + "/" + nmodelName)
+			setLiveModel(nprov, nprovName, nmodelName, ne)
 			return nil
 		},
 	})
@@ -498,25 +612,50 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		})
 		defer stopWatch()
 	}
+	// themeLabel is what the user configured — "auto" (the polarity-detected
+	// palette) or a concrete theme. /theme reports and writes it, so the
+	// value /settings shows ("theme auto") is restorable instead of dead and
+	// a switch survives a restart instead of evaporating at exit.
+	themeLabel := themeName
+	if themeLabel == "" {
+		themeLabel = "auto"
+	}
 	app.SetThemeOps(&tui.ThemeOps{
-		Current: func() string { return th.Name },
-		List:    func() []string { return theme.AvailableThemes(theme.CustomDir()) },
+		Current: func() string {
+			if themeLabel == "auto" {
+				return "auto (" + th.Name + ")"
+			}
+			return th.Name
+		},
+		List: func() []string { return theme.AvailableThemes(theme.CustomDir()) },
 		Set: func(name string) error {
 			nt := theme.LoadNamed(name, theme.CustomDir())
-			if nt == nil || (nt.Name != name && name != "") {
-				// LoadNamed falls back on failure; only accept an exact hit
-				// so a typo is reported rather than silently ignored.
+			if nt == nil {
+				return fmt.Errorf("unknown theme %q", name)
+			}
+			// LoadNamed falls back on failure, so only an exact hit (or the
+			// "auto" polarity default, whose resolved name differs by
+			// design) counts: a typo is reported, never silently applied.
+			if nt.Name != name && name != "auto" {
+				known := false
 				for _, avail := range theme.AvailableThemes(theme.CustomDir()) {
 					if avail == name {
-						app.SetTheme(nt)
-						th = nt
-						return nil
+						known = true
 					}
 				}
-				return fmt.Errorf("unknown theme %q", name)
+				if !known {
+					return fmt.Errorf("unknown theme %q", name)
+				}
 			}
 			app.SetTheme(nt)
 			th = nt
+			themeLabel = name
+			if err := config.Set(config.GlobalSettingsPath(), "theme", name); err != nil {
+				// The palette switched; only saving failed. Say which, rather
+				// than reporting the switch itself as broken.
+				return fmt.Errorf("theme %s applied for this session, but saving failed: %v", name, err)
+			}
+			lastSettings().Theme = name
 			return nil
 		},
 	})
@@ -527,6 +666,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !running.CompareAndSwap(false, true) {
 				app.AddSystemBlock("a turn is already running — Esc cancels it")
 				return
+			}
+			// Name the session after its first prompt: /resume and the
+			// breadcrumb read the title slot, and "print <timestamp>" hides
+			// everything about the conversation. Called before the first
+			// assistant message materializes the file, so the title lands in
+			// the slot without needing a rewrite pass; later prompts keep
+			// the first one's title (omp's first-prompt cascade).
+			if store.Path() == "" {
+				if t := titleFromPrompt(text); t != "" {
+					store.SetTitle(t)
+				}
 			}
 			sessMu.Lock()
 			msg := ai.Message{
@@ -621,13 +771,33 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	return 0, nil
 }
 
+// breadcrumbPath prefers the materialized file path and falls back to the
+// auto-persist target, so a session that has not written its first
+// assistant message yet still owns the pane's --continue breadcrumb.
+func breadcrumbPath(s *session.Store) string {
+	if p := s.Path(); p != "" {
+		return p
+	}
+	return s.AutoPath()
+}
+
+// titleFromPrompt derives a session title from the first user prompt: the
+// first line, whitespace-collapsed, capped at 40 runes. Empty prompts yield
+// "" (the openSession fallback keeps its timestamped title).
+func titleFromPrompt(text string) string {
+	line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(text), "\n", 2)[0])
+	line = strings.Join(strings.Fields(line), " ")
+	runes := []rune(line)
+	if len(runes) > 40 {
+		return string(runes[:40]) + "…"
+	}
+	return line
+}
+
 // tuiSession accumulates the live conversation and persists messages.
 type tuiSession struct {
-	store    *session.Store
-	app      *tui.App
-	model    string
-	api      string
-	provider string
+	store *session.Store
+	app   *tui.App
 }
 
 // tuiHooks implements agent.TurnHooks for the TUI.
@@ -757,41 +927,138 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 	}
 }
 
-// availableModelRefs lists the switchable model refs: the settings default,
-// each provider's configured models (from models.yml refs cached in roles),
-// and the @role aliases — the same superset the model flag accepts. Dedup
-// keeps the list stable. ponytail: runtime discovery (network) is not part
-// of this listing; a provider's models that appear only via its discovery
-// endpoint are not enumerated here.
-func availableModelRefs(settings *config.Settings) []string {
+// modelPickerViews builds the /model selector's tabs: a roles view whose
+// rows open the assignment list, then "All models" (sectioned by provider)
+// and one view per provider — the same shape omp's /model shows.
+func modelPickerViews(cfg *config.Config, s *config.Settings, current string, app *tui.App) []tui.PickerView {
+	items := modelPickerItems(cfg, s, current)
+	roles := make([]tui.PickerItem, 0, len(config.RoleNames))
+	for _, name := range config.RoleNames {
+		ref, effort := "", ""
+		if s != nil {
+			ref = strings.TrimSpace(s.ModelRoles[name])
+			effort = strings.TrimSpace(s.ModelRolesEffort[name])
+		}
+		// An unset @default is not "unconfigured": resolution falls back to
+		// models.yml's defaultModel, so show that as the effective value.
+		if ref == "" && name == "default" && cfg != nil {
+			ref = cfg.DefaultModelRef()
+		}
+		detail := "unset"
+		if ref != "" {
+			// The arrow reads as "this slot resolves to"; a bare ref would
+			// look like a model row.
+			detail = "→ " + ref
+			if effort != "" {
+				detail += ":" + effort
+			}
+		}
+		roles = append(roles, tui.PickerItem{
+			Label:   "@" + name,
+			Detail:  detail,
+			Value:   "@" + name,
+			Current: sameModelRef(ref, current),
+		})
+	}
+	roleView := tui.PickerView{
+		Name: "Roles", Items: roles, Action: "set",
+		OnSelect: func(role string) { app.OpenRolePicker(strings.TrimPrefix(role, "@")) },
+	}
+	views := []tui.PickerView{roleView}
+	if len(items) > 0 {
+		all := make([]tui.PickerItem, len(items))
+		copy(all, items)
+		views = append(views, tui.PickerView{Name: "All models", Items: all, Action: "use"})
+	}
+	for _, name := range providerKeys(cfg) {
+		pc := cfg.Providers[name]
+		if pc == nil || (s != nil && s.ProviderDisabled(name)) {
+			continue
+		}
+		var mine []tui.PickerItem
+		for _, it := range items {
+			if strings.HasPrefix(it.Value, name+"/") {
+				mine = append(mine, it)
+			}
+		}
+		if len(mine) > 0 {
+			views = append(views, tui.PickerView{Name: name, Items: mine, Action: "use"})
+		}
+	}
+	return views
+}
+
+// modelPickerItems is the flat model catalog behind the selector: every
+// provider's pinned models merged with its discovery results (cached once
+// per provider per process by providerModels), sectioned by provider so the
+// "All models" tab reads as a table.
+func modelPickerItems(cfg *config.Config, s *config.Settings, current string) []tui.PickerItem {
+	if cfg == nil {
+		return nil
+	}
+	var out []tui.PickerItem
 	seen := map[string]bool{}
-	var out []string
-	add := func(ref string) {
-		ref = strings.TrimSpace(ref)
-		if ref == "" || seen[ref] {
-			return
+	for _, name := range providerKeys(cfg) {
+		pc := cfg.Providers[name]
+		if pc == nil || (s != nil && s.ProviderDisabled(name)) {
+			continue
 		}
-		seen[ref] = true
-		out = append(out, ref)
+		for _, m := range providerModels(name, pc) {
+			if m.ID == "" {
+				continue
+			}
+			ref := name + "/" + m.ID
+			if seen[ref] {
+				continue
+			}
+			seen[ref] = true
+			out = append(out, tui.PickerItem{
+				Label:   ref,
+				Detail:  modelDetail(m),
+				Value:   ref,
+				Section: name,
+				Current: sameModelRef(ref, current),
+			})
+		}
 	}
-	if settings != nil {
-		if settings.DefaultModel != "" {
-			add(settings.DefaultModel)
-		}
-		for _, role := range roleNamesSorted(settings.ModelRoles) {
-			add("@" + role) // /model "@smol" is a valid resolveModel input
-			add(settings.ModelRoles[role])
-		}
-	}
-	// Add each model ref present in any role value (dedup handles repeats).
 	return out
 }
 
-func roleNamesSorted(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// modelDetail renders a model row's second column: its display name plus
+// the context window when the config declares one.
+func modelDetail(m config.ModelConfig) string {
+	parts := []string{}
+	if m.Name != "" && m.Name != m.ID {
+		parts = append(parts, m.Name)
 	}
-	sort.Strings(out)
-	return out
+	if m.ContextWindow > 0 {
+		parts = append(parts, humanCtx(m.ContextWindow))
+	}
+	if m.Reasoning {
+		parts = append(parts, "reasoning")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func humanCtx(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%gM ctx", float64(n)/1_000_000)
+	case n >= 1000:
+		return fmt.Sprintf("%dk ctx", n/1000)
+	default:
+		return fmt.Sprintf("%d ctx", n)
+	}
+}
+
+// sameModelRef compares two model refs ignoring an ":effort" suffix, so
+// "@slow:high" and the "onegw/dev" it resolves to mark the same session.
+func sameModelRef(a, b string) bool {
+	strip := func(s string) string {
+		if i := strings.LastIndex(s, ":"); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	return a != "" && strip(a) == strip(b)
 }

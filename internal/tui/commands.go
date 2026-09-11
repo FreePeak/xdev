@@ -1,10 +1,13 @@
 package tui
 
 import (
-	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // Command is one slash command: /Name, /Alias... — Fn runs at input-submit
@@ -25,16 +28,32 @@ type SessionOps struct {
 	Fork             func() error
 	Dump             func() (string, error)
 	Resume           func(query string) error
+	// Recent lists the sessions /resume offers when called with no
+	// argument; the TUI renders them as a picker and hands the chosen id
+	// back to Resume. nil degrades /resume to Resume("").
+	Recent func() []ResumeOption
+}
+
+// ResumeOption is one session in the /resume picker.
+type ResumeOption struct {
+	ID      string // full id (Resume resolves by prefix; pass enough to be unambiguous)
+	Title   string // display title
+	Detail  string // e.g. "print · 17:53" or the entry preview
+	Current bool   // the session this TUI is already on
 }
 
 // ModelOps wires the /model command to the live provider state (lives in
-// cmd). Current reports the active ref; List returns the available refs;
-// Set switches the active model for subsequent turns. nil ops degrade the
+// cmd). Current reports the active ref; Views builds the selector's tabs
+// (roles + one per provider); Models returns the flat model catalog the
+// role-assignment step picks from; Set switches the active model for
+// subsequent turns; SetRole persists modelRoles.<role>. nil ops degrade the
 // command to a notice.
 type ModelOps struct {
 	Current func() string
-	List    func() []string
+	Views   func() []PickerView
+	Models  func() []PickerItem
 	Set     func(ref string) error
+	SetRole func(role, ref string) error
 }
 
 // SettingsOps wires the /settings command to the config layer (lives in
@@ -100,6 +119,9 @@ type CommandAPI interface {
 	Memory(args string) error
 	Theme(args string) error
 	SettingsView(args string) error
+	// ExtensionCommands exposes the "/server:cmd" roster for /help; nil
+	// when no extensions are loaded.
+	ExtensionCommands() map[string]string
 	AddSystemBlock(text string)
 	SendPrompt(text string)
 	CommandDir() string
@@ -120,7 +142,14 @@ func builtinCommands() []Command {
 		{Name: "fork", Description: "branch the session into a new file",
 			Fn: func(app CommandAPI, args string) error { return app.ForkSession() }},
 		{Name: "tree", Description: "show the session tree",
-			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.SessionTree()); return nil }},
+			Fn: func(app CommandAPI, args string) error {
+				tree := app.SessionTree()
+				if strings.TrimSpace(tree) == "" {
+					tree = "session is empty — no entries yet"
+				}
+				app.AddSystemBlock(tree)
+				return nil
+			}},
 		{Name: "branch", Description: "switch to an entry by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.BranchSession(args) }},
 		{Name: "dump", Description: "export the transcript to markdown",
@@ -142,7 +171,7 @@ func builtinCommands() []Command {
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "help", Description: "show available commands",
-			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(builtinCommands())); return nil }},
+			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(app)); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
 			Fn: func(app CommandAPI, args string) error { app.Quit(); return nil }},
 	}
@@ -274,13 +303,25 @@ func (a *App) SetExtensionCommands(desc map[string]string, run ExtensionCommand)
 	a.extRun = run
 }
 
+// ExtensionCommands exposes the "/server:cmd" roster (for /help); nil when
+// no extensions are loaded.
+func (a *App) ExtensionCommands() map[string]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.extCommands
+}
+
 // RunExtensionCommand implements CommandAPI.
 func (a *App) RunExtensionCommand(name, args string) (string, error) {
 	a.mu.Lock()
 	run := a.extRun
 	a.mu.Unlock()
 	if run == nil {
-		return "", errors.New("no extensions loaded")
+		// The manager normally produces this message with its own drop-in
+		// dir; with no extensions attached the TUI never wired a runner,
+		// so name the default location here.
+		return "", fmt.Errorf("no extensions loaded (drop an executable into %s and restart)",
+			filepath.Join(config.DataDir(), "extensions"))
 	}
 	return run(name, args)
 }
@@ -288,8 +329,11 @@ func (a *App) RunExtensionCommand(name, args string) (string, error) {
 // SetCommandDir points markdown command discovery at cwd.
 func (a *App) SetCommandDir(cwd string) { a.commandDir = cwd }
 
-// helpText renders the aligned command list for /help.
-func helpText(cmds []Command) string {
+// helpText renders the aligned command list for /help: built-ins first,
+// then markdown-discovered and extension commands — /help must show every
+// command the dropdown offers, not only the static registry.
+func helpText(app CommandAPI) string {
+	cmds := builtinCommands()
 	var b strings.Builder
 	b.WriteString("commands:")
 	for _, c := range cmds {
@@ -299,5 +343,31 @@ func helpText(cmds []Command) string {
 		}
 		fmt.Fprintf(&b, "\n  %-12s %s", names, c.Description)
 	}
+	if mc := DiscoverCommands(app.CommandDir()); len(mc) > 0 {
+		b.WriteString("\n\nproject commands:")
+		for _, c := range mc {
+			fmt.Fprintf(&b, "\n  %-12s %s", "/"+c.Name, collapseLine(c.Description))
+		}
+	}
+	if ext := app.ExtensionCommands(); len(ext) > 0 {
+		b.WriteString("\n\nextension commands:")
+		names := make([]string, 0, len(ext))
+		for n := range ext {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Fprintf(&b, "\n  %-12s %s", "/"+n, collapseLine(ext[n]))
+		}
+	}
 	return b.String()
+}
+
+// collapseLine truncates a description to its first line so a multi-line
+// markdown command cannot break the table.
+func collapseLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
