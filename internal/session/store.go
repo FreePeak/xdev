@@ -415,6 +415,113 @@ func (s *Store) openWriterLocked() error {
 // Branch moves the leaf pointer to entryID and persists a "branch" custom
 // marker (customType "branch", data {"to":entryID}) so Open reconstructs the
 // same leaf after a restart. Nothing is mutated or deleted.
+// Tree renders the entry graph as an indented text tree (M10 #11: /tree).
+// Each line is "<shortID> <type> <summary>" indented by depth; the leaf
+// pointer is marked with "→ ".
+func (s *Store) Tree() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Build adjacency: id → children.
+	children := map[string][]string{}
+	var roots []string
+	for _, e := range s.entries {
+		env := e.Envelope()
+		if env.ParentID == "" {
+			roots = append(roots, env.ID)
+		} else {
+			children[env.ParentID] = append(children[env.ParentID], env.ID)
+		}
+	}
+
+	var b strings.Builder
+	var walk func(id string, depth int)
+	walk = func(id string, depth int) {
+		e := s.byID[id]
+		if e == nil {
+			return
+		}
+		env := e.Envelope()
+		prefix := strings.Repeat("  ", depth)
+		marker := "  "
+		if id == s.leaf {
+			marker = "→ "
+		}
+		fmt.Fprintf(&b, "%s%s%s %s %s\n", prefix, marker, shortID(id), env.Type, summarize(e))
+		for _, c := range children[id] {
+			walk(c, depth+1)
+		}
+	}
+	for _, r := range roots {
+		walk(r, 0)
+	}
+	return b.String()
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// summarize returns a one-line preview of an entry for the tree view.
+func summarize(e Entry) string {
+	env := e.Envelope()
+	switch t := e.(type) {
+	case *MessageEntry:
+		txt := t.Message.Text()
+		if len(txt) > 60 {
+			txt = txt[:60] + "…"
+		}
+		return txt
+	case *CompactionEntry:
+		return "(compaction)"
+	case *ResetBoundaryEntry:
+		return "(reset boundary)"
+	case *BranchSummaryEntry:
+		return "(branch summary)"
+	case *ModelChangeEntry:
+		return t.Model
+	case *CustomEntry:
+		return "(" + t.CustomType + ")"
+	default:
+		return "(" + env.Type + ")"
+	}
+}
+
+// Branches returns the branch points in the tree (entry IDs that have more
+// than one child), newest first.
+func (s *Store) Branches() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	children := map[string]int{}
+	var roots []string
+	for _, e := range s.entries {
+		env := e.Envelope()
+		if env.ParentID == "" {
+			roots = append(roots, env.ID)
+		} else {
+			children[env.ParentID]++
+		}
+	}
+	seen := map[string]bool{}
+	var branches []string
+	for id, n := range children {
+		if n > 1 && !seen[id] {
+			seen[id] = true
+			branches = append(branches, id)
+		}
+	}
+	for _, r := range roots {
+		if children[r] > 1 && !seen[r] {
+			seen[r] = true
+			branches = append(branches, r)
+		}
+	}
+	return branches
+}
+
 func (s *Store) Branch(entryID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
