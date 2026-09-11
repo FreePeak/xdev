@@ -34,19 +34,27 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 
 // xdevLogo is the one welcome logo: "XDEV" in the FIGlet font
 // Delta Corps Priest 1 — the same font the Omarchy wordmark is drawn
-// in (omarchy-ascii). Solid ███ strokes with ▀▄▌▐ half-blocks for the
-// rounded joins; no shaded ░ noise, so the mark reads cleanly at any
-// size. It renders identically at every terminal size; the only
-// size-dependent choice is whether it fits at all (see logoArt).
+// in (omarchy-ascii). Solid block strokes with ▀▄▌▐ half-blocks for
+// the rounded joins; no shaded ░ noise, so the mark reads cleanly at
+// any size.
+//
+// The glyphs are the font's own, drawn here on a fixed 41-cell grid
+// instead of taken at the font's native 49: 49 plus margins needs a
+// 53-column terminal, and a common ~48-column window showed no logo
+// at all. Every stem sits on one absolute column across all eight
+// rows (the X's arms slide one column per row); nothing is resampled,
+// so no stroke wobbles. It renders identically at every terminal
+// size; the only size-dependent choice is whether it fits at all
+// (see logoArt).
 var xdevLogo = []string{
-	"▀████    ▐████▀ ████████▄     ▄████████  ▄█    █▄",
-	"  ███▌   ████▀  ███   ▀███   ███    ███ ███    ███",
-	"   ███  ▐███    ███    ███   ███    █▀  ███    ███",
-	"   ▀███▄███▀    ███    ███  ▄███▄▄▄     ███    ███",
-	"   ████▀██▄     ███    ███ ▀▀███▀▀▀     ███    ███",
-	"  ▐███  ▀███    ███    ███   ███    █▄  ███    ███",
-	" ▄███     ███▄  ███   ▄███   ███    ███ ███    ███",
-	"████       ███▄ ████████▀    ██████████  ▀██████▀",
+	"▀███    ▐███▀ ███████▄   ▄████▄  ▄█    █▄",
+	"  ██▌   ███▀  ██    ▀██ ██    ██ ██    ██",
+	"   ██  ▐██    ██     ██ ██    █▀ ██    ██",
+	"   ▀██▄██▀    ██     ██ ▄██▄▄▄   ██    ██",
+	"   ███▀██▄    ██     ██ ▀▀██▀▀▀  ██    ██",
+	"  ▐██  ▀██    ██     ██ ██    █▄ ██    ██",
+	" ▄██     ██▄  ██    ▄██ ██    ██ ██    ██",
+	"███       ██▄ ███████▀  ████████ ▀██████▀",
 }
 
 // logoWidth returns the widest art row in cells.
@@ -62,7 +70,7 @@ func logoWidth() int {
 
 // logoArt returns the xdev logo for the given terminal size, or nil
 // when the terminal can't fit it: content shorter than the 8 art rows
-// plus tagline, gap and menu, or narrower than the 50-cell art plus
+// plus tagline, gap and menu, or narrower than the 41-cell art plus
 // margins. One logo at every size — no variant swapping, so the
 // artwork never changes shape between terminal sizes.
 func logoArt(w, h int) []string {
