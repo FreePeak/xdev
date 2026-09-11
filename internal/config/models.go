@@ -51,10 +51,13 @@ type ProviderConfig struct {
 	API     string `yaml:"api"`
 	// AuthHeader names where a bearer credential rides (e.g.
 	// "x-api-key"); empty means "Authorization".
-	AuthHeader string            `yaml:"authHeader,omitempty"`
-	Headers    map[string]string `yaml:"headers,omitempty"`
-	Discovery  *DiscoveryConfig  `yaml:"discovery,omitempty"`
-	Models     []ModelConfig     `yaml:"models,omitempty"`
+	AuthHeader string `yaml:"authHeader,omitempty"`
+	// Auth names the credential style: api_key (default), oauth, or none
+	// (a local server that needs no credential — ollama, lm-studio).
+	Auth      string            `yaml:"auth,omitempty"`
+	Headers   map[string]string `yaml:"headers,omitempty"`
+	Discovery *DiscoveryConfig  `yaml:"discovery,omitempty"`
+	Models    []ModelConfig     `yaml:"models,omitempty"`
 }
 
 // Config is the parsed models.yml.
