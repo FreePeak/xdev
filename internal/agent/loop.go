@@ -208,7 +208,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 				text += tb.Text + "\n"
 			}
 		}
-		for _, m := range MagicKeywordMessages(text) {
+		for _, m := range MagicKeywordMessagesForTurns(text, a.hasTool("task")) {
 			history = append(history, m)
 			a.persist(m)
 		}
@@ -405,6 +405,16 @@ func (a *Agent) recoverOverflow(ctx context.Context) []ai.Message {
 // persist appends m to the session mirror when one is attached. The hooks
 // persist assistant/toolResult messages themselves; this covers synthetic
 // user messages (steering, continuations) the hooks never see.
+// hasTool reports whether name is in the live tool registry (used to gate
+// task-conditional magic keywords). A nil registry reports false.
+func (a *Agent) hasTool(name string) bool {
+	if a.Tools == nil {
+		return false
+	}
+	_, ok := a.Tools.Get(name)
+	return ok
+}
+
 func (a *Agent) persist(m ai.Message) {
 	if a.Store == nil {
 		return

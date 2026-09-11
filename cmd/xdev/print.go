@@ -89,7 +89,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	wireTaskParent(reg, store)
 
 	// --- agent ---
-	hooks := &printHooks{store: store}
+	hooks := &printHooks{store: store, showThinking: settings.ShowThinkingOn()}
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef)}
 	applyPolicy(ag, settings)
 
@@ -725,6 +725,9 @@ func initialHistory(store *session.Store, prompt string) ([]ai.Message, error) {
 // printHooks streams to stdout/stderr and persists on message_end.
 type printHooks struct {
 	store *session.Store
+	// showThinking mirrors settings.showThinking: off suppresses the
+	// stderr reasoning stream (issue #20).
+	showThinking bool
 }
 
 func (h *printHooks) OnStart(req ai.StreamRequest) {}
@@ -734,8 +737,10 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 	case ai.EventTextDelta:
 		fmt.Print(ev.Delta)
 	case ai.EventThinkingDelta:
-		// print mode: thinking goes to stderr.
-		fmt.Fprint(os.Stderr, ev.Delta)
+		// print mode: thinking goes to stderr — only when enabled.
+		if h.showThinking {
+			fmt.Fprint(os.Stderr, ev.Delta)
+		}
 	case ai.EventToolcallStart:
 		fmt.Fprintf(os.Stderr, "\n⟨%s⟩\n", ev.ToolName)
 	case ai.EventError:

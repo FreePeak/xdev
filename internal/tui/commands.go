@@ -37,6 +37,16 @@ type ModelOps struct {
 	Set     func(ref string) error
 }
 
+// SettingsOps wires the /settings command to the config layer (lives in
+// cmd). List renders the resolved settings; SetThinking persists the
+// showThinking key to the global layer. nil ops degrade the command to a
+// notice.
+type SettingsOps struct {
+	Path        string
+	List        func() []string
+	SetThinking func(on bool) error
+}
+
 // ExtensionCommand runs one "/ext:cmd" and returns its output. Wired by
 // cmd from the extension manager; nil when no extensions are loaded.
 type ExtensionCommand func(name, args string) (string, error)
@@ -55,6 +65,7 @@ type CommandAPI interface {
 	DumpSession() error
 	ResumeSession(query string) error
 	SwitchModel(args string) error
+	SettingsView(args string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
 	CommandDir() string
@@ -84,6 +95,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
+		{Name: "settings", Description: "show settings; toggle showThinking on|off",
+			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "help", Description: "show available commands",
