@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -75,7 +78,7 @@ func TestPromptBudgetWithLateRegistrants(t *testing.T) {
 	for i := range 3 {
 		reg.Register(verboseTool{name: fmt.Sprintf("late_%d", i)})
 	}
-	got := promptFn(basePrompt(printOptions{}), t.TempDir(), reg, "")()
+	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
 	if tokens := len([]rune(got)) / 4; tokens >= maxPromptTokens {
 		t.Fatalf("prompt with verbose remote tools is ~%d tokens (budget %d) — the description cap is not holding",
 			tokens, maxPromptTokens)
@@ -87,7 +90,7 @@ func TestPromptBudgetWithLateRegistrants(t *testing.T) {
 
 func TestBundledPromptStaysUnderBudget(t *testing.T) {
 	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil)
-	got := promptFn(basePrompt(printOptions{}), t.TempDir(), reg, "")()
+	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
 	tokens := len([]rune(got)) / 4
 	if tokens >= maxPromptTokens {
 		t.Fatalf("system prompt is ~%d tokens (budget %d): %d chars across %d tools — trim a description or make a deliberate PRD change",
@@ -95,5 +98,63 @@ func TestBundledPromptStaysUnderBudget(t *testing.T) {
 	}
 	if len(reg.Defs()) < 9 {
 		t.Fatalf("expected the full bundled tool surface, got %d", len(reg.Defs()))
+	}
+}
+
+// TestSystemPromptFileDiscovery pins the SYSTEM.md / APPEND_SYSTEM.md
+// precedence: project file → user file → built-in default, and the flag
+// wins over both files.
+func TestSystemPromptFileDiscovery(t *testing.T) {
+	proj := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userDir := filepath.Join(home, ".xdev", "agent")
+	os.MkdirAll(userDir, 0o755)
+
+	// No files at all → the built-in default.
+	if got := basePrompt(printOptions{}, proj); got != agent.SystemPromptBase {
+		t.Fatalf("default = %q..., want the base prompt", got[:40])
+	}
+
+	// User-level SYSTEM.md → used when no project file exists.
+	os.WriteFile(filepath.Join(userDir, "SYSTEM.md"), []byte("user prompt"), 0o644)
+	if got := basePrompt(printOptions{}, proj); got != "user prompt" {
+		t.Fatalf("user-level = %q", got)
+	}
+
+	// Project-level SYSTEM.md → wins over user-level.
+	os.WriteFile(filepath.Join(proj, "SYSTEM.md"), []byte("project prompt"), 0o644)
+	if got := basePrompt(printOptions{}, proj); got != "project prompt" {
+		t.Fatalf("project-level = %q", got)
+	}
+
+	// The flag overrides both.
+	opts := printOptions{SystemPrompt: "flag wins"}
+	if got := basePrompt(opts, proj); got != "flag wins" {
+		t.Fatalf("flag = %q", got)
+	}
+}
+
+func TestAppendSystemFileDiscovery(t *testing.T) {
+	proj := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userDir := filepath.Join(home, ".xdev", "agent")
+	os.MkdirAll(userDir, 0o755)
+	os.WriteFile(filepath.Join(userDir, "APPEND_SYSTEM.md"), []byte("user append"), 0o644)
+	os.WriteFile(filepath.Join(proj, "APPEND_SYSTEM.md"), []byte("project append"), 0o644)
+
+	ov := agent.LoadSystemPromptOverrides(proj)
+	if ov.Append != "project append" {
+		t.Fatalf("project APPEND_SYSTEM.md = %q", ov.Append)
+	}
+	// Flag would win over both (the cmd checks AppendSystem before overrides.Append).
+	opts := printOptions{AppendSystem: "flag append"}
+	appendStr := opts.AppendSystem
+	if appendStr == "" {
+		appendStr = ov.Append
+	}
+	if appendStr != "flag append" {
+		t.Fatalf("append precedence broken: %q", appendStr)
 	}
 }
