@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // settingsFor loads the layered settings for this run (M9 #10): schema
@@ -95,11 +98,14 @@ func runConfig(args []string, s *config.Settings) int {
 func validateKey(key, value string) error {
 	switch key {
 	case "theme":
-		switch value {
-		case "auto", "groknight", "grokday":
+		// Delegate to the theme package so custom themes (e.g. ocean)
+		// validate here exactly as they do in the TUI picker; "auto" is
+		// always settable via Load's env polarity guess.
+		avail := theme.AvailableThemes(theme.CustomDir())
+		if value == "auto" || slices.Contains(avail, value) {
 			return nil
 		}
-		return fmt.Errorf("theme must be auto|groknight|grokday, got %q", value)
+		return fmt.Errorf("unknown theme %q (available: %s)", value, strings.Join(avail, ", "))
 	case "approvalMode":
 		switch value {
 		case "always-ask", "write", "yolo":

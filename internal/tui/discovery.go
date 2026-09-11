@@ -109,10 +109,34 @@ func parseMarkdownCommand(path string) (MarkdownCommand, bool) {
 	if strings.TrimSpace(template) == "" {
 		return MarkdownCommand{}, false // body-less or whitespace-only file
 	}
+	// A name the parser can never accept (underscores, uppercase, a colon)
+	// or one a built-in already owns is not a command: listing it would put
+	// a row in the dropdown that submits literal text to the model. Built-ins
+	// reserve their names (omp parity), so the shadowed file is skipped.
+	if !isPlainCommandName(name) || isReservedCommandName(name) {
+		return MarkdownCommand{}, false
+	}
 	if description == "" {
 		description = firstLine(template, 60)
 	}
 	return MarkdownCommand{Name: name, Description: description, Template: template, Path: path}, true
+}
+
+// isPlainCommandName reports whether name is dispatchable as a bare slash
+// command: the [a-z][a-z0-9-]* shape with no colon (a colon means an
+// extension-qualified "/server:cmd", which markdown files may not claim).
+func isPlainCommandName(name string) bool {
+	return !strings.Contains(name, ":") && isCommandName(name)
+}
+
+// isReservedCommandName reports whether a built-in owns the name.
+func isReservedCommandName(name string) bool {
+	for _, c := range builtinCommands() {
+		if c.Name == name || slices.Contains(c.Aliases, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // firstLine returns the first non-empty line of s, trimmed, truncated to max

@@ -254,14 +254,18 @@ func (t *Theme) SymbolPreset() string {
 	return t.Symbols.Preset
 }
 
-// AvailableThemes lists built-ins plus customs from dir (customs never
-// shadow a built-in name).
+// AvailableThemes lists "auto" first, then the built-ins, then customs
+// from dir (customs never shadow a built-in name). "auto" is settable —
+// Load resolves it via the env polarity guess — so it is listed whenever
+// both polarity themes exist, keeping /theme auto discoverable and
+// restorable.
 func AvailableThemes(dir string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for name := range Builtins() {
+	b := Builtins()
+	seen := map[string]bool{"auto": true} // "auto" is prepended below; a custom auto.json never duplicates it
+	var builtinNames, customNames []string
+	for name := range b {
 		seen[name] = true
-		out = append(out, name)
+		builtinNames = append(builtinNames, name)
 	}
 	if dir != "" {
 		entries, err := os.ReadDir(dir)
@@ -275,12 +279,20 @@ func AvailableThemes(dir string) []string {
 					continue // built-ins win
 				}
 				seen[name] = true
-				out = append(out, name)
+				customNames = append(customNames, name)
 			}
 		}
 	}
-	sort.Strings(out)
-	return out
+	// Each group sorted, customs strictly after built-ins so the picker
+	// always shows the shipped themes first.
+	sort.Strings(builtinNames)
+	sort.Strings(customNames)
+	var out []string
+	if b["groknight"] != nil && b["grokday"] != nil {
+		out = append(out, "auto")
+	}
+	out = append(out, builtinNames...)
+	return append(out, customNames...)
 }
 
 // LoadNamed resolves a theme by name for rendering: built-ins first,

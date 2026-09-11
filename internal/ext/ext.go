@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/tool"
 )
@@ -157,7 +158,9 @@ type Manager struct {
 	mu       sync.Mutex
 	exts     []*Extension
 	failures []string // per-extension load errors (never fatal, always reported)
-	host     func(Action)
+	// dir is the drop-in directory Load was pointed at; see extensionsDir.
+	dir  string
+	host func(Action)
 	// EventTimeout overrides DefaultEventTimeout.
 	EventTimeout time.Duration
 }
@@ -184,6 +187,11 @@ func (m *Manager) BindHost(h func(Action)) {
 // with each. A failing extension is logged and skipped: a broken extension
 // must never block a session.
 func (m *Manager) Load(ctx context.Context, dir string) error {
+	// Recorded before anything can fail: this path is what the
+	// zero-extension command error points the user at.
+	m.mu.Lock()
+	m.dir = dir
+	m.mu.Unlock()
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -619,6 +627,15 @@ func (m *Manager) Tools() []tool.Tool {
 	return out
 }
 
+// extensionsDir is the manager's drop-in directory: the one Load read, or
+// the default <dataDir>/extensions when nothing has loaded yet. Nil-safe.
+func (m *Manager) extensionsDir() string {
+	if m == nil || m.dir == "" {
+		return filepath.Join(config.DataDir(), "extensions")
+	}
+	return m.dir
+}
+
 // RunCommand invokes one extension slash command ("/ext:cmd args"). The
 // extension answers with a patch payload whose text is what the host
 // should print. Names are "extension:command" as announced.
@@ -626,6 +643,12 @@ func (m *Manager) RunCommand(ctx context.Context, qualified, args string) (strin
 	server, cmd, found := strings.Cut(qualified, ":")
 	if !found {
 		return "", fmt.Errorf("ext: command %q is not extension-qualified", qualified)
+	}
+	if len(m.list()) == 0 {
+		// Nothing installed is a setup state, not a typo: naming the
+		// directory turns the dead-end into the fix. The unknown-name
+		// error below stays for managers that do have extensions.
+		return "", fmt.Errorf("no extensions loaded (drop an executable into %s and restart)", m.extensionsDir())
 	}
 	for _, x := range m.list() {
 		if x.Name != server {

@@ -36,8 +36,9 @@ var BuiltinActions = []string{
 	"scroll-up", "scroll-down", "scroll-top", "scroll-bottom", "scroll-page-up", "scroll-page-down",
 	"menu-prev", "menu-next", "menu-accept",
 	"history-prev", "history-next",
-	"expand", "collapse",
+	"redraw",
 	"clear-input",
+	"model-select", // Alt+M: the /model roles+models selector (omp app.model.select)
 }
 
 // DefaultKeyMap is the factory chord table.
@@ -45,42 +46,39 @@ func DefaultKeyMap() *KeyMap {
 	m := &KeyMap{
 		bindings: map[string]string{
 			// Editor / composer. Ctrl+J is the portable newline (every
-			// terminal can send 0x0A); Alt-Enter and Shift-Enter are aliases
-			// where the terminal reports them, so the table lists the one
-			// that always works first.
-			"Enter":       "submit",
-			"C-j":         "newline",
-			"Alt-Enter":   "newline",
-			"Shift-Enter": "newline",
-			"Escape":      "cancel",
-			"C-u":         "clear-input",
+			// terminal can send 0x0A); Alt-Enter is the alias some
+			// terminals report for the same keystroke.
+			"Enter":   "submit",
+			"C-j":     "newline",
+			"A-Enter": "newline",
+			"Escape":  "cancel",
+			"C-u":     "clear-input",
 			// Quit
-			"C-c": "quit",
-			// Menu navigation
+			"C-c":  "quit",
+			"C-d":  "quit",
 			"Tab":  "menu-accept",
 			"C-p":  "menu-prev",
 			"C-n":  "menu-next",
 			"Up":   "menu-prev",
 			"Down": "menu-next",
 			// Scroll
-			"PgUp":       "scroll-page-up",
-			"PgDn":       "scroll-page-down",
-			"C-b":        "scroll-page-up",
-			"C-f":        "scroll-page-down",
-			"Home":       "scroll-top",
-			"End":        "scroll-bottom",
-			"Shift-Up":   "scroll-up",
-			"Shift-Down": "scroll-down",
+			"PgUp":   "scroll-page-up",
+			"PgDn":   "scroll-page-down",
+			"C-b":    "scroll-page-up",
+			"C-f":    "scroll-page-down",
+			"Home":   "scroll-top",
+			"End":    "scroll-bottom",
+			"S-Up":   "scroll-up",
+			"S-Down": "scroll-down",
 			// TUI extras
-			"C-l": "expand",
-			"C-e": "collapse",
+			"C-l": "redraw",
+			// Model selector. omp parity chord (app.model.select); Alt+M
+			// is deliverable in every terminal we target.
+			"A-m": "model-select",
 			"C-r": "history-prev",
-			// history-next, abort and complete share chords with menu/history
-			// actions or have no default: context disambiguates at dispatch.
-			// They remain settable from keybindings.yml.
-			// Actions with no default chord (listed so /hotkeys shows them).
-			// "abort" → C-c (shared with quit); "complete" → Tab (shared with
-			// menu-accept). These share chords because context disambiguates.
+			// history-next has no default (Up/Down already recall when the
+			// editor is in history mode); it stays settable from
+			// keybindings.yml.
 		},
 		actions: append([]string(nil), BuiltinActions...),
 	}
