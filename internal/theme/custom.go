@@ -44,6 +44,13 @@ type Symbols struct {
 // CustomDir is <DataDir>/themes. Like every other data path it goes
 // through config.DataDir so XDEV_AGENT_DIR sandboxes custom themes too
 // (config does not import theme, so no cycle).
+func CustomDir() string {
+	dir := config.DataDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "themes")
+}
 
 // LoadCustom reads and validates <dir>/<name>.json. A missing file is
 // (nil, nil) so callers can fall through to built-ins.
