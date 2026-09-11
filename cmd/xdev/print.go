@@ -24,6 +24,7 @@ import (
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
 	"slices"
+	"sync"
 )
 
 // printOptions configures one one-shot run.
@@ -332,15 +333,26 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 // providerModels merges pinned + discovered models once per provider per
 // process: discovery is best-effort (a down server must not affect
 // startup), and the result is cached so a stalled endpoint is not retried
-// on every model lookup.
-var providerModelCache = map[string][]config.ModelConfig{}
+// on every model lookup. The cache is mutex-guarded because the TUI warms
+// discovery providers on a background goroutine while the key thread may
+// read any provider's catalog through /model's picker.
+var (
+	providerModelCacheMu sync.Mutex
+	providerModelCache   = map[string][]config.ModelConfig{}
+)
 
 func providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig {
-	if cached, ok := providerModelCache[name]; ok {
+	providerModelCacheMu.Lock()
+	cached, ok := providerModelCache[name]
+	providerModelCacheMu.Unlock()
+	if ok {
 		return cached
 	}
 	out := pc.Models
 	if pc.Discovery != nil {
+		// Network I/O stays outside the lock: two racers may both probe a
+		// cold provider, and the second write just overwrites an equal
+		// result.
 		ctx, cancel := context.WithTimeout(context.Background(), config.DiscoveryTimeout)
 		found, err := config.DiscoverModels(ctx, pc)
 		cancel()
@@ -350,7 +362,9 @@ func providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig
 			out = found
 		}
 	}
+	providerModelCacheMu.Lock()
 	providerModelCache[name] = out
+	providerModelCacheMu.Unlock()
 	return out
 }
 
@@ -685,8 +699,16 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 		}
 		ref = expanded
 	}
+	// Gateways routinely serve far more than models.yml pins, so an
+	// explicit provider/model ref is accepted even when the catalog does
+	// not list it — rejecting it here would make unpinned-but-served
+	// models unusable. The catalog check stays advisory (logged); the hard
+	// guards are the bare-id resolution above and seedModelFromSession,
+	// which refuses to adopt history refs that do not resolve. The picker
+	// itself only ever offers catalog rows, so the interactive path cannot
+	// produce a typo.
 	if err := validateModelRef(cfg, ref); err != nil {
-		return "", "", err
+		logx.Debugf("model %q not in the configured catalog: %v", ref, err)
 	}
 	return ref, effort, nil
 }
@@ -720,10 +742,11 @@ func expandBareModelID(cfg *config.Config, id string) (string, error) {
 	}
 }
 
-// validateModelRef rejects a ref whose model id is not in the provider's
-// merged catalog: silently accepting "onegw/nope" hands the user a 404 on
-// the next turn instead of an error they can act on. A provider with an
-// empty catalog (override-only, no discovery block) skips the check —
+// validateModelRef reports a ref whose model id is not in the provider's
+// merged catalog. Callers decide severity: resolveModel logs it (explicit
+// refs may name models the gateway serves but models.yml does not pin),
+// while seedModelFromSession treats it as fatal for that seed. A provider
+// with an empty catalog (override-only, no discovery block) never fails —
 // there is nothing to compare against.
 func validateModelRef(cfg *config.Config, ref string) error {
 	if cfg == nil {
