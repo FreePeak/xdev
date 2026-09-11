@@ -473,7 +473,10 @@ func attachExtensions(ctx context.Context, reg *tool.Registry, steer, followUp f
 		return nil
 	}
 	tools := mgr.Tools()
-	if len(tools) == 0 && len(mgr.Commands()) == 0 {
+	// A policy-only extension (events, no tools/commands) must survive:
+	// it is the fail-closed hook the protocol exists for, and discarding
+	// it would silently disable the policy.
+	if len(tools) == 0 && len(mgr.Commands()) == 0 && mgr.PolicyHooks() == 0 {
 		mgr.Close()
 		return nil
 	}

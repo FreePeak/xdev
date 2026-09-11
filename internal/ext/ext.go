@@ -716,6 +716,21 @@ func (m *Manager) retire(x *Extension) {
 	}
 }
 
+// PolicyHooks reports how many live extensions subscribed to a policy
+// event (tool_call / tool_result). A policy-only extension announces no
+// tools and no commands, so callers that decide whether the manager is
+// worth keeping MUST consult this — dropping it silently disables the
+// policy, which is the opposite of the fail-closed contract.
+func (m *Manager) PolicyHooks() int {
+	n := 0
+	for _, x := range m.list() {
+		if x.subscribed(EventToolCall) || x.subscribed(EventToolResult) {
+			n++
+		}
+	}
+	return n
+}
+
 func (m *Manager) list() []*Extension {
 	if m == nil {
 		return nil
