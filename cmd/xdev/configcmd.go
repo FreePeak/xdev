@@ -106,6 +106,12 @@ func validateKey(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("approvalMode must be always-ask|write|yolo, got %q", value)
+	case "memory":
+		switch value {
+		case "off", "local":
+			return nil
+		}
+		return fmt.Errorf("memory must be off|local, got %q", value)
 	case "showThinking", "advisor":
 		switch value {
 		case "true", "false":
@@ -132,6 +138,11 @@ func fallbackValue(s *config.Settings, key string) string {
 		return fmt.Sprint(s.ShowThinkingOn())
 	case "advisor":
 		return fmt.Sprint(s.Advisor)
+	case "memory":
+		if s.Memory == "" {
+			return "off"
+		}
+		return s.Memory
 	}
 	return ""
 }

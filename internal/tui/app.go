@@ -51,6 +51,7 @@ type App struct {
 	modelOps      *ModelOps         // session lifecycle, wired by cmd (nil → notices)
 	planOps       *PlanOps          // /plan, wired by cmd (nil → notices)
 	advisorOps    *AdvisorOps       // /advisor, wired by cmd (nil → notices)
+	memoryOps     *MemoryOps        // /memory, wired by cmd (nil → notices)
 	settingsOps   *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
@@ -382,6 +383,39 @@ func (a *App) SetModelOps(ops *ModelOps) { a.modelOps = ops }
 
 // SetPlanOps wires the /plan command (plan state lives in cmd).
 func (a *App) SetPlanOps(ops *PlanOps) { a.planOps = ops }
+
+// SetMemoryOps wires the /memory command (the backend lives in cmd).
+func (a *App) SetMemoryOps(ops *MemoryOps) { a.memoryOps = ops }
+
+// Memory implements CommandAPI /memory: view|stats|clear.
+func (a *App) Memory(args string) error {
+	if a.memoryOps == nil {
+		return fmt.Errorf("memory not wired (set memory: local in settings)")
+	}
+	switch strings.TrimSpace(args) {
+	case "", "view":
+		if a.memoryOps.View == nil {
+			return fmt.Errorf("memory view not wired")
+		}
+		a.AddSystemBlock(a.memoryOps.View())
+	case "stats":
+		if a.memoryOps.Stats == nil {
+			return fmt.Errorf("memory stats not wired")
+		}
+		a.AddSystemBlock(a.memoryOps.Stats())
+	case "clear":
+		if a.memoryOps.Clear == nil {
+			return fmt.Errorf("memory clear not wired")
+		}
+		if err := a.memoryOps.Clear(); err != nil {
+			return err
+		}
+		a.AddSystemBlock("memory cleared")
+	default:
+		return fmt.Errorf("memory: use view|stats|clear")
+	}
+	return nil
+}
 
 // SetAdvisorOps wires the /advisor command (advisor state lives in cmd).
 func (a *App) SetAdvisorOps(ops *AdvisorOps) { a.advisorOps = ops }

@@ -110,7 +110,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	overrides := agent.LoadSystemPromptOverrides(cwd)
-	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
+	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
+		tailSystemPrompt(overrides, opts.AppendSystem), buildMemory(lastSettings()))
 
 	// Session.
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
@@ -437,6 +438,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	planMode.Propose = agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
 		return false, "awaiting user review — the user will /plan off to approve or send revision feedback"
 	})
+	if mem := buildMemory(lastSettings()); mem != nil {
+		app.SetMemoryOps(&tui.MemoryOps{
+			View: func() string {
+				summary, lessons := mem.Paths()
+				out := mem.Stats()
+				if s := mem.Summary(); s != "" {
+					out += "\n\n" + s
+				}
+				return out + "\n\n  " + summary + "\n  " + lessons
+			},
+			Stats: mem.Stats,
+			Clear: mem.Clear,
+		})
+	}
 	app.SetAdvisorOps(&tui.AdvisorOps{
 		Enabled: func() bool { return adv != nil },
 		Set: func(on bool) error {

@@ -36,6 +36,10 @@ type Settings struct {
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
 	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
+	// Memory selects the long-term memory backend (M12 F1): "off"
+	// (default) or "local" (MEMORY.md + learned.md under the data dir,
+	// with the memory:// read seam and the learn tool).
+	Memory string `yaml:"memory"`
 	// Advisor runs a background reviewer on the session (M11, research §6).
 	// The reviewer model comes from modelRoles.advisor; without that role
 	// the flag warns and starts disarmed.
@@ -54,6 +58,14 @@ type Settings struct {
 }
 
 // defaultSettings is the schema-defaults layer.
+// memoryOrDefault reports the effective memory backend ("" = off).
+func memoryOrDefault(v string) string {
+	if v == "" {
+		return "off"
+	}
+	return v
+}
+
 func defaultSettings() *Settings {
 	show := true
 	return &Settings{
@@ -163,6 +175,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.DisabledProviders != nil {
 		s.DisabledProviders = append([]string(nil), layer.DisabledProviders...)
+	}
+	if layer.Memory != "" {
+		s.Memory = layer.Memory
 	}
 	if layer.Advisor {
 		// bool with a false default: only a layer that turns it ON
@@ -295,6 +310,7 @@ func List(s *Settings, globalPath string) []string {
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
+		"memory " + memoryOrDefault(s.Memory),
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)

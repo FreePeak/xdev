@@ -55,6 +55,13 @@ type PlanOps struct {
 	Set func(on bool) error
 }
 
+// MemoryOps wires the /memory command (backend lives in cmd).
+type MemoryOps struct {
+	View  func() string
+	Stats func() string
+	Clear func() error
+}
+
 // AdvisorOps wires the /advisor command (state lives in cmd).
 type AdvisorOps struct {
 	Enabled func() bool
@@ -83,6 +90,7 @@ type CommandAPI interface {
 	SwitchModel(args string) error
 	PlanMode(args string) error
 	Advisor(args string) error
+	Memory(args string) error
 	SettingsView(args string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
@@ -115,6 +123,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings; toggle showThinking on|off",
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "memory", Description: "long-term memory: /memory view|stats|clear",
+			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit)",
