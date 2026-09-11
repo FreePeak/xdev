@@ -208,12 +208,40 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 	if !ok {
 		return 0
 	}
-	for _, m := range pc.Models {
+	// Pinned entries first; discovered ones (a local server's live model
+	// list) fill what models.yml never named, so compaction knows the real
+	// window instead of silently disabling itself.
+	for _, m := range providerModels(provider, pc) {
 		if m.ID == model {
 			return m.ContextWindow
 		}
 	}
 	return 0
+}
+
+// providerModels merges pinned + discovered models once per provider per
+// process: discovery is best-effort (a down server must not affect
+// startup), and the result is cached so a stalled endpoint is not retried
+// on every model lookup.
+var providerModelCache = map[string][]config.ModelConfig{}
+
+func providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig {
+	if cached, ok := providerModelCache[name]; ok {
+		return cached
+	}
+	out := pc.Models
+	if pc.Discovery != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), config.DiscoveryTimeout)
+		found, err := config.DiscoverModels(ctx, pc)
+		cancel()
+		if err != nil {
+			logx.Debugf("discovery %s: %v", name, err)
+		} else {
+			out = found
+		}
+	}
+	providerModelCache[name] = out
+	return out
 }
 
 // promptFn builds the system prompt from the LIVE registry each time it
