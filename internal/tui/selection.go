@@ -66,28 +66,34 @@ func (a *App) selectionRect() (x0, y0, x1, y1 int) {
 }
 
 // selectionText reconstructs the transcript text under the selection
-// rectangle from the last frame's rendered rows: rows between anchor
-// and end, columns between the respective x positions (full row for
-// middle rows), wide runes included when their first cell is covered.
+// rectangle from the last frame's rendered rows, with terminal-linear
+// shape: the anchor row runs to the end of its line, the end row starts
+// at its line start, middle rows are taken in full. Wide runes are
+// included when their first cell is covered.
 func (a *App) selectionText() string {
 	if len(a.selRows) == 0 {
 		return ""
 	}
-	x0, y0, x1, y1 := a.selectionRect()
+	_, y0, _, y1 := a.selectionRect()
+	ax, bx := a.selAnchor.x, a.selEnd.x
+	if a.selAnchor.y > a.selEnd.y {
+		ax, bx = bx, ax // drag went upward: swap the row endpoints
+	}
 	var sb strings.Builder
 	for y := y0; y <= y1; y++ {
 		if y >= len(a.selRows) {
 			break
 		}
 		sr := a.selRows[y]
-		ca, cb := x0, x1
-		if y == y0 {
-			ca = a.selAnchor.x
+		lo, hi := sr.x0, sr.x0+width(sr.text)
+		switch {
+		case y == y0 && y == y1:
+			lo, hi = min(ax, bx), max(ax, bx)
+		case y == y0:
+			lo = ax
+		case y == y1:
+			hi = bx
 		}
-		if y == y1 {
-			cb = a.selEnd.x
-		}
-		lo, hi := min(ca, cb), max(ca, cb)
 		if y > y0 {
 			sb.WriteByte('\n')
 		}
@@ -124,21 +130,27 @@ func (a *App) drawSelection() {
 		return
 	}
 	x0, y0, x1, y1 := a.selectionRect()
+	ax, bx := a.selAnchor.x, a.selEnd.x
+	if a.selAnchor.y > a.selEnd.y {
+		ax, bx = bx, ax
+	}
 	for y := y0; y <= y1 && y < a.height-4; y++ {
-		ca, cb := x0, x1
-		if y == y0 {
-			ca = a.selAnchor.x
+		lo, hi := x0, x1
+		switch {
+		case y == y0 && y == y1:
+			lo, hi = min(ax, bx), max(ax, bx)
+		case y == y0:
+			lo = ax
+		case y == y1:
+			hi = bx
 		}
-		if y == y1 {
-			cb = a.selEnd.x
-		}
-		lo, hi := min(ca, cb), max(ca, cb)
 		for x := lo; x <= hi && x < a.width; x++ {
 			mainc, combc, style, _ := a.scr.GetContent(x, y)
 			a.scr.SetContent(x, y, mainc, combc, style.Reverse(true))
 		}
 	}
 }
+
 // captureSelRows records the last frame's rendered rows for hit-testing
 // on release. Caller: draw's transcript loop (mu held).
 func (a *App) captureSelRows(sr selRow) {
