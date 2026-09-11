@@ -356,6 +356,7 @@ Net: Claude Code **confirms xdev's pi/omp-shaped minimalism** (it lacks LSP/AST/
 - [docs/research/omp-context-resilience.md](research/omp-context-resilience.md) — omp model switching, buildContext/compaction method ladder, API-error taxonomy + failure-mode matrix, resume guarantees; the M5/M9/M10 resilience spec.
 
 ---
+*Last updated: 2026-09-11 (welcome logo v3.2, #19: the wordmark is the Omarchy font — Delta Corps Priest 1, the face `omarchy-ascii` draws the Omarchy mark in — redrawn on a fixed 41-cell grid instead of the font's native 49, which needed a 53-column terminal and so rendered nothing in a common ~48-column window; the previous figlet 3-d art read as noise rather than "XDev". Solid block strokes with ▀▄▌▐ joins, every stem on one absolute column across all eight rows, glyph shapes verified against `omarchy ascii`. Same art at every size, same fit footprint as before.)*
 
 *Last updated: 2026-09-11 (#20 showThinking + `/settings`: reasoning bodies now render dimmed under the "Thinking…"/"Thought for Xs" header — collapsed header-only before; the layered `showThinking` key (default on, `*bool` to survive the zero-skip merge) drives both the TUI and print mode's stderr reasoning stream; `/settings` lists the resolved config and `/settings showThinking [on|off]` toggles + persists to the global layer; bare `/settings showThinking` flips. Same change fixed multi-line system notices (`/help`/`/model`/`/settings` lists), whose embedded newlines collapsed into one unreadable row)*
 
