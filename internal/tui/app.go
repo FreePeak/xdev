@@ -900,6 +900,40 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 	}
 
+	// Keymap-driven actions: the table /hotkeys prints is the table that
+	// runs, so a remapped chord (keybindings.yml) works rather than being
+	// decorative. Editor-adjacent actions are handled here; everything
+	// else falls through to the editor's own key handling.
+	if action := a.keyMap.Resolve(key); action != "" {
+		switch action {
+		case "submit":
+			// Fall through to the editor: Enter also completes an open
+			// slash menu, which only the editor path knows about.
+		case "newline":
+			// The editor is UI-thread-owned (same discipline as the
+			// HandleKey path below): no lock, no cross-goroutine sharing.
+			a.ed.insert('\n')
+			a.poke()
+			return
+		case "clear-input":
+			a.ed.Reset()
+			a.poke()
+			return
+		case "cancel":
+			if running {
+				a.onCancel()
+			}
+			return
+		case "quit":
+			if running {
+				a.onCancel()
+				return
+			}
+			a.onQuit()
+			return
+		}
+	}
+
 	// Editor keys. Text is captured BEFORE HandleKey — the editor archives
 	// and resets itself when it reports send.
 	text := strings.TrimSpace(a.ed.Text())
@@ -1469,6 +1503,7 @@ func (a *App) drawShortcuts(y int) {
 	type hint struct{ key, label string }
 	hints := []hint{
 		{"Enter", "send"},
+		{"Ctrl+J", "newline"},
 		{"Esc", "cancel"},
 		{"Ctrl+C", "quit"},
 	}
