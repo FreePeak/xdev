@@ -501,14 +501,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				defer cancel()
 				defer running.Store(false)
 				app.SetRunning(true)
-				var feedAdvisor func()
+				feedAdvisor := func() {}
 				modelMu.Lock()
 				lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
 				modelMu.Unlock()
 				ag := &agent.Agent{
-					Provider:   lp,
-					Tools:      reg,
-					Hooks:      &tuiHooks{ts: ts, feed: feedAdvisor},
+					Provider: lp,
+					Tools:    reg,
+					// feedAdvisor is assigned after the agent exists, so go
+					// through an indirection: a direct field copy would
+					// capture the nil func at literal time.
+					Hooks:      &tuiHooks{ts: ts, feed: func() { feedAdvisor() }},
 					MaxTokens:  opts.MaxTokens,
 					MaxTurns:   opts.MaxTurns,
 					Model:      lm,

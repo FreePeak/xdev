@@ -106,12 +106,12 @@ func validateKey(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("approvalMode must be always-ask|write|yolo, got %q", value)
-	case "showThinking":
+	case "showThinking", "advisor":
 		switch value {
 		case "true", "false":
 			return nil
 		}
-		return fmt.Errorf("showThinking must be true|false, got %q", value)
+		return fmt.Errorf("%s must be true|false, got %q", key, value)
 	}
 	return nil
 }
@@ -130,6 +130,8 @@ func fallbackValue(s *config.Settings, key string) string {
 		return s.DefaultModel
 	case "showThinking":
 		return fmt.Sprint(s.ShowThinkingOn())
+	case "advisor":
+		return fmt.Sprint(s.Advisor)
 	}
 	return ""
 }

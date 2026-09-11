@@ -49,12 +49,14 @@ type Advisor struct {
 	// boundary. Set by the host before the first Feed.
 	Primary *Agent
 
-	mu      sync.Mutex
-	cursor  int // primary history length already fed
-	errs    int // consecutive feed failures (3 halts the advisor)
-	halted  bool
-	guard   *emissionGuard
-	noteBuf []note // notes delivered by the most recent review (for /advisor dump)
+	mu     sync.Mutex
+	cursor int // primary history length already fed
+	errs   int // consecutive feed failures (3 halts the advisor)
+	// cursorBefore is the cursor at the start of the latest feed (log only).
+	cursorBefore int
+	halted       bool
+	guard        *emissionGuard
+	noteBuf      []note // notes delivered by the most recent review (for /advisor dump)
 }
 
 type note struct {
@@ -82,6 +84,7 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 		return // nothing new
 	}
 	delta := renderAdvisorDelta(primaryHistory[a.cursor:])
+	a.cursorBefore = a.cursor
 	a.cursor = len(primaryHistory)
 	a.noteBuf = nil
 	adviseTool := a.adviseToolLocked()
@@ -132,7 +135,10 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 	}
 	a.mu.Lock()
 	a.errs = 0
+	before := a.cursorBefore
+	total := len(primaryHistory)
 	a.mu.Unlock()
+	logx.Debugf("advisor: reviewed entries %d..%d, %d note(s)", before, total, delivered)
 }
 
 // Halted reports whether repeated failures stopped the advisor.

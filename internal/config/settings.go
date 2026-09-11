@@ -164,6 +164,12 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.DisabledProviders != nil {
 		s.DisabledProviders = append([]string(nil), layer.DisabledProviders...)
 	}
+	if layer.Advisor {
+		// bool with a false default: only a layer that turns it ON
+		// contributes (there is no expressible "unset" for a plain bool,
+		// and the shipped default is off).
+		s.Advisor = true
+	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
 	}
@@ -288,6 +294,7 @@ func List(s *Settings, globalPath string) []string {
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
+		"advisor " + fmt.Sprint(s.Advisor),
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)
