@@ -217,6 +217,8 @@ Flags:
 			AppendSystem: *appendSystemPrompt,
 			MaxTurns:     *maxTurns,
 			MaxTokens:    *maxTokens,
+			Prewalk:      *prewalkFlag,
+			PrewalkInto:  *prewalkInto,
 		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {
