@@ -120,9 +120,10 @@ func (g *lifeGrid) step() {
 	g.c = next
 }
 
-// ensureLife (re)seeds the backdrop after size changes: a random soup
-// at ~28% density, pre-run a few generations so the screen doesn't
-// open on pure noise. Caller holds a.mu.
+// ensureLife (re)seeds the backdrop after size changes: a sparse
+// random soup (~15% — the inset band reads as a small monochrome
+// texture, not a wall of cells), pre-run a few generations so the
+// screen doesn't open on pure noise. Caller holds a.mu.
 func (a *App) ensureLife(w, top, bot int) {
 	h := bot - top + 1
 	if a.life.w == w && a.life.h == h {
@@ -131,7 +132,7 @@ func (a *App) ensureLife(w, top, bot int) {
 	a.life = newLifeGrid(w, h)
 	for y := range h {
 		for x := range w {
-			a.life.c[y][x] = rand.Float64() < 0.28
+			a.life.c[y][x] = rand.Float64() < 0.15
 		}
 	}
 	for range 6 {
@@ -153,9 +154,10 @@ func (a *App) stepLife(w, top, bot int) {
 	}
 }
 
-// drawLife paints the live cells behind the logo: bright dense cores,
-// mid sparse clusters, dim isolated cells. Caller holds a.mu.
-func (a *App) drawLife(s tcell.Screen, top int, head, mid, dim tcell.Style) {
+// drawLife paints the live cells in shades of gray behind the logo:
+// lighter dense cores, mid sparse clusters, dim isolated cells.
+// left insets the band from the screen edge. Caller holds a.mu.
+func (a *App) drawLife(s tcell.Screen, left, top int, dense, mid, dim tcell.Style) {
 	for y := range a.life.h {
 		for x := range a.life.w {
 			if !a.life.c[y][x] {
@@ -164,20 +166,20 @@ func (a *App) drawLife(s tcell.Screen, top int, head, mid, dim tcell.Style) {
 			st := mid
 			switch n := a.life.neighbors(x, y); {
 			case n >= 4:
-				st = head
+				st = dense
 			case n <= 1:
 				st = dim
 			}
-			s.SetContent(x, top+y, lifeGlyph, nil, st)
+			s.SetContent(left+x, top+y, lifeGlyph, nil, st)
 		}
 	}
 }
 
-// lifeArea returns the backdrop area between the top bar and the
-// composer; ok=false when the terminal is too small for one.
-func lifeArea(w, h int) (top, bot int, ok bool) {
-	top, bot = 1, h-5
-	return top, bot, bot > top+3 && w >= 8
+// lifeArea returns the backdrop's grid width and row range: a band
+// inset from the screen edges — smaller than the full content area —
+// and skipped entirely on terminals too small to spare it.
+func lifeArea(w, h int) (gw, top, bot int, ok bool) {
+	return w - 12, 2, h - 6, w >= 40 && h >= 16
 }
 
 // cwdShort renders the top-bar location: last two path components.
@@ -210,27 +212,28 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		return st
 	}
 
-	// Top bar: cwd:branch left, model right (grok top_bar.rs).
+	// Top bar: cwd:branch left, model right (grok top_bar.rs). On a
+	// narrow window the two would collide — drop the model name.
 	left := "❯ " + a.cwdLabel
 	if a.branch != "" {
 		left += ":" + a.branch
 	}
 	drawText(s, 1, 0, left, st(a.th.Get(theme.GrayDim), false))
 	right := a.st.Model
+	if 1+width(left)+2+width(right) > w-2 {
+		right = ""
+	}
 	drawText(s, w-len(right)-2, 0, right, st(a.th.Get(theme.GrayDim), false))
 
-	// CRT phosphor greens; deepened on the light theme so they stay
-	headC, midC, dimC := theme.Hex("#00ff41"), theme.Hex("#00a828"), theme.Hex("#005c22")
-	if !a.th.Dark {
-		headC, midC, dimC = theme.Hex("#006e24"), theme.Hex("#00511b"), theme.Hex("#003812")
-	}
+	// Monochrome like grok's welcome: white text, gray grue.
+	whiteC, grayC, dimC := a.th.Get(theme.TextPrimary), a.th.Get(theme.Gray), a.th.Get(theme.GrayDim)
 
-	// Life-grid backdrop between the top bar and the composer; the
-	// logo and menu are drawn over it.
-	top, bot, ok := lifeArea(w, h)
+	// Life band between the top bar and the composer; the logo and
+	// menu are drawn over it. Skipped on small terminals.
+	gw, top, bot, ok := lifeArea(w, h)
 	if ok {
-		a.ensureLife(w, top, bot)
-		a.drawLife(s, top, st(headC, false), st(midC, false), st(dimC, false))
+		a.ensureLife(gw, top, bot)
+		a.drawLife(s, 6, top, st(a.th.Get(theme.GrayBright), false), st(grayC, false), st(dimC, false))
 	}
 
 	// Logo + menu vertically centered in the content area (the composer
@@ -253,28 +256,33 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 	}
 	logoX := max(2, (w-logoW)/2)
-	for i, ln := range logo {
-		c := midC
-		if i < len(logo)/2 {
-			c = headC
-		}
-		drawText(s, logoX, y, ln, st(c, false))
+	for _, ln := range logo {
+		drawText(s, logoX, y, ln, st(whiteC, false))
 		y++
 	}
 	if len(logo) > 0 {
 		tag := "01111000 01100100 01100101 01110110" // "xdev" in binary
-		drawText(s, max(2, (w-width(tag))/2), y, tag, st(midC, false))
+		drawText(s, max(2, (w-width(tag))/2), y, tag, st(grayC, false))
 		y++
 	}
 	y++ // gap between logo and menu
 
 	// Menu: label left, hotkey right-aligned in a centered column
-	// (grok menu.rs).
+	// (grok menu.rs). On a narrow window the column doesn't fit —
+	// fall back to label + key inline.
 	colW := 28
 	for _, m := range menu {
 		if cw := width(m.Label) + width(m.Key) + 4; cw > colW {
 			colW = cw
 		}
+	}
+	if w < colW+4 {
+		for _, m := range menu {
+			drawText(s, 2, y, m.Label, st(a.th.Get(theme.TextPrimary), true))
+			drawText(s, 2+width(m.Label)+2, y, m.Key, st(a.th.Get(theme.Gray), false))
+			y++
+		}
+		return
 	}
 	x0 := max(2, (w-colW)/2)
 	for _, m := range menu {

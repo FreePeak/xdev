@@ -354,4 +354,6 @@ Net: Claude Code **confirms xdev's pi/omp-shaped minimalism** (it lacks LSP/AST/
 
 ---
 
+*Last updated: 2026-09-11 (welcome-screen polish, #19 follow-up: monochrome palette like grok CLI — phosphor greens replaced by theme neutrals (TextPrimary logo/tagline menu labels, Gray/GrayDim/GrayBright life cells, theme-aware on light+dark); Game-of-Life backdrop shrunk to an inset band — 6-col margins, rows 2..h-6, soup density 28%→15%, skipped below 40x16; narrow-window text: menu falls back to inline label+key below colW+4, top bar drops the model name on collision. Prior v2 stamps below.)*
+
 *Last updated: 2026-09-11 (M5 complete b4f9d80: promotion ladder + failover chain + partial-stream retain-continue; M10 session-ops slice + context imports: breadcrumb --continue keyed by pane/TTY; --resume <prefix> with case-insensitive startsWith resolution; /fork — new file + parentSession header lineage; /dump → ~/.xdev/agent/dumps/<id>.md; live switchSession in the TUI for /fork and /resume; @path import expansion in AGENTS.md/CLAUDE.md content (<=5 depth, cycle/budget guarded); welcome backdrop v2 — Conway life grid behind the Xdev wordmark; M5-tail retain-and-continue contract pinned by tests. Commits 6a7d8e2, 834222c, b4f9d80. Earlier: P0 gaps resolved in c96f3f2 + 5397b42.)

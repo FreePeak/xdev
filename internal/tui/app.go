@@ -383,11 +383,11 @@ func (a *App) Run() {
 			// idle CPU stays near zero between steps.
 			animate := false
 			if !running && len(a.blocks) == 0 {
-				top, bot, ok := lifeArea(a.width, a.height)
+				gw, top, bot, ok := lifeArea(a.width, a.height)
 				if ok {
 					a.lifeTick = (a.lifeTick + 1) % 4
 					if a.lifeTick == 0 {
-						a.stepLife(a.width, top, bot)
+						a.stepLife(gw, top, bot)
 						animate = true
 					}
 				}

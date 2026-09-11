@@ -248,28 +248,29 @@ func TestAppWelcomeLogo(t *testing.T) {
 	}
 }
 
-// TestAppWelcomeLifeBounds pins the life-grid invariant: live cells
-// only in the content area (grid bounded by the declared area), and
-// the backdrop is still populated after hundreds of generations —
-// die-out (a blank backdrop) is exactly the failure mode Life on a
-// finite torus has without the mutation sprinkle.
+// TestAppWelcomeLifeBounds pins the inset-band contract: the grid is
+// the declared (narrower) band, live cells never reach the top bar,
+// the composer rows, or the side margins, and the backdrop is still
+// populated after hundreds of generations — die-out (a blank
+// backdrop) is exactly the failure mode Life on a finite torus has
+// without the mutation sprinkle.
 func TestAppWelcomeLifeBounds(t *testing.T) {
 	app, scr := newTestApp(t, 80, 26)
 	app.draw()
-	top, bot, ok := lifeArea(80, 26)
+	gw, top, bot, ok := lifeArea(80, 26)
 	if !ok {
 		t.Fatal("life area should fit in an 80x26 terminal")
 	}
-	// Step 200 generations — far past any random soup's burn-in. The
-	// grid must stay within its declared bounds and stay populated:
-	// a die-out (blank backdrop) is exactly the failure mode Life on a
-	// finite torus has without the mutation sprinkle.
+	if gw != 68 || top != 2 || bot != 20 {
+		t.Fatalf("lifeArea(80,26) = (%d,%d,%d), want inset 68x[2,20]", gw, top, bot)
+	}
+	// Step 200 generations — far past any random soup's burn-in.
 	for range 200 {
-		app.stepLife(80, top, bot)
+		app.stepLife(gw, top, bot)
 	}
 	app.draw()
-	if app.life.w != 80 || app.life.h != bot-top+1 {
-		t.Fatalf("life grid = %dx%d, want 80x%d", app.life.w, app.life.h, bot-top+1)
+	if app.life.w != gw || app.life.h != bot-top+1 {
+		t.Fatalf("life grid = %dx%d, want %dx%d", app.life.w, app.life.h, gw, bot-top+1)
 	}
 	prim, w, _ := scr.GetContents()
 	h := len(prim) / w
@@ -279,14 +280,41 @@ func TestAppWelcomeLifeBounds(t *testing.T) {
 			c := prim[y*w+x]
 			if len(c.Runes) == 1 && c.Runes[0] == lifeGlyph {
 				alive++
-				if y == 0 || y >= h-4 {
-					t.Fatalf("life cell at protected row %d", y)
+				if y == 0 || y >= h-4 || x < 6 || x >= 6+gw {
+					t.Fatalf("life cell at (%d,%d), outside band x[6,%d) protected rows", x, y, 6+gw)
 				}
 			}
 		}
 	}
 	if alive == 0 {
 		t.Fatal("backdrop died out: no live cells after 200 generations")
+	}
+}
+
+// TestLifeAreaSkipsSmallTerminals pins the small-window contract: no
+// backdrop on terminals too small to spare the band.
+func TestLifeAreaSkipsSmallTerminals(t *testing.T) {
+	for _, sz := range [][2]int{{80, 24}, {100, 30}, {40, 16}} {
+		if _, _, _, ok := lifeArea(sz[0], sz[1]); !ok {
+			t.Errorf("lifeArea(%d,%d) = not ok, want band", sz[0], sz[1])
+		}
+	}
+	for _, sz := range [][2]int{{38, 20}, {80, 14}, {30, 30}} {
+		if _, _, _, ok := lifeArea(sz[0], sz[1]); ok {
+			t.Errorf("lifeArea(%d,%d) = ok, want skipped", sz[0], sz[1])
+		}
+	}
+}
+
+// TestWelcomeMenuNarrow pins the narrow-window fallback: below the
+// column's fit threshold the menu rows stay on screen, inline.
+func TestWelcomeMenuNarrow(t *testing.T) {
+	app, scr := newTestApp(t, 26, 20)
+	app.draw()
+	for _, want := range []string{"New session", "/new", "Quit", "ctrl+q"} {
+		if !gridContains(scr, want) {
+			t.Fatalf("narrow menu lost %q", want)
+		}
 	}
 }
 
