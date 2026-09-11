@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
+	"os"
+	"path/filepath"
 )
 
 // fakeAPI records CommandAPI calls for dispatch tests.
@@ -54,7 +56,12 @@ func (f *fakeAPI) DropSession() error {
 func (f *fakeAPI) AddSystemBlock(text string) { f.blocks = append(f.blocks, text) }
 func (f *fakeAPI) SendPrompt(text string)     { f.sent = append(f.sent, text) }
 func (f *fakeAPI) CommandDir() string         { return f.dir }
-func (f *fakeAPI) Quit()                      { f.quit++ }
+
+// ExtensionCommands exists to satisfy CommandAPI; the dispatch tests here
+// exercise the built-in registry, not an extension roster.
+func (f *fakeAPI) ExtensionCommands() map[string]string { return nil }
+
+func (f *fakeAPI) Quit() { f.quit++ }
 
 func TestParseCommand(t *testing.T) {
 	tests := []struct {
@@ -227,7 +234,7 @@ func TestDispatchSettingsTogglesThinking(t *testing.T) {
 }
 
 func TestHelpTextAligned(t *testing.T) {
-	got := helpText(builtinCommands())
+	got := helpText(&fakeAPI{})
 	lines := strings.Split(got, "\n")
 	if !strings.HasPrefix(lines[0], "commands:") {
 		t.Fatalf("first line = %q", lines[0])
@@ -243,10 +250,46 @@ func TestHelpTextAligned(t *testing.T) {
 			t.Errorf("helpText missing aligned row %q:\n%s", w, got)
 		}
 	}
+	// A fake with no command dir and no extension roster lists exactly the
+	// built-ins; richer sources are covered by TestHelpTextListsDiscovered.
 	if len(lines) != 1+len(builtinCommands()) {
 		t.Errorf("helpText has %d lines, want %d", len(lines), 1+len(builtinCommands()))
 	}
 }
+
+// TestHelpTextListsDiscovered pins the /help contract: every command the
+// dropdown offers (markdown-discovered and extension) is listed, not only
+// the static registry.
+func TestHelpTextListsDiscovered(t *testing.T) {
+	dir := t.TempDir()
+	cmdsDir := filepath.Join(dir, ".xdev", "commands")
+	if err := os.MkdirAll(cmdsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\ndescription: deploy the thing\n---\nDeploy $1 to $2."
+	if err := os.WriteFile(filepath.Join(cmdsDir, "deploy.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &fakeAPI{dir: dir}
+	got := helpText(app)
+	if !strings.Contains(got, "project commands:") || !strings.Contains(got, "/deploy") {
+		t.Errorf("helpText missing discovered /deploy:\n%s", got)
+	}
+	ext := map[string]string{"myserver:ping": "ping the server"}
+	app2 := &extFakeAPI{fakeAPI: fakeAPI{}, ext: ext}
+	got2 := helpText(app2)
+	if !strings.Contains(got2, "extension commands:") || !strings.Contains(got2, "/myserver:ping") {
+		t.Errorf("helpText missing extension /myserver:ping:\n%s", got2)
+	}
+}
+
+// extFakeAPI is a fakeAPI with an extension roster.
+type extFakeAPI struct {
+	fakeAPI
+	ext map[string]string
+}
+
+func (f *extFakeAPI) ExtensionCommands() map[string]string { return f.ext }
 
 // TestAppCommandHook drives the real submit path: a command is consumed by
 // the router (no user block, no onSend) and plain text flows through.

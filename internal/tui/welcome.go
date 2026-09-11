@@ -27,7 +27,7 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 	items = append(items,
 		welcomeMenu{Label: "New session", Key: "/new"},
 		welcomeMenu{Label: "Clear context", Key: "/clear"},
-		welcomeMenu{Label: "Quit", Key: "ctrl+q"},
+		welcomeMenu{Label: "Quit", Key: "ctrl+c"},
 	)
 	return items
 }

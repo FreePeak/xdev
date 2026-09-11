@@ -42,6 +42,12 @@ type TaskTool struct {
 	// task tool looks up the named agent and uses its system prompt and
 	// tool restrictions. nil = no named agents (default shape only).
 	Agents []AgentDefinition
+	// ExpandModel resolves an agent's frontmatter model — "@role" aliases
+	// per discovery's documented contract — to a bare model id usable with
+	// this tool's Provider. ok=false keeps the parent's model. Wired from
+	// cmd where the settings live; nil disables expansion (a literal
+	// frontmatter model never needs it).
+	ExpandModel func(ref string) (model string, ok bool)
 	// Depth counts how deep in the spawn chain we are. 0 = top-level
 	// agent. omp: task.maxRecursionDepth=2; a child at the cap loses the
 	// task tool (structurally guaranteed since ChildTools excludes it).
@@ -147,7 +153,16 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 			agentTools = resolveAgentTools(def.Tools, t.ChildTools, t.Depth, maxDepth)
 		}
 		if def.Model != "" {
-			agentModel = def.Model
+			if strings.HasPrefix(def.Model, "@") && t.ExpandModel != nil {
+				// The alias resolves per modelRoles; an unresolvable one
+				// keeps the parent model (discovery promises expansion,
+				// not a hard failure on a typo).
+				if m, ok := t.ExpandModel(def.Model); ok {
+					agentModel = m
+				}
+			} else {
+				agentModel = def.Model
+			}
 		}
 		// Recursive spawn (omp task.maxRecursionDepth semantics): a child
 		// below the cap gets its own task tool so it can dispatch further

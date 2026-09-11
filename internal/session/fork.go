@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -27,7 +28,7 @@ func ForkSession(srcPath, destPath, title string) (*Store, error) {
 	}
 
 	now := time.Now().UTC()
-	newID := newUUID()
+	newID := sessionIDFromPath(destPath)
 	newHeader := SessionHeader{
 		Version:       3,
 		ID:            newID,
@@ -87,4 +88,17 @@ func splitLines(raw []byte) [][]byte {
 		lines = append(lines, raw[start:])
 	}
 	return lines
+}
+
+// sessionIDFromPath extracts the session id carried by a canonical
+// <timestamp>_<uuid>.jsonl file name so the header id always equals the
+// file name id — /resume <prefix> matches header ids, so a mismatched
+// header would make the fork unaddressable by its own file. Falls back to
+// a fresh uuid when the name carries none (hand-built paths in tests).
+func sessionIDFromPath(destPath string) string {
+	base := strings.TrimSuffix(filepath.Base(destPath), ".jsonl")
+	if i := strings.LastIndex(base, "_"); i >= 0 && base[i+1:] != "" {
+		return base[i+1:]
+	}
+	return newUUID()
 }

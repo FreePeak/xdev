@@ -33,7 +33,8 @@ func TestForkSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fork, err := ForkSession(path, SessionFilePath(dir, "/proj", time.Now(), newForkID()), "")
+	forkID := newForkID()
+	fork, err := ForkSession(path, SessionFilePath(dir, "/proj", time.Now(), forkID), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +42,11 @@ func TestForkSession(t *testing.T) {
 
 	if fork.ID() == src.ID() || fork.ID() == "" {
 		t.Fatalf("fork id must be new and non-empty: %q", fork.ID())
+	}
+	// Header id MUST equal the file-name id: /resume <prefix> matches
+	// header ids, so a mismatched header leaves the fork unaddressable.
+	if fork.ID() != forkID {
+		t.Fatalf("fork header id %q != file-name id %q", fork.ID(), forkID)
 	}
 	res, err := BuildContext(fork.Entries(), fork.LeafID(), SystemPrompt{})
 	if err != nil {
@@ -94,6 +100,37 @@ func TestForkSessionFreshTimestamp(t *testing.T) {
 	}
 	if time.Since(fork.Entries()[0].Envelope().Timestamp) > time.Minute {
 		t.Fatal("fork timestamp must be fresh")
+	}
+}
+
+// TestForkSessionIDFromFilename pins the id source: the header id is
+// derived from the canonical <timestamp>_<uuid>.jsonl file name, with a
+// fresh-uuid fallback when the name carries none.
+func TestForkSessionIDFromFilename(t *testing.T) {
+	cases := []struct {
+		name     string
+		destPath string
+		want     string // "" = fallback: any fresh uuid
+	}{
+		{"canonical name", "/d/2026-09-11T00-00-00.000Z_abc123.jsonl", "abc123"},
+		{"no underscore", "/d/plain.jsonl", ""},
+		{"empty suffix", "/d/2026-09-11T00-00-00.000Z_.jsonl", ""},
+		{"no .jsonl suffix", "/d/2026-09-11T00-00-00.000Z_abc123", "abc123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sessionIDFromPath(tc.destPath)
+			if tc.want != "" {
+				if got != tc.want {
+					t.Fatalf("id = %q, want %q", got, tc.want)
+				}
+				return
+			}
+			// Fallback path: must mint a fresh uuid, never reuse the name.
+			if got == "" || got == tc.destPath {
+				t.Fatalf("fallback id = %q, want a fresh uuid", got)
+			}
+		})
 	}
 }
 

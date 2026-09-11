@@ -79,7 +79,10 @@ func ResolveModelRef(s *Settings, ref string) (RoleRef, error) {
 			seen[name] = true
 			target, ok := s.ModelRoles[name]
 			if !ok || target == "" {
-				return RoleRef{}, fmt.Errorf("config: unknown role @%s (configured: %s)", name, configuredRoles(s))
+				// Name the configured roles AND the canonical slots: a role
+				// that is merely unconfigured (`@vision`) is one `config set`
+				// away, so the message has to say which command does that.
+				return RoleRef{}, fmt.Errorf("config: unknown role @%s (configured: %s; canonical: %s; set via xdev config set modelRoles.<name> provider/model or /model)", name, configuredRoles(s), strings.Join(RoleNames, ", "))
 			}
 			if hasSuffix && !isEffort(suffix) {
 				return RoleRef{}, fmt.Errorf("config: unknown effort %q for @%s (want %s)", suffix, name, strings.Join(EffortLevels, "|"))

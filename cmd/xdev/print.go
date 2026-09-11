@@ -23,6 +23,7 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
+	"slices"
 )
 
 // printOptions configures one one-shot run.
@@ -582,7 +583,24 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		Thinking: thinking,
 		Provider: prov,
 		Model:    childModel(settings, provName, modelName),
-		CWD:      cwd,
+		// Agent frontmatter "@role" models resolve here, where the settings
+		// live; a cross-provider role keeps the parent model (children
+		// share this tool's single provider client, like childModel).
+		ExpandModel: func(ref string) (string, bool) {
+			if settings == nil {
+				return "", false
+			}
+			rr, err := config.ResolveModelRef(settings, ref)
+			if err != nil {
+				return "", false
+			}
+			p, m, err := config.ParseModelRef(rr.Ref)
+			if err != nil || p != provName {
+				return "", false
+			}
+			return m, true
+		},
+		CWD: cwd,
 		// Children live in their own subtree: session.List(config.DataDir())
 		// must never surface them to --continue/--resume.
 		DataDir: filepath.Join(config.DataDir(), "subagents"),
@@ -652,7 +670,90 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 	if ref == "" {
 		return "", "", fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml, set defaultModel, or pass -model provider/model")
 	}
-	return ref, "", nil
+	// A literal ":effort" suffix belongs to the request, not the model id:
+	// forwarding "dev:high" to the wire 404s one turn later.
+	effort := ""
+	if base, suffix, ok := strings.Cut(ref, ":"); ok && slices.Contains(config.EffortLevels, suffix) {
+		ref, effort = base, suffix
+	}
+	// A bare id ("dev") resolves against the configured catalogs, the same
+	// convenience omp's model resolver offers for `-model`.
+	if !strings.Contains(ref, "/") {
+		expanded, err := expandBareModelID(cfg, ref)
+		if err != nil {
+			return "", "", err
+		}
+		ref = expanded
+	}
+	if err := validateModelRef(cfg, ref); err != nil {
+		return "", "", err
+	}
+	return ref, effort, nil
+}
+
+// expandBareModelID resolves a bare model id against every provider's
+// merged catalog (pinned + discovered, providerModels' cache). One match
+// wins; zero or several are an error naming the candidates.
+func expandBareModelID(cfg *config.Config, id string) (string, error) {
+	if cfg == nil {
+		return id, nil
+	}
+	var hits []string
+	for _, name := range providerKeys(cfg) {
+		pc := cfg.Providers[name]
+		if pc == nil {
+			continue
+		}
+		for _, m := range providerModels(name, pc) {
+			if strings.EqualFold(m.ID, id) {
+				hits = append(hits, name+"/"+m.ID)
+			}
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], nil
+	case 0:
+		return "", fmt.Errorf("unknown model %q (add it to models.yml or use provider/model)", id)
+	default:
+		return "", fmt.Errorf("model %q matches %s — use provider/model", id, strings.Join(hits, ", "))
+	}
+}
+
+// validateModelRef rejects a ref whose model id is not in the provider's
+// merged catalog: silently accepting "onegw/nope" hands the user a 404 on
+// the next turn instead of an error they can act on. A provider with an
+// empty catalog (override-only, no discovery block) skips the check —
+// there is nothing to compare against.
+func validateModelRef(cfg *config.Config, ref string) error {
+	if cfg == nil {
+		return nil
+	}
+	pname, mname, err := config.ParseModelRef(ref)
+	if err != nil {
+		return err
+	}
+	pc, ok := cfg.Providers[pname]
+	if !ok {
+		return fmt.Errorf("unknown provider %q (have: %v)", pname, providerKeys(cfg))
+	}
+	catalog := providerModels(pname, pc)
+	if len(catalog) == 0 {
+		return nil
+	}
+	for _, m := range catalog {
+		if m.ID == mname {
+			return nil
+		}
+	}
+	ids := make([]string, 0, len(catalog))
+	for _, m := range catalog {
+		ids = append(ids, m.ID)
+	}
+	if len(ids) > 6 {
+		ids = append(ids[:6], "…")
+	}
+	return fmt.Errorf("unknown model %q for provider %q (configured: %s)", mname, pname, strings.Join(ids, ", "))
 }
 
 // applyPolicy attaches the configured approval policy to an agent. Print
