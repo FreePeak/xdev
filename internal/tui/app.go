@@ -50,6 +50,7 @@ type App struct {
 	ops           *SessionOps
 	modelOps      *ModelOps         // session lifecycle, wired by cmd (nil → notices)
 	planOps       *PlanOps          // /plan, wired by cmd (nil → notices)
+	advisorOps    *AdvisorOps       // /advisor, wired by cmd (nil → notices)
 	settingsOps   *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
@@ -381,6 +382,41 @@ func (a *App) SetModelOps(ops *ModelOps) { a.modelOps = ops }
 
 // SetPlanOps wires the /plan command (plan state lives in cmd).
 func (a *App) SetPlanOps(ops *PlanOps) { a.planOps = ops }
+
+// SetAdvisorOps wires the /advisor command (advisor state lives in cmd).
+func (a *App) SetAdvisorOps(ops *AdvisorOps) { a.advisorOps = ops }
+
+// Advisor implements CommandAPI /advisor: on|off|status|dump.
+func (a *App) Advisor(args string) error {
+	if a.advisorOps == nil {
+		return fmt.Errorf("advisor not wired")
+	}
+	switch strings.TrimSpace(args) {
+	case "on", "off":
+		on := strings.TrimSpace(args) == "on"
+		if a.advisorOps.Set == nil {
+			return fmt.Errorf("advisor toggle not wired")
+		}
+		if err := a.advisorOps.Set(on); err != nil {
+			return err
+		}
+		a.AddSystemBlock(fmt.Sprintf("advisor %s", strings.TrimSpace(args)))
+	case "", "status":
+		st := "unavailable"
+		if a.advisorOps.Status != nil {
+			st = a.advisorOps.Status()
+		}
+		a.AddSystemBlock("advisor: " + st)
+	case "dump":
+		if a.advisorOps.Dump == nil {
+			return fmt.Errorf("advisor dump not wired")
+		}
+		a.AddSystemBlock(a.advisorOps.Dump())
+	default:
+		return fmt.Errorf("advisor: use on|off|status|dump")
+	}
+	return nil
+}
 
 // PlanMode implements CommandAPI /plan: no args toggles, "on"/"off" set
 // explicitly, and every transition announces itself in the transcript.

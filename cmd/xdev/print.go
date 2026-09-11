@@ -40,6 +40,42 @@ type printOptions struct {
 	Plan bool
 }
 
+// buildAdvisor constructs the background reviewer when enabled. The
+// reviewer model comes from the @advisor role; a missing role warns and
+// disables (never fails the run).
+func buildAdvisor(cfg *config.Config, settings *config.Settings) *agent.Advisor {
+	if settings == nil || !settings.Advisor {
+		return nil
+	}
+	ref, _, err := resolveModel("@advisor", cfg, settings)
+	if err != nil {
+		logx.Errorf("advisor: modelRoles.advisor unresolved, disabled: %v", err)
+		return nil
+	}
+	pName, mName, err := config.ParseModelRef(ref)
+	if err != nil {
+		logx.Errorf("advisor: %v, disabled", err)
+		return nil
+	}
+	pc, ok := cfg.Providers[pName]
+	if !ok {
+		logx.Errorf("advisor: unknown provider %q, disabled", pName)
+		return nil
+	}
+	prov, err := buildProvider(pName, pc, mName, cfg)
+	if err != nil {
+		logx.Errorf("advisor: provider unavailable, disabled: %v", err)
+		return nil
+	}
+	// The reviewer sees the repo read-only plus its advise channel.
+	reg := tool.NewRegistry()
+	reg.Register(tool.NewReadTool())
+	reg.Register(&tool.GrepTool{CWD: mustGetwd()})
+	reg.Register(&tool.GlobTool{CWD: mustGetwd()})
+	agent.RegisterAdviseTool(reg)
+	return agent.NewAdvisor(prov, mName, reg)
+}
+
 // resolvePrewalk builds the handoff target for a run. Returns nil when
 // prewalk is off or the target cannot resolve (warn, start unarmed — the
 // run proceeds on the primary model).
