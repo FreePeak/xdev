@@ -83,6 +83,14 @@ func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if a.Path == "" {
 		return Result{IsError: true, Text: "read: path is required"}, nil
 	}
+	// URI seam: skill:// and memory:// resolve to synthesized text, not
+	// files (omp exposes both through read).
+	if text, matched, uerr := resolveURI(a.Path); matched {
+		if uerr != nil {
+			return Result{IsError: true, Text: "read: " + uerr.Error()}, nil
+		}
+		return readURIText(a.Path, text, a.Offset, a.Limit), nil
+	}
 	resolved, err := resolvePath(a.Path)
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
@@ -314,4 +322,37 @@ func readEntrySize(n int64) string {
 		return fmt.Sprintf("%.0f %s", f, unit)
 	}
 	return fmt.Sprintf("%.1f %s", f, unit)
+}
+
+// readURIText renders synthesized URI content with the same line-number
+// windowing the file path uses, so the model sees one shape everywhere.
+func readURIText(uri, text string, offset, limit int) Result {
+	if offset <= 0 {
+		offset = 1
+	}
+	if limit <= 0 {
+		limit = readDefaultLimit
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // trailing newline is not a line
+	}
+	total := len(lines)
+	start := offset - 1
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d lines)\n", uri, total)
+	for i := start; i < end; i++ {
+		fmt.Fprintf(&b, "%d:%s\n", i+1, lines[i])
+	}
+	if end < total {
+		fmt.Fprintf(&b, "… (%d more lines; use offset=%d)\n", total-end, end+1)
+	}
+	return Result{Text: strings.TrimRight(b.String(), "\n")}
 }
