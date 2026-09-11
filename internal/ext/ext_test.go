@@ -375,3 +375,34 @@ func TestConcurrentToolCallsSerializeCleanly(t *testing.T) {
 		t.Fatal("healthy extension was retired by a host-side race")
 	}
 }
+
+// A policy-only extension (no tools, no commands — just the tool_call
+// event) is the documented hook shape, so the manager must report it as a
+// live policy hook. cmd's attachExtensions used to discard the manager
+// whenever tools and commands were both empty, which silently disabled
+// exactly this extension.
+func TestPolicyOnlyExtensionIsCountedAndEnforces(t *testing.T) {
+	m, _ := loadOne(t, "block")
+	if got := m.PolicyHooks(); got != 1 {
+		t.Fatalf("PolicyHooks = %d, want 1 for an events-only extension", got)
+	}
+	// And it really is in the enforcement path.
+	_, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /"}`))
+	if err == nil {
+		t.Fatal("blocking extension did not deny the call")
+	}
+}
+
+// A manager with no extensions at all reports zero hooks (so callers can
+// keep the cheap "nothing loaded" path).
+func TestPolicyHooksZeroWithoutExtensions(t *testing.T) {
+	m := NewManager()
+	t.Cleanup(m.Close)
+	if got := m.PolicyHooks(); got != 0 {
+		t.Fatalf("PolicyHooks = %d, want 0", got)
+	}
+	var nilMgr *Manager
+	if got := nilMgr.PolicyHooks(); got != 0 {
+		t.Fatalf("nil manager PolicyHooks = %d, want 0", got)
+	}
+}
