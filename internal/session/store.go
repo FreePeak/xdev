@@ -265,6 +265,15 @@ func (s *Store) EnableAutoPersist(path string, opts Options) {
 	s.autoOpts = opts
 }
 
+// AutoPath returns the path recorded by EnableAutoPersist — the intended
+// on-disk location of a not-yet-materialized session. Empty when
+// auto-persist is off.
+func (s *Store) AutoPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.autoPath
+}
+
 // ID returns the session UUID.
 func (s *Store) ID() string {
 	s.mu.Lock()
@@ -543,11 +552,9 @@ func summarize(e Entry) string {
 	env := e.Envelope()
 	switch t := e.(type) {
 	case *MessageEntry:
-		txt := t.Message.Text()
-		if len(txt) > 60 {
-			txt = txt[:60] + "…"
-		}
-		return txt
+		// Role prefix keeps /branch targets classifiable (user vs
+		// assistant turns otherwise render identically).
+		return string(t.Message.Role) + ": " + truncateRunes(t.Message.Text(), 60)
 	case *CompactionEntry:
 		return "(compaction)"
 	case *ResetBoundaryEntry:
@@ -561,6 +568,16 @@ func summarize(e Entry) string {
 	default:
 		return "(" + env.Type + ")"
 	}
+}
+
+// truncateRunes caps s at max RUNES (not bytes) so multibyte previews are
+// never cut mid-rune.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // Branches returns the branch points in the tree (entry IDs that have more

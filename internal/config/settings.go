@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -299,9 +298,12 @@ func yamlScalar(v string) any {
 	return v
 }
 
-// List renders the resolved settings one key: value per line, with the
-// layer each came from. Credential-bearing values are never part of
-// Settings, but any key whose name suggests a secret is masked.
+// List renders the resolved settings one key: value per line, in a stable
+// order: map-backed groups (roles, per-role effort, per-tool approval) are
+// sorted by key, and every grouped key the session actually enforces is
+// listed, minus hook bodies — those carry arbitrary commands, so only the
+// configured event count is reported. Credential-bearing values are never
+// part of Settings, but any key whose name suggests a secret is masked.
 func List(s *Settings, globalPath string) []string {
 	out := []string{
 		"theme " + s.Theme,
@@ -315,13 +317,20 @@ func List(s *Settings, globalPath string) []string {
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)
 	}
-	keys := make([]string, 0, len(s.ModelRoles))
-	for k := range s.ModelRoles {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range sortedKeys(s.ModelRoles) {
 		out = append(out, "modelRoles."+k+" "+maskCred(s.ModelRoles[k]))
+	}
+	for _, k := range sortedKeys(s.ModelRolesEffort) {
+		out = append(out, "modelRolesEffort."+k+" "+s.ModelRolesEffort[k])
+	}
+	for _, k := range sortedKeys(s.ToolsApproval) {
+		out = append(out, "toolsApproval."+k+" "+s.ToolsApproval[k])
+	}
+	if len(s.BashPatterns) > 0 {
+		out = append(out, "bashPatterns "+strings.Join(s.BashPatterns, ", "))
+	}
+	if len(s.Hooks) > 0 {
+		out = append(out, fmt.Sprintf("hooks %d configured", len(s.Hooks)))
 	}
 	out = append(out, "config "+globalPath)
 	if len(s.DisabledProviders) > 0 {

@@ -216,3 +216,59 @@ func TestSetRefusesUnparseableFile(t *testing.T) {
 		t.Fatal("refusal must leave the file untouched")
 	}
 }
+
+// TestListRendersTheEnforcedSurface: `xdev config list` is how a user sees
+// what the session will actually enforce, so every grouped key (per-role
+// effort, per-tool approval, bash patterns, hooks) must appear — map groups
+// sorted, hook bodies never dumped. The empty case pins the base line set.
+func TestListRendersTheEnforcedSurface(t *testing.T) {
+	const path = "/tmp/xdev/config.yml"
+	tests := []struct {
+		name string
+		s    *Settings
+		want []string
+	}{
+		{
+			name: "empty settings: the base lines plus the config path",
+			s:    &Settings{},
+			want: []string{
+				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
+				"showThinking true", "advisor false", "memory off",
+				"config " + path,
+			},
+		},
+		{
+			name: "enforced groups: sorted by key, hooks as a count",
+			s: &Settings{
+				ModelRolesEffort: map[string]string{"smol": "low", "advisor": "high"},
+				ToolsApproval:    map[string]string{"read": "allow", "bash": "prompt", "write": "allow"},
+				BashPatterns:     []string{"deny:rm -rf *", "allow:ls"},
+				Hooks:            map[string]any{"post-tool": "secret-hook-body"},
+			},
+			want: []string{
+				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
+				"showThinking true", "advisor false", "memory off",
+				"modelRolesEffort.advisor high",
+				"modelRolesEffort.smol low",
+				"toolsApproval.bash prompt",
+				"toolsApproval.read allow",
+				"toolsApproval.write allow",
+				"bashPatterns deny:rm -rf *, allow:ls",
+				"hooks 1 configured", // the hook body is never part of the list
+				"config " + path,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Repeat: an unsorted group ranges the map in a new random order
+			// each time, so a single run could pass by luck.
+			for range 4 {
+				got, want := strings.Join(List(tc.s, path), "\n"), strings.Join(tc.want, "\n")
+				if got != want {
+					t.Fatalf("List:\n%s\nwant:\n%s", got, want)
+				}
+			}
+		})
+	}
+}

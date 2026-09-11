@@ -406,3 +406,65 @@ func TestPolicyHooksZeroWithoutExtensions(t *testing.T) {
 		t.Fatalf("nil manager PolicyHooks = %d, want 0", got)
 	}
 }
+
+// TestRunCommandErrors pins the command-error boundaries: a manager with
+// zero extensions must name the drop-in directory (a setup problem, not a
+// typo), while a loaded manager keeps the plain unknown-name error, and
+// unqualified names stay a caller bug.
+func TestRunCommandErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T) (*Manager, string) // (manager, dir the error must mention, "" = none)
+		call    string
+		wantSub string
+	}{
+		{
+			name: "zero extensions names the drop-in directory",
+			setup: func(t *testing.T) (*Manager, string) {
+				dir := t.TempDir()
+				m := NewManager()
+				t.Cleanup(m.Close)
+				if err := m.Load(context.Background(), dir); err != nil {
+					t.Fatal(err)
+				}
+				return m, dir
+			},
+			call:    "nope:cmd",
+			wantSub: "no extensions loaded (drop an executable into ",
+		},
+		{
+			name: "loaded manager keeps the unknown-name error",
+			setup: func(t *testing.T) (*Manager, string) {
+				m, _ := loadOne(t, "block")
+				return m, ""
+			},
+			call:    "nope:cmd",
+			wantSub: `no extension named "nope"`,
+		},
+		{
+			name: "unqualified name stays a caller error",
+			setup: func(t *testing.T) (*Manager, string) {
+				m := NewManager()
+				t.Cleanup(m.Close)
+				return m, ""
+			},
+			call:    "nope",
+			wantSub: "not extension-qualified",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, dir := tc.setup(t)
+			_, err := m.RunCommand(context.Background(), tc.call, "")
+			if err == nil {
+				t.Fatalf("%s: expected an error", tc.call)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q: want substring %q", err, tc.wantSub)
+			}
+			if dir != "" && !strings.Contains(err.Error(), dir) {
+				t.Fatalf("zero-extension error must name the extensions dir %s: %q", dir, err)
+			}
+		})
+	}
+}

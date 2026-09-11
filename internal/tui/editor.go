@@ -151,3 +151,10 @@ func (e *Editor) recall(dir int) {
 	}
 	e.cur = len(e.buf)
 }
+
+// HistoryPrev/HistoryNext recall older/newer prompts. They exist so the
+// keymap's history-prev/history-next actions reach the same machinery the
+// arrow keys use (the /hotkeys table must not advertise dead chords).
+func (e *Editor) HistoryPrev() { e.recall(-1) }
+
+func (e *Editor) HistoryNext() { e.recall(1) }

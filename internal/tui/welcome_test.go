@@ -344,7 +344,7 @@ func TestLifeAreaSkipsSmallTerminals(t *testing.T) {
 func TestWelcomeMenuNarrow(t *testing.T) {
 	app, scr := newTestApp(t, 26, 20)
 	app.draw()
-	for _, want := range []string{"New session", "/new", "Quit", "ctrl+q"} {
+	for _, want := range []string{"New session", "/new", "Quit", "ctrl+c"} {
 		if !gridContains(scr, want) {
 			t.Fatalf("narrow menu lost %q", want)
 		}

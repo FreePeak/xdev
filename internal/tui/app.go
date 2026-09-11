@@ -37,8 +37,13 @@ type App struct {
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
 	ed     Editor
 	smenu  *slashMenu // "/" autocomplete dropdown (nil = closed)
-	keyMap *KeyMap    // remappable keybinding layer
-	st     Status
+	// pickers is the modal-list stack: /model opens a roles+models
+	// selector, and "set role" pushes a second list on top. Esc pops one
+	// level; a selection pops them all. While non-empty the picker owns
+	// every key event and the dropdown is closed.
+	pickers []*picker
+	keyMap  *KeyMap // remappable keybinding layer
+	st      Status
 
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
@@ -65,7 +70,6 @@ type App struct {
 	renderers     map[string]RenderSpec   // tool name -> declarative render spec
 	sessionTree   func() string           // /tree display
 	sessionBranch func(args string) error // /branch to an entry id
-	resumeList    func(cwd string) error  // /resume session listing
 	onSend        func(text string)
 	onCancel      func()
 	onQuit        func()
@@ -172,15 +176,6 @@ func (a *App) SetSessionTree(fn func() string) {
 	a.sessionTree = fn
 }
 
-// SetSessionBranch wires /branch to the store. The callback must rebuild
-// history and replay the transcript (like swapStoreTo) so the user sees the
-// new branch's content.
-func (a *App) SetResumeList(fn func(cwd string) error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.resumeList = fn
-}
-
 func (a *App) SetSessionBranch(fn func(args string) error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -201,14 +196,6 @@ func (a *App) BranchSession(args string) error {
 		return fmt.Errorf("session branch not wired")
 	}
 	return a.sessionBranch(args)
-}
-
-// ListSessions implements CommandAPI /resume listing.
-func (a *App) ListSessions(cwd string) error {
-	if a.resumeList != nil {
-		return a.resumeList(cwd)
-	}
-	return fmt.Errorf("no session listing available")
 }
 
 func (a *App) AddSystemBlock(text string) {
@@ -556,11 +543,41 @@ func (a *App) PlanMode(args string) error {
 	return nil
 }
 
+// ResumeSession implements CommandAPI /resume. With no argument it opens the
+// session picker (the recent sessions for this directory); with a query it
+// resolves immediately, so `/resume <id-prefix>` still works headlessly.
 func (a *App) ResumeSession(query string) error {
 	if a.ops == nil || a.ops.Resume == nil {
 		return fmt.Errorf("session resume not wired")
 	}
-	return a.ops.Resume(query)
+	if q := strings.TrimSpace(query); q != "" {
+		return a.ops.Resume(q)
+	}
+	if a.ops.Recent == nil {
+		return a.ops.Resume("")
+	}
+	opts := a.ops.Recent()
+	if len(opts) == 0 {
+		a.AddSystemBlock("no other sessions in this directory")
+		return nil
+	}
+	items := make([]PickerItem, 0, len(opts))
+	for _, o := range opts {
+		items = append(items, PickerItem{
+			Label: o.Title, Detail: o.Detail, Value: o.ID, Current: o.Current,
+		})
+	}
+	resume := a.ops.Resume
+	a.OpenPicker(PickerOptions{
+		Title: "resume session",
+		Views: []PickerView{{Name: "recent", Items: items, Action: "resume"}},
+		OnSelect: func(id string) {
+			if err := resume(id); err != nil {
+				a.AddSystemBlock("error: " + err.Error())
+			}
+		},
+	})
+	return nil
 }
 
 // Reset clears the transcript (used by /clear): all blocks gone, viewport
@@ -579,38 +596,195 @@ func (a *App) Reset() {
 // degrade the /new /clear /drop commands to notices.
 func (a *App) SetSessionOps(ops *SessionOps) { a.ops = ops }
 
-// SwitchModel implements CommandAPI /model: with no argument it prints the
-// current model and the available refs; with an argument it switches.
+// SwitchModel implements CommandAPI /model: with no argument it opens the
+// interactive selector (roles + models); with an argument it switches
+// directly, accepting anything the -model flag accepts (a concrete
+// provider/model, a bare model id, or an @role[:effort] alias).
 func (a *App) SwitchModel(args string) error {
 	if a.modelOps == nil {
 		return fmt.Errorf("model switching not wired")
 	}
 	if strings.TrimSpace(args) == "" {
-		cur := ""
-		if a.modelOps.Current != nil {
-			cur = a.modelOps.Current()
-		}
-		var lines []string
-		if cur != "" {
-			lines = append(lines, "active model: "+cur)
-		}
-		lines = append(lines, "available:")
-		if a.modelOps.List != nil {
-			for _, m := range a.modelOps.List() {
-				lines = append(lines, "  "+m)
-			}
-		}
-		a.AddSystemBlock(strings.Join(lines, "\n"))
+		a.OpenModelPicker()
 		return nil
 	}
 	if a.modelOps.Set == nil {
 		return fmt.Errorf("model switching not wired")
 	}
-	if err := a.modelOps.Set(strings.TrimSpace(args)); err != nil {
+	ref := strings.TrimSpace(args)
+	if err := a.modelOps.Set(ref); err != nil {
 		return err
 	}
-	a.AddSystemBlock("active model: " + strings.TrimSpace(args))
+	// Echo what is actually live, not what was typed: "/model @slow"
+	// switching to onegw/dev must not claim the session runs "@slow".
+	echo := ref
+	if a.modelOps.Current != nil {
+		if cur := a.modelOps.Current(); cur != "" {
+			echo = cur
+		}
+	}
+	a.AddSystemBlock("active model: " + echo)
 	return nil
+}
+
+// --- modal picker stack ---
+
+// OpenPicker pushes one modal list. The stack's top owns the keyboard until
+// Esc pops it or a selection clears the whole stack.
+func (a *App) OpenPicker(opts PickerOptions) {
+	a.mu.Lock()
+	a.pickers = append(a.pickers, newPicker(opts))
+	a.smenu = nil // one modal at a time: the dropdown would draw under it
+	a.mu.Unlock()
+	a.poke()
+}
+
+// popPicker removes the top picker (Esc).
+func (a *App) popPicker() {
+	a.mu.Lock()
+	if n := len(a.pickers); n > 0 {
+		a.pickers = a.pickers[:n-1]
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// closePickers clears the stack (a selection happened).
+func (a *App) closePickers() {
+	a.mu.Lock()
+	a.pickers = nil
+	a.mu.Unlock()
+	a.poke()
+}
+
+// PickerOpen reports whether a modal list is showing (hosts and tests).
+func (a *App) PickerOpen() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.pickers) > 0
+}
+
+// OpenModelPicker opens the /model selector: one view per provider's
+// concrete models plus a roles view whose rows assign a model to a role.
+// Also bound to Alt+M (omp's app.model.select).
+func (a *App) OpenModelPicker() {
+	if a.modelOps == nil || a.modelOps.Views == nil {
+		cur := ""
+		if a.modelOps != nil && a.modelOps.Current != nil {
+			cur = a.modelOps.Current()
+		}
+		a.AddSystemBlock("active model: " + cur)
+		return
+	}
+	views := a.modelOps.Views()
+	for i := range views {
+		if views[i].Action == "" {
+			views[i].Action = "use"
+		}
+	}
+	// Model rows switch the session; a roles row overrides OnSelect to
+	// assign instead (cmd wires that view).
+	// A failed switch must not vanish: the picker already closed, so the
+	// error lands in the transcript like any other command error.
+	use := func(ref string) {
+		if err := a.modelOps.Set(ref); err != nil {
+			a.AddSystemBlock("error: " + err.Error())
+		}
+	}
+	a.OpenPicker(PickerOptions{Title: "model", Views: views, OnSelect: use})
+}
+
+// OpenRolePicker pushes the model list that assigns @role: Enter persists
+// modelRoles.<role> to the global settings layer and switches this session
+// to it, so the choice is visible immediately. Exported because cmd builds
+// the roles view and points its Enter here.
+func (a *App) OpenRolePicker(role string) {
+	if a.modelOps == nil || a.modelOps.Models == nil || a.modelOps.SetRole == nil {
+		a.AddSystemBlock("role assignment not wired")
+		return
+	}
+	models := a.modelOps.Models()
+	if len(models) == 0 {
+		a.AddSystemBlock("no models configured — check ~/.xdev/agent/models.yml")
+		return
+	}
+	a.OpenPicker(PickerOptions{
+		Title:    "set @" + role + " to",
+		Views:    []PickerView{{Name: "models", Action: "set", Items: models}},
+		OnSelect: func(ref string) { a.setRole(role, ref) },
+	})
+}
+
+// setRole persists modelRoles.<role> and, on success, switches this session
+// to the model so the choice is immediately visible.
+func (a *App) setRole(role, ref string) {
+	if err := a.modelOps.SetRole(role, ref); err != nil {
+		a.AddSystemBlock("error: " + err.Error())
+		return
+	}
+	if a.modelOps.Set != nil {
+		if err := a.modelOps.Set("@" + role); err != nil {
+			a.AddSystemBlock("error: " + err.Error())
+			return
+		}
+	}
+	a.AddSystemBlock("@" + role + " → " + ref)
+}
+
+// handlePickerKey routes one key to the top picker. It reports whether the
+// event was consumed: while a picker is open the editor, scrolling, and the
+// quit chords are all inert, so a stray key can never leak into the
+// transcript behind the panel.
+func (a *App) handlePickerKey(key *tcell.EventKey) bool {
+	a.mu.Lock()
+	if len(a.pickers) == 0 {
+		a.mu.Unlock()
+		return false
+	}
+	p := a.pickers[len(a.pickers)-1]
+	a.mu.Unlock()
+
+	switch key.Key() {
+	case tcell.KeyUp, tcell.KeyCtrlP:
+		a.pickerMutate(func(p *picker) { p.move(-1) })
+	case tcell.KeyDown, tcell.KeyCtrlN:
+		a.pickerMutate(func(p *picker) { p.move(1) })
+	case tcell.KeyPgUp:
+		a.pickerMutate(func(p *picker) { p.move(-p.visible) })
+	case tcell.KeyPgDn:
+		a.pickerMutate(func(p *picker) { p.move(p.visible) })
+	case tcell.KeyRight, tcell.KeyTab:
+		a.pickerMutate(func(p *picker) { p.switchView(1) })
+	case tcell.KeyLeft, tcell.KeyBacktab:
+		a.pickerMutate(func(p *picker) { p.switchView(-1) })
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		a.pickerMutate(func(p *picker) { p.backspace() })
+	case tcell.KeyEnter:
+		act, ok := p.choose()
+		if !ok {
+			return true
+		}
+		it, _ := p.selected()
+		a.closePickers()
+		act(it.Value)
+	case tcell.KeyEsc, tcell.KeyCtrlC, tcell.KeyCtrlD:
+		a.popPicker()
+	case tcell.KeyRune:
+		if r := key.Rune(); r != ' ' {
+			a.pickerMutate(func(p *picker) { p.typeFilter(r) })
+		}
+	}
+	return true
+}
+
+// pickerMutate applies fn to the top picker and repaints.
+func (a *App) pickerMutate(fn func(*picker)) {
+	a.mu.Lock()
+	if n := len(a.pickers); n > 0 {
+		fn(a.pickers[n-1])
+	}
+	a.mu.Unlock()
+	a.poke()
 }
 
 // SetShowThinking toggles transcript rendering of reasoning blocks and
@@ -825,11 +999,23 @@ func (a *App) handleKey(ev tcell.Event) {
 	h := a.height
 	menuOpen := a.smenu != nil && a.smenu.active()
 	a.mu.Unlock()
+	// A modal picker owns every key while it is open: it is a blocking
+	// choice, so nothing behind it (editor, scroll, quit) may react.
+	if a.handlePickerKey(key) {
+		return
+	}
+
+	// Every chord resolves through the keymap first: the table /hotkeys
+	// prints is the table that runs, so a remapped chord (keybindings.yml)
+	// works rather than being decorative. The dropdown reinterprets a few
+	// actions contextually; everything else falls through to the editor's
+	// own key handling.
+	action := a.keyMap.Resolve(key)
 
 	// Slash dropdown owns navigation while open (grok slash_dropdown).
 	if menuOpen {
-		switch key.Key() {
-		case tcell.KeyTab:
+		switch action {
+		case "menu-accept":
 			a.mu.Lock()
 			if sel, ok := a.smenu.selected(); ok {
 				text := sel.Name
@@ -859,110 +1045,95 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Unlock()
 			a.poke()
 			return
-		case tcell.KeyEsc: // close without changing the text
+		case "cancel": // close without changing the text
 			a.mu.Lock()
 			a.smenu = nil
+			a.mu.Unlock()
+			a.poke()
+			return
+		case "menu-prev", "menu-next":
+			delta := -1
+			if action == "menu-next" {
+				delta = 1
+			}
+			a.mu.Lock()
+			a.smenu.move(delta)
 			a.mu.Unlock()
 			a.poke()
 			return
 		}
 	}
 
-	switch key.Key() {
-	case tcell.KeyCtrlC, tcell.KeyCtrlD:
+	switch action {
+	case "submit":
+		// Fall through to the editor: Enter also completes an open
+		// slash menu, which only the editor path knows about.
+	case "newline":
+		// The editor is UI-thread-owned (same discipline as the
+		// HandleKey path below): no lock, no cross-goroutine sharing.
+		a.ed.insert('\n')
+		a.poke()
+		return
+	case "clear-input":
+		a.ed.Reset()
+		a.poke()
+		return
+	case "cancel":
+		// Esc aborts a running turn; idle it is a no-op (the dropdown,
+		// when open, was already closed by the menu branch above).
+		if running {
+			a.onCancel()
+		}
+		return
+	case "quit":
 		if running {
 			a.onCancel()
 			return
 		}
 		a.onQuit()
 		return
-	case tcell.KeyEsc:
-		if running {
-			a.onCancel()
+	case "menu-accept":
+		// No menu open: inert; the editor ignores Tab.
+	case "menu-prev", "menu-next":
+		// No menu open: arrows scroll an empty editor and recall history
+		// inside a draft, so only the empty case is handled here.
+		if !running && strings.TrimSpace(a.ed.Text()) == "" {
+			a.scroll(1, action == "menu-next")
+			return
 		}
+	case "scroll-up":
+		a.scroll(1, false)
 		return
-	case tcell.KeyPgUp, tcell.KeyCtrlB:
+	case "scroll-down":
+		a.scroll(1, true)
+		return
+	case "scroll-page-up":
 		a.scroll(h/2, false)
 		return
-	case tcell.KeyPgDn, tcell.KeyCtrlF:
+	case "scroll-page-down":
 		a.scroll(h/2, true)
 		return
-	case tcell.KeyHome:
+	case "scroll-top":
 		a.scrollTo(false)
 		return
-	case tcell.KeyEnd:
+	case "scroll-bottom":
 		a.scrollTo(true)
 		return
-	case tcell.KeyCtrlL:
+	case "redraw":
 		a.Invalidate()
 		return
-	}
-
-	// Slash dropdown navigation: while the menu is open the arrows move the
-	// selection (not the transcript), Tab completes the selection into the
-	// editor, and Enter still submits the typed text through dispatch.
-	if menuOpen {
-		switch key.Key() {
-		case tcell.KeyUp:
-			a.mu.Lock()
-			a.smenu.move(-1)
-			a.mu.Unlock()
-			a.poke()
-			return
-		case tcell.KeyDown:
-			a.mu.Lock()
-			a.smenu.move(1)
-			a.mu.Unlock()
-			a.poke()
-			return
-		}
-	}
-
-	// Empty editor: arrows scroll the transcript. Non-empty: the editor
-	// uses them for history recall.
-	if !running && strings.TrimSpace(a.ed.Text()) == "" && !menuOpen {
-		switch key.Key() {
-		case tcell.KeyUp:
-			a.scroll(1, false)
-			return
-		case tcell.KeyDown:
-			a.scroll(1, true)
-			return
-		}
-	}
-
-	// Keymap-driven actions: the table /hotkeys prints is the table that
-	// runs, so a remapped chord (keybindings.yml) works rather than being
-	// decorative. Editor-adjacent actions are handled here; everything
-	// else falls through to the editor's own key handling.
-	if action := a.keyMap.Resolve(key); action != "" {
-		switch action {
-		case "submit":
-			// Fall through to the editor: Enter also completes an open
-			// slash menu, which only the editor path knows about.
-		case "newline":
-			// The editor is UI-thread-owned (same discipline as the
-			// HandleKey path below): no lock, no cross-goroutine sharing.
-			a.ed.insert('\n')
-			a.poke()
-			return
-		case "clear-input":
-			a.ed.Reset()
-			a.poke()
-			return
-		case "cancel":
-			if running {
-				a.onCancel()
-			}
-			return
-		case "quit":
-			if running {
-				a.onCancel()
-				return
-			}
-			a.onQuit()
-			return
-		}
+	case "history-prev":
+		a.ed.HistoryPrev()
+		a.poke()
+		return
+	case "history-next":
+		a.ed.HistoryNext()
+		a.poke()
+		return
+	case "model-select":
+		// Alt+M: the /model roles+models selector (omp app.model.select).
+		a.OpenModelPicker()
+		return
 	}
 
 	// Editor keys. Text is captured BEFORE HandleKey — the editor archives
@@ -1247,6 +1418,7 @@ func (a *App) draw() {
 		composerTop := h - 1 - a.composerRows()
 		a.drawWelcome(s, w, h)
 		a.drawSlashDropdown(composerTop)
+		a.drawPicker(composerTop)
 		a.drawComposer(composerTop)
 		a.drawShortcuts(h - 1)
 		s.Show()
@@ -1356,6 +1528,7 @@ func (a *App) draw() {
 	// occupies composerRows() rows above the shortcuts line.
 	composerTop := h - 1 - cRows
 	a.drawSlashDropdown(composerTop)
+	a.drawPicker(composerTop)
 	a.drawComposer(composerTop)
 	a.drawShortcuts(h - 1)
 	s.Show()
@@ -1410,6 +1583,169 @@ func (a *App) drawSlashDropdown(yComposerTop int) {
 	}
 	drawText(s, 2, y, "╰"+strings.Repeat("─", min(w-4, nameW+44))+"╯",
 		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive))))
+}
+
+// drawPicker renders the top modal picker above the composer: a titled box
+// with optional view tabs, the row window (section headers included), and a
+// footer carrying the filter, the position, and the key hints. It borrows
+// the dropdown's surface so both read as the same chrome.
+func (a *App) drawPicker(yComposerTop int) {
+	if len(a.pickers) == 0 {
+		return
+	}
+	p := a.pickers[len(a.pickers)-1]
+	w := a.width
+	if w < 24 || yComposerTop < 6 {
+		return
+	}
+	x0, x1 := 2, w-3
+	inner := x1 - x0 - 1
+	rows := p.visible
+	if rows > pickerMaxRows {
+		rows = pickerMaxRows
+	}
+	tabs := p.viewCount() > 1
+	// chrome = top border + bottom border + footer, plus the tab row.
+	chrome := 3
+	if tabs {
+		chrome++
+	}
+	// The panel floats above the composer and never covers it.
+	if avail := yComposerTop - 1; avail-chrome < 1 {
+		return
+	} else if rows > avail-chrome {
+		rows = avail - chrome
+	}
+	p.visible = rows // paging in handlePickerKey follows the drawn window
+	lines, start, selLine := p.window(rows)
+
+	borderS := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	rowBg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+	selBg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
+	detailCol := a.cellColor(a.th.Get(theme.GrayDim))
+	curCol := a.cellColor(a.th.Get(theme.AccentSuccess))
+	footS := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+
+	height := chrome + len(lines)
+	yTop := yComposerTop - 1 - height
+
+	// Top border with the title embedded: ╭─ model ──…──╮
+	title := " " + p.opts.Title + " "
+	drawText(a.scr, x0, yTop, "╭"+title, borderS)
+	drawn := 1 + width(title)
+	if pad := inner - drawn; pad > 0 {
+		drawText(a.scr, x0+drawn, yTop, strings.Repeat("─", pad), borderS)
+	}
+	drawText(a.scr, x1, yTop, "╮", borderS)
+	y := yTop + 1
+
+	// View tabs (omp's per-provider views): the active one is bright.
+	if tabs {
+		a.drawPickerTabRow(p, y, x0, inner, rowBg, tcell.StyleDefault.Foreground(detailCol))
+		y++
+	}
+
+	// Rows. The label column is aligned across the visible window so the
+	// detail column reads as a table.
+	labelW := 0
+	for _, ln := range lines {
+		if !ln.header {
+			labelW = max(labelW, width(ln.item.Label))
+		}
+	}
+	labelW = min(labelW+2, 28)
+	for i, ln := range lines {
+		st := rowBg
+		if start+i == selLine {
+			st = selBg
+		}
+		for x := x0 + 1; x < x1; x++ {
+			a.scr.SetContent(x, y, ' ', nil, st)
+		}
+		a.scr.SetContent(x0, y, '│', nil, borderS)
+		a.scr.SetContent(x1, y, '│', nil, borderS)
+		if ln.header {
+			drawText(a.scr, x0+3, y, clip(ln.text, inner-4), st.Foreground(a.cellColor(a.th.Get(theme.Gray))))
+			y++
+			continue
+		}
+		marker := "  "
+		if start+i == selLine {
+			marker = "▶ "
+		}
+		drawText(a.scr, x0+2, y, marker, st.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant))))
+		if ln.item.Current {
+			drawText(a.scr, x0+4, y, "●", st.Foreground(a.cellColor(a.th.Get(theme.AccentSuccess))))
+		}
+		drawText(a.scr, x0+6, y, clip(ln.item.Label, labelW-1), st.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
+		if ln.item.Detail != "" {
+			cell := x0 + 6 + labelW
+			if room := x1 - 2 - cell; room > 4 {
+				col := detailCol
+				if ln.item.Current {
+					col = curCol
+				}
+				drawText(a.scr, cell, y, clip(ln.item.Detail, room-1), st.Foreground(col))
+			}
+		}
+		y++
+	}
+
+	// Footer: position/filter left, key hints right.
+	left, right := p.footer()
+	drawText(a.scr, x0, y, "│", borderS)
+	drawText(a.scr, x1, y, "│", borderS)
+	drawText(a.scr, x0+2, y, clip(left, inner-2), footS)
+	if rw := width(right) + 2; rw < inner-width(left) {
+		drawText(a.scr, x1-1-rw, y, right, footS)
+	}
+	y++
+	drawText(a.scr, x0, y, "╰"+strings.Repeat("─", inner)+"╯", borderS)
+}
+
+// drawPickerTabRow draws the tab strip, brightening the active view.
+func (a *App) drawPickerTabRow(p *picker, y, x0, inner int, bg, dim tcell.Style) {
+	borderCol := a.cellColor(a.th.Get(theme.PromptBorderActive))
+	a.scr.SetContent(x0, y, '│', nil, tcell.StyleDefault.Foreground(borderCol))
+	a.scr.SetContent(x0+inner+1, y, '│', nil, tcell.StyleDefault.Foreground(borderCol))
+	for x := x0 + 1; x <= x0+inner; x++ {
+		a.scr.SetContent(x, y, ' ', nil, bg)
+	}
+	x := x0 + 2
+	active := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight))).
+		Foreground(a.cellColor(a.th.Get(theme.AccentAssistant))).Bold(true)
+	for i, v := range p.opts.Views {
+		if x+width(v.Name) > x0+inner {
+			break
+		}
+		st := dim
+		if i == p.view {
+			st = active
+		}
+		drawText(a.scr, x, y, v.Name, st)
+		x += width(v.Name) + 3
+	}
+}
+
+// clip truncates s to max cells, marking the cut with an ellipsis.
+func clip(s string, maxCells int) string {
+	if maxCells <= 1 {
+		return ""
+	}
+	if width(s) <= maxCells {
+		return s
+	}
+	var b strings.Builder
+	w := 0
+	for _, r := range s {
+		rw := width(string(r))
+		if w+rw > maxCells-1 {
+			break
+		}
+		b.WriteRune(r)
+		w += rw
+	}
+	return b.String() + "…"
 }
 
 // composerInputLines returns the wrapped input rows for the editor text

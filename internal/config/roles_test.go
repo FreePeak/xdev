@@ -53,17 +53,21 @@ func TestResolveModelRef(t *testing.T) {
 }
 
 // TestResolveUnknownRoleIsNotSilent: a typo must not quietly run on the
-// default model — that is the whole reason the error names what IS
-// configured.
+// default model — the error names what IS configured, the canonical slots a
+// role may be, and the command that configures one.
 func TestResolveUnknownRoleIsNotSilent(t *testing.T) {
 	_, err := ResolveModelRef(roleSettings(), "@nope")
 	if err == nil {
 		t.Fatal("unknown role must fail")
 	}
-	for _, want := range []string{"smol", "slow", "default"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error must list configured roles, missing %q: %v", want, err)
+	msg := err.Error()
+	for _, want := range []string{"smol", "slow", "default", "canonical:", "advisor", "xdev config set modelRoles.<name>", "/model"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error must list configured roles and the fix-up, missing %q: %v", want, err)
 		}
+	}
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("error must stay one line: %q", msg)
 	}
 }
 
