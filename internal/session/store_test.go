@@ -407,3 +407,64 @@ func concat(parts ...[]byte) []byte {
 }
 
 var _ = time.Now // keep time import when helpers change
+
+// TestTreeRendersGraph pins the /tree display: parent-child indentation,
+// leaf marker, and entry-type summaries. The leaf pointer moves with
+// Branch, which /tree must show.
+func TestTreeRendersGraph(t *testing.T) {
+	s := OpenMem("/proj", "tree test")
+	if err := s.Append(&MessageEntry{Env: Envelope{ID: "m1"}, Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hello"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(&MessageEntry{Env: Envelope{ID: "a1", ParentID: "m1"}, Message: ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "first reply"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(&MessageEntry{Env: Envelope{ID: "a2", ParentID: "m1"}, Message: ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "second reply"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Tree()
+	for _, want := range []string{"m1 message hello", "a1 message", "a2 message", "→"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("tree missing %q:\n%s", want, got)
+		}
+	}
+	// The leaf marker must be on the last entry (leaf).
+	if !strings.Contains(got, "→ a2") {
+		t.Errorf("leaf marker not on a2:\n%s", got)
+	}
+
+	// Branch to a1: the marker moves.
+	if err := s.Branch("a1"); err != nil {
+		t.Fatal(err)
+	}
+	got = s.Tree()
+	if !strings.Contains(got, "→ a1") || strings.Contains(got, "→ a2") {
+		t.Errorf("branch did not move the marker:\n%s", got)
+	}
+}
+
+func TestBranchesFindsForkPoints(t *testing.T) {
+	// Append always links to the current leaf, so a fork is made by
+	// Branch-ing back before appending the second child — exactly how /fork
+	// and a real branch work.
+	s := OpenMem("/proj", "branch test")
+	msg := func(id, parent, text string) *MessageEntry {
+		return &MessageEntry{Env: Envelope{ID: id, ParentID: parent}, Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: text}}}}
+	}
+	if err := s.Append(msg("r", "", "root")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(msg("b1", "r", "first branch")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Branch("r"); err != nil { // move leaf back to r
+		t.Fatal(err)
+	}
+	if err := s.Append(msg("b2", "r", "second branch")); err != nil {
+		t.Fatal(err)
+	}
+	bs := s.Branches()
+	if len(bs) != 1 || bs[0] != "r" {
+		t.Fatalf("branches = %v, want [r] (r has two children b1,b2)", bs)
+	}
+}
