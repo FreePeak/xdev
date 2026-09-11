@@ -74,6 +74,13 @@ type PlanOps struct {
 	Set func(on bool) error
 }
 
+// PrewalkOps wires the /prewalk command (the live target lives in cmd).
+type PrewalkOps struct {
+	Enabled func() bool
+	Status  func() string
+	Set     func(on bool, into string) error
+}
+
 // ThemeOps wires the /theme command (theme resolution lives in cmd).
 type ThemeOps struct {
 	Current func() string
@@ -118,6 +125,7 @@ type CommandAPI interface {
 	Advisor(args string) error
 	Memory(args string) error
 	Theme(args string) error
+	Prewalk(args string) error
 	SettingsView(args string) error
 	// ExtensionCommands exposes the "/server:cmd" roster for /help; nil
 	// when no extensions are loaded.
@@ -133,7 +141,7 @@ type CommandAPI interface {
 // an initialization cycle.
 func builtinCommands() []Command {
 	return []Command{
-		{Name: "new", Description: "start a fresh session",
+		{Name: "new", Aliases: []string{"fresh"}, Description: "start a fresh session",
 			Fn: func(app CommandAPI, args string) error { return app.NewSession() }},
 		{Name: "clear", Description: "reset context in place (history kept on disk)",
 			Fn: func(app CommandAPI, args string) error { return app.ClearSession() }},
@@ -160,6 +168,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings; toggle showThinking on|off",
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default @smol)",
+			Fn: func(app CommandAPI, args string) error { return app.Prewalk(args) }},
 		{Name: "theme", Description: "show or switch the theme: /theme <name>",
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear",
@@ -334,30 +344,39 @@ func (a *App) SetCommandDir(cwd string) { a.commandDir = cwd }
 // command the dropdown offers, not only the static registry.
 func helpText(app CommandAPI) string {
 	cmds := builtinCommands()
+	// The name column covers aliases too ("/new, /fresh" is wider than
+	// "/settings"), so every description starts on the same column.
+	maxLen := 0
+	names := make([]string, len(cmds))
+	for i, c := range cmds {
+		names[i] = "/" + c.Name
+		for _, al := range c.Aliases {
+			names[i] += ", /" + al
+		}
+		if len(names[i]) > maxLen {
+			maxLen = len(names[i])
+		}
+	}
 	var b strings.Builder
 	b.WriteString("commands:")
-	for _, c := range cmds {
-		names := "/" + c.Name
-		for _, al := range c.Aliases {
-			names += ", /" + al
-		}
-		fmt.Fprintf(&b, "\n  %-12s %s", names, c.Description)
+	for i, c := range cmds {
+		fmt.Fprintf(&b, "\n  %-*s %s", maxLen, names[i], c.Description)
 	}
 	if mc := DiscoverCommands(app.CommandDir()); len(mc) > 0 {
 		b.WriteString("\n\nproject commands:")
 		for _, c := range mc {
-			fmt.Fprintf(&b, "\n  %-12s %s", "/"+c.Name, collapseLine(c.Description))
+			fmt.Fprintf(&b, "\n  %-*s %s", maxLen, "/"+c.Name, collapseLine(c.Description))
 		}
 	}
 	if ext := app.ExtensionCommands(); len(ext) > 0 {
 		b.WriteString("\n\nextension commands:")
-		names := make([]string, 0, len(ext))
+		extNames := make([]string, 0, len(ext))
 		for n := range ext {
-			names = append(names, n)
+			extNames = append(extNames, n)
 		}
-		sort.Strings(names)
-		for _, n := range names {
-			fmt.Fprintf(&b, "\n  %-12s %s", "/"+n, collapseLine(ext[n]))
+		sort.Strings(extNames)
+		for _, n := range extNames {
+			fmt.Fprintf(&b, "\n  %-*s %s", maxLen, "/"+n, collapseLine(ext[n]))
 		}
 	}
 	return b.String()

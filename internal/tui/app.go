@@ -58,6 +58,7 @@ type App struct {
 	advisorOps    *AdvisorOps       // /advisor, wired by cmd (nil → notices)
 	memoryOps     *MemoryOps        // /memory, wired by cmd (nil → notices)
 	themeOps      *ThemeOps         // /theme, wired by cmd (nil → notices)
+	prewalkOps    *PrewalkOps       // /prewalk, wired by cmd (nil → notices)
 	settingsOps   *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
@@ -386,6 +387,36 @@ func (a *App) SetTheme(th *theme.Theme) {
 	a.lineCache = map[blockKey][]line{}
 	a.mu.Unlock()
 	a.poke()
+}
+
+// SetPrewalkOps wires the /prewalk command (the target lives in cmd).
+func (a *App) SetPrewalkOps(ops *PrewalkOps) { a.prewalkOps = ops }
+
+// Prewalk implements CommandAPI /prewalk: "", on, off, or "into <ref>".
+func (a *App) Prewalk(args string) error {
+	if a.prewalkOps == nil {
+		return fmt.Errorf("prewalk not wired")
+	}
+	switch fields := strings.Fields(strings.TrimSpace(args)); {
+	case len(fields) == 0, fields[0] == "on", fields[0] == "off", fields[0] == "into":
+		on := len(fields) == 0 || fields[0] != "off"
+		into := ""
+		if len(fields) == 3 && fields[0] == "into" {
+			into = fields[1] + " " + fields[2] // "into <ref>" joins back
+		} else if len(fields) >= 2 && fields[0] == "into" {
+			into = strings.Join(fields[1:], " ")
+		}
+		if a.prewalkOps.Set == nil {
+			return fmt.Errorf("prewalk toggle not wired")
+		}
+		if err := a.prewalkOps.Set(on, into); err != nil {
+			return err
+		}
+		a.AddSystemBlock(a.prewalkOps.Status())
+	default:
+		return fmt.Errorf("prewalk: use /prewalk, /prewalk on|off, or /prewalk into <ref>")
+	}
+	return nil
 }
 
 // SetThemeOps wires the /theme command (theme resolution lives in cmd).

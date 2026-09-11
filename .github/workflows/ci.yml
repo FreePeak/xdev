@@ -67,6 +67,14 @@ jobs:
       - name: Boot smoke
         run: ./xdev version
 
+      # M8 memory proof: the worst-case transcript test under gctrace.
+      # The test itself asserts the heap budget; gctrace makes the GC
+      # behavior visible in the log for a human reading a failure.
+      - name: Memory proof (worst-case transcript, gctrace)
+        env:
+          GODEBUG: gctrace=1
+        run: go test -count=1 -run TestWorstCaseTranscriptStaysUnderBudget -v ./internal/session/ 2>&1 | tail -40
+
       # M8: untrusted-input surfaces get a short fuzz pass on every run.
       # Longer campaigns are a release activity; this catches the
       # regression that reintroduces a panic path.
