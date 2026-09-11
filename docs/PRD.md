@@ -125,7 +125,7 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | `todo` tool (9 ops, 5 statuses, phased init, TodoTracker reminders; transcript-persisted) | todo harness doc (omp v18) | CORE | M3 — **ABSENT as of 2026-09-11**; #16 reopened with code audit |
 | Session titles (`/rename`, ai-title generation, resolution cascade, picker metadata) | claude-code-internals.md | CORE | M2 + M10 |
 | File-freshness check (modified-since-read rejection) | claude-code-internals.md | CORE | M3 — **ABSENT** (hash rendered, never validated — see #16 audit) |
-| Backgrounded bash (`run_in_background` + output polling + kill) | claude-code-internals.md | NICE | M3 |
+| Backgrounded bash (`run_in_background` + output polling + kill) | claude-code-internals.md | NICE | M3 — **ABSENT** (no background logic in bash.go — see #16 audit) |
 | Cross-session messaging (mailbox, SendMessage, InboxPoller) | claude-code-internals.md | NICE | M11 |
 | Deferred tool catalog (`tool_search`/`tool_describe`/`tool_call` bridge) | hermes-internals.md | NICE | M7 |
 | Context-file prompt-injection scanning | hermes-internals.md | NICE | M10 |
