@@ -72,8 +72,7 @@ func TestSlashMenuVisibleWindow(t *testing.T) {
 // opens the dropdown with /help; typing plain text never opens it.
 func TestAppDropdownAppearsOnSlash(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
-	app.life.c = nil
-	app.life.w, app.life.h = 0, 0
+	typeRunes(app, "/h")
 	app.mu.Lock()
 	open := app.smenu != nil && app.smenu.active()
 	app.mu.Unlock()
