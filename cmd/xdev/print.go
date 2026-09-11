@@ -20,6 +20,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/session"
+	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -363,6 +364,9 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 			named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
 		}
 		sys := agent.BuildSystemPrompt(base, ctxFiles, named)
+		if sb := skillPromptBlock(cwd); sb != "" {
+			sys += "\n\n" + sb
+		}
 		if appendSystem != "" {
 			sys += "\n\n" + appendSystem
 		}
@@ -520,7 +524,14 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 // a child can never spawn grandchildren (structural depth guard).
 // thinking is the parent's resolved role effort, forwarded to children so
 // delegation does not silently downgrade (or upgrade) the reasoning budget.
+// registerURISchemes installs the read-tool URI resolvers. Idempotent:
+// re-registering replaces the resolver (tests, repeated startup).
+func registerURISchemes() {
+	tool.RegisterURIScheme("skill", skills.Resolve)
+}
+
 func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode) *tool.Registry {
+	registerURISchemes()
 	pol := settingsPolicy(settings)
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{
@@ -876,3 +887,22 @@ func (h *printHooks) OnCompaction(tokensBefore int64) {
 }
 
 var _ = filepath.Join
+
+// skillPromptBlock lists discovered skills for the model: name +
+// description only, with the full body reachable via read skill://name.
+// Hidden and model-invocation-disabled skills stay out of the list but
+// remain reachable explicitly.
+func skillPromptBlock(cwd string) string {
+	list := skills.Discover(cwd)
+	var b strings.Builder
+	for _, s := range list {
+		if s.Hide || s.DisableModelInvocation {
+			continue
+		}
+		fmt.Fprintf(&b, "\n%s: %s", s.Name, s.Description)
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "# Skills\n\nLoad a skill with read skill://<name> before acting on a task it covers." + b.String()
+}
