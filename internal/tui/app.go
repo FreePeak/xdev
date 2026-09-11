@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/FreePeak/xdev/internal/logx"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type App struct {
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
 	ed     Editor
 	smenu  *slashMenu // "/" autocomplete dropdown (nil = closed)
+	keyMap *KeyMap    // remappable keybinding layer
 	st     Status
 
 	width, height int
@@ -77,11 +79,17 @@ type blockKey struct {
 // New creates the App over an initialized screen.
 func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 	w, h := scr.Size()
+	km, err := LoadKeyMap()
+	if err != nil {
+		logx.Errorf("tui: keybindings.yml: %v (using defaults)", err)
+		km = DefaultKeyMap()
+	}
 	return &App{
-		scr:   scr,
-		th:    th,
-		st:    Status{Model: model, SessionID: sessionID},
-		width: w, height: h,
+		keyMap: km,
+		scr:    scr,
+		th:     th,
+		st:     Status{Model: model, SessionID: sessionID},
+		width:  w, height: h,
 		keyq:      make(chan tcell.Event, 64),
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),
@@ -122,6 +130,9 @@ func (a *App) AddUserBlock(text string) {
 }
 
 // AddSystemBlock appends a harness notice.
+// KeyMap returns the active keybinding map.
+func (a *App) KeyMap() *KeyMap { return a.keyMap }
+
 func (a *App) AddSystemBlock(text string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{Kind: KindSystem, Text: text})

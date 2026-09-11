@@ -38,6 +38,7 @@ type CommandAPI interface {
 	ClearSession() error
 	DropSession() error
 	RunExtensionCommand(name, args string) (string, error)
+	KeyMap() *KeyMap
 	ForkSession() error
 	DumpSession() error
 	ResumeSession(query string) error
@@ -64,6 +65,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.DumpSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
+		{Name: "hotkeys", Description: "show keybinding map",
+			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "help", Description: "show available commands",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(builtinCommands())); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",

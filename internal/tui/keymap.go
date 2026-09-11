@@ -1,0 +1,261 @@
+package tui
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/gdamore/tcell/v2"
+	"gopkg.in/yaml.v3"
+
+	"github.com/FreePeak/xdev/internal/config"
+)
+
+// KeyMap is the remappable keybinding layer (M10 #11, parity-session-ux §3).
+// keybindings.yml maps action-ids to chords; an empty list disables the
+// action entirely. Unmapped actions fall back to DefaultKeyMap so a partial
+// config never leaves the editor dead.
+
+// KeyMap resolves chords to action ids and back.
+type KeyMap struct {
+	// bindings maps "C-x" style chord strings to action ids.
+	bindings map[string]string
+	// actions lists the known action ids for /hotkeys display.
+	actions []string
+}
+
+// BuiltinActions are the ~20 core actions the keybinding layer manages.
+// BuiltinActions are the actions the keybinding layer manages, aligned with
+// the DefaultKeyMap chord table. Actions that share a chord with another
+// (abort shares C-c with quit; complete shares Tab with menu-accept) are
+// omitted from the defaults but still resolvable from a user keybindings.yml.
+var BuiltinActions = []string{
+	"submit", "newline", "cancel", "quit",
+	"scroll-up", "scroll-down", "scroll-top", "scroll-bottom", "scroll-page-up", "scroll-page-down",
+	"menu-prev", "menu-next", "menu-accept",
+	"history-prev", "history-next",
+	"expand", "collapse",
+	"clear-input",
+}
+
+// DefaultKeyMap is the factory chord table.
+func DefaultKeyMap() *KeyMap {
+	m := &KeyMap{
+		bindings: map[string]string{
+			// Editor / composer
+			"Enter":       "submit",
+			"Shift-Enter": "newline",
+			"Escape":      "cancel",
+			"C-u":         "clear-input",
+			// Quit
+			"C-c": "quit",
+			// Menu navigation
+			"Tab":  "menu-accept",
+			"C-p":  "menu-prev",
+			"C-n":  "menu-next",
+			"Up":   "menu-prev",
+			"Down": "menu-next",
+			// Scroll
+			"PgUp":       "scroll-page-up",
+			"PgDn":       "scroll-page-down",
+			"C-b":        "scroll-page-up",
+			"C-f":        "scroll-page-down",
+			"Home":       "scroll-top",
+			"End":        "scroll-bottom",
+			"Shift-Up":   "scroll-up",
+			"Shift-Down": "scroll-down",
+			// TUI extras
+			"C-l": "expand",
+			"C-e": "collapse",
+			"C-r": "history-prev",
+			// history-next, abort and complete share chords with menu/history
+			// actions or have no default: context disambiguates at dispatch.
+			// They remain settable from keybindings.yml.
+			// Actions with no default chord (listed so /hotkeys shows them).
+			// "abort" → C-c (shared with quit); "complete" → Tab (shared with
+			// menu-accept). These share chords because context disambiguates.
+		},
+		actions: append([]string(nil), BuiltinActions...),
+	}
+	return m
+}
+
+// keybindingsPath is <dataDir>/keybindings.yml.
+func keybindingsPath() string {
+	return filepath.Join(config.DataDir(), "keybindings.yml")
+}
+
+// LoadKeyMap reads keybindings.yml, layering user overrides on the
+// defaults. A missing file is not an error; a malformed one is.
+func LoadKeyMap() (*KeyMap, error) {
+	m := DefaultKeyMap()
+	raw, err := os.ReadFile(keybindingsPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return m, nil
+		}
+		return nil, err
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("tui: keybindings.yml: %w", err)
+	}
+	for action, val := range doc {
+		if !isKnownAction(action) {
+			continue // unknown actions are ignored (forward-compat: a future
+			// build may add actions this one doesn't know yet)
+		}
+		chords, ok := val.([]any)
+		if !ok {
+			return nil, fmt.Errorf("tui: keybindings.yml %q: expected a list of chords", action)
+		}
+		// Remove the default bindings for this action, then re-add.
+		m.clearAction(action)
+		for _, c := range chords {
+			s, ok := c.(string)
+			if !ok {
+				return nil, fmt.Errorf("tui: keybindings.yml %q: chord must be a string", action)
+			}
+			m.bindings[s] = action // an empty chord string disables the action
+		}
+	}
+	return m, nil
+}
+
+func isKnownAction(name string) bool {
+	for _, a := range BuiltinActions {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *KeyMap) clearAction(action string) {
+	for chord, a := range m.bindings {
+		if a == action {
+			delete(m.bindings, chord)
+		}
+	}
+}
+
+// Resolve maps a key event to an action id ("" when unbound).
+func (m *KeyMap) Resolve(ev *tcell.EventKey) string {
+	chord := chordOf(ev)
+	if chord == "" {
+		return ""
+	}
+	return m.bindings[chord]
+}
+
+// Chord returns the display string for an action's first binding ("" if none).
+func (m *KeyMap) Chord(action string) string {
+	for _, chord := range m.sortedChords() {
+		if m.bindings[chord] == action {
+			return chord
+		}
+	}
+	return ""
+}
+
+// Hotkeys renders a two-column action/chord table for /hotkeys.
+func (m *KeyMap) Hotkeys() string {
+	lines := make([]string, 0, len(BuiltinActions))
+	maxLen := 0
+	for _, a := range BuiltinActions {
+		chord := m.Chord(a)
+		if chord == "" {
+			chord = "—" // no binding: action is effectively disabled
+		}
+		if len(a) > maxLen {
+			maxLen = len(a)
+		}
+		lines = append(lines, fmt.Sprintf("  %-*s  %s", maxLen, a, chord))
+	}
+	return "keybindings (" + keybindingsPath() + "):\n" + strings.Join(lines, "\n")
+}
+
+func (m *KeyMap) sortedChords() []string {
+	out := make([]string, 0, len(m.bindings))
+	for c := range m.bindings {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// chordOf renders a key event as a "C-x" / "S-Tab" / "A-Backspace" style
+// chord for table lookup. Only the chords used by the default and user keymaps
+// are encoded; others return "".
+func chordOf(ev *tcell.EventKey) string {
+	var parts []string
+	m := ev.Modifiers()
+	if m&tcell.ModCtrl != 0 {
+		parts = append(parts, "C")
+	}
+	if m&tcell.ModShift != 0 && ev.Key() >= tcell.KeyUp && ev.Key() <= tcell.KeyPgDn {
+		parts = append(parts, "S") // Shift only distinguishes arrow/nav keys
+	}
+	if m&tcell.ModAlt != 0 {
+		parts = append(parts, "A")
+	}
+	keyPart := keyName(ev)
+	if keyPart == "" {
+		return ""
+	}
+	parts = append(parts, keyPart)
+	return strings.Join(parts, "-")
+}
+
+// keyName maps a key event to its chord name.
+func keyName(ev *tcell.EventKey) string {
+	// Ctrl+letter arrives as KeyCtrlA..KeyCtrlZ (not KeyRune+ModCtrl) in
+	// real tcell events; normalize to the letter form so keybindings.yml
+	// can just say "C-q".
+	if k := ev.Key(); k >= tcell.KeyCtrlA && k <= tcell.KeyCtrlZ {
+		return string(rune('a' + int(k-tcell.KeyCtrlA)))
+	}
+	switch ev.Key() {
+	case tcell.KeyEnter:
+		return "Enter"
+	case tcell.KeyEscape:
+		return "Escape"
+	case tcell.KeyTab:
+		return "Tab"
+	case tcell.KeyBacktab:
+		return "Shift-Tab"
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		return "Backspace"
+	case tcell.KeyUp:
+		return "Up"
+	case tcell.KeyDown:
+		return "Down"
+	case tcell.KeyLeft:
+		return "Left"
+	case tcell.KeyRight:
+		return "Right"
+	case tcell.KeyPgUp:
+		return "PgUp"
+	case tcell.KeyPgDn:
+		return "PgDn"
+	case tcell.KeyHome:
+		return "Home"
+	case tcell.KeyEnd:
+		return "End"
+	case tcell.KeyDelete:
+		return "Delete"
+	case tcell.KeyRune:
+		r := ev.Rune()
+		if r >= 'a' && r <= 'z' {
+			return string(r)
+		}
+		if r >= 'A' && r <= 'Z' {
+			return string(r)
+		}
+		return ""
+	default:
+		return ""
+	}
+}
