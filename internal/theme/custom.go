@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // Custom JSON themes (M12, research F4 CORE): user themes live in
@@ -39,14 +41,9 @@ type Symbols struct {
 	Activity      []string          `json:"activity"`
 }
 
-// CustomDir is ~/.xdev/agent/themes.
-func CustomDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".xdev", "agent", "themes")
-}
+// CustomDir is <DataDir>/themes. Like every other data path it goes
+// through config.DataDir so XDEV_AGENT_DIR sandboxes custom themes too
+// (config does not import theme, so no cycle).
 
 // LoadCustom reads and validates <dir>/<name>.json. A missing file is
 // (nil, nil) so callers can fall through to built-ins.
