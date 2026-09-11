@@ -32,20 +32,21 @@ func welcomeMenuItems(hasHistory bool) []welcomeMenu {
 	return items
 }
 
-// xdevLogo is the one welcome logo: the figlet "3d" font (the
-// ANSI-shadow family's companion — same solid/shaded block aesthetic,
-// but with genuine lowercase, so the mark actually reads "XDev").
-// It renders identically at every terminal size; the only
+// xdevLogo is the one welcome logo: "XDEV" in the FIGlet font
+// Delta Corps Priest 1 — the same font the Omarchy wordmark is drawn
+// in (omarchy-ascii). Solid ███ strokes with ▀▄▌▐ half-blocks for the
+// rounded joins; no shaded ░ noise, so the mark reads cleanly at any
+// size. It renders identically at every terminal size; the only
 // size-dependent choice is whether it fits at all (see logoArt).
 var xdevLogo = []string{
-	" ██     ██ ████████",
-	"░░██   ██ ░██░░░░██",
-	" ░░██ ██ ░██    ░██   █████  ██    ██",
-	"  ░░███ ░██     ░██  ██░░░██ ░██   ░██",
-	"   ██░██ ░██     ░██ ░███████ ░░██ ░██",
-	"  ██ ░░██ ░██    ░██ ░██░░░░  ░░████",
-	" ██   ░░██ ░█████  ░░██████   ░░██",
-	"░░     ░░ ░░░░░░  ░░░░░░    ░░",
+	"▀████    ▐████▀ ████████▄     ▄████████  ▄█    █▄",
+	"  ███▌   ████▀  ███   ▀███   ███    ███ ███    ███",
+	"   ███  ▐███    ███    ███   ███    █▀  ███    ███",
+	"   ▀███▄███▀    ███    ███  ▄███▄▄▄     ███    ███",
+	"   ████▀██▄     ███    ███ ▀▀███▀▀▀     ███    ███",
+	"  ▐███  ▀███    ███    ███   ███    █▄  ███    ███",
+	" ▄███     ███▄  ███   ▄███   ███    ███ ███    ███",
+	"████       ███▄ ████████▀    ██████████  ▀██████▀",
 }
 
 // logoWidth returns the widest art row in cells.
@@ -61,7 +62,7 @@ func logoWidth() int {
 
 // logoArt returns the xdev logo for the given terminal size, or nil
 // when the terminal can't fit it: content shorter than the 8 art rows
-// plus tagline, gap and menu, or narrower than the 37-cell art plus
+// plus tagline, gap and menu, or narrower than the 50-cell art plus
 // margins. One logo at every size — no variant swapping, so the
 // artwork never changes shape between terminal sizes.
 func logoArt(w, h int) []string {
@@ -69,6 +70,36 @@ func logoArt(w, h int) []string {
 		return nil
 	}
 	return xdevLogo
+}
+
+// --- Sheen sweep (welcome-screen logo) ---
+
+// Sheen band geometry, ported from omarchy-branding-about-animation:
+// two columns per row leans the band to ~45° on screen (a cell is
+// about twice as tall as wide), ±2 columns is its half-width, and the
+// rest pauses the sweep between passes. The phase advances one column
+// per welcome animation step (~8fps), so a pass takes ~8s with a
+// 2s-ish rest.
+const (
+	sheenSlant = 2
+	sheenHalf  = 2
+	sheenRest  = 16
+)
+
+// sheenInBand reports whether logo cell (row, col) sits under the
+// sheen band at the given phase, for a logo of the given width.
+func sheenInBand(phase, row, col, logoW int) bool {
+	rows := len(xdevLogo)
+	if rows == 0 {
+		return false
+	}
+	// One period: band fully off the left (centre -2*half), across
+	// the art and off the right of the lowest row (+logoW plus the
+	// slant's worth), then the rest.
+	period := logoW + (rows-1)*sheenSlant + 2*sheenHalf + 1 + sheenRest
+	at := phase%period - 2*sheenHalf
+	c := at - row*sheenSlant
+	return col >= c-sheenHalf && col <= c+sheenHalf
 }
 
 // --- Conway's Game of Life backdrop (welcome screen only) ---
@@ -271,10 +302,23 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 			}
 		}
 	}
-	for _, ln := range logo {
-		drawText(s, logoX, y, ln, st(whiteC, false))
-		y++
+
+	// Brand colour with the sheen band riding across it (omarchy
+	// About branding): the assistant accent for the wordmark, Text-
+	// Primary bold for the lit band — the one colored element on an
+	// otherwise monochrome screen, like omarchy's green logo.
+	base := st(a.th.Get(theme.AccentAssistant), false)
+	for r, ln := range logo {
+		c := 0
+		for _, rn := range ln {
+			s.SetContent(logoX+c, y+r, rn, nil, base)
+			if sheenInBand(a.sheenPhase, r, c, logoW) {
+				s.SetContent(logoX+c, y+r, rn, nil, st(whiteC, true))
+			}
+			c++
+		}
 	}
+	y += len(logo)
 	if len(logo) > 0 {
 		tag := "01111000 01100100 01100101 01110110" // "xdev" in binary
 		drawText(s, max(2, (w-width(tag))/2), y, tag, st(grayC, false))

@@ -73,9 +73,9 @@ type App struct {
 	lineCache map[blockKey][]line
 
 	// Welcome-screen Game of Life backdrop (UI thread; guarded by mu).
-	life     lifeGrid
-	lifeTick int
-
+	life       lifeGrid
+	lifeTick   int
+	sheenPhase int // welcome logo sheen sweep position (columns)
 	// Mouse text selection: drag across transcript rows, release copies
 	// to the clipboard. selRows is the last frame's rendered rows with
 	// their screen origins, kept for hit-testing (UI thread; mu-guarded).
@@ -661,15 +661,18 @@ func (a *App) Run() {
 			// Game of Life on the welcome screen: step every 4th
 			// 33ms tick (~8fps) and redraw only on those steps,
 			// while it is visible (no blocks, nothing running) —
-			// idle CPU stays near zero between steps.
+			// idle CPU stays near zero between steps. The logo
+			// sheen advances on the same cadence, so it animates
+			// every step and Life steps every 4th tick.
 			animate := false
 			if !running && len(a.blocks) == 0 {
 				gw, top, bot, ok := lifeArea(a.width, a.height)
 				if ok {
 					a.lifeTick = (a.lifeTick + 1) % 4
+					a.sheenPhase++
+					animate = true
 					if a.lifeTick == 0 {
 						a.stepLife(gw, top, bot)
-						animate = true
 					}
 				}
 			}
