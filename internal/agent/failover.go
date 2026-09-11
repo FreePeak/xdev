@@ -59,7 +59,7 @@ func (a *Agent) nextFailoverTarget() int {
 // switchTarget activates chain index i (1-based, Failovers[i-1]), raises
 // the compaction window when the target is bigger, and mirrors the change
 // into the session store. Run is single-goroutine, so no lock is needed.
-func (a *Agent) switchTarget(i int) {
+func (a *Agent) switchTarget(i int, reason string) {
 	t := a.Failovers[i-1]
 	a.curTarget = i
 	a.Provider = t.Provider
@@ -67,7 +67,7 @@ func (a *Agent) switchTarget(i int) {
 	if t.ContextWindow > a.Compaction.ContextWindow {
 		a.Compaction.ContextWindow = t.ContextWindow
 	}
-	logx.Errorf("recovery: switched to %s/%s (window %d)", t.Provider.Name(), t.Model, t.ContextWindow)
+	logx.Errorf("%s: switched to %s/%s (window %d)", reason, t.Provider.Name(), t.Model, t.ContextWindow)
 	if a.Store != nil {
 		_ = a.Store.Append(&session.ModelChangeEntry{Model: t.Provider.Name() + "/" + t.Model})
 	}

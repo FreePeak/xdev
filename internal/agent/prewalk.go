@@ -55,7 +55,7 @@ func (a *Agent) prewalkSwitch() {
 		return
 	}
 	a.Failovers = append(a.Failovers, a.Prewalk.Target)
-	a.switchTarget(len(a.Failovers))
+	a.switchTarget(len(a.Failovers), "prewalk")
 	a.prewalk.done = true
 	logx.Errorf("prewalk: handed off to %s/%s", a.Prewalk.Target.Provider.Name(), a.Prewalk.Target.Model)
 }

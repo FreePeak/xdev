@@ -125,6 +125,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	hooks := &printHooks{store: store, showThinking: settings.ShowThinkingOn()}
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef)}
+	if t := resolvePrewalk(opts, cfg, settings); t != nil {
+		ag.Prewalk = &agent.Prewalk{Target: *t}
+	}
 	applyPolicy(ag, settings)
 
 	// Extension processes (optional): their tools join the registry and the

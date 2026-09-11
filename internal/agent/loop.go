@@ -358,7 +358,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// Ladder drained: fail over to the next model-host;
 				// without one the error surfaces.
 				if nxt := a.nextFailoverTarget(); nxt > 0 {
-					a.switchTarget(nxt)
+					a.switchTarget(nxt, "recovery")
 					attempt = 0
 					continue
 				}
@@ -370,7 +370,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// just fit; each overflow climbs one ladder step. At the top
 			// compaction owns recovery, once.
 			if nxt := a.promotionTarget(); nxt > 0 {
-				a.switchTarget(nxt)
+				a.switchTarget(nxt, "recovery")
 				continue
 			}
 			if compacted {
