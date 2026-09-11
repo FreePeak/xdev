@@ -260,6 +260,14 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 	}
 	logoX := max(2, (w-logoW)/2)
+	// Clear the band behind the logo block (a margin around the art)
+	// so '▓' cells never sit flush against the '░' shading — that
+	// collision read as noise, not letterforms, on the welcome screen.
+	for yy := y - 1; yy < y+len(logo)+1; yy++ {
+		for xx := logoX - 3; xx < logoX+logoW+3; xx++ {
+			s.SetContent(xx, yy, ' ', nil, st(whiteC, false))
+		}
+	}
 	for _, ln := range logo {
 		drawText(s, logoX, y, ln, st(whiteC, false))
 		y++

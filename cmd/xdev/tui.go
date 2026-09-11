@@ -248,6 +248,31 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return out
 	})
 
+	app.SetResumeList(func(cwd string) error {
+		metas, err := session.List(config.DataDir())
+		if err != nil {
+			return err
+		}
+		var lines []string
+		count := 0
+		for _, m := range metas {
+			if m.CWD != cwd || m.TitleSource == "subagent" {
+				continue
+			}
+			count++
+			msg := fmt.Sprintf("%-8s  %s  (%d entries, last %s)", m.ID[:8], m.Title, len(metas), m.ModTime.Format("Jan 02 15:04"))
+			lines = append(lines, msg)
+			if count >= 12 {
+				break
+			}
+		}
+		if len(lines) == 0 {
+			app.AddSystemBlock("no other sessions in this directory")
+			return nil
+		}
+		app.AddSystemBlock("sessions in " + cwd + " (use /resume <id-prefix>):\n" + strings.Join(lines, "\n"))
+		return nil
+	})
 	app.SetSessionTree(func() string { return store.Tree() })
 	app.SetSessionBranch(func(args string) error {
 		query := strings.TrimSpace(args)
@@ -313,7 +338,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
 			if query == "" {
-				return fmt.Errorf("usage: /resume <session-id-prefix>")
+				// Show the recent-sessions list like Claude Code's picker
+				// (without the dialog chrome, which is M12).
+				return app.ListSessions(cwd)
 			}
 			path, err := resolveResumeID(cwd, query)
 			if err != nil {
