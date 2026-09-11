@@ -146,6 +146,44 @@ func (s *Settings) merge(layer *Settings) error {
 	return nil
 }
 
+// ProviderDisabled reports whether a provider is switched off by
+// disabledProviders. Matching is case-insensitive on the models.yml key.
+func (s *Settings) ProviderDisabled(name string) bool {
+	if s == nil {
+		return false
+	}
+	for _, d := range s.DisabledProviders {
+		if strings.EqualFold(strings.TrimSpace(d), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckProvider gates a provider before it is used. Absent credentials are
+// reported only for providers that can actually authenticate (a keyless
+// local server like ollama is legitimately credential-free), so the rule is
+// "disabled → refuse; enabled but unconfigured → refuse with the fix".
+func (s *Settings) CheckProvider(name string, hasCredential bool) error {
+	// A nil layer (tests, pre-settings code paths) means "no gating": the
+	// zero configuration must not refuse to start.
+	if s == nil {
+		return nil
+	}
+	if s.ProviderDisabled(name) {
+		return fmt.Errorf("config: provider %q is disabled (remove it from disabledProviders to use it)", name)
+	}
+	if !hasCredential {
+		return fmt.Errorf("config: provider %q has no credential: set apiKey in models.yml, run /login, or export the provider key", name)
+	}
+	return nil
+}
+
+// KeylessAuth reports a provider that needs no credential (auth: none).
+func (pc *ProviderConfig) KeylessAuth() bool {
+	return pc != nil && strings.EqualFold(strings.TrimSpace(pc.Auth), "none")
+}
+
 // timestampForBackup names a preserved broken file uniquely enough that two
 // failures in one run never overwrite each other.
 func timestampForBackup() string {

@@ -158,15 +158,26 @@ func buildProvider(name string, pc *config.ProviderConfig) (ai.Provider, error) 
 		headers[k] = config.Resolve(v)
 	}
 	baseURL := config.Resolve(pc.BaseURL)
-	// Resolve through the credential chain (cli key → models.yml → stored
-	// oauth/login → env). pc.APIKey is already ${VAR}-expanded; pass it via
-	// a copy so a chain hit from a lower source still works.
-	credReq := config.CredentialRequest{
-		Provider: name, ProviderCfg: pc, CLIKey: cliAPIKey(),
+	settings := lastSettings()
+	// Chain order: CLI key → models.yml (per-model then provider) → stored
+	// OAuth → /login key → env.
+	credReq := config.CredentialRequest{Provider: name, ProviderCfg: pc, CLIKey: cliAPIKey()}
+	resolved, credErr := config.ResolveCredential(credReq)
+	// auth: none — a local server (ollama, lm-studio) is configured by
+	// definition, so it has no credential and that is not an error.
+	configured := pc.KeylessAuth() || (credErr == nil && strings.TrimSpace(resolved.Value) != "")
+	// Gate on the RESOLVED credential rather than a second copy of the
+	// chain's rules: an env-only key is exactly as configured as a
+	// models.yml one, and duplicating the lookup is how a gate ends up
+	// rejecting valid setups.
+	if err := settings.CheckProvider(name, configured); err != nil {
+		return nil, err
 	}
 	apiKey := config.Resolve(pc.APIKey)
-	if resolved, err := config.ResolveCredential(credReq); err == nil {
+	if credErr == nil {
 		apiKey = resolved.Value
+	} else if pc.KeylessAuth() {
+		apiKey = ""
 	}
 	// An explicit authHeader other than "Authorization" overrides the
 	// adapter's own convention: the key rides that header and the adapter
@@ -231,6 +242,17 @@ func basePrompt(opts printOptions) string {
 		return opts.SystemPrompt
 	}
 	return agent.SystemPromptBase
+}
+
+// hasStoredCredential reports whether credentials.json holds anything for a
+// provider (a stored OAuth token counts as configured).
+func hasStoredCredential(provider string) bool {
+	store, err := config.LoadCredentials()
+	if err != nil {
+		return false // a corrupt store fails later with its own precise error
+	}
+	c, ok := store[provider]
+	return ok && (strings.TrimSpace(c.APIKey) != "" || strings.TrimSpace(c.AccessToken) != "")
 }
 
 // cliAPIKey holds the -api-key value for the run (set once in main before
@@ -378,7 +400,13 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 
 // lastSettings returns the layered settings main() resolved for this run
 // (main owns loading so every mode sees the same layering).
-func lastSettings() *config.Settings { return loadedSettings }
+func lastSettings() *config.Settings {
+	if loadedSettings == nil {
+		// Pre-main callers (tests, tooling): defaults with no gating.
+		return &config.Settings{}
+	}
+	return loadedSettings
+}
 
 // resolveModel applies the M9 precedence: explicit value (flag, already
 // merged over settings.defaultModel by main) → XDEV_MODEL → @role
