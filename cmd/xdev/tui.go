@@ -215,19 +215,23 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if err != nil || res.Model == "" {
 			return
 		}
-		// History can carry a ref that no longer resolves (a deleted model,
-		// a pre-validation typo): keep the configured model rather than
-		// adopting something that would 404 on the next turn. The check is
-		// hard here — unlike an explicit ref, the user never typed this.
-		if rerr := validateModelRef(cfg, res.Model); rerr != nil {
-			logx.Debugf("resume model %q unusable: %v", res.Model, rerr)
-			app.AddSystemBlock("kept " + live.provName + "/" + live.model + " — session model " + res.Model + " does not resolve")
-			return
-		}
+		// The seed follows the typed path's rule (the catalog check is
+		// advisory there too): gateways routinely serve more than models.yml
+		// pins, so a strict catalog gate here would silently drop the model
+		// the user left on the moment it is unpinned-but-served — switch to
+		// it with /model, resume, and quietly be back on the default. The
+		// guards that remain are parseability and a known provider; a ref
+		// that fails those keeps the current model with the remedy named,
+		// and an adopted-but-unlisted ref logs its trail so a gateway 404
+		// on the next turn is explainable.
 		np, pname, mname, err := buildModel(res.Model)
 		if err != nil {
-			logx.Debugf("resume model %q: %v", res.Model, err)
+			logx.Debugf("resume model %q unusable: %v", res.Model, err)
+			app.AddSystemBlock("kept " + live.provName + "/" + live.model + " — session model " + res.Model + " is not loadable (" + err.Error() + "); pick one with /model")
 			return
+		}
+		if verr := validateModelRef(cfg, res.Model); verr != nil {
+			logx.Debugf("resume model %q not in the catalog: %v", res.Model, verr)
 		}
 		setLiveModel(np, pname, mname, "")
 	}
