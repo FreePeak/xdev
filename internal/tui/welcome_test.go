@@ -72,7 +72,8 @@ func TestSlashMenuVisibleWindow(t *testing.T) {
 // opens the dropdown with /help; typing plain text never opens it.
 func TestAppDropdownAppearsOnSlash(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
-	typeRunes(app, "/h")
+	app.life.c = nil
+	app.life.w, app.life.h = 0, 0
 	app.mu.Lock()
 	open := app.smenu != nil && app.smenu.active()
 	app.mu.Unlock()
@@ -223,39 +224,45 @@ func TestAppWelcomeLogo(t *testing.T) {
 
 	// The art rows are ragged-width, so they must all sit at the same
 	// x on consecutive rows — per-line centering would wobble them
-	// (the bug this test pins). Life cells use '▓', never art glyphs,
-	// so a full-row string match is unambiguous.
+	// (the bug this test pins). The Life band paints '▓' into the
+	// art's whitespace, so rows are matched with band cells masked
+	// to spaces.
 	prim, w, _ := scr.GetContents()
 	h := len(prim) / w
 	rowStr := func(y int) string {
 		var b strings.Builder
 		for x := range w {
-			if r := prim[y*w+x].Runes; len(r) > 0 {
+			switch r := prim[y*w+x].Runes; {
+			case len(r) == 1 && r[0] == lifeGlyph:
+				b.WriteByte(' ') // backdrop, not art
+			case len(r) > 0:
 				b.WriteRune(r[0])
-			} else {
+			default:
 				b.WriteByte(' ')
 			}
 		}
 		return b.String()
 	}
+
 	x0, y0 := -1, -1
 	for i, art := range xdevLogo {
+		want := art // exact row, leading spaces included
 		x, y := -1, -1
 		for yy := range h {
-			if xx := strings.Index(rowStr(yy), art); xx >= 0 {
+			if xx := strings.Index(rowStr(yy), want); xx >= 0 {
 				x, y = xx, yy
 				break
 			}
 		}
 		if x < 0 {
-			t.Fatalf("logo row %d (%q) not on screen", i, art)
+			t.Fatalf("logo row %d (%q) not on screen", i, want)
 		}
 		if i == 0 {
 			x0, y0 = x, y
 			continue
 		}
 		if x != x0 {
-			t.Fatalf("logo row %d at x=%d, want %d (common left edge)", i, x, x0)
+			t.Fatalf("logo row %d origin x=%d, want %d (common left edge)", i, x, x0)
 		}
 		if y != y0+i {
 			t.Fatalf("logo row %d at y=%d, want %d (consecutive)", i, y, y0+i)
