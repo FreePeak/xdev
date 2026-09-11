@@ -51,6 +51,25 @@ type Store struct {
 
 	autoPath string // when set, the first assistant message persists here
 	autoOpts Options
+
+	// Windowed materialization (M8): a long session's pre-boundary history
+	// is already summarized into a compaction entry, so retaining its
+	// entries costs memory the context will never read. During load the
+	// store drops everything before the latest boundary once the boundary
+	// is known. The FILE is untouched — reopening after a boundary-free
+	// append still sees the full history — only the in-memory view is
+	// bounded, which is the §IV.1 budget promise.
+	windowCut   int  // index into entries of the oldest retained entry
+	windowed    bool // a boundary has been applied
+	entriesSeen int  // total entries parsed (diagnostics)
+}
+
+// WindowStats reports the load-windowing outcome (diagnostics + the M8
+// audit harness).
+func (s *Store) WindowStats() (retained, seen int, windowed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries), s.entriesSeen, s.windowed
 }
 
 // Options tunes Store persistence behavior.
@@ -157,6 +176,7 @@ func (s *Store) loadLine(line []byte, no int) error {
 
 	env := e.Envelope()
 	s.entries = append(s.entries, e)
+	s.entriesSeen++
 	s.byID[env.ID] = e
 	if env.ParentID != "" {
 		s.children[env.ParentID] = append(s.children[env.ParentID], env.ID)
@@ -170,7 +190,60 @@ func (s *Store) loadLine(line []byte, no int) error {
 		}
 	}
 	s.leaf = env.ID
+	s.maybeWindow()
 	return nil
+}
+
+// maybeWindow drops entries the next context build can never read: those
+// strictly before the latest reset boundary / compaction window. It runs
+// after every append but only rebuilds indexes when it actually cuts, so
+// the amortized cost is one rebuild per boundary.
+func (s *Store) maybeWindow() {
+	cut := -1
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		switch s.entries[i].(type) {
+		case *ResetBoundaryEntry:
+			cut = i + 1
+		case *CompactionEntry:
+			// Keep the compaction entry itself: its summary is the first
+			// thing a rebuilt context emits. Everything before it is dead.
+			cut = i
+		}
+		if cut >= 0 {
+			break
+		}
+	}
+	// Prune only in batches: rebuilding the indexes per entry would make
+	// loading quadratic.
+	if cut <= 0 || cut-s.windowCut < loadWindowBatch {
+		return
+	}
+	s.entries = append([]Entry(nil), s.entries[cut:]...)
+	s.windowCut = 0
+	s.windowed = true
+	s.reindex()
+	// A cut can orphan the leaf if the leaf lived before the boundary;
+	// the last entry is the chronological tail, so it stays the leaf.
+	if len(s.entries) > 0 {
+		s.leaf = s.entries[len(s.entries)-1].Envelope().ID
+	}
+}
+
+// loadWindowBatch is how many droppable entries accumulate before the
+// index rebuild pays for itself.
+const loadWindowBatch = 512
+
+// reindex rebuilds byID/children from the retained entries.
+func (s *Store) reindex() {
+	s.byID = make(map[string]Entry, len(s.entries))
+	s.children = make(map[string][]string, len(s.entries))
+	for _, e := range s.entries {
+		env := e.Envelope()
+		s.byID[env.ID] = e
+		if env.ParentID != "" {
+			s.children[env.ParentID] = append(s.children[env.ParentID], env.ID)
+		}
+	}
 }
 
 func (s *Store) adoptHeader(h SessionHeader) {
