@@ -143,6 +143,13 @@ type Agent struct {
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model role. nil asks for none.
 	Thinking *ai.ThinkingBudget
+	// Prewalk is the one-shot model handoff (nil = disabled): after the
+	// first successful edit/write, the run switches to the target model
+	// through the failover machinery (see prewalk.go).
+	Prewalk *Prewalk
+
+	// prewalk is the live state machine; Run is single-goroutine, no lock.
+	prewalk prewalkState
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -264,6 +271,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			history = append(history, rm)
 			a.Hooks.OnToolResultMessage(&rm)
 		}
+		a.prewalkNote(results)
 	}
 	// Budget exhausted: ask for one wrap-up message rather than erroring.
 	// The prompt is persisted so a store rebuild keeps it, and tool calls in

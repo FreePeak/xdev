@@ -31,6 +31,40 @@ type printOptions struct {
 	ResumePrefix string
 	MaxTurns     int
 	MaxTokens    int
+	// Prewalk enables the one-shot model handoff (research §5); the target
+	// defaults to the @smol role.
+	Prewalk     bool
+	PrewalkInto string
+}
+
+// resolvePrewalk builds the handoff target for a run. Returns nil when
+// prewalk is off or the target cannot resolve (warn, start unarmed — the
+// run proceeds on the primary model).
+func resolvePrewalk(opts printOptions, cfg *config.Config, settings *config.Settings) *agent.FailoverTarget {
+	if !opts.Prewalk {
+		return nil
+	}
+	ref, _, err := resolveModel(opts.PrewalkInto, cfg, settings)
+	if err != nil {
+		logx.Errorf("prewalk: target %q unresolved, starting on primary: %v", opts.PrewalkInto, err)
+		return nil
+	}
+	pName, mName, err := config.ParseModelRef(ref)
+	if err != nil {
+		logx.Errorf("prewalk: target %q invalid, starting on primary: %v", ref, err)
+		return nil
+	}
+	pc, ok := cfg.Providers[pName]
+	if !ok {
+		logx.Errorf("prewalk: unknown provider %q, starting on primary", pName)
+		return nil
+	}
+	prov, err := buildProvider(pName, pc, mName, cfg)
+	if err != nil {
+		logx.Errorf("prewalk: provider for %q unavailable, starting on primary: %v", ref, err)
+		return nil
+	}
+	return &agent.FailoverTarget{Provider: prov, Model: mName}
 }
 
 func runPrint(prompt string, opts printOptions) (exitCode int, err error) {

@@ -52,6 +52,8 @@ func main() {
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	apiKeyValue := fs.String("api-key", "", "credential for this run only (never persisted)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
+	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write")
+	prewalkInto := fs.String("prewalk-into", "@smol", "prewalk target: model ref or @role (default @smol)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -116,6 +118,8 @@ Flags:
 			AppendSystem: *appendSystemPrompt,
 			MaxTokens:    *maxTokens,
 			MaxTurns:     *maxTurns,
+			Prewalk:      *prewalkFlag,
+			PrewalkInto:  *prewalkInto,
 		}, *themeName)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "xdev:", err)
