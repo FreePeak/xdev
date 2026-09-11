@@ -7,7 +7,10 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  # Release artifacts (and a full manual gate run) can be dispatched.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -63,6 +66,62 @@ jobs:
 
       - name: Boot smoke
         run: ./xdev version
+
+      # M8: untrusted-input surfaces get a short fuzz pass on every run.
+      # Longer campaigns are a release activity; this catches the
+      # regression that reintroduces a panic path.
+      - name: Fuzz (short)
+        run: |
+          go test -run FuzzSessionLoad -fuzz FuzzSessionLoad -fuzztime 20s ./internal/session/
+          go test -run FuzzParsePartial -fuzz FuzzParsePartial -fuzztime 20s ./internal/ai/sse/
+
+      # M8: known-CVE scan. Pinned deps + govulncheck together are the
+      # supply-chain gate (PRD §IV.9.7).
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
+  release-artifacts:
+    # M8 packaging: single static binaries per platform plus a checksum
+    # manifest. Runs on tags (and can be dispatched) so the release is
+    # reproducible from CI rather than a laptop.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: darwin, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: windows, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          go build -trimpath -ldflags "-s -w" -o "dist/xdev_${GOOS}_${GOARCH}${ext}" ./cmd/xdev
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum * > "SHA256SUMS_${{ matrix.goos }}_${{ matrix.goarch }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xdev-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
 
   cross:
     # Six-platform cross-compile is a Goal-1 promise; catch breakage early.
