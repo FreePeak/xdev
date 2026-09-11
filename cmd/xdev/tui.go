@@ -16,6 +16,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/fscache"
+	hookbus "github.com/FreePeak/xdev/internal/hooks"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/theme"
@@ -465,8 +466,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// target until the next submit replaces it.
 				agentMu.Lock()
 				curAgent = ag
-				if exts != nil {
-					ag.Intercept = exts
+				hookBus := hookbus.FromSettings(lastSettings().Hooks)
+				if c := agent.NewChain(hookBus, exts); c != nil {
+					ag.Intercept = c
 				}
 				agentMu.Unlock()
 				defer func() {

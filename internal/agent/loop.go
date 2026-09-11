@@ -204,7 +204,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	}
 	if a.Intercept != nil {
 		a.Intercept.Emit(ctx, "session_start", map[string]any{"model": a.Model})
+		a.Intercept.Emit(ctx, "agent_start", map[string]any{"model": a.Model})
 	}
+	defer func() {
+		if a.Intercept != nil {
+			a.Intercept.Emit(ctx, "agent_end", nil)
+		}
+	}()
 	// Magic keywords (research §8): standalone prose words in the user's
 	// prompt inject a hidden, user-attributed notice for this turn. The
 	// notice is persisted so a compaction rebuild replays it consistently.

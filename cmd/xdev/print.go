@@ -16,6 +16,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/ext"
+	hookbus "github.com/FreePeak/xdev/internal/hooks"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/session"
@@ -134,8 +135,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// manager becomes the agent's fail-closed policy interceptor; runtime
 	// actions steer the live run.
 	exts := attachExtensions(context.Background(), reg, ag.Steer, ag.FollowUp)
+	// Hooks and extensions compose into one interceptor chain; hooks must
+	// fire even when no extensions are installed.
+	hookBus := hookbus.FromSettings(settings.Hooks)
+	if c := agent.NewChain(hookBus, exts); c != nil {
+		ag.Intercept = c
+	}
 	if exts != nil {
-		ag.Intercept = exts
 		defer exts.Close()
 	}
 
