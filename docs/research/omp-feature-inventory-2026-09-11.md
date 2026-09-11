@@ -1,6 +1,6 @@
 # omp current feature inventory — full-parity sweep (2026-09-11)
 
-Primary sources: all 131 `omp://` harness docs, read live on 2026-09-11. This doc is the
+Primary sources: all 131 `omp://` harness docs, read live on 2026-09-11 against installed **@oh-my-pi/pi-coding-agent 18.1.17** (the 2026-09-09 parity-research baseline cites 18.0.7; deltas are flagged NEW). This doc is the
 authoritative current-state feature list behind the PRD §2 feature-parity matrix refresh.
 Rows marked **NEW** were absent from the 2026-09-09 parity research docs.
 

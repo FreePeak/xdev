@@ -23,14 +23,14 @@ Derived from the [omp/pi Go-rebuild architecture research](research/2026-09-09-o
 - No JS/Bun runtime, no in-process plugin VM, no Rust N-API natives.
 - No built-in permission/security system: YOLO by default; sandboxing documented externally (container/seatbelt/bubblewrap recipes, like pi).
 - No `stats.db`-scale sidecar accumulation (77 MB on the reference machine) — a tiny rollup table only.
-- No marketplace, complex theme system, or composer-shape system until there is demand (research IV.10).
+- ~~No marketplace~~ → **Deferred to M15** (2026-09-11 full-parity directive: user wants all omp features; Go port over subprocess extensions, no bun — issue #53/#22).
 - No tree-sitter embedding (CGO + memory); AST work shells out to the `ast-grep` binary when present.
 - No in-tree Git library; shell out to `git` (no go-git for v1).
 - No built-in LSP server management beyond opt-in-lazy launch: `gopls`/`rust-analyzer` start only when the `lsp` tool is used (omp's `lsp.lazy` default, research IV.10).
-- No desktop control (`computer`), full DAP debugging, OMP-native `security_scan`, `tts`, or `generate_image` — per-OS native code or cloud-only dependencies with no daily-driver coding value (parity research: docs/research/parity-tools-providers.md).
-- No embedded local tiny models (ONNX/MLX workers for titles/memory) — heavy native dependency; the online path only (research IV.10).
-- No omp ecosystem services: `auth-broker`/`gateway`, `browser-relay`, `mnemopi` backend, `collab-web`, `metaharness`, `robomp`, `omp-stats`, `omptype`, `edit-benchmark` companion packages (parity research: docs/research/parity-tools-providers.md §E).
-- No `sharpshooter` memory backend — niche; xdev ships the local two-phase memory pipeline instead (parity research: docs/research/parity-knowledge-ui.md).
+- ~~No desktop control (`computer`), full DAP debugging, `security_scan`, `tts`, `generate_image`~~ → **Deferred to M15** (2026-09-11 full-parity directive; per-OS Go backends / adapter-based DAP / scanner shell-outs designed per issue #65–#69).
+- ~~No embedded local tiny models~~ → **Deferred to M15 as a decision issue** (#70): ONNX/MLX in Go breaks CGO-free or the memory budget; ship/record a decision, never silently.
+- ~~No omp ecosystem services~~ → **Deferred to M15** (#63, #71, #72): Go services/equivalents per issue; the tiny-stats-rollup stance inside the agent binary is unchanged.
+- ~~No `sharpshooter` memory backend~~ → **Deferred to M15** (#73) — friction-gated decision files behind the memory backend seam.
 
 ## 2. Scope
 
@@ -122,9 +122,9 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | LSP tool + `lsp-config` (lazy launch, rootMarkers autodetect) | lsp-config.md | NICE | M13 |
 | Marketplace + plugin manager | marketplace.md | NICE | M13 |
 | MCP config extensions (imports from claude/codex/gemini/cursor, `!command` secrets, per-server timeout) | mcp-config.md | CORE | M6 + M13 |
-| `todo` tool (9 ops, 5 statuses, phased init, TodoTracker reminders; transcript-persisted) | todo harness doc (omp v18) | CORE | M3 |
+| `todo` tool (9 ops, 5 statuses, phased init, TodoTracker reminders; transcript-persisted) | todo harness doc (omp v18) | CORE | M3 — **ABSENT as of 2026-09-11**; #16 reopened with code audit |
 | Session titles (`/rename`, ai-title generation, resolution cascade, picker metadata) | claude-code-internals.md | CORE | M2 + M10 |
-| File-freshness check (modified-since-read rejection) | claude-code-internals.md | CORE | M3 |
+| File-freshness check (modified-since-read rejection) | claude-code-internals.md | CORE | M3 — **ABSENT** (hash rendered, never validated — see #16 audit) |
 | Backgrounded bash (`run_in_background` + output polling + kill) | claude-code-internals.md | NICE | M3 |
 | Cross-session messaging (mailbox, SendMessage, InboxPoller) | claude-code-internals.md | NICE | M11 |
 | Deferred tool catalog (`tool_search`/`tool_describe`/`tool_call` bridge) | hermes-internals.md | NICE | M7 |
@@ -150,7 +150,6 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | Vibe mode detail (5 worker tools, fast\|good tiers, worker persistence/rehydration, plan/goal mutual exclusion) | vibe-mode.md | NICE (NEW) | M14 |
 | Advisor tails (`syncBacklog` off\|1\|3\|5, `immuneTurns`, `task.agentAdvisor` per-subagent) | advisor-watchdog.md, settings.md | NICE (NEW) | M11 |
 | Distribution polish (macos signing/notarization, `update` canary/stable, shell completions, `gc`, `bench` dashboard) | cli-reference.md, macos-signing-notarization.md | NICE (NEW) | M14 |
-
 | `computer` desktop control (native screenshots/input) | computer-use.md | DEFERRED | M15 (parity requested 2026-09-11) |
 | Full DAP debug driver (adapter-based, `debug` tool) | debug.md | DEFERRED | M15 (parity requested) |
 | `security_scan` (OMP-native + Codex cloud) | security-scan.md | DEFERRED | M15 (parity requested) |
@@ -307,7 +306,7 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 
 **Execution order:** M0→M7 as numbered; M9→M12 (the parity-CORE milestones) next; M13/M14 are demand-driven and can interleave after their CORE prerequisites; M15 (full-parity tail) is per-feature demand-driven and may run any time after its dependency milestone. M8 (issue #9) re-runs as the **final release gate** once M9–M12 land, re-verifying the <100 MB RSS budget against the full feature set — including M15 heavyweights (ONNX/CGO decisions may amend the memory budget).
 
-**Per-feature parity issues (2026-09-11 sweep):** #22 (M15 umbrella) · M5: #23 #24 #25 · M10: #26–#34 · M11: #35–#42 · M12: #43–#46 · M13: #47–#57 · M14: #58–#64 · M15: #65–#73. Milestone umbrella issues (#6 #8 #9 #11–#15) carry cross-link comments.
+**Per-feature parity issues (2026-09-11 sweep):** #22 (M15 umbrella) · M5: #23 #24 #25 · M10: #26–#34 · M11: #35–#42 · M12: #43–#46 · M13: #47–#57 · M14: #58–#64 · M15: #65–#73. Milestone umbrellas (#6 #8 #9 #11–#15) carry cross-link comments. **Re-scoped after shipped-status audit** (13 issues narrowed to verified-missing slices: #26–#30, #32–#34, #36–#39, #41, #46). **#16 reopened**: todo tool + arg-repair + freshness gate + backgrounded bash are code-verified absent (only bash.patterns had landed). Sources pinned to installed omp **18.1.17** (prior parity research baseline: 18.0.7).
 
 **Known gaps — resolved (2026-09-10, commit c96f3f2):**
 1. **`/<command>` slash commands now work** (M10 #11 first slice): built-in registry (`/new` `/clear` `/drop` `/help` `/quit` + `/q`) routed at input-submit before any user block is created; markdown commands discovered from `<cwd>/.xdev/commands/*.md` + `~/.xdev/agent/commands/*.md` (project beats user, non-recursive, hidden/non-md skipped) with frontmatter `name:`/`description:`, quote-aware `$1..$n`/`$@`/`$@[start]`/`$@[start:length]`/`$ARGUMENTS` expansion and the no-placeholder blank-line append fallback; unknown `/foo` still falls through as literal prompt text. Lifecycle wired to the session store: `/new` swaps a fresh session file, `/clear` appends a durable `reset_boundary` and resets in place, `/drop` deletes the file and starts fresh — all refuse while a turn is in flight. Remaining M10 scope (fork/resume/picker, context files, keybindings, /dump) unchanged.
