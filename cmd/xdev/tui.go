@@ -35,6 +35,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// Warm discovery-enabled providers off the UI thread: /model's picker
+	// reads every provider's catalog on open, and a cold discovery probe
+	// (4s timeout, dead-server worst case) would freeze the key thread on
+	// the first open. Pinned-only providers need no warm-up — providerModels
+	// answers those from memory.
+	for name, pc := range cfg.Providers {
+		if pc != nil && pc.Discovery != nil {
+			go providerModels(name, pc)
+		}
+	}
 	modelRef, effortRef, err := resolveModel(opts.Model, cfg, lastSettings())
 	if err != nil {
 		return 2, err
@@ -195,9 +205,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// seedModelFromSession honors a resumed session's last model_change: the
 	// switch is recorded in the file, and a relaunch that ignored it would
 	// quietly run a different model than the user left. An explicit -model
-	// flag still wins.
+	// flag and XDEV_MODEL both outrank session memory (resolveModel's
+	// precedence puts the env above settings; memory sits below env).
 	seedModelFromSession := func(s *session.Store) {
-		if opts.Model != "" || len(s.Entries()) == 0 {
+		if opts.Model != "" || os.Getenv("XDEV_MODEL") != "" || len(s.Entries()) == 0 {
 			return
 		}
 		res, err := session.BuildContext(s.Entries(), s.LeafID(), session.SystemPrompt{})
@@ -206,9 +217,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		// History can carry a ref that no longer resolves (a deleted model,
 		// a pre-validation typo): keep the configured model rather than
-		// adopting something that would 404 on the next turn.
-		if _, _, rerr := resolveModel(res.Model, cfg, lastSettings()); rerr != nil {
+		// adopting something that would 404 on the next turn. The check is
+		// hard here — unlike an explicit ref, the user never typed this.
+		if rerr := validateModelRef(cfg, res.Model); rerr != nil {
 			logx.Debugf("resume model %q unusable: %v", res.Model, rerr)
+			app.AddSystemBlock("kept " + live.provName + "/" + live.model + " — session model " + res.Model + " does not resolve")
 			return
 		}
 		np, pname, mname, err := buildModel(res.Model)

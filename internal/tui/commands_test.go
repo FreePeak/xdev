@@ -235,6 +235,12 @@ func TestDispatchSettingsTogglesThinking(t *testing.T) {
 }
 
 func TestHelpTextAligned(t *testing.T) {
+	// Isolate the user command root: helpText discovers markdown commands
+	// from the real ~/.xdev/agent/commands too, and a machine that has any
+	// would grow the list and break the line-count pin below.
+	prev := userCommandsDir
+	userCommandsDir = func() string { return t.TempDir() }
+	t.Cleanup(func() { userCommandsDir = prev })
 	got := helpText(&fakeAPI{})
 	lines := strings.Split(got, "\n")
 	if !strings.HasPrefix(lines[0], "commands:") {
