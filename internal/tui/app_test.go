@@ -201,6 +201,23 @@ func TestThinkingDisplayToggle(t *testing.T) {
 	}
 }
 
+// TestSystemBlockRendersEveryLine pins the multi-line fix: a system notice
+// with embedded newlines (from /help, /model, /settings) must render one
+// row per line, not collapse into a single unreadable row.
+func TestSystemBlockRendersEveryLine(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddSystemBlock("commands:\n  /new   start a fresh session\n  /help  show commands")
+	app.mu.Lock()
+	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	app.mu.Unlock()
+	if len(lines) != 3 {
+		t.Fatalf("system block rows = %d, want 3", len(lines))
+	}
+	if lines[1].runs[0].text != "  /new   start a fresh session" {
+		t.Fatalf("row 1 = %q", lines[1].runs[0].text)
+	}
+}
+
 // TestToolResultRendersFullOutput pins the fix for "bash output not
 // printed fully": the KindToolDone render must show every body line
 // (not a flattened 200-char preview) and cap huge outputs with the

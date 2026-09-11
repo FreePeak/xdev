@@ -965,7 +965,17 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		if strings.Contains(strings.ToLower(b.Text), "error") || strings.Contains(strings.ToLower(b.Text), "canceled") {
 			fg = theme.AccentError
 		}
-		lines = append(lines, textline(strings.TrimRight(b.Text, "\n"), tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))).Italic(true)))
+		st := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))).Italic(true)
+		// Multi-line notices (/help, /model list, /settings) render one row
+		// per line; embedded \n used to collapse into a single unreadable row.
+		body := strings.TrimRight(b.Text, "\n")
+		if body == "" {
+			lines = append(lines, textline("", st))
+			break
+		}
+		for _, wl := range wrap(body, max(10, w-2)) {
+			lines = append(lines, textline(wl, st))
+		}
 	case KindAssistant:
 		for _, ln := range a.renderMarkdown(b.Text, w) {
 			lines = append(lines, wrapLine(ln, w)...)
