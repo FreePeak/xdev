@@ -158,3 +158,25 @@ func TestAppendSystemFileDiscovery(t *testing.T) {
 		t.Fatalf("append precedence broken: %q", appendStr)
 	}
 }
+
+// TestPersonalityReachesThePrompt pins that a discovered PERSONALITY.md is
+// actually composed into the system prompt tail (it was set on the struct
+// but never consumed — the recurring inert-field pattern).
+func TestPersonalityReachesThePrompt(t *testing.T) {
+	ov := agent.SystemPromptOverrides{Personality: "You are terse.", Append: "Always test."}
+	if got := tailSystemPrompt(ov, ""); got != "You are terse.\n\nAlways test." {
+		t.Fatalf("personality+append = %q", got)
+	}
+	// The flag overrides APPEND_SYSTEM.md but not the persona.
+	if got := tailSystemPrompt(ov, "flag wins"); got != "You are terse.\n\nflag wins" {
+		t.Fatalf("flag precedence = %q", got)
+	}
+	// Personality alone.
+	only := agent.SystemPromptOverrides{Personality: "Curious."}
+	if got := tailSystemPrompt(only, ""); got != "Curious." {
+		t.Fatalf("personality only = %q", got)
+	}
+	if got := tailSystemPrompt(agent.SystemPromptOverrides{}, ""); got != "" {
+		t.Fatalf("empty overrides should yield empty, got %q", got)
+	}
+}

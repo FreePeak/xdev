@@ -73,11 +73,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- system prompt ---
 	overrides := agent.LoadSystemPromptOverrides(cwd)
-	appendStr := opts.AppendSystem
-	if appendStr == "" {
-		appendStr = overrides.Append
-	}
-	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, appendStr)
+	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
 	// --- session ---
@@ -290,6 +286,29 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 		}
 		return sys
 	}
+}
+
+// tailSystemPrompt composes the after-tools tail of the system prompt:
+// PERSONALITY.md (who the agent is) then APPEND_SYSTEM.md / the flag
+// (extra instructions). A discovered PERSONALITY.md must actually reach
+// the prompt — the field was previously set but never consumed.
+func tailSystemPrompt(overrides agent.SystemPromptOverrides, flagAppend string) string {
+	var b strings.Builder
+	if overrides.Personality != "" {
+		b.WriteString(overrides.Personality)
+	}
+	if flagAppend != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(flagAppend)
+	} else if overrides.Append != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(overrides.Append)
+	}
+	return b.String()
 }
 
 // basePrompt resolves the system prompt base: --system-prompt flag →
