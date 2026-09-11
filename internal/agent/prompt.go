@@ -33,6 +33,46 @@ Rules:
 - Finish by calling the yield tool exactly once, as your last action, with the result the caller asked for.
 - Your transcript is not visible to the caller — put everything it needs into the yield result.`
 
+// SystemPromptOverrides discovers SYSTEM.md/APPEND_SYSTEM.md/PERSONALITY.md
+// from the project directory first, then the user data dir. No ancestor
+// walk — unlike AGENTS.md, system prompts are workspace-scoped by design.
+// Both return "" when no override exists.
+type SystemPromptOverrides struct {
+	System, Append string
+	Personality    string
+}
+
+// LoadSystemPromptOverrides checks project SYSTEM.md/APPEND_SYSTEM.md/
+// PERSONALITY.md then their user-level counterparts.
+func LoadSystemPromptOverrides(cwd string) SystemPromptOverrides {
+	var o SystemPromptOverrides
+	o.System = findSystemPromptFile(cwd, "SYSTEM.md")
+	o.Append = findSystemPromptFile(cwd, "APPEND_SYSTEM.md")
+	o.Personality = findSystemPromptFile(cwd, "PERSONALITY.md")
+	return o
+}
+
+// findSystemPromptFile: project-first, then user data dir.
+func findSystemPromptFile(cwd, name string) string {
+	for _, dir := range []string{cwd, userAgentDir()} {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if raw, err := os.ReadFile(p); err == nil && len(raw) > 0 {
+			return strings.TrimSpace(string(raw))
+		}
+	}
+	return ""
+}
+
+func userAgentDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".xdev", "agent")
+	}
+	return ""
+}
+
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.
 const MaxContextBytes = 32 << 10
 
