@@ -54,6 +54,7 @@ type App struct {
 	renderers     map[string]RenderSpec   // tool name -> declarative render spec
 	sessionTree   func() string           // /tree display
 	sessionBranch func(args string) error // /branch to an entry id
+	resumeList    func(cwd string) error  // /resume session listing
 	onSend        func(text string)
 	onCancel      func()
 	onQuit        func()
@@ -145,6 +146,12 @@ func (a *App) SetSessionTree(fn func() string) {
 // SetSessionBranch wires /branch to the store. The callback must rebuild
 // history and replay the transcript (like swapStoreTo) so the user sees the
 // new branch's content.
+func (a *App) SetResumeList(fn func(cwd string) error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.resumeList = fn
+}
+
 func (a *App) SetSessionBranch(fn func(args string) error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -165,6 +172,14 @@ func (a *App) BranchSession(args string) error {
 		return fmt.Errorf("session branch not wired")
 	}
 	return a.sessionBranch(args)
+}
+
+// ListSessions implements CommandAPI /resume listing.
+func (a *App) ListSessions(cwd string) error {
+	if a.resumeList != nil {
+		return a.resumeList(cwd)
+	}
+	return fmt.Errorf("no session listing available")
 }
 
 func (a *App) AddSystemBlock(text string) {
