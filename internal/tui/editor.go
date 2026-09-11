@@ -68,6 +68,10 @@ func (e *Editor) HandleKey(ev *tcell.EventKey) (send bool) {
 			e.finishSend()
 			send = true
 		}
+	case tcell.KeyCtrlJ:
+		// Ctrl+J inserts a newline in the box (claude/omp/grok parity);
+		// Alt/Option+Enter already did this on mac. Never sends.
+		e.insert('\n')
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		if e.cur > 0 {
 			e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)

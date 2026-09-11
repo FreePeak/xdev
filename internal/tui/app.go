@@ -40,11 +40,16 @@ type App struct {
 	keyMap *KeyMap    // remappable keybinding layer
 	st     Status
 
+	// showThinking renders model reasoning blocks in the transcript
+	// (settings key `showThinking`, toggled by /settings; issue #20).
+	showThinking bool
+
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
 	ops           *SessionOps
 	modelOps      *ModelOps         // session lifecycle, wired by cmd (nil → notices)
+	settingsOps   *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel      string            // welcome top bar (last two path components)
 	branch        string            // git branch for the welcome top bar ("" when none)
 	commandDir    string            // markdown command discovery root
@@ -68,6 +73,14 @@ type App struct {
 	// Welcome-screen Game of Life backdrop (UI thread; guarded by mu).
 	life     lifeGrid
 	lifeTick int
+
+	// Mouse text selection: drag across transcript rows, release copies
+	// to the clipboard. selRows is the last frame's rendered rows with
+	// their screen origins, kept for hit-testing (UI thread; mu-guarded).
+	selActive bool
+	selAnchor selPoint
+	selEnd    selPoint
+	selRows   []selRow
 }
 
 type blockKey struct {
@@ -89,11 +102,12 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		km = DefaultKeyMap()
 	}
 	return &App{
-		keyMap: km,
-		scr:    scr,
-		th:     th,
-		st:     Status{Model: model, SessionID: sessionID},
-		width:  w, height: h,
+		keyMap:       km,
+		scr:          scr,
+		th:           th,
+		st:           Status{Model: model, SessionID: sessionID},
+		showThinking: true,
+		width:        w, height: h,
 		keyq:      make(chan tcell.Event, 64),
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),
@@ -108,6 +122,15 @@ func (a *App) SetLocation(cwd string) {
 	a.cwdLabel = cwdShort(cwd)
 	a.branch = gitBranch(cwd)
 	a.mu.Unlock()
+}
+
+// SetStatusModel updates the status-line model name (wired by cmd on
+// /model switch).
+func (a *App) SetStatusModel(m string) {
+	a.mu.Lock()
+	a.st.Model = m
+	a.mu.Unlock()
+	a.poke()
 }
 
 // SetHandlers wires the send/cancel/quit callbacks.
@@ -222,8 +245,14 @@ func (a *App) EndAssistant() {
 }
 
 // BeginThinking adds a dim thinking block (collapsed while streaming).
+// With thinking display off the block is never created, so the transcript
+// stays exactly as if the model had not reasoned at all.
 func (a *App) BeginThinking() {
 	a.mu.Lock()
+	if !a.showThinking {
+		a.mu.Unlock()
+		return
+	}
 	a.blocks = append(a.blocks, &Block{Kind: KindThinking, stream: true, Ts: time.Now()})
 	a.mu.Unlock()
 	a.poke()
@@ -406,6 +435,89 @@ func (a *App) SwitchModel(args string) error {
 	return nil
 }
 
+// SetShowThinking toggles transcript rendering of reasoning blocks and
+// drops any already-rendered thinking blocks when turning it off, so the
+// transcript matches what a session started with the flag off shows.
+func (a *App) SetShowThinking(on bool) {
+	a.mu.Lock()
+	a.showThinking = on
+	if !on {
+		kept := a.blocks[:0]
+		for _, b := range a.blocks {
+			if b.Kind != KindThinking {
+				kept = append(kept, b)
+			}
+		}
+		a.blocks = kept
+	}
+	a.lineCache = map[blockKey][]line{}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetSettingsOps wires the /settings command (settings live in cmd).
+func (a *App) SetSettingsOps(ops *SettingsOps) { a.settingsOps = ops }
+
+// Thinking reports whether reasoning output is currently displayed.
+func (a *App) Thinking() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.showThinking
+}
+
+// SettingsView implements CommandAPI /settings: bare lists the resolved
+// settings; "/settings showThinking [on|off]" turns the reasoning display
+// (and only the display — the ":effort" budget still decides whether the
+// model thinks) for the rest of the session and persists it to the global
+// layer. Omitting on|off flips the current state.
+func (a *App) SettingsView(args string) error {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		if a.settingsOps == nil {
+			return fmt.Errorf("settings not wired")
+		}
+		var lines []string
+		if a.settingsOps.List != nil {
+			lines = a.settingsOps.List()
+		}
+		a.AddSystemBlock(strings.Join(lines, "\n"))
+		return nil
+	}
+	if fields[0] != "showThinking" {
+		return fmt.Errorf("unknown setting %q (want showThinking)", fields[0])
+	}
+	on := !a.Thinking()
+	if len(fields) == 2 {
+		switch fields[1] {
+		case "on", "true":
+			on = true
+		case "off", "false":
+			on = false
+		default:
+			return fmt.Errorf("usage: /settings showThinking on|off")
+		}
+	} else if len(fields) != 1 {
+		return fmt.Errorf("usage: /settings showThinking [on|off]")
+	}
+	// The display flip is App-local state, so it works with unwired ops;
+	// persisting needs the config layer, silently skipped when absent.
+	confirm := "showThinking "
+	if on {
+		confirm += "on"
+	} else {
+		confirm += "off"
+	}
+	if a.settingsOps != nil && a.settingsOps.SetThinking != nil {
+		if err := a.settingsOps.SetThinking(on); err != nil {
+			return err
+		}
+		confirm += " (saved to " + a.settingsOps.Path + ")"
+	}
+	a.SetShowThinking(on)
+	a.AddSystemBlock(confirm)
+	return nil
+}
+
 // SendPrompt submits text through the normal send path (markdown commands).
 func (a *App) SendPrompt(text string) {
 	a.mu.Lock()
@@ -505,6 +617,10 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.scroll(3, false)
 			case tcell.WheelDown:
 				a.scroll(3, true)
+			default:
+				a.mu.Lock()
+				a.handleMouse(m)
+				a.mu.Unlock()
 			}
 		}
 		return
@@ -750,7 +866,11 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		}
 	case KindThinking:
 		// Grok thinking.rs: "Thinking…" (running, with braille spinner) or
-		// "Thought for Xs" (done). Muted bold; body hidden (collapsed).
+		// "Thought for Xs" (done). Muted bold header; the reasoning body
+		// renders dimmed underneath while showThinking is on (issue #20).
+		if !a.showThinking {
+			break
+		}
 		var hdr string
 		if b.stream {
 			hdr = "⠹ Thinking…"
@@ -760,6 +880,28 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			hdr = "Thought"
 		}
 		lines = append(lines, textline(hdr, stThinkingHdr(a, b.stream)))
+		body := strings.TrimRight(b.Text, "\n")
+		if body == "" {
+			break
+		}
+		// Row budget mirrors the tool-output window (PRD row budget): the
+		// full reasoning always stays in the session JSONL.
+		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+		rows := wrap(body, max(10, w-4))
+		const thinkHeadRows, thinkTailRows = 100, 40
+		if len(rows) > thinkHeadRows+thinkTailRows+1 {
+			for _, wl := range rows[:thinkHeadRows] {
+				lines = append(lines, textline("  "+wl, bodySt))
+			}
+			lines = append(lines, textline(fmt.Sprintf("  … %d rows elided (full reasoning in the session log) …", len(rows)-thinkHeadRows-thinkTailRows), stThinkingHdr(a, false)))
+			for _, wl := range rows[len(rows)-thinkTailRows:] {
+				lines = append(lines, textline("  "+wl, bodySt))
+			}
+		} else {
+			for _, wl := range rows {
+				lines = append(lines, textline("  "+wl, bodySt))
+			}
+		}
 	case KindTool:
 		fg := theme.AccentTool
 		switch b.Status {
@@ -925,6 +1067,7 @@ func (a *App) draw() {
 	if end > len(rows) {
 		end = len(rows)
 	}
+	selRows := make([]selRow, 0, end-start)
 	for y, r := range rows[start:end] {
 		if r.ln.bg != 0 {
 			// Band row (user prompt / code fence): fill the full width so
@@ -940,10 +1083,15 @@ func (a *App) draw() {
 		if r.rail != "" {
 			drawText(s, 0, y, r.rail, r.railS)
 		}
+		startX, content := x, strings.Builder{}
 		for _, run := range r.ln.runs {
 			drawText(s, x, y, run.text, run.style)
+			content.WriteString(run.text)
 			x += width(run.text)
 		}
+		// Selection hit-testing works off this text (the streaming
+		// cursor is decoration, not content).
+		selRows = append(selRows, selRow{text: strings.TrimSuffix(content.String(), "▍"), x0: startX})
 		// Right-aligned dim timestamp (grok draws these on first rows).
 		if r.ts != "" {
 			tsSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
@@ -953,6 +1101,8 @@ func (a *App) draw() {
 			drawText(s, w-width(r.ts)-2, y, r.ts, tsSt)
 		}
 	}
+	a.selRows = selRows
+	a.drawSelection()
 	// Scroll indicator (grok-style ▲n ▼n): rows hidden above/below.
 	if up, down := a.sm.Indicator(len(rows), vp); up > 0 || down > 0 {
 		hint := fmt.Sprintf("▲ %d ▼ %d", up, down)

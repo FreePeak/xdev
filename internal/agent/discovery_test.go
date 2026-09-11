@@ -308,24 +308,38 @@ func TestDepthCapBlocksAtExecute(t *testing.T) {
 }
 
 func TestNamedAgentBelowCapGetsChildTaskTool(t *testing.T) {
-	// `worker` declares tools: read,task. A depth-0 spawn of it must
-	// receive an injected child task tool (research §1: recursion is live,
-	// not structurally capped at 1).
-	p := &fakeProvider{}
+	// worker declares tools: read,task. Spawning it at depth 0 must inject
+	// a child TaskTool (research §1: recursion is live, not structural).
+	// The child is scripted to call task, so the grandchild actually runs
+	// and its yield result must surface in the root result — proving the
+	// child really has a task tool.
+	// Shared provider across worker and leaf. Stream orders: worker calls
+	// task (0), the leaf runs and yields (1), then the worker yields (2).
+	child := fakeProvider{calls: []fakeScript{{
+		events: toolCallEvents("task", `{"prompt":"deep compute","agent":"leaf"}`),
+	}, {
+		events: yieldEvents(`{"result":"recursion-proven"}`),
+	}, {
+		events: yieldEvents(`{"result":"worker-done"}`),
+	}}}
 	tt := &TaskTool{
-		Provider: p, Model: "m",
+		Provider: &child, Model: "m",
 		Agents:     matrixAgents(),
 		ChildTools: []tool.Tool{&tool.ReadTool{}},
-		Depth:      0,
+		MaxTurns:   2,
 	}
-	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
+	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"spawn","agent":"worker"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fake provider cannot satisfy the child loop, so the run ends
-	// failed/completed — the assertion is that it was ATTEMPTED with the
-	// child pool containing read + task, which no error mentions.
-	if strings.Contains(res.Text, "unknown agent") || strings.Contains(res.Text, "not allowed") {
-		t.Fatalf("worker should have spawned: %q", res.Text)
+	if res.IsError {
+		t.Fatalf("worker recursion failed: %q", res.Text)
+	}
+	// The root result must be the WORKER's own yield (calls[2]), which is
+	// only reachable if the leaf consumed calls[1] — i.e. the child ran a
+	// real task tool. Without recursion the worker would yield calls[1]
+	// ("recursion-proven"), not calls[2] ("worker-done").
+	if !strings.Contains(res.Text, "worker-done") {
+		t.Fatalf("child did not run a task tool (worker yield script not consumed): %q", res.Text)
 	}
 }

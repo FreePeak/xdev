@@ -37,10 +37,17 @@ type Settings struct {
 	// on a @role reference overrides it).
 	ModelRolesEffort  map[string]string `yaml:"modelRolesEffort"`
 	DisabledProviders []string          `yaml:"disabledProviders"`
+	// ShowThinking renders model reasoning output in the transcript. A
+	// nil pointer means "unset in this layer" (the schema default is on);
+	// a plain bool could never express an explicit false through the
+	// zero-skip merge. Display only — the ":effort" budget controls
+	// whether the provider thinks at all.
+	ShowThinking *bool `yaml:"showThinking"`
 }
 
 // defaultSettings is the schema-defaults layer.
 func defaultSettings() *Settings {
+	show := true
 	return &Settings{
 		Theme:            "auto",
 		ApprovalMode:     "yolo",
@@ -49,7 +56,14 @@ func defaultSettings() *Settings {
 		ModelRoles:       map[string]string{},
 		ToolsApproval:    map[string]string{},
 		ModelRolesEffort: map[string]string{},
+		ShowThinking:     &show,
 	}
+}
+
+// ShowThinkingOn reports whether thinking output should be displayed;
+// unset follows the schema default (on).
+func (s *Settings) ShowThinkingOn() bool {
+	return s == nil || s.ShowThinking == nil || *s.ShowThinking
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -137,6 +151,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.DisabledProviders != nil {
 		s.DisabledProviders = append([]string(nil), layer.DisabledProviders...)
+	}
+	if layer.ShowThinking != nil {
+		s.ShowThinking = layer.ShowThinking
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
@@ -258,6 +275,7 @@ func List(s *Settings, globalPath string) []string {
 		"approvalMode " + s.ApprovalMode,
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
+		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)

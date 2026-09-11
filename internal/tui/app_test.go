@@ -146,6 +146,61 @@ func TestStreamingBlocksAndTools(t *testing.T) {
 	}
 }
 
+func TestThinkingDisplayToggle(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.BeginThinking()
+	app.AppendThinking("first line of reasoning\nsecond line")
+	app.EndThinking()
+	app.mu.Lock()
+	if len(app.blocks) != 1 || app.blocks[0].Kind != KindThinking {
+		t.Fatalf("thinking block missing: blocks=%d", len(app.blocks))
+	}
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+	var got []string
+	for _, ln := range lines {
+		if len(ln.runs) == 1 {
+			got = append(got, ln.runs[0].text)
+		}
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"Thought for", "first line of reasoning", "second line"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("thinking render missing %q:\n%s", want, joined)
+		}
+	}
+	// Turning it off drops existing thinking blocks and suppresses new ones.
+	app.SetShowThinking(false)
+	app.mu.Lock()
+	if len(app.blocks) != 0 {
+		t.Fatalf("thinking blocks must be dropped when off: %d", len(app.blocks))
+	}
+	app.mu.Unlock()
+	app.BeginThinking()
+	app.mu.Lock()
+	if len(app.blocks) != 0 {
+		t.Fatalf("thinking block created while off: %d", len(app.blocks))
+	}
+	app.mu.Unlock()
+	// Turning it back on renders the body again.
+	app.SetShowThinking(true)
+	app.BeginThinking()
+	app.AppendThinking("visible again")
+	app.EndThinking()
+	app.mu.Lock()
+	lines = app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	app.mu.Unlock()
+	got = got[:0]
+	for _, ln := range lines {
+		if len(ln.runs) == 1 {
+			got = append(got, ln.runs[0].text)
+		}
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "visible again") {
+		t.Fatalf("thinking body missing after re-enable:\n%s", strings.Join(got, "\n"))
+	}
+}
+
 // TestToolResultRendersFullOutput pins the fix for "bash output not
 // printed fully": the KindToolDone render must show every body line
 // (not a flattened 200-char preview) and cap huge outputs with the

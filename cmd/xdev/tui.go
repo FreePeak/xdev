@@ -106,7 +106,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	saveBreadcrumb(store.Path())
 	wireTaskParent(reg, store)
 	defer func() {
-		_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
+		modelMu.Lock()
+		lm := live.provName + "/" + live.model
+		modelMu.Unlock()
+		_ = store.Append(&session.ModelChangeEntry{Model: lm})
 		_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
 		if cerr := store.Close(); cerr != nil {
 			logx.Errorf("session close: %v", cerr)
@@ -130,6 +133,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer setCursorReset()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	// showThinking drives the reasoning display (issue #20); the resolved
+	// layered config is the source of truth at startup.
+	app.SetShowThinking(lastSettings().ShowThinkingOn())
+	// /settings lists the resolved config; toggles persist to the global
+	// layer (the same file `xdev config set` edits) and update the
+	// in-memory settings so a later /settings sees them.
+	app.SetSettingsOps(&tui.SettingsOps{
+		Path: config.GlobalSettingsPath(),
+		List: func() []string { return config.List(lastSettings(), config.GlobalSettingsPath()) },
+		SetThinking: func(on bool) error {
+			if err := config.Set(config.GlobalSettingsPath(), "showThinking", fmt.Sprint(on)); err != nil {
+				return err
+			}
+			v := on
+			lastSettings().ShowThinking = &v
+			return nil
+		},
+	})
 	if exts != nil {
 		// The UI callback carries no context: the extension's per-event
 		// timeout is the bound here.
@@ -422,6 +443,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			modelMu.Lock()
 			live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
 			modelMu.Unlock()
+			app.SetStatusModel(nprovName + "/" + nmodelName)
 			return nil
 		},
 	})

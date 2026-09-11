@@ -67,6 +67,26 @@ func ScanMagicKeywords(text string) []string {
 	return out
 }
 
+// MagicKeywordMessagesForTurns builds the hidden user-attributed notices
+// for a keyword-bearing prompt. hasTask reports whether the task tool is
+// active; workflowz is spec'd to fire only when eval+task are active
+// (omp §8), so a missing task tool drops it. ultrathink and orchestrate
+// fire regardless.
+func MagicKeywordMessagesForTurns(text string, hasTask bool) []ai.Message {
+	var out []ai.Message
+	for _, n := range ScanMagicKeywords(text) {
+		if n == noticeWorkflowz && !hasTask {
+			continue
+		}
+		out = append(out, ai.Message{
+			Role:        ai.RoleUser,
+			Content:     []ai.Block{ai.TextBlock{Text: n}},
+			Attribution: "user",
+		})
+	}
+	return out
+}
+
 // MagicKeywordMessages builds the hidden user-attributed notices that
 // accompany a keyword-bearing prompt for this turn.
 func MagicKeywordMessages(text string) []ai.Message {

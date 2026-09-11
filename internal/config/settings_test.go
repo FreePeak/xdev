@@ -64,6 +64,40 @@ maxTurns: 7
 	}
 }
 
+func TestSettingsShowThinking(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	// Default: unset in every layer means on.
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.ShowThinkingOn() {
+		t.Fatal("showThinking must default to on")
+	}
+	// Explicit false survives the layer merge (the zero-skip hazard a
+	// plain bool could not express) and overrides the global layer.
+	writeFile(t, GlobalSettingsPath(), "showThinking: false\n")
+	writeFile(t, projectSettingsPath(cwd), "showThinking: true\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.ShowThinkingOn() {
+		t.Fatal("project layer must win showThinking: true")
+	}
+	writeFile(t, projectSettingsPath(cwd), "showThinking: false\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ShowThinkingOn() {
+		t.Fatal("explicit false must survive the merge")
+	}
+}
+
 func TestSettingsUnknownKeyIsRejected(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

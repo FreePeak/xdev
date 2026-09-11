@@ -167,6 +167,61 @@ func TestDispatchModelSwitch(t *testing.T) {
 	}
 }
 
+func TestDispatchSettingsTogglesThinking(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var toggles []bool
+	app.SetSettingsOps(&SettingsOps{
+		Path: "/tmp/xdev-config.yml",
+		List: func() []string { return []string{"showThinking true", "theme auto"} },
+		SetThinking: func(on bool) error {
+			toggles = append(toggles, on)
+			return nil
+		},
+	})
+	// Bare /settings lists the resolved config.
+	if !dispatch(app, "/settings") {
+		t.Fatal("/settings not consumed")
+	}
+	if len(app.blocks) != 1 || app.blocks[0].Kind != KindSystem {
+		t.Fatalf("settings list block = %+v", app.blocks)
+	}
+	// Nil ops: the display flip still works (App-local state); nothing
+	// persists.
+	app.SetSettingsOps(nil)
+	if !dispatch(app, "/settings showThinking") {
+		t.Fatal("/settings showThinking not consumed")
+	}
+	if app.Thinking() {
+		t.Fatal("thinking display still on")
+	}
+	if len(toggles) != 0 {
+		t.Fatalf("nil ops must not persist: %v", toggles)
+	}
+	// Wired again: explicit off persists through the ops and re-applies.
+	app.SetSettingsOps(&SettingsOps{SetThinking: func(on bool) error {
+		toggles = append(toggles, on)
+		return nil
+	}})
+	if !dispatch(app, "/settings showThinking off") {
+		t.Fatal("/settings showThinking off not consumed")
+	}
+	if app.Thinking() {
+		t.Fatal("thinking display still on after off")
+	}
+	if len(toggles) != 1 || toggles[0] {
+		t.Fatalf("toggles = %v, want [false]", toggles)
+	}
+	if !dispatch(app, "/settings showThinking on") {
+		t.Fatal("/settings showThinking on not consumed")
+	}
+	if !app.Thinking() {
+		t.Fatal("thinking display still off after on")
+	}
+	if len(toggles) != 2 || !toggles[1] {
+		t.Fatalf("toggles = %v, want [false true]", toggles)
+	}
+}
+
 func TestHelpTextAligned(t *testing.T) {
 	got := helpText(builtinCommands())
 	lines := strings.Split(got, "\n")
@@ -241,6 +296,8 @@ func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
 func (f *fakeAPI) ForkSession() error               { return nil }
 func (f *fakeAPI) DumpSession() error               { return nil }
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
+
+func (f *fakeAPI) SettingsView(args string) error { return nil }
 
 // TestExtensionCommandDispatch routes "/server:cmd args" to the extension
 // runner and prints its output as a system block — the consumer that makes
