@@ -45,7 +45,11 @@ type Symbols struct {
 // through config.DataDir so XDEV_AGENT_DIR sandboxes custom themes too
 // (config does not import theme, so no cycle).
 func CustomDir() string {
-	return filepath.Join(config.DataDir(), "themes")
+	dir := config.DataDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "themes")
 }
 
 // LoadCustom reads and validates <dir>/<name>.json. A missing file is

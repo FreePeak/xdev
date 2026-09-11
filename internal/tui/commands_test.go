@@ -27,6 +27,7 @@ type fakeAPI struct {
 	advisor  string
 	mem      string
 	theme    string
+	prewalk  string
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -242,7 +243,7 @@ func TestHelpTextAligned(t *testing.T) {
 	// Every entry line: two-space indent, command column padded to 12
 	// cells before the description (aligned list).
 	want := []string{
-		"  /new         start a fresh session",
+		"  /new, /fresh start a fresh session",
 		"  /quit, /q    quit xdev",
 	}
 	for _, w := range want {
@@ -372,6 +373,14 @@ func TestExtensionCommandErrorSurfaces(t *testing.T) {
 	}
 }
 
+func (f *fakeAPI) Prewalk(args string) error {
+	if f.fail == "prewalk" {
+		return fmt.Errorf("boom")
+	}
+	f.prewalk = args
+	return nil
+}
+
 func (f *fakeAPI) Theme(args string) error {
 	if f.fail == "theme" {
 		return fmt.Errorf("boom")
@@ -414,4 +423,15 @@ func (f *fakeAPI) SwitchModel(args string) error {
 		f.setModel = args
 	}
 	return nil
+}
+
+// /fresh is omp's spelling; it aliases /new.
+func TestDispatchFreshAliasesNew(t *testing.T) {
+	f := &fakeAPI{}
+	if !dispatch(f, "/fresh") {
+		t.Fatal("/fresh not consumed")
+	}
+	if f.newed != 1 {
+		t.Fatalf("/fresh must start a fresh session, newed=%d", f.newed)
+	}
 }

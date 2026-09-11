@@ -59,6 +59,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// surfaces the plan in the transcript and stays in read-only until the
 	// user resolves (/plan off to approve, feedback to revise).
 	planMode := &agent.PlanMode{}
+	// /prewalk live toggle: the holder is what each submit reads; Set
+	// resolves the ref through the same precedence as --prewalk-into.
+	var prewalkMu sync.Mutex
+	prewalkTarget := &agent.FailoverTarget{}
+	prewalkOn := false
 	// Advisor (M11 #12): a background reviewer when settings.advisor is on
 	// AND modelRoles.advisor resolves. It watches transcript snapshots and
 	// steers into the live run.
@@ -602,6 +607,49 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return strings.TrimRight(b.String(), "\n")
 		},
 	})
+	app.SetPrewalkOps(&tui.PrewalkOps{
+		Enabled: func() bool { return true },
+		Status: func() string {
+			prewalkMu.Lock()
+			defer prewalkMu.Unlock()
+			if !prewalkOn {
+				return "prewalk off (flags still apply: --prewalk)"
+			}
+			return fmt.Sprintf("prewalk on — hands off to %s/%s after the first edit/write", prewalkTarget.Provider.Name(), prewalkTarget.Model)
+		},
+		Set: func(on bool, into string) error {
+			if on {
+				ref := into
+				if ref == "" {
+					ref = "@smol"
+				}
+				nref, _, err := resolveModel(ref, cfg, lastSettings())
+				if err != nil {
+					return err
+				}
+				pn, mn, err := config.ParseModelRef(nref)
+				if err != nil {
+					return err
+				}
+				pc, ok := cfg.Providers[pn]
+				if !ok {
+					return fmt.Errorf("unknown provider %q", pn)
+				}
+				prov, err := buildProvider(pn, pc, mn, cfg)
+				if err != nil {
+					return err
+				}
+				prewalkMu.Lock()
+				prewalkOn, *prewalkTarget = true, agent.FailoverTarget{Provider: prov, Model: mn}
+				prewalkMu.Unlock()
+				return nil
+			}
+			prewalkMu.Lock()
+			prewalkOn = false
+			prewalkMu.Unlock()
+			return nil
+		},
+	})
 	app.SetPlanOps(&tui.PlanOps{
 		Get: func() bool { return planMode.Active },
 		Set: func(on bool) error { planMode.Active = on; return nil },
@@ -715,7 +763,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// Intercept set below from exts (only when non-nil).
 					Policy: agentPolicy(),
 				}
-				if t := resolvePrewalk(opts, cfg, lastSettings()); t != nil {
+				prewalkMu.Lock()
+				pwOn, pwT := prewalkOn, *prewalkTarget
+				prewalkMu.Unlock()
+				if pwOn {
+					ag.Prewalk = &agent.Prewalk{Target: pwT}
+				} else if t := resolvePrewalk(opts, cfg, lastSettings()); t != nil {
 					ag.Prewalk = &agent.Prewalk{Target: *t}
 				}
 				ag.PlanMode = planMode
