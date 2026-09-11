@@ -294,8 +294,8 @@ func TestAppWelcomeLifeBounds(t *testing.T) {
 	if !ok {
 		t.Fatal("life area should fit in an 80x26 terminal")
 	}
-	if gw != 68 || top != 2 || bot != 20 {
-		t.Fatalf("lifeArea(80,26) = (%d,%d,%d), want inset 68x[2,20]", gw, top, bot)
+	if gw != 60 || top != 3 || bot != 18 {
+		t.Fatalf("lifeArea(80,26) = (%d,%d,%d), want inset 60x[3,18]", gw, top, bot)
 	}
 	// Step 200 generations — far past any random soup's burn-in.
 	for range 200 {
@@ -313,8 +313,8 @@ func TestAppWelcomeLifeBounds(t *testing.T) {
 			c := prim[y*w+x]
 			if len(c.Runes) == 1 && c.Runes[0] == lifeGlyph {
 				alive++
-				if y == 0 || y >= h-4 || x < 6 || x >= 6+gw {
-					t.Fatalf("life cell at (%d,%d), outside band x[6,%d) protected rows", x, y, 6+gw)
+				if y == 0 || y >= h-4 || x < 10 || x >= 10+gw {
+					t.Fatalf("life cell at (%d,%d), outside band x[10,%d) protected rows", x, y, 10+gw)
 				}
 			}
 		}
@@ -327,12 +327,12 @@ func TestAppWelcomeLifeBounds(t *testing.T) {
 // TestLifeAreaSkipsSmallTerminals pins the small-window contract: no
 // backdrop on terminals too small to spare the band.
 func TestLifeAreaSkipsSmallTerminals(t *testing.T) {
-	for _, sz := range [][2]int{{80, 24}, {100, 30}, {40, 16}} {
+	for _, sz := range [][2]int{{80, 24}, {100, 30}, {60, 20}, {48, 18}} {
 		if _, _, _, ok := lifeArea(sz[0], sz[1]); !ok {
 			t.Errorf("lifeArea(%d,%d) = not ok, want band", sz[0], sz[1])
 		}
 	}
-	for _, sz := range [][2]int{{38, 20}, {80, 14}, {30, 30}} {
+	for _, sz := range [][2]int{{38, 20}, {80, 14}, {30, 30}, {46, 17}} {
 		if _, _, _, ok := lifeArea(sz[0], sz[1]); ok {
 			t.Errorf("lifeArea(%d,%d) = ok, want skipped", sz[0], sz[1])
 		}
