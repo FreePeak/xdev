@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -93,15 +94,16 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 		return // registry without advise: nothing to route into
 	}
 
-	var delivered int
+	// Tool calls execute concurrently, so a reviewer emitting two advises
+	// in one turn races on this counter — atomic, not a plain int.
+	var delivered atomic.Int32
 	adviseTool.setSink(func(sev, text string) {
 		if !a.guard.allow(sev, text) {
 			return
 		}
-		if delivered >= 1 {
+		if delivered.Add(1) > 1 {
 			return // one note per review (omp emission guard)
 		}
-		delivered++
 		a.mu.Lock()
 		a.noteBuf = append(a.noteBuf, note{Severity: sev, Text: text})
 		a.mu.Unlock()
@@ -138,7 +140,7 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 	before := a.cursorBefore
 	total := len(primaryHistory)
 	a.mu.Unlock()
-	logx.Debugf("advisor: reviewed entries %d..%d, %d note(s)", before, total, delivered)
+	logx.Debugf("advisor: reviewed entries %d..%d, %d note(s)", before, total, delivered.Load())
 }
 
 // Halted reports whether repeated failures stopped the advisor.

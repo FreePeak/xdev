@@ -82,21 +82,21 @@ func TestHubSendSteersRunningChild(t *testing.T) {
 		{events: yieldEvents(`{"result":"steered-done"}`)},
 	}}
 	h := NewHub()
-	var child *Agent
+	// The child pointer crosses goroutines, so hand it over a channel
+	// (a shared var is a data race under -race, which CI runs).
+	started := make(chan *Agent, 1)
 	id, err := h.Start(context.Background(), SubagentSpec{
 		Name: "s", Prompt: "go", Provider: p, Model: "m",
 		Tools: []tool.Tool{blocker}, MaxTurns: 3,
-		OnRun: func(a *Agent) { child = a },
+		OnRun: func(a *Agent) { started <- a },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait for the child's run to start (OnRun fires before turn 1).
-	deadline := time.Now().Add(5 * time.Second)
-	for child == nil && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if child == nil {
+	var child *Agent
+	select {
+	case child = <-started:
+	case <-time.After(5 * time.Second):
 		t.Fatal("child agent never started")
 	}
 	if err := h.Send(id, "focus on the database part"); err != nil {

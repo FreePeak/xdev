@@ -985,7 +985,8 @@ func (a *App) totalLinesLocked() int {
 }
 
 func (a *App) viewportLinesLocked() int {
-	return a.height - 4 // scrollback + composer(2) + shortcuts
+	// scrollback + blank + composer (grows with the draft) + shortcuts.
+	return a.height - a.composerRows() - 2
 }
 
 // contentWidth is the scrollback text width (rail + padding removed).
@@ -1178,17 +1179,19 @@ func (a *App) draw() {
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
 	if len(a.blocks) == 0 {
+		composerTop := h - 1 - a.composerRows()
 		a.drawWelcome(s, w, h)
-		a.drawSlashDropdown(h - 3)
-		a.drawComposer(h - 3)
+		a.drawSlashDropdown(composerTop)
+		a.drawComposer(composerTop)
 		a.drawShortcuts(h - 1)
 		s.Show()
 		return
 	}
 
-	// Grok layout: scrollback rows [0, h-4), blank row, composer box (2
-	// rows: input + info divider), shortcuts row at the bottom.
-	vp := h - 4
+	// Grok layout: scrollback, blank row, composer box (grows with the
+	// draft's wrapped line count), shortcuts row at the bottom.
+	cRows := a.composerRows()
+	vp := h - cRows - 2
 	if vp < 1 {
 		vp = 1
 	}
@@ -1284,8 +1287,11 @@ func (a *App) draw() {
 			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))))
 	}
 
-	a.drawSlashDropdown(h - 3)
-	a.drawComposer(h - 3)
+	// The composer's first input row sits below the transcript; the box
+	// occupies composerRows() rows above the shortcuts line.
+	composerTop := h - 1 - cRows
+	a.drawSlashDropdown(composerTop)
+	a.drawComposer(composerTop)
 	a.drawShortcuts(h - 1)
 	s.Show()
 }
@@ -1341,6 +1347,56 @@ func (a *App) drawSlashDropdown(yComposerTop int) {
 		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive))))
 }
 
+// composerInputLines returns the wrapped input rows for the editor text
+// plus the column of the cursor within that wrapped grid. An embedded
+// newline is a hard row break (Ctrl+J / Alt+Enter), and a long line wraps
+// at the available width so the box grows instead of truncating.
+func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
+	text := a.ed.Text()
+	cur := a.ed.cur
+	avail := a.width - 7 // inner width: border+pad+prefix+right pad+border
+	if avail < 4 {
+		avail = 4
+	}
+	// Convert the rune-cursor into (row, col) while wrapping.
+	row, col := 0, 0
+	flush := func(line string) {
+		lines = append(lines, line)
+		row++
+		col = 0
+	}
+	line := strings.Builder{}
+	for i, r := range []rune(text) {
+		if i == cur {
+			curRow, curCol = row, col
+		}
+		switch {
+		case r == '\n':
+			flush(line.String())
+			line.Reset()
+		default:
+			if col+width(string(r)) > avail {
+				flush(line.String())
+				line.Reset()
+			}
+			line.WriteRune(r)
+			col += width(string(r))
+		}
+	}
+	if cur >= len([]rune(text)) {
+		curRow, curCol = row, col
+	}
+	flush(line.String())
+	return lines, curRow, curCol
+}
+
+// composerRows is the total height of the prompt box (top border, wrapped
+// input rows, bottom divider).
+func (a *App) composerRows() int {
+	lines, _, _ := a.composerInputLines()
+	return len(lines) + 2
+}
+
 // drawComposer renders the grok prompt box: rounded border, ❯ prefix,
 // editor text, blinking block cursor; model info line on the bottom border.
 func (a *App) drawComposer(yTop int) {
@@ -1359,51 +1415,48 @@ func (a *App) drawComposer(yTop int) {
 	}
 	drawText(a.scr, w-2, yTop-1, "╮", bs)
 
-	// Input row: │ ❯ text…│
-	a.scr.SetContent(1, yTop, '│', nil, bs)
-	a.scr.SetContent(w-2, yTop, '│', nil, bs)
-	drawText(a.scr, 3, yTop, "❯ ", tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true))
-
-	text := a.ed.Text()
-	cur := a.ed.cur
-	avail := w - 7 // inner: border(1)+pad(1)+prefix(2)+right pad(2)+border(1)
-	if avail < 2 {
-		avail = 2
-	}
-	vis := []rune(text)
-	if width(text) > avail {
-		start := cur
-		shown := 0
-		for start > 0 && shown < avail-3 {
-			start--
-			shown += width(string(vis[start]))
+	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
+	lines, curRow, curCol := a.composerInputLines()
+	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
+	for i, ln := range lines {
+		y := yTop + i
+		a.scr.SetContent(1, y, '│', nil, bs)
+		a.scr.SetContent(w-2, y, '│', nil, bs)
+		if i == 0 {
+			drawText(a.scr, 3, y, "❯ ", promptStyle)
+		} else {
+			drawText(a.scr, 3, y, "  ", promptStyle)
 		}
-		vis = append(vis[start:], []rune("…")...)
-		cur = cur - start
-		if cur > len(vis) {
-			cur = len(vis)
+		drawText(a.scr, 5, y, ln, ms.body)
+	}
+	// Blank the space between the last text row and the right border so a
+	// short line cannot leave stale cells from a previous longer draft.
+	for i, ln := range lines {
+		x := 5 + width(ln)
+		for ; x < w-2; x++ {
+			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
 		}
 	}
-	drawText(a.scr, 5, yTop, string(vis), ms.body)
 
 	// Info divider bottom border: ╰─ model · ⠋ ───────────╯
+	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
 	if a.st.Running {
 		a.st.spinnerIdx = a.st.spinnerIdx % len(spinnerFrames)
 		info += " · " + spinnerFrames[a.st.spinnerIdx]
 	}
-	drawText(a.scr, 1, yTop+1, "╰", bs)
+	drawText(a.scr, 1, yBottom, "╰", bs)
 	for x := 2; x < w-2; x++ {
-		a.scr.SetContent(x, yTop+1, '─', nil, bs)
+		a.scr.SetContent(x, yBottom, '─', nil, bs)
 	}
 	if info != " " {
-		drawText(a.scr, 2, yTop+1, info, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+		drawText(a.scr, 2, yBottom, info, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
 	}
-	drawText(a.scr, w-2, yTop+1, "╯", bs)
+	drawText(a.scr, w-2, yBottom, "╯", bs)
 
-	// Cursor: blinking block at the editor position.
-	cx := 5 + width(string(vis[:min(cur, len(vis))]))
-	a.scr.ShowCursor(min(cx, w-3), yTop)
+	// Cursor: blinking block at the editor position inside the wrapped grid.
+	cx := 5 + curCol
+	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
 }
 
 // drawShortcuts renders the bottom hint row: bold keys, gray labels,
