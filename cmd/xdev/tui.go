@@ -166,21 +166,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetRenderers(specs)
 	}
 
-	// Replay resumed history as read-only blocks (text only).
+	// Replay resumed history as read-only blocks (thinking blocks replay
+	// too, gated by the showThinking display toggle).
 	if opts.ContinueLast {
 		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
-			for _, m := range res.Messages {
-				switch m.Role {
-				case ai.RoleUser:
-					if txt := m.Text(); txt != "" {
-						app.AddUserBlock(txt)
-					}
-				case ai.RoleAssistant:
-					if txt := m.Text(); txt != "" {
-						app.AddAssistantBlock(txt)
-					}
-				}
-			}
+			replayTranscript(app, res.Messages)
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -245,18 +235,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.Reset()
 		saveBreadcrumb(ns.Path())
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
-			for _, m := range res.Messages {
-				switch m.Role {
-				case ai.RoleUser:
-					if txt := m.Text(); txt != "" {
-						app.AddUserBlock(txt)
-					}
-				case ai.RoleAssistant:
-					if txt := m.Text(); txt != "" {
-						app.AddAssistantBlock(txt)
-					}
-				}
-			}
+			replayTranscript(app, res.Messages)
 		}
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		_ = old
@@ -321,18 +300,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// Replay the new branch's transcript into the TUI.
 				if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
 					app.Reset()
-					for _, m := range res.Messages {
-						switch m.Role {
-						case ai.RoleUser:
-							if txt := m.Text(); txt != "" {
-								app.AddUserBlock(txt)
-							}
-						case ai.RoleAssistant:
-							if txt := m.Text(); txt != "" {
-								app.AddAssistantBlock(txt)
-							}
-						}
-					}
+					replayTranscript(app, res.Messages)
 					app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
 				}
 				return nil
@@ -622,6 +590,40 @@ func setCursorColor(c theme.Color) {
 // setCursorReset restores the terminal's default cursor color (OSC 112).
 func setCursorReset() {
 	fmt.Fprint(os.Stdout, "\033]112\033\\")
+}
+
+// replayTranscript replays built context as read-only transcript blocks.
+// Thinking blocks ride along (BeginThinking is a no-op while showThinking
+// is off), so resumed, forked, and branched sessions show past reasoning
+// the same way fresh turns do instead of silently dropping it.
+func replayTranscript(app *tui.App, msgs []ai.Message) {
+	for _, m := range msgs {
+		switch m.Role {
+		case ai.RoleUser:
+			if txt := m.Text(); txt != "" {
+				app.AddUserBlock(txt)
+			}
+		case ai.RoleAssistant:
+			var pending strings.Builder
+			for _, blk := range m.Content {
+				switch b := blk.(type) {
+				case ai.ThinkingBlock:
+					if pending.Len() > 0 {
+						app.AddAssistantBlock(pending.String())
+						pending.Reset()
+					}
+					app.BeginThinking()
+					app.AppendThinking(b.Thinking)
+					app.EndThinking()
+				case ai.TextBlock:
+					pending.WriteString(b.Text)
+				}
+			}
+			if pending.Len() > 0 {
+				app.AddAssistantBlock(pending.String())
+			}
+		}
+	}
 }
 
 // availableModelRefs lists the switchable model refs: the settings default,

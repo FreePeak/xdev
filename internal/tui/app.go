@@ -465,6 +465,18 @@ func (a *App) Thinking() bool {
 	return a.showThinking
 }
 
+// Blocks snapshots the transcript blocks (read-only; for tests and hosts
+// asserting on replayed transcript shape).
+func (a *App) Blocks() []Block {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]Block, len(a.blocks))
+	for i, b := range a.blocks {
+		out[i] = *b
+	}
+	return out
+}
+
 // SettingsView implements CommandAPI /settings: bare lists the resolved
 // settings; "/settings showThinking [on|off]" turns the reasoning display
 // (and only the display — the ":effort" budget still decides whether the
