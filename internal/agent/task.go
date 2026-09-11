@@ -124,10 +124,13 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 			return tool.Result{Text: fmt.Sprintf("task: unknown agent %q (available: %s)", agentArg, agentNames(t.Agents)), IsError: true}, nil
 		}
 		// Spawn policy: can this parent agent spawn the requested child?
+		// A restrictive parent (None or a non-matching allowlist) denies.
 		if t.AgentName != "" {
 			if parent, ok := FindAgent(t.Agents, t.AgentName); ok {
 				pol := parent.ResolveSpawnPolicy()
-				if !pol.AllowAll && len(pol.Allow) > 0 && !slices.Contains(pol.Allow, agentArg) {
+				blocked := pol.None ||
+					(!pol.AllowAll && len(pol.Allow) > 0 && !slices.Contains(pol.Allow, agentArg))
+				if blocked {
 					return tool.Result{Text: fmt.Sprintf("task: %s is not allowed to spawn %s (spawns policy)", t.AgentName, agentArg), IsError: true}, nil
 				}
 			}
@@ -140,6 +143,30 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		}
 		if def.Model != "" {
 			agentModel = def.Model
+		}
+		// Recursive spawn (omp task.maxRecursionDepth semantics): a child
+		// below the cap gets its own task tool so it can dispatch further
+		// (still-capped) children. The child inherits the resolved agent
+		// name, so ITS spawns policy governs the next level. The depth
+		// guard at the top of this function terminates the chain.
+		if slices.Contains(def.Tools, "task") && t.Depth+1 < maxDepth {
+			agentTools = append(agentTools, &TaskTool{
+				Provider:        t.Provider,
+				Model:           agentModel,
+				CWD:             t.CWD,
+				ChildTools:      t.ChildTools,
+				DataDir:         t.DataDir,
+				MaxTurns:        t.MaxTurns,
+				MaxTokens:       t.MaxTokens,
+				System:          agentSystem,
+				ParentSessionID: t.ParentSessionID,
+				Policy:          t.Policy,
+				Approve:         t.Approve,
+				Thinking:        t.Thinking,
+				Agents:          t.Agents,
+				Depth:           t.Depth + 1,
+				AgentName:       agentArg,
+			})
 		}
 	}
 

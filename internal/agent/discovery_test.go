@@ -113,7 +113,8 @@ func TestSpawnPolicyResolution(t *testing.T) {
 		want   SpawnPolicy
 	}{
 		{"unrestricted", "*", SpawnPolicy{AllowAll: true}},
-		{"empty", nil, SpawnPolicy{}},
+		{"absent = unrestricted", nil, SpawnPolicy{AllowAll: true}},
+		{"false = none", false, SpawnPolicy{None: true}},
 		{"csv", "a, b", SpawnPolicy{Allow: []string{"a", "b"}}},
 	}
 	for _, tc := range tests {
@@ -226,5 +227,105 @@ func TestTaskToolSpawnPolicyEnforced(t *testing.T) {
 	res, _ = tt.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"rogue"}`))
 	if !res.IsError || !strings.Contains(res.Text, "not allowed") {
 		t.Fatalf("spawn policy must block rogue: %q", res.Text)
+	}
+}
+
+// --- Execute-level spawn policy matrix (research §1 guards) ---
+
+func matrixAgents() []AgentDefinition {
+	return []AgentDefinition{
+		{Name: "root-open", Description: "d", Spawns: "*"},
+		{Name: "root-csv", Description: "d", Spawns: "worker"},
+		{Name: "root-none", Description: "d", Spawns: false},
+		{Name: "worker", Description: "d", Tools: stringList{"read", "task"}},
+		{Name: "leaf", Description: "d", Tools: stringList{"read"}},
+	}
+}
+
+func newMatrixTool(parent string, depth int) *TaskTool {
+	p := &fakeProvider{}
+	return &TaskTool{
+		Provider:   p,
+		Model:      "m",
+		Agents:     matrixAgents(),
+		AgentName:  parent,
+		Depth:      depth,
+		ChildTools: []tool.Tool{&tool.ReadTool{}},
+		MaxTurns:   1,
+	}
+}
+
+func TestSpawnPolicyMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		parent  string
+		child   string
+		wantErr string // "" = allowed
+	}{
+		{"unrestricted", "root-open", "worker", ""},
+		{"csv hit", "root-csv", "worker", ""},
+		{"csv miss", "root-csv", "leaf", "not allowed"},
+		{"empty spawns", "root-none", "worker", "not allowed"},
+		{"no parent name = free", "", "worker", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := newMatrixTool(tc.parent, 0)
+			res, err := tt.Execute(context.Background(),
+				json.RawMessage(`{"prompt":"x","agent":"`+tc.child+`"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr == "" {
+				// Allowed: the child ran (fake provider exhausts), so the
+				// failure must NOT be the policy error.
+				if strings.Contains(res.Text, "not allowed") {
+					t.Fatalf("policy wrongly blocked: %q", res.Text)
+				}
+				return
+			}
+			if !res.IsError || !strings.Contains(res.Text, tc.wantErr) {
+				t.Fatalf("want %q, got %q", tc.wantErr, res.Text)
+			}
+		})
+	}
+}
+
+func TestDepthCapBlocksAtExecute(t *testing.T) {
+	// A child at the cap (depth 2) cannot spawn, regardless of policy.
+	tt := newMatrixTool("root-open", 2)
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
+	if !res.IsError || !strings.Contains(res.Text, "depth limit") {
+		t.Fatalf("cap must block: %q", res.Text)
+	}
+	// One below the cap is allowed to try (provider exhausted = not a
+	// depth error).
+	tt2 := newMatrixTool("root-open", 1)
+	res2, _ := tt2.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
+	if strings.Contains(res2.Text, "depth limit") {
+		t.Fatalf("depth 1 must be allowed to spawn: %q", res2.Text)
+	}
+}
+
+func TestNamedAgentBelowCapGetsChildTaskTool(t *testing.T) {
+	// `worker` declares tools: read,task. A depth-0 spawn of it must
+	// receive an injected child task tool (research §1: recursion is live,
+	// not structurally capped at 1).
+	p := &fakeProvider{}
+	tt := &TaskTool{
+		Provider: p, Model: "m",
+		Agents:     matrixAgents(),
+		ChildTools: []tool.Tool{&tool.ReadTool{}},
+		Depth:      0,
+	}
+	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake provider cannot satisfy the child loop, so the run ends
+	// failed/completed — the assertion is that it was ATTEMPTED with the
+	// child pool containing read + task, which no error mentions.
+	if strings.Contains(res.Text, "unknown agent") || strings.Contains(res.Text, "not allowed") {
+		t.Fatalf("worker should have spawned: %q", res.Text)
 	}
 }

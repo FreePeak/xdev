@@ -198,6 +198,21 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	if a.Intercept != nil {
 		a.Intercept.Emit(ctx, "session_start", map[string]any{"model": a.Model})
 	}
+	// Magic keywords (research §8): standalone prose words in the user's
+	// prompt inject a hidden, user-attributed notice for this turn. The
+	// notice is persisted so a compaction rebuild replays it consistently.
+	if n := len(history); n > 0 && history[n-1].Role == ai.RoleUser {
+		var text string
+		for _, b := range history[n-1].Content {
+			if tb, ok := b.(ai.TextBlock); ok {
+				text += tb.Text + "\n"
+			}
+		}
+		for _, m := range MagicKeywordMessages(text) {
+			history = append(history, m)
+			a.persist(m)
+		}
+	}
 	var lastAssistant *ai.Message
 	limit := a.effectiveMaxTurns()
 	for turn := 0; turn < limit; turn++ {

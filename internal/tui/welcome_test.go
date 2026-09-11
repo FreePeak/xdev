@@ -267,6 +267,15 @@ func TestAppWelcomeLogo(t *testing.T) {
 			t.Fatalf("logo row %d at y=%d, want %d (consecutive)", i, y, y0+i)
 		}
 	}
+	// The band must be cleared around the art: a '▓' flush against
+	// the '░' shading reads as static, not letterforms.
+	for yy := y0 - 1; yy < y0+len(xdevLogo)+1; yy++ {
+		for xx := x0 - 3; xx < x0+logoWidth()+3; xx++ {
+			if r := prim[yy*w+xx].Runes; len(r) == 1 && r[0] == lifeGlyph {
+				t.Fatalf("life cell inside logo bbox at (%d,%d)", xx, yy)
+			}
+		}
+	}
 	if !gridContains(scr, "01111000") {
 		t.Fatal("binary tagline missing")
 	}
