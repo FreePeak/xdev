@@ -44,8 +44,13 @@ var BuiltinActions = []string{
 func DefaultKeyMap() *KeyMap {
 	m := &KeyMap{
 		bindings: map[string]string{
-			// Editor / composer
+			// Editor / composer. Ctrl+J is the portable newline (every
+			// terminal can send 0x0A); Alt-Enter and Shift-Enter are aliases
+			// where the terminal reports them, so the table lists the one
+			// that always works first.
 			"Enter":       "submit",
+			"C-j":         "newline",
+			"Alt-Enter":   "newline",
 			"Shift-Enter": "newline",
 			"Escape":      "cancel",
 			"C-u":         "clear-input",
@@ -160,21 +165,64 @@ func (m *KeyMap) Chord(action string) string {
 	return ""
 }
 
-// Hotkeys renders a two-column action/chord table for /hotkeys.
+// Hotkeys renders a two-column action/chord table for /hotkeys. Every
+// chord bound to an action is listed (not just one), because the table is
+// the user's only view of a remap — hiding the aliases would make a
+// working binding look broken.
 func (m *KeyMap) Hotkeys() string {
 	lines := make([]string, 0, len(BuiltinActions))
 	maxLen := 0
 	for _, a := range BuiltinActions {
-		chord := m.Chord(a)
-		if chord == "" {
-			chord = "—" // no binding: action is effectively disabled
+		chords := m.Chords(a)
+		if len(chords) == 0 {
+			chords = []string{"—"} // no binding: action is effectively disabled
 		}
 		if len(a) > maxLen {
 			maxLen = len(a)
 		}
-		lines = append(lines, fmt.Sprintf("  %-*s  %s", maxLen, a, chord))
+		lines = append(lines, fmt.Sprintf("  %-*s  %s", maxLen, a, strings.Join(chords, " / ")))
 	}
 	return "keybindings (" + keybindingsPath() + "):\n" + strings.Join(lines, "\n")
+}
+
+// Chords returns every chord bound to an action, ordered with the
+// preferred (most portable) chord first: the primary defaults lead, then
+// the remaining chords alphabetically.
+func (m *KeyMap) Chords(action string) []string {
+	var all []string
+	for _, chord := range m.sortedChords() {
+		if m.bindings[chord] == action {
+			all = append(all, chord)
+		}
+	}
+	var primary, rest []string
+	for _, c := range all {
+		if isPrimaryChord(action, c) {
+			primary = append(primary, c)
+			continue
+		}
+		rest = append(rest, c)
+	}
+	return append(primary, rest...)
+}
+
+// isPrimaryChord names the chord each action advertises first: the one
+// that works in every terminal we support. Ctrl+J (0x0A) is deliverable
+// everywhere, where Shift-Enter needs the kitty keyboard protocol.
+func isPrimaryChord(action, chord string) bool {
+	switch action {
+	case "newline":
+		return chord == "C-j"
+	case "submit":
+		return chord == "Enter"
+	case "cancel":
+		return chord == "Escape"
+	case "quit":
+		return chord == "C-c"
+	case "clear-input":
+		return chord == "C-u"
+	}
+	return false
 }
 
 func (m *KeyMap) sortedChords() []string {

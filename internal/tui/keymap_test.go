@@ -156,3 +156,42 @@ func TestHotkeysRendersEveryAction(t *testing.T) {
 		}
 	}
 }
+
+// The newline action must advertise the portable chord first: Ctrl+J
+// (0x0A) reaches every terminal, Shift-Enter needs the kitty protocol.
+func TestChordsPreferPortableNewline(t *testing.T) {
+	m := DefaultKeyMap()
+	chords := m.Chords("newline")
+	if len(chords) < 3 {
+		t.Fatalf("newline chords = %v, want Ctrl+J plus aliases", chords)
+	}
+	if chords[0] != "C-j" {
+		t.Fatalf("first newline chord = %q, want C-j", chords[0])
+	}
+	// Every listed chord must actually resolve to the action (a table
+	// that lists a chord the runtime ignores is the bug this guards).
+	for _, c := range chords {
+		if m.bindings[c] != "newline" {
+			t.Fatalf("listed chord %q does not resolve to newline", c)
+		}
+	}
+	if got := m.Chords("submit"); len(got) == 0 || got[0] != "Enter" {
+		t.Fatalf("submit chords = %v", got)
+	}
+}
+
+// A remapped chord in keybindings.yml must drive the action: the table
+// is not decorative.
+func TestRemapDrivesAction(t *testing.T) {
+	m := DefaultKeyMap()
+	m.bindings["C-y"] = "newline"
+	m.clearAction("newline")
+	m.bindings["C-y"] = "newline"
+	ev := tcell.NewEventKey(tcell.KeyCtrlY, 0, tcell.ModCtrl)
+	if got := m.Resolve(ev); got != "newline" {
+		t.Fatalf("remap Resolve = %q, want newline", got)
+	}
+	if got := m.Chords("newline"); len(got) != 1 || got[0] != "C-y" {
+		t.Fatalf("after remap, chords = %v", got)
+	}
+}
