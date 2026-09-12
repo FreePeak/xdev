@@ -1407,6 +1407,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Policy:  agentPolicy(),
 					Handoff: handoffSettings(),
 				}
+				// M13 #54/#79: tool_call bridges into THIS agent's call path,
+				// so a catalogued (deferred) tool is gated exactly like a
+				// direct one. The registry is the shared one except under
+				// vibe mode, which has no catalog to bridge.
+				ag.WireCatalog(reg.Catalog())
 				// The HUD context segment measures against this window.
 				app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
 				prewalkMu.Lock()

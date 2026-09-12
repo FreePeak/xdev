@@ -217,6 +217,9 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 		Intercept:  h.intercept,
 		Approve:    s.approve,
 	}
+	// M13 #54/#79: bridge the deferred-tool catalog into this agent's call
+	// path (tool_call was "no runner installed" outside print mode).
+	ag.WireCatalog(h.reg.Catalog())
 	// A compaction also reaches the bus as session_compact.
 	ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
 	// M13 #55: secrets.yml redaction — placeholders out, real values in.
