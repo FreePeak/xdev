@@ -18,11 +18,11 @@ func TestFromSettingsShapes(t *testing.T) {
 		"tool_call": "echo blocked",
 		"lifecycle": []any{"echo one", "echo two"},
 	})
-	if b == nil || len(b.Commands) != 2 {
+	if b == nil || len(b.Hooks) != 3 {
 		t.Fatalf("bus = %+v", b)
 	}
-	if got := b.Commands["lifecycle"]; len(got) != 2 {
-		t.Fatalf("list commands = %v", got)
+	if got := b.Events(); len(got) != 2 || got[0] != "lifecycle" || got[1] != "tool_call" {
+		t.Fatalf("events = %v", got)
 	}
 }
 

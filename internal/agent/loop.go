@@ -81,6 +81,32 @@ func (h TurnHooksFunc) OnTurnEnd(s ai.StopReason, err error) {
 	}
 }
 
+// compactionNotifier bridges the compaction call path onto the hook bus:
+// compact.go invokes TurnHooks.OnCompaction after persisting the summary
+// (that file is owned elsewhere this wave, so the seam lives here).
+type compactionNotifier struct {
+	TurnHooks
+	intercept Interceptor
+}
+
+func (c compactionNotifier) OnCompaction(tokensBefore int64) {
+	c.TurnHooks.OnCompaction(tokensBefore)
+	c.intercept.Emit(context.Background(), "session_compact", map[string]any{"tokens_before": tokensBefore})
+}
+
+// WithCompactionEvent decorates TurnHooks so a compaction also reaches the
+// interceptor bus as the omp `session_compact` event (research §4):
+//
+//	ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
+//
+// A nil interceptor or hooks returns the input unchanged.
+func WithCompactionEvent(h TurnHooks, i Interceptor) TurnHooks {
+	if h == nil || i == nil {
+		return h
+	}
+	return compactionNotifier{TurnHooks: h, intercept: i}
+}
+
 // DefaultMaxTurns bounds one Run against runaway tool loops.
 const DefaultMaxTurns = 200
 
@@ -207,10 +233,15 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	if a.Hooks == nil {
 		a.Hooks = TurnHooksFunc{} // no-op: an unwired agent must not panic mid-turn
 	}
-	if a.Intercept != nil {
-		a.Intercept.Emit(ctx, "session_start", map[string]any{"model": a.Model})
-		a.Intercept.Emit(ctx, "agent_start", map[string]any{"model": a.Model})
+	// emit publishes one lifecycle event on the interceptor bus (nil-safe).
+	emit := func(event string, payload map[string]any) {
+		if a.Intercept != nil {
+			a.Intercept.Emit(ctx, event, payload)
+		}
 	}
+	emit("session_start", map[string]any{"model": a.Model})
+	emit("before_agent_start", map[string]any{"model": a.Model, "system": system})
+	emit("agent_start", map[string]any{"model": a.Model})
 	defer func() {
 		if a.Intercept != nil {
 			a.Intercept.Emit(ctx, "agent_end", nil)
@@ -244,6 +275,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 		default:
 		}
 
+		emit("turn_start", map[string]any{"turn": turn})
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
 		for _, s := range a.drainSteering() {
@@ -268,6 +300,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
 			if len(queued) == 0 {
+				emit("turn_end", map[string]any{"turn": turn})
 				return msg, nil
 			}
 			history = append(history, *msg)
@@ -276,6 +309,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 				history = append(history, m)
 				a.persist(m)
 			}
+			emit("turn_end", map[string]any{"turn": turn})
 			continue
 		}
 		// Execute tool calls concurrently on a bounded pool.
@@ -287,6 +321,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			a.Hooks.OnToolResultMessage(&rm)
 		}
 		a.prewalkNote(results)
+		emit("turn_end", map[string]any{"turn": turn})
 	}
 	// Budget exhausted: ask for one wrap-up message rather than erroring.
 	// The prompt is persisted so a store rebuild keeps it, and tool calls in
@@ -300,6 +335,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 		return lastAssistant, err
 	}
 	a.Hooks.OnMessageEnd(msg)
+	emit("turn_end", map[string]any{"turn": limit})
 	return msg, nil
 }
 

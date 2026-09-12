@@ -55,6 +55,10 @@ func main() {
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
 	prewalkInto := fs.String("prewalk-into", "@smol", "prewalk target: model ref or @role (default @smol)")
+	hookFlag := repeatable{}
+	fs.Var(&hookFlag, "hook", "hook to run: event=command, or the name of a discovered hook (repeatable)")
+	trustedExtension := repeatable{}
+	fs.Var(&trustedExtension, "trusted-extension", "extension whose hooks/ directory is trusted and loaded (repeatable)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -121,6 +125,9 @@ Flags:
 			MaxTurns:     *maxTurns,
 			Prewalk:      *prewalkFlag,
 			PrewalkInto:  *prewalkInto,
+
+			Hooks:             hookFlag,
+			TrustedExtensions: trustedExtension,
 		}, *themeName)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "xdev:", err)
@@ -138,6 +145,9 @@ Flags:
 			AppendSystem: *appendSystemPrompt,
 			MaxTurns:     *maxTurns,
 			MaxTokens:    *maxTokens,
+
+			Hooks:             hookFlag,
+			TrustedExtensions: trustedExtension,
 		}
 		code, err := runRPC(opts)
 		if err != nil {
@@ -221,6 +231,9 @@ Flags:
 			Prewalk:      *prewalkFlag,
 			PrewalkInto:  *prewalkInto,
 			Plan:         *planFlag,
+
+			Hooks:             hookFlag,
+			TrustedExtensions: trustedExtension,
 		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {
