@@ -172,6 +172,10 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
 	applyPolicy(ag, settings)
+	// Stream rules (M11 #35): settings-declared rules watch the deltas.
+	// Sessions re-read settings at start, so a change needs a new session
+	// (fired state is in-session only, never persisted).
+	ag.TTSR = agent.NewTTSR(settings.TTSR)
 
 	// Extension processes (optional): their tools join the registry and the
 	// manager becomes the agent's fail-closed policy interceptor; runtime
