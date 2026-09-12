@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -310,11 +311,37 @@ func runOne(ctx context.Context, cmd string, payload any) (map[string]any, error
 	}
 	c := exec.CommandContext(cctx, "sh", "-c", cmd)
 	c.Stdin = bytes.NewReader(body)
-	c.Stderr = nil // hook stderr goes to the parent's stderr via inherit? No: drop noise.
-	var out bytes.Buffer
+	// stderr is captured, not dropped: under the Claude-Code/omp contract it
+	// IS the block reason.
+	var out, errBuf bytes.Buffer
 	c.Stdout = &out
+	c.Stderr = &errBuf
 	if err := c.Run(); err != nil {
-		return nil, fmt.Errorf("hook failed (fail-closed): %w", err)
+		reason := strings.TrimSpace(errBuf.String())
+		// A timed-out or unspawnable hook stays fail-closed: the timeout is
+		// the safety contract, not an exit code, and silently downgrading it
+		// would turn a hung policy hook into an approval.
+		if cctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("hook timed out after %s (fail-closed): %w", DefaultTimeout, err)
+		}
+		// Exit-code contract (#92): 2 blocks with the stderr reason; ANY
+		// other non-zero is a non-blocking warning — the hook failed, the
+		// action proceeds. Treating every failure as a denial made hooks
+		// ported from Claude Code over-block (a missing binary, a linter
+		// exiting 1, an advisory check).
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() != 2 {
+			msg := fmt.Sprintf("hook warning (exit %d)", ee.ExitCode())
+			if reason != "" {
+				msg += ": " + reason
+			}
+			logx.Errorf("%s", msg)
+			return map[string]any{}, nil
+		}
+		if reason == "" {
+			reason = "blocked by exit status"
+		}
+		return nil, fmt.Errorf("hook blocked: %s", reason)
 	}
 	s := strings.TrimSpace(out.String())
 	if s == "" {
