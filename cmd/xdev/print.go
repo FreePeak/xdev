@@ -38,6 +38,10 @@ type printOptions struct {
 	// defaults to the @smol role.
 	Prewalk     bool
 	PrewalkInto string
+	// Hooks are extra --hook specs (event=command, or a discovered hook
+	// name); TrustedExtensions allowlists extension hook directories.
+	Hooks             []string
+	TrustedExtensions []string
 	// Plan starts the run in plan mode (read-only + propose exit).
 	Plan bool
 }
@@ -179,10 +183,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	exts := attachExtensions(context.Background(), reg, ag.Steer, ag.FollowUp)
 	// Hooks and extensions compose into one interceptor chain; hooks must
 	// fire even when no extensions are installed.
-	hookBus := hookbus.FromSettings(settings.Hooks)
+	hookBus := buildHookBus(cwd, opts)
 	if c := agent.NewChain(hookBus, exts); c != nil {
 		ag.Intercept = c
 	}
+	// A compaction also reaches the bus as `session_compact` (compact.go's
+	// OnCompaction call is the emission point; see agent.WithCompactionEvent).
+	ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
 	if exts != nil {
 		defer exts.Close()
 	}
@@ -200,7 +207,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// buildSys() at the call site, never a boot-captured string: extension
 	// and MCP tools register after startup and must be in the prompt the
 	// model is told to use (see TestPromptReflectsLiveRegistry).
-	final, err := ag.Run(ctx, buildSys(), history)
+	final, err := ag.Run(ctx, hookBus.Context(ctx, buildSys()), history)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
 		exitCode = 1
@@ -213,6 +220,23 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 	logx.Debugf("print: done in %s", time.Since(started).Round(time.Millisecond))
 	return exitCode, nil
+}
+
+// buildHookBus resolves the session hook bus: --hook specs, the settings
+// `hooks` record, and discovered hook files (project .xdev/hooks, user
+// <dataDir>/hooks, trusted extension dirs). Warnings are logged, never
+// fatal — a malformed hook file must not block a session.
+func buildHookBus(cwd string, opts printOptions) *hookbus.Bus {
+	b, warns := hookbus.Build(hookbus.Options{
+		Settings:          lastSettings().Hooks,
+		CLI:               opts.Hooks,
+		CWD:               cwd,
+		TrustedExtensions: opts.TrustedExtensions,
+	})
+	for _, w := range warns {
+		logx.Errorf("hooks: %s", w)
+	}
+	return b
 }
 
 func providerKeys(cfg *config.Config) []string {
