@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/collab"
@@ -53,6 +54,21 @@ var subcommands = map[string]bool{
 	"stats": true, "memory": true,
 }
 
+// handoffMode is the one-shot -handoff request (main owns the flag; the run
+// modes consume it): the session replaces its live context with a handoff
+// document and continues from it (M5 #23).
+var handoffMode bool
+
+// handoffSaveDir resolves where handoff documents are mirrored: settings
+// handoff.saveToDisk puts them under <dataDir>/handoffs/<shortid>.md. Empty
+// means the committed compaction entry is the only copy.
+func handoffSaveDir(s *config.Settings) string {
+	if s == nil || !s.HandoffSaveToDisk() {
+		return ""
+	}
+	return filepath.Join(config.DataDir(), "handoffs")
+}
+
 func main() {
 	fs := flag.NewFlagSet("xdev", flag.ContinueOnError)
 	configOverlays := repeatable{}
@@ -84,6 +100,7 @@ func main() {
 	profileName := fs.String("profile", "", "named profile: relocate the user base to <base>/profiles/<name> (or set XDEV_PROFILE)")
 	aliasName := fs.String("alias", "", "agent identity name for this session: other sessions address it by this name")
 	modeFlag := fs.String("mode", "", "run mode: print | tui | rpc | acp (alternative to the subcommand)")
+	handoffFlag := fs.Bool("handoff", false, "replace the resumed context with a handoff document before the run continues (compaction method `handoff`)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -153,6 +170,7 @@ Flags:
 	// M12 F2: user-declared extra SKILL.md roots (inert until wired).
 	skills.SetCustomDirectories(settings.Skills.CustomDirectories)
 	noRulesFlag = *noRules
+	handoffMode = *handoffFlag
 	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
 	// Flag-vs-settings precedence: an explicit flag always wins.
 	if *themeName == "" {

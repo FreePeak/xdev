@@ -205,6 +205,11 @@ type Agent struct {
 	// discovered from the tool registry on the first Run.
 	Goals *GoalState
 
+	// Handoff configures the handoff-document compaction (M5 #23): the
+	// side-request target, the artifact mirror, and the per-branch reset
+	// seam. See handoff.go.
+	Handoff HandoffSettings
+
 	// prewalk is the live state machine; Run is single-goroutine, no lock.
 	prewalk prewalkState
 
@@ -320,7 +325,14 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 		}
 
 		// Threshold maintenance: compact before the window overflows.
-		history = a.maybeCompact(ctx, history)
+		// The handoff method (M5 #23) owns this boundary when the method
+		// order selects it — the document replaces the summary — and
+		// degrades to the summary path when its side request fails.
+		if rebuilt, ok := a.HandoffRung(ctx, a.goalSystem(system), history); ok {
+			history = rebuilt
+		} else {
+			history = a.maybeCompact(ctx, history)
+		}
 		// Notes-backed rollover (M12 #45): a pending new_context boundary
 		// rebuilds history from the store so the dropped middle leaves this
 		// run's provider request; a no-op otherwise.
@@ -591,20 +603,7 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	// caller's context is untouched.
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req := ai.StreamRequest{
-		System:    system,
-		Messages:  history,
-		Tools:     a.toolDefs(),
-		MaxTokens: a.MaxTokens,
-		Model:     a.Model,
-		Thinking:  a.Thinking,
-	}
-	if a.Redactor != nil {
-		// Redact a copy: the store keeps the raw values, only the
-		// provider request carries placeholders (M13 #55).
-		req.System = a.Redactor.Apply(req.System)
-		req.Messages = redactMessages(history, a.Redactor)
-	}
+	req := a.liveRequest(system, history, a.toolDefs())
 	a.Hooks.OnStart(req)
 
 	ch, err := a.Provider.Stream(sctx, req)
