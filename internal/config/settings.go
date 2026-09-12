@@ -64,6 +64,14 @@ type CompactionSettings struct {
 	MethodOrder MethodOrderSetting `yaml:"methodOrder"`
 }
 
+// HandoffSettings holds the handoff-document knobs (M5 #23).
+type HandoffSettings struct {
+	// SaveToDisk mirrors each generated handoff document under
+	// <dataDir>/handoffs/<shortid>.md, so a handed-off context survives
+	// the session file being deleted (omp compaction.handoffSaveToDisk).
+	SaveToDisk bool `yaml:"saveToDisk"`
+}
+
 type Settings struct {
 	Theme        string `yaml:"theme"`
 	DefaultModel string `yaml:"defaultModel"`
@@ -73,6 +81,9 @@ type Settings struct {
 	// Compaction tunes context maintenance (compaction.methodOrder).
 	Compaction CompactionSettings `yaml:"compaction"`
 	ModelRoles map[string]string  `yaml:"modelRoles"`
+	// Handoff tunes the handoff-document compaction (M5 #23): the
+	// compaction.methodOrder member `handoff` and its artifacts.
+	Handoff HandoffSettings `yaml:"handoff"`
 	// ToolsApproval sets an action per tool (allow|deny|prompt).
 	ToolsApproval map[string]string `yaml:"toolsApproval"`
 	// BashPatterns are ordered command rules, "deny:rm -rf *" style.
@@ -294,6 +305,12 @@ func (s *Settings) WebSearchConfig() websearch.Settings {
 	return s.WebSearch
 }
 
+// HandoffSaveToDisk reports whether handoff documents are mirrored to disk
+// (nil-safe: no layer means no artifacts).
+func (s *Settings) HandoffSaveToDisk() bool {
+	return s != nil && s.Handoff.SaveToDisk
+}
+
 // AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
 // or the tool's schema default when unset.
 func (s *Settings) AskTimeout() time.Duration {
@@ -412,6 +429,11 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	if layer.Handoff.SaveToDisk {
+		// Same plain-bool rule as Advisor: only a layer that turns it ON
+		// contributes (the shipped default is off).
+		s.Handoff.SaveToDisk = true
 	}
 	if layer.Personality != "" {
 		s.Personality = layer.Personality
@@ -661,6 +683,7 @@ func List(s *Settings, globalPath string) []string {
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
 		"personality " + s.Personality,
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
+		"handoff.saveToDisk " + fmt.Sprint(s.HandoffSaveToDisk()),
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)

@@ -314,7 +314,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- agent ---
 	hooks := &printHooks{store: store, showThinking: settings.ShowThinkingOn()}
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -325,6 +325,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
 	ag.TTSR = agent.NewTTSR(settings.TTSR)
+	// Handoff (M5 #23): the document side request mirrors the live turn's
+	// transform on the @smol role, and settings handoff.saveToDisk mirrors
+	// the document under <dataDir>/handoffs.
+	ag.Handoff = agent.HandoffSettings{SaveDir: handoffSaveDir(settings)}
+	if t := resolveInto("@smol", cfg, settings, "handoff"); t != nil {
+		ag.Handoff.Target = *t
+	}
 	// Plan-mode exit: print runs are unattended, so there is no reviewer —
 	// propose auto-accepts (a plan nobody can review must not trap the run
 	// in read-only). --plan-yolo keeps that and hands the run to the
@@ -358,6 +365,15 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	// -handoff (M5 #23): document the resumed session before the prompt, so
+	// the run streams the handoff document instead of the raw history.
+	if handoffMode && len(store.Entries()) > 0 {
+		doc, herr := ag.HandoffDoc(ctx, buildSys(), "")
+		if herr != nil {
+			return 2, fmt.Errorf("handoff: %w", herr)
+		}
+		fmt.Fprintln(os.Stdout, doc)
+	}
 
 	history, err := initialHistory(store, prompt)
 	if err != nil {
