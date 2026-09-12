@@ -65,6 +65,15 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 	if a.Path == "" {
 		return Result{IsError: true, Text: "write: path is required"}, nil
 	}
+	// xd://propose etc.: registered URI write devices take this path
+	// before the FS layer (M11 #36). handled-but-error is a tool error,
+	// never a literal file write.
+	if text, handled, werr := WriteURI(a.Path, a.Content); handled {
+		if werr != nil {
+			return Result{IsError: true, Text: "write: " + werr.Error()}, nil
+		}
+		return Result{Text: text}, nil
+	}
 	resolved, err := resolvePath(a.Path)
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("write: %v", err)}, nil
