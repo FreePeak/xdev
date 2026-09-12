@@ -264,9 +264,7 @@ func builtin() []Rule {
 		Source:      "builtin",
 		AlwaysApply: true,
 		Description: "Built-in workflow defaults",
-		Content: "- Never commit, push, or force-push unless the user explicitly asks.\n" +
-			"- Never stage with `git add -A` or `git add .`; stage explicit paths.\n" +
-			"- Keep diffs minimal: fix the cause, never reformat unrelated code.\n",
+		Content: "- Stage explicit paths; never commit or push unasked.\n",
 	}}
 }
 

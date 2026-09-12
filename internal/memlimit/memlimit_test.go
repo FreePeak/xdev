@@ -56,3 +56,32 @@ func TestParseBytesUnitForms(t *testing.T) {
 		}
 	}
 }
+
+// TestPressureRatio covers the memory-pressure trigger input: heap over
+// limit, and 0 when no limit is set (so the trigger stays inert). The seams
+// are stubbed so the test never allocates toward the real limit.
+func TestPressureRatio(t *testing.T) {
+	oldHeap, oldLimit := liveHeap, memLimit
+	t.Cleanup(func() { liveHeap, memLimit = oldHeap, oldLimit })
+
+	liveHeap = func() uint64 { return 85 }
+	memLimit = func() int64 { return 100 }
+	if got, want := Pressure(), 85.0/100.0; got != want {
+		t.Fatalf("Pressure = %v, want %v", got, want)
+	}
+	if Pressure() < HighPressure {
+		t.Fatalf("85%% of the limit must reach HighPressure (%v)", HighPressure)
+	}
+
+	// Just below the threshold must not fire.
+	liveHeap = func() uint64 { return 84 }
+	if Pressure() >= HighPressure {
+		t.Fatalf("84%% of the limit must not reach HighPressure (%v)", HighPressure)
+	}
+
+	// No limit: division is meaningless, so the trigger reads 0.
+	memLimit = func() int64 { return 0 }
+	if got := Pressure(); got != 0 {
+		t.Fatalf("Pressure without a limit = %v, want 0", got)
+	}
+}
