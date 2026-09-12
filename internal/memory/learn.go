@@ -15,7 +15,7 @@ import (
 // it stores the lesson FIRST, then optionally mints or updates a managed
 // skill from the same call. A skill-write failure never loses the lesson.
 type LearnTool struct {
-	Backend *Backend
+	Backend Store
 	// SkillsDir is the managed-skills root for `skill` payloads.
 	SkillsDir string
 	// Cwd is the project directory project-relative native skills are

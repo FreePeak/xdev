@@ -337,17 +337,19 @@ func (p *Pipeline) leasePath() string { return filepath.Join(p.Backend.Dir, leas
 
 func (p *Pipeline) watermarkPath() string { return filepath.Join(p.Backend.Dir, watermarkFile) }
 
-// acquireLease takes the cross-process lease and returns its release func
-// plus this run's id. A lease older than LeaseTTL (a crashed run) is stolen.
+// acquireFileLease takes a cross-process lease file and returns its release
+// func plus this run's id. A lease older than ttl (a crashed run) is stolen.
+// The pipeline and the sharpshooter consolidation pass share this algorithm
+// on their own lease paths, so two xdev processes never write memory state
+// concurrently.
 //
 // ponytail: two lock stealers can both win the remove-then-create race, so a
 // crash exactly at the stale boundary can double-run once. Phase writes are
 // replace/append of heuristic context, so the damage is a duplicated pass,
 // not corruption — the upgrade path is a per-run temp file plus rename, or
 // flock under a build tag (same ceiling as internal/agent's mailbox lock).
-func (p *Pipeline) acquireLease() (func(), string, error) {
+func acquireFileLease(path string, ttl time.Duration) (func(), string, error) {
 	runID := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
-	path := p.leasePath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, "", err
 	}
@@ -355,16 +357,16 @@ func (p *Pipeline) acquireLease() (func(), string, error) {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			f.Close()
-			if err := p.writeLease(runID); err != nil {
+			if err := writeLeaseFile(path, runID); err != nil {
 				os.Remove(path)
 				return nil, "", err
 			}
-			return func() { p.releaseLease(runID) }, runID, nil
+			return func() { releaseFileLease(path, runID) }, runID, nil
 		}
 		if !os.IsExist(err) {
 			return nil, "", err
 		}
-		if p.leaseFresh(path) {
+		if leaseFreshAt(path, ttl) {
 			return nil, "", ErrLeaseHeld
 		}
 		_ = os.Remove(path) // stale: a crashed or stuck run; retry the take
@@ -372,20 +374,13 @@ func (p *Pipeline) acquireLease() (func(), string, error) {
 	return nil, "", ErrLeaseHeld // lost the steal race to another process
 }
 
-// heartbeat re-stamps the lease so a live run is never mistaken for stale.
-func (p *Pipeline) heartbeat(runID string) error {
-	if !p.leaseOwned(runID) {
-		return ErrLeaseHeld
-	}
-	return p.writeLease(runID)
-}
-
-func (p *Pipeline) writeLease(runID string) error {
+// writeLeaseFile re-stamps a lease atomically (a live run is never mistaken
+// for stale, and a reader never sees a torn payload).
+func writeLeaseFile(path, runID string) error {
 	raw, err := json.Marshal(lease{PID: os.Getpid(), Run: runID, At: time.Now().UTC().Format(time.RFC3339Nano)})
 	if err != nil {
 		return err
 	}
-	path := p.leasePath()
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
@@ -393,8 +388,8 @@ func (p *Pipeline) writeLease(runID string) error {
 	return os.Rename(tmp, path)
 }
 
-// leaseFresh reports whether the lease on disk is still inside its TTL.
-func (p *Pipeline) leaseFresh(path string) bool {
+// leaseFreshAt reports whether the lease on disk is still inside its TTL.
+func leaseFreshAt(path string, ttl time.Duration) bool {
 	l, ok := readLease(path)
 	if !ok {
 		return false // unreadable/torn: treat as stale and reclaim
@@ -403,22 +398,30 @@ func (p *Pipeline) leaseFresh(path string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Since(at) < p.leaseTTL()
+	return time.Since(at) < ttl
 }
 
-// leaseOwned reports whether the lease file still belongs to this run.
-func (p *Pipeline) leaseOwned(runID string) bool {
-	l, ok := readLease(p.leasePath())
-	return ok && l.Run == runID
-}
-
-// releaseLease drops the lease only when it is still ours: a stolen lease
-// belongs to the run that took it.
-func (p *Pipeline) releaseLease(runID string) {
-	if p.leaseOwned(runID) {
-		_ = os.Remove(p.leasePath())
+// releaseFileLease drops the lease only when it is still ours: a stolen
+// lease belongs to the run that took it.
+func releaseFileLease(path, runID string) {
+	if l, ok := readLease(path); ok && l.Run == runID {
+		_ = os.Remove(path)
 	}
 }
+
+func (p *Pipeline) acquireLease() (func(), string, error) {
+	return acquireFileLease(p.leasePath(), p.leaseTTL())
+}
+
+// heartbeat re-stamps the lease so a live run is never mistaken for stale.
+func (p *Pipeline) heartbeat(runID string) error {
+	if l, ok := readLease(p.leasePath()); !ok || l.Run != runID {
+		return ErrLeaseHeld
+	}
+	return p.writeLease(runID)
+}
+
+func (p *Pipeline) writeLease(runID string) error { return writeLeaseFile(p.leasePath(), runID) }
 
 func readLease(path string) (lease, bool) {
 	raw, err := os.ReadFile(path)
