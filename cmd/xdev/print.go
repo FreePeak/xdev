@@ -798,6 +798,10 @@ var noRulesFlag bool
 
 func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode) *tool.Registry {
 	registerURISchemes()
+	// M13 #49: github tool + pr://issue:// reader URLs. One instance per
+	// registry so the URL cache and the pr_checkout registry are shared.
+	ghTool := tool.NewGithubTool(cwd)
+	ghTool.RegisterURISchemes()
 	pol := settingsPolicy(settings)
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{
@@ -810,6 +814,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		&tool.ASTGrepTool{CWD: cwd},
 		&tool.ASTEditTool{CWD: cwd},
 		eval.NewTool(cwd),
+		ghTool,
 	} {
 		reg.Register(t)
 	}
