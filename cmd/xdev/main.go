@@ -63,6 +63,12 @@ var subcommands = map[string]bool{
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
 	"usage": true, "ps": true, "token": true, "completions": true,
 	"worktree": true, "wt": true,
+	// omp names these services at the top level; xdev ships them under
+	// `serve`, so the names dispatch there rather than reaching the model as
+	// a prompt (#104).
+	"auth-broker": true, "auth-gateway": true, "browser-relay": true,
+	// omp's `install` is its plugin installer.
+	"install": true,
 }
 
 // handoffMode is the one-shot -handoff request (main owns the flag; the run
@@ -111,7 +117,8 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev worktree|wt <sub>       git worktrees: list | add | remove | prune
   xdev plugin <sub>            plugins: list | search | install | remove | info
   xdev share [id|path]         serve an E2E-encrypted view-only snapshot
-  xdev serve <svc>             auth-broker | auth-gateway | browser-relay
+  xdev serve <svc>             auth-broker | auth-gateway | browser-relay (each also works bare)
+  xdev install <name>          alias of "plugin install"
   xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
   xdev update [--channel C]    check for and install updates (stable | canary)
   xdev setup                   onboarding: data dir, starter config, next steps
@@ -402,8 +409,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "xdev: starting in %s (home directory; --allow-home to stay)\n", dir)
 		}
 	}
-	if mode == "serve" {
+	// The three service names work bare as well as under `serve` (omp parity).
+	if mode == "serve" || serve.IsService(mode) {
+		if mode != "serve" {
+			args = append([]string{mode}, args...)
+		}
 		os.Exit(serve.Dispatch(args, version))
+	}
+	if mode == "install" {
+		// omp's `install <name>` is `plugin install <name>`.
+		os.Exit(marketplace.Run(append([]string{"install"}, args...), os.Stdout, os.Stderr, settings.Plugins.Marketplaces))
 	}
 	if mode == "join" {
 		// Collab guest: mirror a shared session (M14 #59).

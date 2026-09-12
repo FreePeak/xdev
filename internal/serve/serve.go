@@ -80,6 +80,17 @@ explicit token: --listen 0.0.0.0:4000 without one refuses to start.
 `
 
 // Dispatch runs `xdev serve <service> [flags]` and returns a process exit code.
+// IsService reports whether a bare word names one of the three services, so
+// the top-level spellings omp uses (`xdev auth-broker`) can dispatch here
+// instead of reaching the model as a prompt (#104).
+func IsService(name string) bool {
+	switch name {
+	case serviceBroker, serviceGateway, serviceRelay:
+		return true
+	}
+	return false
+}
+
 func Dispatch(args []string, version string) int {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, serveUsage)
