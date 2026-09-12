@@ -438,6 +438,23 @@ func (a *App) ForkSession() error {
 	return a.ops.Fork()
 }
 
+// RenameSession implements CommandAPI /rename: a manual title beats any
+// generated one and survives the ai-title pass (the slot records the source).
+func (a *App) RenameSession(title string) error {
+	if a.ops == nil || a.ops.Rename == nil {
+		return fmt.Errorf("session rename not wired")
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fmt.Errorf("usage: /rename <new title>")
+	}
+	if err := a.ops.Rename(title); err != nil {
+		return err
+	}
+	a.AddSystemBlock("· session renamed: " + title)
+	return nil
+}
+
 // DumpSession implements CommandAPI by exporting the transcript.
 func (a *App) DumpSession() error {
 	if a.ops == nil || a.ops.Dump == nil {

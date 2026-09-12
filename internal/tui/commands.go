@@ -50,6 +50,9 @@ type SessionOps struct {
 	// a compaction entry on this session, and returns the document text.
 	// nil degrades the command to a notice.
 	Handoff func(instruction string) (string, error)
+	// Rename stamps a custom title on the live session (/rename). The title
+	// slot is rewritten in place, so the listing and the picker see it.
+	Rename func(title string) error
 	// Recent lists the sessions /resume offers when called with no
 	// argument; the TUI renders them as a picker and hands the chosen id
 	// back to Resume. nil degrades /resume to Resume("").
@@ -328,6 +331,7 @@ type CommandAPI interface {
 	KeyMap() *KeyMap
 	ForkSession() error
 	DumpSession() error
+	RenameSession(title string) error
 	ExportSession(path string) error
 	ShareSession() error
 	ResumeSession(query string) error
@@ -370,6 +374,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { app.OpenTreeSelector(); return nil }},
 		{Name: "branch", Description: "switch to an entry by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.BranchSession(args) }},
+		{Name: "rename", Description: "title this session: /rename <new title>",
+			Fn: func(app CommandAPI, args string) error { return app.RenameSession(strings.TrimSpace(args)) }},
 		{Name: "dump", Description: "export the transcript to markdown",
 			Fn: func(app CommandAPI, args string) error { return app.DumpSession() }},
 		{Name: "export", Description: "write the transcript as self-contained HTML: /export [path]",
