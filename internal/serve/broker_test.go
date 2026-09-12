@@ -3,6 +3,7 @@ package serve
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/FreePeak/xdev/internal/config"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,13 @@ const brokerTestToken = "vault-test-token"
 
 func newTestBroker(t *testing.T, dir string) *Broker {
 	t.Helper()
+	// The broker no longer mints its own install id (#102) — it shares
+	// config.InstallID — so a test that wants the id under `dir` must point
+	// the install dir there, and must clear the process cache the previous
+	// test filled.
+	t.Setenv("XDEV_AGENT_DIR", dir)
+	config.ResetInstallIDCacheForTests()
+	t.Cleanup(config.ResetInstallIDCacheForTests)
 	b, err := NewBroker(BrokerOptions{Options: Options{DataDir: dir, Token: brokerTestToken, Version: "test"}})
 	if err != nil {
 		t.Fatalf("NewBroker: %v", err)

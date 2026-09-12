@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/config"
 	"sync"
 	"time"
 )
@@ -481,36 +483,14 @@ func (u *usageLog) snapshot() []UsageEntry {
 	return out
 }
 
-// installID returns the per-install UUID (lowercase RFC 4122 v4), minting and
-// persisting one at <data dir>/install-id on first use. Unlike agent state,
-// this survives wiping sessions; an unwritable data dir is not fatal, the id
-// is still stable for the lifetime of the process.
+// installID returns the per-install UUID. It delegates to config.InstallID
+// rather than maintaining a second mint+file of its own: two writers of the
+// same identity can disagree (different profile resolution, different
+// recovery path on a corrupt file), which defeats the point of a stable id
+// (#102: the broker minted its own). An unwritable dir still yields a
+// process-stable value because config.InstallID degrades the same way.
 func installID(o Options) (string, error) {
-	dir := o.dataDir()
-	path := filepath.Join(dir, "install-id")
-	if b, err := os.ReadFile(path); err == nil {
-		if id := strings.TrimSpace(string(b)); uuidRe.MatchString(id) {
-			return strings.ToLower(id), nil
-		}
-		// Stale garbage would make the exclusive create below fail forever.
-		_ = os.Remove(path)
-	}
-	id, err := newUUID()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return id, nil // not persisted; still stable for this process
-	}
-	if err := createPrivate(path, []byte(id+"\n")); err != nil {
-		if b, rerr := os.ReadFile(path); rerr == nil {
-			if got := strings.TrimSpace(string(b)); uuidRe.MatchString(got) {
-				return strings.ToLower(got), nil
-			}
-		}
-		return id, nil
-	}
-	return id, nil
+	return config.InstallID(), nil
 }
 
 var uuidRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

@@ -1,6 +1,10 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"strings"
+)
 
 // StreamRequest is one assistant-turn request to a provider.
 type StreamRequest struct {
@@ -58,4 +62,33 @@ func SupportedAPIs() []string {
 		APIAzureOpenAIResponses, APIOpenAICodexResponses,
 		APIGoogleGenerativeAI, APIGoogleVertex, APIGeminiCLI,
 	}
+}
+
+// Identity is the stable per-install identifier providers attach to requests
+// (Claude's metadata.user_id device blob, Codex's installation id). The ai
+// package cannot import internal/config — config imports ai, so a cycle — and
+// minting an id in the wire layer would defeat the purpose: it must be the
+// SAME value the credential store keys on. main() installs it once at startup
+// (#102: install-id minted a file that no request ever attached).
+var identityUserID string
+
+// SetInstallIdentity records the per-install identifier for request metadata.
+// "" leaves every request exactly as it was, so an unset identity can never
+// send an empty device blob.
+func SetInstallIdentity(id string) { identityUserID = strings.TrimSpace(id) }
+
+// InstallID returns the attached identifier ("" when unset).
+func InstallID() string { return identityUserID }
+
+// installIdentity renders the Claude-side metadata.user_id value: omp sends a
+// JSON object rather than a bare id, so the shape is kept.
+func installIdentity() string {
+	if identityUserID == "" {
+		return ""
+	}
+	b, err := json.Marshal(map[string]string{"device_id": identityUserID})
+	if err != nil { // unreachable: one string field
+		return ""
+	}
+	return string(b)
 }

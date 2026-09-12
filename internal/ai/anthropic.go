@@ -92,6 +92,15 @@ type anthropicWireRequest struct {
 	Stream    bool                   `json:"stream"`
 	Tools     []anthropicWireTool    `json:"tools,omitempty"`
 	Thinking  *anthropicWireThinking `json:"thinking,omitempty"`
+	// Metadata carries the stable installation identity the OAuth account is
+	// keyed by (omp sends {device_id, session_id, account_uuid}); it rides the
+	// documented `metadata.user_id` string field. #102: install-id minted a
+	// file no request ever attached.
+	Metadata *anthropicWireMetadata `json:"metadata,omitempty"`
+}
+
+type anthropicWireMetadata struct {
+	UserID string `json:"user_id,omitempty"`
 }
 
 // buildRequest maps the unified conversation onto the Anthropic wire shape.
@@ -114,6 +123,9 @@ func (p *AnthropicProvider) buildRequest(req StreamRequest) ([]byte, error) {
 		MaxTokens: maxTokens,
 		System:    req.System,
 		Stream:    true,
+	}
+	if uid := installIdentity(); uid != "" {
+		wr.Metadata = &anthropicWireMetadata{UserID: uid}
 	}
 	if req.Thinking != nil {
 		wr.Thinking = &anthropicWireThinking{Type: "enabled", BudgetTokens: req.Thinking.Tokens}

@@ -25,7 +25,10 @@ const CodexDefaultInstructions = "You are a coding agent. Follow the user's inst
 func NewOpenAICodexResponsesProvider(name, baseURL, apiKey string, headers map[string]string, hc *http.Client) *OpenAICodexResponsesProvider {
 	inner := NewOpenAIResponsesProvider(name, baseURL, apiKey, headers, hc)
 	inner.apiLabel = APIOpenAICodexResponses
-	inner.behavior = responsesBehavior{sanitize: true, strictTools: true}
+	// Codex carries the per-install identity on the wire (#102): omp sends
+	// installation_id in the request metadata; the Responses API's documented
+	// home for an opaque external id is `user`.
+	inner.behavior = responsesBehavior{sanitize: true, strictTools: true, attachInstallID: true}
 	storeDisabled := false // Codex is stateless; the flag must be present and false
 	inner.store = &storeDisabled
 	return &OpenAICodexResponsesProvider{OpenAIResponsesProvider: inner}
