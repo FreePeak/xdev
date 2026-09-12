@@ -104,6 +104,25 @@ func main() {
 	aliasName := fs.String("alias", "", "agent identity name for this session: other sessions address it by this name")
 	modeFlag := fs.String("mode", "", "run mode: print | tui | rpc | acp (alternative to the subcommand)")
 	handoffFlag := fs.Bool("handoff", false, "replace the resumed context with a handoff document before the run continues (compaction method `handoff`)")
+	// --- issue #33 launch flags. Grouped with the run-shaping flags above;
+	// each one's consumer is noted where the value lands below.
+	cwdFlag := fs.String("cwd", "", "directory to start in (overrides the launch cwd)")
+	sessionDir := fs.String("session-dir", "", "session storage and lookup root for this run (default: the install data dir; sessions live under <dir>/sessions)")
+	noSession := fs.Bool("no-session", false, "don't save the session (ephemeral: nothing is written to disk)")
+	noTitle := fs.Bool("no-title", false, "skip the mechanical session-title stamp")
+	modelsFlag := fs.Bool("models", false, "print the resolved model catalog and exit")
+	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the model role's effort)")
+	hideThinking := fs.Bool("hide-thinking", false, "hide thinking blocks in TUI output (display only; model thinking is unaffected)")
+	printThoughts := fs.Bool("print-thoughts", false, "include thinking blocks in print-mode output")
+	toolsFlag := fs.String("tools", "", "comma-separated tools to enable (default: all)")
+	noTools := fs.Bool("no-tools", false, "disable all built-in tools")
+	noLSP := fs.Bool("no-lsp", false, "disable the lsp tool (no language server is started)")
+	autoApprove := fs.Bool("auto-approve", false, "auto-approve every tool call (approval mode yolo; explicit per-tool denies and bash patterns still apply)")
+	advisorFlag := fs.Bool("advisor", false, "enable the advisor runtime (a background reviewer; needs modelRoles.advisor)")
+	maxTimeFlag := fs.String("max-time", "", "stop the run after this duration (600 = 600s, 10m, 1h)")
+	noExtensions := fs.Bool("no-extensions", false, "disable extension discovery (no extension tool, command, or policy hook loads)")
+	skillsFlag := fs.String("skills", "", "comma-separated glob patterns filtering which skills are advertised (e.g. git-*,docker)")
+	noSkills := fs.Bool("no-skills", false, "disable skills discovery (nothing is advertised to the model)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -128,6 +147,22 @@ Flags:
 	}
 	if *verbose {
 		logx.Enable(logx.LevelDebug)
+	}
+
+	// --- issue #33 launch flags: fail-fast validation, then the chdir.
+	// --cwd has to land before everything downstream: the dotenv chain,
+	// project settings, session bucketing and the tool roots all resolve
+	// against the process cwd.
+	maxTime, err := parseMaxTime(*maxTimeFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		os.Exit(2)
+	}
+	if *cwdFlag != "" {
+		if err := chdirTo(*cwdFlag); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
 	}
 
 	// --- install identity and native-base relocation (M14 #63). Runs
@@ -168,6 +203,23 @@ Flags:
 	noRulesFlag = *noRules
 	handoffMode = *handoffFlag
 	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
+	// issue #33: the launch surface the modes and their helpers read.
+	launch = launchFlags{
+		SessionDir:      *sessionDir,
+		NoSession:       *noSession,
+		NoTitle:         *noTitle,
+		Thinking:        *thinkingFlag,
+		ThinkingDisplay: resolveThinkingDisplay(*hideThinking, *printThoughts),
+		Tools:           parseCSV(*toolsFlag),
+		NoTools:         *noTools,
+		NoLSP:           *noLSP,
+		AutoApprove:     *autoApprove,
+		MaxTime:         maxTime,
+		NoExtensions:    *noExtensions,
+		Skills:          parseCSV(*skillsFlag),
+		NoSkills:        *noSkills,
+		Advisor:         *advisorFlag,
+	}
 	// Flag-vs-settings precedence: an explicit flag always wins.
 	if *themeName == "" {
 		*themeName = settings.Theme
@@ -197,6 +249,19 @@ Flags:
 			fmt.Fprintln(os.Stderr, "xdev:", err)
 			os.Exit(2)
 		}
+		os.Exit(0)
+	}
+
+	// --- --models (issue #33): print the resolved catalog and exit. A
+	// read-only fast path like --export — it answers "which models can this
+	// install actually reach?" without starting a run.
+	if *modelsFlag {
+		cfg, cerr := config.LoadModelsLayered()
+		if cerr != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", cerr)
+			os.Exit(2)
+		}
+		printModelCatalog(os.Stdout, cfg, settings)
 		os.Exit(0)
 	}
 
@@ -422,6 +487,12 @@ Flags:
 		if err != nil {
 			logx.Debugf("print failed: %v", err)
 			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(code)
+		}
+		// A clean return is not necessarily a successful run: an aborted one
+		// (--max-time, a refused approval, a provider failure) comes back as
+		// (1, nil). Dropping the code made every aborted script run exit 0.
+		if code != 0 {
 			os.Exit(code)
 		}
 	}

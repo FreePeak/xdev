@@ -76,7 +76,7 @@ func readBreadcrumb() string {
 // resolveResumeID finds a session by case-insensitive id prefix (mtime
 // desc, omp parity). "" query returns the most recent in cwd.
 func resolveResumeID(cwd, query string) (string, error) {
-	metas, err := session.List(config.DataDir())
+	metas, err := session.List(sessionDataDir())
 	if err != nil {
 		return "", err
 	}
@@ -275,9 +275,9 @@ func importForeignSession(kind, ref, cwd string) (*session.Store, error) {
 	var res *session.ImportResult
 	switch kind {
 	case "claude":
-		res, err = session.ImportClaude(path, config.DataDir(), cwd)
+		res, err = session.ImportClaude(path, sessionDataDir(), cwd)
 	case "codex":
-		res, err = session.ImportCodex(path, config.DataDir(), cwd)
+		res, err = session.ImportCodex(path, sessionDataDir(), cwd)
 	default:
 		err = fmt.Errorf("import: unknown foreign source %q", kind)
 	}
@@ -301,7 +301,7 @@ func forkSessionByID(cwd, query string) (*session.Store, error) {
 		src = p
 	}
 	return session.ForkSession(src,
-		session.SessionFilePath(config.DataDir(), cwd, time.Now(), session.NewSessionID()), "")
+		session.SessionFilePath(sessionDataDir(), cwd, time.Now(), session.NewSessionID()), "")
 }
 
 // openStartupSession resolves the startup session for print/TUI runs:
@@ -391,7 +391,7 @@ func unpinSession(shortID string) {
 // forward compatibility) and drops its pin. Deleting the active session
 // is refused: its store is live.
 func deleteSessionByShortID(shortID, activePath string) error {
-	metas, err := session.List(config.DataDir())
+	metas, err := session.List(sessionDataDir())
 	if err != nil {
 		return err
 	}

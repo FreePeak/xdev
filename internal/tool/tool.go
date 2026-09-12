@@ -67,6 +67,43 @@ func (r *Registry) Register(t Tool) {
 	}
 }
 
+// Names returns every registered tool name (eager and deferred), sorted.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.tools))
+	for n := range r.tools {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Remove unregisters the named tools (the launch --tools/--no-tools filter).
+// A removed tool leaves the registry, the eager schema (Defs) and the deferred
+// catalog in the same call; freshness snapshots are left alone. Names that
+// matched nothing come back so a caller can report a filter that narrowed less
+// than it was asked to. A nil registry removes nothing.
+func (r *Registry) Remove(names ...string) []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var unknown []string
+	for _, n := range names {
+		if _, ok := r.tools[n]; !ok {
+			unknown = append(unknown, n)
+			continue
+		}
+		delete(r.tools, n)
+		if r.catalog != nil {
+			r.catalog.drop(n)
+		}
+	}
+	return unknown
+}
+
 // recordSnapshot stores the freshness record for a resolved path: the
 // content hash plus, when known, the exact line text last shown to the
 // model (1-based line → text). A nil registry is a no-op so standalone
