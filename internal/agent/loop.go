@@ -305,6 +305,10 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 
 		// Threshold maintenance: compact before the window overflows.
 		history = a.maybeCompact(ctx, history)
+		// Notes-backed rollover (M12 #45): a pending new_context boundary
+		// rebuilds history from the store so the dropped middle leaves this
+		// run's provider request; a no-op otherwise.
+		history = a.notesRollover(history)
 		var hist []ai.Message
 		msg, hist, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
 		if err != nil {
