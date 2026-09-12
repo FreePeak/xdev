@@ -28,6 +28,11 @@ type fakeAPI struct {
 	mem      string
 	theme    string
 	prewalk  string
+
+	exported  string
+	exportErr error
+	shared    int
+	shareErr  error
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -329,8 +334,17 @@ func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
 	return "ext output: " + name, f.extErr
 }
 
-func (f *fakeAPI) ForkSession() error               { return nil }
-func (f *fakeAPI) DumpSession() error               { return nil }
+func (f *fakeAPI) ForkSession() error { return nil }
+func (f *fakeAPI) DumpSession() error { return nil }
+func (f *fakeAPI) ExportSession(path string) error {
+	f.exported = path
+	return f.exportErr
+}
+
+func (f *fakeAPI) ShareSession() error {
+	f.shared++
+	return f.shareErr
+}
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
 
 func (f *fakeAPI) SettingsView(args string) error { return nil }
@@ -401,6 +415,63 @@ func (f *fakeAPI) PlanMode(args string) error {
 	return nil
 }
 
+// TestExportShareCommands: /export hands its path to the wired op and reports
+// the file written; /share puts the view-only link in the transcript. Neither
+// is ever a model turn.
+func TestExportShareCommands(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	var sent []string
+	app.SetHandlers(func(text string) { sent = append(sent, text) }, func() {}, func() {})
+	var gotPath string
+	app.SetSessionOps(&SessionOps{
+		Export: func(path string) (string, error) { gotPath = path; return "/tmp/out.html", nil },
+		Share:  func() (string, error) { return "http://127.0.0.1:9/abc12345#KEY", nil },
+	})
+
+	enter := func(input string) {
+		t.Helper()
+		typeRunes(app, input)
+		app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	}
+	systemBlocks := func() string {
+		var b strings.Builder
+		for _, blk := range app.Blocks() {
+			if blk.Kind == KindSystem {
+				b.WriteString(blk.Text)
+				b.WriteString("\n")
+			}
+		}
+		return b.String()
+	}
+
+	enter("/export /tmp/out.html")
+	if gotPath != "/tmp/out.html" {
+		t.Fatalf("export path = %q", gotPath)
+	}
+	if !strings.Contains(systemBlocks(), "exported to /tmp/out.html") {
+		t.Fatalf("export result missing from the transcript: %q", systemBlocks())
+	}
+
+	enter("/share")
+	if !strings.Contains(systemBlocks(), "http://127.0.0.1:9/abc12345#KEY") {
+		t.Fatalf("share link missing from the transcript: %q", systemBlocks())
+	}
+
+	if len(sent) != 0 {
+		t.Fatalf("/export and /share must never reach the agent: %q", sent)
+	}
+}
+
+// TestExportShareUnwired: a host without the ops degrades to a notice.
+func TestExportShareUnwired(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	if err := app.ExportSession("/tmp/x.html"); err == nil || !strings.Contains(err.Error(), "not wired") {
+		t.Fatalf("unwired /export error = %v", err)
+	}
+	if err := app.ShareSession(); err == nil || !strings.Contains(err.Error(), "not wired") {
+		t.Fatalf("unwired /share error = %v", err)
+	}
+}
 func (f *fakeAPI) SwitchModel(args string) error {
 	if f.fail == "model" {
 		return fmt.Errorf("boom")

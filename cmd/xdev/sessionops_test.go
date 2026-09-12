@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
+	"github.com/FreePeak/xdev/internal/share"
 
 	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/FreePeak/xdev/internal/tui"
@@ -255,5 +258,176 @@ func TestSearchPickerItemsRanksMatches(t *testing.T) {
 	got = searchPickerItems(cwd, "alpha")
 	if len(got) != 4 {
 		t.Fatalf("single-token matches = %v, want all 4 sessions", got)
+	}
+}
+
+// exportTestStore lays down a session carrying a message with markup, an
+// assistant turn with thinking + a tool call, and a tool result.
+func exportTestStore(t *testing.T) *session.Store {
+	t.Helper()
+	st := session.OpenMem("/proj/export", "export command test")
+	entries := []session.Entry{
+		&session.MessageEntry{Message: ai.Message{
+			Role:    ai.RoleUser,
+			Content: []ai.Block{ai.TextBlock{Text: "please read <script>alert(1)</script>"}},
+		}},
+		&session.MessageEntry{Message: ai.Message{
+			Role: ai.RoleAssistant,
+			Content: []ai.Block{
+				ai.ThinkingBlock{Thinking: "which file?"},
+				ai.TextBlock{Text: "reading main.go"},
+				ai.ToolCallBlock{ID: "call-9", Name: "read", Arguments: []byte(`{"path":"main.go"}`)},
+			},
+			Model: "onegw/free",
+		}},
+		&session.MessageEntry{Message: ai.Message{
+			Role:       ai.RoleToolResult,
+			ToolCallID: "call-9",
+			ToolName:   "read",
+			IsError:    true,
+			Content:    []ai.Block{ai.TextBlock{Text: "permission denied"}},
+		}},
+	}
+	for _, e := range entries {
+		if err := st.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return st
+}
+
+// TestExportSessionWritesHTML: the /export op writes one self-contained HTML
+// file at the requested path, escapes transcript text, and carries the system
+// prompt plus the metadata header.
+func TestExportSessionWritesHTML(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	st := exportTestStore(t)
+
+	path := filepath.Join(t.TempDir(), "nested", "session.html")
+	got, err := exportSession(st, "SYS <b>prompt</b>", "onegw/live", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != path {
+		t.Fatalf("written path = %q, want %q", got, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		"<!doctype html>", "<style>", "SYS &lt;b&gt;prompt&lt;/b&gt;",
+		"&lt;script&gt;alert(1)&lt;/script&gt;", "which file?", "main.go", "call-9",
+		"permission denied", "onegw/live", st.ID()[:8], "/proj/export",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("export missing %q", want)
+		}
+	}
+	if strings.Contains(html, "<script>alert(1)</script>") {
+		t.Fatal("transcript markup was not escaped")
+	}
+	if strings.Contains(strings.ToLower(html), "<script") {
+		t.Fatal("export must not embed any script element")
+	}
+
+	// No path: the default export dir, beside /dump's dumps.
+	def, err := exportSession(st, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(config.DataDir(), "exports"); !strings.HasPrefix(def, want) {
+		t.Fatalf("default export path = %q, want under %q", def, want)
+	}
+}
+
+// TestExportEmptySessionIsValidHTML: exporting a session with no entries still
+// writes a complete document.
+func TestExportEmptySessionIsValidHTML(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "empty.html")
+	if _, err := exportSession(session.OpenMem("/proj/empty", "empty"), "", "", path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	if !strings.HasPrefix(html, "<!doctype html>") || !strings.Contains(html, "</html>") {
+		t.Fatalf("empty export is not a complete document:\n%.120s", html)
+	}
+	if strings.Count(html, "<article") != 0 {
+		t.Fatal("empty export rendered entries")
+	}
+}
+
+// TestRunExportNeverCreatesASession: --export reads a session; with nothing to
+// read it fails instead of exporting a brand-new empty one.
+func TestRunExportNeverCreatesASession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	out := filepath.Join(t.TempDir(), "out.html")
+	err := runExport(out, printOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no session") {
+		t.Fatalf("runExport err = %v, want a no-session error", err)
+	}
+	if _, serr := os.Stat(out); serr == nil {
+		t.Fatal("runExport wrote a file for a session that does not exist")
+	}
+	if err := runExport("", printOptions{}); err == nil || !strings.Contains(err.Error(), "needs a file path") {
+		t.Fatalf("runExport without a path = %v", err)
+	}
+}
+
+// TestShareLiveServesOneSnapshot: /share hands back a loopback link whose
+// fragment key opens the served ciphertext, and a second /share replaces the
+// first — one live link per process, never a stale server left running.
+func TestShareLiveServesOneSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	st := exportTestStore(t)
+
+	first, err := shareLive(st, "SYS prompt", "onegw/free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first, "http://127.0.0.1:") || !strings.Contains(first, "#") {
+		t.Fatalf("first link = %q", first)
+	}
+
+	second, err := shareLive(st, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("a second /share reused the first link")
+	}
+	if _, err := http.Get(strings.SplitN(first, "#", 2)[0]); err == nil {
+		t.Fatal("the replaced share server is still serving")
+	}
+
+	base, fragment, _ := strings.Cut(second, "#")
+	res, err := http.Get(base + "/blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	blob, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "SYS prompt") || strings.Contains(string(blob), "<!doctype html>") {
+		t.Fatal("the served snapshot is not encrypted")
+	}
+	key, err := share.DecodeKey(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := share.Open(blob, key)
+	if err != nil {
+		t.Fatalf("link key does not open the served snapshot: %v", err)
+	}
+	if !strings.Contains(string(plain), "please read") {
+		t.Fatalf("shared snapshot lost the transcript:\n%.200s", plain)
 	}
 }

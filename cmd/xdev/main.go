@@ -11,6 +11,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/memlimit"
+	"github.com/FreePeak/xdev/internal/share"
 	"github.com/FreePeak/xdev/internal/skills"
 )
 
@@ -49,6 +50,7 @@ func main() {
 	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
 	fromClaude := fs.String("from-claude", "", "import a Claude Code transcript (id prefix or path) and continue it")
 	fromCodex := fs.String("from-codex", "", "import a Codex transcript (id prefix or path) and continue it")
+	exportFile := fs.String("export", "", "write the session as one self-contained HTML file and exit")
 	forkID := fs.String("fork", "", "fork a session by id prefix or path and continue the fork")
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
@@ -77,6 +79,7 @@ func main() {
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev share [-port N] [-export file] [id|path]  serve an E2E-encrypted view-only snapshot
 
 Flags:
 `, version)
@@ -125,9 +128,27 @@ Flags:
 		*personality = settings.Personality
 	}
 
+	// --- --export <file> (issue #61 §4): a read-only fast path — resolve
+	// the selected session (-resume/-continue/--from-*), write the HTML
+	// export, and exit without starting a run.
+	if *exportFile != "" {
+		opts := printOptions{
+			ContinueLast: *continueLast,
+			ResumePrefix: *resumePrefix,
+			FromClaude:   *fromClaude,
+			FromCodex:    *fromCodex,
+			ForkID:       *forkID,
+		}
+		if err := runExport(*exportFile, opts); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "share" || args[0] == "version") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -203,6 +224,14 @@ Flags:
 
 	if mode == "lsp-config" {
 		os.Exit(lsp.ConfigCommand(args, os.Stdout, os.Stderr, settings))
+	}
+
+	if mode == "share" {
+		if err := share.Run(args); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
 	}
 
 	switch mode {
