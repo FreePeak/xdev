@@ -659,7 +659,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !prewalkOn {
 				return "prewalk off (flags still apply: --prewalk)"
 			}
-			return fmt.Sprintf("prewalk on — hands off to %s/%s after the first edit/write", prewalkTarget.Provider.Name(), prewalkTarget.Model)
+			return fmt.Sprintf("prewalk on — hands off to %s/%s after the first edit/write once a plan todo list exists", prewalkTarget.Provider.Name(), prewalkTarget.Model)
 		},
 		Set: func(on bool, into string) error {
 			if on {
