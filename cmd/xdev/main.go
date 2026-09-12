@@ -13,6 +13,7 @@ import (
 	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/marketplace"
 	"github.com/FreePeak/xdev/internal/memlimit"
+	"github.com/FreePeak/xdev/internal/serve"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tts"
 )
@@ -48,7 +49,7 @@ var appliedLimit int64
 var subcommands = map[string]bool{
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
-	"login": true, "logout": true, "version": true,
+	"login": true, "logout": true, "version": true, "serve": true,
 }
 
 func main() {
@@ -173,6 +174,9 @@ Flags:
 	}
 	if *modeFlag != "" {
 		mode = *modeFlag
+	}
+	if mode == "serve" {
+		os.Exit(serve.Dispatch(args, version))
 	}
 	if mode == "join" {
 		// Collab guest: mirror a shared session (M14 #59).
