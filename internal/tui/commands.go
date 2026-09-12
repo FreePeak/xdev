@@ -36,6 +36,11 @@ type SessionOps struct {
 	// abandoned branch, then moves the leaf to entryID (tree selector
 	// Shift+Enter). nil degrades to a notice.
 	SummarizeAndBranch func(entryID string) error
+	// Handoff replaces the live context with a handoff document (M5 #23):
+	// the host generates the document through a side request, commits it as
+	// a compaction entry on this session, and returns the document text.
+	// nil degrades the command to a notice.
+	Handoff func(instruction string) (string, error)
 }
 
 // ModelOps wires the /model command to the live provider state (lives in
@@ -155,6 +160,7 @@ type CommandAPI interface {
 	Memory(args string) error
 	Theme(args string) error
 	Prewalk(args string) error
+	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
 	AddSystemBlock(text string)
@@ -192,6 +198,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default @smol)",
 			Fn: func(app CommandAPI, args string) error { return app.Prewalk(args) }},
+		{Name: "handoff", Description: "replace the context with a handoff document (continues from it)",
+			Fn: func(app CommandAPI, args string) error { return app.Handoff(args) }},
 		{Name: "theme", Description: "show or switch the theme: /theme <name>",
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear",
@@ -226,6 +234,23 @@ func builtinCommands() []Command {
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
 			Fn: func(app CommandAPI, args string) error { app.Quit(); return nil }},
 	}
+}
+
+// Handoff implements CommandAPI: /handoff [instruction] hands the live
+// context off to a generated document (M5 #23). The document generation, the
+// compaction-entry commit, and the per-branch reset all live in cmd (the
+// store, the @smol role, and the advisor are wired there); this surfaces the
+// result — including the document itself, which is the point of the command.
+func (a *App) Handoff(args string) error {
+	if a.ops == nil || a.ops.Handoff == nil {
+		return fmt.Errorf("handoff not wired")
+	}
+	doc, err := a.ops.Handoff(strings.TrimSpace(args))
+	if err != nil {
+		return err
+	}
+	a.AddSystemBlock(doc + "\n\n· handoff committed — the next turn continues from this document")
+	return nil
 }
 
 // BashJobs renders the background bash job listing for /tasks. It defaults
