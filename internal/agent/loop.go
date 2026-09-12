@@ -183,6 +183,12 @@ type Agent struct {
 	// planmode.go.
 	PlanMode *PlanMode
 
+	// Goals is the session-scoped goal state (M11 #40; nil = goal mode
+	// off). The goal tool mutates it; Run injects a bounded reminder at
+	// each turn start and counts token spend at turn end. Left nil it is
+	// discovered from the tool registry on the first Run.
+	Goals *GoalState
+
 	// prewalk is the live state machine; Run is single-goroutine, no lock.
 	prewalk prewalkState
 
@@ -255,6 +261,15 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	if a.PlanMode != nil && a.PlanMode.Active {
 		system += "\n\n" + planModeSystemReminder(a.PlanMode.Note)
 	}
+	// Goal mode (M11 #40): the goal tool owns the session-scoped objective;
+	// bind it (and this run's event hook) so the loop can inject the
+	// per-turn reminder and account the budget.
+	if a.Goals == nil {
+		a.Goals = GoalStateOf(a.Tools)
+	}
+	if a.Goals != nil {
+		a.Goals.SetOnUpdate(GoalNotify(a.Hooks))
+	}
 	// Magic keywords (research §8): standalone prose words in the user's
 	// prompt inject a hidden, user-attributed notice for this turn. The
 	// notice is persisted so a compaction rebuild replays it consistently.
@@ -291,12 +306,18 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 		// Threshold maintenance: compact before the window overflows.
 		history = a.maybeCompact(ctx, history)
 		var hist []ai.Message
-		msg, hist, err := a.oneTurnWithRecovery(ctx, system, history)
+		msg, hist, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
 		if err != nil {
 			return lastAssistant, err
 		}
 		history = hist
 		lastAssistant = msg
+		// Goal budget accounting (M11 #40): count this turn's tokens and
+		// flip an overdrawn goal to budget_exhausted — reminders stop, and
+		// the objective is never completed implicitly.
+		if a.Goals != nil && msg.Usage != nil {
+			a.Goals.AddUsage(msg.Usage.TotalTokens)
+		}
 
 		if len(msg.ToolCalls()) == 0 {
 			a.Hooks.OnMessageEnd(msg)
@@ -334,13 +355,27 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}}
 	history = append(history, wrap)
 	a.persist(wrap)
-	msg, _, err := a.oneTurnWithRecovery(ctx, system, history)
+	msg, _, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
 	if err != nil {
 		return lastAssistant, err
 	}
 	a.Hooks.OnMessageEnd(msg)
 	emit("turn_end", map[string]any{"turn": limit})
 	return msg, nil
+}
+
+// goalSystem appends the bounded goal reminder for the active goal to the
+// turn's system context (unchanged when no goal is active). It is recomputed
+// per turn so "budget remaining" stays current; the base prompt is untouched,
+// so a cached prefix still matches.
+func (a *Agent) goalSystem(system string) string {
+	if a.Goals == nil {
+		return system
+	}
+	if rem := a.Goals.Reminder(); rem != "" {
+		return system + "\n\n" + rem
+	}
+	return system
 }
 
 // turnError marks a failed turn and whether any content event already
