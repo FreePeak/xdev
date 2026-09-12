@@ -81,6 +81,12 @@ type Settings struct {
 	// (default) or "local" (MEMORY.md + learned.md under the data dir,
 	// with the memory:// read seam and the learn tool).
 	Memory string `yaml:"memory"`
+	// MemoryPipeline enables the local backend's two-phase consolidation
+	// pipeline (M12 #13): "on" or "off" (the default). The YAML key is
+	// top-level memoryPipeline, because the omp-style dotted memory.pipeline
+	// path cannot sit next to the memory backend scalar; the pipeline is
+	// inert unless memory is also "local" (it needs somewhere to write).
+	MemoryPipeline string `yaml:"memoryPipeline"`
 	// Advisor runs a background reviewer on the session (M11, research §6).
 	// The reviewer model comes from modelRoles.advisor; without that role
 	// the flag warns and starts disarmed.
@@ -196,6 +202,12 @@ func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
 }
 
+// MemoryPipelineOn reports whether the local backend's two-phase pipeline
+// should run at session end (nil-safe; the shipped default is off).
+func (s *Settings) MemoryPipelineOn() bool {
+	return s != nil && s.MemoryPipeline == "on"
+}
+
 // CompactionMethodOrder returns the compaction.methodOrder setting in the
 // comma-separated form agent.ParseMethodOrder consumes (nil-safe: a missing
 // layer means "shipped default").
@@ -304,6 +316,9 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Memory != "" {
 		s.Memory = layer.Memory
 	}
+	if layer.MemoryPipeline != "" {
+		s.MemoryPipeline = layer.MemoryPipeline
+	}
 	if layer.Advisor {
 		// bool with a false default: only a layer that turns it ON
 		// contributes (there is no expressible "unset" for a plain bool,
@@ -376,6 +391,11 @@ func (s *Settings) merge(layer *Settings) error {
 			}
 			seen[r.Name] = true
 		}
+	}
+	switch s.MemoryPipeline {
+	case "", "on", "off":
+	default:
+		return fmt.Errorf("unknown memoryPipeline %q (want on|off)", s.MemoryPipeline)
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
@@ -505,6 +525,7 @@ func List(s *Settings, globalPath string) []string {
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),
+		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
 		"personality " + s.Personality,
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
 	}
