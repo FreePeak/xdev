@@ -49,6 +49,12 @@ type Settings struct {
 	// last-wins for input/result overrides. See internal/hooks.
 	Hooks             map[string]any `yaml:"hooks"`
 	DisabledProviders []string       `yaml:"disabledProviders"`
+	// EnabledProviders gates rules-discovery providers (M10 #30):
+	// empty = all providers run; otherwise only the named ones
+	// (native|omp-plugins|agents|cursor|windsurf|cline|github|builtin,
+	// or "all"). v1 scope: this gates the rulebook only, not model
+	// providers (disabledProviders keeps that role).
+	EnabledProviders []string `yaml:"enabledProviders"`
 	// ShowThinking renders model reasoning output in the transcript. A
 	// nil pointer means "unset in this layer" (the schema default is on);
 	// a plain bool could never express an explicit false through the
@@ -180,6 +186,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.DisabledProviders != nil {
 		s.DisabledProviders = append([]string(nil), layer.DisabledProviders...)
+	}
+	if layer.EnabledProviders != nil {
+		s.EnabledProviders = append([]string(nil), layer.EnabledProviders...)
 	}
 	if layer.Memory != "" {
 		s.Memory = layer.Memory
@@ -340,6 +349,9 @@ func List(s *Settings, globalPath string) []string {
 	out = append(out, "config "+globalPath)
 	if len(s.DisabledProviders) > 0 {
 		out = append(out, "disabledProviders "+strings.Join(s.DisabledProviders, ","))
+	}
+	if len(s.EnabledProviders) > 0 {
+		out = append(out, "enabledProviders "+strings.Join(s.EnabledProviders, ","))
 	}
 	return out
 }
