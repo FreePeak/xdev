@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -224,4 +226,93 @@ func openStartupSession(cwd string, opts printOptions) (*session.Store, error) {
 		return importForeignSession("codex", opts.FromCodex, cwd)
 	}
 	return openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
+}
+
+// session-pins.json sidecar: {"pins": ["<shortid>", ...]} — pinned
+// sessions sort first in the /resume picker. Keys are the 8-hex short ids
+// the picker rows carry.
+
+func pinsPath() string { return filepath.Join(config.DataDir(), "session-pins.json") }
+
+// loadSessionPins reads the pin set; any error means "no pins".
+func loadSessionPins() map[string]bool {
+	out := map[string]bool{}
+	b, err := os.ReadFile(pinsPath())
+	if err != nil {
+		return out
+	}
+	var v struct {
+		Pins []string `json:"pins"`
+	}
+	if json.Unmarshal(b, &v) == nil {
+		for _, id := range v.Pins {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func saveSessionPins(pins map[string]bool) error {
+	ids := make([]string, 0, len(pins))
+	for id, on := range pins {
+		if on {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	b, err := json.MarshalIndent(struct {
+		Pins []string `json:"pins"`
+	}{ids}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pinsPath(), append(b, '\n'), 0o644)
+}
+
+// toggleSessionPin flips one pin and persists the sidecar.
+func toggleSessionPin(shortID string) error {
+	pins := loadSessionPins()
+	if pins[shortID] {
+		delete(pins, shortID)
+	} else {
+		pins[shortID] = true
+	}
+	return saveSessionPins(pins)
+}
+
+// unpinSession drops a pin best-effort (delete cleanup).
+func unpinSession(shortID string) {
+	pins := loadSessionPins()
+	if !pins[shortID] {
+		return
+	}
+	delete(pins, shortID)
+	_ = saveSessionPins(pins)
+}
+
+// deleteSessionByShortID removes the session's JSONL plus its artifacts
+// dir (xdev spills no per-session artifacts today, but the omp layout
+// keeps them under dataDir/artifacts/<id> — best-effort RemoveAll for
+// forward compatibility) and drops its pin. Deleting the active session
+// is refused: its store is live.
+func deleteSessionByShortID(shortID, activePath string) error {
+	metas, err := session.List(config.DataDir())
+	if err != nil {
+		return err
+	}
+	for _, m := range metas {
+		if len(m.ID) < 8 || m.ID[:8] != shortID {
+			continue
+		}
+		if m.Path == activePath {
+			return fmt.Errorf("cannot delete the active session")
+		}
+		if err := os.Remove(m.Path); err != nil {
+			return err
+		}
+		os.RemoveAll(filepath.Join(config.DataDir(), "artifacts", shortID))
+		unpinSession(shortID)
+		return nil
+	}
+	return fmt.Errorf("no session %s", shortID)
 }

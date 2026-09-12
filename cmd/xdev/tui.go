@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -300,6 +301,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("resume: " + err.Error())
 		}
 	})
+	// Picker extras (issue #26): prompt-text search, pin sidecar, delete.
+	app.SetPickerSearch(func(query string) []tui.PickerItem {
+		return searchPickerItems(cwd, query)
+	})
+	app.SetPickerPinToggle(func(id string) {
+		if err := toggleSessionPin(id); err != nil {
+			app.AddSystemBlock("pin: " + err.Error())
+		}
+	})
+	app.SetPickerDelete(func(id string) error {
+		return deleteSessionByShortID(id, store.Path())
+	})
 	app.SetResumeList(func(cwd string) error {
 		metas, err := session.List(config.DataDir())
 		if err != nil {
@@ -379,9 +392,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
 			if query == "" {
-				// Interactive picker (omp/Claude Code /resume): rows are
-				// this project's sessions, newest first; Up/Down + Enter
-				// resumes, Esc closes. No candidates → text listing.
+				// Interactive picker (omp/Claude Code /resume): rows
+				// span all projects (Tab toggles scope; the picker
+				// defaults to this folder and shows the Tab hint when
+				// the folder has no sessions), newest first;
+				// Up/Down + Enter resumes, Esc closes. No candidates
+				// at all → text listing.
 				items := resumePickerItems(cwd)
 				if len(items) == 0 {
 					return app.ListSessions(cwd)
@@ -919,32 +935,137 @@ func roleNamesSorted(m map[string]string) []string {
 	return out
 }
 
-// resumePickerItems lists this project's resumable sessions as picker
-// rows: short id, title, mtime, size. Subagent children and other
-// projects are filtered out (same rules as the text listing); session.List
-// is newest-first. Capped at 12 rows — the picker windows, but a giant
-// list is not useful to scroll through either.
+// resumePickerItems lists resumable sessions as picker rows across ALL
+// projects (session.List already scans every bucket): subagent children
+// are filtered out (same rules as the text listing); session.List is
+// newest-first. Rows carry InCwd so the TUI can window the
+// current-folder scope without a second scan, and Pinned from the
+// session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
+// browsing while the picker windows to 8 visible rows.
 func resumePickerItems(cwd string) []tui.PickerItem {
 	metas, err := session.List(config.DataDir())
 	if err != nil {
 		return nil
 	}
+	pins := loadSessionPins()
 	var out []tui.PickerItem
 	for _, m := range metas {
-		if m.CWD != cwd || m.TitleSource == "subagent" || len(m.ID) < 8 {
+		if m.TitleSource == "subagent" || len(m.ID) < 8 {
 			continue
 		}
 		out = append(out, tui.PickerItem{
-			ID:    m.ID[:8],
-			Title: m.Title,
-			Mtime: m.ModTime.Format("Jan 02 15:04"),
-			Size:  humanSize(m.SizeBytes),
+			ID:     m.ID[:8],
+			Title:  m.Title,
+			Mtime:  m.ModTime.Format("Jan 02 15:04"),
+			Size:   humanSize(m.SizeBytes),
+			Pinned: pins[m.ID[:8]],
+			InCwd:  m.CWD == cwd,
 		})
-		if len(out) >= 12 {
+		if len(out) >= 50 {
 			break
 		}
 	}
 	return out
+}
+
+// searchPickerItems ranks sessions for the picker query: every
+// whitespace-separated token must match the id or title (the TUI re-checks
+// scope + id/title itself), and sessions whose JSONL body contains the
+// tokens count as prompt matches — matches rank by match count: id/title
+// hits count double, body hits count occurrences. The body scan is capped
+// (64 KiB per file, 50 files) — the picker runs per keystroke.
+func searchPickerItems(cwd, query string) []tui.PickerItem {
+	items := resumePickerItems(cwd)
+	tokens := strings.Fields(strings.ToLower(query))
+	if len(tokens) == 0 {
+		return items
+	}
+	type ranked struct {
+		item  tui.PickerItem
+		score int
+	}
+	var out []ranked
+	for _, it := range items {
+		hay := strings.ToLower(it.ID + " " + it.Title)
+		score, ok := 0, true
+		var body []string // tokens the id/title did not satisfy
+		for _, t := range tokens {
+			if strings.Contains(hay, t) {
+				score += 2 // id/title match counts double
+			} else {
+				body = append(body, t)
+			}
+		}
+		if len(body) > 0 {
+			if n := countSessionFileTokens(it.ID, body); n > 0 {
+				score += n // prompt matches rank by occurrence count
+			} else {
+				ok = false
+			}
+		}
+		if ok {
+			out = append(out, ranked{item: it, score: score})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
+	res := make([]tui.PickerItem, 0, len(out))
+	for _, r := range out {
+		res = append(res, r.item)
+	}
+	return res
+}
+
+// countSessionFileTokens counts query-token occurrences in the first
+// 64 KiB of a candidate session JSONL (case-insensitive); 0 when ANY
+// token is absent. Files are named <timestamp>_<id>.jsonl, so the short
+// id locates them under sessions/<bucket>/.
+func countSessionFileTokens(shortID string, tokens []string) int {
+	if len(shortID) < 8 {
+		return 0
+	}
+	paths := make([]string, 0, 4)
+	root := session.SessionsRoot(config.DataDir())
+	buckets, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	for _, b := range buckets {
+		if !b.IsDir() {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(root, b.Name()))
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if !f.IsDir() && strings.Contains(f.Name(), shortID) {
+				paths = append(paths, filepath.Join(root, b.Name(), f.Name()))
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return 0
+	}
+	f, err := os.Open(paths[0])
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, 64<<10)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return 0
+	}
+	hay := strings.ToLower(string(buf[:n]))
+	total := 0
+	for _, t := range tokens {
+		c := strings.Count(hay, t)
+		if c == 0 {
+			return 0
+		}
+		total += c
+	}
+	return total
 }
 
 // humanSize renders bytes the way the token counter renders numbers.
