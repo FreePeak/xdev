@@ -96,13 +96,13 @@ func pickerRowText(it PickerItem) string {
 // drawSessionPicker renders the selector above the composer (same chrome
 // as the slash dropdown).
 func (a *App) drawSessionPicker(yComposerTop int) {
-	if !a.SessionPickerOpen() {
+	// Callers hold a.mu (draw does), so this must not re-lock — use the
+	// internal accessors directly (SessionPickerOpen would deadlock).
+	if a.spick == nil || !a.spick.active() {
 		return
 	}
-	a.mu.Lock()
 	items := append([]PickerItem(nil), a.spick.items...)
 	sel := a.spick.sel
-	a.mu.Unlock()
 
 	rows := items
 	if len(rows) > 8 {
