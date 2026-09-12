@@ -14,6 +14,7 @@ import (
 
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/browser"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/ext"
@@ -1000,6 +1001,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	reg.Register(&agent.NotesTool{Notes: notes})
 	reg.Register(&agent.NewContextTool{Notes: notes})
 	tool.RegisterURIScheme("history", notes.ResolveHistory)
+	// M13 #50: browser — CDP attach to an already-running Chrome. Never
+	// launches a browser; screenshots land in the session blob store.
+	reg.Register(browser.NewTool(settings.BrowserConfig(), session.NewBlobStore(config.DataDir())))
 
 	return reg
 }
