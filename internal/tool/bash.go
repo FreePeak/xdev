@@ -38,6 +38,24 @@ type bashArgs struct {
 	RunInBackground bool   `json:"run_in_background,omitempty"`
 }
 
+// RewriteBashCommand replaces the command in bash arguments, preserving the
+// other fields (timeout, workdir, run_in_background) so an interceptor's
+// rewrite runs under the same call settings (M13 #56). It returns nil when
+// the arguments cannot be parsed or re-encoded, which the caller treats as a
+// fail-closed denial rather than as "no rewrite".
+func RewriteBashCommand(args json.RawMessage, command string) json.RawMessage {
+	var v bashArgs
+	if err := json.Unmarshal(args, &v); err != nil {
+		return nil
+	}
+	v.Command = command
+	out, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // bashDetails is persisted in Result.Details.
 type bashDetails struct {
 	ExitCode    int    `json:"exitCode"`

@@ -10,9 +10,27 @@ import (
 // plus ordered bash glob patterns, resolved deny > prompt > allow, and
 // consulted by the agent loop through the Prompter seam.
 //
-// Compound commands are resolved conservatively: `a && rm -rf /` is judged
-// on BOTH sides, and the strictest verdict wins, so an innocuous prefix
-// can't smuggle a denied command.
+// Compound commands are resolved conservatively by default: `a && rm -rf /`
+// is judged on BOTH sides, and the strictest verdict wins, so an innocuous
+// prefix can't smuggle a denied command. Deny rules are absolute under
+// either regime: no per-tool allow, approval mode, or whole-command allow
+// lifts one.
+//
+// bash.allowCompoundCommands (default off) opts the prompt/allow layers into
+// the other regime: the command is offered to the rules AS A WHOLE first
+// (wholeCommandRule), and only when no rule matches the whole string does
+// resolution fall back to the per-segment scan below. SECURITY TRADEOFF: a
+// glob over a compound sees operators as ordinary characters, so
+// `allow:npm test *` also matches `npm test && npm run lint` — and because a
+// whole match decides the command, the per-segment rules that would
+// otherwise prompt about the other segments never run. That is the point of
+// the opt-in (approve a whole compound once, by pattern) and the reason it
+// ships off: enable it only with a pattern set written for whole commands,
+// and keep the deny rules that carry the real safety.
+//
+// bash.interceptor (see interceptor.go) is consulted by the agent loop at
+// this same seam: its rewrite replaces the command and is then judged here
+// like any other command.
 
 // Action is one policy verdict for a single tool invocation.
 type Action int
@@ -66,6 +84,14 @@ type ApprovalPolicy struct {
 	PerTool map[string]Action
 	// BashPatterns is ORDERED: the first matching rule decides.
 	BashPatterns []PolicyRule
+	// AllowCompoundCommands matches a compound command against the rules as
+	// ONE string before falling back to per-segment resolution
+	// (settings bash.allowCompoundCommands; default off). See the
+	// package-level note above for the tradeoff it accepts.
+	AllowCompoundCommands bool
+	// BashInterceptor is the settings-declared external reviewer
+	// (bash.interceptor); its zero value means "no interceptor".
+	BashInterceptor BashInterceptor
 }
 
 // ModeOf exposes a policy's mode for tests and diagnostics.
@@ -79,7 +105,8 @@ type Decision struct {
 
 // Decide resolves one invocation. Precedence:
 //
-//	deny rule > explicit per-tool rule > bash pattern > mode+tier default
+//	deny rule > explicit per-tool rule > bash pattern (whole command first
+//	when the compound opt-in is on, else per segment) > mode+tier default
 //
 // A tool name outside the tier table (grep/glob/ast tools, ext_*/mcp_*)
 // classifies conservatively as TierExec, so dynamically registered tools
@@ -93,9 +120,11 @@ func (p ApprovalPolicy) Decide(toolName string, args json.RawMessage) (Decision,
 	}
 	if toolName == "bash" {
 		cmd := bashCommand(args)
-		// deny is absolute: no per-tool allow or mode can lift it.
+		// deny is absolute: no per-tool allow or mode can lift it, and the
+		// compound opt-in only widens it (a rule written for a whole
+		// compound now fires too).
 		for _, r := range p.BashPatterns {
-			if r.Action == ActionDeny && matchCommand(r.Pattern, cmd) {
+			if r.Action == ActionDeny && p.matchesCommand(r.Pattern, cmd) {
 				return Decision{Action: ActionDeny, Reason: "bash.patterns deny " + quote(r.Pattern)}, nil
 			}
 		}
@@ -113,6 +142,20 @@ func (p ApprovalPolicy) Decide(toolName string, args json.RawMessage) (Decision,
 	}
 	if toolName == "bash" {
 		cmd := bashCommand(args)
+		if p.AllowCompoundCommands {
+			// Whole-command opt-in (M13 #56): the compound is offered to the
+			// rules as one string first, so a rule written for the whole
+			// command ("allow:npm test *") can decide it; only when no rule
+			// matches the whole command does resolution fall back to the
+			// per-segment scan below. Deny rules were already resolved
+			// absolutely, above and per segment.
+			if r, ok := wholeCommandRule(p.BashPatterns, cmd); ok {
+				if r.Action == ActionPrompt {
+					return Decision{Action: ActionPrompt, Reason: "bash.patterns prompt " + quote(r.Pattern) + " (whole command)"}, nil
+				}
+				return Decision{Action: ActionAllow}, nil
+			}
+		}
 		for _, r := range p.BashPatterns {
 			if r.Action != ActionPrompt {
 				continue
@@ -154,15 +197,75 @@ func matchCommand(pattern, command string) bool {
 	return false
 }
 
-// splitCompound breaks a shell line on the operators that sequence
-// commands. Quotes are respected so `echo "a && b"` stays one segment.
+// matchesCommand reports whether one rule governs a command: per segment by
+// default, or — under the bash.allowCompoundCommands opt-in — also against
+// the compound as a whole string.
+func (p ApprovalPolicy) matchesCommand(pattern, command string) bool {
+	if p.AllowCompoundCommands && globMatch(pattern, command) {
+		return true
+	}
+	return matchCommand(pattern, command)
+}
+
+// wholeCommandRule returns the rule that decides a command as ONE string.
+// Deny rules are skipped (they are resolved absolutely, ahead of
+// everything); prompt beats allow, and order breaks ties inside a class, so
+// the whole-command layer keeps the deny > prompt > allow precedence.
+// ok=false means no rule matched the whole command and the caller falls
+// back to per-segment resolution.
+//
+// This is where the opt-in's tradeoff lives: the string it matches against
+// contains shell operators, so a pattern like "npm test *" spans them (see
+// the package-level note).
+func wholeCommandRule(rules []PolicyRule, command string) (PolicyRule, bool) {
+	if strings.TrimSpace(command) == "" {
+		return PolicyRule{}, false
+	}
+	for _, want := range []Action{ActionPrompt, ActionAllow} {
+		for _, r := range rules {
+			if r.Action == want && globMatch(r.Pattern, command) {
+				return r, true
+			}
+		}
+	}
+	return PolicyRule{}, false
+}
+
+// splitCompound breaks a shell line on the operators that sequence or
+// compose commands: `;`, `&`/`&&`, `|`/`||`, the list/subshell parens, the
+// backtick substitution, and newlines. Quotes are respected, so
+// `echo "a && b"` stays one segment — a quoted operator is data.
+//
+// Splitting on pipes, subshells and substitutions (not just on the
+// sequencing operators) is the conservative direction: a denied command
+// hidden behind `|` or `$(…)` is still judged, which is what makes "deny if
+// ANY segment denies" mean what it says. A substitution inside double
+// quotes stays part of its segment, so it is only judged as outer text —
+// whole-command rules (bash.allowCompoundCommands) are what cover that.
 func splitCompound(command string) []string {
+	segs := splitOnOperators(command)
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		if seg = trimSegment(seg); seg != "" {
+			out = append(out, seg)
+		}
+	}
+	return out
+}
+
+// splitOnOperators cuts the line at every unquoted operator, keeping the
+// pieces verbatim (trimSegment cleans their edges).
+func splitOnOperators(command string) []string {
 	var segs []string
 	var cur strings.Builder
 	var quote byte
-	s := command
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	skip := false
+	for i := range len(command) {
+		if skip {
+			skip = false
+			continue // the second half of && / ||
+		}
+		c := command[i]
 		switch {
 		case quote != 0:
 			cur.WriteByte(c)
@@ -172,27 +275,34 @@ func splitCompound(command string) []string {
 		case c == '\'' || c == '"':
 			quote = c
 			cur.WriteByte(c)
-		case c == ';' || (c == '&' && i+1 < len(s) && s[i+1] == '&') || (c == '|' && i+1 < len(s) && s[i+1] == '|'):
-			segs = append(segs, strings.TrimSpace(cur.String()))
+		case isCompoundOperator(c):
+			segs = append(segs, cur.String())
 			cur.Reset()
-			if c != ';' {
-				i++ // consume the second char of && / ||
+			if (c == '&' || c == '|') && i+1 < len(command) && command[i+1] == c {
+				skip = true // && and || are one operator, not two
 			}
-		case c == '\n':
-			segs = append(segs, strings.TrimSpace(cur.String()))
-			cur.Reset()
 		default:
 			cur.WriteByte(c)
 		}
 	}
-	segs = append(segs, strings.TrimSpace(cur.String()))
-	out := make([]string, 0, len(segs))
-	for _, g := range segs {
-		if g != "" {
-			out = append(out, g)
-		}
+	return append(segs, cur.String())
+}
+
+// isCompoundOperator reports whether c starts a new command.
+func isCompoundOperator(c byte) bool {
+	switch c {
+	case ';', '&', '|', '(', ')', '`', '\n':
+		return true
 	}
-	return out
+	return false
+}
+
+// trimSegment strips the whitespace and boundary punctuation a split leaves
+// on a segment, so `$(rm -rf /)` yields `rm -rf /` and `{ cd /tmp` yields
+// `cd /tmp`: a rule written without wildcards must still see the command
+// itself.
+func trimSegment(seg string) string {
+	return strings.Trim(seg, " \t\r\n;&|(){}`$")
 }
 
 // globMatch matches command text with `*` (any run, INCLUDING spaces and
