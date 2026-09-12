@@ -313,15 +313,20 @@ func truncateNotes(text string) (string, bool) {
 	return text[:keep] + notesTruncationMarker, true
 }
 
-// rolloverCut picks where the retained tail starts in res: the last
-// rolloverKeepEntries messages, capped at rolloverKeepBytes of text, advanced
-// off tool results (their call would be dropped with the middle) and onto a
-// message with a real entry anchor. -1 when nothing can be dropped (fewer than
-// one exchange leaves the window, or the tail has no anchor).
+// rolloverCut picks where the retained tail starts in res: at most
+// rolloverKeepEntries messages (and at most rolloverKeepBytes of text), always
+// leaving at least one exchange behind the boundary — a rollover that dropped
+// nothing, or everything, would not be one. The tail start is advanced off tool
+// results (their call would be dropped with the middle) and onto a message with
+// a real entry anchor. -1 when no cut qualifies.
 func rolloverCut(res *session.ContextResult) int {
 	msgs := res.Messages
+	if len(msgs) < 3 {
+		return -1 // nothing to drop: keep the whole (tiny) context
+	}
+	keep := min(rolloverKeepEntries, len(msgs)-2)
 	cut, size := len(msgs), 0
-	for cut > 1 && len(msgs)-cut < rolloverKeepEntries && size < rolloverKeepBytes {
+	for len(msgs)-cut < keep && size < rolloverKeepBytes {
 		cut--
 		size += len(msgs[cut].Text()) + 64
 	}
