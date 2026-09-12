@@ -55,6 +55,41 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// LSP declares language servers for the lsp tool (M13 #52). Absent =
+	// the built-in servers (gopls, rust-analyzer, typescript-language-server,
+	// pyright-langserver), all launched lazily on first use.
+	LSP *LSPConfig `yaml:"lsp"`
+}
+
+// LSPConfig is the lsp: settings block.
+type LSPConfig struct {
+	// Lazy defers the launch to the first lsp call (default true). Setting
+	// it false warms up servers whose root marker is present at session start.
+	Lazy *bool `yaml:"lazy"`
+	// IdleTimeout is a Go duration ("5m"); a running server is stopped after
+	// this long without a query.
+	IdleTimeout string `yaml:"idleTimeout"`
+	// Servers is keyed by language name (go, rust, ...). An entry merges onto
+	// the built-in server of that language, so overriding just the command
+	// keeps the built-in file types and root markers.
+	Servers map[string]LSPServer `yaml:"servers"`
+}
+
+// LSPServer is one language server command.
+type LSPServer struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+	// FileTypes are the extensions (with or without the dot) this server
+	// claims, used to route a file to a server.
+	FileTypes []string `yaml:"fileTypes"`
+	// RootMarkers are the project markers (go.mod, .git, ...) searched
+	// upward from the file to pick the server's root directory.
+	RootMarkers []string `yaml:"rootMarkers"`
+	// RootPatterns is an accepted alias for rootMarkers.
+	RootPatterns []string `yaml:"rootPatterns"`
+	// InitOptions is passed through as initializationOptions.
+	InitOptions map[string]any `yaml:"initOptions"`
+	Disabled    bool           `yaml:"disabled"`
 }
 
 // defaultSettings is the schema-defaults layer.
@@ -187,6 +222,23 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	if layer.LSP != nil {
+		if s.LSP == nil {
+			s.LSP = &LSPConfig{}
+		}
+		if layer.LSP.Lazy != nil {
+			s.LSP.Lazy = layer.LSP.Lazy
+		}
+		if layer.LSP.IdleTimeout != "" {
+			s.LSP.IdleTimeout = layer.LSP.IdleTimeout
+		}
+		if len(layer.LSP.Servers) > 0 && s.LSP.Servers == nil {
+			s.LSP.Servers = map[string]LSPServer{}
+		}
+		for k, v := range layer.LSP.Servers {
+			s.LSP.Servers[k] = v
+		}
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":

@@ -18,6 +18,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ext"
 	hookbus "github.com/FreePeak/xdev/internal/hooks"
 	"github.com/FreePeak/xdev/internal/logx"
+	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/session"
@@ -619,6 +620,11 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	if mem := buildMemory(settings); mem != nil {
 		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
 	}
+	// M13 #52: language-server queries. Servers launch lazily on the first
+	// lsp call (lsp.lazy: false opts into eager warmup).
+	lspTool := lsp.NewTool(cwd, settings)
+	reg.Register(lspTool)
+	lspTool.Prewarm()
 
 	return reg
 }
