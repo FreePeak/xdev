@@ -181,6 +181,10 @@ type Settings struct {
 	// the built-in servers (gopls, rust-analyzer, typescript-language-server,
 	// pyright-langserver), all launched lazily on first use.
 	LSP *LSPConfig `yaml:"lsp"`
+	// Debug declares debug adapters for the debug tool (M15 #66). Absent =
+	// the built-in adapters (dlv, debugpy, lldb-dap), all started lazily on
+	// the first launch or attach.
+	Debug *DebugConfig `yaml:"debug"`
 	// WebSearch configures the web_search provider chain (M13 #48):
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
@@ -371,6 +375,31 @@ type LSPServer struct {
 	// InitOptions is passed through as initializationOptions.
 	InitOptions map[string]any `yaml:"initOptions"`
 	Disabled    bool           `yaml:"disabled"`
+}
+
+// DebugConfig is the debug: settings block (M15 #66).
+type DebugConfig struct {
+	// Timeout is a Go duration ("30s") bounding one DAP request and one
+	// post-continue stop wait.
+	Timeout string `yaml:"timeout"`
+	// Adapters is keyed by adapter id (dlv, debugpy, lldb-dap, or any
+	// custom name). An entry for a built-in id merges onto it, so
+	// overriding just the command keeps the built-in languages.
+	Adapters map[string]DebugAdapter `yaml:"adapters"`
+}
+
+// DebugAdapter is one debug adapter command.
+type DebugAdapter struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+	// Languages are the languages this adapter serves (go, python, c, cpp,
+	// rust, or a custom name), used to pick an adapter from the debugged
+	// file's extension when none is named.
+	Languages []string `yaml:"languages"`
+	// Socket marks an adapter that answers DAP on a TCP port instead of
+	// stdio: xdev listens on a loopback port and passes
+	// --client-addr=<host:port> so the adapter dials back (dlv's mode).
+	Socket bool `yaml:"socket"`
 }
 
 // WebSearchSettings is the webSearch config block: ordered providers,
@@ -764,6 +793,26 @@ func (s *Settings) merge(layer *Settings) error {
 		}
 		for k, v := range layer.LSP.Servers {
 			s.LSP.Servers[k] = v
+		}
+	}
+	// debug: adapters merge per id (a layer overriding one adapter keeps the
+	// others), and the timeout is validated here so a typo is reported
+	// instead of silently falling back to the default.
+	if layer.Debug != nil {
+		if s.Debug == nil {
+			s.Debug = &DebugConfig{}
+		}
+		if layer.Debug.Timeout != "" {
+			if _, err := time.ParseDuration(layer.Debug.Timeout); err != nil {
+				return fmt.Errorf("debug.timeout %q: %w", layer.Debug.Timeout, err)
+			}
+			s.Debug.Timeout = layer.Debug.Timeout
+		}
+		if len(layer.Debug.Adapters) > 0 && s.Debug.Adapters == nil {
+			s.Debug.Adapters = map[string]DebugAdapter{}
+		}
+		for k, v := range layer.Debug.Adapters {
+			s.Debug.Adapters[k] = v
 		}
 	}
 	// webSearch: the provider list is replaced wholesale (an overlay that
