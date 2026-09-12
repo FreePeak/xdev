@@ -55,6 +55,10 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// Personality selects the prompt-tail preset (M10 #32, omp parity):
+	// default | friendly | pragmatic | none. A PERSONALITY.md override
+	// always beats the preset; "none" omits the block.
+	Personality string `yaml:"personality"`
 }
 
 // defaultSettings is the schema-defaults layer.
@@ -78,6 +82,7 @@ func defaultSettings() *Settings {
 		ModelRolesEffort: map[string]string{},
 		Hooks:            map[string]any{},
 		ShowThinking:     &show,
+		Personality:      "default",
 	}
 }
 
@@ -188,10 +193,18 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
 	}
+	if layer.Personality != "" {
+		s.Personality = layer.Personality
+	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
 	default:
 		return fmt.Errorf("unknown approvalMode %q (want always-ask|write|yolo)", s.ApprovalMode)
+	}
+	switch s.Personality {
+	case "default", "friendly", "pragmatic", "none":
+	default:
+		return fmt.Errorf("unknown personality %q (want default|friendly|pragmatic|none)", s.Personality)
 	}
 	return nil
 }
@@ -311,6 +324,7 @@ func List(s *Settings, globalPath string) []string {
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),
+		"personality " + s.Personality,
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)

@@ -85,3 +85,75 @@ func TestBundledToolsFitTheCap(t *testing.T) {
 		}
 	}
 }
+
+// TestTitleSystemPromptDiscovery pins TITLE_SYSTEM.md precedence —
+// project, then user, then absent — and the accessor a future ai-title
+// call reads (xdev titles are mechanical today).
+func TestTitleSystemPromptDiscovery(t *testing.T) {
+	proj := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userDir := filepath.Join(home, ".xdev", "agent")
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Absent everywhere: the field and the accessor both stay empty.
+	if o := LoadSystemPromptOverrides(proj); o.Title != "" || o.TitleSystemPrompt() != "" {
+		t.Fatalf("absent TITLE_SYSTEM.md = %q", o.Title)
+	}
+
+	// User-level only.
+	os.WriteFile(filepath.Join(userDir, "TITLE_SYSTEM.md"), []byte("user title prompt"), 0o644)
+	o := LoadSystemPromptOverrides(proj)
+	if o.Title != "user title prompt" {
+		t.Fatalf("user-level = %q", o.Title)
+	}
+	if o.TitleSystemPrompt() != o.Title {
+		t.Fatalf("accessor = %q, want %q", o.TitleSystemPrompt(), o.Title)
+	}
+
+	// Project-level beats user-level.
+	os.WriteFile(filepath.Join(proj, "TITLE_SYSTEM.md"), []byte("project title prompt"), 0o644)
+	if o := LoadSystemPromptOverrides(proj); o.Title != "project title prompt" {
+		t.Fatalf("project-level = %q", o.Title)
+	}
+}
+
+// TestApplyPersonalityPreset pins the preset enum: each preset resolves
+// to its paragraph, "none"/"" inject nothing, an unknown value errors,
+// and a discovered PERSONALITY.md beats the preset.
+func TestApplyPersonalityPreset(t *testing.T) {
+	for _, preset := range []string{"default", "friendly", "pragmatic"} {
+		if !ValidPersonality(preset) {
+			t.Fatalf("%q must be a valid preset", preset)
+		}
+		var o SystemPromptOverrides
+		if err := o.ApplyPersonalityPreset(preset); err != nil {
+			t.Fatalf("%s: %v", preset, err)
+		}
+		if o.Personality == "" || o.Personality != PersonalityPresets[preset] {
+			t.Fatalf("%s = %q", preset, o.Personality)
+		}
+	}
+	for _, off := range []string{"none", ""} {
+		o := SystemPromptOverrides{}
+		if err := o.ApplyPersonalityPreset(off); err != nil {
+			t.Fatalf("%s: %v", off, err)
+		}
+		if o.Personality != "" {
+			t.Fatalf("%s must inject nothing, got %q", off, o.Personality)
+		}
+	}
+	if err := (&SystemPromptOverrides{}).ApplyPersonalityPreset("moody"); err == nil {
+		t.Fatal("an unknown preset must be rejected")
+	}
+	// The file beats the preset.
+	file := SystemPromptOverrides{Personality: "from the file"}
+	if err := file.ApplyPersonalityPreset("friendly"); err != nil {
+		t.Fatal(err)
+	}
+	if file.Personality != "from the file" {
+		t.Fatalf("file should beat the preset, got %q", file.Personality)
+	}
+}
