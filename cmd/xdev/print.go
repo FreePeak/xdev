@@ -319,6 +319,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
 	applyPolicy(ag, settings)
+	// M13 #55: secrets.yml redaction — placeholders out, real values in.
+	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
