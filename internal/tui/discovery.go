@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // MarkdownCommand is one slash command discovered from a markdown file.
@@ -16,16 +18,10 @@ type MarkdownCommand struct {
 	Path        string // absolute source path (diagnostics only)
 }
 
-// userCommandsDir returns the user-level command root (~/.xdev/agent). It is
-// a var, not a plain call, so tests can swap it for a temp dir and discovery
-// never reads the developer's real home directory.
-var userCommandsDir = func() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".xdev", "agent")
-}
+// userCommandsDir returns the user-level command root (config.DataDir). It
+// is a var, not a plain call, so tests can swap it for a temp dir and
+// discovery never reads the developer's real home directory.
+var userCommandsDir = config.DataDir
 
 // DiscoverCommands finds markdown slash commands for cwd. Project root
 // <cwd>/.xdev/commands/*.md wins over user root ~/.xdev/agent/commands/*.md
