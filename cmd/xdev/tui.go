@@ -282,6 +282,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return out
 	})
 
+	app.SetPickerResume(func(id string) {
+		if id == "" {
+			return
+		}
+		path, err := resolveResumeID(cwd, id)
+		if err != nil {
+			app.AddSystemBlock("resume: " + err.Error())
+			return
+		}
+		resumed, err := session.Open(path)
+		if err != nil {
+			app.AddSystemBlock("resume: " + err.Error())
+			return
+		}
+		if err := swapStoreTo(resumed); err != nil {
+			app.AddSystemBlock("resume: " + err.Error())
+		}
+	})
 	app.SetResumeList(func(cwd string) error {
 		metas, err := session.List(config.DataDir())
 		if err != nil {
@@ -294,7 +312,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				continue
 			}
 			count++
-			msg := fmt.Sprintf("%-8s  %s  (%d entries, last %s)", m.ID[:8], m.Title, len(metas), m.ModTime.Format("Jan 02 15:04"))
+			msg := fmt.Sprintf("%-8s  %s  (%s, last %s)", m.ID[:8], m.Title, humanSize(m.SizeBytes), m.ModTime.Format("Jan 02 15:04"))
 			lines = append(lines, msg)
 			if count >= 12 {
 				break
@@ -361,9 +379,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
 			if query == "" {
-				// Show the recent-sessions list like Claude Code's picker
-				// (without the dialog chrome, which is M12).
-				return app.ListSessions(cwd)
+				// Interactive picker (omp/Claude Code /resume): rows are
+				// this project's sessions, newest first; Up/Down + Enter
+				// resumes, Esc closes. No candidates → text listing.
+				items := resumePickerItems(cwd)
+				if len(items) == 0 {
+					return app.ListSessions(cwd)
+				}
+				app.OpenSessionPicker(items)
+				return nil
 			}
 			path, err := resolveResumeID(cwd, query)
 			if err != nil {
@@ -847,4 +871,43 @@ func roleNamesSorted(m map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// resumePickerItems lists this project's resumable sessions as picker
+// rows: short id, title, mtime, size. Subagent children and other
+// projects are filtered out (same rules as the text listing); session.List
+// is newest-first. Capped at 12 rows — the picker windows, but a giant
+// list is not useful to scroll through either.
+func resumePickerItems(cwd string) []tui.PickerItem {
+	metas, err := session.List(config.DataDir())
+	if err != nil {
+		return nil
+	}
+	var out []tui.PickerItem
+	for _, m := range metas {
+		if m.CWD != cwd || m.TitleSource == "subagent" || len(m.ID) < 8 {
+			continue
+		}
+		out = append(out, tui.PickerItem{
+			ID:    m.ID[:8],
+			Title: m.Title,
+			Mtime: m.ModTime.Format("Jan 02 15:04"),
+			Size:  humanSize(m.SizeBytes),
+		})
+		if len(out) >= 12 {
+			break
+		}
+	}
+	return out
+}
+
+// humanSize renders bytes the way the token counter renders numbers.
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%d KB", n>>10)
+	}
+	return fmt.Sprintf("%d B", n)
 }
