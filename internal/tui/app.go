@@ -54,6 +54,7 @@ type App struct {
 	memoryOps      *MemoryOps        // /memory, wired by cmd (nil → notices)
 	themeOps       *ThemeOps         // /theme, wired by cmd (nil → notices)
 	prewalkOps     *PrewalkOps       // /prewalk, wired by cmd (nil → notices)
+	goalOps        *GoalOps          // /goal, wired by cmd (nil → notices)
 	spick          *sessionPicker    // /resume selector (nil = closed)
 	onPickerResume func(id string)   // wired by cmd: performs the resume
 	settingsOps    *SettingsOps      // /settings, wired by cmd (nil → notices)
@@ -435,6 +436,19 @@ func (a *App) Prewalk(args string) error {
 	default:
 		return fmt.Errorf("prewalk: use /prewalk, /prewalk on|off, or /prewalk into <ref>")
 	}
+	return nil
+}
+
+// SetGoalOps wires the /goal command (the goal state lives in cmd).
+func (a *App) SetGoalOps(ops *GoalOps) { a.goalOps = ops }
+
+// Goal implements CommandAPI /goal: it shows the current goal and budget
+// (create/complete go through the goal tool). A nil seam degrades to a notice.
+func (a *App) Goal(_ string) error {
+	if a.goalOps == nil || a.goalOps.View == nil {
+		return fmt.Errorf("goal view not wired")
+	}
+	a.AddSystemBlock(a.goalOps.View())
 	return nil
 }
 
