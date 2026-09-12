@@ -85,9 +85,8 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		Failovers:  failoverChain(cfg, provName, modelName),
 		Thinking:   effortBudget(effortRef),
 	}
-	// M13 #54/#79: bridge the deferred-tool catalog into this agent's call
-	// path (tool_call was "no runner installed" outside print mode).
-	h.agent.WireCatalog(reg.Catalog())
+	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
+	wireAgentMode(h.agent, reg, cwd)
 
 	// Extension processes: tools join the registry, and the manager is the
 	// agent's fail-closed policy interceptor; actions steer the live run.

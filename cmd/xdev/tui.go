@@ -296,9 +296,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Store:      store,
 			Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
 			PlanMode:   planMode,
-			Redactor:   config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) }),
 			Handoff:    handoffSettings(),
 		}
+		wireAgentMode(ag, reg, cwd)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
 	// -handoff: document the resumed session before the first turn.
@@ -1407,11 +1407,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Policy:  agentPolicy(),
 					Handoff: handoffSettings(),
 				}
-				// M13 #54/#79: tool_call bridges into THIS agent's call path,
-				// so a catalogued (deferred) tool is gated exactly like a
-				// direct one. The registry is the shared one except under
-				// vibe mode, which has no catalog to bridge.
-				ag.WireCatalog(reg.Catalog())
+				// Shared per-mode seams: catalog bridge + secrets redactor
+				// (#79/#80). The TUI is the daily driver; an unredacted tool
+				// result here is the case that mattered.
+				wireAgentMode(ag, reg, cwd)
 				// The HUD context segment measures against this window.
 				app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
 				prewalkMu.Lock()

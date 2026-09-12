@@ -218,6 +218,23 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 	}
 }
 
+// wireAgentMode applies the seams EVERY mode must share on its agent: the
+// deferred-tool catalog bridge (tool_call runs through this agent's own call
+// path, so a catalogued call is policy-gated like a direct one) and the
+// secrets redactor (placeholders out to the provider, real values back in on
+// tool args). Both were once print-only — modes that hand-build an agent drift
+// silently, which is why the wiring lives in one function with one test
+// (#79 catalog, #80 redactor).
+func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cwd string) {
+	if ag == nil {
+		return
+	}
+	if reg != nil {
+		ag.WireCatalog(reg.Catalog())
+	}
+	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
+}
+
 // advisorDrainCap bounds the final headless review at run exit. Thirty
 // seconds matches the TUI's error drain; a stalled reviewer must not hold
 // the process.
@@ -384,11 +401,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		ph.advisorFeed = func() { adv.Feed(context.Background(), advisorHistory(store)) }
 	}
 	applyPolicy(ag, settings)
-	// M13 #54: tool_call bridges into this agent's own call path, so a
-	// catalogued call is gated exactly like a direct one.
-	ag.WireCatalog(reg.Catalog())
-	// M13 #55: secrets.yml redaction — placeholders out, real values in.
-	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
+	wireAgentMode(ag, reg, cwd)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
