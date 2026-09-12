@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"slices"
+	"strings"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -56,10 +57,16 @@ func (a *Agent) kickAsyncCompaction(ctx context.Context) bool {
 	// the job runs, and the goroutine must not read them.
 	provider, model := a.Provider, a.Model
 	msgs := span.msgs[:span.cut]
+	// Resolved here, not in the goroutine: the job must not read live agent
+	// fields (same reason provider/model are copied above).
+	memCtx := ""
+	if a.MemoryContext != nil {
+		memCtx = strings.TrimSpace(a.MemoryContext())
+	}
 	go func() {
 		defer cancel()
 		var res asyncCompactResult
-		if summary, err := summarizeWith(jobCtx, provider, model, msgs); err != nil {
+		if summary, err := summarizeWith(jobCtx, provider, model, msgs, memCtx); err != nil {
 			res.err = err
 		} else {
 			res.summary = textSummary(summary)

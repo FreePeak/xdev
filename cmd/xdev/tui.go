@@ -170,8 +170,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	overrides := agent.LoadSystemPromptOverrides(cwd)
+	// ONE memory backend for the whole session. buildMemory was called at
+	// each of the three sites below, so a cadence-tracking backend (Hindsight
+	// retains every N turns; mnemopi counts turns) reset on every call and
+	// never reached its threshold (#86).
+	sessionMemory := buildMemory(lastSettings())
 	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
-		tailSystemPrompt(overrides, opts.AppendSystem), buildMemory(lastSettings()))
+		tailSystemPrompt(overrides, opts.AppendSystem), sessionMemory)
 
 	// Session.
 	store, err := openStartupSession(cwd, opts)
@@ -641,7 +646,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				},
 			})
 			vibeSys = promptFnWithMemory(basePrompt(opts, cwd), cwd, vibeScope.Registry(),
-				tailSystemPrompt(overrides, opts.AppendSystem)+"\n\n"+agent.VibeDirectorPrompt, buildMemory(lastSettings()))
+				tailSystemPrompt(overrides, opts.AppendSystem)+"\n\n"+agent.VibeDirectorPrompt, sessionMemory)
 			// The startup session may itself be a resume: adopt its mode.
 			workers, on := agent.LoadVibe(store.Entries())
 			vibeScope.Restore(workers, on)
@@ -984,7 +989,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 	}
-	app.SetMemoryOps(memoryOps(buildMemory(lastSettings())))
+	app.SetMemoryOps(memoryOps(sessionMemory))
 	app.SetAdvisorOps(&tui.AdvisorOps{
 		Enabled: func() bool { return adv != nil },
 		Set: func(on bool) error {
@@ -1389,6 +1394,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
 				logx.Errorf("persist user message: %v", err)
 			}
+			// #86: the memory turn boundary. print mode counted turns for the
+			// remote backend; the TUI — where sessions are actually long —
+			// never fed it, so retainEveryNTurns could not fire and queued
+			// retains sat until exit.
+			noteMemoryTurn(sessionMemory, []ai.Message{msg})
 			ctx, cancel := context.WithCancel(baseCtx)
 			// Published so a full-link guest's interrupt can cancel the
 			// live turn (baseCancel would kill every future turn).

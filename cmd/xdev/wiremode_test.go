@@ -174,3 +174,15 @@ func TestAbortCancelsAsyncCompaction(t *testing.T) {
 	}
 	ag.CancelAsyncCompaction() // safe with nothing in flight
 }
+
+// #86: the remote memory backend's turn cadence and its compaction context
+// both had no production caller in the interactive path.
+func TestWireAgentModeCarriesMemoryContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag := &agent.Agent{Model: "m"}
+	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", t.TempDir())
+	// Backend off: no seam, and nothing panics.
+	if ag.MemoryContext != nil {
+		t.Fatal("MemoryContext set with no remote backend configured")
+	}
+}
