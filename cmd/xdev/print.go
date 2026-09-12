@@ -574,6 +574,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	} {
 		reg.Register(t)
 	}
+	reg.Register(tool.NewTodoTool())
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	reg.Register(&agent.TaskTool{
@@ -729,13 +730,16 @@ func childModel(settings *config.Settings, provName, modelName string) string {
 }
 
 // wireTaskParent stamps the parent session id onto the registry's task
-// tool once the store exists (lineage for post-hoc inspection).
+// tool once the store exists (lineage for post-hoc inspection), and gives
+// the todo tool its session sink (every state change lands as a
+// user_todo_edit entry). Called by print, TUI, and RPC entrypoints.
 func wireTaskParent(reg *tool.Registry, store *session.Store) {
 	if t, ok := reg.Get(agent.TaskToolName); ok {
 		if tt, ok := t.(*agent.TaskTool); ok {
 			tt.ParentSessionID = store.ID()
 		}
 	}
+	tool.WireTodoSink(reg, store)
 }
 
 // failoverChain builds the M5 resilience chain from models.yml: every

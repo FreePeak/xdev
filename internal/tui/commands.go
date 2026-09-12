@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/tool"
 )
 
 // Command is one slash command: /Name, /Alias... — Fn runs at input-submit
@@ -151,12 +153,26 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
+		{Name: "tasks", Description: "list background bash jobs",
+			Fn: func(app CommandAPI, args string) error {
+				if BashJobs == nil {
+					app.AddSystemBlock("background jobs are not wired in this build")
+					return nil
+				}
+				app.AddSystemBlock(BashJobs())
+				return nil
+			}},
 		{Name: "help", Description: "show available commands",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(builtinCommands())); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
 			Fn: func(app CommandAPI, args string) error { app.Quit(); return nil }},
 	}
 }
+
+// BashJobs renders the background bash job listing for /tasks. It defaults
+// to the tool package's process-wide registry (the same one the bash tool
+// records into); tests may override it. Nil degrades to a notice.
+var BashJobs = func() string { return tool.SharedBashJobs().Render() }
 
 // ParseCommand reports whether input names a slash command and splits it
 // into the command name (without the leading '/') and the argument text.

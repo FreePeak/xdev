@@ -32,9 +32,10 @@ const (
 
 // bashArgs mirrors pi's bash input schema.
 type bashArgs struct {
-	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
-	Workdir string `json:"workdir,omitempty"`
+	Command         string `json:"command"`
+	Timeout         int    `json:"timeout,omitempty"`
+	Workdir         string `json:"workdir,omitempty"`
+	RunInBackground bool   `json:"run_in_background,omitempty"`
 }
 
 // bashDetails is persisted in Result.Details.
@@ -45,6 +46,11 @@ type bashDetails struct {
 	StdoutBytes uint64 `json:"stdoutBytes"`
 	StderrBytes uint64 `json:"stderrBytes"`
 	Workdir     string `json:"workdir"`
+	// Backgrounded marks a result whose process continues in the job
+	// registry (explicit run_in_background, or a timeout handoff).
+	Backgrounded bool   `json:"backgrounded,omitempty"`
+	JobID        int64  `json:"jobId,omitempty"`
+	OutputFile   string `json:"outputFile,omitempty"`
 }
 
 // BashTool runs one-shot shell commands in a hardened environment.
@@ -53,6 +59,16 @@ type bashDetails struct {
 type BashTool struct {
 	// RootCwd resolves relative workdir arguments.
 	RootCwd string
+	// Jobs is the background registry; nil → the process-wide shared one.
+	Jobs *BashJobs
+}
+
+// jobs returns the registry background work is recorded in.
+func (b *BashTool) jobs() *BashJobs {
+	if b.Jobs == nil {
+		return SharedBashJobs()
+	}
+	return b.Jobs
 }
 
 // NewBashTool returns a BashTool rooted at cwd (empty → process cwd).
@@ -67,7 +83,10 @@ func (b *BashTool) Name() string { return "bash" }
 
 func (b *BashTool) Description() string {
 	return "Run a shell command and get its output. " +
-		"Per-stream output is windowed to the first and last 16KB."
+		"Per-stream output is windowed to the first and last 16KB. " +
+		"Set run_in_background to start a detached job instead of waiting; " +
+		"/tasks lists background jobs, and a foreground command that hits " +
+		"its timeout is handed to the same registry rather than killed."
 }
 
 func (b *BashTool) Parameters() json.RawMessage {
@@ -85,6 +104,10 @@ func (b *BashTool) Parameters() json.RawMessage {
     "workdir": {
       "type": "string",
       "description": "Optional working directory (relative paths resolve against the session cwd)"
+    },
+    "run_in_background": {
+      "type": "boolean",
+      "description": "Start the command detached and return immediately with a job id and output-file path"
     }
   },
   "required": ["command"]
@@ -116,6 +139,10 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		}
 	}
 
+	if a.RunInBackground {
+		return b.startBackground(a.Command, workdir)
+	}
+
 	timeout := DefaultTimeoutSecs
 	if a.Timeout > 0 {
 		timeout = min(a.Timeout, MaxTimeoutSecs)
@@ -123,7 +150,7 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	res, execErr := runShell(runCtx, a.Command, workdir)
+	res, execErr := runShell(ctx, runCtx, a.Command, workdir, b.jobs(), time.Duration(timeout)*time.Second)
 	if execErr != nil {
 		return Result{}, fmt.Errorf("bash: %w", execErr)
 	}
@@ -134,6 +161,54 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	return Result{Text: res.Text, Details: res.Details, IsError: res.IsError}, nil
 }
 
+// startBackground launches the command detached and returns immediately: a
+// janitor reaps it, the job registry reports status/exit code/output tail,
+// and combined output streams to a temp file under the system temp dir.
+func (b *BashTool) startBackground(command, workdir string) (Result, error) {
+	f, err := os.CreateTemp("", "xdev-bg-*.log")
+	if err != nil {
+		return Result{}, fmt.Errorf("bash: background output file: %w", err)
+	}
+	name, argv := shellCommand(command)
+	cmd := exec.Command(name, argv...)
+	cmd.Env = HardenedEnv()
+	cmd.Dir = workdir
+	prepareProcessGroup(cmd) // no-op on windows
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Start(); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return Result{}, fmt.Errorf("bash: start: %w", err)
+	}
+	job := b.jobs().add(command, workdir, f.Name())
+	go func() {
+		waitErr := cmd.Wait()
+		f.Close() // release the fd; the process has been reaped
+		code, killed := exitStatus(waitErr)
+		job.finish(code, killed)
+	}()
+	SharedFSCache().InvalidateAll()
+	return Result{
+		Text: fmt.Sprintf("Started background job #%d: %s\nOutput file: %s\nIt keeps running across turns — /tasks lists jobs and the output file shows progress.", job.ID, command, f.Name()),
+		Details: &bashDetails{
+			ExitCode:     -1,
+			Workdir:      workdir,
+			Backgrounded: true,
+			JobID:        job.ID,
+			OutputFile:   f.Name(),
+		},
+	}, nil
+}
+
+// shellCommand returns the platform shell argv for a command string.
+func shellCommand(command string) (name string, argv []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd", []string{"/c", command}
+	}
+	return "/bin/bash", []string{"-c", command}
+}
+
 // runOutcome carries what runShell observed about one execution.
 type runOutcome struct {
 	Text    string
@@ -141,19 +216,14 @@ type runOutcome struct {
 	IsError bool
 }
 
-// runShell spawns the command, streams output into windowed sinks, and
-// kills the process group on timeout/cap overflow.
-func runShell(ctx context.Context, command, workdir string) (runOutcome, error) {
+// runShell spawns the command and streams output into windowed sinks. abort
+// cancellation (agent stop, Ctrl+C) kills the process group; a runCtx
+// timeout does not — the live process is handed to the job registry with an
+// explicit notice, and its remaining output tees into a temp file.
+func runShell(abortCtx, runCtx context.Context, command, workdir string, jobs *BashJobs, timeout time.Duration) (runOutcome, error) {
 	start := time.Now()
 
-	var name string
-	var argv []string
-	if runtime.GOOS == "windows" {
-		name, argv = "cmd", []string{"/c", command}
-	} else {
-		name, argv = "/bin/bash", []string{"-c", command}
-	}
-
+	name, argv := shellCommand(command)
 	cmd := exec.Command(name, argv...)
 	cmd.Env = HardenedEnv()
 	cmd.Dir = workdir
@@ -177,12 +247,16 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 	killGroup := func() { killOnce.Do(func() { killProcessGroup(pgid, signalKill) }) }
 	stdoutSink := NewOutputSink(StreamHeadLimit, StreamTailLimit)
 	stderrSink := NewOutputSink(StreamHeadLimit, StreamTailLimit)
+	// Output targets are switchable so a timed-out run can keep streaming
+	// into a file while the sinks hold what the model already got.
+	stdoutW := &switchWriter{w: stdoutSink}
+	stderrW := &switchWriter{w: stderrSink}
 
-	// Watchdog: ctx done (timeout/abort) → SIGTERM, 2s grace, SIGKILL.
+	// Watchdog: abort only. A timeout is not a kill anymore (see below).
 	watch := make(chan struct{})
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-abortCtx.Done():
 			killProcessGroup(pgid, signalTerm)
 			timer := time.NewTimer(KillGrace)
 			defer timer.Stop()
@@ -195,8 +269,8 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 		}
 	}()
 
-	capWriter := func(sink *OutputSink) io.Writer {
-		return &cappedWriter{sink: sink, combined: &combined, cap: CombinedOutputCap, kill: killGroup}
+	capWriter := func(w io.Writer) io.Writer {
+		return &cappedWriter{sink: w, combined: &combined, cap: CombinedOutputCap, kill: killGroup}
 	}
 
 	var wg sync.WaitGroup
@@ -205,35 +279,40 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 		src io.Reader
 		w   io.Writer
 	}{
-		{stdout, capWriter(stdoutSink)},
-		{stderr, capWriter(stderrSink)},
+		{stdout, capWriter(stdoutW)},
+		{stderr, capWriter(stderrW)},
 	} {
 		go func(r io.Reader, w io.Writer) {
 			defer wg.Done()
 			_, _ = io.Copy(w, r)
 		}(r.src, r.w)
 	}
-
 	// Order matters: os/exec closes StdoutPipe/StderrPipe handles inside
 	// Wait, so Wait must run only AFTER the copiers have seen EOF —
 	// otherwise a concurrent batch truncates mid-flight reads to "".
-	wg.Wait()
-	close(watch)
-	waitErr := cmd.Wait()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	var waitErr error
+	select {
+	case <-done:
+		close(watch)
+		waitErr = cmd.Wait()
+	case <-runCtx.Done():
+		if abortCtx.Err() == nil {
+			return backgroundRun(jobs, cmd, stdoutW, stderrW, stdoutSink, stderrSink, command, workdir, timeout, done, watch, start)
+		}
+		// Abort raced the timeout: the watchdog is killing; reap normally.
+		<-done
+		close(watch)
+		waitErr = cmd.Wait()
+	}
 
 	durationMs := time.Since(start).Milliseconds()
 	exitCode, killed := exitStatus(waitErr)
-
 	outText, outTrunc := stdoutSink.Result()
 	errText, errTrunc := stderrSink.Result()
-
-	text := outText
-	if errText != "" {
-		if text != "" && !strings.HasSuffix(text, "\n") {
-			text += "\n"
-		}
-		text += "--- stderr ---\n" + errText
-	}
+	text := joinShellText(outText, errText)
 	switch {
 	case killed:
 		text += "\n[killed: signal]"
@@ -253,11 +332,94 @@ func runShell(ctx context.Context, command, workdir string) (runOutcome, error) 
 	}, IsError: false}, nil
 }
 
+// backgroundRun hands a process that outlived its timeout to the job
+// registry: remaining output tees into a temp file, a janitor reaps it, and
+// the model gets the partial output plus an explicit notice.
+func backgroundRun(jobs *BashJobs, cmd *exec.Cmd, stdoutW, stderrW *switchWriter, stdoutSink, stderrSink *OutputSink, command, workdir string, timeout time.Duration, done <-chan struct{}, watch chan struct{}, start time.Time) (runOutcome, error) {
+	f, err := os.CreateTemp("", "xdev-bg-*.log")
+	if err != nil {
+		// No file to own the continuation: kill rather than leave an
+		// unobservable orphan.
+		killProcessGroup(cmd.Process.Pid, signalKill)
+		<-done
+		close(watch)
+		waitErr := cmd.Wait()
+		exitCode, killed := exitStatus(waitErr)
+		outText, outTrunc := stdoutSink.Result()
+		errText, errTrunc := stderrSink.Result()
+		text := joinShellText(outText, errText)
+		if killed {
+			text += "\n[killed: signal]"
+		}
+		text += fmt.Sprintf("\n[timeout after %s, and backgrounding failed: %v]", timeout, err)
+		return runOutcome{Text: text, Details: &bashDetails{
+			ExitCode: exitCode, DurationMs: time.Since(start).Milliseconds(),
+			Truncated:   outTrunc || errTrunc,
+			StdoutBytes: stdoutSink.Total(), StderrBytes: stderrSink.Total(),
+		}, IsError: true}, nil
+	}
+
+	stdoutW.set(io.MultiWriter(stdoutSink, f))
+	stderrW.set(io.MultiWriter(stderrSink, f))
+	job := jobs.add(command, workdir, f.Name())
+	go func() {
+		<-done
+		close(watch)
+		waitErr := cmd.Wait()
+		f.Close()
+		code, killed := exitStatus(waitErr)
+		job.finish(code, killed)
+	}()
+
+	outText, outTrunc := stdoutSink.Result()
+	errText, errTrunc := stderrSink.Result()
+	text := joinShellText(outText, errText)
+	text += fmt.Sprintf("\n[timed out after %s — still running as background job #%d; output: %s]", timeout, job.ID, f.Name())
+	return runOutcome{Text: text, Details: &bashDetails{
+		ExitCode: -1, DurationMs: time.Since(start).Milliseconds(),
+		Truncated:   outTrunc || errTrunc,
+		StdoutBytes: stdoutSink.Total(), StderrBytes: stderrSink.Total(),
+		Backgrounded: true, JobID: job.ID, OutputFile: f.Name(),
+	}, IsError: false}, nil
+}
+
+// joinShellText combines stdout and stderr the way the tool has always
+// reported them.
+func joinShellText(outText, errText string) string {
+	text := outText
+	if errText != "" {
+		if text != "" && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		text += "--- stderr ---\n" + errText
+	}
+	return text
+}
+
+// switchWriter forwards writes to a swappable target (sink → sink+file when
+// a timed-out run is backgrounded).
+type switchWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *switchWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+func (s *switchWriter) set(w io.Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.w = w
+}
+
 // cappedWriter counts combined bytes across both streams and fires the
 // kill callback once the cap is exceeded; the sink underneath stays
 // bounded by its windows regardless.
 type cappedWriter struct {
-	sink     *OutputSink
+	sink     io.Writer
 	combined *atomic.Int64
 	cap      int64
 	kill     func()

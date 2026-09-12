@@ -57,6 +57,33 @@ func (f *fakeAPI) SendPrompt(text string)     { f.sent = append(f.sent, text) }
 func (f *fakeAPI) CommandDir() string         { return f.dir }
 func (f *fakeAPI) Quit()                      { f.quit++ }
 
+func TestDispatchTasks(t *testing.T) {
+	orig := BashJobs
+	t.Cleanup(func() { BashJobs = orig })
+
+	BashJobs = func() string { return "Background bash jobs (1):\n#1 exit 0 — echo hi" }
+	f := &fakeAPI{}
+	if !dispatch(f, "/tasks") {
+		t.Fatal("/tasks must be consumed as a command")
+	}
+	if len(f.blocks) != 1 || !strings.Contains(f.blocks[0], "Background bash jobs (1)") {
+		t.Fatalf("blocks = %q", f.blocks)
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("/tasks must never reach the model: %q", f.sent)
+	}
+
+	// Nil renderer (bare TUI/test harness) degrades to a notice.
+	BashJobs = nil
+	f = &fakeAPI{}
+	if !dispatch(f, "/tasks") {
+		t.Fatal("/tasks must stay consumed when unwired")
+	}
+	if len(f.blocks) != 1 || !strings.Contains(f.blocks[0], "not wired") {
+		t.Fatalf("unwired /tasks blocks = %q", f.blocks)
+	}
+}
+
 func TestParseCommand(t *testing.T) {
 	tests := []struct {
 		input string
