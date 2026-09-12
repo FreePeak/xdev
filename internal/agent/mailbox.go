@@ -363,12 +363,17 @@ func (m *Mailbox) Resolve(id string) string {
 }
 
 // InboxPoller watches the owner's inbox and pushes newly arrived messages to
-// OnMessage and to the channel consumed by Wait. The agent loop integration
-// (start on session open, stop on close) lives in the loop wiring.
+// OnMessage and to the channel consumed by Wait.
+//
+// OnMessage reports whether the message reached a live sink. A message that
+// reached none is left UNREAD (and out of the dedupe set), so a session that
+// starts while no run is listening does not silently consume its own mailbox —
+// the read-time `inbox` tool still shows it. Before this, MarkRead ran
+// unconditionally behind a poller no mode ever started.
 type InboxPoller struct {
 	MB        *Mailbox
 	Interval  time.Duration // default 2s
-	OnMessage func(Message)
+	OnMessage func(Message) bool
 
 	mu        sync.Mutex
 	running   bool
@@ -440,28 +445,41 @@ func (p *InboxPoller) poll(ctx context.Context) {
 		}
 		p.mu.Lock()
 		already := p.delivered[msg.ID]
-		p.delivered[msg.ID] = true
 		p.mu.Unlock()
 		if already {
 			continue
 		}
-		p.deliver(msg)
+		if !p.deliver(msg) {
+			continue // no sink: stay unread, retry on the next sweep
+		}
+		p.mu.Lock()
+		p.delivered[msg.ID] = true
+		p.mu.Unlock()
 		_ = p.MB.MarkRead(msg.ID) // best effort; delivered map covers retry
 	}
 }
 
-func (p *InboxPoller) deliver(msg Message) {
+// deliver hands one message to the sink and the Wait channel. It reports
+// false when no sink took it, which keeps the message unread.
+func (p *InboxPoller) deliver(msg Message) bool {
+	handled := false
 	if p.OnMessage != nil {
-		p.OnMessage(msg)
+		handled = p.OnMessage(msg)
+	} else {
+		handled = true // no callback installed: Wait is the consumer
+	}
+	if !handled {
+		return false
 	}
 	select {
 	case p.ch <- msg:
 	default:
-		// ponytail: bounded 256-message buffer; overflow drops the
-		// delivery (the message stays persisted — and already marked
-		// read — in the inbox file). Upgrade path: spill to disk or
-		// drain-blocking semantics with backpressure into the loop.
+		// ponytail: bounded 256-message buffer; overflow drops the Wait
+		// copy (the sink already took the message, and it stays persisted in
+		// the inbox file). Upgrade path: spill to disk or drain-blocking
+		// semantics with backpressure into the loop.
 	}
+	return true
 }
 
 // Stop halts polling and blocks until the in-flight sweep has finished (so

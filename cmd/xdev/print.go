@@ -400,6 +400,18 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		adv.Primary = ag
 		ph.advisorFeed = func() { adv.Feed(context.Background(), advisorHistory(store)) }
 	}
+	// #90: a message from another session arrives as a follow-up into the
+	// live run rather than waiting for the model to read the inbox.
+	setInboxSink(func(m agent.Message) bool {
+		ag.FollowUp(inboxFollowUp(m))
+		return true
+	})
+	defer func() {
+		setInboxSink(nil)
+		if stopInbox != nil {
+			stopInbox()
+		}
+	}()
 	applyPolicy(ag, settings)
 	wireAgentMode(ag, reg, cwd)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
@@ -1507,6 +1519,13 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	mailbox := agent.NewMailbox(config.DataDir())
 	reg.Register(&agent.SendMessageTool{Mailbox: mailbox})
 	reg.Register(&agent.InboxTool{Mailbox: mailbox})
+	// #90: start the push path once per process (the poller shipped with no
+	// Start caller, so arrivals waited for a read). stopInbox is deferred by
+	// each run mode on exit.
+	sharedMailbox = mailbox
+	if stopInbox == nil {
+		stopInbox = startInboxPoller(mailbox)
+	}
 	// M11 #40: goal mode — one session-scoped objective with an optional
 	// token budget. The agent loop reads the same state for the per-turn
 	// reminder and budget accounting; wireTaskParent binds the store.
@@ -1584,6 +1603,15 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 // loadedSettings): the run modes reach it on exit to stop the processes the
 // model started through the hub tool.
 var sharedHub *agent.Hub
+
+// sharedMailbox is the session's cross-session mailbox (one per process): the
+// `send_message`/`inbox` tools and the push poller share it, so the poller's
+// owner binding follows the same session identity the tools use.
+var sharedMailbox *agent.Mailbox
+
+// stopInbox is the poller's stop func, installed once per process by
+// newToolRegistry and deferred by each run mode.
+var stopInbox func()
 
 // closeSharedHub stops every hub-started child process. Every run mode defers
 // it right after building its registry — without it, `hub start` leaves the

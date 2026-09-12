@@ -142,6 +142,26 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 	}
+	// #90: the mailbox push path. The TUI rebuilds its agent per submit, so
+	// delivery rides the same live-agent indirection extensions steer through.
+	// With no turn running the sink delivers nothing, and the poller leaves the
+	// message UNREAD — the `inbox` tool and the next turn still see it.
+	setInboxSink(func(m agent.Message) bool {
+		agentMu.Lock()
+		a := curAgent
+		agentMu.Unlock()
+		if a == nil {
+			return false // idle: the message stays unread for the next turn
+		}
+		a.FollowUp(inboxFollowUp(m))
+		return true
+	})
+	defer func() {
+		setInboxSink(nil)
+		if stopInbox != nil {
+			stopInbox()
+		}
+	}()
 	exts := attachExtensions(context.Background(), reg,
 		routeToLiveAgent(func(a *agent.Agent, s string) { a.Steer(s) }),
 		routeToLiveAgent(func(a *agent.Agent, s string) { a.FollowUp(s) }), cfg)
@@ -2264,4 +2284,12 @@ func collabStatusText(h *collab.Host) string {
 	fmt.Fprintf(&b, "\n  full       %s", h.URL(true))
 	fmt.Fprintf(&b, "\n  view-only  %s", h.URL(false))
 	return b.String()
+}
+
+// orUnset keeps a mailbox notice readable when a peer sent no name/subject.
+func orUnset(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "unknown"
+	}
+	return s
 }

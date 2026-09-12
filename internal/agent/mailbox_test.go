@@ -78,7 +78,7 @@ func TestMailboxPollerDelivery(t *testing.T) {
 	poller := NewInboxPoller(b)
 	poller.Interval = 10 * time.Millisecond
 	gotCallback := make(chan Message, 8)
-	poller.OnMessage = func(m Message) { gotCallback <- m }
+	poller.OnMessage = func(m Message) bool { gotCallback <- m; return true }
 	poller.Start()
 	defer poller.Stop()
 
@@ -281,5 +281,52 @@ func TestConcurrentAppendsLineAtomic(t *testing.T) {
 	}
 	if len(inbox) != goroutines*perG {
 		t.Errorf("inbox = %d, want %d", len(inbox), goroutines*perG)
+	}
+}
+
+// A message that reaches no live sink stays UNREAD (#90): before this, the
+// poller marked read unconditionally, so a session that polled while nothing
+// was listening consumed its own mailbox and the `inbox` tool showed nothing.
+func TestInboxPollerLeavesUndeliveredUnread(t *testing.T) {
+	dir := t.TempDir()
+	mb := NewMailbox(dir)
+	mb.SetOwner("recipient")
+	sender := NewMailbox(dir)
+	sender.SetOwner("sender")
+	if _, err := sender.SendMessage("recipient", "peer note", "body"); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewInboxPoller(mb)
+	p.Interval = 10 * time.Millisecond
+	p.OnMessage = func(Message) bool { return false } // declining sink
+	p.Start()
+	time.Sleep(120 * time.Millisecond)
+	p.Stop()
+
+	unread, err := mb.Unread()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unread) != 1 || unread[0].Subject != "peer note" {
+		t.Fatalf("a declined message must stay unread, got %+v", unread)
+	}
+
+	// Accepting it now consumes it exactly once.
+	p2 := NewInboxPoller(mb)
+	p2.Interval = 10 * time.Millisecond
+	var got []Message
+	p2.OnMessage = func(m Message) bool { got = append(got, m); return true }
+	p2.Start()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(got) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	p2.Stop()
+	if len(got) != 1 {
+		t.Fatalf("accepted delivery = %d, want 1", len(got))
+	}
+	if left, _ := mb.Unread(); len(left) != 0 {
+		t.Fatalf("an accepted message must be marked read: %+v", left)
 	}
 }
