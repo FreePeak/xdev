@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // Skill is one discovered capability pack.
@@ -47,33 +49,24 @@ type frontmatter struct {
 	DisableModelInvocation bool `yaml:"disableModelInvocation"`
 }
 
-// UserRoot is ~/.xdev/agent/skills — the user-level native root.
+// UserRoot is <data dir>/skills — the user-level native root.
 func UserRoot() string { return filepath.Join(dataDir(), "skills") }
 
-// ManagedRoot is ~/.xdev/agent/managed-skills — agent-authored skills.
-// They never override an authored pack (project/user roots), only the
+// ManagedRoot is <data dir>/managed-skills — agent-authored skills. They
+// never override an authored pack (project/user roots), only the
 // configured custom directories.
 func ManagedRoot() string { return filepath.Join(dataDir(), "managed-skills") }
 
-// dataDir mirrors config.DataDir without importing it (avoids a cycle:
-// config does not know skills, and skills only needs the path).
+// dataDir is config.DataDir — the one place that resolves the native base
+// (XDEV_AGENT_DIR, a named profile, the XDG record), so skills follow a
+// relocated base instead of re-deriving it and reading the wrong root.
 var dataDirFunc = defaultDataDir
 
 func dataDir() string { return dataDirFunc() }
 
-func defaultDataDir() string {
-	// XDEV_AGENT_DIR relocates the agent directory (config.DataDir honors
-	// it too); skills must follow the same override or a sandboxed run
-	// reads the real ~/.xdev/agent.
-	if v := os.Getenv("XDEV_AGENT_DIR"); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".xdev"
-	}
-	return filepath.Join(home, ".xdev", "agent")
-}
+// defaultDataDir is the production default, named so a test can restore it
+// after SetDataDir.
+func defaultDataDir() string { return config.DataDir() }
 
 // SetDataDir overrides the data directory (tests).
 func SetDataDir(dir string) { dataDirFunc = func() string { return dir } }

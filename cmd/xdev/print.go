@@ -1133,6 +1133,18 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 		}
 	}
 	tool.WireTodoSink(reg, store)
+	// M14 #63: --alias names this session's agent identity so other
+	// sessions can address it by name; re-registered on /resume and session
+	// switches, so the name follows the live session like the owner above.
+	if a := config.Alias(); a != "" {
+		if t, ok := reg.Get(agent.InboxToolName); ok {
+			if it, ok := t.(*agent.InboxTool); ok {
+				if err := it.Mailbox.RegisterIdentity(a, store.ID()); err != nil {
+					logx.Errorf("alias %q: %v", a, err)
+				}
+			}
+		}
+	}
 	// M11 #40: bind the goal state to the active session (again on /resume
 	// and session switches — the new session starts with its own goal).
 	if t, ok := reg.Get(agent.GoalToolName); ok {
