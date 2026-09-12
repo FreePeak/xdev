@@ -12,6 +12,7 @@ import (
 	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/memlimit"
 	"github.com/FreePeak/xdev/internal/skills"
+	"github.com/FreePeak/xdev/internal/tts"
 )
 
 var version = "0.1.0-dev"
@@ -77,6 +78,7 @@ func main() {
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
 
 Flags:
 `, version)
@@ -127,7 +129,7 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "say" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -203,6 +205,10 @@ Flags:
 
 	if mode == "lsp-config" {
 		os.Exit(lsp.ConfigCommand(args, os.Stdout, os.Stderr, settings))
+	}
+
+	if mode == "say" {
+		os.Exit(tts.Say(args, os.Stdout, os.Stderr, settings.TTSConfig()))
 	}
 
 	switch mode {
