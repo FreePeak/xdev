@@ -62,6 +62,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// surfaces the plan in the transcript and stays in read-only until the
 	// user resolves (/plan off to approve, feedback to revise).
 	planMode := &agent.PlanMode{}
+	// Vibe mode (M14 #58): the director scope. Declared here because the
+	// per-submit agent, the session swaps, and the status line all read it;
+	// it is built below, once the registry's hub and task tools are known.
+	var vibeScope *agent.VibeScope
+	// vibeSys is the director's system prompt (built with the scope, below).
+	var vibeSys func() string
+	vibeActive := func() bool { return vibeScope != nil && vibeScope.Active() }
 	// /prewalk live toggle: the holder is what each submit reads; Set
 	// resolves the ref through the same precedence as --prewalk-into.
 	var prewalkMu sync.Mutex
@@ -89,6 +96,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
+	}
+	// toolsForTurn routes each turn at the vibe director's restricted view
+	// while the mode is on. The parent registry is never mutated, so exiting
+	// the mode restores the full toolset by construction.
+	toolsForTurn := func() *tool.Registry {
+		if vibeActive() {
+			return vibeScope.Registry()
+		}
+		return reg
 	}
 	// Recomputed per submit: MCP and extension processes register tools
 	// after startup, and a boot-frozen prompt would never mention them.
@@ -233,6 +249,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// live hooks/agent point at the new store (single source of truth: the
 	// captured `store` variable, which all closures re-read).
 	swapStore := func(drop bool) error {
+		// Vibe mode is session-scoped: a new session would orphan the
+		// director's workers, so the switch is refused until it is off
+		// (omp rejects start/fork while the mode is active).
+		if vibeActive() {
+			return fmt.Errorf("vibe mode is active — /vibe off first")
+		}
 		old := store
 		ns, err := openSession(cwd, false, "")
 		if err != nil {
@@ -258,12 +280,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// swapStoreTo adopts an already-open store (fork/resume): replays its
 	// transcript and points hooks/agent at it.
 	swapStoreTo = func(ns *session.Store) error {
+		if vibeActive() {
+			return fmt.Errorf("vibe mode is active — /vibe off first")
+		}
 		old := store
 		bus := buildHookBus(cwd, opts) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
 		store = ns
 		ts.store = ns
 		wireTaskParent(reg, ns)
+		// The resumed session carries its own director state: adopt it
+		// (workers rehydrate as idle — nothing runs in a fresh process).
+		if vibeScope != nil {
+			workers, on := agent.LoadVibe(ns.Entries())
+			vibeScope.Restore(workers, on)
+		}
 		app.Reset()
 		saveBreadcrumb(ns.Path())
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
@@ -423,6 +454,91 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Revive: func(id string) bool { return sessionHub.Revive(id, "") == nil },
 		})
 	}
+	// Vibe mode (M14 #58): the director scope over the session hub and the
+	// task tool's subagent machinery. Workers inherit the task tool's tool
+	// surface and approval posture; the tier selects the bundled agent
+	// prompt and the resolved role model (parent model as the fallback).
+	if sessionHub != nil {
+		var taskTool *agent.TaskTool
+		if tt, ok := reg.Get(agent.TaskToolName); ok {
+			taskTool, _ = tt.(*agent.TaskTool)
+		}
+		if taskTool != nil {
+			vibeScope = agent.NewVibeScope(agent.VibeConfig{
+				Hub:   sessionHub,
+				Task:  taskTool,
+				Tools: reg,
+				Resolve: func(role string) (*agent.VibeModel, error) {
+					if ref, effort, err := resolveModel(role, cfg, lastSettings()); err == nil {
+						pn, mn, perr := config.ParseModelRef(ref)
+						if perr != nil {
+							return nil, perr
+						}
+						pc, has := cfg.Providers[pn]
+						if !has {
+							return nil, fmt.Errorf("unknown provider %q", pn)
+						}
+						prov, berr := buildProvider(pn, pc, mn, cfg)
+						if berr != nil {
+							return nil, berr
+						}
+						return &agent.VibeModel{Provider: prov, Model: mn, Thinking: effortBudget(effort)}, nil
+					}
+					// Unset role: the parent's active model is the fallback
+					// (the task tool's routing).
+					modelMu.Lock()
+					lp, lm, le := live.prov, live.model, live.effort
+					modelMu.Unlock()
+					return &agent.VibeModel{Provider: lp, Model: lm, Thinking: effortBudget(le)}, nil
+				},
+				Persist: func(customType string, data map[string]any) {
+					if err := store.Append(&session.CustomEntry{CustomType: customType, Data: data}); err != nil {
+						logx.Errorf("vibe: persist %s: %v", customType, err)
+					}
+				},
+				ParentID: func() string { return store.ID() },
+				Conflicts: func() []string {
+					var out []string
+					if planMode.Active {
+						out = append(out, "plan")
+					}
+					if gs := agent.GoalStateOf(reg); gs != nil {
+						if gv, ok := gs.View(); ok && gv.Status == agent.GoalActive {
+							out = append(out, "goal")
+						}
+					}
+					return out
+				},
+				OnSettle: func(w agent.VibeWorker) {
+					app.AddSystemBlock("· vibe " + w.ID + " (" + w.Tier + ") " + w.Status + ": " + agent.VibePreview(w.Output))
+				},
+			})
+			vibeSys = promptFnWithMemory(basePrompt(opts, cwd), cwd, vibeScope.Registry(),
+				tailSystemPrompt(overrides, opts.AppendSystem)+"\n\n"+agent.VibeDirectorPrompt, buildMemory(lastSettings()))
+			// The startup session may itself be a resume: adopt its mode.
+			workers, on := agent.LoadVibe(store.Entries())
+			vibeScope.Restore(workers, on)
+		}
+	}
+	app.SetVibeOps(&tui.VibeOps{
+		Active: vibeActive,
+		Set: func(on bool) error {
+			if vibeScope == nil {
+				return fmt.Errorf("vibe mode not wired (this build has no agent hub/task tool)")
+			}
+			if on {
+				return vibeScope.Enter()
+			}
+			vibeScope.Exit()
+			return nil
+		},
+		Status: func() string {
+			if vibeScope == nil {
+				return "vibe: not wired"
+			}
+			return vibeScope.Status()
+		},
+	})
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
@@ -705,7 +821,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	app.SetPlanOps(&tui.PlanOps{
 		Get: func() bool { return planMode.Active },
-		Set: func(on bool) error { planMode.Active = on; return nil },
+		Set: func(on bool) error {
+			// The director's reduced toolset and read-only planning
+			// contradict each other: one mode at a time.
+			if on && vibeActive() {
+				return fmt.Errorf("vibe mode is active — /vibe off first")
+			}
+			planMode.Active = on
+			return nil
+		},
 	})
 
 	app.SetGoalOps(&tui.GoalOps{
@@ -950,7 +1074,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				modelMu.Unlock()
 				ag := &agent.Agent{
 					Provider: lp,
-					Tools:    reg,
+					Tools:    toolsForTurn(),
 					// feedAdvisor is assigned after the agent exists, so go
 					// through an indirection: a direct field copy would
 					// capture the nil func at literal time.
@@ -1011,7 +1135,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				sessMu.Lock()
 				hist := rebuildHistory() // store mirror is authoritative
 				sessMu.Unlock()
-				_, err := ag.Run(ctx, hookBus.Context(ctx, buildSys()), hist)
+				sys := buildSys()
+				if vibeActive() {
+					sys = vibeSys() // director prompt for the restricted toolset
+				}
+				_, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
 				app.EndAssistant()
 				app.FinishRun()
 				if err != nil {
