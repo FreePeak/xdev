@@ -11,6 +11,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/memlimit"
+	"github.com/FreePeak/xdev/internal/skills"
 )
 
 var version = "0.1.0-dev"
@@ -106,6 +107,8 @@ Flags:
 	}
 	cliKeyValue = *apiKeyValue
 	loadedSettings = settings
+	// M12 F2: user-declared extra SKILL.md roots (inert until wired).
+	skills.SetCustomDirectories(settings.Skills.CustomDirectories)
 	noRulesFlag = *noRules
 	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
 	// Flag-vs-settings precedence: an explicit flag always wins.

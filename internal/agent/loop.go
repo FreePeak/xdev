@@ -165,6 +165,9 @@ type Agent struct {
 	// Policy is the approval configuration; Approve prompts the user when a
 	// decision requires it (nil means an unattended run: prompts deny).
 	Policy  tool.ApprovalPolicy
+	// Redactor hides configured secrets in provider-visible text and
+	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
+	Redactor Redactor
 	Approve ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model role. nil asks for none.
@@ -569,6 +572,12 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		Model:     a.Model,
 		Thinking:  a.Thinking,
 	}
+	if a.Redactor != nil {
+		// Redact a copy: the store keeps the raw values, only the
+		// provider request carries placeholders (M13 #55).
+		req.System = a.Redactor.Apply(req.System)
+		req.Messages = redactMessages(history, a.Redactor)
+	}
 	a.Hooks.OnStart(req)
 
 	ch, err := a.Provider.Stream(sctx, req)
@@ -724,7 +733,7 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out[i] = a.runOneTool(ctx, calls[i])
+			out[i] = a.redactToolMessage(a.runOneTool(ctx, calls[i]))
 		}(i)
 	}
 	wg.Wait()
@@ -755,6 +764,11 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		args = call.Arguments
 	} else if call.PartialArgs != "" {
 		args = json.RawMessage(call.PartialArgs)
+	}
+	if a.Redactor != nil && len(args) > 0 {
+		// The model sees placeholders; the tool must run on real values
+		// (M13 #55).
+		args = json.RawMessage(a.Redactor.Expand(string(args)))
 	}
 	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
 	// to propose while the sub-state is active. Checked before approval —
@@ -830,4 +844,49 @@ func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
 		IsError:    res.IsError,
 		Details:    res.Details,
 	}
+}
+
+// Redactor hides configured secrets in provider-visible text and restores
+// placeholders in inbound tool arguments (M13 #55). nil = off.
+type Redactor interface {
+	Apply(string) string
+	Expand(string) string
+}
+
+// redactMessages copies history with every text block redacted. The
+// caller's slice is never mutated: the session store keeps raw values, so
+// only the provider request carries placeholders.
+func redactMessages(msgs []ai.Message, r Redactor) []ai.Message {
+	out := make([]ai.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = m
+		if len(m.Content) == 0 {
+			continue
+		}
+		blocks := make([]ai.Block, len(m.Content))
+		copy(blocks, m.Content)
+		for j, b := range blocks {
+			if tb, ok := b.(ai.TextBlock); ok {
+				tb.Text = r.Apply(tb.Text)
+				blocks[j] = tb
+			}
+		}
+		out[i].Content = blocks
+	}
+	return out
+}
+
+// redactToolMessage hides secrets in a tool result before it enters the
+// provider request (M13 #55); nil Redactor is the identity.
+func (a *Agent) redactToolMessage(m ai.Message) ai.Message {
+	if a.Redactor == nil || m.Role != ai.RoleToolResult || len(m.Content) == 0 {
+		return m
+	}
+	for i, b := range m.Content {
+		if tb, ok := b.(ai.TextBlock); ok {
+			tb.Text = a.Redactor.Apply(tb.Text)
+			m.Content[i] = tb
+		}
+	}
+	return m
 }
