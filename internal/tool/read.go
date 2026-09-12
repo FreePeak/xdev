@@ -77,6 +77,23 @@ type readArgs struct {
 	Limit  int    `json:"limit,omitempty"`
 }
 
+// isSelectorSuffix reports whether s looks like an omp line-selector suffix
+// ("1", "50-100", "5-16,960-973", "raw"): digits, hyphens, commas, dots
+// only, never a path separator.
+func isSelectorSuffix(s string) bool {
+	if s == "" || strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r == '-', r == ',', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Execute implements Tool.
 func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
 	if err := ctx.Err(); err != nil {
@@ -88,6 +105,15 @@ func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	}
 	if a.Path == "" {
 		return Result{IsError: true, Text: "read: path is required"}, nil
+	}
+	// An omp-style selector suffix ("go.mod:50-100", "go.mod:1") is not a
+	// filename: xdev's read takes offset/limit fields instead. Saying "file
+	// not found" for a file that exists teaches the model the wrong lesson;
+	// name the difference and the fields that do the same job.
+	if base, suffix, ok := strings.Cut(a.Path, ":"); ok && suffix != "" && isSelectorSuffix(suffix) {
+		if _, err := os.Stat(base); err == nil {
+			return Result{IsError: true, Text: fmt.Sprintf("read: %q looks like an omp line selector, but xdev's read takes offset/limit fields instead — re-read with path=%q plus offset/limit", a.Path, base)}, nil
+		}
 	}
 	// URI seam: skill:// and memory:// resolve to synthesized text, not
 	// files (omp exposes both through read).

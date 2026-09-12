@@ -133,7 +133,7 @@ func TestBashInterceptorRewriteKeepsCallSettings(t *testing.T) {
 	if err := json.Unmarshal(rewritten, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Command != "git status" || v.Timeout != 30 || v.Workdir != "/w" || !v.RunInBackground {
+	if v.Command != "git status" || v.Timeout == nil || *v.Timeout != 30 || v.Workdir != "/w" || !v.RunInBackground {
 		t.Fatalf("rewrite changed more than the command: %s", rewritten)
 	}
 }

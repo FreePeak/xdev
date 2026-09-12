@@ -16,8 +16,11 @@ import (
 
 var _ Tool = (*AskTool)(nil)
 
-// DefaultAskTimeout is the headless wait when ask.timeout is unset.
-const DefaultAskTimeout = 2 * time.Minute
+// DefaultAskTimeout is the headless wait when ask.timeout is unset. Thirty
+// seconds, not minutes: a one-shot run that hits an ask must not stall CI
+// for two minutes per question — the wait exists so a barely-late human can
+// still answer, and ask.timeout raises it deliberately.
+const DefaultAskTimeout = 30 * time.Second
 
 // AskToolName is the registry name of the ask tool.
 const AskToolName = "ask"
@@ -85,7 +88,8 @@ func (t *AskTool) Parameters() json.RawMessage {
       }
     },
     "multi": {"type": "boolean", "description": "true = several options may be selected"},
-    "recommended": {"description": "option label(s) to use when nobody answers within the timeout; string or array of labels"}
+    "recommended": {"description": "option label(s) to use when nobody answers within the headless wait; string or array of labels"},
+    "_note": {"description": "unattended (print/rpc) runs wait ask.timeout (default 30s) then take the recommended option — in a one-shot run, prefer deciding over asking"}
   },
   "required": ["question", "options"]
 }`)

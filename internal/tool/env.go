@@ -129,6 +129,52 @@ func HardenedEnvFrom(environ []string) []string {
 	return out
 }
 
+// ApplyCallEnv layers explicit per-call environment entries onto a hardened
+// base environment. Call entries are the caller's stated intent, so the
+// inherited-secret strip pattern (envStripRe: API/KEY/TOKEN/...) does NOT
+// apply to them — it exists to keep the PARENT's credentials out of the
+// child, and applying it here would silently drop a value the caller named
+// (the exact silent-drop class this layering was added to fix). The
+// always-set keys (TERM, NO_COLOR, LC_ALL, ...) and the always-strip keys
+// still win, so deterministic-output hardening cannot be defeated by a call.
+func ApplyCallEnv(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	protected := map[string]bool{}
+	for _, kv := range envAlwaysSet() {
+		key, _, _ := strings.Cut(kv, "=")
+		protected[key] = true
+	}
+	for _, key := range envAlwaysStrip {
+		protected[key] = true
+	}
+	// A protected key is ignored entirely — the base value must SURVIVE, so
+	// the replace-set is only the keys the call actually applies.
+	apply := make(map[string]bool, len(extra))
+	for k := range extra {
+		if !protected[k] {
+			apply[k] = true
+		}
+	}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, kv := range base {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || key == "" || apply[key] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	for k, v := range extra {
+		if !apply[k] {
+			continue
+		}
+		out = append(out, k+"="+v)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // shouldStripKey reports whether an env key matches the hardening pattern
 // or the always-strip set.
 func shouldStripKey(key string) bool {

@@ -148,6 +148,25 @@ func runExport(outPath string, opts printOptions) error {
 	if strings.TrimSpace(outPath) == "" {
 		return errors.New("export needs a file path (xdev -export session.html)")
 	}
+	// omp's --export takes the SESSION (id or .jsonl path) as its first
+	// argument; xdev's takes the OUTPUT path. A user following the omp docs
+	// would therefore point the HTML writer at the transcript itself and
+	// destroy it — HTML over JSONL, exit 0. Refuse to write over anything
+	// that is not already an HTML export: re-exporting over a previous
+	// export stays allowed.
+	if data, rerr := os.ReadFile(outPath); rerr == nil {
+		head := data
+		if len(head) > 256 {
+			head = head[:256]
+		}
+		trimmed := strings.ToLower(strings.TrimSpace(string(head)))
+		// xdev's own exports emit lowercase `<!doctype html>` — the case
+		// check must fold, or a legitimate re-export is refused.
+		isHTML := strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html")
+		if !isHTML {
+			return fmt.Errorf("refusing to overwrite %s: it exists and is not an HTML export (point -export at a new .html path, and select the session with -resume/-continue/-fork)", outPath)
+		}
+	}
 	cwd := mustGetwd()
 	store, err := exportSourceSession(cwd, opts)
 	if err != nil {
