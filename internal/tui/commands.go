@@ -120,6 +120,7 @@ type CommandAPI interface {
 	ResumeSession(query string) error
 	SwitchModel(args string) error
 	PlanMode(args string) error
+	Vibe(args string) error
 	Goal(args string) error
 	Advisor(args string) error
 	Memory(args string) error
@@ -172,6 +173,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "goal", Description: "show the active goal and its token budget",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
+		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
+			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},
 		{Name: "hub", Description: "agent hub roster: live status, kill/revive, transcripts",
 			Fn: func(app CommandAPI, args string) error { return app.HubRoster() }},
 		{Name: "hotkeys", Description: "show keybinding map",

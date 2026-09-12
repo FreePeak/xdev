@@ -55,6 +55,7 @@ type App struct {
 	themeOps          *ThemeOps                       // /theme, wired by cmd (nil → notices)
 	prewalkOps        *PrewalkOps                     // /prewalk, wired by cmd (nil → notices)
 	goalOps           *GoalOps                        // /goal, wired by cmd (nil → notices)
+	vibeOps           *VibeOps                        // /vibe, wired by cmd (nil → notices)
 	spick             *sessionPicker                  // /resume selector (nil = closed)
 	onPickerResume    func(id string)                 // wired by cmd: performs the resume
 	onPickerSearch    func(query string) []PickerItem // wired by cmd: prompt-text matches (nil → local id+title filter)
@@ -1558,6 +1559,9 @@ func (a *App) drawComposer(yTop int) {
 	// Info divider bottom border: ╰─ model · ⠋ ───────────╯
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
+	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
+		info += " · Vibe"
+	}
 	if a.st.Running {
 		a.st.spinnerIdx = a.st.spinnerIdx % len(spinnerFrames)
 		info += " · " + spinnerFrames[a.st.spinnerIdx]
