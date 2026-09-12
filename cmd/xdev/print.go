@@ -25,6 +25,7 @@ import (
 	"github.com/FreePeak/xdev/internal/rules"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/skills"
+	"github.com/FreePeak/xdev/internal/tiny"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -879,6 +880,13 @@ func buildMemoryPipeline(cfg *config.Config, settings *config.Settings, backend 
 	}
 	bySmol := complete("@smol")
 	if bySmol == nil {
+		return nil
+	}
+	// M15 #70: an explicit local-tiny opt-in must never silently fall back
+	// to the API (docs/decisions/local-tiny-models.md).
+	bySmol, selErr := tiny.Select(tiny.TaskMemoryExtract, bySmol)
+	if selErr != nil {
+		logx.Errorf("memory pipeline: %v", selErr)
 		return nil
 	}
 	return &memory.Pipeline{
