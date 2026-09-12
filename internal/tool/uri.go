@@ -2,6 +2,7 @@ package tool
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -48,4 +49,61 @@ func resolveURI(uri string) (string, bool, error) {
 		return "", true, fmt.Errorf("%s", err.Error())
 	}
 	return text, true, nil
+}
+
+// URIWriter finalizes a write-device: content is the write payload, the
+// returned text is what the write tool reports back. Write-devices are
+// the omp xd:// transport — e.g. write xd://resolve "<reason>" finalizes
+// a pending plan proposal (#36) — and ride the same process-global
+// registry as the read schemes.
+type URIWriter func(uri, content string) (string, error)
+
+var uriWriters = map[string]map[string]URIWriter{} // scheme -> device -> writer
+
+// RegisterWriteDevice installs a writer under scheme://device
+// (e.g. "xd", "resolve"). Re-registration replaces (tests, repeated
+// startup).
+func RegisterWriteDevice(scheme, device string, fn URIWriter) {
+	uriMu.Lock()
+	defer uriMu.Unlock()
+	scheme, device = strings.ToLower(scheme), strings.ToLower(device)
+	if uriWriters[scheme] == nil {
+		uriWriters[scheme] = map[string]URIWriter{}
+	}
+	uriWriters[scheme][device] = fn
+}
+
+// WriteURI dispatches a write to a registered device. handled=false when
+// the scheme has no write-device, so callers fall through to the
+// filesystem; a registered scheme with an unknown device is an error —
+// a typo'd device must not silently create a file.
+func WriteURI(uri, content string) (text string, handled bool, err error) {
+	i := strings.Index(uri, "://")
+	if i <= 0 {
+		return "", false, nil
+	}
+	uriMu.RLock()
+	scheme := strings.ToLower(uri[:i])
+	devs, ok := uriWriters[scheme]
+	uriMu.RUnlock()
+	if !ok {
+		return "", false, nil
+	}
+	uriMu.RLock()
+	fn, ok := devs[strings.ToLower(uri[i+3:])]
+	uriMu.RUnlock()
+	if !ok {
+		return "", true, fmt.Errorf("unknown %s:// write-device (have: %s)", scheme, strings.Join(writeDeviceNames(devs), ", "))
+	}
+	text, err = fn(uri, content)
+	return text, true, err
+}
+
+func writeDeviceNames(devs map[string]URIWriter) []string {
+	names := make([]string, 0, len(devs))
+	for d := range devs {
+		names = append(names, d)
+	}
+	sort.Strings(names)
+	return names
 }

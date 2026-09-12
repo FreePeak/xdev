@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/tool"
 	"gopkg.in/yaml.v3"
 
 	"github.com/FreePeak/xdev/internal/websearch"
@@ -131,6 +132,12 @@ type Settings struct {
 	// WebSearch configures the web_search provider chain (M13 #48):
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
+	// Ask configures the ask tool (M11 #36): ask.timeout bounds how long
+	// a headless run waits for an answer before the recommended option
+	// proceeds.
+	Ask struct {
+		Timeout int `yaml:"timeout"`
+	} `yaml:"ask"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -261,6 +268,14 @@ func (s *Settings) WebSearchConfig() websearch.Settings {
 		return websearch.Settings{}
 	}
 	return s.WebSearch
+}
+// AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
+// or the tool's schema default when unset.
+func (s *Settings) AskTimeout() time.Duration {
+	if s == nil || s.Ask.Timeout <= 0 {
+		return tool.DefaultAskTimeout
+	}
+	return time.Duration(s.Ask.Timeout) * time.Second
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -476,6 +491,9 @@ func (s *Settings) merge(layer *Settings) error {
 		}
 		s.WebSearch.APIKeys[k] = v
 	}
+	if layer.Ask.Timeout != 0 {
+		s.Ask.Timeout = layer.Ask.Timeout
+	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
 	default:
@@ -639,6 +657,9 @@ func List(s *Settings, globalPath string) []string {
 	}
 	if len(s.EnabledProviders) > 0 {
 		out = append(out, "enabledProviders "+strings.Join(s.EnabledProviders, ","))
+	}
+	if s.Ask.Timeout > 0 {
+		out = append(out, "ask.timeout "+fmt.Sprint(s.Ask.Timeout))
 	}
 	return out
 }
