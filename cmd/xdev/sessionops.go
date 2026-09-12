@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
@@ -315,4 +316,24 @@ func deleteSessionByShortID(shortID, activePath string) error {
 		return nil
 	}
 	return fmt.Errorf("no session %s", shortID)
+}
+
+// summarizeAndBranch records that the branch being left is summarized
+// away, then moves the leaf to entryID (tree selector Shift+Enter). The
+// summary is a fixed marker — no model round-trip.
+// ponytail: a real LLM-written summary would need a provider call from
+// cmd; upgrade path is the live target in runTUI next to /prewalk.
+func summarizeAndBranch(store *session.Store, entryID string) error {
+	if store.Entry(entryID) == nil {
+		return fmt.Errorf("branch: no entry matching %q", entryID)
+	}
+	if err := store.Append(&session.BranchSummaryEntry{
+		Summary: ai.Message{
+			Role:    ai.RoleUser,
+			Content: []ai.Block{ai.TextBlock{Text: "(branch summary) the previous branch was abandoned for a tree-selector switch"}},
+		},
+	}); err != nil {
+		return err
+	}
+	return store.Branch(entryID)
 }
