@@ -15,6 +15,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/dap"
 	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/ext"
 	hookbus "github.com/FreePeak/xdev/internal/hooks"
@@ -992,6 +993,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	lspTool := lsp.NewTool(cwd, settings)
 	reg.Register(lspTool)
 	lspTool.Prewarm()
+	// M15 #66: DAP debug driver — the adapters in debug.adapters (dlv,
+	// debugpy, lldb-dap) start lazily on the first launch or attach.
+	reg.Register(dap.NewTool(cwd, settings))
 	// M12 #45: experimental notes-backed context windows — context_notes (a
 	// branch-scoped 16 KiB notebook) and new_context (rollover). The state is
 	// built from the finished registry: notes-backed rollover stays disabled
