@@ -2,6 +2,7 @@ package marketplace
 
 import (
 	"os"
+	"path/filepath"
 )
 
 // Discovery integration (M13 #53).
@@ -42,8 +43,35 @@ func AgentDirs() []string { return pluginRoots(func(d Dirs) []string { return d.
 // HookDirs lists the hook-declaration roots contributed by installed plugins.
 func HookDirs() []string { return pluginRoots(func(d Dirs) []string { return d.Hooks }) }
 
+// extraRoots are launch-provided plugin roots (--plugin-dir). They behave
+// exactly like an installed plugin tree: same per-kind subdirectories, same
+// lowest precedence, no registry entry required.
+var extraRoots []string
+
+// SetExtraRoots installs the launch-provided plugin roots.
+func SetExtraRoots(roots []string) {
+	extraRoots = append([]string(nil), roots...)
+}
+
+// extraDirs maps one --plugin-dir root onto its per-kind directories.
+func extraDirs(root string) Dirs {
+	return Dirs{
+		Commands: []string{filepath.Join(root, "commands")},
+		Skills:   []string{filepath.Join(root, "skills")},
+		Agents:   []string{filepath.Join(root, "agents")},
+		Hooks:    []string{filepath.Join(root, "hooks")},
+	}
+}
+
 func pluginRoots(pick func(Dirs) []string) []string {
 	var out []string
+	for _, root := range extraRoots {
+		for _, dir := range pick(extraDirs(root)) {
+			if st, err := os.Stat(dir); err == nil && st.IsDir() {
+				out = append(out, dir)
+			}
+		}
+	}
 	for _, inst := range InstalledPlugins() {
 		if !insideRoot(inst.Path) {
 			continue

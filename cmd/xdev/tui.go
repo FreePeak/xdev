@@ -382,7 +382,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// grep/glob use, so the menu costs one walk per TTL, not per keystroke.
 	app.SetPathCompletion(cwd, func() []string {
 		entries, _, _ := tool.SharedFSCache().Scan(fscache.Options{
-			Roots: []string{cwd}, RespectGitignore: true,
+			Roots: workspaceDirs(cwd), RespectGitignore: true,
 		})
 		out := make([]string, 0, len(entries))
 		for _, e := range entries {
@@ -821,6 +821,39 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		Handoff: runHandoff,
 	})
 
+	// setRef applies a resolved model ref; shared by /model
+	// and the Ctrl+P cycle so both paths keep the same
+	// effect (entry, status, context window).
+	setRef := func(ref string) error {
+		nr, ne, err := resolveModel(ref, cfg, lastSettings())
+		if err != nil {
+			return err
+		}
+		nprovName, nmodelName, err := config.ParseModelRef(nr)
+		if err != nil {
+			return err
+		}
+		npc, ok := cfg.Providers[nprovName]
+		if !ok {
+			return fmt.Errorf("unknown provider %q", nprovName)
+		}
+		nprov, err := buildProvider(nprovName, npc, nmodelName, cfg)
+		if err != nil {
+			return err
+		}
+		_ = nprov
+		if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
+			logx.Errorf("model change entry: %v", err)
+		}
+		modelMu.Lock()
+		live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
+		modelMu.Unlock()
+		app.SetStatusModel(nprovName + "/" + nmodelName)
+		// The HUD context segment measures against the new window.
+		app.SetContextWindow(int64(modelWindow(cfg, nprovName, nmodelName)))
+		return nil
+	}
+
 	// /model: the interactive selector. Roles tab first (each row sets that
 	// slot), then the concrete model catalog — all models plus one view per
 	// provider, which is what omp's /model shows.
@@ -858,34 +891,47 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			s.ModelRoles[role] = ref
 			return nil
 		},
-		Set: func(ref string) error {
-			nr, ne, err := resolveModel(ref, cfg, lastSettings())
-			if err != nil {
-				return err
+		Set: setRef,
+		// Cycle advances the active model through the --models
+		// patterns (omp's Ctrl+P): each pattern matches the first
+		// catalog entry whose provider/model/label contains it.
+		Cycle: func() (string, bool) {
+			if len(lastSettings().Models.Cycle) == 0 {
+				return "", false
 			}
-			nprovName, nmodelName, err := config.ParseModelRef(nr)
-			if err != nil {
-				return err
-			}
-			npc, ok := cfg.Providers[nprovName]
-			if !ok {
-				return fmt.Errorf("unknown provider %q", nprovName)
-			}
-			nprov, err := buildProvider(nprovName, npc, nmodelName, cfg)
-			if err != nil {
-				return err
-			}
-			_ = nprov
-			if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
-				logx.Errorf("model change entry: %v", err)
-			}
+			cur := ""
 			modelMu.Lock()
-			live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
+			if live.provName != "" && live.model != "" {
+				cur = live.provName + "/" + live.model
+			}
 			modelMu.Unlock()
-			app.SetStatusModel(nprovName + "/" + nmodelName)
-			// The HUD context segment measures against the new window.
-			app.SetContextWindow(int64(modelWindow(cfg, nprovName, nmodelName)))
-			return nil
+			items := modelPickerItems(cfg, lastSettings(), cur)
+			if len(items) == 0 {
+				return "", false
+			}
+			next := ""
+			for _, pat := range lastSettings().Models.Cycle {
+				for _, it := range items {
+					if strings.Contains(strings.ToLower(it.Value), strings.ToLower(pat)) ||
+						strings.Contains(strings.ToLower(it.Label), strings.ToLower(pat)) {
+						if it.Value == cur {
+							continue
+						}
+						next = it.Value
+						break
+					}
+				}
+				if next != "" {
+					break
+				}
+			}
+			if next == "" {
+				return "", false
+			}
+			if err := setRef(next); err != nil {
+				return "", false
+			}
+			return next, true
 		},
 	})
 	// In the TUI, propose HOLDS the decision: the plan shows in the tool

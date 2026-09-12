@@ -125,6 +125,17 @@ func runLogin(provider string, cfg *config.Config) int {
 
 // runLogout removes one provider's stored credential.
 func runLogout(provider string) int {
+	// An unknown name is a usage error, not a success: deleting a
+	// credential that never existed reported "logged out of <typo>".
+	cfg, err := config.LoadModelsLayered()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		return 2
+	}
+	if _, ok := cfg.Providers[provider]; !ok {
+		fmt.Fprintf(os.Stderr, "xdev: unknown provider %q (configured: %s)\n", provider, strings.Join(providerKeys(cfg), " "))
+		return 2
+	}
 	if err := config.DeleteCredential(provider); err != nil {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		return 1

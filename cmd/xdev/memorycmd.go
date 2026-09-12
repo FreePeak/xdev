@@ -36,10 +36,10 @@ const memoryUsage = `usage: xdev memory <subcommand>
 
 func memoryCmd(args []string, in io.Reader, out, errOut io.Writer, settings *config.Settings) int {
 	sub := ""
+	rest := []string{}
 	if len(args) > 0 {
-		sub = args[0]
+		sub, rest = args[0], args[1:]
 	}
-	rest := args[1:]
 	switch sub {
 	case "", "help", "-h", "--help":
 		fmt.Fprint(errOut, memoryUsage)

@@ -222,10 +222,23 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // prewalk is off or the target cannot resolve (warn, start unarmed — the
 // run proceeds on the primary model).
 func resolvePrewalk(opts printOptions, cfg *config.Config, settings *config.Settings) *agent.FailoverTarget {
-	if !opts.Prewalk {
+	if launch.NoPrewalk {
+		return nil // --no-prewalk beats the flag, the setting and the profile
+	}
+	// The handoff is armed by either the flag or prewalk.enabled; the target
+	// is --prewalk-into, then prewalk.into, then @smol.
+	enabled := opts.Prewalk || (settings != nil && settings.Prewalk.Enabled)
+	if !enabled {
 		return nil
 	}
-	return resolveInto(opts.PrewalkInto, cfg, settings, "prewalk")
+	into := opts.PrewalkInto
+	if strings.TrimSpace(into) == "" && settings != nil {
+		into = settings.Prewalk.Into
+	}
+	if strings.TrimSpace(into) == "" {
+		into = "@smol"
+	}
+	return resolveInto(into, cfg, settings, "prewalk")
 }
 
 // resolveInto resolves a model ref or @role to a handoff target (prewalk,
@@ -672,7 +685,17 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 }
 
 func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem memory.Store) func() string {
+	// --add-dir roots contribute their own AGENTS.md hierarchy; the launch
+	// cwd stays first so its files keep precedence.
 	ctxFiles := agent.LoadContextFiles(cwd)
+	for _, dir := range launch.ExtraDirs {
+		if extra := agent.LoadContextFiles(dir); extra != "" {
+			ctxFiles += "\n" + extra
+		}
+	}
+	if dirs := workspaceDirs(cwd); len(dirs) > 1 {
+		ctxFiles += "\n\nWorkspace directories (in scope): " + strings.Join(dirs, ", ")
+	}
 	var ruleSet []rules.Rule
 	if noRulesFlag {
 		rules.Set(nil)
@@ -859,9 +882,24 @@ func attachExtensions(ctx context.Context, reg *tool.Registry, steer, followUp f
 	}
 	mgr := ext.NewManager()
 	mgr.BindHost(actionRouter(steer, followUp, cfg))
+	// Discovery first, then the explicit -e/--extension paths (their
+	// failures are reported, not fatal: one bad path must not take down the
+	// working set).
 	if err := mgr.Load(ctx, extensionsDir()); err != nil {
 		logx.Errorf("ext: %v", err)
-		return nil
+	}
+	for _, dir := range launch.Extensions {
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			// logx is off in print mode, so an ignored -e path would be
+			// silent. xdev loads a DIRECTORY of extension executables
+			// (PRD §1.5); omp's -e names a file, so say which shape is
+			// expected instead of no-op'ing.
+			fmt.Fprintf(os.Stderr, "xdev: --extension %s: want a directory of extension executables (omp's single-file -e is not supported)\n", dir)
+			continue
+		}
+		if err := mgr.Load(ctx, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "xdev: --extension %s: %v\n", dir, err)
+		}
 	}
 	tools := mgr.Tools()
 	// A policy-only extension (events, no tools/commands) must survive:
@@ -1510,6 +1548,17 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 	effort := ""
 	if base, suffix, ok := strings.Cut(ref, ":"); ok && slices.Contains(config.EffortLevels, suffix) {
 		ref, effort = base, suffix
+	}
+	// --provider forces the provider when the ref names none (omp's
+	// --provider onegw --model dev); an unknown provider fails here rather
+	// than one turn later at the wire.
+	if launch.Provider != "" {
+		if _, ok := cfg.Providers[launch.Provider]; !ok {
+			return "", "", fmt.Errorf("unknown provider %q (have: %v)", launch.Provider, providerKeys(cfg))
+		}
+		if !strings.Contains(ref, "/") {
+			ref = launch.Provider + "/" + ref
+		}
 	}
 	// A bare id ("dev") resolves against the configured catalogs, the same
 	// convenience omp's model resolver offers for `-model`.
