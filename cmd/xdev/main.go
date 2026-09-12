@@ -54,6 +54,11 @@ var subcommands = map[string]bool{
 	"login": true, "logout": true, "version": true, "serve": true,
 	"stats": true, "memory": true, "share": true,
 	"update": true, "setup": true, "bench": true,
+	// Wave 9 CLI suite (#34).
+	"models": true, "search": true, "commit": true, "compress": true,
+	"cleanse": true, "gallery": true, "render": true, "gc": true,
+	"usage": true, "ps": true, "token": true, "completions": true,
+	"worktree": true, "wt": true,
 }
 
 // handoffMode is the one-shot -handoff request (main owns the flag; the run
@@ -134,6 +139,18 @@ func main() {
   xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
   xdev join "<link>"           mirror a shared session (collab guest)
   xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev models [query]          resolved model catalog (--refresh re-discovers)
+  xdev search <query>          search local sessions (--regex, --here, --json)
+  xdev worktree|wt <sub>       git worktrees: list | add | remove | prune
+  xdev commit [--apply]        commit message from the staged diff (@commit role)
+  xdev compress [--dry-run]    compact a session through the compaction ladder
+  xdev cleanse [--dry-run]     redact secrets from a transcript (writes .bak)
+  xdev gallery|render [id]     list sessions, render one to HTML (--html)
+  xdev gc [--yes]              storage GC: orphaned blobs/artifacts/subagents
+  xdev usage [--provider P]    provider accounts/limits + observed usage
+  xdev ps                      xdev processes on this host (--json)
+  xdev token <sub>             list | show | rotate the per-install service tokens
+  xdev completions <shell>     bash | zsh | fish completion script
  @both
 
 Flags:
@@ -412,6 +429,47 @@ Flags:
 			os.Exit(2)
 		}
 		os.Exit(0)
+	}
+
+	// --- Wave 9 CLI suite (issue #34). One dispatch line per subcommand:
+	// each prints its own usage and exits on its own.
+	if mode == "models" {
+		os.Exit(runModels(args))
+	}
+	if mode == "search" {
+		os.Exit(runSearch(args))
+	}
+	if mode == "worktree" || mode == "wt" {
+		os.Exit(runWorktree(args))
+	}
+	if mode == "commit" {
+		os.Exit(runCommit(args))
+	}
+	if mode == "compress" {
+		os.Exit(runCompress(args))
+	}
+	if mode == "cleanse" {
+		os.Exit(runCleanse(args))
+	}
+	if mode == "gallery" || mode == "render" {
+		os.Exit(runGallery(args))
+	}
+	if mode == "gc" {
+		os.Exit(runGC(args))
+	}
+	if mode == "usage" {
+		os.Exit(runUsage(args))
+	}
+	if mode == "ps" {
+		os.Exit(runPS(args))
+	}
+	if mode == "token" {
+		os.Exit(runToken(args))
+	}
+	if mode == "completions" {
+		// The script is generated from the root FlagSet parsed above, so
+		// completions stay current with every flag registration.
+		os.Exit(runCompletions(args, fs))
 	}
 
 	switch mode {
