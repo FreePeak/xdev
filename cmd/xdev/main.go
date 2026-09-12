@@ -53,6 +53,7 @@ var subcommands = map[string]bool{
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
 	"stats": true, "memory": true, "share": true,
+	"update": true, "setup": true, "bench": true,
 }
 
 // handoffMode is the one-shot -handoff request (main owns the flag; the run
@@ -114,15 +115,7 @@ func main() {
   xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
   xdev join "<link>"           mirror a shared session (collab guest)
   xdev lsp-config [list|validate]  language servers, resolved binaries
-  xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
-
-  Base dir: --profile > XDEV_PROFILE > XDEV_AGENT_DIR > XDG (after config init-xdg) > ~/.xdev/agent
-  xdev plugin <sub>            plugins: list | search | install | remove | info
-  xdev acp                     ACP server on stdio (Agent Client Protocol, for editors)
-  xdev stats [--summary|--json|--serve]  usage over the local session store
-  xdev memory <sub>            local memory: show | stats | lessons | add | edit
-                               | export | import | scratchpad | clear --yes
-  xdev share [-port N] [-export file] [id|path]  serve an E2E-encrypted view-only snapshot
+ @both
 
 Flags:
 `, version)
@@ -326,6 +319,10 @@ Flags:
 
 	if mode == "lsp-config" {
 		os.Exit(lsp.ConfigCommand(args, os.Stdout, os.Stderr, settings))
+	}
+	// Distribution surface (M14 #64): update/setup/bench parse their own flags.
+	if mode == "update" || mode == "setup" || mode == "bench" {
+		os.Exit(runDist(mode, args, version))
 	}
 
 	if mode == "say" {
