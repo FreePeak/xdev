@@ -22,13 +22,54 @@ import (
 // Settings is the layered configuration surface xdev acts on. New keys
 // join here so every layer sees them; unknown YAML keys are rejected so a
 // typo is reported instead of ignored.
+// DefaultCompactionMethodOrder is the shipped compaction priority ladder
+// (PRD M5 #6): the step-boundary threshold check first, then the reactive
+// overflow and promotion strategies. agent.ParseMethodOrder owns parsing
+// this value; an empty setting means this order.
+const DefaultCompactionMethodOrder = "threshold,overflow,promotion"
+
+// MethodOrderSetting is the compaction.methodOrder value: a comma-separated
+// strategy priority list. A scalar ("a,b") and a sequence (["a","b"]) both
+// decode, because `xdev config set` stores comma-separated values as a list
+// — a plain string field would reject the CLI's own output and get the
+// user's config file quarantined as broken.
+type MethodOrderSetting string
+
+func (m *MethodOrderSetting) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		*m = MethodOrderSetting(strings.TrimSpace(node.Value))
+	case yaml.SequenceNode:
+		var parts []string
+		if err := node.Decode(&parts); err != nil {
+			return err
+		}
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		*m = MethodOrderSetting(strings.Join(parts, ","))
+	default:
+		return fmt.Errorf("compaction.methodOrder: want \"a,b\" or a list of names")
+	}
+	return nil
+}
+
+// CompactionSettings holds context-maintenance knobs (PRD M5 #6).
+type CompactionSettings struct {
+	// MethodOrder is the strategy priority order
+	// (threshold|overflow|promotion); empty means the shipped default.
+	MethodOrder MethodOrderSetting `yaml:"methodOrder"`
+}
+
 type Settings struct {
-	Theme        string            `yaml:"theme"`
-	DefaultModel string            `yaml:"defaultModel"`
-	ApprovalMode string            `yaml:"approvalMode"` // always-ask|write|yolo
-	MemoryLimit  int64             `yaml:"memoryLimit"`
-	MaxTurns     int               `yaml:"maxTurns"`
-	ModelRoles   map[string]string `yaml:"modelRoles"`
+	Theme        string `yaml:"theme"`
+	DefaultModel string `yaml:"defaultModel"`
+	ApprovalMode string `yaml:"approvalMode"` // always-ask|write|yolo
+	MemoryLimit  int64  `yaml:"memoryLimit"`
+	MaxTurns     int    `yaml:"maxTurns"`
+	// Compaction tunes context maintenance (compaction.methodOrder).
+	Compaction CompactionSettings `yaml:"compaction"`
+	ModelRoles map[string]string  `yaml:"modelRoles"`
 	// ToolsApproval sets an action per tool (allow|deny|prompt).
 	ToolsApproval map[string]string `yaml:"toolsApproval"`
 	// BashPatterns are ordered command rules, "deny:rm -rf *" style.
@@ -83,6 +124,7 @@ func defaultSettings() *Settings {
 		ApprovalMode:     "yolo",
 		MemoryLimit:      100 << 20,
 		MaxTurns:         200,
+		Compaction:       CompactionSettings{MethodOrder: DefaultCompactionMethodOrder},
 		ModelRoles:       map[string]string{},
 		ToolsApproval:    map[string]string{},
 		ModelRolesEffort: map[string]string{},
@@ -96,6 +138,16 @@ func defaultSettings() *Settings {
 // unset follows the schema default (on).
 func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
+}
+
+// CompactionMethodOrder returns the compaction.methodOrder setting in the
+// comma-separated form agent.ParseMethodOrder consumes (nil-safe: a missing
+// layer means "shipped default").
+func (s *Settings) CompactionMethodOrder() string {
+	if s == nil {
+		return ""
+	}
+	return string(s.Compaction.MethodOrder)
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -168,6 +220,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.MaxTurns != 0 {
 		s.MaxTurns = layer.MaxTurns
+	}
+	if layer.Compaction.MethodOrder != "" {
+		s.Compaction.MethodOrder = layer.Compaction.MethodOrder
 	}
 	for k, v := range layer.ModelRoles {
 		s.ModelRoles[k] = v
@@ -334,6 +389,7 @@ func List(s *Settings, globalPath string) []string {
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),
 		"personality " + s.Personality,
+		"compaction.methodOrder " + s.CompactionMethodOrder(),
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)

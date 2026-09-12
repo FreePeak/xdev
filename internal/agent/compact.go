@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
+	"github.com/FreePeak/xdev/internal/memlimit"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -25,11 +28,53 @@ const (
 	charsPerToken = 4
 )
 
+// Compaction strategies (compaction.methodOrder). `threshold` is the only
+// one that acts at a step boundary; `overflow` and `promotion` are reactive
+// (they fire when a request actually overflows the window) and appear in the
+// order for completeness — the ladder is one knob. The one spelling of the
+// default order is config.DefaultCompactionMethodOrder; config cannot import
+// agent, so the vocabulary is derived from it here.
+const methodThreshold = "threshold"
+
+var compactionMethods = strings.Split(config.DefaultCompactionMethodOrder, ",")
+
+// memPressure samples live heap pressure (0..1 of the process memory
+// limit). A package var so tests pin the trigger instead of allocating
+// toward the real limit.
+var memPressure = memlimit.Pressure
+
+// ParseMethodOrder parses the compaction.methodOrder setting into a
+// validated priority list. Unknown names are dropped with a warning (a
+// typo must not silently disable compaction) and duplicates collapse to
+// their first position; an empty or all-invalid value falls back to the
+// shipped default order.
+func ParseMethodOrder(raw string) []string {
+	out := make([]string, 0, len(compactionMethods))
+	for _, part := range strings.Split(raw, ",") {
+		m := strings.ToLower(strings.TrimSpace(part))
+		if m == "" || slices.Contains(out, m) {
+			continue
+		}
+		if !slices.Contains(compactionMethods, m) {
+			logx.Errorf("compaction: methodOrder: unknown method %q dropped (want %s)", m, strings.Join(compactionMethods, ","))
+			continue
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return slices.Clone(compactionMethods)
+	}
+	return out
+}
+
 // CompactionConfig tunes context maintenance. ContextWindow 0 disables it.
 type CompactionConfig struct {
 	ContextWindow    int
 	ReserveTokens    int64 // 0 → DefaultReserveTokens
 	KeepRecentTokens int64 // 0 → DefaultKeepRecentTokens
+	// Methods is the compaction.methodOrder priority list (see
+	// ParseMethodOrder); nil/empty → the shipped default order.
+	Methods []string
 }
 
 func (c CompactionConfig) reserve() int64 {
@@ -56,6 +101,14 @@ func (c CompactionConfig) keepRecent() int64 {
 		return DefaultKeepRecentTokens
 	}
 	return c.KeepRecentTokens
+}
+
+// methods is the effective strategy priority order for this config.
+func (c CompactionConfig) methods() []string {
+	if len(c.Methods) == 0 {
+		return compactionMethods
+	}
+	return c.Methods
 }
 
 // estimateTokens approximates the model-visible size of messages in tokens
@@ -214,14 +267,18 @@ func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error
 	return "", fmt.Errorf("compaction: stream ended without done")
 }
 
-// maybeCompact runs the threshold check at a step boundary. It is silent on
-// failure (logged, never fatal): a failed compaction degrades to the
-// pre-compaction behavior, and the overflow path re-tries it.
+// maybeCompact applies the compaction ladder at a step boundary: the
+// methodOrder setting decides whether the token threshold check runs at
+// all, and a live heap near the process memory limit forces compaction
+// regardless of tokens (PRD §3.7: degrade into "compact now", never an OOM
+// kill). It is silent on failure (logged, never fatal): a failed
+// compaction degrades to the pre-compaction behavior, and the overflow
+// path re-tries it.
 func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Message {
 	if a.Store == nil || a.Compaction.ContextWindow <= 0 {
 		return history
 	}
-	if contextTokens(history) <= a.Compaction.threshold() {
+	if !a.compactionDue(history) {
 		return history
 	}
 	if err := a.compact(ctx); err != nil {
@@ -233,4 +290,20 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 		return res.Messages
 	}
 	return history
+}
+
+// compactionDue reports whether this step boundary should compact.
+func (a *Agent) compactionDue(history []ai.Message) bool {
+	// Memory pressure overrides the token budget: the hard backstop must
+	// fire even while the context still fits its window.
+	if p := memPressure(); p >= memlimit.HighPressure {
+		logx.Infof("compaction: memory pressure %.0f%% of the process limit — compacting", p*100)
+		return true
+	}
+	// Only `threshold` can act at a boundary; the reactive methods reached
+	// here are no-ops by design (loop.go consults them on real overflow).
+	if !slices.Contains(a.Compaction.methods(), methodThreshold) {
+		return false
+	}
+	return contextTokens(history) > a.Compaction.threshold()
 }

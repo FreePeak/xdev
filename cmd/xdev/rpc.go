@@ -73,7 +73,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	h.agent = &agent.Agent{
 		Provider: prov, Tools: reg, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
-		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)},
+		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, provName, modelName),
 		Thinking:   effortBudget(effortRef),
@@ -81,7 +81,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 
 	// Extension processes: tools join the registry, and the manager is the
 	// agent's fail-closed policy interceptor; actions steer the live run.
-	if exts := attachExtensions(context.Background(), reg, h.agent.Steer, h.agent.FollowUp); exts != nil {
+	if exts := attachExtensions(context.Background(), reg, h.agent.Steer, h.agent.FollowUp, cfg); exts != nil {
 		h.agent.Intercept = exts
 		defer exts.Close()
 	}
@@ -249,7 +249,7 @@ func (h *rpcHandler) SetModel(ref string) error {
 	h.provName, h.modelName = provName, modelName
 	h.agent.Provider = prov
 	h.agent.Model = modelName
-	h.agent.Compaction = agent.CompactionConfig{ContextWindow: modelWindow(h.cfg, provName, modelName)}
+	h.agent.Compaction = agent.CompactionConfig{ContextWindow: modelWindow(h.cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())}
 	h.agent.Failovers = failoverChain(h.cfg, provName, modelName)
 	// Children must spawn on the current model, not the one captured at
 	// startup.
