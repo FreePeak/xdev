@@ -2,25 +2,30 @@ package tui
 
 import (
 	"fmt"
-	"github.com/FreePeak/xdev/internal/logx"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/theme"
 )
 
-// spinnerFrames are the braille spinner (Grok-style running indicator).
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-// Status carries the status-line state.
+// Status carries the status-line state. The running indicator's frames come
+// from the theme (Symbols.SpinnerFrames → preset default, see
+// theme.Theme.SpinnerFrames).
 type Status struct {
-	Model      string
-	SessionID  string
-	TokensIn   int64
-	TokensOut  int64
+	Model     string
+	SessionID string
+	TokensIn  int64
+	TokensOut int64
+	// Cost is the session spend in USD (0 when the provider reports none)
+	// and CtxWindow the model's context window (0 = unknown). Both feed the
+	// optional HUD segments (settings statusLine.segments).
+	Cost       float64
+	CtxWindow  int64
 	Running    bool
 	spinnerIdx int
 }
@@ -39,6 +44,12 @@ type App struct {
 	smenu  *slashMenu // "/" autocomplete dropdown (nil = closed)
 	keyMap *KeyMap    // remappable keybinding layer
 	st     Status
+
+	// statusSegs is the HUD segment order (settings statusLine.segments);
+	// empty = defaultStatusSegments.
+	statusSegs []string
+	// ask is the blocking ask card (#46/#36); nil = closed.
+	ask *askState
 
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
@@ -354,6 +365,49 @@ func (a *App) AddUsage(in, out int64) {
 	a.st.TokensIn += in
 	a.st.TokensOut += out
 	a.mu.Unlock()
+}
+
+// AddCost folds provider-reported spend (USD) into the HUD cost segment.
+func (a *App) AddCost(usd float64) {
+	a.mu.Lock()
+	a.st.Cost += usd
+	a.mu.Unlock()
+}
+
+// SetContextWindow records the model's context window for the HUD context
+// segment (0 = unknown: the segment hides).
+func (a *App) SetContextWindow(tokens int64) {
+	a.mu.Lock()
+	a.st.CtxWindow = tokens
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetStatusSegments configures the HUD (settings statusLine.segments): the
+// segment names to render, in order. Unknown names are skipped with a
+// warning; nil/empty restores the shipped layout.
+func (a *App) SetStatusSegments(segs []string) {
+	known := make([]string, 0, len(segs))
+	var unknown []string
+	for _, s := range segs {
+		name := strings.ToLower(strings.TrimSpace(s))
+		if name == "" {
+			continue
+		}
+		if _, ok := statusSegments[name]; ok {
+			known = append(known, name)
+			continue
+		}
+		unknown = append(unknown, name)
+	}
+	if len(unknown) > 0 {
+		logx.Warnf("tui: statusLine.segments: unknown segment(s) %s skipped (known: %s)",
+			strings.Join(unknown, ", "), strings.Join(statusSegmentNames(), ", "))
+	}
+	a.mu.Lock()
+	a.statusSegs = known
+	a.mu.Unlock()
+	a.poke()
 }
 
 // SetRunning toggles the spinner state.
@@ -789,7 +843,7 @@ func (a *App) Run() {
 			a.mu.Lock()
 			running := a.st.Running
 			if running {
-				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(spinnerFrames)
+				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(a.th.SpinnerFrames())
 			}
 			// Welcome animation. The logo sheen advances one column
 			// per 33ms tick and redraws with it — a smooth sweep at
@@ -850,7 +904,15 @@ func (a *App) handleKey(ev tcell.Event) {
 	h := a.height
 	menuOpen := a.smenu != nil && a.smenu.active()
 	a.mu.Unlock()
-
+	// The ask card (#46) is the topmost modal: it blocks the composer and
+	// owns every key until it is answered or skipped.
+	if a.handleAskKey(key) {
+		return
+	}
+	// The hub roster owns navigation while open.
+	if a.handleHubRosterKey(key) {
+		return
+	}
 	// The session picker owns navigation while open (Up/Down/Enter/Esc).
 	if a.handlePickerKey(key) {
 		return
@@ -1295,8 +1357,10 @@ func (a *App) draw() {
 		composerTop := h - 1 - a.composerRows()
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
+		a.drawHubRoster(composerTop)
 		a.drawTreeSelector(composerTop)
 		a.drawSlashDropdown(composerTop)
+		a.drawAskCard(composerTop)
 		a.drawComposer(composerTop)
 		a.drawShortcuts(h - 1)
 		s.Show()
@@ -1406,8 +1470,10 @@ func (a *App) draw() {
 	// occupies composerRows() rows above the shortcuts line.
 	composerTop := h - 1 - cRows
 	a.drawSessionPicker(composerTop)
+	a.drawHubRoster(composerTop)
 	a.drawTreeSelector(composerTop)
 	a.drawSlashDropdown(composerTop)
+	a.drawAskCard(composerTop)
 	a.drawComposer(composerTop)
 	a.drawShortcuts(h - 1)
 	s.Show()
@@ -1439,8 +1505,10 @@ func (a *App) drawSlashDropdown(yComposerTop int) {
 	nameW = min(nameW+2, 42)
 
 	y := yComposerTop - len(rows) - 2 // popup = rows + 2 border rows
-	drawText(s, 2, y, "╭"+strings.Repeat("─", min(w-4, nameW+44))+"╮",
-		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive))))
+	popup := a.th.Box()
+	popupSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	drawText(s, 2, y, popup.TopLeft+strings.Repeat(popup.Horizontal, min(w-4, nameW+44))+popup.TopRight,
+		popupSt)
 	y++
 	for _, r := range rows {
 		selected := r.Name == selName.Name
@@ -1460,8 +1528,8 @@ func (a *App) drawSlashDropdown(yComposerTop int) {
 		}
 		y++
 	}
-	drawText(s, 2, y, "╰"+strings.Repeat("─", min(w-4, nameW+44))+"╯",
-		tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive))))
+	drawText(s, 2, y, popup.BottomLeft+strings.Repeat(popup.Horizontal, min(w-4, nameW+44))+popup.BottomRight,
+		popupSt)
 }
 
 // composerInputLines returns the wrapped input rows for the editor text
@@ -1514,31 +1582,40 @@ func (a *App) composerRows() int {
 	return len(lines) + 2
 }
 
-// drawComposer renders the grok prompt box: rounded border, ❯ prefix,
-// editor text, blinking block cursor; model info line on the bottom border.
+// drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
+// editor text, blinking block cursor; the model + running spinner ride the
+// info divider, tinted with the statusLine tokens.
 func (a *App) drawComposer(yTop int) {
 	w := a.width
 	if w < 6 || yTop < 1 {
 		return
 	}
-	border := a.th.Get(theme.PromptBorderActive)
-	bs := tcell.StyleDefault.Foreground(a.cellColor(border))
+	box := a.th.Box()
+	bs := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	// The divider is the status line: a theme that sets statusLineBg fills
+	// the row ("" = terminal default = transparent, today's look).
+	infoBg, hasInfoBg := a.th.Slot(theme.StatusLineBg)
+	divSt := bs
+	if hasInfoBg {
+		divSt = divSt.Background(a.cellColor(infoBg))
+	}
 	ms := a.mdStyle()
 
 	// Top border: ╭────╮ (1-cell inset on each side, like grok's box).
-	drawText(a.scr, 1, yTop-1, "╭", bs)
+	drawText(a.scr, 1, yTop-1, box.TopLeft, bs)
 	for x := 2; x < w-2; x++ {
-		a.scr.SetContent(x, yTop-1, '─', nil, bs)
+		a.scr.SetContent(x, yTop-1, boxRune(box.Horizontal), nil, bs)
 	}
-	drawText(a.scr, w-2, yTop-1, "╮", bs)
+	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
 	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
 	lines, curRow, curCol := a.composerInputLines()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
+	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
 		y := yTop + i
-		a.scr.SetContent(1, y, '│', nil, bs)
-		a.scr.SetContent(w-2, y, '│', nil, bs)
+		a.scr.SetContent(1, y, vert, nil, bs)
+		a.scr.SetContent(w-2, y, vert, nil, bs)
 		if i == 0 {
 			drawText(a.scr, 3, y, "❯ ", promptStyle)
 		} else {
@@ -1559,25 +1636,31 @@ func (a *App) drawComposer(yTop int) {
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
 	if a.st.Running {
-		a.st.spinnerIdx = a.st.spinnerIdx % len(spinnerFrames)
-		info += " · " + spinnerFrames[a.st.spinnerIdx]
+		frames := a.th.SpinnerFrames() // theme frames, braille by default
+		a.st.spinnerIdx = a.st.spinnerIdx % len(frames)
+		info += " · " + frames[a.st.spinnerIdx]
 	}
-	drawText(a.scr, 1, yBottom, "╰", bs)
+	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
 	for x := 2; x < w-2; x++ {
-		a.scr.SetContent(x, yBottom, '─', nil, bs)
+		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
 	if info != " " {
-		drawText(a.scr, 2, yBottom, info, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+		infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
+		if hasInfoBg {
+			infoSt = infoSt.Background(a.cellColor(infoBg))
+		}
+		drawText(a.scr, 2, yBottom, info, infoSt)
 	}
-	drawText(a.scr, w-2, yBottom, "╯", bs)
+	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
 	// Cursor: blinking block at the editor position inside the wrapped grid.
 	cx := 5 + curCol
 	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
 }
 
-// drawShortcuts renders the bottom hint row: bold keys, gray labels,
-// dim │ separators (grok shortcuts_bar.rs).
+// drawShortcuts renders the bottom hint row: bold keys, gray labels, dim │
+// separators (grok shortcuts_bar.rs), with the configured HUD segments
+// (settings statusLine.segments) right-aligned on the same row.
 func (a *App) drawShortcuts(y int) {
 	keyStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
 	lblStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
@@ -1603,11 +1686,127 @@ func (a *App) drawShortcuts(y int) {
 		drawText(a.scr, x, y, hh.label, lblStyle)
 		x += width(hh.label)
 	}
-	// Right-aligned token counter (status_line style: muted segments).
-	if a.st.TokensIn > 0 || a.st.TokensOut > 0 {
-		right := fmt.Sprintf("↑%s │ ↓%s", humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut))
-		drawText(a.scr, a.width-width(right)-2, y, right, lblStyle)
+	a.drawHUD(y, x)
+}
+
+// drawHUD renders the configured status segments right-aligned on the
+// shortcuts row (caller holds a.mu). Segment colors come from the
+// statusLine* tokens, the separators from statusLineSep, and statusLineBg
+// fills the row when the theme sets one. The keyboard hints win a narrow
+// row: segments are dropped from the left until the rest fit.
+func (a *App) drawHUD(y, hintsEnd int) {
+	segs := a.statusSegs
+	if len(segs) == 0 {
+		segs = defaultStatusSegments
 	}
+	type part struct{ text, token string }
+	var parts []part
+	for _, name := range segs {
+		text, token := a.hudSegment(name)
+		if text != "" {
+			parts = append(parts, part{text, token})
+		}
+	}
+	if len(parts) == 0 {
+		return
+	}
+	const sep = " │ "
+	widthOf := func(ps []part) int {
+		n := 0
+		for i, p := range ps {
+			if i > 0 {
+				n += width(sep)
+			}
+			n += width(p.text)
+		}
+		return n
+	}
+	end := a.width - 2
+	for len(parts) > 0 && end-widthOf(parts) < hintsEnd+1 {
+		parts = parts[1:]
+	}
+	if len(parts) == 0 {
+		return
+	}
+	bgSt := tcell.StyleDefault
+	if bg, ok := a.th.Slot(theme.StatusLineBg); ok {
+		bgSt = bgSt.Background(a.cellColor(bg))
+	}
+	sepSt := bgSt.Foreground(a.cellColor(a.th.Get(theme.StatusLineSep)))
+	x := end - widthOf(parts)
+	if _, ok := a.th.Slot(theme.StatusLineBg); ok {
+		for bx := x; bx < end; bx++ {
+			a.scr.SetContent(bx, y, ' ', nil, bgSt)
+		}
+	}
+	for i, p := range parts {
+		if i > 0 {
+			drawText(a.scr, x, y, sep, sepSt)
+			x += width(sep)
+		}
+		drawText(a.scr, x, y, p.text, bgSt.Foreground(a.cellColor(a.th.Get(p.token))))
+		x += width(p.text)
+	}
+}
+
+// statusSegments is the HUD segment vocabulary (settings
+// statusLine.segments): model, tokens, context, cost, theme.
+var statusSegments = map[string]bool{
+	"model":   true,
+	"tokens":  true,
+	"context": true,
+	"cost":    true,
+	"theme":   true,
+}
+
+// defaultStatusSegments keeps the layout the HUD shipped with: the token
+// counters, right-aligned. The model keeps its composer divider slot, which
+// is chrome rather than a segment.
+var defaultStatusSegments = []string{"tokens"}
+
+func statusSegmentNames() []string {
+	out := make([]string, 0, len(statusSegments))
+	for name := range statusSegments {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hudSegment renders one segment: its text and the statusLine token that
+// colors it. An empty text means the segment has nothing to show (hidden,
+// not blank) — an unwired cost or context never draws an empty cell.
+func (a *App) hudSegment(name string) (text, token string) {
+	switch name {
+	case "model":
+		return a.st.Model, theme.StatusLineModel
+	case "tokens":
+		if a.st.TokensIn == 0 && a.st.TokensOut == 0 {
+			return "", ""
+		}
+		return fmt.Sprintf("↑%s │ ↓%s", humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut)), theme.StatusLineSpend
+	case "context":
+		if a.st.CtxWindow <= 0 || a.st.TokensIn+a.st.TokensOut == 0 {
+			return "", ""
+		}
+		return fmt.Sprintf("ctx %d%%", (a.st.TokensIn+a.st.TokensOut)*100/a.st.CtxWindow), theme.StatusLineContext
+	case "cost":
+		if a.st.Cost <= 0 {
+			return "", ""
+		}
+		return fmt.Sprintf("$%.4f", a.st.Cost), theme.StatusLineCost
+	case "theme":
+		return a.th.Name, theme.StatusLineSep
+	}
+	return "", ""
+}
+
+// boxRune is the first rune of a themed box glyph ("" = a space).
+func boxRune(glyph string) rune {
+	for _, r := range glyph {
+		return r
+	}
+	return ' '
 }
 
 // drawText writes s at (x, y); wide runes handled by tcell.

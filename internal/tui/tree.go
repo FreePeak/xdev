@@ -419,7 +419,8 @@ func (a *App) drawTreeSelector(yComposerTop int) {
 	if y < 1 {
 		return // no room above the composer
 	}
-	drawText(s, 2, y, "╭"+strings.Repeat("─", boxW)+"╮", borderSt)
+	box := a.th.Box()
+	drawText(s, 2, y, box.TopLeft+strings.Repeat(box.Horizontal, boxW)+box.TopRight, borderSt)
 	drawText(s, 4, y, title, dimSt)
 	y++
 	for i, idx := range idxs {
@@ -438,6 +439,6 @@ func (a *App) drawTreeSelector(yComposerTop int) {
 			st.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
 		y++
 	}
-	drawText(s, 2, y, "╰"+strings.Repeat("─", boxW)+"╯", borderSt)
+	drawText(s, 2, y, box.BottomLeft+strings.Repeat(box.Horizontal, boxW)+box.BottomRight, borderSt)
 	drawText(s, 4, y, footer, dimSt)
 }

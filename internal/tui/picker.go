@@ -459,7 +459,8 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 	if y < 1 {
 		return
 	}
-	drawText(s, 2, y, "╭"+label+strings.Repeat("─", max(0, inner-width(label)))+"╮", borderSt)
+	box := a.th.Box()
+	drawText(s, 2, y, box.TopLeft+label+strings.Repeat(box.Horizontal, max(0, inner-width(label)))+box.TopRight, borderSt)
 	y++
 	for i := range rows {
 		st := rowSt
@@ -479,5 +480,5 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 		drawText(s, 2, y, f, dimSt)
 		y++
 	}
-	drawText(s, 2, y, "╰"+strings.Repeat("─", inner)+"╯", borderSt)
+	drawText(s, 2, y, box.BottomLeft+strings.Repeat(box.Horizontal, inner)+box.BottomRight, borderSt)
 }
