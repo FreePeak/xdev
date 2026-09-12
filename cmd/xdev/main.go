@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/lsp"
@@ -76,6 +77,7 @@ func main() {
   xdev print [flags] "prompt"  same as above
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
+  xdev join "<link>"           mirror a shared session (collab guest)
   xdev lsp-config [list|validate]  language servers, resolved binaries
 
 Flags:
@@ -127,9 +129,18 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version" || args[0] == "join") {
 		mode, args = args[0], args[1:]
 	}
+	if mode == "join" {
+		// Collab guest: mirror a shared session (M14 #59).
+		if err := collab.Run(args); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
 	if mode == "tui" {
 		code, err := runTUI(printOptions{
 			Model:        *model,
