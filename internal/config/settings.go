@@ -170,6 +170,12 @@ type Settings struct {
 	// and words-per-minute rate, both backend-relative, both
 	// overridable per call.
 	TTS TTSSettings `yaml:"tts"`
+	// Plugins configures the marketplace/plugin manager (M13 #53):
+	// marketplaces lists catalog locations (a local directory or a git URL)
+	// for `xdev plugin list|search|install`. Installed plugins live in
+	// <dataDir>/plugins and contribute commands/skills/agents/hooks at the
+	// lowest discovery priority.
+	Plugins PluginsSettings `yaml:"plugins"`
 }
 
 // TTSSettings is the `tts` group. It is the engine's own Settings type,
@@ -242,6 +248,15 @@ func (s *Settings) StatusLineSegments() []string {
 		return nil
 	}
 	return s.StatusLine.Segments
+}
+
+// PluginsSettings is the `plugins` group.
+type PluginsSettings struct {
+	// Marketplaces are catalog locations in precedence order: a local
+	// directory holding a catalog manifest, or a git URL that is cloned into
+	// <dataDir>/plugins/marketplaces. A relative path resolves against the
+	// process working directory.
+	Marketplaces []string `yaml:"marketplaces"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -558,6 +573,9 @@ func (s *Settings) merge(layer *Settings) error {
 			return err
 		}
 		s.TTS.Rate = layer.TTS.Rate
+	}
+	if layer.Plugins.Marketplaces != nil {
+		s.Plugins.Marketplaces = append([]string(nil), layer.Plugins.Marketplaces...)
 	}
 	if layer.TaskAgentAdvisor != "" {
 		s.TaskAgentAdvisor = layer.TaskAgentAdvisor
