@@ -930,6 +930,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M13 #48: web_search — ordered provider chain (keys from env or
 	// settings); keyless DuckDuckGo keeps it answering without config.
 	reg.Register(tool.NewWebSearchTool(settings.WebSearchConfig()))
+	// M15 #67: security_scan — merges the scanners the host has (go vet,
+	// govulncheck, semgrep, gitleaks); a missing binary is reported, not fatal.
+	reg.Register(tool.NewSecurityScanTool(cwd))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	reg.Register(&agent.TaskTool{
