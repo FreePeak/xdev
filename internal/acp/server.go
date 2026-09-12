@@ -77,7 +77,7 @@ type Server struct {
 func New(in io.Reader, out io.Writer, h Handler) *Server {
 	return &Server{
 		h:       h,
-		r:       bufio.NewReaderSize(in, 64<<10),
+		r:       newReader(in), // the frame reader; the cap lives in framing.go
 		w:       out,
 		pending: map[string]chan *rpcFrame{},
 		running: map[string]context.CancelFunc{},
