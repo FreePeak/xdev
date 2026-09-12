@@ -34,6 +34,13 @@ type printOptions struct {
 	ResumePrefix string
 	MaxTurns     int
 	MaxTokens    int
+	// FromClaude/FromCodex import a foreign transcript (id prefix or path)
+	// and continue it as a new xdev session (issue #28).
+	FromClaude string
+	FromCodex  string
+	// ForkID forks a session by id prefix or path and continues the fork
+	// (issue #11: --fork <id|path>).
+	ForkID string
 	// Prewalk enables the one-shot model handoff (research §5); the target
 	// defaults to the @smol role.
 	Prewalk     bool
@@ -154,7 +161,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
 	// --- session ---
-	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
+	store, err := openStartupSession(cwd, opts)
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
