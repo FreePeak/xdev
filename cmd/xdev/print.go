@@ -487,18 +487,37 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 		}
 		break
 	}
+	var prov ai.Provider
 	switch pc.API {
 	case ai.APIOpenAICompletions:
-		return ai.NewOpenAICompletionsProvider(name, baseURL, apiKey, headers, hc), nil
+		prov = ai.NewOpenAICompletionsProvider(name, baseURL, apiKey, headers, hc)
 	case ai.APIOpenAIResponses:
-		return ai.NewOpenAIResponsesProvider(name, baseURL, apiKey, headers, hc), nil
+		prov = ai.NewOpenAIResponsesProvider(name, baseURL, apiKey, headers, hc)
+	case ai.APIAzureOpenAIResponses:
+		prov = ai.NewAzureResponsesProvider(name, baseURL, apiKey, headers,
+			ai.AzureResponsesOptions{Deployment: pc.Deployment, APIVersion: pc.APIVersion}, hc)
+	case ai.APIOpenAICodexResponses:
+		prov = ai.NewOpenAICodexResponsesProvider(name, baseURL, apiKey, headers, hc)
 	case ai.APIAnthropicMessages:
-		return ai.NewAnthropicProvider(name, baseURL, apiKey, headers, hc), nil
+		prov = ai.NewAnthropicProvider(name, baseURL, apiKey, headers, hc)
 	case ai.APIGoogleGenerativeAI:
-		return ai.NewGoogleGenAIProvider(name, baseURL, apiKey, headers, hc), nil
+		prov = ai.NewGoogleGenAIProvider(name, baseURL, apiKey, headers, hc)
+	case ai.APIGoogleVertex:
+		prov = ai.NewGoogleVertexProvider(name, baseURL, apiKey, headers,
+			ai.GoogleVertexOptions{Project: pc.Project, Location: pc.Location}, hc)
+	case ai.APIGeminiCLI:
+		prov = ai.NewGeminiCLIProvider(name, baseURL, apiKey, headers,
+			ai.GeminiCLIOptions{Project: pc.Project}, hc)
 	default:
 		return nil, fmt.Errorf("provider %q: unsupported api %q", name, pc.API)
 	}
+	// toolsFormat pins an in-band tool dialect for a model that cannot emit
+	// native structured tool calls; empty leaves the provider's own tool calls.
+	format, err := ai.ParseToolFormat(pc.ToolsFormat)
+	if err != nil {
+		return nil, fmt.Errorf("provider %q: %w", name, err)
+	}
+	return ai.NewInBandProvider(prov, format), nil
 }
 
 // modelWindow resolves the context window for one provider/model pair
