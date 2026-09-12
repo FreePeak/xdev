@@ -28,6 +28,12 @@ func (s *Settings) Policy() (tool.ApprovalPolicy, error) {
 	if err != nil {
 		return tool.ApprovalPolicy{}, err
 	}
+	// bash.allowCompoundCommands + bash.interceptor (M13 #56): the
+	// pattern rules are shared, so both ride the resolved policy.
+	pol.AllowCompoundCommands = s.AllowCompoundCommandsOn()
+	if cmd := strings.TrimSpace(s.Bash.Interceptor); cmd != "" {
+		pol.BashInterceptor = tool.BashInterceptor{Command: cmd}
+	}
 	pol.BashPatterns = rules
 	return pol, nil
 }
