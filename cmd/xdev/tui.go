@@ -1528,6 +1528,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	)
 
 	app.Run() // blocks until Quit
+	// #92: the session is ending (quit, or the terminal closing): tell the
+	// bus once, with whatever agent was last live.
+	agentMu.Lock()
+	if curAgent != nil {
+		curAgent.EmitSessionShutdown()
+	}
+	agentMu.Unlock()
 	// The memory session boundary (M12 #43/#44): the remote server flushes its
 	// queued retains, the local store drains its queue inside a fixed budget.
 	// Both are best-effort — the TUI is exiting either way.

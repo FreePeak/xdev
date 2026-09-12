@@ -38,10 +38,16 @@ import (
 //	context                              system-prompt assembly (the hook may
 //	                                     return {"text": …} to replace it)
 //	ttsr_triggered                       the TTSR rules engine (issue #35)
+//	auto_retry_start, auto_retry_end      the retry ladder (attempt, kind,
+//	                                     error, delay) so a hook can observe
+//	                                     provider health (#92)
+//	session_shutdown                     run exit (print) and TUI quit (#92)
 var KnownEvents = []string{
 	"session_start", "session_before_switch", "session_switch",
 	"before_agent_start", "agent_start", "agent_end", "turn_start", "turn_end",
 	"session_compact", "context", "tool_call", "tool_result", "ttsr_triggered",
+	// #92: the provider-health and end-of-session events the loop emits now.
+	"auto_retry_start", "auto_retry_end", "session_shutdown",
 }
 
 // Hook is one resolved hook command.
