@@ -22,6 +22,28 @@ type OpenAIResponsesProvider struct {
 	extraHeaders map[string]string
 	model        string // default model when a request omits Model
 	name         string
+	// apiLabel overrides the wire name reported by API() so the v2 Responses
+	// variants (azure-openai-responses, openai-codex-responses) reuse this
+	// adapter instead of copying its SSE mapping.
+	apiLabel string
+	// store is the Responses `store` flag; nil omits it. Codex requires false
+	// (no server-side conversation state).
+	store *bool
+	// behavior tunes the variant without duplicating buildRequest: strictTools
+	// controls the strict-mode pipeline, sanitize runs the Responses schema
+	// normalizer, and azureURL switches to the deployment-style endpoint.
+	behavior responsesBehavior
+}
+
+// responsesBehavior is the option set the Responses variants differ by.
+type responsesBehavior struct {
+	// sanitize runs SanitizeSchemaForOpenAIResponses over every tool schema.
+	sanitize bool
+	// strictTools turns on the strict-mode pipeline (and emits `strict`).
+	strictTools bool
+	// requestKeyHeader sends the key in this header instead of Authorization
+	// (Azure's `api-key` convention).
+	requestKeyHeader string
 }
 
 // NewOpenAIResponsesProvider builds a provider. A nil hc uses the shared
@@ -40,7 +62,15 @@ func NewOpenAIResponsesProvider(name, baseURL, apiKey string, headers map[string
 }
 
 func (p *OpenAIResponsesProvider) Name() string { return p.name }
-func (p *OpenAIResponsesProvider) API() string  { return APIOpenAIResponses }
+
+// API reports the wire name: the Responses variants override it so sessions
+// record which transport actually served the turn.
+func (p *OpenAIResponsesProvider) API() string {
+	if p.apiLabel != "" {
+		return p.apiLabel
+	}
+	return APIOpenAIResponses
+}
 
 // Wire shapes for the request body.
 
@@ -67,6 +97,9 @@ type openaiRespTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+	// Strict is emitted only when the strict-mode pipeline actually enforced the
+	// schema (fail-open: an unenforced schema must not claim strict).
+	Strict bool `json:"strict,omitempty"`
 }
 
 type openaiRespRequest struct {
@@ -75,6 +108,7 @@ type openaiRespRequest struct {
 	Stream       bool             `json:"stream"`
 	Instructions string           `json:"instructions,omitempty"`
 	Tools        []openaiRespTool `json:"tools,omitempty"`
+	Store        *bool            `json:"store,omitempty"`
 	Reasoning    *struct {
 		Effort string `json:"effort"`
 	} `json:"reasoning,omitempty"`
@@ -99,13 +133,25 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 			Effort string `json:"effort"`
 		}{Effort: reasoningEffort(req.Thinking.Tokens)}
 	}
-	for _, t := range req.Tools {
+	tools := req.Tools
+	if p.behavior.sanitize {
+		tools = NormalizeToolsForAPI(p.API(), tools)
+	}
+	for _, t := range tools {
+		params, strict := t.Parameters, false
+		if p.behavior.strictTools {
+			params, strict = AdaptSchemaForStrict(t.Parameters, true)
+		}
 		wr.Tools = append(wr.Tools, openaiRespTool{
 			Type:        "function",
 			Name:        t.Name,
 			Description: t.Description,
-			Parameters:  t.Parameters,
+			Parameters:  params,
+			Strict:      strict,
 		})
+	}
+	if p.store != nil {
+		wr.Store = p.store
 	}
 	for _, m := range req.Messages {
 		switch m.Role {
@@ -165,7 +211,11 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 func (p *OpenAIResponsesProvider) headers() map[string]string {
 	h := map[string]string{}
 	if p.apiKey != "" {
-		h["Authorization"] = "Bearer " + p.apiKey
+		if key := p.behavior.requestKeyHeader; key != "" {
+			h[key] = p.apiKey
+		} else {
+			h["Authorization"] = "Bearer " + p.apiKey
+		}
 	}
 	for k, v := range p.extraHeaders {
 		h[k] = v
@@ -175,6 +225,12 @@ func (p *OpenAIResponsesProvider) headers() map[string]string {
 
 // Stream implements Provider.
 func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {
+	return p.streamAt(ctx, req, p.baseURL+"/responses", p.headers())
+}
+
+// streamAt is the shared request path of the Responses family: build the body,
+// POST it to the variant's URL, and map the SSE stream onto the unified events.
+func (p *OpenAIResponsesProvider) streamAt(ctx context.Context, req StreamRequest, url string, headers map[string]string) (<-chan Event, error) {
 	body, err := p.buildRequest(req)
 	if err != nil {
 		return nil, err
@@ -184,7 +240,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req StreamRequest)
 		model = p.model
 	}
 	sctx, cancel := context.WithCancel(ctx)
-	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/responses", p.headers(), body, APIOpenAIResponses)
+	resp, err := wirePost(sctx, p.httpClient, url, headers, body, p.API())
 	if err != nil {
 		cancel() // no goroutine will own it on this path
 		return nil, err
@@ -225,7 +281,7 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 	emit := func(ev Event) {
 		if !emitted {
 			emitted = true
-			ch <- Event{Type: EventStart, Provider: p.name, API: APIOpenAIResponses, Model: model}
+			ch <- Event{Type: EventStart, Provider: p.name, API: p.API(), Model: model}
 		}
 		if ttft == 0 {
 			switch ev.Type {
@@ -289,7 +345,7 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 			fail(Errorf(err))
 			return
 		}
-		msg.Provider, msg.API, msg.Model = p.name, APIOpenAIResponses, model
+		msg.Provider, msg.API, msg.Model = p.name, p.API(), model
 		msg.ResponseID, msg.StopReason, msg.Usage = response, reason, usage
 		msg.DurationMS, msg.TTFTMS = time.Since(start).Milliseconds(), ttft
 		emit(Donef(reason, usage, &msg))
