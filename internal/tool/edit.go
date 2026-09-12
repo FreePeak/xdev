@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -22,11 +23,20 @@ const editSnapshotRadius = 3
 
 var _ Tool = (*EditTool)(nil)
 
-// EditTool edits files with ordered line operations.
-type EditTool struct{}
+// EditTool edits files with ordered line operations. When registered in a
+// Registry it participates in the freshness guard: the registry remembers
+// what read/write last saw for each path, a mismatching edit is re-anchored
+// by exact text where possible, and unrecoverable staleness is rejected
+// with a fresh-read advisory.
+type EditTool struct {
+	reg *Registry
+}
 
 // NewEditTool returns an EditTool.
 func NewEditTool() *EditTool { return &EditTool{} }
+
+// setRegistry receives the owning registry from Registry.Register.
+func (t *EditTool) setRegistry(r *Registry) { t.reg = r }
 
 // Name implements Tool.
 func (t *EditTool) Name() string { return "edit" }
@@ -116,16 +126,24 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if len(a.Ops) == 0 {
 		return Result{IsError: true, Text: "edit: no ops provided"}, nil
 	}
-	resolved, err := resolvePath(a.Path)
+	display, wantTag := splitSnapshotTag(a.Path)
+	resolved, err := resolvePath(display)
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("edit: %v", err)}, nil
 	}
 	lines, err := ReadLines(resolved)
 	if err != nil {
-		return Result{IsError: true, Text: fmt.Sprintf("edit: cannot read %s: %v", a.Path, err)}, nil
+		return Result{IsError: true, Text: fmt.Sprintf("edit: cannot read %s: %v", display, err)}, nil
 	}
 	linesBefore := len(lines)
 
+	// Freshness guard + arg repair: compare the file against what read/
+	// write last recorded; on a stale match, re-anchor ops by exact text
+	// and only reject when recovery is impossible.
+	recovered, err := t.checkFreshness(resolved, display, wantTag, a.Ops, lines)
+	if err != nil {
+		return Result{IsError: true, Text: err.Error()}, nil
+	}
 	// Validate MV destinations up front so a bad dest cannot leave a
 	// half-applied edit (line ops written, move failed).
 	moves := make([]mvPlan, 0, len(a.Ops))
@@ -197,7 +215,7 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	}
 
 	finalPath := resolved
-	display := a.Path
+	outDisplay := display
 	for _, mv := range moves {
 		if mv.dest == finalPath {
 			continue
@@ -206,21 +224,34 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			return Result{IsError: true, Text: fmt.Sprintf("edit: op %d (MV): %v", mv.index, err)}, nil
 		}
 		finalPath = mv.dest
-		display = mv.display
+		outDisplay = mv.display
 	}
 
 	raw := ""
 	if len(lines) > 0 {
 		raw = strings.Join(lines, "\n") + "\n"
 	}
-	text := fmt.Sprintf("[%s#%s]", display, ShortHash(raw))
+	text := fmt.Sprintf("[%s#%s]", outDisplay, ShortHash(raw))
 	if len(lines) == 0 {
 		text += "\n(file is now empty)"
 	} else {
 		text += "\n" + RenderWindow(lines, max(firstEdit, 1), editSnapshotRadius)
 	}
 	if finalPath != resolved {
-		text = fmt.Sprintf("Moved %s to %s\n", a.Path, display) + text
+		text = fmt.Sprintf("Moved %s to %s\n", a.Path, outDisplay) + text
+	}
+	if recovered != "" {
+		text = recovered + "\n" + text
+	}
+	// Record the post-edit state so a following edit against this path is
+	// anchored on what the model just saw. An MV moves the record.
+	full := make(map[int]string, len(lines))
+	for i, l := range lines {
+		full[i+1] = l
+	}
+	t.reg.recordSnapshot(finalPath, linesHash(lines), full)
+	if finalPath != resolved {
+		t.reg.forgetSnapshot(resolved)
 	}
 
 	return Result{
@@ -279,4 +310,134 @@ func movePath(src, dst string) error {
 		return err
 	}
 	return nil
+}
+
+// hashTag is the 4-char snapshot anchor for a full content hash.
+func hashTag(h string) string {
+	if len(h) < 4 {
+		return h
+	}
+	return h[:4]
+}
+
+// checkFreshness validates the current file against the registry's
+// read/write record for the path and repairs stale line numbers by exact
+// text where it can. It returns a recovery note ("" when nothing needed
+// repairing) or an error when the edit must not proceed.
+//
+// Rules, in order:
+//   - A quoted tag equal to the current snapshot tag → numbers as-is.
+//   - A quoted tag equal to the recorded read's tag → the model's numbers
+//     refer to that read: verify/re-anchor each op by its recorded text.
+//   - No tag: hash equality is freshness; a mismatch re-anchors by text.
+//   - No record at all → unchanged behavior (bounds checks only).
+//   - Any op whose recorded text is missing, ambiguous, or was never
+//     rendered → reject with a fresh-read advisory.
+func (t *EditTool) checkFreshness(resolved, display, wantTag string, ops []editOp, cur []string) (string, error) {
+	rec, hasRec := t.reg.snapshot(resolved)
+	curHash := linesHash(cur)
+	curTag := hashTag(curHash)
+
+	if wantTag != "" {
+		switch {
+		case wantTag == curTag:
+			return "", nil
+		case hasRec && rec.tag() == wantTag:
+			// Stale tag that identifies the recorded read: repair below.
+		default:
+			return "", fmt.Errorf("edit: %s changed since it was read (snapshot tag %s, current %s) — re-read the file and redo the edit with fresh line numbers", display, wantTag, curTag)
+		}
+	} else if !hasRec || rec.hash == curHash {
+		// No record, or the file is exactly as recorded: nothing to guard.
+		return "", nil
+	}
+
+	notes := make([]string, 0, len(ops))
+	for i := range ops {
+		op := &ops[i]
+		kind := strings.ToUpper(op.Op)
+		if kind != "PUT" && kind != "CUT" {
+			continue
+		}
+		start, end, ok := editRangeBounds(op.Range)
+		if !ok {
+			// Malformed range: normalizeEditRange reports it as before.
+			continue
+		}
+		exp, covered := rec.window(start, end)
+		if !covered {
+			return "", fmt.Errorf("edit: %s changed since it was read; op %d (%s) targets lines %d-%d that the last read or write did not record — re-read the file and redo the edit", display, i+1, kind, start, end)
+		}
+		hits := lineRuns(cur, exp)
+		switch {
+		case len(hits) == 0:
+			return "", fmt.Errorf("edit: %s changed since it was read; op %d (%s) referenced lines %d-%d (%s) which no longer exist — re-read the file and redo the edit", display, i+1, kind, start, end, linePreview(exp))
+		case slices.Contains(hits, start-1):
+			// The numbers still point at exactly this text: accept as-is.
+		case len(hits) == 1:
+			op.Range = &editRange{Start: hits[0] + 1, End: hits[0] + len(exp)}
+			notes = append(notes, fmt.Sprintf("op %d (%s): lines %d-%d → %d-%d", i+1, kind, start, end, hits[0]+1, hits[0]+len(exp)))
+		default:
+			return "", fmt.Errorf("edit: %s changed since it was read; op %d (%s) referenced lines %d-%d (%s) which now match %d places — re-read the file and redo the edit", display, i+1, kind, start, end, linePreview(exp), len(hits))
+		}
+	}
+	if len(notes) == 0 {
+		return "", nil
+	}
+	return "edit: file changed since it was read; recovered by exact text:\n  " + strings.Join(notes, "\n  "), nil
+}
+
+// editRangeBounds resolves the {line}/{start,end} shorthands without
+// bounds-checking, reporting false for malformed ranges.
+func editRangeBounds(r *editRange) (start, end int, ok bool) {
+	if r == nil {
+		return 0, 0, false
+	}
+	switch {
+	case r.Line != 0:
+		start, end = r.Line, r.Line
+	case r.End != 0:
+		start, end = r.Start, r.End
+	default:
+		start, end = r.Start, r.Start
+	}
+	if start < 1 || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// lineRuns returns the 0-based start indexes where exp occurs verbatim in
+// cur (every occurrence — uniqueness is what makes a re-anchor safe).
+func lineRuns(cur, exp []string) []int {
+	if len(exp) == 0 || len(exp) > len(cur) {
+		return nil
+	}
+	var hits []int
+	for i := 0; i+len(exp) <= len(cur); i++ {
+		match := true
+		for j := range exp {
+			if cur[i+j] != exp[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			hits = append(hits, i)
+		}
+	}
+	return hits
+}
+
+// linePreview renders the first recorded line of an op's text for error
+// messages, truncated to keep the message one line.
+func linePreview(exp []string) string {
+	s := exp[0]
+	if len(s) > 40 {
+		s = s[:37] + "…"
+	}
+	if len(exp) > 1 {
+		return fmt.Sprintf("%q +%d more lines", s, len(exp)-1)
+	}
+	return fmt.Sprintf("%q", s)
 }

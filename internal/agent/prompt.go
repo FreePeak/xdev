@@ -200,15 +200,29 @@ func BuildSystemPrompt(base string, contextFiles string, defs []NamedToolDef) st
 	}
 	if len(defs) > 0 {
 		b.WriteString("\n\n# Tools\n")
+		// Section-level budget on top of the per-tool cap: with a dozen
+		//-plus bundled tools the recap itself would bust PRD §1 Goal 4,
+		// so once the budget is spent later tools are listed name-only.
+		// The authoritative channel is the native tool schema in
+		// StreamRequest.Tools (Agent.toolDefs → registry Defs, uncapped).
+		budget := MaxToolRecapChars
 		for _, d := range defs {
-			// One choke-point cap: bundled tools are terse by hand, but
-			// MCP servers and extensions bring their own documentation,
-			// and unbounded remote prose would bust PRD §1 Goal 4 silently.
-			fmt.Fprintf(&b, "\n%s: %s\n", d.Name, capToolDescription(d.Description))
+			line := d.Name + ": " + capToolDescription(d.Description)
+			if budget < len(line) {
+				fmt.Fprintf(&b, "\n%s\n", d.Name)
+				continue
+			}
+			budget -= len(line)
+			fmt.Fprintf(&b, "\n%s\n", line)
 		}
 	}
 	return b.String()
 }
+
+// MaxToolRecapChars bounds the whole `# Tools` recap. Bundled base prose
+// plus this section must stay inside the <1,000-token system-prompt goal
+// (PRD §1 Goal 4); tools past the budget are listed name-only.
+const MaxToolRecapChars = 1200
 
 // MaxToolDescriptionChars bounds any single tool's prompt prose.
 //
