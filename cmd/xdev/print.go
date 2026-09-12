@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FreePeak/xdev/internal/agent"
@@ -302,6 +303,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		return 2, err
 	}
 	mem := buildMemory(settings)
+	// A remote memory backend that cannot be reached must say so once,
+	// visibly: logx is off in print mode, and this warning names the URL.
+	if h, ok := mem.(*memory.Hindsight); ok {
+		h.SetWarnSink(func(msg string) { fmt.Fprintln(os.Stderr, "xdev: "+msg) })
+	}
 	// M15 #73: the sharpshooter backend consolidates friction through the
 	// smol role, resolved here where the config is in hand.
 	if ss, ok := mem.(*memory.SharpShooter); ok {
@@ -324,7 +330,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	wireTaskParent(reg, store)
 
 	// --- agent ---
-	hooks := &printHooks{store: store, showThinking: settings.ShowThinkingOn()}
+	// M12 #44: mnemopi counts turns; every retainEveryNTurns turns this
+	// enqueues a consolidation the exit drain below applies.
+	hooks := memoryTurnHooks(&printHooks{store: store, showThinking: settings.ShowThinkingOn()}, settings)
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
@@ -401,6 +409,10 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// M12 #43: the turn boundary — the remote backend counts this run's new
+	// user turn (autoRetain cadence) and flushes queued retains off the
+	// critical path.
+	noteMemoryTurn(mem, history)
 
 	logx.Debugf("print: model=%s session=%s", modelRef, store.Path())
 	started := time.Now()
@@ -414,6 +426,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"code": exitCode}})
+	// M12 #43: the session boundary — the remote backend queues any unfired
+	// cadence turns as one final retain and drains its queue (bounded by the
+	// retain timeout; a dead server leaves the queue behind).
+	if h, ok := mem.(*memory.Hindsight); ok {
+		if err := h.EndSession(); err != nil {
+			logx.Debugf("memory: hindsight session end: %v", err)
+		}
+	}
 	// M12 F1: local memory pipeline runs after the session ends, off the
 	// critical path (off unless memory: local + memoryPipeline: on).
 	if pipe := buildMemoryPipeline(cfg, settings, buildLocalMemory(settings)); pipe != nil {
@@ -428,6 +448,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 		ss.Observe(memory.Turn{Text: prompt, AfterFailure: exitCode != 0})
 		ss.Wait()
+	}
+	// M12 #44: the mnemopi retain queue drains on exit inside a fixed budget
+	// (memory.mnemopi.queueDrainMillis, default 1.5s); whatever does not fit
+	// stays queued for the next run, so a slow synthesis can never delay the
+	// exit.
+	if mm := mnemopiFrom(settings); mm != nil {
+		mm.Drain(context.Background())
 	}
 	// Text is already streamed live via OnEvent; only close the line.
 	if final != nil {
@@ -878,9 +905,17 @@ func registerURISchemes() {
 	tool.RegisterURIScheme("rule", rules.Resolve)
 }
 
+// memoryBackend is this package's name for the internal/memory.Store seam
+// (M12): the local markdown backend, the mnemopi SQLite store, the remote
+// Hindsight server and the friction-gated sharpshooter all satisfy it, so
+// the prompt injection, the memory:// read seam, the learn tool and /memory
+// never branch on the backend.
+type memoryBackend = memory.Store
+
 // buildMemory returns the configured memory backend (nil = off). The Store
 // seam keeps every consumer — prompt injection, the memory:// read seam, the
-// learn tool, /memory — backend-agnostic across local and sharpshooter.
+// learn tool, /memory — backend-agnostic across local, mnemopi, hindsight
+// and sharpshooter.
 func buildMemory(settings *config.Settings) memory.Store {
 	if settings == nil {
 		return nil
@@ -892,6 +927,10 @@ func buildMemory(settings *config.Settings) memory.Store {
 			return nil
 		}
 		return b
+	case "mnemopi":
+		return buildMnemopiMemory(settings)
+	case "hindsight":
+		return buildHindsightMemory(settings)
 	case "sharpshooter":
 		// M15 #73: friction-gated decision files under <dataDir>/memories.
 		ss := &memory.SharpShooter{Dir: filepath.Join(config.DataDir(), "memories")}
@@ -918,6 +957,236 @@ func buildLocalMemory(settings *config.Settings) *memory.Backend {
 	}
 	tool.RegisterURIScheme("memory", b.Read)
 	return b
+}
+
+// mnemopiCache keeps one mnemopi backend per settings identity: the prompt
+// path, the tool registry and the exit drain all ask for the backend, and
+// three *sql.DB handles on one file would only add write contention.
+var (
+	mnemopiMu    sync.Mutex
+	mnemopiCache = map[string]*memory.Mnemopi{}
+)
+
+// mnemopiKey identifies a mnemopi backend by everything that changes its
+// behavior (the store path, the bank scoping, and the project the cwd names).
+func mnemopiKey(settings *config.Settings) string {
+	mm := settings.MnemopiConfig()
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return strings.Join([]string{config.DataDir(), mm.Scope, mm.Tag, mm.LLMMode, cwd}, "|")
+}
+
+// mnemopiFrom returns the memoized backend when mnemopi is the configured
+// memory backend, without constructing one: the drain, the turn counter and
+// the /memory queue verbs must not create a store as a side effect.
+func mnemopiFrom(settings *config.Settings) *memory.Mnemopi {
+	if settings == nil || settings.Memory != "mnemopi" {
+		return nil
+	}
+	mnemopiMu.Lock()
+	defer mnemopiMu.Unlock()
+	return mnemopiCache[mnemopiKey(settings)]
+}
+
+// buildMnemopiMemory opens (once) the SQLite backend (M12 #44). nil = off: a
+// store that cannot be opened must degrade to "no memory", never to a failed
+// run.
+func buildMnemopiMemory(settings *config.Settings) *memory.Mnemopi {
+	key := mnemopiKey(settings)
+	// Construction happens under the lock: two entry points racing here
+	// would otherwise open two connections to the same file.
+	mnemopiMu.Lock()
+	defer mnemopiMu.Unlock()
+	if cached, ok := mnemopiCache[key]; ok {
+		return cached
+	}
+	mm := settings.MnemopiConfig()
+	cwd, _ := os.Getwd()
+	m := &memory.Mnemopi{
+		Dir:                 filepath.Join(config.DataDir(), "memory"),
+		Scope:               mm.Scope,
+		Tag:                 mm.Tag,
+		CWD:                 cwd,
+		LLMMode:             mm.LLMMode,
+		RecallLimit:         mm.RecallLimit,
+		InjectionTokenLimit: mm.InjectionTokenLimit,
+		RetainEveryNTurns:   mm.RetainEveryNTurns,
+		OnError:             func(err error) { logx.Debugf("memory: %v", err) },
+	}
+	// The synthesis seam: the reflect pass and the queue drain run on it.
+	// llmMode none leaves it nil, which every caller reports honestly
+	// instead of pretending the pass happened.
+	if mm.LLMMode != "none" {
+		role := "@smol"
+		if mm.LLMMode == "remote" {
+			role = "@default"
+		}
+		m.Complete = mnemopiSeam(settings, role)
+	}
+	if err := m.Ensure(); err != nil {
+		logx.Errorf("memory: cannot open %s, disabling: %v", m.Dir, err)
+		return nil
+	}
+	tool.RegisterURIScheme("memory", m.Read)
+	mnemopiCache[key] = m
+	return m
+}
+
+// mnemopiSeam resolves the synthesis role lazily (and once): the backend is
+// built from settings alone, and only a reflect/sync call needs a model.
+func mnemopiSeam(settings *config.Settings, role string) memory.CompleteFunc {
+	var (
+		once sync.Once
+		fn   func(context.Context, string) (string, error)
+		fail error
+	)
+	return func(ctx context.Context, prompt string) (string, error) {
+		once.Do(func() {
+			cfg, err := config.LoadModelsLayered()
+			if err != nil {
+				fail = fmt.Errorf("memory: models.yml: %w", err)
+				return
+			}
+			fn = memoryRoleComplete(cfg, settings, role)
+			if fn == nil {
+				fail = fmt.Errorf("memory: no model for role %s", role)
+			}
+		})
+		if fail != nil {
+			return "", fail
+		}
+		return fn(ctx, prompt)
+	}
+}
+
+// hindsightCache keeps one Hindsight backend per settings identity
+// (M12 #43): the prompt builder, the turn boundary and the tool registry all
+// call buildMemory, and they must share ONE instance — the remote backend
+// owns the offline retain queue and the recall cache, and a second instance
+// would silently split both.
+var (
+	hindsightMu    sync.Mutex
+	hindsightCache = map[string]*memory.Hindsight{}
+)
+
+// hindsightKey identifies a backend by the settings that shape its scope.
+func hindsightKey(settings *config.Settings) string {
+	wd, _ := os.Getwd()
+	h := settings.Hindsight
+	return strings.Join([]string{h.APIURL, h.BankID, h.Scoping, h.RetainMode, wd}, "|")
+}
+
+// hindsightFrom returns the memoized backend when hindsight is the configured
+// memory backend, without constructing one.
+func hindsightFrom(settings *config.Settings) *memory.Hindsight {
+	if settings == nil || settings.Memory != "hindsight" {
+		return nil
+	}
+	hindsightMu.Lock()
+	defer hindsightMu.Unlock()
+	return hindsightCache[hindsightKey(settings)]
+}
+
+// mnemopiSyncReport renders one bounded consolidation pass for
+// /memory sync|enqueue.
+func mnemopiSyncReport(res memory.SyncResult) string {
+	out := fmt.Sprintf("applied %d queued retain(s); %d still queued in %s",
+		res.Applied, res.Remaining, res.Elapsed.Round(time.Millisecond))
+	if res.Consolidated {
+		out += fmt.Sprintf("; consolidated with %d reflection pass(es)", res.Reflections)
+	}
+	return out
+}
+
+// memoryTurnHooks wraps a run's hooks so the configured memory backend sees
+// the turn boundary (M12 #44: mnemopi's retainEveryNTurns cadence enqueues a
+// consolidation the exit drain or /memory sync applies). Every other backend
+// is a pass-through.
+func memoryTurnHooks(hooks agent.TurnHooks, settings *config.Settings) agent.TurnHooks {
+	if mm := mnemopiFrom(settings); mm != nil {
+		return mnemopiTurnHooks{TurnHooks: hooks, mem: mm}
+	}
+	return hooks
+}
+
+// buildHindsightMemory constructs (once) the remote backend. The cwd anchors
+// the project scope; the HINDSIGHT_* environment overrides are applied by
+// HindsightConfigFromSettings.
+func buildHindsightMemory(settings *config.Settings) *memory.Hindsight {
+	key := hindsightKey(settings)
+	hindsightMu.Lock()
+	defer hindsightMu.Unlock()
+	if cached, ok := hindsightCache[key]; ok {
+		return cached
+	}
+	h := memory.NewHindsight(memory.HindsightConfigFromSettings(settings, ""))
+	bank, tag := h.Scope()
+	logx.Debugf("memory: hindsight backend, bank %s, tag %q", bank, tag)
+	tool.RegisterURIScheme("memory", h.Read)
+	hindsightCache[key] = h
+	return h
+}
+
+// noteMemoryTurn hands the backend this run's newest user turn (M12 #43).
+// It is the print-mode turn boundary; only the remote backend has a cadence,
+// so this is a no-op for every other backend. Resumed sessions whose history
+// already ends with a tool result or an assistant message add no turn.
+func noteMemoryTurn(mem memoryBackend, history []ai.Message) {
+	h, ok := mem.(*memory.Hindsight)
+	if !ok || h.Off() || len(history) == 0 {
+		return
+	}
+	last := history[len(history)-1]
+	if last.Role != ai.RoleUser {
+		return
+	}
+	if text := strings.TrimSpace(last.Text()); text != "" {
+		h.NoteUserTurn(text)
+	}
+	h.RetainAsync()
+}
+
+// mnemopiTurnHooks feeds the mnemopi turn counter (M12 #44): every
+// memoryMnemopi.retainEveryNTurns turns it enqueues a consolidation that the
+// exit drain or /memory sync applies. Embedding forwards every other hook.
+type mnemopiTurnHooks struct {
+	agent.TurnHooks
+	mem *memory.Mnemopi
+}
+
+func (h mnemopiTurnHooks) OnTurnEnd(s ai.StopReason, err error) {
+	h.TurnHooks.OnTurnEnd(s, err)
+	if err == nil {
+		if _, nerr := h.mem.NoteTurn(); nerr != nil {
+			logx.Debugf("memory: turn note: %v", nerr)
+		}
+	}
+}
+
+// registerMemoryTools adds the configured backend's model-facing tools. The
+// lesson recorder (learn) rides the Store seam, so every backend gets it; the
+// backend-specific trio rides the concrete type: mnemopi adds polyphonic
+// recall, retain, reflect and the bounded memory_edit, while the remote
+// Hindsight backend exposes recall/retain/reflect and deliberately no
+// memory_edit (upstream memories are not edited through this backend).
+func registerMemoryTools(reg *tool.Registry, mem memory.Store) {
+	if reg == nil || mem == nil {
+		return
+	}
+	reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
+	switch m := mem.(type) {
+	case *memory.Mnemopi:
+		reg.Register(&memory.MnemopiRecallTool{Mem: m})
+		reg.Register(&memory.MnemopiRetainTool{Mem: m})
+		reg.Register(&memory.MnemopiReflectTool{Mem: m})
+		reg.Register(&memory.MemoryEditTool{Mem: m})
+	case *memory.Hindsight:
+		reg.Register(&memory.RecallTool{Backend: m})
+		reg.Register(&memory.RetainTool{Backend: m})
+		reg.Register(&memory.ReflectTool{Backend: m})
+	}
 }
 
 // buildMemoryPipeline constructs the two-phase local memory pipeline
@@ -1106,9 +1375,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// a branch summary; wireTaskParent binds the live session.
 	reg.Register(&tool.CheckpointTool{})
 	reg.Register(&tool.RewindTool{})
-	if mem := buildMemory(settings); mem != nil {
-		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
-	}
+	registerMemoryTools(reg, buildMemory(settings))
 	// M13 #52: language-server queries. Servers launch lazily on the first
 	// lsp call (lsp.lazy: false opts into eager warmup).
 	lspTool := lsp.NewTool(cwd, settings)

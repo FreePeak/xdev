@@ -95,6 +95,234 @@ type HandoffSettings struct {
 	SaveToDisk bool `yaml:"saveToDisk"`
 }
 
+// MnemopiSettings is the memoryMnemopi config block (M12 #44): bank
+// scoping for the SQLite backend, the synthesis mode, and the recall /
+// injection bounds.
+//
+// The YAML key is top-level (memoryMnemopi.*) for the same reason
+// memoryPipeline is: the memory scalar already occupies the `memory` key,
+// so an omp-style dotted memory.mnemopi path cannot live beside it.
+type MnemopiSettings struct {
+	// Scope is the bank scoping rule: global | project (default) |
+	// project-tagged. A recall always also reads the global bank.
+	Scope string `yaml:"scope"`
+	// Tag is the literal bank tag used by the project-tagged scope.
+	Tag string `yaml:"tag"`
+	// LLMMode is smol (default) | remote | none. It selects which role's
+	// completion the reflect pass runs on; none disables reflect.
+	LLMMode string `yaml:"llmMode"`
+	// RetainEveryNTurns enqueues a consolidation every N turns
+	// (default 3; -1 disables the turn trigger).
+	RetainEveryNTurns int `yaml:"retainEveryNTurns"`
+	// RecallLimit bounds how many memories one recall returns
+	// (default 8; the backend clamps at 32).
+	RecallLimit int `yaml:"recallLimit"`
+	// InjectionTokenLimit bounds the injected recall/summary block
+	// (~4 chars/token; default 1200).
+	InjectionTokenLimit int `yaml:"injectionTokenLimit"`
+	// QueueDrainMillis is the session-exit drain budget for the retain
+	// queue (default 1500ms).
+	QueueDrainMillis int `yaml:"queueDrainMillis"`
+}
+
+// DefaultMnemopiSettings is the shipped memoryMnemopi block.
+func DefaultMnemopiSettings() MnemopiSettings {
+	return MnemopiSettings{
+		Scope:               "project",
+		LLMMode:             "smol",
+		RetainEveryNTurns:   3,
+		RecallLimit:         8,
+		InjectionTokenLimit: 1200,
+		QueueDrainMillis:    1500,
+	}
+}
+
+// MnemopiConfig returns the memoryMnemopi block with the shipped defaults
+// applied field by field (nil/zero-safe: what a caller gets is always
+// usable, the same rule WebSearchConfig follows).
+func (s *Settings) MnemopiConfig() MnemopiSettings {
+	out := DefaultMnemopiSettings()
+	if s == nil {
+		return out
+	}
+	if s.Mnemopi.Scope != "" {
+		out.Scope = s.Mnemopi.Scope
+	}
+	if s.Mnemopi.Tag != "" {
+		out.Tag = s.Mnemopi.Tag
+	}
+	if s.Mnemopi.LLMMode != "" {
+		out.LLMMode = s.Mnemopi.LLMMode
+	}
+	if s.Mnemopi.RetainEveryNTurns != 0 {
+		out.RetainEveryNTurns = s.Mnemopi.RetainEveryNTurns
+	}
+	if s.Mnemopi.RecallLimit != 0 {
+		out.RecallLimit = s.Mnemopi.RecallLimit
+	}
+	if s.Mnemopi.InjectionTokenLimit != 0 {
+		out.InjectionTokenLimit = s.Mnemopi.InjectionTokenLimit
+	}
+	if s.Mnemopi.QueueDrainMillis != 0 {
+		out.QueueDrainMillis = s.Mnemopi.QueueDrainMillis
+	}
+	return out
+}
+
+// mergeMnemopi applies a later layer's block over an earlier one, field by
+// field (zero-skip, the same rule Settings.merge uses for scalars).
+func mergeMnemopi(dst, layer MnemopiSettings) MnemopiSettings {
+	if layer.Scope != "" {
+		dst.Scope = layer.Scope
+	}
+	if layer.Tag != "" {
+		dst.Tag = layer.Tag
+	}
+	if layer.LLMMode != "" {
+		dst.LLMMode = layer.LLMMode
+	}
+	if layer.RetainEveryNTurns != 0 {
+		dst.RetainEveryNTurns = layer.RetainEveryNTurns
+	}
+	if layer.RecallLimit != 0 {
+		dst.RecallLimit = layer.RecallLimit
+	}
+	if layer.InjectionTokenLimit != 0 {
+		dst.InjectionTokenLimit = layer.InjectionTokenLimit
+	}
+	if layer.QueueDrainMillis != 0 {
+		dst.QueueDrainMillis = layer.QueueDrainMillis
+	}
+	return dst
+}
+
+// HindsightSettings is the `hindsight` group (memory: hindsight). Every key
+// is optional; an unset key takes the built-in default, then the
+// HINDSIGHT_* environment override.
+type HindsightSettings struct {
+	// APIURL is the server base URL (default http://localhost:8888).
+	APIURL string `yaml:"apiUrl"`
+	// APIToken is sent as `Authorization: Bearer <token>` when set.
+	APIToken string `yaml:"apiToken"`
+	// BankID is the bank base; empty derives it from the scoping mode.
+	BankID string `yaml:"bankId"`
+	// BankMission is an advisory mission string carried for parity.
+	BankMission string `yaml:"bankMission"`
+	// Scoping is global | per-project | per-project-tagged (default).
+	Scoping string `yaml:"scoping"`
+	// RetainMode is full-session | last-turn (default full-session).
+	RetainMode string `yaml:"retainMode"`
+	// RecallBudget is low | mid | high (default mid).
+	RecallBudget string `yaml:"recallBudget"`
+	// AutoRecall recalls once at the first turn (default on).
+	AutoRecall *bool `yaml:"autoRecall"`
+	// AutoRetain retains every RetainEveryNTurns user turns (default on).
+	AutoRetain *bool `yaml:"autoRetain"`
+	// Debug logs every request.
+	Debug bool `yaml:"debug"`
+	// RecallMaxTokens bounds what the server may return (default 1024).
+	RecallMaxTokens int `yaml:"recallMaxTokens"`
+	// RecallContextTurns is how many recent turns seed the recall query.
+	RecallContextTurns int `yaml:"recallContextTurns"`
+	// RecallMaxQueryChars caps the query text sent to the server (800).
+	RecallMaxQueryChars int `yaml:"recallMaxQueryChars"`
+	// RetainEveryNTurns is the autoRetain cadence in user turns (3).
+	RetainEveryNTurns int `yaml:"retainEveryNTurns"`
+	// InjectionTokenLimit bounds the recalled block injected into the
+	// prompt and appended to a compaction summary (default 1024).
+	InjectionTokenLimit int `yaml:"injectionTokenLimit"`
+	// QueueLimit bounds retains kept while the server is unreachable (8).
+	QueueLimit int `yaml:"queueLimit"`
+	// SummaryCapChars bounds /memory view and memory://root (6000).
+	SummaryCapChars int `yaml:"summaryCapChars"`
+	// RecallTTLSeconds caches the injected recall block (default 60).
+	RecallTTLSeconds int `yaml:"recallTTLSeconds"`
+	// Timeouts, in milliseconds: the request default and the per-operation
+	// overrides (30000 / 30000 / 60000 / 120000).
+	RequestTimeoutMS int `yaml:"requestTimeoutMs"`
+	RecallTimeoutMS  int `yaml:"recallTimeoutMs"`
+	RetainTimeoutMS  int `yaml:"retainTimeoutMs"`
+	ReflectTimeoutMS int `yaml:"reflectTimeoutMs"`
+}
+
+// merge applies a later hindsight layer over the receiver. The enums are
+// validated here so a typo is reported instead of silently taking the
+// default.
+func (h *HindsightSettings) merge(layer HindsightSettings) error {
+	if layer.APIURL != "" {
+		h.APIURL = layer.APIURL
+	}
+	if layer.APIToken != "" {
+		h.APIToken = layer.APIToken
+	}
+	if layer.BankID != "" {
+		h.BankID = layer.BankID
+	}
+	if layer.BankMission != "" {
+		h.BankMission = layer.BankMission
+	}
+	if layer.Scoping != "" {
+		switch layer.Scoping {
+		case "global", "per-project", "per-project-tagged":
+			h.Scoping = layer.Scoping
+		default:
+			return fmt.Errorf("unknown hindsight.scoping %q (want global|per-project|per-project-tagged)", layer.Scoping)
+		}
+	}
+	if layer.RetainMode != "" {
+		switch layer.RetainMode {
+		case "full-session", "last-turn":
+			h.RetainMode = layer.RetainMode
+		default:
+			return fmt.Errorf("unknown hindsight.retainMode %q (want full-session|last-turn)", layer.RetainMode)
+		}
+	}
+	if layer.RecallBudget != "" {
+		switch layer.RecallBudget {
+		case "low", "mid", "high":
+			h.RecallBudget = layer.RecallBudget
+		default:
+			return fmt.Errorf("unknown hindsight.recallBudget %q (want low|mid|high)", layer.RecallBudget)
+		}
+	}
+	if layer.AutoRecall != nil {
+		h.AutoRecall = layer.AutoRecall
+	}
+	if layer.AutoRetain != nil {
+		h.AutoRetain = layer.AutoRetain
+	}
+	if layer.Debug {
+		h.Debug = true
+	}
+	for _, f := range []struct {
+		src *int
+		dst *int
+		key string
+	}{
+		{&layer.RecallMaxTokens, &h.RecallMaxTokens, "recallMaxTokens"},
+		{&layer.RecallContextTurns, &h.RecallContextTurns, "recallContextTurns"},
+		{&layer.RecallMaxQueryChars, &h.RecallMaxQueryChars, "recallMaxQueryChars"},
+		{&layer.RetainEveryNTurns, &h.RetainEveryNTurns, "retainEveryNTurns"},
+		{&layer.InjectionTokenLimit, &h.InjectionTokenLimit, "injectionTokenLimit"},
+		{&layer.QueueLimit, &h.QueueLimit, "queueLimit"},
+		{&layer.SummaryCapChars, &h.SummaryCapChars, "summaryCapChars"},
+		{&layer.RecallTTLSeconds, &h.RecallTTLSeconds, "recallTTLSeconds"},
+		{&layer.RequestTimeoutMS, &h.RequestTimeoutMS, "requestTimeoutMs"},
+		{&layer.RecallTimeoutMS, &h.RecallTimeoutMS, "recallTimeoutMs"},
+		{&layer.RetainTimeoutMS, &h.RetainTimeoutMS, "retainTimeoutMs"},
+		{&layer.ReflectTimeoutMS, &h.ReflectTimeoutMS, "reflectTimeoutMs"},
+	} {
+		if *f.src == 0 {
+			continue
+		}
+		if *f.src < 0 {
+			return fmt.Errorf("hindsight.%s must be positive, got %d", f.key, *f.src)
+		}
+		*f.dst = *f.src
+	}
+	return nil
+}
+
 type Settings struct {
 	Theme string `yaml:"theme"`
 	// ColorBlindMode moves the palette's red/green-only distinctions
@@ -131,10 +359,12 @@ type Settings struct {
 	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
 	// Memory selects the long-term memory backend (M12 F1, M15 #73): "off"
 	// (default), "local" (MEMORY.md + learned.md under the data dir, with the
-	// memory:// read seam and the learn tool), or "sharpshooter"
+	// memory:// read seam and the learn tool), "mnemopi" (local SQLite store
+	// with banks, a fact link graph and polyphonic recall, M12 #44),
+	// "hindsight" (remote Hindsight HTTP server, M12 #43), or "sharpshooter"
 	// (friction-gated decision files under <dataDir>/memories, consolidated in
-	// the background through the @smol role). Both live backends expose the
-	// same seam, so memory:// and /memory work unchanged.
+	// the background through the @smol role). Every backend exposes the same
+	// Store seam, so memory://, the learn tool and /memory work unchanged.
 	Memory string `yaml:"memory"`
 	// MemoryPipeline enables the local backend's two-phase consolidation
 	// pipeline (M12 #13): "on" or "off" (the default). The YAML key is
@@ -142,6 +372,14 @@ type Settings struct {
 	// path cannot sit next to the memory backend scalar; the pipeline is
 	// inert unless memory is also "local" (it needs somewhere to write).
 	MemoryPipeline string `yaml:"memoryPipeline"`
+	// Mnemopi tunes the mnemopi SQLite backend (M12 #44); see
+	// MnemopiSettings and MnemopiConfig.
+	Mnemopi MnemopiSettings `yaml:"memoryMnemopi"`
+	// Hindsight configures the remote Hindsight memory backend (M12 #43):
+	// the sandboxed group mirrors omp's hindsight.* keys, and the HINDSIGHT_*
+	// environment variables override them at the backend (see
+	// internal/memory/hindsight.go for the precedence table).
+	Hindsight HindsightSettings `yaml:"hindsight"`
 	// Advisor runs a background reviewer on the session (M11, research §6).
 	// The reviewer model comes from modelRoles.advisor; without that role
 	// the flag warns and starts disarmed.
@@ -448,6 +686,18 @@ func memoryOrDefault(v string) string {
 	return v
 }
 
+// ValidMemoryBackend reports whether name selects a shipped memory backend
+// ("" is the off default). The settings validation and the `xdev config set
+// memory` CLI both read the vocabulary from here, so the two lists cannot
+// drift apart.
+func ValidMemoryBackend(name string) bool {
+	switch name {
+	case "", "off", "local", "mnemopi", "hindsight", "sharpshooter":
+		return true
+	}
+	return false
+}
+
 func defaultSettings() *Settings {
 	show := true
 	return &Settings{
@@ -738,6 +988,14 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.MemoryPipeline != "" {
 		s.MemoryPipeline = layer.MemoryPipeline
 	}
+	if layer.Mnemopi != (MnemopiSettings{}) {
+		s.Mnemopi = mergeMnemopi(s.Mnemopi, layer.Mnemopi)
+	}
+	// The hindsight group validates its enums while merging, so a typo is
+	// reported against the layer that wrote it.
+	if err := s.Hindsight.merge(layer.Hindsight); err != nil {
+		return err
+	}
 	if layer.Advisor {
 		// bool with a false default: only a layer that turns it ON
 		// contributes (there is no expressible "unset" for a plain bool,
@@ -954,10 +1212,40 @@ func (s *Settings) merge(layer *Settings) error {
 		}
 		s.Computer.Timeout = layer.Computer.Timeout
 	}
+	if !ValidMemoryBackend(s.Memory) {
+		return fmt.Errorf("unknown memory %q (want off|local|mnemopi|hindsight|sharpshooter)", s.Memory)
+	}
 	switch s.MemoryPipeline {
 	case "", "on", "off":
 	default:
 		return fmt.Errorf("unknown memoryPipeline %q (want on|off)", s.MemoryPipeline)
+	}
+	switch s.Mnemopi.Scope {
+	case "", "global", "project", "project-tagged":
+	default:
+		return fmt.Errorf("unknown memoryMnemopi.scope %q (want global|project|project-tagged)", s.Mnemopi.Scope)
+	}
+	switch s.Mnemopi.LLMMode {
+	case "", "smol", "remote", "none":
+	default:
+		return fmt.Errorf("unknown memoryMnemopi.llmMode %q (want smol|remote|none)", s.Mnemopi.LLMMode)
+	}
+	if s.Mnemopi.Scope == "project-tagged" && s.Mnemopi.Tag == "" {
+		return fmt.Errorf("memoryMnemopi.scope project-tagged needs memoryMnemopi.tag")
+	}
+	// retainEveryNTurns uses -1 for "no turn trigger", so it is checked
+	// separately from the sizes (which must not be negative).
+	for _, f := range []struct {
+		key string
+		val int
+	}{
+		{"memoryMnemopi.recallLimit", s.Mnemopi.RecallLimit},
+		{"memoryMnemopi.injectionTokenLimit", s.Mnemopi.InjectionTokenLimit},
+		{"memoryMnemopi.queueDrainMillis", s.Mnemopi.QueueDrainMillis},
+	} {
+		if f.val < 0 {
+			return fmt.Errorf("%s must not be negative, got %d", f.key, f.val)
+		}
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
@@ -1104,6 +1392,7 @@ func yamlScalar(v string) any {
 // layer each came from. Credential-bearing values are never part of
 // Settings, but any key whose name suggests a secret is masked.
 func List(s *Settings, globalPath string) []string {
+	mm := s.MnemopiConfig()
 	out := []string{
 		"theme " + s.Theme,
 		"colorBlindMode " + fmt.Sprint(s.ColorBlindMode),
@@ -1116,6 +1405,12 @@ func List(s *Settings, globalPath string) []string {
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
+		"memoryMnemopi.scope " + mm.Scope,
+		"memoryMnemopi.llmMode " + mm.LLMMode,
+		"memoryMnemopi.retainEveryNTurns " + fmt.Sprint(mm.RetainEveryNTurns),
+		"memoryMnemopi.recallLimit " + fmt.Sprint(mm.RecallLimit),
+		"memoryMnemopi.injectionTokenLimit " + fmt.Sprint(mm.InjectionTokenLimit),
+		"memoryMnemopi.queueDrainMillis " + fmt.Sprint(mm.QueueDrainMillis),
 		"personality " + s.Personality,
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
 		"compaction.idleAfter " + idleAfterOrDefault(s.Compaction.IdleAfter),
@@ -1123,6 +1418,11 @@ func List(s *Settings, globalPath string) []string {
 	}
 	if segs := s.StatusLineSegments(); segs != nil {
 		out = append(out, "statusLine.segments "+strings.Join(segs, ","))
+	}
+	// The bank tag only exists for the project-tagged scope; an empty one
+	// would just print a dangling key.
+	if mm.Tag != "" {
+		out = append(out, "memoryMnemopi.tag "+mm.Tag)
 	}
 	out = append(out, "handoff.saveToDisk "+fmt.Sprint(s.HandoffSaveToDisk()))
 	if s.DefaultModel != "" {
@@ -1158,6 +1458,17 @@ func List(s *Settings, globalPath string) []string {
 	if len(s.EnabledProviders) > 0 {
 		out = append(out, "enabledProviders "+strings.Join(s.EnabledProviders, ","))
 	}
+	// The hindsight group is only surfaced when it is in play: an unset
+	// block on a local/off setup would be noise. The token is never
+	// printed, only whether one is configured.
+	if s.Memory == "hindsight" || s.Hindsight.APIURL != "" {
+		out = append(out, "hindsight.apiUrl "+hindsightOrDefault(s.Hindsight.APIURL),
+			"hindsight.scoping "+hindsightOrDefault(s.Hindsight.Scoping),
+			"hindsight.bankId "+hindsightOrDefault(s.Hindsight.BankID))
+		if s.Hindsight.APIToken != "" {
+			out = append(out, "hindsight.apiToken (set)")
+		}
+	}
 	if s.Ask.Timeout > 0 {
 		out = append(out, "ask.timeout "+fmt.Sprint(s.Ask.Timeout))
 	}
@@ -1178,6 +1489,15 @@ func maskCred(v string) string {
 		if i := strings.Index(lower, marker); i >= 0 && len(v)-i > 12 {
 			return v[:i+8] + "…"
 		}
+	}
+	return v
+}
+
+// hindsightOrDefault renders an unset hindsight key as the default marker
+// (unlike memoryOrDefault, "" here is not "off").
+func hindsightOrDefault(v string) string {
+	if v == "" {
+		return "(default)"
 	}
 	return v
 }

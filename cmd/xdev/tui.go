@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/FreePeak/xdev/internal/memory"
 	"os"
 	"path/filepath"
 	"sort"
@@ -792,20 +793,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			at2.Sink = &askCardSink{app: app, fallback: tool.NewHeadlessAskSink(lastSettings().AskTimeout())}
 		}
 	}
-	if mem := buildMemory(lastSettings()); mem != nil {
-		app.SetMemoryOps(&tui.MemoryOps{
-			View: func() string {
-				summary, lessons := mem.Paths()
-				out := mem.Stats()
-				if s := mem.Summary(); s != "" {
-					out += "\n\n" + s
-				}
-				return out + "\n\n  " + summary + "\n  " + lessons
-			},
-			Stats: mem.Stats,
-			Clear: mem.Clear,
-		})
-	}
+	app.SetMemoryOps(memoryOps(buildMemory(lastSettings())))
 	app.SetAdvisorOps(&tui.AdvisorOps{
 		Enabled: func() bool { return adv != nil },
 		Set: func(on bool) error {
@@ -1144,7 +1132,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// feedAdvisor is assigned after the agent exists, so go
 					// through an indirection: a direct field copy would
 					// capture the nil func at literal time.
-					Hooks:      &tuiHooks{ts: ts, feed: func() { feedAdvisor() }},
+					Hooks:      memoryTurnHooks(&tuiHooks{ts: ts, feed: func() { feedAdvisor() }}, lastSettings()),
 					TTSR:       agent.NewTTSR(lastSettings().TTSR),
 					MaxTokens:  opts.MaxTokens,
 					MaxTurns:   opts.MaxTurns,
@@ -1224,7 +1212,69 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	)
 
 	app.Run() // blocks until Quit
+	// The memory session boundary (M12 #43/#44): the remote server flushes its
+	// queued retains, the local store drains its queue inside a fixed budget.
+	// Both are best-effort — the TUI is exiting either way.
+	if h := hindsightFrom(lastSettings()); h != nil {
+		if err := h.EndSession(); err != nil {
+			logx.Debugf("memory: hindsight session end: %v", err)
+		}
+	}
+	if mm := mnemopiFrom(lastSettings()); mm != nil {
+		mm.Drain(context.Background())
+	}
 	return 0, nil
+}
+
+// memoryOps builds the /memory command wiring for one backend: the shared
+// view/stats/clear trio over the Store seam, plus the backend-specific verbs
+// (M12 #43/#44) — the queue-backed store answers queue|sync|enqueue, the
+// remote server answers diagnose|enqueue. Each backend leaves the other's
+// verbs nil and MemoryOps.Dispatch reports them as unavailable. nil (no
+// backend configured) leaves /memory unwired.
+func memoryOps(mem memoryBackend) *tui.MemoryOps {
+	if mem == nil {
+		return nil
+	}
+	ops := &tui.MemoryOps{
+		View: func() string {
+			summary, lessons := mem.Paths()
+			out := mem.Stats()
+			if s := mem.Summary(); s != "" {
+				out += "\n\n" + s
+			}
+			return out + "\n\n  " + summary + "\n  " + lessons
+		},
+		Stats: mem.Stats,
+		Clear: mem.Clear,
+	}
+	if mm, ok := mem.(*memory.Mnemopi); ok {
+		ops.Queue = mm.QueueStats
+		ops.Sync = func() (string, error) {
+			res, err := mm.Sync(context.Background(), 0)
+			if err != nil {
+				return "", err
+			}
+			return mnemopiSyncReport(res), nil
+		}
+		ops.Enqueue = func(text string) (string, error) {
+			if _, err := mm.Enqueue(text, "user"); err != nil {
+				return "", err
+			}
+			// /memory enqueue is explicit: queue the retain and apply it now,
+			// inside the same bounded drain the exit path uses.
+			res, err := mm.Sync(context.Background(), 0)
+			if err != nil {
+				return "", err
+			}
+			return "queued: " + mnemopiSyncReport(res), nil
+		}
+	}
+	if h, ok := mem.(*memory.Hindsight); ok {
+		ops.Diagnose = h.Diagnose
+		ops.Enqueue = func(string) (string, error) { return h.Enqueue() }
+	}
+	return ops
 }
 
 // tuiSession accumulates the live conversation and persists messages.

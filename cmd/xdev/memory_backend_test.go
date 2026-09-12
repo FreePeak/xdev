@@ -22,7 +22,9 @@ func TestBuildMemoryBackendSelection(t *testing.T) {
 	}{
 		"unset":        {"", "<nil>"},
 		"off":          {"off", "<nil>"},
-		"unknown":      {"mnemopi", "<nil>"},
+		"typo":         {"mnemopii", "<nil>"},
+		"mnemopi":      {"mnemopi", "*memory.Mnemopi"},
+		"hindsight":    {"hindsight", "*memory.Hindsight"},
 		"sharpshooter": {"sharpshooter", "*memory.SharpShooter"},
 	}
 	for name, tc := range cases {
@@ -42,6 +44,14 @@ func TestBuildMemoryBackendSelection(t *testing.T) {
 				}
 				if b.Off() {
 					t.Fatal("selected sharpshooter backend must not be off")
+				}
+			case *memory.Mnemopi:
+				if b.Off() {
+					t.Fatal("selected mnemopi backend must not be off")
+				}
+			case *memory.Hindsight:
+				if b.Off() {
+					t.Fatal("selected hindsight backend must not be off")
 				}
 			}
 		})

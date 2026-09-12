@@ -64,11 +64,13 @@ type Store interface {
 	SaveLesson(text, context string) error
 }
 
-// Both shipped backends satisfy the seam; a compile-time check, so a
+// Every shipped backend satisfies the seam; a compile-time check, so a
 // signature drift is a build failure, not a runtime nil.
 var (
 	_ Store = (*Backend)(nil)
 	_ Store = (*SharpShooter)(nil)
+	_ Store = (*Mnemopi)(nil)
+	_ Store = (*Hindsight)(nil)
 )
 
 // Off reports whether the backend is disabled.
@@ -84,6 +86,15 @@ type PipelineStore interface {
 	Ensure() error
 	WriteSummary(text string) error
 }
+
+// The two consolidation-capable stores (M12 #13): the local markdown
+// backend and the mnemopi SQLite backend. SharpShooter and Hindsight are
+// deliberately absent — their state is written by the friction detector and
+// the remote server respectively, not by the pipeline.
+var (
+	_ PipelineStore = (*Backend)(nil)
+	_ PipelineStore = (*Mnemopi)(nil)
+)
 
 func (b *Backend) paths() (summary, lessons string) {
 	return filepath.Join(b.Dir, "MEMORY.md"), filepath.Join(b.Dir, "learned.md")

@@ -97,11 +97,80 @@ type ThemeOps struct {
 	Set     func(name string) error
 }
 
-// MemoryOps wires the /memory command (backend lives in cmd).
+// MemoryOps wires the /memory command (backend lives in cmd). View, Stats and
+// Clear are the backend-agnostic verbs; Diagnose is the remote backend's
+// health dump and Queue/Sync/Enqueue are the queue-backed store's (mnemopi);
+// a nil func is reported as unwired, never a silent no-op.
 type MemoryOps struct {
 	View  func() string
 	Stats func() string
 	Clear func() error
+	// Diagnose is the backend config + server health dump.
+	Diagnose func() string
+	// Queue reports the pending retain work.
+	Queue func() string
+	// Sync forces one bounded consolidation and returns its report.
+	Sync func() (string, error)
+	// Enqueue queues one retain for the next boundary. The argument is the
+	// subcommand tail, passed through verbatim (including empty); the
+	// backend decides whether it is required.
+	Enqueue func(text string) (string, error)
+}
+
+// Dispatch runs one /memory subcommand and returns the block to display. The
+// grammar lives here rather than in the app method, so every backend answers
+// the same verbs through one place.
+func (o *MemoryOps) Dispatch(args string) (string, error) {
+	if o == nil {
+		return "", errors.New("memory not wired (set memory: local, mnemopi, hindsight or sharpshooter in settings)")
+	}
+	trimmed := strings.TrimSpace(args)
+	verb, rest := trimmed, ""
+	if i := strings.IndexFunc(trimmed, func(r rune) bool { return r == ' ' || r == '\t' }); i >= 0 {
+		verb, rest = trimmed[:i], strings.TrimSpace(trimmed[i+1:])
+	}
+	switch verb {
+	case "", "view":
+		if o.View == nil {
+			return "", errors.New("memory view not wired")
+		}
+		return o.View(), nil
+	case "stats":
+		if o.Stats == nil {
+			return "", errors.New("memory stats not wired")
+		}
+		return o.Stats(), nil
+	case "clear", "reset":
+		if o.Clear == nil {
+			return "", errors.New("memory clear not wired")
+		}
+		if err := o.Clear(); err != nil {
+			return "", err
+		}
+		return "memory cleared", nil
+	case "diagnose":
+		if o.Diagnose == nil {
+			return "", errors.New("memory diagnose is not available for this backend (hindsight only)")
+		}
+		return o.Diagnose(), nil
+	case "queue":
+		if o.Queue == nil {
+			return "", errors.New("memory queue: this backend keeps no retain queue (memory: mnemopi has one)")
+		}
+		return o.Queue(), nil
+	case "sync":
+		if o.Sync == nil {
+			return "", errors.New("memory sync: this backend keeps no retain queue (memory: mnemopi has one; hindsight syncs server-side)")
+		}
+		return o.Sync()
+	case "enqueue", "rebuild":
+		if o.Enqueue == nil {
+			return "", errors.New("memory enqueue: this backend has no queue to enqueue into (memory: mnemopi or hindsight)")
+		}
+		return o.Enqueue(rest)
+	default:
+		return "", fmt.Errorf("memory: use view|stats|clear, or queue|sync|enqueue <text> (mnemopi) or diagnose|enqueue (hindsight)")
+	}
 }
 
 // AdvisorOps wires the /advisor command (state lives in cmd).
@@ -214,7 +283,7 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Handoff(args) }},
 		{Name: "theme", Description: "show or switch the theme: /theme <name>",
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
-		{Name: "memory", Description: "long-term memory: /memory view|stats|clear",
+		{Name: "memory", Description: "long-term memory: /memory view|stats|clear, plus queue|sync|enqueue (mnemopi) and diagnose|enqueue (hindsight)",
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
