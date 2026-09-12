@@ -231,6 +231,7 @@ func planModeSystemReminder(note string) string {
 // planning needs.
 var planReadOnlyTools = map[string]bool{
 	"read": true, "grep": true, "glob": true, "ast_grep": true,
+	"web_search": true, "lsp": true, // read-only research tools (M13)
 }
 
 // planDenyKinds gives friendlier denial text for the common mutators.
