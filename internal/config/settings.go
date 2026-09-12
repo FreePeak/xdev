@@ -119,6 +119,46 @@ type Settings struct {
 	// advisor to spawned subagents: "on" (the modelRoles.advisor model),
 	// "off" (the default), or an explicit model reference.
 	TaskAgentAdvisor string `yaml:"taskAgentAdvisor"`
+	// TTSR is the stream-rules group (M11 #35): rule conditions are
+	// matched against the assistant deltas; see internal/agent/ttsr.go.
+	TTSR *TTSRSettings `yaml:"ttsr"`
+}
+
+// TTSRSettings is the `ttsr` group. Rule-level fields override the group
+// defaults; the group is inert unless it lists at least one usable rule.
+type TTSRSettings struct {
+	Enabled       *bool      `yaml:"enabled"`
+	InterruptMode string     `yaml:"interruptMode"` // always|prose-only|tool-only|never
+	ContextMode   string     `yaml:"contextMode"`   // discard|keep
+	RepeatGap     int        `yaml:"repeatGap"`     // turns between two fires
+	Rules         []TTSRRule `yaml:"rules"`
+}
+
+// TTSRRule is one stream rule: a regex condition, an optional astCondition
+// (run through ast-grep when it is installed), the interrupt/context policy
+// for its matches, and the notice the model receives.
+type TTSRRule struct {
+	Name          string `yaml:"name"`
+	Condition     string `yaml:"condition"`
+	ASTCondition  string `yaml:"astCondition"`
+	InterruptMode string `yaml:"interruptMode"`
+	ContextMode   string `yaml:"contextMode"`
+	RepeatGap     int    `yaml:"repeatGap"`
+	Message       string `yaml:"message"`
+}
+
+// ttsrModeOK reports a valid interrupt mode ("" = inherit the group).
+func ttsrModeOK(m string) bool {
+	switch m {
+	case "", "always", "prose-only", "tool-only", "never":
+		return true
+	}
+	return false
+}
+
+// ttsrContextOK reports a valid context mode ("" = inherit the group).
+func ttsrContextOK(m string) bool {
+	return m == "" || m == "discard" || m == "keep"
 }
 
 // defaultSettings is the schema-defaults layer.
@@ -145,6 +185,8 @@ func defaultSettings() *Settings {
 		ShowThinking:       &show,
 		Personality:        "default",
 		AdvisorImmuneTurns: 3,
+		// The group ships enabled but rule-less (no rules = inert).
+		TTSR: &TTSRSettings{Enabled: &show, InterruptMode: "always", ContextMode: "discard", RepeatGap: 3},
 	}
 }
 
@@ -282,6 +324,58 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.TaskAgentAdvisor != "" {
 		s.TaskAgentAdvisor = layer.TaskAgentAdvisor
+	}
+	if layer.TTSR != nil {
+		if s.TTSR == nil {
+			s.TTSR = layer.TTSR
+		} else {
+			// Rules are a list: a layer that declares any replaces the
+			// earlier set wholesale (same rule as bashPatterns).
+			if layer.TTSR.Rules != nil {
+				s.TTSR.Rules = layer.TTSR.Rules
+			}
+			if layer.TTSR.InterruptMode != "" {
+				s.TTSR.InterruptMode = layer.TTSR.InterruptMode
+			}
+			if layer.TTSR.ContextMode != "" {
+				s.TTSR.ContextMode = layer.TTSR.ContextMode
+			}
+			if layer.TTSR.RepeatGap != 0 {
+				s.TTSR.RepeatGap = layer.TTSR.RepeatGap
+			}
+			if layer.TTSR.Enabled != nil {
+				s.TTSR.Enabled = layer.TTSR.Enabled
+			}
+		}
+	}
+	if s.TTSR != nil {
+		if !ttsrModeOK(s.TTSR.InterruptMode) {
+			return fmt.Errorf("ttsr: unknown interruptMode %q (want always|prose-only|tool-only|never)", s.TTSR.InterruptMode)
+		}
+		if !ttsrContextOK(s.TTSR.ContextMode) {
+			return fmt.Errorf("ttsr: unknown contextMode %q (want discard|keep)", s.TTSR.ContextMode)
+		}
+		if s.TTSR.RepeatGap < 0 {
+			return fmt.Errorf("ttsr: repeatGap must be >= 0, got %d", s.TTSR.RepeatGap)
+		}
+		seen := map[string]bool{}
+		for _, r := range s.TTSR.Rules {
+			switch {
+			case r.Name == "":
+				return fmt.Errorf("ttsr: every rule needs a name")
+			case seen[r.Name]:
+				return fmt.Errorf("ttsr: duplicate rule name %q", r.Name)
+			case r.Condition == "":
+				return fmt.Errorf("ttsr: rule %q needs a condition", r.Name)
+			case !ttsrModeOK(r.InterruptMode):
+				return fmt.Errorf("ttsr: rule %q: unknown interruptMode %q", r.Name, r.InterruptMode)
+			case !ttsrContextOK(r.ContextMode):
+				return fmt.Errorf("ttsr: rule %q: unknown contextMode %q", r.Name, r.ContextMode)
+			case r.RepeatGap < 0:
+				return fmt.Errorf("ttsr: rule %q: repeatGap must be >= 0", r.Name)
+			}
+			seen[r.Name] = true
+		}
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":

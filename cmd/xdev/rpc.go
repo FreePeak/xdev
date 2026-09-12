@@ -73,6 +73,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	h.agent = &agent.Agent{
 		Provider: prov, Tools: reg, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
+		TTSR:       agent.NewTTSR(lastSettings().TTSR),
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, provName, modelName),
