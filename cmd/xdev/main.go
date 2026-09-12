@@ -10,6 +10,7 @@ import (
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/lsp"
+	"github.com/FreePeak/xdev/internal/marketplace"
 	"github.com/FreePeak/xdev/internal/memlimit"
 	"github.com/FreePeak/xdev/internal/skills"
 )
@@ -77,11 +78,11 @@ func main() {
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev plugin <sub>            plugins: list | search | install | remove | info
 
 Flags:
 `, version)
 		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nMemory limit: %d bytes (XDEV_MEMLIMIT to override)\n", appliedLimit)
 	}
 	// NOTE: Go's flag package stops at the first positional arg, so flags
 	// must precede the subcommand: `xdev -continue tui`, not `xdev tui -continue`.
@@ -127,7 +128,7 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version" || args[0] == "plugin") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -205,6 +206,9 @@ Flags:
 		os.Exit(lsp.ConfigCommand(args, os.Stdout, os.Stderr, settings))
 	}
 
+	if mode == "plugin" {
+		os.Exit(marketplace.Run(args, os.Stdout, os.Stderr, settings.Plugins.Marketplaces))
+	}
 	switch mode {
 	case "version":
 		fmt.Printf("xdev %s\n", version)
