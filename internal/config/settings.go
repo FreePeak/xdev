@@ -10,6 +10,7 @@ import (
 
 	"github.com/FreePeak/xdev/internal/imagegen"
 	"github.com/FreePeak/xdev/internal/tool"
+	"github.com/FreePeak/xdev/internal/tts"
 	"gopkg.in/yaml.v3"
 
 	"github.com/FreePeak/xdev/internal/websearch"
@@ -162,6 +163,23 @@ type Settings struct {
 	// ordered cloud image providers, per-attempt timeout, response cap.
 	// Absent = the built-in order (openai, gemini) with environment keys.
 	ImageProviders imagegen.Settings `yaml:"imageProviders"`
+	// TTS configures the tts tool and `xdev say` (M15 #68): voice name
+	// and words-per-minute rate, both backend-relative, both
+	// overridable per call.
+	TTS TTSSettings `yaml:"tts"`
+}
+
+// TTSSettings is the `tts` group. It is the engine's own Settings type,
+// aliased rather than redeclared (same reason as WebSearchSettings: the
+// struct the registry hands to the tool must live in internal/tts).
+type TTSSettings = tts.Settings
+
+// TTSConfig returns the tts group, nil-safe.
+func (s *Settings) TTSConfig() tts.Settings {
+	if s == nil {
+		return tts.Settings{}
+	}
+	return s.TTS
 }
 
 // SkillsSettings is the `skills` group.
@@ -529,6 +547,15 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Skills.CustomDirectories != nil {
 		s.Skills.CustomDirectories = append([]string(nil), layer.Skills.CustomDirectories...)
 	}
+	if layer.TTS.Voice != "" {
+		s.TTS.Voice = layer.TTS.Voice
+	}
+	if layer.TTS.Rate != 0 {
+		if err := tts.ValidateRate(layer.TTS.Rate); err != nil {
+			return err
+		}
+		s.TTS.Rate = layer.TTS.Rate
+	}
 	if layer.TaskAgentAdvisor != "" {
 		s.TaskAgentAdvisor = layer.TaskAgentAdvisor
 	}
@@ -832,6 +859,12 @@ func List(s *Settings, globalPath string) []string {
 	}
 	if s.Ask.Timeout > 0 {
 		out = append(out, "ask.timeout "+fmt.Sprint(s.Ask.Timeout))
+	}
+	if s.TTS.Voice != "" {
+		out = append(out, "tts.voice "+s.TTS.Voice)
+	}
+	if s.TTS.Rate != 0 {
+		out = append(out, "tts.rate "+fmt.Sprint(s.TTS.Rate))
 	}
 	return out
 }
