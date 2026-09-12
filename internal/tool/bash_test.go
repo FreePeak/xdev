@@ -94,29 +94,43 @@ func TestBashStderrCaptureOnly(t *testing.T) {
 	}
 }
 
-func TestBashTimeoutKills(t *testing.T) {
+func TestBashTimeoutMovesToBackground(t *testing.T) {
+	// #16: a timeout no longer kills — the live process is handed to the
+	// job registry, keeps running, and its later exit is observable.
 	bt := NewBashTool(t.TempDir())
+	bt.Jobs = NewBashJobs()
 	start := time.Now()
 	res, err := bt.Execute(context.Background(), args(t, map[string]any{
-		"command": "sleep 10",
+		"command": "sleep 1; echo done-bg",
 		"timeout": 1,
 	}))
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.IsError {
-		t.Fatalf("timeout kill must set IsError=true, text=%q", res.Text)
-	}
 	if elapsed > 5*time.Second {
-		t.Fatalf("timeout kill took %v, process not terminated promptly", elapsed)
+		t.Fatalf("timeout handoff took %v, process not detached promptly", elapsed)
 	}
 	d := res.Details.(*bashDetails)
-	if d.ExitCode == 0 {
-		t.Fatalf("killed process must report non-zero exitCode, got %+v", d)
+	if !d.Backgrounded || d.JobID == 0 || d.OutputFile == "" {
+		t.Fatalf("timeout result must carry background metadata, got %+v", d)
 	}
-	if !strings.Contains(res.Text, "[killed: signal]") {
-		t.Fatalf("missing kill marker in %q", res.Text)
+	if !strings.Contains(res.Text, "background job #") {
+		t.Fatalf("missing background notice in %q", res.Text)
+	}
+	job, ok := bt.Jobs.Get(d.JobID)
+	if !ok {
+		t.Fatalf("job #%d not in the registry", d.JobID)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !job.Done() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if code, done := job.ExitCode(); !done || code != 0 {
+		t.Fatalf("backgrounded job did not finish cleanly: code=%d done=%v state=%s", code, done, job.State())
+	}
+	if !strings.Contains(job.Tail(5), "done-bg") {
+		t.Fatalf("background output file lost the continuation: %q", job.Tail(5))
 	}
 }
 
@@ -265,12 +279,19 @@ func TestBashConcurrentCalls(t *testing.T) {
 
 func TestBashProcessGroupKill(t *testing.T) {
 	// A background child spawned inside the shell must die with the group
-	// when the timeout fires — this is the Setpgid + kill(-pgid) contract.
+	// when the agent aborts — this is the Setpgid + kill(-pgid) contract.
+	// (A plain timeout backgrounds instead; see the handoff test.)
 	bt := NewBashTool(t.TempDir())
+	bt.Jobs = NewBashJobs()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
 	start := time.Now()
-	res, err := bt.Execute(context.Background(), args(t, map[string]any{
+	res, err := bt.Execute(ctx, args(t, map[string]any{
 		"command": `sleep 30 & wait`,
-		"timeout": 1,
+		"timeout": 60,
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -280,5 +301,53 @@ func TestBashProcessGroupKill(t *testing.T) {
 	}
 	if !res.IsError || !strings.Contains(res.Text, "[killed: signal]") {
 		t.Fatalf("expected killed result, got IsError=%v text=%q", res.IsError, res.Text)
+	}
+}
+
+func TestBashRunInBackgroundReturnsJob(t *testing.T) {
+	bt := NewBashTool(t.TempDir())
+	bt.Jobs = NewBashJobs()
+	res, err := bt.Execute(context.Background(), args(t, map[string]any{
+		"command":           "sleep 0.2; exit 7",
+		"run_in_background": true,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := res.Details.(*bashDetails)
+	if !d.Backgrounded || d.JobID == 0 || d.OutputFile == "" {
+		t.Fatalf("background result must carry a job id and output path: %+v", d)
+	}
+	if !strings.Contains(res.Text, fmt.Sprintf("job #%d", d.JobID)) {
+		t.Fatalf("result text must name the job: %q", res.Text)
+	}
+	job, ok := bt.Jobs.Get(d.JobID)
+	if !ok {
+		t.Fatalf("job #%d not registered", d.JobID)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !job.Done() && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	// The exit status lands later — that is the point of the registry.
+	if code, done := job.ExitCode(); !done || code != 7 {
+		t.Fatalf("exit status = (%d, done=%v), want (7, true); state=%s", code, done, job.State())
+	}
+}
+
+func TestBashJobsBoundedEviction(t *testing.T) {
+	jobs := NewBashJobs()
+	for i := range bashJobsCap + 3 {
+		jobs.add(fmt.Sprintf("job %d", i), "", "")
+	}
+	if jobs.Len() != bashJobsCap {
+		t.Fatalf("registry cap: len=%d, want %d", jobs.Len(), bashJobsCap)
+	}
+	list := jobs.List()
+	if list[0].ID != 4 || list[len(list)-1].ID != bashJobsCap+3 {
+		t.Fatalf("eviction must drop oldest first: first=%d last=%d", list[0].ID, list[len(list)-1].ID)
+	}
+	if !strings.Contains(jobs.Render(), "Background bash jobs") {
+		t.Fatalf("render missing header: %q", jobs.Render())
 	}
 }

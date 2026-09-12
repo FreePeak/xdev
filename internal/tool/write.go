@@ -14,11 +14,17 @@ import (
 
 var _ Tool = (*WriteTool)(nil)
 
-// WriteTool creates or overwrites files atomically.
-type WriteTool struct{}
+// WriteTool creates or overwrites files atomically. Successful writes
+// refresh the freshness record so a following edit is not flagged stale.
+type WriteTool struct {
+	reg *Registry
+}
 
 // NewWriteTool returns a WriteTool.
 func NewWriteTool() *WriteTool { return &WriteTool{} }
+
+// setRegistry receives the owning registry from Registry.Register.
+func (t *WriteTool) setRegistry(r *Registry) { t.reg = r }
 
 // Name implements Tool.
 func (t *WriteTool) Name() string { return "write" }
@@ -78,6 +84,14 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 	if err := writeBytesAtomic(resolved, data); err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("write: %v", err)}, nil
 	}
+
+	// Refresh the freshness record: the model's next edit against this
+	// path is anchored on the content just written.
+	wlines := strings.Split(strings.TrimSuffix(a.Content, "\n"), "\n")
+	if a.Content == "" {
+		wlines = []string{}
+	}
+	t.reg.recordSnapshot(resolved, linesHash(wlines), nil)
 
 	details := map[string]any{
 		"resolvedPath": resolved,

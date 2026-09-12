@@ -38,11 +38,17 @@ const (
 var _ Tool = (*ReadTool)(nil)
 
 // ReadTool reads files as line-numbered windows, with directory and
-// binary/image fallbacks.
-type ReadTool struct{}
+// binary/image fallbacks. It records a freshness snapshot for every text
+// window so a later edit can detect a file that changed since the read.
+type ReadTool struct {
+	reg *Registry
+}
 
 // NewReadTool returns a ReadTool.
 func NewReadTool() *ReadTool { return &ReadTool{} }
+
+// setRegistry receives the owning registry from Registry.Register.
+func (t *ReadTool) setRegistry(r *Registry) { t.reg = r }
 
 // Name implements Tool.
 func (t *ReadTool) Name() string { return "read" }
@@ -128,7 +134,7 @@ func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			},
 		}, nil
 	}
-	return readTextWindow(a.Path, resolved, a.Offset, a.Limit)
+	return t.readTextWindow(a.Path, resolved, a.Offset, a.Limit)
 }
 
 // readHead returns up to n leading bytes plus the full file size.
@@ -150,8 +156,9 @@ func readHead(path string, n int) ([]byte, int64, error) {
 }
 
 // readTextWindow renders the offset/limit window with real 1-based line
-// numbers and the omp continuation footer.
-func readTextWindow(display, resolved string, offset, limit int) (Result, error) {
+// numbers and the omp continuation footer, recording the freshness snapshot
+// (full-file hash + the rendered window's exact text) for later edits.
+func (t *ReadTool) readTextWindow(display, resolved string, offset, limit int) (Result, error) {
 	lines, err := ReadLines(resolved)
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
@@ -179,6 +186,8 @@ func readTextWindow(display, resolved string, offset, limit int) (Result, error)
 	}
 	end := min(start+limit-1, total)
 
+	// (The freshness snapshot itself is recorded on the success path below.)
+
 	var b strings.Builder
 	for i, line := range lines[start-1 : end] {
 		if i > 0 {
@@ -192,6 +201,12 @@ func readTextWindow(display, resolved string, offset, limit int) (Result, error)
 	if truncated {
 		fmt.Fprintf(&b, "\n[Showing lines %d-%d of %d. Use :%d to continue]", start, end, total, end+1)
 	}
+	// Success path: the model now holds real line numbers for start..end.
+	window := make(map[int]string, end-start+1)
+	for i := start; i <= end; i++ {
+		window[i] = lines[i-1]
+	}
+	t.reg.recordSnapshot(resolved, linesHash(lines), window)
 	details["lineCount"] = end - start + 1
 	details["truncated"] = truncated
 	return Result{Text: b.String(), Details: details}, nil
