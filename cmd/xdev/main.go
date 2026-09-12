@@ -55,6 +55,7 @@ func main() {
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
 	prewalkInto := fs.String("prewalk-into", "@smol", "prewalk target: model ref or @role (default @smol)")
+	noRules := fs.Bool("no-rules", false, "disable rules discovery (.omp/rules, RULES.md, third-party rulebooks)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -93,6 +94,7 @@ Flags:
 	}
 	cliKeyValue = *apiKeyValue
 	loadedSettings = settings
+	noRulesFlag = *noRules
 	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
 	// Flag-vs-settings precedence: an explicit flag always wins.
 	if *themeName == "" {
