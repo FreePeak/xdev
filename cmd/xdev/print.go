@@ -862,6 +862,11 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// token budget. The agent loop reads the same state for the per-turn
 	// reminder and budget accounting; wireTaskParent binds the store.
 	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
+	// M13 #51: checkpoint/rewind — named session-tree bookmarks. rewind
+	// re-points the leaf at a checkpoint and records the caller's report as
+	// a branch summary; wireTaskParent binds the live session.
+	reg.Register(&tool.CheckpointTool{})
+	reg.Register(&tool.RewindTool{})
 	if mem := buildMemory(settings); mem != nil {
 		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
 	}
@@ -1005,6 +1010,11 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 			gt.Goals.Bind(store)
 		}
 	}
+	// M13 #51: bind checkpoint/rewind to the active session (again on
+	// /resume and session switches). The running probe stays nil here: a
+	// model rewind runs inside its own turn, so a run-wide probe would
+	// refuse every call. See tool.WireCheckpoint.
+	tool.WireCheckpoint(reg, store, nil)
 }
 
 // failoverChain builds the M5 resilience chain from models.yml: every
