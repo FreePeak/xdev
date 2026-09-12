@@ -176,6 +176,10 @@ type Settings struct {
 	// <dataDir>/plugins and contribute commands/skills/agents/hooks at the
 	// lowest discovery priority.
 	Plugins PluginsSettings `yaml:"plugins"`
+	// Computer gates the computer tool (M15 #65): desktop control
+	// (screenshot, pointer, keyboard) is opt-in, because synthetic input
+	// is a real-world side effect.
+	Computer ComputerSettings `yaml:"computer"`
 }
 
 // TTSSettings is the `tts` group. It is the engine's own Settings type,
@@ -257,6 +261,16 @@ type PluginsSettings struct {
 	// <dataDir>/plugins/marketplaces. A relative path resolves against the
 	// process working directory.
 	Marketplaces []string `yaml:"marketplaces"`
+}
+
+// ComputerSettings is the `computer` group.
+type ComputerSettings struct {
+	// Enabled opts into desktop control. A pointer so a later layer can
+	// turn it back off through the zero-skip merge; nil means off (the
+	// shipped default).
+	Enabled *bool `yaml:"enabled"`
+	// Timeout bounds one op in seconds (0 = the tool's own default).
+	Timeout int `yaml:"timeout"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -427,6 +441,21 @@ func (s *Settings) AskTimeout() time.Duration {
 		return tool.DefaultAskTimeout
 	}
 	return time.Duration(s.Ask.Timeout) * time.Second
+}
+
+// ComputerOn reports whether the computer tool is enabled (nil-safe:
+// desktop control is off unless a layer explicitly opts in).
+func (s *Settings) ComputerOn() bool {
+	return s != nil && s.Computer.Enabled != nil && *s.Computer.Enabled
+}
+
+// ComputerTimeout bounds one computer op (nil-safe: 0 = the tool's own
+// default of 15s).
+func (s *Settings) ComputerTimeout() time.Duration {
+	if s == nil || s.Computer.Timeout <= 0 {
+		return 0
+	}
+	return time.Duration(s.Computer.Timeout) * time.Second
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -704,6 +733,18 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
 	}
+	// computer: desktop control is opt-in (a layer that sets enabled wins,
+	// including an explicit no), and the timeout is validated here so a
+	// negative value is reported instead of silently meaning "default".
+	if layer.Computer.Enabled != nil {
+		s.Computer.Enabled = layer.Computer.Enabled
+	}
+	if layer.Computer.Timeout != 0 {
+		if layer.Computer.Timeout < 0 {
+			return fmt.Errorf("computer.timeout must be >= 0, got %d", layer.Computer.Timeout)
+		}
+		s.Computer.Timeout = layer.Computer.Timeout
+	}
 	switch s.MemoryPipeline {
 	case "", "on", "off":
 	default:
@@ -836,6 +877,7 @@ func List(s *Settings, globalPath string) []string {
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
+		"computer " + fmt.Sprint(s.ComputerOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
