@@ -143,3 +143,117 @@ func TestReplayTranscriptIncludesThinking(t *testing.T) {
 		t.Fatalf("assistant text = %q", blocks[1].Text)
 	}
 }
+
+// writePickerSession lays down a session JSONL (title slot + header +
+// one user prompt line) for picker/search/delete tests.
+func writePickerSession(t *testing.T, cwd, id, title, prompt string) string {
+	t.Helper()
+	now := time.Now().UTC()
+	path := session.SessionFilePath(config.DataDir(), cwd, now, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.Write(session.MarshalTitleSlot(title, session.TitleSourceAuto, now))
+	b.Write(session.MarshalHeader(session.SessionHeader{
+		Version: 3, ID: id, Timestamp: now, CWD: cwd, Title: title, TitleSource: session.TitleSourceAuto,
+	}))
+	if prompt != "" {
+		line, err := session.MarshalEntry(&session.MessageEntry{
+			Env:     session.Envelope{ID: id[:8] + "-0000"},
+			Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: prompt}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(line)
+		b.WriteString("\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestSessionPinsRoundTrip: toggle persists to session-pins.json, toggle
+// back clears it.
+func TestSessionPinsRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(config.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := toggleSessionPin("aaaa1111"); err != nil {
+		t.Fatal(err)
+	}
+	if !loadSessionPins()["aaaa1111"] {
+		t.Fatal("pin not persisted")
+	}
+	b, err := os.ReadFile(pinsPath())
+	if err != nil || !strings.Contains(string(b), "aaaa1111") {
+		t.Fatalf("sidecar = %q err=%v", b, err)
+	}
+	if err := toggleSessionPin("aaaa1111"); err != nil {
+		t.Fatal(err)
+	}
+	if pins := loadSessionPins(); len(pins) != 0 {
+		t.Fatalf("unpin left %v", pins)
+	}
+}
+
+// TestDeleteSessionRemovesJSONLAndPin: confirmed delete removes the
+// session JSONL and its pin, refuses the active session, and errors on
+// unknown ids.
+func TestDeleteSessionRemovesJSONLAndPin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := "/tmp/picker-del"
+	path := writePickerSession(t, cwd, "AAAA1111-0000-0000-0000-000000000000", "delete me", "hello")
+	if err := toggleSessionPin("AAAA1111"); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteSessionByShortID("AAAA1111", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("jsonl still present: %v", err)
+	}
+	if loadSessionPins()["AAAA1111"] {
+		t.Fatal("pin survived the delete")
+	}
+	active := writePickerSession(t, cwd, "BBBB2222-0000-0000-0000-000000000000", "active", "hi")
+	if err := deleteSessionByShortID("BBBB2222", active); err == nil {
+		t.Fatal("deleting the active session must be refused")
+	}
+	if _, err := os.Stat(active); err != nil {
+		t.Fatalf("active session file was removed: %v", err)
+	}
+	if err := deleteSessionByShortID("zzzz9999", ""); err == nil {
+		t.Fatal("unknown id must error")
+	}
+}
+
+// TestSearchPickerItemsRanksMatches: all tokens must hit; id/title
+// matches outrank prompt-text (body) matches; other projects' bodies
+// count too; body-only non-matches drop out.
+func TestSearchPickerItemsRanksMatches(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := "/tmp/picker-search"
+	writePickerSession(t, cwd, "AAAA1111-0000-0000-0000-000000000000", "alpha parser", "irrelevant prompt")
+	writePickerSession(t, cwd, "BBBB2222-0000-0000-0000-000000000000", "unrelated", "please fix the alpha parser now; alpha again")
+	writePickerSession(t, cwd, "CCCC3333-0000-0000-0000-000000000000", "alpha only", "no second token here")
+	writePickerSession(t, "/tmp/picker-other", "DDDD4444-0000-0000-0000-000000000000", "elsewhere", "alpha parser there")
+
+	got := searchPickerItems(cwd, "alpha parser")
+	if len(got) != 3 {
+		t.Fatalf("matches = %v, want 3 (CCCC3333 lacks 'parser' in id/title/body)", got)
+	}
+	// id/title match first; then body matches by occurrence count
+	// (BBBB2222 has 3, DDDD4444 has 2).
+	if got[0].ID != "AAAA1111" || got[1].ID != "BBBB2222" || got[2].ID != "DDDD4444" {
+		t.Fatalf("ranking = %v, want AAAA1111, BBBB2222, DDDD4444", got)
+	}
+
+	got = searchPickerItems(cwd, "alpha")
+	if len(got) != 4 {
+		t.Fatalf("single-token matches = %v, want all 4 sessions", got)
+	}
+}
