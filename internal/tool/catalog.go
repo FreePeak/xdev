@@ -94,6 +94,15 @@ func (c *Catalog) Defer(name, index string, tags ...string) {
 	c.entries[name] = Entry{Name: name, Index: index, Tags: append([]string(nil), tags...)}
 }
 
+// drop forgets a deferred tool whose registration went away
+// (Registry.Remove). Callers hold the registry lock: registry → catalog is
+// the documented lock order.
+func (c *Catalog) drop(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, name)
+}
+
 // Entries returns every deferred tool, ordered by name for deterministic
 // prompts and search output.
 func (c *Catalog) Entries() []Entry {
