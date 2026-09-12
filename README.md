@@ -41,6 +41,35 @@ xdev tui -theme grokday         # light variant (default: auto)
 # hard RSS backstop defaults to 100MB; set XDEV_MEMLIMIT to override
 ```
 
+## Onboarding, updates, benchmarks
+
+```bash
+xdev setup                           # data dir + starter config.yml + next steps
+xdev update --check                  # is a newer release published for the channel?
+xdev update                          # verify SHA256SUMS, then replace this binary
+xdev update --channel canary         # pre-release tags (v0.2.0-canary.1)
+xdev bench --turns 5 --model @smol   # TTFT + decode p50/p95 for the configured provider
+```
+
+`xdev update` resolves the channel's newest release from GitHub releases
+(`XDEV_UPDATE_REPO`, default `FreePeak/xdev`; `XDEV_UPDATE_API` for a mirror),
+refuses a release that carries no `SHA256SUMS` entry, refuses when the running
+binary is not writable (printing the exact `chmod u+w <path>` hint), and
+installs by writing a temp file next to the target and renaming — an
+interrupted update never leaves a half-written binary. `--check` only reports.
+
+`xdev setup` is the non-interactive onboarding pass: it creates
+`~/.xdev/agent/` (plus `sessions/`, `agents/`, `commands/`, `themes/`), writes
+a starter `config.yml` only when none exists, then prints the `models.yml`
+template and which optional external tools (git, rg, fd, ast-grep, gh,
+python3) it found. Re-running it never overwrites an existing file.
+
+Release binaries are Developer ID-signed and notarized in CI when the
+`APPLE_*` repository secrets are configured, and ship ad-hoc signed when they
+are absent — a release never fails for want of credentials. See
+`.github/workflows/ci.yml` (job `macos-sign`) for the five secret names and how
+to produce them.
+
 ## Interactive mode
 
 `xdev tui` is the Grok-CLI-styled interactive mode (GrokNight/GrokDay themes).

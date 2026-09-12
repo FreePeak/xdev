@@ -119,9 +119,13 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          # Stamp the tag into the binary: `xdev version` prints it, and
+          # `xdev update` compares it against the release it resolves.
+          version="0.1.0-dev"
+          case "$GITHUB_REF" in refs/tags/v*) version="$GITHUB_REF_NAME" ;; esac
           ext=""
           [ "$GOOS" = "windows" ] && ext=".exe"
-          go build -trimpath -ldflags "-s -w" -o "dist/xdev_${GOOS}_${GOARCH}${ext}" ./cmd/xdev
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/xdev_${GOOS}_${GOARCH}${ext}" ./cmd/xdev
       - name: Checksum
         run: |
           cd dist
@@ -130,6 +134,173 @@ jobs:
         with:
           name: xdev-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
+
+  macos-sign:
+    # Apple Developer ID signing + notarization for the darwin binaries
+    # (M14 #64). Runs only on tags (or a manual dispatch) and SKIPS CLEANLY
+    # when the signing secrets are absent — a release must never fail for
+    # want of credentials:
+    #
+    #   APPLE_CERTIFICATE_P12       base64 of the Developer ID Application .p12
+    #   APPLE_CERTIFICATE_PASSWORD  the password set when exporting that .p12
+    #   APPLE_API_KEY_ID            App Store Connect API Key ID
+    #   APPLE_API_ISSUER_ID         App Store Connect API Issuer ID (UUID)
+    #   APPLE_API_KEY               base64 of the App Store Connect .p8 key
+    #
+    # How to produce them: Keychain Access -> right-click the "Developer ID
+    # Application: ..." identity (the entry that expands to a certificate
+    # WITH a private key) -> Export -> .p12; App Store Connect -> Users and
+    # Access -> Integrations -> App Store Connect API -> create a key
+    # (Developer role suffices for notarization) -> download the .p8 once.
+    # Upload each as a repository secret, base64-encoding the binary files:
+    #   base64 -i cert.p12 | gh secret set APPLE_CERTIFICATE_P12
+    # Without all five, the binaries stay ad-hoc signed: `curl | sh` and a
+    # Homebrew formula install work (neither path quarantines), a browser
+    # download or a cask needs Apple's online ticket lookup.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: release-artifacts
+    runs-on: macos-latest
+    timeout-minutes: 30
+    outputs:
+      signed: ${{ steps.secrets.outputs.present }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: xdev-darwin-*
+          path: dist
+          merge-multiple: true
+
+      - name: Detect signing secrets
+        id: secrets
+        run: |
+          if [ -n "${{ secrets.APPLE_CERTIFICATE_P12 }}" ] \
+            && [ -n "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ] \
+            && [ -n "${{ secrets.APPLE_API_KEY_ID }}" ] \
+            && [ -n "${{ secrets.APPLE_API_ISSUER_ID }}" ] \
+            && [ -n "${{ secrets.APPLE_API_KEY }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apple signing secrets are not configured — publishing ad-hoc darwin binaries (see this job's comment for the five required secrets)."
+          fi
+
+      - name: Codesign (Developer ID, hardened runtime)
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/xdev-signing.keychain-db"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings -lut 1800 "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$keychain" > /dev/null
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/Developer ID Application/ {print $2; exit}')"
+          [ -n "$identity" ] || { echo "no Developer ID Application identity in the imported certificate"; exit 1; }
+          # Hardened runtime + a secure timestamp is what notarization
+          # requires. No entitlements: xdev is a static CGO-free Go binary —
+          # it JITs nothing and dlopens nothing, so none of the JS-runtime
+          # allowances (allow-jit, disable-library-validation) apply.
+          for bin in dist/xdev_darwin_arm64 dist/xdev_darwin_amd64; do
+            codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$identity" "$bin"
+            codesign --verify --strict -vv "$bin"
+          done
+          # Fail fast when the signature cannot actually run: a runner-arch
+          # binary (an amd64 one needs Rosetta) is the only live check.
+          case "$(uname -m)" in arm64) arch=arm64 ;; *) arch=amd64 ;; esac
+          "dist/xdev_darwin_${arch}" version
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security delete-keychain "$keychain"
+
+      - name: Notarize
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notary"
+          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary/AuthKey_${APPLE_API_KEY_ID}.p8"
+          for arch in arm64 amd64; do
+            bin="dist/xdev_darwin_${arch}"
+            # notarytool takes an archive, not a bare Mach-O executable.
+            ditto -c -k --keepParent "$bin" "$RUNNER_TEMP/notary/${arch}.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/notary/${arch}.zip" \
+              --key "$RUNNER_TEMP/notary/AuthKey_${APPLE_API_KEY_ID}.p8" \
+              --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          done
+          # Deliberately no `stapler staple`: it only stamps .app/.pkg/.dmg
+          # bundles. The binary IS notarized (the ticket is keyed to its
+          # cdhash and Gatekeeper fetches it online); it just cannot carry
+          # the ticket inline. An offline-installable artifact would mean
+          # wrapping the binary in a notarized .pkg/.dmg, which the curl and
+          # Homebrew paths do not need.
+          rm -rf "$RUNNER_TEMP/notary"
+
+      - name: Upload signed darwin binaries
+        if: steps.secrets.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdev-darwin-signed
+          path: dist/*
+          overwrite: true
+
+  publish-release:
+    # Single source of truth for `xdev update`: one GitHub release per tag,
+    # carrying every platform binary plus ONE merged SHA256SUMS computed
+    # over the final (signed, when credentials exist) artifacts. A tag with
+    # a pre-release suffix (v0.2.0-canary.1) publishes as a pre-release —
+    # which is exactly what the canary channel resolves and the stable
+    # channel skips.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-artifacts, macos-sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Downloading last means the signed darwin binaries win over the
+      # unsigned ones from release-artifacts.
+      - uses: actions/download-artifact@v4
+        if: needs.macos-sign.outputs.signed == 'true'
+        with:
+          name: xdev-darwin-signed
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          # The per-platform manifests are superseded: signing rewrites the
+          # darwin binaries, so their hashes would be stale, and `xdev
+          # update` verifies against this merged manifest.
+          rm -f SHA256SUMS_*.txt
+          sha256sum xdev_* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          flags=""
+          case "$tag" in *-*) flags="--prerelease" ;; esac
+          # `--clobber` upload keeps a re-run of the same tag idempotent.
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" \
+            --generate-notes $flags dist/* \
+            || gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber dist/*
 
   cross:
     # Six-platform cross-compile is a Goal-1 promise; catch breakage early.

@@ -77,6 +77,7 @@ func main() {
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev update|setup|bench      distribution: release channel | onboarding | provider bench
 
 Flags:
 `, version)
@@ -127,7 +128,7 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version" || args[0] == "update" || args[0] == "setup" || args[0] == "bench") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -203,6 +204,10 @@ Flags:
 
 	if mode == "lsp-config" {
 		os.Exit(lsp.ConfigCommand(args, os.Stdout, os.Stderr, settings))
+	}
+	// Distribution surface (M14 #64): update/setup/bench parse their own flags.
+	if mode == "update" || mode == "setup" || mode == "bench" {
+		os.Exit(runDist(mode, args, version))
 	}
 
 	switch mode {
