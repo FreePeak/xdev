@@ -11,6 +11,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/memlimit"
+	"github.com/FreePeak/xdev/internal/serve"
 	"github.com/FreePeak/xdev/internal/skills"
 )
 
@@ -127,8 +128,11 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version" || args[0] == "serve") {
 		mode, args = args[0], args[1:]
+	}
+	if mode == "serve" {
+		os.Exit(serve.Dispatch(args, version))
 	}
 	if mode == "tui" {
 		code, err := runTUI(printOptions{
