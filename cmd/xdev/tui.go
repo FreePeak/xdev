@@ -956,7 +956,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// deliberately one-way — it shows the question and lets the headless
 	if at, ok := reg.Get(tool.AskToolName); ok {
 		if at2, isAsk := at.(*tool.AskTool); isAsk {
-			at2.Sink = &askCardSink{app: app, fallback: tool.NewHeadlessAskSink(lastSettings().AskTimeout())}
+			// The overlay is the answer path; the headless policy is the
+			// skip/timeout fallback.
+			at2.Sink = &askCardSink{
+				ops:      app.NewAskOps(lastSettings().AskTimeout()),
+				fallback: tool.NewHeadlessAskSink(lastSettings().AskTimeout()),
+			}
 		}
 	}
 	app.SetMemoryOps(memoryOps(buildMemory(lastSettings())))
@@ -2117,15 +2122,28 @@ func hubCostLabel(r agent.RosterEntry) string {
 	return "-"
 }
 
-// askCardSink is the ask tool's TUI answer path (#36): the question is
-// surfaced as a system block, then the headless timeout→recommended policy
-// answers it. The interactive option card is #46.
+// askCardSink is the ask tool's TUI answer path (#36 → #106): the interactive
+// option card answers when the user picks one; the headless timeout→recommended
+// policy is the fallback when the card is skipped, times out, or the terminal
+// is too narrow for it. The overlay existed (internal/tui/askoverlay.go) with
+// zero callers — NewAskOps was never wired — so every ask timed out.
 type askCardSink struct {
-	app      *tui.App
+	ops      *tui.AskOps
 	fallback tool.AskSink
 }
 
 func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskResponse, error) {
+	if s.ops != nil && s.ops.Show != nil {
+		ans, ok := s.ops.Show(ctx, tui.AskRequest{
+			Question: req.Question, Options: askCardOptions(req.Options),
+			Multi: req.Multi, Recommended: req.Recommended,
+		}, 0)
+		if ok && len(ans.Labels) > 0 {
+			return tool.AskResponse{Labels: ans.Labels}, nil
+		}
+		// Skip/timeout: fall through to the transcript notice + headless
+		// policy below, exactly the pre-overlay behavior.
+	}
 	var b strings.Builder
 	b.WriteString("ask: " + req.Question)
 	for _, o := range req.Options {
@@ -2140,8 +2158,19 @@ func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskRes
 	if len(req.Recommended) > 0 {
 		b.WriteString("\n  recommended: " + strings.Join(req.Recommended, ", "))
 	}
-	s.app.AddSystemBlock(b.String())
+	if s.ops != nil {
+		s.ops = nil // unreachable with the wired Show; kept for safety
+	}
 	return s.fallback.Ask(ctx, req)
+}
+
+// askCardOptions converts the tool's option list to the overlay's shape.
+func askCardOptions(in []tool.AskOption) []tui.AskOption {
+	out := make([]tui.AskOption, len(in))
+	for i, o := range in {
+		out[i] = tui.AskOption{Label: o.Label, Description: o.Description}
+	}
+	return out
 }
 
 // --- collab helpers (M14 #59) ---
