@@ -39,8 +39,9 @@ var BuiltinActions = []string{
 	"redraw",
 	"clear-input",
 	"app.session.tree",
-	"model-select", // Alt+M: the /model roles+models selector (omp app.model.select)
-	"model-cycle",  // Ctrl+P: cycle the active model through --models patterns
+	"model-select",   // Alt+M: the /model roles+models selector (omp app.model.select)
+	"app.agents.hub", // Alt+A: the agent-hub roster (omp app.agents.hub)
+	"model-cycle",    // Ctrl+P: cycle the active model through --models patterns
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
 
@@ -85,6 +86,10 @@ func DefaultKeyMap() *KeyMap {
 			// Model selector. omp parity chord (app.model.select); Alt+M
 			// is deliverable in every terminal we target.
 			"A-m": "model-select",
+			// Agent hub roster. Alt+A is the same deliverable chord class
+			// as Alt+M (omp's app.agents.hub); it opens the overlay even
+			// when no agent is running.
+			"A-a": "app.agents.hub",
 			"C-r": "history-prev",
 			"A-t": "app.session.tree",
 			// history-next, abort and complete share chords with menu/history

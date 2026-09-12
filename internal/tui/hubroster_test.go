@@ -202,19 +202,22 @@ func TestHubRosterNotWired(t *testing.T) {
 		t.Fatalf("missing notice block: n=%d text=%q", n, text)
 	}
 
-	// An empty roster reports no agents rather than opening an empty panel.
+	// An empty roster still opens (omp behavior): the overlay is where
+	// "what is running?" is answered, and it refreshes as agents start, so a
+	// refused chord is worse than an empty panel. It must also close.
 	app.SetHubOps(&HubOps{Roster: func() []HubAgent { return nil }})
 	if err := app.HubRoster(); err != nil {
 		t.Fatal(err)
 	}
-	if app.HubRosterOpen() {
-		t.Fatal("empty roster must not open the overlay")
+	if !app.HubRosterOpen() {
+		t.Fatal("empty roster must open the overlay")
 	}
-	app.mu.Lock()
-	text = app.blocks[len(app.blocks)-1].Text
-	app.mu.Unlock()
-	if text == "" {
-		t.Fatal("empty roster must leave a notice")
+	// Esc closes it again (the overlay owns the key while open).
+	if !app.handleHubRosterKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)) {
+		t.Fatal("Esc must be handled by the open roster")
+	}
+	if app.HubRosterOpen() {
+		t.Fatal("Esc did not close the empty roster")
 	}
 }
 

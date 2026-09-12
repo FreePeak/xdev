@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/ai"
@@ -13,6 +14,7 @@ import (
 
 // fakeProvider streams a scripted sequence of events per Stream call.
 type fakeProvider struct {
+	mu      sync.Mutex // a batch spawn drives it from several goroutines
 	calls   []fakeScript
 	i       int
 	gotReqs []ai.StreamRequest
@@ -24,12 +26,15 @@ type fakeScript struct {
 }
 
 func (f *fakeProvider) Stream(_ context.Context, req ai.StreamRequest) (<-chan ai.Event, error) {
+	f.mu.Lock()
 	f.gotReqs = append(f.gotReqs, req)
 	if f.i >= len(f.calls) {
+		f.mu.Unlock()
 		return nil, errors.New("script exhausted")
 	}
 	sc := f.calls[f.i]
 	f.i++
+	f.mu.Unlock()
 	ch := make(chan ai.Event, 32)
 	go func() {
 		defer close(ch)

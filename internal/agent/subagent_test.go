@@ -51,9 +51,17 @@ func TestSubagentYieldHandoff(t *testing.T) {
 	}
 }
 
+// A child that finishes in prose is nudged to use the yield tool, and once
+// the nudges run out the result says so: a bare "completed" used to be
+// indistinguishable from a real structured handoff (parity finding T3 #6).
 func TestSubagentCompletedWithoutYield(t *testing.T) {
+	prose := func(text string) fakeScript {
+		return fakeScript{events: []ai.Event{{Type: ai.EventStart}, textEvent(text), doneEvent(text)}}
+	}
 	p := &fakeProvider{calls: []fakeScript{
-		{events: []ai.Event{{Type: ai.EventStart}, textEvent("just an answer"), doneEvent("just an answer")}},
+		prose("just an answer"),
+		prose("nudge one"),
+		prose("nudge two"),
 	}}
 	res, err := SpawnChild(context.Background(), SubagentSpec{
 		Name: "chatty", Prompt: "answer", Provider: p,
@@ -61,8 +69,36 @@ func TestSubagentCompletedWithoutYield(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != "completed" || res.Text != "just an answer" {
+	if res.Status != "completed" {
+		t.Fatalf("status = %q, want completed", res.Status)
+	}
+	if !strings.Contains(res.Note, "never called yield") {
+		t.Fatalf("an unstructured handoff must carry the warning, got Note=%q", res.Note)
+	}
+	// The run plus one turn per nudge: the child really was asked.
+	p.mu.Lock()
+	n := len(p.gotReqs)
+	p.mu.Unlock()
+	if want := 1 + yieldNudges; n != want {
+		t.Fatalf("provider turns = %d, want %d", n, want)
+	}
+}
+
+// Yielding after a nudge clears the warning (the handoff is structured again).
+func TestSubagentYieldsAfterNudge(t *testing.T) {
+	prose := fakeScript{events: []ai.Event{{Type: ai.EventStart}, textEvent("prose"), doneEvent("prose")}}
+	p := &fakeProvider{calls: []fakeScript{prose, {events: yieldEvents(`{"result":"structured"}`)}}}
+	res, err := SpawnChild(context.Background(), SubagentSpec{
+		Name: "late", Prompt: "answer", Provider: p,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "yielded" || res.Text != "structured" {
 		t.Fatalf("res = %+v", res)
+	}
+	if strings.Contains(res.Note, "never called yield") {
+		t.Fatalf("a recovered yield must not warn: %q", res.Note)
 	}
 }
 
