@@ -1,6 +1,11 @@
 package ai
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // EventType names oneAssistantMessageEvent kind. Event names match omp's
 // unified stream contract verbatim (research IV.4 / PRD §3.3).
@@ -79,6 +84,62 @@ func FirstError(ch <-chan Event) error {
 		}
 	}
 	return err
+}
+
+// Complete runs one request without tools and returns the assistant message.
+// Side jobs (a session title, a summary, a memory consolidation) need the
+// text of one reply and nothing else; each of them rolling its own stream loop
+// is how a cancelled request or a dropped error event slips through, so the
+// loop lives here. The Done event's message wins when present (it carries the
+// provider's final shape); otherwise the accumulated deltas are returned.
+func Complete(ctx context.Context, p Provider, model, system, prompt string, maxTokens int) (*Message, error) {
+	if p == nil {
+		return nil, errors.New("ai: no provider")
+	}
+	ch, err := p.Stream(ctx, StreamRequest{
+		System: system,
+		Model:  model,
+		Messages: []Message{{Role: RoleUser,
+			Content: []Block{TextBlock{Text: prompt}}}},
+		MaxTokens: maxTokens,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ai: stream start: %w", err)
+	}
+	var (
+		sb      strings.Builder
+		final   *Message
+		streamE error
+	)
+	for ev := range ch {
+		switch ev.Type {
+		case EventTextDelta:
+			sb.WriteString(ev.Delta)
+		case EventError:
+			if streamE == nil {
+				streamE = ev.Err
+			}
+		case EventDone:
+			if ev.Message != nil {
+				final = ev.Message
+			}
+			if ev.StopReason == StopReasonError && streamE == nil {
+				streamE = errors.New("ai: stream ended in error")
+			}
+		}
+	}
+	if streamE != nil {
+		Drain(ch)
+		return nil, streamE
+	}
+	if final != nil {
+		return final, nil
+	}
+	if sb.Len() == 0 {
+		return nil, errors.New("ai: empty completion")
+	}
+	return &Message{Role: RoleAssistant, Content: []Block{TextBlock{Text: sb.String()}},
+		StopReason: StopReasonStop}, nil
 }
 
 func (e Event) String() string {

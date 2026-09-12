@@ -312,6 +312,50 @@ func (s *Store) SetTitle(title string) {
 	s.title = title
 }
 
+// Rename sets the session title and rewrites the on-disk title slot in place
+// (source: TitleSourceAuto or TitleSourceManual). Line 1 is fixed-width by
+// construction — MarshalTitleSlot pads it to TitleSlotWidth — so the rewrite
+// shifts no later byte; that invariant is what makes an ai-title generator
+// and /rename safe against a live session file. A store that never
+// materialized updates only the in-memory title.
+func (s *Store) Rename(title, source string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("session: rename on closed store")
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return errors.New("session: title is required")
+	}
+	s.title = title
+	if source == TitleSourceManual {
+		s.manualTitle = true
+	}
+	if s.file == "" {
+		return nil
+	}
+	// Flush first: the slot itself may still sit in the buffer, and a
+	// pending sequential write must not land behind the offset-0 rewrite.
+	if s.w != nil {
+		if err := s.w.Flush(); err != nil {
+			return fmt.Errorf("session: flush before rename: %w", err)
+		}
+	}
+	f, err := os.OpenFile(s.file, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("session: rename open: %w", err)
+	}
+	defer f.Close()
+	line := MarshalTitleSlot(title, s.titleSourceFor(), time.Now())
+	// WriteAt leaves the fd's sequential offset untouched, so appends after
+	// this keep writing at their own position.
+	if _, err := f.WriteAt(line, 0); err != nil {
+		return fmt.Errorf("session: rename write: %w", err)
+	}
+	return f.Sync()
+}
+
 // Path returns the session file path, empty until the session is on disk.
 func (s *Store) Path() string {
 	s.mu.Lock()

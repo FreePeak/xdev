@@ -827,6 +827,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// /handoff (M5 #23): replace the live context with a handoff
 		// document committed as a compaction entry.
 		Handoff: runHandoff,
+		// /rename: a manual title, written into the fixed-width slot so
+		// /resume and the breadcrumb show it (#107).
+		Rename: func(title string) error { return store.Rename(title, session.TitleSourceManual) },
 	})
 
 	// setRef applies a resolved model ref; shared by /model
@@ -1448,9 +1451,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				if vibeActive() {
 					sys = vibeSys() // director prompt for the restricted toolset
 				}
-				_, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
+				finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
 				app.EndAssistant()
 				app.FinishRun()
+				// Ai-title cascade (#107): the TUI sessions are the ones the
+				// picker lists, and they are the ones stuck with "tui
+				// <timestamp>". Async on purpose: the user's next keystroke
+				// must not wait on a title request.
+				if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
+					go generateTitle(cfg, lastSettings(), cwd, store,
+						append(append([]ai.Message(nil), hist...), *finalMsg))
+				}
 				if err != nil {
 					if ctx.Err() != nil {
 						app.AddSystemBlock("· turn canceled")

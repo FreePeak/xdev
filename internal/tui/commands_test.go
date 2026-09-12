@@ -424,6 +424,8 @@ func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
 
 func (f *fakeAPI) ForkSession() error { return nil }
 func (f *fakeAPI) DumpSession() error { return nil }
+
+func (f *fakeAPI) RenameSession(string) error { return nil }
 func (f *fakeAPI) ExportSession(path string) error {
 	f.exported = path
 	return f.exportErr

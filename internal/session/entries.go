@@ -5,11 +5,13 @@
 package session
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -531,6 +533,25 @@ func MarshalTitleSlot(title, source string, updatedAt time.Time) []byte {
 	out = append(out, `"}`...)
 	out = append(out, '\n')
 	return out
+}
+
+// ReadTitleSlot returns the raw first line of a session file (nil on any
+// read error — callers treat that as "no slot"). A read-only peek that does
+// not open the session: the ai-title pass only needs the source stamp.
+func ReadTitleSlot(path string) []byte {
+	if path == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	line, err := bufio.NewReaderSize(f, TitleSlotWidth+1).ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return nil
+	}
+	return line
 }
 
 // ParseTitleSlot decodes line 1 (without newline). Returns ("", false) when
