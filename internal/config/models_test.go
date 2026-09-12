@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,66 @@ func TestDefaultModelRef(t *testing.T) {
 func TestResolveMissingVar(t *testing.T) {
 	if got := Resolve("x-${XDEV_NO_SUCH_VAR}-y"); got != "x--y" {
 		t.Fatalf("Resolve = %q", got)
+	}
+}
+
+// TestRegisterProviderValidates covers the runtime provider registration an
+// extension performs (ext action `register_provider`): a payload that cannot
+// produce a working adapter is refused with a fix, an unusable name never
+// becomes a lookup key, and a valid block lands in the registry.
+func TestRegisterProviderValidates(t *testing.T) {
+	valid := func() *ProviderConfig {
+		return &ProviderConfig{
+			BaseURL: "http://127.0.0.1:20128/v1",
+			API:     "openai-completions",
+			Models:  []ModelConfig{{ID: "free"}},
+		}
+	}
+	tests := []struct {
+		name   string
+		key    string
+		pc     *ProviderConfig
+		errHas string
+	}{
+		{"empty name", "", valid(), "name is required"},
+		{"name with slash", "a/b", valid(), "bare provider key"},
+		{"name with space", "a b", valid(), "bare provider key"},
+		{"nil block", "ext", nil, "provider block is required"},
+		{"missing baseUrl", "ext", &ProviderConfig{API: "openai-completions", Models: []ModelConfig{{ID: "free"}}}, "baseUrl is required"},
+		{"unsupported api", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "telepathy", Models: []ModelConfig{{ID: "free"}}}, "unsupported api"},
+		{"no models", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "openai-completions"}, "at least one model"},
+		{"blank model id", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "openai-completions", Models: []ModelConfig{{ID: "  "}}}, "at least one model"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			err := cfg.RegisterProvider(tc.key, tc.pc)
+			if err == nil {
+				t.Fatalf("RegisterProvider(%q) must fail", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.errHas) {
+				t.Fatalf("error %q does not mention %q", err, tc.errHas)
+			}
+			if len(cfg.Providers) != 0 {
+				t.Fatalf("a refused payload must not register: %v", cfg.Providers)
+			}
+		})
+	}
+
+	// Nil registry: an extension must not be able to panic the session.
+	var nilCfg *Config
+	if err := nilCfg.RegisterProvider("ext", valid()); err == nil {
+		t.Fatal("nil config must be refused")
+	}
+
+	// Valid block: keyed by name, reachable through the same map every model
+	// reference resolves against.
+	cfg := &Config{Providers: map[string]*ProviderConfig{}}
+	pc := valid()
+	if err := cfg.RegisterProvider("ext", pc); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["ext"] != pc {
+		t.Fatalf("provider not installed: %v", cfg.Providers)
 	}
 }

@@ -216,3 +216,96 @@ func TestSetRefusesUnparseableFile(t *testing.T) {
 		t.Fatal("refusal must leave the file untouched")
 	}
 }
+
+// TestCompactionMethodOrderKey covers the compaction.methodOrder knob: the
+// shipped default, the hand-written scalar form, and the list form
+// `xdev config set` produces (a scalar-only field would reject the CLI's own
+// output and quarantine the user's config file).
+func TestCompactionMethodOrderKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := t.TempDir()
+
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.CompactionMethodOrder(); got != DefaultCompactionMethodOrder {
+		t.Fatalf("default methodOrder = %q, want %q", got, DefaultCompactionMethodOrder)
+	}
+
+	scalar := writeFile(t, filepath.Join(t.TempDir(), "scalar.yml"),
+		"compaction:\n  methodOrder: promotion,threshold\n")
+	s, err = LoadSettings(cwd, []string{scalar})
+	if err != nil {
+		t.Fatalf("scalar form must load: %v", err)
+	}
+	if got := s.CompactionMethodOrder(); got != "promotion,threshold" {
+		t.Fatalf("scalar methodOrder = %q", got)
+	}
+
+	listed := false
+	for _, line := range List(s, "/tmp/config.yml") {
+		if line == "compaction.methodOrder promotion,threshold" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("config list must show the knob: %v", List(s, "/tmp/config.yml"))
+	}
+
+	path := filepath.Join(t.TempDir(), "cli.yml")
+	if err := Set(path, "compaction.methodOrder", "overflow,threshold"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "- overflow") {
+		t.Fatalf("comma value must store as a list:\n%s", raw)
+	}
+	s, err = LoadSettings(cwd, []string{path})
+	if err != nil {
+		t.Fatalf("list form must load: %v", err)
+	}
+	if got := s.CompactionMethodOrder(); got != "overflow,threshold" {
+		t.Fatalf("list methodOrder = %q", got)
+	}
+}
+
+// TestCompactionMethodOrderLayers: a later layer replaces the order, an
+// earlier one survives when the later omits the key.
+func TestCompactionMethodOrderLayers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	writeFile(t, GlobalSettingsPath(), "compaction:\n  methodOrder: promotion,threshold\n")
+
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.CompactionMethodOrder(); got != "promotion,threshold" {
+		t.Fatalf("global methodOrder = %q", got)
+	}
+
+	overlay := writeFile(t, filepath.Join(t.TempDir(), "extra.yml"), "maxTurns: 3\n")
+	s, err = LoadSettings(cwd, []string{overlay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.CompactionMethodOrder(); got != "promotion,threshold" {
+		t.Fatalf("a layer without the key must not clear it: %q", got)
+	}
+}
+
+// TestCompactionMethodOrderUnknownKeyIsRejected: the tolerant value type
+// must not weaken the strict layer decode.
+func TestCompactionMethodOrderUnknownKeyIsRejected(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bad := writeFile(t, filepath.Join(t.TempDir(), "bad.yml"),
+		"compaction:\n  methodOder: threshold\n")
+	if _, err := LoadSettings(t.TempDir(), []string{bad}); err == nil {
+		t.Fatal("a typo inside the compaction block must be rejected")
+	}
+}

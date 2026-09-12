@@ -167,7 +167,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- agent ---
 	hooks := &printHooks{store: store, showThinking: settings.ShowThinkingOn()}
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName)}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -176,7 +176,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// Extension processes (optional): their tools join the registry and the
 	// manager becomes the agent's fail-closed policy interceptor; runtime
 	// actions steer the live run.
-	exts := attachExtensions(context.Background(), reg, ag.Steer, ag.FollowUp)
+	exts := attachExtensions(context.Background(), reg, ag.Steer, ag.FollowUp, cfg)
 	// Hooks and extensions compose into one interceptor chain; hooks must
 	// fire even when no extensions are installed.
 	hookBus := hookbus.FromSettings(settings.Hooks)
@@ -448,26 +448,64 @@ func extensionsDir() string {
 // returns the manager for use as the agent's Interceptor. Runtime actions
 // route back into the agent as steering. Failures are logged, never
 // fatal; a broken extension must not block a session.
-// actionRouter turns extension runtime requests into agent steering. The
-// agent exposes both kinds, so followUp is routed distinctly rather than
-// collapsed into steer; `aside` has no loop surface yet (nearest behavior
-// is steer) and `register_provider` needs the M9 provider registry.
-func actionRouter(steer, followUp func(text string)) func(ext.Action) {
+// actionRouter turns extension runtime requests into agent steering or a
+// session-scoped provider registration. The agent exposes both steering
+// kinds, so followUp is routed distinctly rather than collapsed into steer;
+// `aside` rides the followUp channel with a marker — the agent has no aside
+// steering kind, and the marker is what keeps a side remark distinguishable
+// from the user's next instruction (loop.go injects every queued kind at the
+// next step boundary today, so aside lands there rather than after the run);
+// `register_provider` installs a models.yml-shaped block in cfg so later
+// model references resolve through it.
+func actionRouter(steer, followUp func(text string), cfg *config.Config) func(ext.Action) {
 	return func(a ext.Action) {
 		switch a.Action {
-		case "steer", "aside":
+		case "steer":
 			steer(a.Text)
+		case "aside":
+			followUp(asidePrefix + a.Text)
 		case "followUp":
 			followUp(a.Text)
+		case "register_provider":
+			registerProvider(cfg, a)
 		default:
 			logx.Debugf("ext: unsupported action %q", a.Action)
 		}
 	}
 }
 
-func attachExtensions(ctx context.Context, reg *tool.Registry, steer, followUp func(text string)) *ext.Manager {
+// asidePrefix marks a routed aside so the model reads it as a side remark
+// rather than as the user's next instruction.
+const asidePrefix = "(aside) "
+
+// registerProvider installs an extension-supplied provider block (models.yml
+// shape: {name, baseUrl, api, models[]}). Failures are logged, never fatal:
+// a broken payload must not take the session down.
+func registerProvider(cfg *config.Config, a ext.Action) {
+	var payload struct {
+		Name string `json:"name"`
+		config.ProviderConfig
+	}
+	if len(a.Data) > 0 {
+		if err := json.Unmarshal(a.Data, &payload); err != nil {
+			logx.Errorf("ext: register_provider: bad payload: %v", err)
+			return
+		}
+	}
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = strings.TrimSpace(a.Text)
+	}
+	if err := cfg.RegisterProvider(name, &payload.ProviderConfig); err != nil {
+		logx.Errorf("ext: %v", err)
+		return
+	}
+	logx.Infof("ext: register_provider: %q registered (session-scoped)", name)
+}
+
+func attachExtensions(ctx context.Context, reg *tool.Registry, steer, followUp func(text string), cfg *config.Config) *ext.Manager {
 	mgr := ext.NewManager()
-	mgr.BindHost(actionRouter(steer, followUp))
+	mgr.BindHost(actionRouter(steer, followUp, cfg))
 	if err := mgr.Load(ctx, extensionsDir()); err != nil {
 		logx.Errorf("ext: %v", err)
 		return nil

@@ -109,7 +109,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 	exts := attachExtensions(context.Background(), reg,
 		routeToLiveAgent(func(a *agent.Agent, s string) { a.Steer(s) }),
-		routeToLiveAgent(func(a *agent.Agent, s string) { a.FollowUp(s) }))
+		routeToLiveAgent(func(a *agent.Agent, s string) { a.FollowUp(s) }), cfg)
 	if exts != nil {
 		defer exts.Close()
 	}
@@ -631,7 +631,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					MaxTurns:   opts.MaxTurns,
 					Model:      lm,
 					Store:      store,
-					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm)},
+					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 					Failovers:  failoverChain(cfg, lpn, lm),
 					Thinking:   effortBudget(le),
 					// Intercept set below from exts (only when non-nil).
