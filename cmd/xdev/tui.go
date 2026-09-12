@@ -584,6 +584,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return vibeScope.Status()
 		},
 	})
+	// The active model ref, as the status line and /model see it.
+	modelNow := func() string {
+		modelMu.Lock()
+		defer modelMu.Unlock()
+		return live.provName + "/" + live.model
+	}
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
@@ -608,6 +614,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 		Dump: func() (string, error) {
 			return dumpSession(store)
+		},
+		// /export: the system prompt and the active model are read from
+		// the live session here rather than stored, so a mid-session
+		// switch or context change is reflected in the export.
+		Export: func(path string) (string, error) {
+			return exportSession(store, buildSys(), modelNow(), path)
+		},
+		// /share: seal the transcript and serve it on loopback; the link
+		// (key in the fragment) is view-only and lives as long as this
+		// process does.
+		Share: func() (string, error) {
+			return shareLive(store, buildSys(), modelNow())
 		},
 		Resume: func(query string) error {
 			if running.Load() {
