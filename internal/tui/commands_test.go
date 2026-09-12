@@ -28,6 +28,7 @@ type fakeAPI struct {
 	mem      string
 	theme    string
 	prewalk  string
+	handoff  string
 }
 
 func (f *fakeAPI) NewSession() error {
@@ -83,6 +84,45 @@ func TestDispatchTasks(t *testing.T) {
 	}
 	if len(f.blocks) != 1 || !strings.Contains(f.blocks[0], "not wired") {
 		t.Fatalf("unwired /tasks blocks = %q", f.blocks)
+	}
+}
+
+func TestDispatchHandoff(t *testing.T) {
+	f := &fakeAPI{}
+	if !dispatch(f, "/handoff focus on the parser") {
+		t.Fatal("/handoff must be consumed as a command")
+	}
+	if f.handoff != "focus on the parser" {
+		t.Fatalf("instruction = %q", f.handoff)
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("/handoff must never reach the model as text: %q", f.sent)
+	}
+}
+
+// TestAppHandoffSurfacesDocument: the command shows the document the host
+// committed (that is the point of /handoff), and stays nil-safe when no host
+// wired the op.
+func TestAppHandoffSurfacesDocument(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	if err := app.Handoff(""); err == nil || !strings.Contains(err.Error(), "not wired") {
+		t.Fatalf("unwired /handoff error = %v", err)
+	}
+
+	var got string
+	app.SetSessionOps(&SessionOps{Handoff: func(instruction string) (string, error) {
+		got = instruction
+		return "## Goal\n" + instruction, nil
+	}})
+	if err := app.Handoff("ship the parser"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "ship the parser" {
+		t.Fatalf("op got %q", got)
+	}
+	last := app.blocks[len(app.blocks)-1]
+	if !strings.Contains(last.Text, "## Goal") || !strings.Contains(last.Text, "continues from this document") {
+		t.Fatalf("handoff block = %q", last.Text)
 	}
 }
 
@@ -366,6 +406,14 @@ func (f *fakeAPI) Prewalk(args string) error {
 		return fmt.Errorf("boom")
 	}
 	f.prewalk = args
+	return nil
+}
+
+func (f *fakeAPI) Handoff(args string) error {
+	if f.fail == "handoff" {
+		return fmt.Errorf("boom")
+	}
+	f.handoff = args
 	return nil
 }
 

@@ -217,6 +217,51 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// guarded for the UI thread that reads nothing here).
 	var sessMu sync.Mutex
 
+	// Handoff (M5 #23): /handoff and -handoff replace the live context with
+	// a handoff document committed as a normal compaction entry, so the
+	// next turn continues from the document. The side request mirrors a
+	// live turn's transform (system + history + a trailing instruction, no
+	// tools) on the @smol role; the reset closure rewinds the advisor feed
+	// cursor — the todo list and plan mode are the agent's own seams — and
+	// settings handoff.saveToDisk mirrors the document to disk.
+	handoffSettings := func() agent.HandoffSettings {
+		hs := agent.HandoffSettings{SaveDir: handoffSaveDir(lastSettings())}
+		if t := resolveInto("@smol", cfg, lastSettings(), "handoff"); t != nil {
+			hs.Target = *t
+		}
+		if adv != nil {
+			hs.Reset = func(kept []ai.Message) { adv.Reset(kept) }
+		}
+		return hs
+	}
+	runHandoff := func(instruction string) (string, error) {
+		if running.Load() {
+			return "", fmt.Errorf("a turn is running — Esc cancels it first")
+		}
+		modelMu.Lock()
+		lp, lm, lpn := live.prov, live.model, live.provName
+		modelMu.Unlock()
+		ag := &agent.Agent{
+			Provider:   lp,
+			Tools:      reg,
+			Model:      lm,
+			Store:      store,
+			Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
+			PlanMode:   planMode,
+			Redactor:   config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) }),
+			Handoff:    handoffSettings(),
+		}
+		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
+	}
+	// -handoff: document the resumed session before the first turn.
+	if handoffMode && len(store.Entries()) > 0 {
+		if doc, err := runHandoff(""); err != nil {
+			logx.Errorf("handoff: %v", err)
+		} else {
+			app.AddSystemBlock(doc)
+		}
+	}
+
 	ts := &tuiSession{store: store, app: app, model: modelName, api: prov.API(), provider: provName}
 
 	var swapStoreTo func(*session.Store) error
@@ -549,6 +594,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			defer running.Store(false)
 			return swapStore(true)
 		},
+		// /handoff (M5 #23): replace the live context with a handoff
+		// document committed as a compaction entry.
+		Handoff: runHandoff,
 	})
 	// /model: current + available from settings roles, switch by ref.
 	app.SetModelOps(&tui.ModelOps{
@@ -776,11 +824,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					MaxTurns:   opts.MaxTurns,
 					Model:      lm,
 					Store:      store,
-					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
+					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
 					Failovers:  failoverChain(cfg, lpn, lm),
 					Thinking:   effortBudget(le),
 					// Intercept set below from exts (only when non-nil).
-					Policy: agentPolicy(),
+					Policy:  agentPolicy(),
+					Handoff: handoffSettings(),
 				}
 				prewalkMu.Lock()
 				pwOn, pwT := prewalkOn, *prewalkTarget
