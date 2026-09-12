@@ -15,6 +15,7 @@ import (
 	"github.com/FreePeak/xdev/internal/marketplace"
 	"github.com/FreePeak/xdev/internal/memlimit"
 	"github.com/FreePeak/xdev/internal/serve"
+	"github.com/FreePeak/xdev/internal/share"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tts"
 )
@@ -51,7 +52,7 @@ var subcommands = map[string]bool{
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
-	"stats": true, "memory": true,
+	"stats": true, "memory": true, "share": true,
 }
 
 // handoffMode is the one-shot -handoff request (main owns the flag; the run
@@ -78,6 +79,7 @@ func main() {
 	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
 	fromClaude := fs.String("from-claude", "", "import a Claude Code transcript (id prefix or path) and continue it")
 	fromCodex := fs.String("from-codex", "", "import a Codex transcript (id prefix or path) and continue it")
+	exportFile := fs.String("export", "", "write the session as one self-contained HTML file and exit")
 	forkID := fs.String("fork", "", "fork a session by id prefix or path and continue the fork")
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
@@ -120,6 +122,7 @@ func main() {
   xdev stats [--summary|--json|--serve]  usage over the local session store
   xdev memory <sub>            local memory: show | stats | lessons | add | edit
                                | export | import | scratchpad | clear --yes
+  xdev share [-port N] [-export file] [id|path]  serve an E2E-encrypted view-only snapshot
 
 Flags:
 `, version)
@@ -184,6 +187,24 @@ Flags:
 	}
 	if *personality == "" {
 		*personality = settings.Personality
+	}
+
+	// --- --export <file> (issue #61 §4): a read-only fast path — resolve
+	// the selected session (-resume/-continue/--from-*), write the HTML
+	// export, and exit without starting a run.
+	if *exportFile != "" {
+		opts := printOptions{
+			ContinueLast: *continueLast,
+			ResumePrefix: *resumePrefix,
+			FromClaude:   *fromClaude,
+			FromCodex:    *fromCodex,
+			ForkID:       *forkID,
+		}
+		if err := runExport(*exportFile, opts); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
 	}
 
 	args := fs.Args()
@@ -321,6 +342,14 @@ Flags:
 
 	if mode == "memory" {
 		os.Exit(runMemoryCLI(args, settings))
+	}
+
+	if mode == "share" {
+		if err := share.Run(args); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
 	}
 
 	switch mode {

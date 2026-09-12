@@ -31,7 +31,13 @@ type SessionOps struct {
 	Fresh            func() error
 	Fork             func() error
 	Dump             func() (string, error)
-	Resume           func(query string) error
+	// Export writes the transcript as one self-contained HTML file and
+	// returns the path written ("" = the default export path).
+	Export func(path string) (string, error)
+	// Share seals the transcript, serves it on loopback, and returns the
+	// view-only link (the key rides in the URL fragment).
+	Share  func() (string, error)
+	Resume func(query string) error
 	// SummarizeAndBranch appends a branch_summary entry for the
 	// abandoned branch, then moves the leaf to entryID (tree selector
 	// Shift+Enter). nil degrades to a notice.
@@ -151,6 +157,8 @@ type CommandAPI interface {
 	KeyMap() *KeyMap
 	ForkSession() error
 	DumpSession() error
+	ExportSession(path string) error
+	ShareSession() error
 	ResumeSession(query string) error
 	SwitchModel(args string) error
 	PlanMode(args string) error
@@ -190,6 +198,10 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.BranchSession(args) }},
 		{Name: "dump", Description: "export the transcript to markdown",
 			Fn: func(app CommandAPI, args string) error { return app.DumpSession() }},
+		{Name: "export", Description: "write the transcript as self-contained HTML: /export [path]",
+			Fn: func(app CommandAPI, args string) error { return app.ExportSession(strings.TrimSpace(args)) }},
+		{Name: "share", Description: "serve an E2E-encrypted view-only snapshot and print the link",
+			Fn: func(app CommandAPI, args string) error { return app.ShareSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
 		{Name: "model", Description: "show or switch the active model",
@@ -441,6 +453,36 @@ func (a *App) DropSession() error {
 		return fmt.Errorf("session lifecycle not wired")
 	}
 	return a.ops.Drop()
+}
+
+// ExportSession implements CommandAPI /export: write the transcript as one
+// self-contained HTML file at path ("" = the default export path) and report
+// where it landed.
+func (a *App) ExportSession(path string) error {
+	if a.ops == nil || a.ops.Export == nil {
+		return fmt.Errorf("session export not wired")
+	}
+	written, err := a.ops.Export(path)
+	if err != nil {
+		return err
+	}
+	a.AddSystemBlock("exported to " + written)
+	return nil
+}
+
+// ShareSession implements CommandAPI /share: seal the transcript, serve it
+// over loopback, and put the view-only link in the transcript. The link
+// works while this process lives.
+func (a *App) ShareSession() error {
+	if a.ops == nil || a.ops.Share == nil {
+		return fmt.Errorf("session share not wired")
+	}
+	link, err := a.ops.Share()
+	if err != nil {
+		return err
+	}
+	a.AddSystemBlock("share link (view-only, key in the URL fragment):\n" + link)
+	return nil
 }
 
 // CommandDir returns the cwd markdown commands are discovered from
