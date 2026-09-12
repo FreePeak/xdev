@@ -714,6 +714,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// through an indirection: a direct field copy would
 					// capture the nil func at literal time.
 					Hooks:      &tuiHooks{ts: ts, feed: func() { feedAdvisor() }},
+					TTSR:       agent.NewTTSR(lastSettings().TTSR),
 					MaxTokens:  opts.MaxTokens,
 					MaxTurns:   opts.MaxTurns,
 					Model:      lm,

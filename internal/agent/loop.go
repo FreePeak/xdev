@@ -147,6 +147,10 @@ type Agent struct {
 	// first successful edit/write, the run switches to the target model
 	// through the failover machinery (see prewalk.go).
 	Prewalk *Prewalk
+	// TTSR is the stream-rules engine (M11 #35, nil = disabled): deltas
+	// are matched against the configured rules, which may abort the turn
+	// or fold a reminder into a tool result. See ttsr.go.
+	TTSR *TTSR
 
 	// PlanMode is the read-only sub-state (nil = plain mode). While
 	// active, mutating tools are denied and propose is the exit; see
@@ -337,15 +341,32 @@ func turnContentEmitted(err error) bool {
 // carries everything recovery appended (partials, continuation prompts,
 // compacted rebuilds) so the caller's loop stays consistent.
 func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history []ai.Message) (*ai.Message, []ai.Message, error) {
+	a.ttsrBeginTurn()
+	// A turn that burned its interrupt budget stays quiet until it ends.
+	defer a.ttsrSetQuiet(false)
 	policy := a.Retry
 	if policy.MaxRetries == 0 && policy.BaseDelay == 0 {
 		policy = DefaultRetryPolicy()
 	}
 	attempt, continued, compacted := 0, false, false
+	interrupted := 0
 	for {
 		msg, err := a.oneTurn(ctx, system, history)
 		if err == nil {
 			return msg, history, nil
+		}
+		// TTSR interrupt (M11 #35): the turn was aborted mid-stream. The
+		// injected system-interrupt re-steers the model and the turn is
+		// retried — deliberately NOT counted as a retry-ladder attempt,
+		// and never retried by the transient/overflow branches below.
+		var ti *ttsrInterrupt
+		if errors.As(err, &ti) {
+			history = a.ttsrResume(ctx, ti, history)
+			interrupted++
+			if interrupted >= ttsrMaxInterruptsPerTurn {
+				a.ttsrSetQuiet(true)
+			}
+			continue
 		}
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
@@ -461,6 +482,10 @@ func (a *Agent) popFollowUp() string {
 
 // oneTurn streams one assistant message.
 func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
+	// A child context aborts the provider stream on a TTSR interrupt; the
+	// caller's context is untouched.
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req := ai.StreamRequest{
 		System:    system,
 		Messages:  history,
@@ -471,7 +496,7 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	}
 	a.Hooks.OnStart(req)
 
-	ch, err := a.Provider.Stream(ctx, req)
+	ch, err := a.Provider.Stream(sctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("agent: stream start: %w", err)
 	}
@@ -498,6 +523,20 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 			textOpen = false
 		}
 	}
+	// ttsrAbort tears the stream down and reports the interrupt upward
+	// (oneTurnWithRecovery owns the retry-with-injection path).
+	ttsrAbort := func(m *TTSRMatch) (*ai.Message, error) {
+		closeBlock() // flush streamed text/thinking into msg.Content
+		cancel()
+		ai.Drain(ch) // let the provider goroutine exit
+		ti := &ttsrInterrupt{match: m}
+		if len(msg.Content) > 0 {
+			partial := msg
+			partial.Role = ai.RoleAssistant
+			ti.partial = &partial
+		}
+		return nil, ti
+	}
 	for ev := range ch {
 		a.Hooks.OnEvent(ev)
 		switch ev.Type {
@@ -509,12 +548,18 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		case ai.EventTextDelta:
 			text.WriteString(ev.Delta)
 			emitted = true
+			if m := a.ttsrObserve(ctx, ttsrProse, ev.Delta, ev.StreamIndex); m != nil {
+				return ttsrAbort(m)
+			}
 		case ai.EventThinkingStart:
 			thinkOpen = true
 			emitted = true
 		case ai.EventThinkingDelta:
 			thinking.WriteString(ev.Delta)
 			emitted = true
+			if m := a.ttsrObserve(ctx, ttsrProse, ev.Delta, ev.StreamIndex); m != nil {
+				return ttsrAbort(m)
+			}
 		case ai.EventToolcallStart:
 			closeBlock()
 			emitted = true
@@ -524,6 +569,9 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 			emitted = true
 			if tc := toolCalls[ev.StreamIndex]; tc != nil {
 				tc.PartialArgs = ev.PartialJSON
+			}
+			if m := a.ttsrObserve(ctx, ttsrTool, ev.PartialJSON, ev.StreamIndex); m != nil {
+				return ttsrAbort(m)
 			}
 		case ai.EventToolcallEnd:
 			if tc := toolCalls[ev.StreamIndex]; tc != nil {
@@ -688,6 +736,11 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 				res.Text, res.IsError = p.Text, p.IsError
 			}
 		}
+	}
+	if rem := a.ttsrReminder(call.StreamIndex); rem != "" {
+		// Non-interrupting tool match (M11 #35): the rule may not cut the
+		// call short, so its notice rides along in the tool result.
+		res.Text = strings.TrimRight(res.Text, "\n") + "\n\n" + rem
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
 	return toolResultMsg(call, res)
