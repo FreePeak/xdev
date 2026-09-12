@@ -2,12 +2,15 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/browser"
 	"github.com/FreePeak/xdev/internal/imagegen"
 	"github.com/FreePeak/xdev/internal/tool"
 	"github.com/FreePeak/xdev/internal/tts"
@@ -191,6 +194,10 @@ type Settings struct {
 	// WebSearch configures the web_search provider chain (M13 #48):
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
+	// Browser configures the browser tool (M13 #50): the CDP discovery
+	// endpoint of an already-running Chrome. xdev never launches a browser,
+	// so an empty block means "attach to 127.0.0.1:9222".
+	Browser BrowserSettings `yaml:"browser"`
 	// Ask configures the ask tool (M11 #36): ask.timeout bounds how long
 	// a headless run waits for an answer before the recommended option
 	// proceeds.
@@ -428,6 +435,10 @@ type DebugAdapter struct {
 // the tool cannot live in either of those packages without an import cycle.
 type WebSearchSettings = websearch.Settings
 
+// BrowserSettings is the browser: config block (M13 #50). Same alias rule as
+// WebSearchSettings: the engine (internal/browser) owns the struct.
+type BrowserSettings = browser.Settings
+
 // defaultSettings is the schema-defaults layer.
 // memoryOrDefault reports the effective memory backend ("" = off).
 func memoryOrDefault(v string) string {
@@ -554,6 +565,16 @@ func (s *Settings) ImageGenConfig() imagegen.Settings {
 // (nil-safe: no layer means no artifacts).
 func (s *Settings) HandoffSaveToDisk() bool {
 	return s != nil && s.Handoff.SaveToDisk
+}
+
+// BrowserConfig returns the browser block; the zero value is the default
+// endpoint on Chrome's standard debugging port (same nil tolerance as
+// WebSearchConfig for pre-main callers).
+func (s *Settings) BrowserConfig() browser.Settings {
+	if s == nil {
+		return browser.Settings{}
+	}
+	return s.Browser
 }
 
 // AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
@@ -903,6 +924,21 @@ func (s *Settings) merge(layer *Settings) error {
 	if err := s.mergeRetry(layer); err != nil {
 		return err
 	}
+	// browser: the endpoint must be a usable URL (a typo would otherwise
+	// surface as a confusing "no Chrome DevTools endpoint" at call time),
+	// and the timeout is bounded where it is set.
+	if v := strings.TrimSpace(layer.Browser.CDPURL); v != "" {
+		if err := validateCDPURL(v); err != nil {
+			return err
+		}
+		s.Browser.CDPURL = v
+	}
+	if layer.Browser.Timeout != 0 {
+		if layer.Browser.Timeout < 0 {
+			return fmt.Errorf("browser.timeout must be positive, got %d", layer.Browser.Timeout)
+		}
+		s.Browser.Timeout = layer.Browser.Timeout
+	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
 	}
@@ -972,6 +1008,31 @@ func (s *Settings) CheckProvider(name string, hasCredential bool) error {
 // KeylessAuth reports a provider that needs no credential (auth: none).
 func (pc *ProviderConfig) KeylessAuth() bool {
 	return pc != nil && strings.EqualFold(strings.TrimSpace(pc.Auth), "none")
+}
+
+// validateCDPURL checks browser.cdpUrl: either an http(s)/ws(s) URL or the
+// host:port shorthand the browser tool normalizes. Caught here so a typo is
+// reported at load instead of as a confusing "nothing to attach to" later.
+func validateCDPURL(v string) error {
+	if !strings.Contains(v, "://") {
+		if _, _, err := net.SplitHostPort(v); err != nil {
+			return fmt.Errorf("browser.cdpUrl %q: want host:port or an http(s):// URL", v)
+		}
+		return nil
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("browser.cdpUrl %q: %w", v, err)
+	}
+	switch u.Scheme {
+	case "http", "https", "ws", "wss":
+	default:
+		return fmt.Errorf("browser.cdpUrl %q: unsupported scheme %q", v, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("browser.cdpUrl %q has no host", v)
+	}
+	return nil
 }
 
 // timestampForBackup names a preserved broken file uniquely enough that two
