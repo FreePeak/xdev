@@ -46,7 +46,7 @@ var appliedLimit int64
 // subcommands are the first-arg names that select a mode instead of a
 // prompt. One entry per subcommand keeps merges (and reviews) trivial.
 var subcommands = map[string]bool{
-	"print": true, "tui": true, "rpc": true, "config": true,
+	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true,
 }
@@ -81,6 +81,7 @@ func main() {
 	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref or @role to switch to after the first approved proposal (default: stay)")
 	profileName := fs.String("profile", "", "named profile: relocate the user base to <base>/profiles/<name> (or set XDEV_PROFILE)")
 	aliasName := fs.String("alias", "", "agent identity name for this session: other sessions address it by this name")
+	modeFlag := fs.String("mode", "", "run mode: print | tui | rpc | acp (alternative to the subcommand)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -96,6 +97,7 @@ func main() {
 
   Base dir: --profile > XDEV_PROFILE > XDEV_AGENT_DIR > XDG (after config init-xdg) > ~/.xdev/agent
   xdev plugin <sub>            plugins: list | search | install | remove | info
+  xdev acp                     ACP server on stdio (Agent Client Protocol, for editors)
 
 Flags:
 `, version)
@@ -169,6 +171,9 @@ Flags:
 	if len(args) > 0 && subcommands[args[0]] {
 		mode, args = args[0], args[1:]
 	}
+	if *modeFlag != "" {
+		mode = *modeFlag
+	}
 	if mode == "join" {
 		// Collab guest: mirror a shared session (M14 #59).
 		if err := collab.Run(args); err != nil {
@@ -177,7 +182,6 @@ Flags:
 		}
 		os.Exit(0)
 	}
-
 	if mode == "tui" {
 		code, err := runTUI(printOptions{
 			Model:        *model,
@@ -219,6 +223,26 @@ Flags:
 			TrustedExtensions: trustedExtension,
 		}
 		code, err := runRPC(opts)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(code)
+		}
+		os.Exit(code)
+	}
+
+	if mode == "acp" {
+		opts := printOptions{
+			Model:        *model,
+			SystemPrompt: *systemPrompt,
+			AppendSystem: *appendSystemPrompt,
+			Personality:  *personality,
+			MaxTurns:     *maxTurns,
+			MaxTokens:    *maxTokens,
+
+			Hooks:             hookFlag,
+			TrustedExtensions: trustedExtension,
+		}
+		code, err := runACP(opts)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "xdev:", err)
 			os.Exit(code)
