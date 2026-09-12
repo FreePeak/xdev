@@ -68,6 +68,8 @@ func main() {
 	fs.Var(&trustedExtension, "trusted-extension", "extension whose hooks/ directory is trusted and loaded (repeatable)")
 	planYolo := fs.Bool("plan-yolo", false, "plan mode with the first proposal auto-approved (implies -plan)")
 	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref or @role to switch to after the first approved proposal (default: stay)")
+	profileName := fs.String("profile", "", "named profile: relocate the user base to <base>/profiles/<name> (or set XDEV_PROFILE)")
+	aliasName := fs.String("alias", "", "agent identity name for this session: other sessions address it by this name")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -76,7 +78,10 @@ func main() {
   xdev print [flags] "prompt"  same as above
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
+  xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
   xdev lsp-config [list|validate]  language servers, resolved binaries
+
+  Base dir: --profile > XDEV_PROFILE > XDEV_AGENT_DIR > XDG (after config init-xdg) > ~/.xdev/agent
 
 Flags:
 `, version)
@@ -90,6 +95,24 @@ Flags:
 	}
 	if *verbose {
 		logx.Enable(logx.LevelDebug)
+	}
+
+	// --- install identity and native-base relocation (M14 #63). Runs
+	// before the dotenv chain and the settings layer: both resolve paths
+	// under the active profile (XDEV_AGENT_DIR, else XDG, else ~/.xdev/agent).
+	if err := config.SetProfile(*profileName); err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		os.Exit(2)
+	}
+	if err := config.SetAlias(*aliasName); err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		os.Exit(2)
+	}
+	// Mint the per-install id on first run (0600, O_EXCL, never rewritten)
+	// so provider metadata — Codex installationId, Claude device_id — sees
+	// a stable value from the very first request.
+	if id := config.InstallID(); *verbose {
+		logx.Debugf("install-id: %s (%s)", id, config.InstallIDPath())
 	}
 
 	// --- dotenv chain (M9 #10): process env → project .env → agent .env.
@@ -195,6 +218,10 @@ Flags:
 			os.Exit(runLogin(provider, cfg))
 		}
 		os.Exit(runLogout(provider))
+	}
+
+	if mode == "config" && len(args) > 0 && args[0] == "init-xdg" {
+		os.Exit(config.InitXDGCommand(args[1:], os.Stdout, os.Stderr))
 	}
 
 	if mode == "config" {

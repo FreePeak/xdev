@@ -15,18 +15,6 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 )
 
-// DataDir returns the xdev agent data directory (~/.xdev/agent).
-func DataDir() string {
-	if v := os.Getenv("XDEV_AGENT_DIR"); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".xdev/agent"
-	}
-	return filepath.Join(home, ".xdev", "agent")
-}
-
 // DiscoveryConfig selects dynamic model listing.
 type DiscoveryConfig struct {
 	Type     string `yaml:"type"` // "openai-models-list" is the MVP value

@@ -15,6 +15,8 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // Provider priorities (issue #31; omp rulebook-matching-pipeline).
@@ -410,20 +412,13 @@ func Resolve(uri string) (string, error) {
 	return "", fmt.Errorf("rule: %q not found", name)
 }
 
-// dataDir mirrors config.DataDir without importing it (same pattern as
-// internal/skills: config does not know rules, and rules only needs the
-// path).
-var dataDirFunc = defaultDataDir
+// dataDir is config.DataDir — the one place that resolves the native base
+// (XDEV_AGENT_DIR, a named profile, the XDG record). Re-deriving it here
+// ignored XDEV_AGENT_DIR: a sandboxed run read the real ~/.xdev/agent
+// rulebook, and a profile could not relocate rules at all.
+var dataDirFunc = config.DataDir
 
 func dataDir() string { return dataDirFunc() }
-
-func defaultDataDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".xdev"
-	}
-	return filepath.Join(home, ".xdev", "agent")
-}
 
 // SetDataDir overrides the data directory (tests).
 func SetDataDir(dir string) { dataDirFunc = func() string { return dir } }
