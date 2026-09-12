@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/imagegen"
 	"github.com/FreePeak/xdev/internal/tool"
 	"gopkg.in/yaml.v3"
 
@@ -148,6 +149,10 @@ type Settings struct {
 	// are extra roots scanned after native/user/managed, so an authored
 	// pack — and an agent-learned one — outranks them.
 	Skills SkillsSettings `yaml:"skills"`
+	// ImageProviders configures the generate_image chain (M15 #69):
+	// ordered cloud image providers, per-attempt timeout, response cap.
+	// Absent = the built-in order (openai, gemini) with environment keys.
+	ImageProviders imagegen.Settings `yaml:"imageProviders"`
 }
 
 // SkillsSettings is the `skills` group.
@@ -292,6 +297,31 @@ func (s *Settings) WebSearchConfig() websearch.Settings {
 		return websearch.Settings{}
 	}
 	return s.WebSearch
+}
+
+// ImageGenSettings is the imageProviders config block: generate_image's own
+// Settings type, aliased rather than redeclared for the same import-cycle
+// reason as WebSearchSettings (M15 #69).
+type ImageGenSettings = imagegen.Settings
+
+// ImageGenConfig returns the imageProviders block with ${VAR} references in
+// each provider expanded (settings files, unlike models.yml, are not
+// env-expanded at load time), so an inline key can live in the environment
+// without being written into config.yml. Nil-safe: the zero value is the
+// built-in provider order, credentialed from the environment.
+func (s *Settings) ImageGenConfig() imagegen.Settings {
+	if s == nil {
+		return imagegen.Settings{}
+	}
+	cfg := s.ImageProviders
+	if len(cfg.Providers) > 0 {
+		cfg.Providers = append([]imagegen.Provider(nil), cfg.Providers...)
+		for i := range cfg.Providers {
+			cfg.Providers[i].APIKey = Resolve(cfg.Providers[i].APIKey)
+			cfg.Providers[i].BaseURL = Resolve(cfg.Providers[i].BaseURL)
+		}
+	}
+	return cfg
 }
 
 // AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
@@ -521,6 +551,33 @@ func (s *Settings) merge(layer *Settings) error {
 			s.WebSearch.APIKeys = map[string]string{}
 		}
 		s.WebSearch.APIKeys[k] = v
+	}
+	// imageProviders: the provider list is replaced wholesale (the same rule
+	// as webSearch — an overlay that names one provider means exactly that
+	// chain), the timeout and the size cap are validated here, and an
+	// unknown adapter name is reported rather than silently dropped from
+	// the chain.
+	if layer.ImageProviders.Providers != nil {
+		s.ImageProviders.Providers = append([]imagegen.Provider(nil), layer.ImageProviders.Providers...)
+	}
+	if layer.ImageProviders.Timeout != "" {
+		if _, err := time.ParseDuration(layer.ImageProviders.Timeout); err != nil {
+			return fmt.Errorf("imageProviders.timeout %q: %w", layer.ImageProviders.Timeout, err)
+		}
+		s.ImageProviders.Timeout = layer.ImageProviders.Timeout
+	}
+	if layer.ImageProviders.MaxBytes < 0 {
+		return fmt.Errorf("imageProviders.maxBytes must be positive, got %d", layer.ImageProviders.MaxBytes)
+	}
+	if layer.ImageProviders.MaxBytes != 0 {
+		s.ImageProviders.MaxBytes = layer.ImageProviders.MaxBytes
+	}
+	for _, p := range s.ImageProviders.Providers {
+		switch strings.ToLower(strings.TrimSpace(p.Name)) {
+		case imagegen.OpenAI, imagegen.Gemini:
+		default:
+			return fmt.Errorf("imageProviders: unknown provider %q (want %s|%s)", p.Name, imagegen.OpenAI, imagegen.Gemini)
+		}
 	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
