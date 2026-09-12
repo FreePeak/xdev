@@ -107,6 +107,7 @@ type CommandAPI interface {
 	Memory(args string) error
 	Theme(args string) error
 	Prewalk(args string) error
+	HubRoster() error
 	SettingsView(args string) error
 	AddSystemBlock(text string)
 	SendPrompt(text string)
@@ -149,6 +150,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit)",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
+		{Name: "hub", Description: "agent hub roster: live status, kill/revive, transcripts",
+			Fn: func(app CommandAPI, args string) error { return app.HubRoster() }},
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "help", Description: "show available commands",
