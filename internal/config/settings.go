@@ -373,6 +373,19 @@ type Settings struct {
 	// the background through the @smol role). Every backend exposes the same
 	// Store seam, so memory://, the learn tool and /memory work unchanged.
 	Memory string `yaml:"memory"`
+	// ExperimentalContextManagement gates the notes-backed context windows
+	// (context_notes / new_context) and the rollover that consumes them. omp
+	// ships these behind `compaction.experimentalContextManagement` because
+	// they change what the model sees mid-session; xdev registered the tools
+	// unconditionally, so the knob did not exist (#88).
+	ExperimentalContextManagement bool `yaml:"experimentalContextManagement"`
+	// AutolearnEnabled gates the learn tool writing lessons at all
+	// (omp's autolearn.enabled). Default true: the shipped behavior stays
+	// unless a user opts out explicitly.
+	AutolearnEnabled *bool `yaml:"autolearnEnabled"`
+	// LessonCap bounds how many recent lessons the prompt sees; 0 = the
+	// shipped default (omp's cap is a setting, xdev's was a constant).
+	LessonCap int `yaml:"lessonCap"`
 	// MemoryPipeline enables the local backend's two-phase consolidation
 	// pipeline (M12 #13): "on" or "off" (the default). The YAML key is
 	// top-level memoryPipeline, because the omp-style dotted memory.pipeline
@@ -756,6 +769,27 @@ func (s *Settings) AllowCompoundCommandsOn() bool {
 
 // MemoryPipelineOn reports whether the local backend's two-phase pipeline
 // should run at session end (nil-safe; the shipped default is off).
+// ExperimentalContextManagementOn reports whether the notes-backed context
+// tools may register (nil-safe; the shipped default is OFF, matching omp's
+// opt-in gate).
+func (s *Settings) ExperimentalContextManagementOn() bool {
+	return s != nil && s.ExperimentalContextManagement
+}
+
+// AutolearnOn reports whether the learn tool may record lessons (nil-safe:
+// unset means on, so an existing config keeps its behavior).
+func (s *Settings) AutolearnOn() bool {
+	return s == nil || s.AutolearnEnabled == nil || *s.AutolearnEnabled
+}
+
+// LessonCapOrDefault resolves the lesson cap (0 = memory.DefaultLessonCap).
+func (s *Settings) LessonCapOrDefault() int {
+	if s == nil || s.LessonCap <= 0 {
+		return 0
+	}
+	return s.LessonCap
+}
+
 func (s *Settings) MemoryPipelineOn() bool {
 	return s != nil && s.MemoryPipeline == "on"
 }
@@ -1019,6 +1053,15 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.MemoryPipeline != "" {
 		s.MemoryPipeline = layer.MemoryPipeline
+	}
+	if layer.ExperimentalContextManagement {
+		s.ExperimentalContextManagement = true
+	}
+	if layer.AutolearnEnabled != nil {
+		s.AutolearnEnabled = layer.AutolearnEnabled
+	}
+	if layer.LessonCap > 0 {
+		s.LessonCap = layer.LessonCap
 	}
 	if layer.Mnemopi != (MnemopiSettings{}) {
 		s.Mnemopi = mergeMnemopi(s.Mnemopi, layer.Mnemopi)
@@ -1459,6 +1502,9 @@ func List(s *Settings, globalPath string) []string {
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
+		"compaction.experimentalContextManagement " + fmt.Sprint(s.ExperimentalContextManagement),
+		"autolearn.enabled " + fmt.Sprint(s.AutolearnOn()),
+		"lessonCap " + fmt.Sprint(s.LessonCapOrDefault()),
 		"memoryMnemopi.scope " + mm.Scope,
 		"memoryMnemopi.llmMode " + mm.LLMMode,
 		"memoryMnemopi.retainEveryNTurns " + fmt.Sprint(mm.RetainEveryNTurns),

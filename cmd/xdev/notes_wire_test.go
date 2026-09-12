@@ -8,6 +8,7 @@ import (
 
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
@@ -17,7 +18,10 @@ import (
 // resolver, wireTaskParent binds the notebook to the active session, and a
 // notebook write is reachable through both the tool and the read seam.
 func TestNotesToolsWiredThroughRegistry(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	// The tools are gated behind compaction.experimentalContextManagement
+	// (#88, matching omp's opt-in), so the settings enable it here.
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m",
+		&config.Settings{ExperimentalContextManagement: true}, nil, nil)
 	nt, ok := reg.Get(agent.ContextNotesToolName)
 	if !ok {
 		t.Fatal("context_notes not registered")
@@ -92,5 +96,23 @@ func TestNotesToolsWiredThroughRegistry(t *testing.T) {
 	wireTaskParent(reg, other)
 	if res := exec(nt, `{}`); res.IsError || !strings.Contains(res.Text, "No context notes") {
 		t.Fatalf("session switch leaked the notebook: %q", res.Text)
+	}
+}
+
+// #88: with the gate off (the shipped default) neither tool registers, and the
+// notes-backed rollover is unreachable — registering them unconditionally was
+// the bug.
+func TestNotesToolsGatedOffByDefault(t *testing.T) {
+	for name, s := range map[string]*config.Settings{
+		"unset": {},
+		"off":   {ExperimentalContextManagement: false},
+	} {
+		reg := newToolRegistry(t.TempDir(), nil, "p", "m", s, nil, nil)
+		if _, ok := reg.Get(agent.ContextNotesToolName); ok {
+			t.Errorf("%s: context_notes registered with the gate off", name)
+		}
+		if _, ok := reg.Get(agent.NewContextToolName); ok {
+			t.Errorf("%s: new_context registered with the gate off", name)
+		}
 	}
 }
