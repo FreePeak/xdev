@@ -119,7 +119,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		tailSystemPrompt(overrides, opts.AppendSystem), buildMemory(lastSettings()))
 
 	// Session.
-	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
+	store, err := openStartupSession(cwd, opts)
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
@@ -389,6 +389,37 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				app.OpenSessionPicker(items)
 				return nil
 			}
+			// Foreign-session import (issue #28): /resume @claude|@codex
+			// lists foreign transcripts; with an id/path prefix it imports
+			// one (read-only source) and switches to the new session.
+			if kind, ref, ok := splitForeignQuery(query); ok {
+				if ref == "" {
+					list, err := listForeignTranscripts(kind, cwd)
+					if err != nil {
+						return err
+					}
+					if len(list) == 0 {
+						app.AddSystemBlock("no " + kind + " transcripts found for " + cwd)
+						return nil
+					}
+					lines := make([]string, 0, len(list))
+					for i, ft := range list {
+						if i == 12 {
+							break
+						}
+						lines = append(lines, fmt.Sprintf("%-8s  %s  (last %s)",
+							shortSessionID(ft.ID), ft.Path, ft.ModTime.Format("Jan 02 15:04")))
+					}
+					app.AddSystemBlock(kind + " transcripts (import with /resume @" + kind + " <id-prefix>):\n" +
+						strings.Join(lines, "\n"))
+					return nil
+				}
+				imported, err := importForeignSession(kind, ref, cwd)
+				if err != nil {
+					return err
+				}
+				return swapStoreTo(imported)
+			}
 			path, err := resolveResumeID(cwd, query)
 			if err != nil {
 				return err
@@ -405,6 +436,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			defer running.Store(false)
 			return swapStore(false)
+		},
+		Fresh: func() error {
+			if running.Load() {
+				return fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			// /fresh (issue #11 §5): rotate PROVIDER-facing state only —
+			// the session store, transcript file, title, and session id
+			// are all kept (that is the difference from /new, which
+			// mints a new identity). xdev providers are stateless across
+			// Stream calls (each submit rebuilds history from the store),
+			// so there is no provider session id / prompt-cache key to
+			// drop today.
+			// ponytail: when provider-session or prompt-cache state lands
+			// (openSession / swapStoreTo), clear it here.
+			return swapStoreTo(store)
 		},
 		Clear: func() error {
 			if running.Load() {

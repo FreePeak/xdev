@@ -45,6 +45,9 @@ func main() {
 	model := fs.String("model", "", "model to use (provider/model)")
 	continueLast := fs.Bool("continue", false, "continue the most recent session in this directory")
 	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
+	fromClaude := fs.String("from-claude", "", "import a Claude Code transcript (id prefix or path) and continue it")
+	fromCodex := fs.String("from-codex", "", "import a Codex transcript (id prefix or path) and continue it")
+	forkID := fs.String("fork", "", "fork a session by id prefix or path and continue the fork")
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
 	personality := fs.String("personality", "", "personality preset: default | friendly | pragmatic | none (default: settings.personality)")
@@ -121,6 +124,9 @@ Flags:
 			Model:        *model,
 			ContinueLast: *continueLast,
 			ResumePrefix: *resumePrefix,
+			FromClaude:   *fromClaude,
+			FromCodex:    *fromCodex,
+			ForkID:       *forkID,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
 			Personality:  *personality,
@@ -186,12 +192,16 @@ Flags:
 		if len(args) > 0 {
 			prompt = args[0]
 		}
-		if prompt == "" && !*continueLast {
+		if prompt == "" && !*continueLast && *resumePrefix == "" && *forkID == "" && *fromClaude == "" && *fromCodex == "" {
 			if stdinIsTerminal() {
 				// Bare interactive invocation: open the TUI.
 				code, err := runTUI(printOptions{
 					Model:        *model,
 					ContinueLast: *continueLast,
+					ResumePrefix: *resumePrefix,
+					FromClaude:   *fromClaude,
+					FromCodex:    *fromCodex,
+					ForkID:       *forkID,
 					SystemPrompt: *systemPrompt,
 					AppendSystem: *appendSystemPrompt,
 					Personality:  *personality,
@@ -215,7 +225,7 @@ Flags:
 			}
 			prompt = string(buf)
 		}
-		if prompt == "" && !*continueLast {
+		if prompt == "" && !*continueLast && *resumePrefix == "" && *forkID == "" && *fromClaude == "" && *fromCodex == "" {
 			fs.Usage()
 			os.Exit(2)
 		}
@@ -223,6 +233,9 @@ Flags:
 			Model:        *model,
 			ContinueLast: *continueLast,
 			ResumePrefix: *resumePrefix,
+			FromClaude:   *fromClaude,
+			FromCodex:    *fromCodex,
+			ForkID:       *forkID,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
 			Personality:  *personality,
