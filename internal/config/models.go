@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -50,7 +51,12 @@ type ModelConfig struct {
 type ProviderConfig struct {
 	BaseURL string `yaml:"baseUrl"`
 	APIKey  string `yaml:"apiKey,omitempty"`
-	API     string `yaml:"api"`
+	// APIKeys are sibling credentials for the same provider (M5 #25): a
+	// usage limit on one account rotates to the next instead of leaving
+	// the provider. The chain still starts at apiKey (or the first entry
+	// when apiKey is absent) — apiKeys only supplies the rotation pool.
+	APIKeys []string `yaml:"apiKeys,omitempty"`
+	API     string   `yaml:"api"`
 	// AuthHeader names where a bearer credential rides (e.g.
 	// "x-api-key"); empty means "Authorization".
 	AuthHeader string `yaml:"authHeader,omitempty"`
@@ -72,6 +78,51 @@ type OAuthConfig struct {
 	ClientID     string   `yaml:"clientId"`
 	Scopes       []string `yaml:"scopes,omitempty"`
 	RedirectPort int      `yaml:"redirectPort,omitempty"`
+}
+
+// CredentialPool returns a provider's declared models.yml credentials in
+// rotation order (M5 #25): the per-model apiKey first when model names an
+// entry, then the provider's apiKey, then the apiKeys siblings. Blanks and
+// duplicates are dropped, so pool[0] is exactly the credential the ordinary
+// chain picks and every later index is a real sibling to rotate onto.
+//
+// An empty pool means "no models.yml credential at all" — the caller falls
+// through to the oauth / login / env chain as before.
+func CredentialPool(pc *ProviderConfig, model string) []string {
+	if pc == nil {
+		return nil
+	}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || slices.Contains(out, v) {
+			return
+		}
+		out = append(out, v)
+	}
+	if model != "" {
+		for _, m := range pc.Models {
+			if m.ID == model {
+				add(m.APIKey)
+			}
+		}
+	}
+	add(pc.APIKey)
+	for _, k := range pc.APIKeys {
+		add(k)
+	}
+	return out
+}
+
+// CredentialKey returns the i-th credential of the pool ("" when the index
+// is out of range — an exhausted rotation must not silently reuse the
+// primary credential).
+func CredentialKey(pc *ProviderConfig, model string, i int) string {
+	pool := CredentialPool(pc, model)
+	if i < 0 || i >= len(pool) {
+		return ""
+	}
+	return pool[i]
 }
 
 // Config is the parsed models.yml.

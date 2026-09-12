@@ -146,6 +146,11 @@ type CredentialRequest struct {
 	// Refresh, when set, is called for an expired OAuth entry and must
 	// return a fresh access token (and optionally a new refresh token).
 	Refresh func(StoredCredential) (StoredCredential, error)
+	// PoolIndex rotates among the provider's models.yml credentials
+	// (M5 #25): 0 (the default) resolves the ordinary chain, ≥1 uses
+	// CredentialPool's i-th sibling. An index past the pool is an error —
+	// an exhausted rotation must not silently reuse the primary key.
+	PoolIndex int
 }
 
 // ResolveCredential walks the chain in contract order.
@@ -154,6 +159,13 @@ func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 		return ResolvedCredential{Value: req.CLIKey, Source: "cli", Kind: "api_key", Header: authHeader(req)}, nil
 	}
 	if pc := req.ProviderCfg; pc != nil {
+		if req.PoolIndex > 0 {
+			pool := CredentialPool(pc, req.Model)
+			if req.PoolIndex >= len(pool) {
+				return ResolvedCredential{}, fmt.Errorf("credentials: %s: no credential at rotation index %d (models.yml declares %d)", req.Provider, req.PoolIndex, len(pool))
+			}
+			return ResolvedCredential{Value: pool[req.PoolIndex], Source: fmt.Sprintf("models.yml (key %d)", req.PoolIndex+1), Kind: "api_key", Header: authHeader(req)}, nil
+		}
 		// A per-model apiKey overrides the provider-level one.
 		if req.Model != "" {
 			for _, m := range pc.Models {
@@ -164,6 +176,11 @@ func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 		}
 		if strings.TrimSpace(pc.APIKey) != "" {
 			return ResolvedCredential{Value: pc.APIKey, Source: "models.yml", Kind: "api_key", Header: authHeader(req)}, nil
+		}
+		// A provider configured with only `apiKeys: [...]` still has a
+		// primary credential: the first pool entry (M5 #25).
+		if k := CredentialKey(pc, req.Model, 0); k != "" {
+			return ResolvedCredential{Value: k, Source: "models.yml", Kind: "api_key", Header: authHeader(req)}, nil
 		}
 	}
 	stored := req.Store[req.Provider]
