@@ -379,6 +379,43 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetTreeData(func() []tui.TreeEntry { return treeEntries(store) })
 	app.SetTreeLabels(loadSessionLabels, saveSessionLabel)
 	app.SetLocation(cwd)
+	// Agent Hub roster (/hub, issue #37): the registry owns this session's
+	// hub (registered alongside the hub tool); read it back out.
+	var sessionHub *agent.Hub
+	if ht, ok := reg.Get(agent.HubToolName); ok {
+		if hb, ok := ht.(*agent.HubTool); ok {
+			sessionHub = hb.Hub
+		}
+	}
+	if sessionHub != nil {
+		app.SetHubOps(&tui.HubOps{
+			Roster: func() []tui.HubAgent {
+				rows := sessionHub.Roster()
+				out := make([]tui.HubAgent, len(rows))
+				for i, r := range rows {
+					out[i] = tui.HubAgent{
+						ID: r.ID, Name: r.Name, Status: r.Status, Model: r.Model,
+						Activity: r.Activity, Cost: hubCostLabel(r),
+					}
+				}
+				return out
+			},
+			Transcript: func(id string, fromSeq int) ([]tui.HubTranscriptLine, int, bool) {
+				entries, total, ok := sessionHub.Transcript(id, fromSeq)
+				if !ok {
+					return nil, 0, false
+				}
+				lines := make([]tui.HubTranscriptLine, len(entries))
+				for i, e := range entries {
+					lines[i] = tui.HubTranscriptLine{Role: e.Role, Text: e.Text}
+				}
+				return lines, total, true
+			},
+			Park:   sessionHub.Park,
+			Kill:   sessionHub.Cancel,
+			Revive: func(id string) bool { return sessionHub.Revive(id, "") == nil },
+		})
+	}
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
@@ -1232,4 +1269,16 @@ func emitSwitchEvents(bus switchEmitter, before bool, to, title string) {
 		event = "session_before_switch"
 	}
 	bus.Emit(context.Background(), event, map[string]any{"session": to, "title": title})
+}
+
+// hubCostLabel renders the roster's cost column: USD when the provider
+// priced the run, otherwise a token estimate, otherwise "-".
+func hubCostLabel(r agent.RosterEntry) string {
+	if r.Cost > 0 {
+		return fmt.Sprintf("$%.4f", r.Cost)
+	}
+	if r.Tokens > 0 {
+		return fmt.Sprintf("~%.1fk tok", float64(r.Tokens)/1000)
+	}
+	return "-"
 }
