@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
@@ -13,7 +14,6 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 )
 
-// Compaction defaults (omp engine constants, PRD M5).
 const (
 	// DefaultReserveTokens is the context head-room a compaction aims to
 	// free up to; the effective reserve is never below 15% of the window.
@@ -28,14 +28,19 @@ const (
 	charsPerToken = 4
 )
 
-// Compaction strategies (compaction.methodOrder). `threshold` is the only
-// one that acts at a step boundary; `overflow` and `promotion` are reactive
-// (they fire when a request actually overflows the window) and appear in the
-// order for completeness — the ladder is one knob. The one spelling of the
-// default order is config.DefaultCompactionMethodOrder; config cannot import
-// agent, so the vocabulary is derived from it here.
+// Compaction strategies (compaction.methodOrder, M5 #24). `threshold` is the
+// only trigger that acts on the token budget; `overflow` and `promotion` are
+// reactive (they fire when a request actually overflows the window); the idle
+// and async triggers live in compactionDue / compact_async.go. The ladder
+// members that produce the retained context — remote, snapcompact, handoff,
+// shake, soft — live in compact_ladder.go, and the accepted vocabulary has one
+// spelling: config.CompactionMethodNames.
 const methodThreshold = "threshold"
 
+// compactionMethods is the shipped default order, whose members are all
+// triggers: the product is then the builtin handoff summarize (see
+// CompactionConfig.products), so an unset methodOrder behaves exactly as it
+// did before the ladder tails existed.
 var compactionMethods = strings.Split(config.DefaultCompactionMethodOrder, ",")
 
 // memPressure samples live heap pressure (0..1 of the process memory
@@ -43,11 +48,16 @@ var compactionMethods = strings.Split(config.DefaultCompactionMethodOrder, ",")
 // toward the real limit.
 var memPressure = memlimit.Pressure
 
+// compactionNow is the clock the idle trigger measures with; a package var so
+// tests advance time instead of sleeping.
+var compactionNow = time.Now
+
 // ParseMethodOrder parses the compaction.methodOrder setting into a
 // validated priority list. Unknown names are dropped with a warning (a
 // typo must not silently disable compaction) and duplicates collapse to
 // their first position; an empty or all-invalid value falls back to the
-// shipped default order.
+// shipped default order. The vocabulary is config.CompactionMethodNames —
+// the triggers plus the M5 #24 ladder members.
 func ParseMethodOrder(raw string) []string {
 	out := make([]string, 0, len(compactionMethods))
 	for _, part := range strings.Split(raw, ",") {
@@ -55,8 +65,8 @@ func ParseMethodOrder(raw string) []string {
 		if m == "" || slices.Contains(out, m) {
 			continue
 		}
-		if !slices.Contains(compactionMethods, m) {
-			logx.Errorf("compaction: methodOrder: unknown method %q dropped (want %s)", m, strings.Join(compactionMethods, ","))
+		if !slices.Contains(config.CompactionMethodNames, m) {
+			logx.Errorf("compaction: methodOrder: unknown method %q dropped (want %s)", m, strings.Join(config.CompactionMethodNames, ","))
 			continue
 		}
 		out = append(out, m)
@@ -75,6 +85,16 @@ type CompactionConfig struct {
 	// Methods is the compaction.methodOrder priority list (see
 	// ParseMethodOrder); nil/empty → the shipped default order.
 	Methods []string
+	// IdleAfter compacts a session that sat idle between two step
+	// boundaries for at least this long (M5 #24 idle trigger); 0 disables
+	// it. The trigger is independent of the token threshold, like memory
+	// pressure.
+	IdleAfter time.Duration
+	// Async summarizes in the background and applies the result at the
+	// next boundary instead of blocking the turn (M5 #24); only the
+	// provider summarize (handoff) has a round-trip worth backgrounding,
+	// so the deterministic methods stay synchronous.
+	Async bool
 }
 
 func (c CompactionConfig) reserve() int64 {
@@ -176,56 +196,88 @@ func findCutPoint(msgs []ai.Message, keepRecent int64) int {
 	return cut
 }
 
-// compact summarizes history[:cut] via the provider, persists a compaction
-// entry anchored at history[cut]'s entry, and returns the rebuilt context.
-// The store is the mirror of record: it holds every message produced so far
-// (hooks persist on message_end / tool result), so the cut resolves against
-// store entry IDs via one BuildContext walk.
-func (a *Agent) compact(ctx context.Context) error {
+// compactionSpan prepares one boundary compaction: the context rebuilt from
+// the store, the message index where the dropped prefix ends, the tokens
+// that prefix currently costs, and the entry id the compaction anchors on.
+// The store is the mirror of record — it holds every message produced so far
+// (hooks persist on message_end / tool result) — so the cut resolves against
+// store entry IDs via one BuildContext walk. The ladder and the async job
+// share this snapshot.
+type compactionSpan struct {
+	msgs     []ai.Message
+	entryIDs []string
+	cut      int
+	tokens   int64
+}
+
+func (a *Agent) compactionSpan() (*compactionSpan, error) {
 	if a.Store == nil {
-		return fmt.Errorf("compaction: no session store")
+		return nil, fmt.Errorf("compaction: no session store")
 	}
 	res, err := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{})
 	if err != nil {
-		return fmt.Errorf("compaction: build context: %w", err)
+		return nil, fmt.Errorf("compaction: build context: %w", err)
 	}
-	msgs := res.Messages
-	if len(msgs) < 2 {
-		return fmt.Errorf("compaction: nothing to summarize")
+	if len(res.Messages) < 2 {
+		return nil, fmt.Errorf("compaction: nothing to summarize")
 	}
-	cut := findCutPoint(msgs, a.Compaction.keepRecent())
+	cut := findCutPoint(res.Messages, a.Compaction.keepRecent())
 	if cut < 1 {
-		return fmt.Errorf("compaction: no droppable prefix")
+		return nil, fmt.Errorf("compaction: no droppable prefix")
 	}
 	if cut >= len(res.EntryIDs) || res.EntryIDs[cut] == "" {
-		return fmt.Errorf("compaction: cut %d has no anchor entry", cut)
+		return nil, fmt.Errorf("compaction: cut %d has no anchor entry", cut)
 	}
+	return &compactionSpan{
+		msgs:     res.Messages,
+		entryIDs: res.EntryIDs,
+		cut:      cut,
+		tokens:   contextTokens(res.Messages),
+	}, nil
+}
 
-	summary, err := a.summarize(ctx, msgs[:cut])
+// anchor is the entry the compaction keeps: everything before it is dropped.
+func (s *compactionSpan) anchor() string { return s.entryIDs[s.cut] }
+
+// compact runs the method ladder over the current history span, persists the
+// retained-context entry the winning method produced, and notifies the hook
+// bus. The entry records which member ran (M5 #24).
+func (a *Agent) compact(ctx context.Context) error {
+	span, err := a.compactionSpan()
 	if err != nil {
-		return fmt.Errorf("compaction: summarize: %w", err)
+		return err
 	}
+	entry, err := a.runCompactLadder(ctx, span)
+	if err != nil {
+		return err
+	}
+	return a.persistCompaction(entry)
+}
 
-	tokensBefore := contextTokens(msgs)
-	entry := &session.CompactionEntry{
-		Summary: ai.Message{
-			Role:       ai.RoleAssistant,
-			Content:    []ai.Block{ai.TextBlock{Text: summary}},
-			StopReason: ai.StopReasonStop,
-		},
-		FirstKeptEntryID: &res.EntryIDs[cut],
-		TokensBefore:     tokensBefore,
-	}
+// persistCompaction appends a ladder result to the session store and tells the
+// hook bus how big the context was before it (the entry carries that number).
+func (a *Agent) persistCompaction(entry *session.CompactionEntry) error {
 	if err := a.Store.Append(entry); err != nil {
 		return fmt.Errorf("compaction: persist: %w", err)
 	}
-	a.Hooks.OnCompaction(tokensBefore)
+	if a.Hooks != nil {
+		a.Hooks.OnCompaction(entry.TokensBefore)
+	}
 	return nil
 }
 
-// summarize renders msgs[:cut] as a transcript and compresses it through
-// one provider call (no tools; hard MaxTokens clamp).
+// summarize renders msgs as a transcript and compresses it through one
+// provider call (no tools; hard MaxTokens clamp). It is the in-turn
+// spelling of summarizeWith; the async trigger keeps its own snapshot.
 func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error) {
+	return summarizeWith(ctx, a.Provider, a.Model, msgs)
+}
+
+// summarizeWith is summarize against a provider/model snapshot: the async
+// job runs on its own goroutine, and a failover can move a.Provider or
+// a.Model while that call is in flight, so the background job must carry
+// copies rather than read the live fields.
+func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message) (string, error) {
 	var b strings.Builder
 	b.WriteString("Conversation transcript:\n\n")
 	for i := range msgs {
@@ -244,9 +296,9 @@ func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error
 		System:    compactionPrompt,
 		Messages:  []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: b.String()}}}},
 		MaxTokens: MaxSummaryTokens,
-		Model:     a.Model,
+		Model:     model,
 	}
-	ch, err := a.Provider.Stream(ctx, req)
+	ch, err := provider.Stream(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -267,19 +319,40 @@ func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error
 	return "", fmt.Errorf("compaction: stream ended without done")
 }
 
-// maybeCompact applies the compaction ladder at a step boundary: the
-// methodOrder setting decides whether the token threshold check runs at
-// all, and a live heap near the process memory limit forces compaction
-// regardless of tokens (PRD §3.7: degrade into "compact now", never an OOM
-// kill). It is silent on failure (logged, never fatal): a failed
-// compaction degrades to the pre-compaction behavior, and the overflow
-// path re-tries it.
+// maybeCompact applies the compaction ladder at a step boundary. Triggers
+// (M5 #24): the token threshold, a live heap near the process memory limit
+// (PRD §3.7: degrade into "compact now", never an OOM kill), and an idle
+// session — the gap between the previous boundary and this one, which after
+// a pause between runs is the pause itself. With compaction.async on and the
+// ladder's first product being the provider summarize, a due boundary kicks
+// that summarize off in the background instead of blocking; a later boundary
+// applies it. Silent on failure (logged, never fatal): a failed compaction
+// degrades to the pre-compaction behavior, and the overflow path re-tries it.
 func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Message {
 	if a.Store == nil || a.Compaction.ContextWindow <= 0 {
 		return history
 	}
+	// A background summarize that finished since the last boundary applies
+	// here, whatever the trigger state; an applied result is this boundary's
+	// whole job (M5 #24 async).
+	if rebuilt, ok := a.applyAsyncCompaction(history); ok {
+		return rebuilt
+	}
 	if !a.compactionDue(history) {
 		return history
+	}
+	// Async hands the provider round-trip to a goroutine; the deterministic
+	// members are already cheap, so they stay on this goroutine. Memory
+	// pressure never defers: the OOM backstop must act now.
+	if a.Compaction.Async && a.firstProductIsHandoff() && memPressure() < memlimit.HighPressure {
+		if a.compactAsync != nil {
+			// One job at a time: it lands at a later boundary, and blocking
+			// here on a second summarize would defeat the whole trigger.
+			return history
+		}
+		if a.kickAsyncCompaction(ctx) {
+			return history
+		}
 	}
 	if err := a.compact(ctx); err != nil {
 		logx.Errorf("compaction: %v", err)
@@ -300,10 +373,39 @@ func (a *Agent) compactionDue(history []ai.Message) bool {
 		logx.Infof("compaction: memory pressure %.0f%% of the process limit — compacting", p*100)
 		return true
 	}
-	// Only `threshold` can act at a boundary; the reactive methods reached
-	// here are no-ops by design (loop.go consults them on real overflow).
-	if !slices.Contains(a.Compaction.methods(), methodThreshold) {
+	if a.idleDue() {
+		return true
+	}
+	// The token budget triggers when the order names the threshold member —
+	// or any product member, because naming a method is a request to use it
+	// at the boundary (the omp ladder, `remote,snapcompact,handoff,shake,
+	// soft`, names no trigger at all). An order of triggers alone (the
+	// shipped default names exactly those) keeps the historical rule:
+	// whether a boundary compacts on the token budget is the threshold
+	// member's business.
+	if !slices.Contains(a.Compaction.methods(), methodThreshold) && !a.hasExplicitProduct() {
 		return false
 	}
 	return contextTokens(history) > a.Compaction.threshold()
+}
+
+// idleDue reports — and closes — the idle trigger: the session sat between
+// two step boundaries for at least compaction.idleAfter. The clock updates on
+// every boundary, so only the gap between two runs can reach the threshold (a
+// run's own boundaries follow each other in milliseconds); that gap IS the
+// idle time the trigger is about. Like memory pressure it needs no threshold
+// member in the method order.
+func (a *Agent) idleDue() bool {
+	now := compactionNow()
+	last := a.compactIdle
+	a.compactIdle = now
+	if a.Compaction.IdleAfter <= 0 || last.IsZero() {
+		return false
+	}
+	if now.Sub(last) < a.Compaction.IdleAfter {
+		return false
+	}
+	logx.Infof("compaction: session idle %s (≥ %s) — compacting",
+		now.Sub(last).Round(time.Second), a.Compaction.IdleAfter)
+	return true
 }
