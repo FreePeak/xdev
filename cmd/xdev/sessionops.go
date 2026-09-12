@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -117,4 +118,110 @@ func dumpSession(store *session.Store) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// --- foreign-session import + --fork startup (issues #28, #11) ---
+
+// splitForeignQuery recognizes the /resume @claude|@codex picker variants:
+// "@claude" (bare list) or "@claude <id-or-path>" (import + switch).
+func splitForeignQuery(query string) (kind, ref string, ok bool) {
+	q := strings.TrimSpace(query)
+	for _, k := range []string{"claude", "codex"} {
+		prefix := "@" + k
+		if q == prefix {
+			return k, "", true
+		}
+		if strings.HasPrefix(q, prefix+" ") {
+			return k, strings.TrimSpace(q[len(prefix)+1:]), true
+		}
+	}
+	return "", "", false
+}
+
+// foreignRoot returns the on-disk transcript root for a foreign source.
+func foreignRoot(kind string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("import %s: cannot locate home directory: %w", kind, err)
+	}
+	switch kind {
+	case "claude":
+		return session.ClaudeProjectsRoot(home), nil
+	case "codex":
+		return session.CodexSessionsRoot(home), nil
+	}
+	return "", fmt.Errorf("import: unknown foreign source %q", kind)
+}
+
+// listForeignTranscripts lists one kind of foreign transcript, newest
+// first, filtered to cwd where the source layout encodes it.
+func listForeignTranscripts(kind, cwd string) ([]session.ForeignTranscript, error) {
+	root, err := foreignRoot(kind)
+	if err != nil {
+		return nil, err
+	}
+	return session.ListForeignRoot(kind, root, cwd)
+}
+
+// importForeignSession resolves a --from-claude/--from-codex (or
+// /resume @kind) reference, imports the transcript read-only, and returns
+// the NEW on-disk xdev session.
+func importForeignSession(kind, ref, cwd string) (*session.Store, error) {
+	root, err := foreignRoot(kind)
+	if err != nil {
+		return nil, err
+	}
+	path, err := session.ResolveForeign(kind, ref, root)
+	if err != nil {
+		return nil, err
+	}
+	var res *session.ImportResult
+	switch kind {
+	case "claude":
+		res, err = session.ImportClaude(path, config.DataDir(), cwd)
+	case "codex":
+		res, err = session.ImportCodex(path, config.DataDir(), cwd)
+	default:
+		err = fmt.Errorf("import: unknown foreign source %q", kind)
+	}
+	if err != nil {
+		return nil, err
+	}
+	logx.Debugf("import %s: %s → %s (%d turns, %d dropped)",
+		kind, path, res.Store.Path(), res.Turns, res.Dropped)
+	return res.Store, nil
+}
+
+// forkSessionByID implements --fork <id|path>: open the resolved session
+// and fork it — new file, parentSession header (session.ForkSession).
+func forkSessionByID(cwd, query string) (*session.Store, error) {
+	src := query
+	if st, err := os.Stat(query); err != nil || st.IsDir() {
+		p, rerr := resolveResumeID(cwd, query)
+		if rerr != nil {
+			return nil, fmt.Errorf("fork: %q is neither a session file nor an id prefix (%v)", query, rerr)
+		}
+		src = p
+	}
+	return session.ForkSession(src,
+		session.SessionFilePath(config.DataDir(), cwd, time.Now(), session.NewSessionID()), "")
+}
+
+// openStartupSession resolves the startup session for print/TUI runs:
+// a foreign import (--from-claude/--from-codex) wins over --resume, and
+// --fork wins over both (forking an import would need a source id anyway).
+func openStartupSession(cwd string, opts printOptions) (*session.Store, error) {
+	if opts.FromClaude != "" && opts.FromCodex != "" {
+		return nil, fmt.Errorf("--from-claude and --from-codex are mutually exclusive")
+	}
+	if opts.ForkID != "" {
+		return forkSessionByID(cwd, opts.ForkID)
+	}
+	if opts.FromClaude != "" {
+		return importForeignSession("claude", opts.FromClaude, cwd)
+	}
+	if opts.FromCodex != "" {
+		return importForeignSession("codex", opts.FromCodex, cwd)
+	}
+	return openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 }

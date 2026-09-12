@@ -11,11 +11,11 @@ import (
 
 // fakeAPI records CommandAPI calls for dispatch tests.
 type fakeAPI struct {
-	newed, cleared, dropped, quit int
-	blocks                        []string
-	sent                          []string
-	dir                           string
-	fail                          string // method name that returns an error
+	newed, freshed, cleared, dropped, quit int
+	blocks                                 []string
+	sent                                   []string
+	dir                                    string
+	fail                                   string // method name that returns an error
 
 	extCalls []string
 	extErr   error
@@ -236,8 +236,9 @@ func TestHelpTextAligned(t *testing.T) {
 	// Every entry line: two-space indent, command column padded to 12
 	// cells before the description (aligned list).
 	want := []string{
-		"  /new, /fresh start a fresh session",
-		"  /quit, /q    quit xdev",
+		"  /new      start a new session",
+		"  /fresh    rotate provider state; keep this session",
+		"  /quit, /q quit xdev",
 	}
 	for _, w := range want {
 		if !strings.Contains(got, "\n"+w) {
@@ -382,13 +383,36 @@ func (f *fakeAPI) SwitchModel(args string) error {
 	return nil
 }
 
-// /fresh is omp's spelling; it aliases /new.
-func TestDispatchFreshAliasesNew(t *testing.T) {
+// /fresh rotates PROVIDER state only (issue #11 §5): it dispatches the
+// app's FreshSession when the host exposes one, and degrades to /new
+// semantics otherwise. /new always mints a new session.
+func TestDispatchFreshVsNew(t *testing.T) {
 	f := &fakeAPI{}
 	if !dispatch(f, "/fresh") {
 		t.Fatal("/fresh not consumed")
 	}
 	if f.newed != 1 {
-		t.Fatalf("/fresh must start a fresh session, newed=%d", f.newed)
+		t.Fatalf("bare CommandAPI /fresh should fall back to new, newed=%d", f.newed)
 	}
+	fresh := &fakeAPI{}
+	if !dispatch(withFresh{fresh}, "/fresh") {
+		t.Fatal("/fresh not consumed")
+	}
+	if fresh.freshed != 1 || fresh.newed != 0 {
+		t.Fatalf("/fresh must dispatch FreshSession only, freshed=%d newed=%d", fresh.freshed, fresh.newed)
+	}
+	if !dispatch(withFresh{fresh}, "/new") {
+		t.Fatal("/new not consumed")
+	}
+	if fresh.newed != 1 || fresh.freshed != 1 {
+		t.Fatalf("/new must dispatch NewSession, freshed=%d newed=%d", fresh.freshed, fresh.newed)
+	}
+}
+
+// withFresh adds the optional FreshSession op to a fakeAPI.
+type withFresh struct{ *fakeAPI }
+
+func (w withFresh) FreshSession() error {
+	w.freshed++
+	return nil
 }

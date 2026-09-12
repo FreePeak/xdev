@@ -20,8 +20,12 @@ type Command struct {
 // SessionOps holds the session lifecycle operations. The session store
 // lives in cmd, so it wires these; nil entries degrade the commands to
 // notices instead of new store machinery in the TUI.
+// SessionOps wires the session lifecycle to the host (the store lives in
+// cmd). Fresh rotates provider-facing state only — same session identity
+// and transcript; nil ops degrade to a notice (Fresh falls back to New).
 type SessionOps struct {
 	New, Clear, Drop func() error
+	Fresh            func() error
 	Fork             func() error
 	Dump             func() (string, error)
 	Resume           func(query string) error
@@ -119,8 +123,10 @@ type CommandAPI interface {
 // an initialization cycle.
 func builtinCommands() []Command {
 	return []Command{
-		{Name: "new", Aliases: []string{"fresh"}, Description: "start a fresh session",
+		{Name: "new", Description: "start a new session",
 			Fn: func(app CommandAPI, args string) error { return app.NewSession() }},
+		{Name: "fresh", Description: "rotate provider state; keep this session",
+			Fn: func(app CommandAPI, args string) error { return freshSession(app) }},
 		{Name: "clear", Description: "reset context in place (history kept on disk)",
 			Fn: func(app CommandAPI, args string) error { return app.ClearSession() }},
 		{Name: "drop", Description: "delete the session file and start fresh",
@@ -255,6 +261,29 @@ func (a *App) NewSession() error {
 		return fmt.Errorf("session lifecycle not wired — restart xdev for a fresh session")
 	}
 	return a.ops.New()
+}
+
+// FreshSession rotates provider-facing state only (issue #11 §5): the
+// session identity and transcript are kept. Hosts without a Fresh op fall
+// back to /new semantics rather than erroring.
+func (a *App) FreshSession() error {
+	if a.ops == nil {
+		return fmt.Errorf("session lifecycle not wired")
+	}
+	if a.ops.Fresh != nil {
+		return a.ops.Fresh()
+	}
+	return a.NewSession()
+}
+
+// freshSession routes `/fresh` to the app's provider-rotation op when the
+// host exposes one (App does; bare CommandAPI fakes in tests may not), and
+// otherwise degrades to /new semantics.
+func freshSession(app CommandAPI) error {
+	if f, ok := app.(interface{ FreshSession() error }); ok {
+		return f.FreshSession()
+	}
+	return app.NewSession()
 }
 
 func (a *App) ClearSession() error {
