@@ -98,12 +98,17 @@ type ModelChangeEntry struct {
 func (e *ModelChangeEntry) Envelope() Envelope { return e.Env }
 
 // CompactionEntry replaces pre-compaction history with a summary message.
-// Wire: {"type":"compaction",...,"summary":{...},"firstKeptEntryId":...,"tokensBefore":N}.
+// Wire: {"type":"compaction",...,"summary":{...},"firstKeptEntryId":...,
+// "tokensBefore":N,"method":"handoff"}.
 type CompactionEntry struct {
 	Env              Envelope
 	Summary          ai.Message
 	FirstKeptEntryID *string // nil → only the summary survives
 	TokensBefore     int64
+	// Method names the compaction ladder member that produced Summary
+	// (M5 #24): handoff|snapcompact|shake|soft. "" for entries written
+	// before the ladder recorded it.
+	Method string
 }
 
 func (e *CompactionEntry) Envelope() Envelope { return e.Env }
@@ -254,6 +259,7 @@ type entryWire struct {
 	Summary          json.RawMessage    `json:"summary,omitempty"`
 	FirstKeptEntryID *string            `json:"firstKeptEntryId,omitempty"`
 	TokensBefore     *int64             `json:"tokensBefore,omitempty"`
+	Method           *string            `json:"method,omitempty"`
 	CustomType       string             `json:"customType,omitempty"`
 	Data             map[string]any     `json:"data,omitempty"`
 	Goal             *GoalPayload       `json:"goal,omitempty"`
@@ -285,6 +291,10 @@ func MarshalEntry(e Entry) ([]byte, error) {
 		w.FirstKeptEntryID = t.FirstKeptEntryID
 		tokens := t.TokensBefore
 		w.TokensBefore = &tokens
+		if t.Method != "" {
+			method := t.Method
+			w.Method = &method
+		}
 	case *BranchSummaryEntry:
 		w.Type = TypeBranchSummary
 		w.Summary = mustMarshal(t.Summary)
@@ -342,6 +352,9 @@ func ParseEntry(line []byte) (Entry, error) {
 		e := &CompactionEntry{Env: env, Summary: s, FirstKeptEntryID: w.FirstKeptEntryID}
 		if w.TokensBefore != nil {
 			e.TokensBefore = *w.TokensBefore
+		}
+		if w.Method != nil {
+			e.Method = *w.Method
 		}
 		return e, nil
 	case TypeBranchSummary:
