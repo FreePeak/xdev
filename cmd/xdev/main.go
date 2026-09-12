@@ -65,6 +65,8 @@ func main() {
 	fs.Var(&hookFlag, "hook", "hook to run: event=command, or the name of a discovered hook (repeatable)")
 	trustedExtension := repeatable{}
 	fs.Var(&trustedExtension, "trusted-extension", "extension whose hooks/ directory is trusted and loaded (repeatable)")
+	planYolo := fs.Bool("plan-yolo", false, "plan mode with the first proposal auto-approved (implies -plan)")
+	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref or @role to switch to after the first approved proposal (default: stay)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -263,6 +265,11 @@ Flags:
 
 			Hooks:             hookFlag,
 			TrustedExtensions: trustedExtension,
+			PlanYolo:          *planYolo,
+			PlanYoloInto:      *planYoloInto,
+		}
+		if *planYoloInto != "" && !*planYolo {
+			fmt.Fprintln(os.Stderr, "xdev: -plan-yolo-into has no effect without -plan-yolo")
 		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {

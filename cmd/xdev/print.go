@@ -57,6 +57,10 @@ type printOptions struct {
 	TrustedExtensions []string
 	// Plan starts the run in plan mode (read-only + propose exit).
 	Plan bool
+	// PlanYolo auto-approves the first proposal (#36); PlanYoloInto is the
+	// execution model to hand off to after that acceptance ("" = stay).
+	PlanYolo     bool
+	PlanYoloInto string
 }
 
 // buildAdvisor constructs the background reviewer when enabled. The
@@ -214,24 +218,31 @@ func resolvePrewalk(opts printOptions, cfg *config.Config, settings *config.Sett
 	if !opts.Prewalk {
 		return nil
 	}
-	ref, _, err := resolveModel(opts.PrewalkInto, cfg, settings)
+	return resolveInto(opts.PrewalkInto, cfg, settings, "prewalk")
+}
+
+// resolveInto resolves a model ref or @role to a handoff target (prewalk,
+// plan-yolo). Returns nil after a warning when it cannot resolve: the run
+// starts on the primary model rather than failing.
+func resolveInto(refArg string, cfg *config.Config, settings *config.Settings, label string) *agent.FailoverTarget {
+	ref, _, err := resolveModel(refArg, cfg, settings)
 	if err != nil {
-		logx.Errorf("prewalk: target %q unresolved, starting on primary: %v", opts.PrewalkInto, err)
+		logx.Errorf("%s: target %q unresolved, starting on primary: %v", label, refArg, err)
 		return nil
 	}
 	pName, mName, err := config.ParseModelRef(ref)
 	if err != nil {
-		logx.Errorf("prewalk: target %q invalid, starting on primary: %v", ref, err)
+		logx.Errorf("%s: target %q invalid, starting on primary: %v", label, ref, err)
 		return nil
 	}
 	pc, ok := cfg.Providers[pName]
 	if !ok {
-		logx.Errorf("prewalk: unknown provider %q, starting on primary", pName)
+		logx.Errorf("%s: unknown provider %q, starting on primary", label, pName)
 		return nil
 	}
 	prov, err := buildProvider(pName, pc, mName, cfg)
 	if err != nil {
-		logx.Errorf("prewalk: provider for %q unavailable, starting on primary: %v", ref, err)
+		logx.Errorf("%s: provider for %q unavailable, starting on primary: %v", label, ref, err)
 		return nil
 	}
 	return &agent.FailoverTarget{Provider: prov, Model: mName}
@@ -267,7 +278,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- tools ---
-	planMode := &agent.PlanMode{Active: opts.Plan}
+	planMode := &agent.PlanMode{Active: opts.Plan || opts.PlanYolo}
 	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef), planMode)
 
 	// MCP servers (optional; absent config = nothing happens).
@@ -312,6 +323,19 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
 	ag.TTSR = agent.NewTTSR(settings.TTSR)
+	// Plan-mode exit: print runs are unattended, so there is no reviewer —
+	// propose auto-accepts (a plan nobody can review must not trap the run
+	// in read-only). --plan-yolo keeps that and hands the run to the
+	// execution model on the first acceptance (#36).
+	planMode.Propose = agent.NewProposeTool(planMode, nil)
+	if opts.PlanYolo {
+		planMode.Yolo = true
+		if opts.PlanYoloInto != "" {
+			if t := resolveInto(opts.PlanYoloInto, cfg, settings, "plan-yolo"); t != nil {
+				planMode.OnAccept = func() { ag.SwitchToModel(*t, "plan-yolo") }
+			}
+		}
+	}
 
 	// Extension processes (optional): their tools join the registry and the
 	// manager becomes the agent's fail-closed policy interceptor; runtime
@@ -802,6 +826,12 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// registry so the URL cache and the pr_checkout registry are shared.
 	ghTool := tool.NewGithubTool(cwd)
 	ghTool.RegisterURISchemes()
+	// xd:// proposal devices (#36): read xd://propose serves the pending
+	// plan; writes to xd://resolve / xd://reject finalize it — the same
+	// seam the skill/memory read schemes ride.
+	tool.RegisterURIScheme("xd", planMode.DeviceRead)
+	tool.RegisterWriteDevice("xd", "resolve", planMode.ResolveDevice)
+	tool.RegisterWriteDevice("xd", "reject", planMode.RejectDevice)
 	pol := settingsPolicy(settings)
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{
@@ -815,6 +845,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		&tool.ASTEditTool{CWD: cwd},
 		eval.NewTool(cwd),
 		ghTool,
+		// ask is the parent's channel to the user; children (ChildTools
+		// below) deliberately omit it — a scoped subagent has no user.
+		tool.NewAskTool(settings.AskTimeout()),
 	} {
 		reg.Register(t)
 	}
