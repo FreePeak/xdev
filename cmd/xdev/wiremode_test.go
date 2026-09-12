@@ -5,8 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"context"
 	"github.com/FreePeak/xdev/internal/agent"
+	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/tool"
 )
@@ -130,4 +133,44 @@ func TestWireAgentModeArmsFallbackState(t *testing.T) {
 	if st.Rotate == nil {
 		t.Fatal("credential rotation seam unwired: a spent apiKeys key fails the run")
 	}
+}
+
+// #82: compaction.idleAfter / compaction.async were parsed, validated and
+// listed in `config list` — and copied nowhere, so neither trigger could fire.
+func TestWireAgentModeAppliesCompactionSettings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	on := true
+	s := &config.Settings{}
+	s.Compaction.IdleAfter = "90s"
+	s.Compaction.Async = &on
+	ag := &agent.Agent{Model: "m", Compaction: agent.CompactionConfig{ContextWindow: 1000}}
+	wireAgentMode(ag, nil, &config.Config{}, s, "", t.TempDir())
+	if ag.Compaction.IdleAfter != 90*time.Second {
+		t.Fatalf("IdleAfter = %v, want 90s from settings", ag.Compaction.IdleAfter)
+	}
+	if !ag.Compaction.Async {
+		t.Fatal("Async not applied")
+	}
+	// The fields the build site already set must survive the seam.
+	if ag.Compaction.ContextWindow != 1000 {
+		t.Fatalf("ContextWindow clobbered: %d", ag.Compaction.ContextWindow)
+	}
+	if len(ag.Compaction.Methods) != 0 {
+		t.Fatal("Methods unexpectedly changed")
+	}
+}
+
+// An abort must drop the in-flight background summarize; wiring the cancel
+// into the loop's abort path is what makes the async trigger safe.
+func TestAbortCancelsAsyncCompaction(t *testing.T) {
+	ag := &agent.Agent{Model: "m"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Run must return the cancellation and not panic on the (absent) job.
+	_, err := ag.Run(ctx, "sys", []ai.Message{{Role: ai.RoleUser,
+		Content: []ai.Block{ai.TextBlock{Text: "x"}}}})
+	if err == nil {
+		t.Fatal("a canceled context must end the run with an error")
+	}
+	ag.CancelAsyncCompaction() // safe with nothing in flight
 }
