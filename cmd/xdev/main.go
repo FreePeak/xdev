@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -250,9 +251,13 @@ func main() {
 	}
 	// Mint the per-install id on first run (0600, O_EXCL, never rewritten)
 	// so provider metadata — Codex installationId, Claude device_id — sees
-	// a stable value from the very first request.
-	if id := config.InstallID(); *verbose {
-		logx.Debugf("install-id: %s (%s)", id, config.InstallIDPath())
+	// a stable value from the very first request. Handing it to the wire
+	// layer is what actually attaches it (#102: it minted and stopped).
+	if id := config.InstallID(); id != "" {
+		ai.SetInstallIdentity(id)
+		if *verbose {
+			logx.Debugf("install-id: %s (%s)", id, config.InstallIDPath())
+		}
 	}
 
 	// --- dotenv chain (M9 #10): process env → project .env → agent .env.

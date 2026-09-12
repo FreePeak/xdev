@@ -44,6 +44,9 @@ type responsesBehavior struct {
 	// requestKeyHeader sends the key in this header instead of Authorization
 	// (Azure's `api-key` convention).
 	requestKeyHeader string
+	// attachInstallID puts the per-install id in the request's documented
+	// `user` field (Codex does this as installation_id client metadata).
+	attachInstallID bool
 }
 
 // NewOpenAIResponsesProvider builds a provider. A nil hc uses the shared
@@ -103,9 +106,14 @@ type openaiRespTool struct {
 }
 
 type openaiRespRequest struct {
-	Model        string           `json:"model"`
-	Input        []openaiRespItem `json:"input"`
-	Stream       bool             `json:"stream"`
+	Model  string           `json:"model"`
+	Input  []openaiRespItem `json:"input"`
+	Stream bool             `json:"stream"`
+	// User is the provider-documented opaque external id (abuse/monitoring).
+	// The Codex transport carries the per-install id here — omp sends the same
+	// value as installation_id in its client metadata (#102: xdev minted the
+	// file and attached it nowhere).
+	User         string           `json:"user,omitempty"`
 	Instructions string           `json:"instructions,omitempty"`
 	Tools        []openaiRespTool `json:"tools,omitempty"`
 	Store        *bool            `json:"store,omitempty"`
@@ -127,6 +135,10 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 		Model:        model,
 		Stream:       true,
 		Instructions: req.System,
+	}
+
+	if p.behavior.attachInstallID {
+		wr.User = InstallID() // "" when unset: the field is omitted
 	}
 	if req.Thinking != nil {
 		wr.Reasoning = &struct {
