@@ -36,18 +36,22 @@ type Tool interface {
 	Execute(ctx context.Context, args json.RawMessage) (Result, error)
 }
 
-// Registry holds tools by name.
+// Registry holds tools by name plus the file-freshness records the read/
+// write/edit tools share (see snapshot.go).
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
+	snaps map[string]*fileSnapshot
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{tools: map[string]Tool{}}
+	return &Registry{tools: map[string]Tool{}, snaps: map[string]*fileSnapshot{}}
 }
 
-// Register adds t; panics on duplicate names (programming error).
+// Register adds t; panics on duplicate names (programming error). Tools
+// that implement setRegistry (the freshness-record participants) get the
+// owning registry injected here.
 func (r *Registry) Register(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -55,6 +59,52 @@ func (r *Registry) Register(t Tool) {
 		panic(fmt.Sprintf("tool: duplicate tool %q", t.Name()))
 	}
 	r.tools[t.Name()] = t
+	if ra, ok := t.(interface{ setRegistry(*Registry) }); ok {
+		ra.setRegistry(r)
+	}
+}
+
+// recordSnapshot stores the freshness record for a resolved path: the
+// content hash plus, when known, the exact line text last shown to the
+// model (1-based line → text). A nil registry is a no-op so standalone
+// tools (tests, ad-hoc construction) keep working.
+func (r *Registry) recordSnapshot(path, hash string, lines map[int]string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.snaps == nil {
+		r.snaps = map[string]*fileSnapshot{}
+	}
+	max := 0
+	for n := range lines {
+		if n > max {
+			max = n
+		}
+	}
+	r.snaps[path] = &fileSnapshot{hash: hash, lines: lines, max: max}
+}
+
+// snapshot returns the freshness record for a resolved path.
+func (r *Registry) snapshot(path string) (*fileSnapshot, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	s, ok := r.snaps[path]
+	return s, ok
+}
+
+// forgetSnapshot drops the freshness record (path renamed away).
+func (r *Registry) forgetSnapshot(path string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.snaps, path)
 }
 
 // Get returns the tool by name.

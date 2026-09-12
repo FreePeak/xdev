@@ -92,8 +92,78 @@ func resolvePath(p string) (string, error) {
 // ShortHash returns the first 4 hex chars of sha256(content) — the snapshot
 // anchor the model can quote back in later edits.
 func ShortHash(content string) string {
+	h := HashContent(content)
+	if len(h) < 4 {
+		return h
+	}
+	return h[:4]
+}
+
+// HashContent returns the full sha256 hex of content.
+func HashContent(content string) string {
 	sum := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(sum[:])[:4]
+	return hex.EncodeToString(sum[:])
+}
+
+// linesHash hashes the canonical reconstruction of a file's lines (what
+// ReadLines reverses). Read/write/edit all record this same value, so a
+// freshness comparison is like-for-like even when a file lacks a trailing
+// newline.
+func linesHash(lines []string) string {
+	if len(lines) == 0 {
+		return HashContent("")
+	}
+	return HashContent(strings.Join(lines, "\n") + "\n")
+}
+
+// fileSnapshot is the freshness record one path carries in the Registry:
+// the content hash at record time plus, when the source rendered line text
+// to the model, that exact text (1-based line → content; windowed reads
+// record only their window).
+type fileSnapshot struct {
+	hash  string
+	lines map[int]string
+	max   int // highest recorded line number
+}
+
+// tag is the 4-char snapshot anchor ([path#TAG]) for the recorded content.
+func (s *fileSnapshot) tag() string { return hashTag(s.hash) }
+
+// window returns the recorded text of lines start..end, reporting whether
+// the record covers the whole range.
+func (s *fileSnapshot) window(start, end int) ([]string, bool) {
+	if start < 1 || end > s.max {
+		return nil, false
+	}
+	out := make([]string, 0, end-start+1)
+	for n := start; n <= end; n++ {
+		l, ok := s.lines[n]
+		if !ok {
+			return nil, false
+		}
+		out = append(out, l)
+	}
+	return out, true
+}
+
+// splitSnapshotTag strips an optional "#TAG" snapshot anchor from a path
+// argument ("f.go#A1B2" — the header form tool results render), returning
+// the bare path and the tag ("" when absent or not a plausible hex tag).
+func splitSnapshotTag(p string) (path, tag string) {
+	i := strings.LastIndex(p, "#")
+	if i <= 0 {
+		return p, ""
+	}
+	t := p[i+1:]
+	if len(t) < 4 || len(t) > 64 {
+		return p, ""
+	}
+	for _, c := range t {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return p, ""
+		}
+	}
+	return p[:i], strings.ToLower(t)
 }
 
 // RenderWindow renders lines as 1-based "N:content" rows in a
