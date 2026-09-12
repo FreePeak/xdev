@@ -50,6 +50,7 @@ var subcommands = map[string]bool{
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
+	"stats": true, "memory": true,
 }
 
 func main() {
@@ -99,6 +100,9 @@ func main() {
   Base dir: --profile > XDEV_PROFILE > XDEV_AGENT_DIR > XDG (after config init-xdg) > ~/.xdev/agent
   xdev plugin <sub>            plugins: list | search | install | remove | info
   xdev acp                     ACP server on stdio (Agent Client Protocol, for editors)
+  xdev stats [--summary|--json|--serve]  usage over the local session store
+  xdev memory <sub>            local memory: show | stats | lessons | add | edit
+                               | export | import | scratchpad | clear --yes
 
 Flags:
 `, version)
@@ -292,6 +296,15 @@ Flags:
 	if mode == "plugin" {
 		os.Exit(marketplace.Run(args, os.Stdout, os.Stderr, settings.Plugins.Marketplaces))
 	}
+
+	if mode == "stats" {
+		os.Exit(runStats(args))
+	}
+
+	if mode == "memory" {
+		os.Exit(runMemoryCLI(args, settings))
+	}
+
 	switch mode {
 	case "version":
 		fmt.Printf("xdev %s\n", version)
