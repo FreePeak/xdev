@@ -574,7 +574,22 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		default:
 			return nil, history, err
 		}
-		if serr := sleepBackoff(ctx, policy.delay(attempt)); serr != nil {
+		// omp's auto_retry_* pair (#92): a hook that logs provider health
+		// needs the attempt and the reason, not just a debug line. Emitted
+		// before the backoff so a long wait is visible while it happens.
+		a.emitIntercept(ctx, "auto_retry_start", map[string]any{
+			"attempt": attempt, "maxAttempts": policy.MaxRetries,
+			"kind": string(ai.Classify(err)), "error": err.Error(),
+			"delayMs": policy.delay(attempt).Milliseconds(),
+		})
+		serr := sleepBackoff(ctx, policy.delay(attempt))
+		// "ok" is whether the BACKOFF completed (false = the run was aborted
+		// during it), not whether the retry succeeded — the next
+		// auto_retry_start / agent_end carries the outcome.
+		a.emitIntercept(ctx, "auto_retry_end", map[string]any{
+			"attempt": attempt, "ok": serr == nil,
+		})
+		if serr != nil {
 			return nil, history, serr
 		}
 		logx.Debugf("retry %d/%d after: %v", attempt, policy.MaxRetries, err)
@@ -979,6 +994,23 @@ func redactMessages(msgs []ai.Message, r Redactor) []ai.Message {
 		out[i].Content = blocks
 	}
 	return out
+}
+
+// EmitSessionShutdown publishes session_shutdown (omp's end-of-session
+// event). Idempotent-safe: a nil bus is a no-op, and a run that never opened
+// a bus simply emits nothing.
+func (a *Agent) EmitSessionShutdown() {
+	a.emitIntercept(context.Background(), "session_shutdown", map[string]any{"model": a.Model})
+}
+
+// emitIntercept publishes one lifecycle event on the interceptor bus
+// (nil-safe): the loop and the modes share this so an event cannot be emitted
+// from one place and forgotten in the others.
+func (a *Agent) emitIntercept(ctx context.Context, event string, payload any) {
+	if a == nil || a.Intercept == nil {
+		return
+	}
+	a.Intercept.Emit(ctx, event, payload)
 }
 
 // rulebookNote renders the path-scoped rulebook guidance for one completed

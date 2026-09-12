@@ -565,6 +565,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// A compaction also reaches the bus as `session_compact` (compact.go's
 	// OnCompaction call is the emission point; see agent.WithCompactionEvent).
 	ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
+	// #92: omp's session_shutdown fires when the session ends, so a hook can
+	// archive or notify on exit rather than only on a switch.
+	defer ag.EmitSessionShutdown()
 	if exts != nil {
 		defer exts.Close()
 	}
