@@ -1,13 +1,16 @@
 # xdev ↔ omp parity delta (2026-09-12)
 
-Status: **launch surface implemented, CLI defect batch fixed.** Companion evidence:
+Status: **launch surface implemented, CLI defect batch fixed; the remaining
+residuals were re-verified 2026-09-13 and ticketed as #79–#112 (PRD §4).** Companion evidence:
 `docs/parity/cli.md` (CLI/flag/subcommand findings), `docs/parity/tools.md`,
-`docs/parity/agent-system.md`, `docs/parity/knowledge-and-sessions.md`,
-`docs/parity/tui-and-v2.md`.
+`docs/parity/agent-system.md`. (Earlier this line listed `knowledge-and-sessions.md`
+and `tui-and-v2.md` as companions — those docs were never written; the 2026-09-13
+reconciliation fan-out covers their scope with file:line evidence in the issues.)
 
-Baseline: **omp v18.1.17** (`~/.bun/bin/omp`, docs `omp://`) plus the authoritative
-`cli-reference.md`. Method: mechanical surface diff of `omp --help` vs the
-installed `xdev -h`, then per-item semantic check against the omp reference.
+Baseline: **omp v18.1.17** (`~/.bun/bin/omp` at audit time; installed since moved to
+`~/.local/bin/omp`, v18.1.18 — 2026-09-13 drift check: same 131 `omp://` docs, no feature
+drift) plus the authoritative `cli-reference.md`. Method: mechanical surface diff of
+`omp --help` vs the installed `xdev -h`, then per-item semantic check against the omp reference.
 
 ## Already found and fixed by this pass
 
@@ -76,12 +79,13 @@ installed `xdev -h`, then per-item semantic check against the omp reference.
 | `glob` rejected omp's path-only shape; `read` said "file not found" for a selector-shaped path; malformed `ast_grep` patterns reported "no matches" | T2 F10/F4/F11 | all three fixed; the ast case documents its heuristic ceiling |
 | `-export <session.jsonl>` overwrote the transcript with HTML | T4/T5 | refuses any existing non-HTML target; re-export over a previous export stays allowed |
 
-Still open from T3 (recorded, not yet fixed): hooks payload field names (`tool`/`args`/`text`
-vs omp's `toolName`/`toolCallId`/`input`/`content`/`isError` — the rename is a
-cross-package interface change), hub processes orphaned at session exit, the
-TTSR `condition` field on discovered rules parsed but never consumed, task
-batch wire shape `{context, tasks[]}`, `task.disabledAgents`, goal budget
-accounting lagging one turn, and a no-`yield` child completing silently.
+Still open from T3 — corrected 2026-09-13 against HEAD: three of these were fixed by the
+4ed9920/6038f28 waves — hooks payload names (`toolName`/`input`/`content`/`isError` now
+ship; only `toolCallId` remains, #92), hub processes orphaned (StopAll deferred in all
+four modes), and the TTSR `condition` field on discovered rules (`ttsrConfig` merge, #95).
+Still genuinely open: task batch wire shape `{context, tasks[]}` + `task.disabledAgents` +
+no-`yield` child completion (#91), goal budget lag (#40 — accounting timing, see agent
+audit), and the items in the tables below (#104, #105).
 
 ## Subcommands: missing in xdev
 
