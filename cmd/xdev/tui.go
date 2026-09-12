@@ -39,6 +39,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// Warm discovery-enabled providers off the UI thread: /model's picker
+	// reads every provider's catalog on open, and a cold discovery probe
+	// (4s timeout, dead-server worst case) would freeze the key thread on
+	// the first open. Pinned-only providers need no warm-up — providerModels
+	// answers those from memory.
+	for name, pc := range cfg.Providers {
+		if pc != nil && pc.Discovery != nil {
+			go providerModels(name, pc)
+		}
+	}
 	modelRef, effortRef, err := resolveModel(opts.Model, cfg, lastSettings())
 	if err != nil {
 		return 2, err
@@ -147,7 +157,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
-	saveBreadcrumb(store.Path())
+	// The breadcrumb keys --continue for this pane. A fresh session is
+	// memory-only until its first assistant message, so record the
+	// AUTO-PERSIST path: --continue already guards with os.Stat, and a
+	// breadcrumb naming the live session beats silently reopening the
+	// previous one (the /new, /drop defect).
+	saveBreadcrumb(breadcrumbPath(store))
 	wireTaskParent(reg, store)
 	defer func() {
 		modelMu.Lock()
@@ -294,7 +309,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	}
 
-	ts := &tuiSession{store: store, app: app, model: modelName, api: prov.API(), provider: provName}
+	ts := &tuiSession{store: store, app: app}
 
 	var swapStoreTo func(*session.Store) error
 
@@ -326,7 +341,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.store = ns
 		wireTaskParent(reg, ns) // children must link to the ACTIVE session
 		app.Reset()
-		saveBreadcrumb(ns.Path())
+		saveBreadcrumb(breadcrumbPath(ns))
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
 		return nil
 	}
@@ -350,7 +365,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			vibeScope.Restore(workers, on)
 		}
 		app.Reset()
-		saveBreadcrumb(ns.Path())
+		saveBreadcrumb(breadcrumbPath(ns))
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 		}
@@ -397,7 +412,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	})
 	// Picker extras (issue #26): prompt-text search, pin sidecar, delete.
-	app.SetPickerSearch(func(query string) []tui.PickerItem {
+	app.SetPickerSearch(func(query string) []tui.SessionPickerItem {
 		return searchPickerItems(cwd, query)
 	})
 	app.SetPickerPinToggle(func(id string) {
@@ -411,26 +426,29 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetResumeList(func(cwd string) error {
 		metas, err := session.List(sessionDataDir())
 		if err != nil {
-			return err
+			return nil
 		}
-		var lines []string
-		count := 0
+		out := make([]tui.ResumeOption, 0, 12)
 		for _, m := range metas {
-			if m.CWD != cwd || m.TitleSource == "subagent" {
+			if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
 				continue
 			}
-			count++
-			msg := fmt.Sprintf("%-8s  %s  (%s, last %s)", m.ID[:8], m.Title, humanSize(m.SizeBytes), m.ModTime.Format("Jan 02 15:04"))
-			lines = append(lines, msg)
-			if count >= 12 {
+			out = append(out, tui.ResumeOption{
+				ID:      m.ID,
+				Title:   m.Title,
+				Detail:  humanSize(m.SizeBytes) + " · " + m.ModTime.Format("Jan 02 15:04"),
+				Current: m.ID == store.ID(),
+			})
+			if len(out) >= 12 {
 				break
 			}
 		}
-		if len(lines) == 0 {
+		items := resumePickerItems(cwd)
+		if len(items) == 0 {
 			app.AddSystemBlock("no other sessions in this directory")
 			return nil
 		}
-		app.AddSystemBlock("sessions in " + cwd + " (use /resume <id-prefix>):\n" + strings.Join(lines, "\n"))
+		app.OpenSessionPicker(items)
 		return nil
 	})
 	// branchReplay rebuilds the transcript from the live leaf.
@@ -456,15 +474,42 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetSessionBranch(func(args string) error {
 		query := strings.TrimSpace(args)
 		if query == "" {
-			return fmt.Errorf("branch: entry-id prefix required")
+			return fmt.Errorf("branch: entry-id prefix required (ids are listed by /tree)")
 		}
+		// Only message entries are branch targets: a leaf on a marker
+		// (model_change, reset boundary) would terminate the context in a
+		// non-message, and prefixes must be unambiguous — first-match-wins
+		// silently picked a different entry than the user meant.
+		var (
+			match   session.Entry
+			matches int
+		)
 		for _, e := range store.Entries() {
 			env := e.Envelope()
 			if strings.HasPrefix(env.ID, query) {
 				return branchToEntry(env.ID)
 			}
 		}
-		return fmt.Errorf("branch: no entry matching %q", query)
+		if matches == 0 {
+			return fmt.Errorf("branch: no entry matching %q (entries before the last /clear or compaction are not addressable)", query)
+		}
+		if matches > 1 {
+			return fmt.Errorf("branch: %q matches %d entries — use a longer prefix", query, matches)
+		}
+		env := match.Envelope()
+		if _, ok := match.(*session.MessageEntry); !ok {
+			return fmt.Errorf("branch: %s is a %s entry — /branch switches to a message", env.ID[:8], env.Type)
+		}
+		if err := store.Branch(env.ID); err != nil {
+			return fmt.Errorf("branch: %v", err)
+		}
+		// Replay the new branch's transcript into the TUI.
+		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
+			app.Reset()
+			replayTranscript(app, res.Messages)
+			app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
+		}
+		return nil
 	})
 	// /tree selector: entry rows built from the live store, labels from
 	// the dataDir sidecar (UI state — the session package stays label-free).
@@ -602,9 +647,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
-			if running.Load() {
+			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
+			defer running.Store(false)
 			// A fresh session lives memory-only until its first
 			// assistant message — materialize it so the fork has a
 			// source file to copy.
@@ -728,14 +774,40 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return swapStoreTo(store)
 		},
 		Clear: func() error {
-			if running.Load() {
+			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
+			defer running.Store(false)
 			if err := store.ResetLeaf(); err != nil {
 				return err
 			}
 			app.Reset()
+			// The transcript must not go fully blank: draw() renders the
+			// welcome screen whenever there are no blocks, and a command
+			// that answers with nothing reads as if it were swallowed.
+			app.AddSystemBlock("· context cleared — history kept on disk")
 			return nil
+		},
+		Recent: func() []tui.ResumeOption {
+			metas, err := session.List(sessionDataDir())
+			if err != nil {
+				return nil
+			}
+			out := make([]tui.ResumeOption, 0, 12)
+			for _, m := range metas {
+				if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent || m.ID == store.ID() {
+					continue
+				}
+				out = append(out, tui.ResumeOption{
+					ID:     m.ID,
+					Title:  m.Title,
+					Detail: m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04"),
+				})
+				if len(out) >= 12 {
+					break
+				}
+			}
+			return out
 		},
 		Drop: func() error {
 			if !running.CompareAndSwap(false, true) {
@@ -748,15 +820,43 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// document committed as a compaction entry.
 		Handoff: runHandoff,
 	})
-	// /model: current + available from settings roles, switch by ref.
+
+	// /model: the interactive selector. Roles tab first (each row sets that
+	// slot), then the concrete model catalog — all models plus one view per
+	// provider, which is what omp's /model shows.
 	app.SetModelOps(&tui.ModelOps{
 		Current: func() string {
 			modelMu.Lock()
 			defer modelMu.Unlock()
 			return live.provName + "/" + live.model
 		},
-		List: func() []string {
-			return availableModelRefs(lastSettings())
+		Views: func() []tui.PickerView {
+			modelMu.Lock()
+			cur := live.provName + "/" + live.model
+			modelMu.Unlock()
+			return modelPickerViews(cfg, lastSettings(), cur, app)
+		},
+		Models: func() []tui.PickerItem {
+			modelMu.Lock()
+			cur := live.provName + "/" + live.model
+			modelMu.Unlock()
+			return modelPickerItems(cfg, lastSettings(), cur)
+		},
+		SetRole: func(role, ref string) error {
+			if !config.IsKnownRole(role) {
+				return fmt.Errorf("unknown role @%s", role)
+			}
+			if err := config.Set(config.GlobalSettingsPath(), "modelRoles."+role, ref); err != nil {
+				return err
+			}
+			// Keep the in-memory layer in sync so the follow-up
+			// "@role" switch resolves without a restart.
+			s := lastSettings()
+			if s.ModelRoles == nil {
+				s.ModelRoles = map[string]string{}
+			}
+			s.ModelRoles[role] = ref
+			return nil
 		},
 		Set: func(ref string) error {
 			nr, ne, err := resolveModel(ref, cfg, lastSettings())
@@ -775,6 +875,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if err != nil {
 				return err
 			}
+			_ = nprov
 			if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
 				logx.Errorf("model change entry: %v", err)
 			}
@@ -917,14 +1018,32 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		})
 		defer stopWatch()
 	}
+	// themeLabel is what the user configured — "auto" (the polarity-detected
+	// palette) or a concrete theme. /theme reports and writes it, so the
+	// value /settings shows ("theme auto") is restorable instead of dead and
+	// a switch survives a restart instead of evaporating at exit.
+	themeLabel := themeName
+	if themeLabel == "" {
+		themeLabel = "auto"
+	}
 	app.SetThemeOps(&tui.ThemeOps{
-		Current: func() string { return th.Name },
-		List:    func() []string { return theme.AvailableThemes(theme.CustomDir()) },
+		Current: func() string {
+			if themeLabel == "auto" {
+				return "auto (" + th.Name + ")"
+			}
+			return th.Name
+		},
+		List: func() []string { return theme.AvailableThemes(theme.CustomDir()) },
 		Set: func(name string) error {
 			nt := theme.LoadNamed(name, theme.CustomDir())
-			if nt == nil || (nt.Name != name && name != "") {
-				// LoadNamed falls back on failure; only accept an exact hit
-				// so a typo is reported rather than silently ignored.
+			if nt == nil {
+				return fmt.Errorf("unknown theme %q", name)
+			}
+			// LoadNamed falls back on failure, so only an exact hit (or the
+			// "auto" polarity default, whose resolved name differs by
+			// design) counts: a typo is reported, never silently applied.
+			if nt.Name != name && name != "auto" {
+				known := false
 				for _, avail := range theme.AvailableThemes(theme.CustomDir()) {
 					if avail == name {
 						app.SetTheme(applyTheme(nt))
@@ -932,10 +1051,19 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 						return nil
 					}
 				}
-				return fmt.Errorf("unknown theme %q", name)
+				if !known {
+					return fmt.Errorf("unknown theme %q", name)
+				}
 			}
 			app.SetTheme(applyTheme(nt))
 			th = nt
+			themeLabel = name
+			if err := config.Set(config.GlobalSettingsPath(), "theme", name); err != nil {
+				// The palette switched; only saving failed. Say which, rather
+				// than reporting the switch itself as broken.
+				return fmt.Errorf("theme %s applied for this session, but saving failed: %v", name, err)
+			}
+			lastSettings().Theme = name
 			return nil
 		},
 	})
@@ -1103,6 +1231,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !running.CompareAndSwap(false, true) {
 				app.AddSystemBlock("a turn is already running — Esc cancels it")
 				return
+			}
+			// Name the session after its first prompt: /resume and the
+			// breadcrumb read the title slot, and "print <timestamp>" hides
+			// everything about the conversation. Called before the first
+			// assistant message materializes the file, so the title lands in
+			// the slot without needing a rewrite pass; later prompts keep
+			// the first one's title (omp's first-prompt cascade).
+			if store.Path() == "" {
+				if t := titleFromPrompt(text); t != "" {
+					store.SetTitle(t)
+				}
 			}
 			sessMu.Lock()
 			msg := ai.Message{
@@ -1286,12 +1425,42 @@ func memoryOps(mem memoryBackend) *tui.MemoryOps {
 }
 
 // tuiSession accumulates the live conversation and persists messages.
+// titleFromPrompt derives a session title from the first user prompt: the
+// first line, whitespace-collapsed, capped at 40 runes.
+func titleFromPrompt(text string) string {
+	line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(text), "\n", 2)[0])
+	line = strings.Join(strings.Fields(line), " ")
+	runes := []rune(line)
+	if len(runes) > 40 {
+		return string(runes[:40]) + "…"
+	}
+	return line
+}
+
+// roleNamesSorted lists the configured role names in stable order (the
+// /model roles tab and the usage report both want determinism).
+func roleNamesSorted(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// breadcrumbPath prefers the materialized file path and falls back to the
+// auto-persist target, so a session that has not written its first
+// assistant message yet still owns the pane's --continue breadcrumb.
+func breadcrumbPath(s *session.Store) string {
+	if p := s.Path(); p != "" {
+		return p
+	}
+	return s.AutoPath()
+}
+
 type tuiSession struct {
-	store    *session.Store
-	app      *tui.App
-	model    string
-	api      string
-	provider string
+	store *session.Store
+	app   *tui.App
 }
 
 // tuiHooks implements agent.TurnHooks for the TUI.
@@ -1430,43 +1599,140 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 	}
 }
 
-// availableModelRefs lists the switchable model refs: the settings default,
-// each provider's configured models (from models.yml refs cached in roles),
-// and the @role aliases — the same superset the model flag accepts. Dedup
-// keeps the list stable. ponytail: runtime discovery (network) is not part
-// of this listing; a provider's models that appear only via its discovery
-// endpoint are not enumerated here.
-func availableModelRefs(settings *config.Settings) []string {
+// modelPickerViews builds the /model selector's tabs: a roles view whose
+// rows open the assignment list, then "All models" (sectioned by provider)
+// and one view per provider — the same shape omp's /model shows.
+func modelPickerViews(cfg *config.Config, s *config.Settings, current string, app *tui.App) []tui.PickerView {
+	items := modelPickerItems(cfg, s, current)
+	roles := make([]tui.PickerItem, 0, len(config.RoleNames))
+	for _, name := range config.RoleNames {
+		ref, effort := "", ""
+		if s != nil {
+			ref = strings.TrimSpace(s.ModelRoles[name])
+			effort = strings.TrimSpace(s.ModelRolesEffort[name])
+		}
+		// An unset @default is not "unconfigured": resolution falls back to
+		// models.yml's defaultModel, so show that as the effective value.
+		if ref == "" && name == "default" && cfg != nil {
+			ref = cfg.DefaultModelRef()
+		}
+		detail := "unset"
+		if ref != "" {
+			// The arrow reads as "this slot resolves to"; a bare ref would
+			// look like a model row.
+			detail = "→ " + ref
+			if effort != "" {
+				detail += ":" + effort
+			}
+		}
+		roles = append(roles, tui.PickerItem{
+			Label:   "@" + name,
+			Detail:  detail,
+			Value:   "@" + name,
+			Current: sameModelRef(ref, current),
+		})
+	}
+	roleView := tui.PickerView{
+		Name: "Roles", Items: roles, Action: "set",
+		OnSelect: func(role string) { app.OpenRolePicker(strings.TrimPrefix(role, "@")) },
+	}
+	views := []tui.PickerView{roleView}
+	if len(items) > 0 {
+		all := make([]tui.PickerItem, len(items))
+		copy(all, items)
+		views = append(views, tui.PickerView{Name: "All models", Items: all, Action: "use"})
+	}
+	for _, name := range providerKeys(cfg) {
+		pc := cfg.Providers[name]
+		if pc == nil || (s != nil && s.ProviderDisabled(name)) {
+			continue
+		}
+		var mine []tui.PickerItem
+		for _, it := range items {
+			if strings.HasPrefix(it.Value, name+"/") {
+				mine = append(mine, it)
+			}
+		}
+		if len(mine) > 0 {
+			views = append(views, tui.PickerView{Name: name, Items: mine, Action: "use"})
+		}
+	}
+	return views
+}
+
+// modelPickerItems is the flat model catalog behind the selector: every
+// provider's pinned models merged with its discovery results (cached once
+// per provider per process by providerModels), sectioned by provider so the
+// "All models" tab reads as a table.
+func modelPickerItems(cfg *config.Config, s *config.Settings, current string) []tui.PickerItem {
+	if cfg == nil {
+		return nil
+	}
+	var out []tui.PickerItem
 	seen := map[string]bool{}
-	var out []string
-	add := func(ref string) {
-		ref = strings.TrimSpace(ref)
-		if ref == "" || seen[ref] {
-			return
+	for _, name := range providerKeys(cfg) {
+		pc := cfg.Providers[name]
+		if pc == nil || (s != nil && s.ProviderDisabled(name)) {
+			continue
 		}
-		seen[ref] = true
-		out = append(out, ref)
+		for _, m := range providerModels(name, pc) {
+			if m.ID == "" {
+				continue
+			}
+			ref := name + "/" + m.ID
+			if seen[ref] {
+				continue
+			}
+			seen[ref] = true
+			out = append(out, tui.PickerItem{
+				Label:   ref,
+				Detail:  modelDetail(m),
+				Value:   ref,
+				Section: name,
+				Current: sameModelRef(ref, current),
+			})
+		}
 	}
-	if settings != nil {
-		if settings.DefaultModel != "" {
-			add(settings.DefaultModel)
-		}
-		for _, role := range roleNamesSorted(settings.ModelRoles) {
-			add("@" + role) // /model "@smol" is a valid resolveModel input
-			add(settings.ModelRoles[role])
-		}
-	}
-	// Add each model ref present in any role value (dedup handles repeats).
 	return out
 }
 
-func roleNamesSorted(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// modelDetail renders a model row's second column: its display name plus
+// the context window when the config declares one.
+func modelDetail(m config.ModelConfig) string {
+	parts := []string{}
+	if m.Name != "" && m.Name != m.ID {
+		parts = append(parts, m.Name)
 	}
-	sort.Strings(out)
-	return out
+	if m.ContextWindow > 0 {
+		parts = append(parts, humanCtx(m.ContextWindow))
+	}
+	if m.Reasoning {
+		parts = append(parts, "reasoning")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func humanCtx(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%gM ctx", float64(n)/1_000_000)
+	case n >= 1000:
+		return fmt.Sprintf("%dk ctx", n/1000)
+	default:
+		return fmt.Sprintf("%d ctx", n)
+	}
+}
+
+// sameModelRef compares two model refs ignoring an ":effort" suffix, so
+// "@slow:high" and the "onegw/dev" it resolves to mark the same session.
+func sameModelRef(a, b string) bool {
+	strip := func(s string) string {
+		if i := strings.LastIndex(s, ":"); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	return a != "" && strip(a) == strip(b)
 }
 
 // resumePickerItems lists resumable sessions as picker rows across ALL
@@ -1476,18 +1742,18 @@ func roleNamesSorted(m map[string]string) []string {
 // current-folder scope without a second scan, and Pinned from the
 // session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
 // browsing while the picker windows to 8 visible rows.
-func resumePickerItems(cwd string) []tui.PickerItem {
+func resumePickerItems(cwd string) []tui.SessionPickerItem {
 	metas, err := session.List(sessionDataDir())
 	if err != nil {
 		return nil
 	}
 	pins := loadSessionPins()
-	var out []tui.PickerItem
+	var out []tui.SessionPickerItem
 	for _, m := range metas {
 		if m.TitleSource == "subagent" || len(m.ID) < 8 {
 			continue
 		}
-		out = append(out, tui.PickerItem{
+		out = append(out, tui.SessionPickerItem{
 			ID:     m.ID[:8],
 			Title:  m.Title,
 			Mtime:  m.ModTime.Format("Jan 02 15:04"),
@@ -1508,14 +1774,14 @@ func resumePickerItems(cwd string) []tui.PickerItem {
 // tokens count as prompt matches — matches rank by match count: id/title
 // hits count double, body hits count occurrences. The body scan is capped
 // (64 KiB per file, 50 files) — the picker runs per keystroke.
-func searchPickerItems(cwd, query string) []tui.PickerItem {
+func searchPickerItems(cwd, query string) []tui.SessionPickerItem {
 	items := resumePickerItems(cwd)
 	tokens := strings.Fields(strings.ToLower(query))
 	if len(tokens) == 0 {
 		return items
 	}
 	type ranked struct {
-		item  tui.PickerItem
+		item  tui.SessionPickerItem
 		score int
 	}
 	var out []ranked
@@ -1542,7 +1808,7 @@ func searchPickerItems(cwd, query string) []tui.PickerItem {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
-	res := make([]tui.PickerItem, 0, len(out))
+	res := make([]tui.SessionPickerItem, 0, len(out))
 	for _, r := range out {
 		res = append(res, r.item)
 	}

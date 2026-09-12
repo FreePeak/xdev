@@ -190,3 +190,57 @@ func TestXterm256Palette(t *testing.T) {
 		t.Fatalf("gray ramp must be neutral: %+v", g)
 	}
 }
+
+// TestCustomDirFollowsDataDir pins CustomDir to config.DataDir so
+// XDEV_AGENT_DIR sandboxes custom themes like every other data path.
+func TestCustomDirFollowsDataDir(t *testing.T) {
+	home := t.TempDir()
+	sandbox := t.TempDir()
+	cases := []struct {
+		name     string
+		agentDir string
+		want     string
+	}{
+		{"unset falls back to the home data dir", "", filepath.Join(home, ".xdev", "agent", "themes")},
+		{"XDEV_AGENT_DIR redirects the dir", sandbox, filepath.Join(sandbox, "themes")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			if tc.agentDir != "" {
+				t.Setenv("XDEV_AGENT_DIR", tc.agentDir)
+			}
+			if got := CustomDir(); got != tc.want {
+				t.Fatalf("CustomDir() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAvailableThemesShape pins the list the /theme picker offers: "auto"
+// leads so it is settable and restorable, built-ins follow, then customs.
+func TestAvailableThemesShape(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"zeta", "aardvark", "groknight"} {
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(validThemeJSON(t, nil)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name    string
+		dir     string
+		want    string // comma-joined
+		wantAny string // substring that must appear
+	}{
+		{"no custom dir", "", "auto,grokday,groknight", ""},
+		{"auto leads, customs trail built-ins sorted", dir, "auto,grokday,groknight,aardvark,zeta", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.Join(AvailableThemes(tc.dir), ",")
+			if got != tc.want {
+				t.Fatalf("AvailableThemes(%q) = %q, want %q", tc.dir, got, tc.want)
+			}
+		})
+	}
+}

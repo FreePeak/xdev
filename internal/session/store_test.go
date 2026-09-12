@@ -423,7 +423,7 @@ func TestTreeRendersGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := s.Tree()
-	for _, want := range []string{"m1 message hello", "a1 message", "a2 message", "→"} {
+	for _, want := range []string{"m1 message user: hello", "a1 message assistant", "a2 message assistant", "→"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("tree missing %q:\n%s", want, got)
 		}
@@ -440,6 +440,71 @@ func TestTreeRendersGraph(t *testing.T) {
 	got = s.Tree()
 	if !strings.Contains(got, "→ a1") || strings.Contains(got, "→ a2") {
 		t.Errorf("branch did not move the marker:\n%s", got)
+	}
+}
+
+// TestStorePaths pins path visibility: Path is empty until materialized,
+// AutoPath reports EnableAutoPersist's intended destination even while the
+// session is still memory-only.
+func TestStorePaths(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name     string
+		build    func() *Store
+		wantPath string
+		wantAuto string
+	}{
+		{"memory only", func() *Store { return OpenMem("/p", "t") }, "", ""},
+		{"on disk", func() *Store {
+			s := OpenMem("/p", "t")
+			if _, err := s.EnsureOnDisk(filepath.Join(dir, "on.jsonl"), Options{}); err != nil {
+				t.Fatal(err)
+			}
+			return s
+		}, filepath.Join(dir, "on.jsonl"), ""},
+		{"auto persist, not materialized", func() *Store {
+			s := OpenMem("/p", "t")
+			s.EnableAutoPersist(filepath.Join(dir, "auto.jsonl"), Options{})
+			return s
+		}, "", filepath.Join(dir, "auto.jsonl")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.build()
+			defer s.Close()
+			if got := s.Path(); got != tc.wantPath {
+				t.Errorf("Path() = %q, want %q", got, tc.wantPath)
+			}
+			if got := s.AutoPath(); got != tc.wantAuto {
+				t.Errorf("AutoPath() = %q, want %q", got, tc.wantAuto)
+			}
+		})
+	}
+}
+
+// TestSummarizeMessage pins the message summary shape: "role: text" with
+// rune-safe truncation at 60 runes (multibyte text must never be cut
+// mid-rune).
+func TestSummarizeMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		role ai.Role
+		text string
+		want string
+	}{
+		{"user", ai.RoleUser, "hello", "user: hello"},
+		{"assistant", ai.RoleAssistant, "hi there", "assistant: hi there"},
+		// "tiếng" is 5 runes; 100 runes in, 60 runes out = exactly 12 reps.
+		{"multibyte cut at 60 runes", ai.RoleUser, strings.Repeat("tiếng", 20), "user: " + strings.Repeat("tiếng", 12) + "…"},
+		{"under limit untouched", ai.RoleAssistant, "tiếng Việt", "assistant: tiếng Việt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarize(&MessageEntry{Message: ai.Message{Role: tc.role, Content: []ai.Block{ai.TextBlock{Text: tc.text}}}})
+			if got != tc.want {
+				t.Fatalf("summarize = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

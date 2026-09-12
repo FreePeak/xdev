@@ -36,9 +36,10 @@ var BuiltinActions = []string{
 	"scroll-up", "scroll-down", "scroll-top", "scroll-bottom", "scroll-page-up", "scroll-page-down",
 	"menu-prev", "menu-next", "menu-accept",
 	"history-prev", "history-next",
-	"expand", "collapse",
+	"redraw",
 	"clear-input",
 	"app.session.tree",
+	"model-select", // Alt+M: the /model roles+models selector (omp app.model.select)
 }
 
 // DefaultKeyMap is the factory chord table.
@@ -46,35 +47,38 @@ func DefaultKeyMap() *KeyMap {
 	m := &KeyMap{
 		bindings: map[string]string{
 			// Editor / composer. Ctrl+J is the portable newline (every
-			// terminal can send 0x0A); Alt-Enter and Shift-Enter are aliases
-			// where the terminal reports them, so the table lists the one
-			// that always works first.
-			"Enter":       "submit",
-			"C-j":         "newline",
-			"Alt-Enter":   "newline",
-			"Shift-Enter": "newline",
-			"Escape":      "cancel",
-			"C-u":         "clear-input",
+			// terminal can send 0x0A). The aliases are real chords on the
+			// terminals that report them: Alt-Enter via ESC-prefixing,
+			// Shift-Enter via kitty/CSI-u (chordOf marks KeyEnter
+			// shift-eligible); elsewhere they degrade to plain Enter.
+			"Enter":   "submit",
+			"C-j":     "newline",
+			"A-Enter": "newline",
+			"S-Enter": "newline",
+			"Escape":  "cancel",
+			"C-u":     "clear-input",
 			// Quit
-			"C-c": "quit",
-			// Menu navigation
+			"C-c":  "quit",
+			"C-d":  "quit",
 			"Tab":  "menu-accept",
 			"C-p":  "menu-prev",
 			"C-n":  "menu-next",
 			"Up":   "menu-prev",
 			"Down": "menu-next",
 			// Scroll
-			"PgUp":       "scroll-page-up",
-			"PgDn":       "scroll-page-down",
-			"C-b":        "scroll-page-up",
-			"C-f":        "scroll-page-down",
-			"Home":       "scroll-top",
-			"End":        "scroll-bottom",
-			"Shift-Up":   "scroll-up",
-			"Shift-Down": "scroll-down",
+			"PgUp":   "scroll-page-up",
+			"PgDn":   "scroll-page-down",
+			"C-b":    "scroll-page-up",
+			"C-f":    "scroll-page-down",
+			"Home":   "scroll-top",
+			"End":    "scroll-bottom",
+			"S-Up":   "scroll-up",
+			"S-Down": "scroll-down",
 			// TUI extras
-			"C-l": "expand",
-			"C-e": "collapse",
+			"C-l": "redraw",
+			// Model selector. omp parity chord (app.model.select); Alt+M
+			// is deliverable in every terminal we target.
+			"A-m": "model-select",
 			"C-r": "history-prev",
 			"A-t": "app.session.tree",
 			// history-next, abort and complete share chords with menu/history
@@ -83,6 +87,9 @@ func DefaultKeyMap() *KeyMap {
 			// Actions with no default chord (listed so /hotkeys shows them).
 			// "abort" → C-c (shared with quit); "complete" → Tab (shared with
 			// menu-accept). These share chords because context disambiguates.
+			// history-next has no default (Up/Down already recall when the
+			// editor is in history mode); it stays settable from
+			// keybindings.yml.
 		},
 		actions: append([]string(nil), BuiltinActions...),
 	}
@@ -247,8 +254,11 @@ func chordOf(ev *tcell.EventKey) string {
 	if m&tcell.ModCtrl != 0 {
 		parts = append(parts, "C")
 	}
-	if m&tcell.ModShift != 0 && ev.Key() >= tcell.KeyUp && ev.Key() <= tcell.KeyPgDn {
-		parts = append(parts, "S") // Shift only distinguishes arrow/nav keys
+	// Shift distinguishes arrow/nav keys — and Enter on kitty/CSI-u
+	// terminals, which report Shift+Enter as a distinct event. Terminals
+	// that send plain Enter for Shift+Enter degrade to the Enter chord.
+	if m&tcell.ModShift != 0 && ((ev.Key() >= tcell.KeyUp && ev.Key() <= tcell.KeyPgDn) || ev.Key() == tcell.KeyEnter) {
+		parts = append(parts, "S")
 	}
 	if m&tcell.ModAlt != 0 {
 		parts = append(parts, "A")

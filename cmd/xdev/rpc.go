@@ -239,7 +239,14 @@ func (h *rpcHandler) State() protocol.State {
 }
 
 func (h *rpcHandler) SetModel(ref string) error {
-	provName, modelName, err := config.ParseModelRef(ref)
+	// Route through the shared resolver so RPC accepts what the flag and
+	// /model accept (bare ids, @role aliases, :effort) and a bad id fails
+	// here instead of 404ing on the next turn.
+	resolved, _, err := resolveModel(ref, h.cfg, lastSettings())
+	if err != nil {
+		return err
+	}
+	provName, modelName, err := config.ParseModelRef(resolved)
 	if err != nil {
 		return err
 	}
@@ -268,7 +275,9 @@ func (h *rpcHandler) SetModel(ref string) error {
 			tt.Provider, tt.Model = prov, modelName
 		}
 	}
-	_ = h.store.Append(&session.ModelChangeEntry{Model: ref})
+	// Persist the RESOLVED ref: a raw "@smol" alias in the session log
+	// would not resolve on resume (print/tui already store provider/model).
+	_ = h.store.Append(&session.ModelChangeEntry{Model: provName + "/" + modelName})
 	return nil
 }
 
