@@ -415,6 +415,8 @@ func entryTypeOf(e Entry) string {
 		return TypeCustom
 	case *UnknownEntry:
 		return t.EntryType
+	case *GoalUpdatedEntry:
+		return TypeGoalUpdated
 	default:
 		return ""
 	}
@@ -436,6 +438,8 @@ func setEnvelope(e Entry, env Envelope) {
 	case *CustomEntry:
 		t.Env = env
 	case *UnknownEntry:
+		t.Env = env
+	case *GoalUpdatedEntry:
 		t.Env = env
 	}
 }
@@ -558,6 +562,8 @@ func summarize(e Entry) string {
 		return t.Model
 	case *CustomEntry:
 		return "(" + t.CustomType + ")"
+	case *GoalUpdatedEntry:
+		return "goal " + t.Goal.Status
 	default:
 		return "(" + env.Type + ")"
 	}

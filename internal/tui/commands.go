@@ -72,6 +72,12 @@ type PrewalkOps struct {
 	Set     func(on bool, into string) error
 }
 
+// GoalOps wires the /goal command to the live goal state (lives in cmd).
+// View renders the current goal and budget; nil ops degrade to a notice.
+type GoalOps struct {
+	View func() string
+}
+
 // ThemeOps wires the /theme command (theme resolution lives in cmd).
 type ThemeOps struct {
 	Current func() string
@@ -113,6 +119,7 @@ type CommandAPI interface {
 	ResumeSession(query string) error
 	SwitchModel(args string) error
 	PlanMode(args string) error
+	Goal(args string) error
 	Advisor(args string) error
 	Memory(args string) error
 	Theme(args string) error
@@ -161,6 +168,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit)",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
+		{Name: "goal", Description: "show the active goal and its token budget",
+			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
 		{Name: "hotkeys", Description: "show keybinding map",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.KeyMap().Hotkeys()); return nil }},
 		{Name: "tasks", Description: "list background bash jobs",

@@ -653,6 +653,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		Get: func() bool { return planMode.Active },
 		Set: func(on bool) error { planMode.Active = on; return nil },
 	})
+
+	app.SetGoalOps(&tui.GoalOps{
+		View: func() string {
+			gs := agent.GoalStateOf(reg)
+			if gs == nil {
+				return "goal: not wired"
+			}
+			return gs.Describe()
+		},
+	})
 	if themeName != "" {
 		stopWatch := theme.Watch(theme.CustomDir(), themeName, func(nt *theme.Theme) {
 			app.SetTheme(nt)
@@ -877,6 +887,12 @@ func (h *tuiHooks) OnToolResultMessage(msg *ai.Message) {
 func (h *tuiHooks) OnTurnEnd(reason ai.StopReason, err error) {}
 func (h *tuiHooks) OnCompaction(tokensBefore int64) {
 	h.ts.app.AddSystemBlock(fmt.Sprintf("· context compacted (~%d tokens)", tokensBefore))
+}
+
+// OnGoalUpdated implements agent.GoalHook: goal transitions land in the
+// transcript.
+func (h *tuiHooks) OnGoalUpdated(g agent.Goal) {
+	h.ts.app.AddSystemBlock("· goal " + g.Status + " — " + g.Objective)
 }
 
 // config2Load is a tiny alias so tui.go shares print.go's loader.

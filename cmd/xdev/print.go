@@ -855,6 +855,10 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	mailbox := agent.NewMailbox(config.DataDir())
 	reg.Register(&agent.SendMessageTool{Mailbox: mailbox})
 	reg.Register(&agent.InboxTool{Mailbox: mailbox})
+	// M11 #40: goal mode — one session-scoped objective with an optional
+	// token budget. The agent loop reads the same state for the per-turn
+	// reminder and budget accounting; wireTaskParent binds the store.
+	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
 	if mem := buildMemory(settings); mem != nil {
 		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
 	}
@@ -991,6 +995,13 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 		}
 	}
 	tool.WireTodoSink(reg, store)
+	// M11 #40: bind the goal state to the active session (again on /resume
+	// and session switches — the new session starts with its own goal).
+	if t, ok := reg.Get(agent.GoalToolName); ok {
+		if gt, ok := t.(*agent.GoalTool); ok {
+			gt.Goals.Bind(store)
+		}
+	}
 }
 
 // failoverChain builds the M5 resilience chain from models.yml: every
@@ -1174,6 +1185,12 @@ func (h *printHooks) OnToolResultMessage(msg *ai.Message) {
 func (h *printHooks) OnTurnEnd(reason ai.StopReason, err error) {}
 func (h *printHooks) OnCompaction(tokensBefore int64) {
 	fmt.Fprintf(os.Stderr, "\n[context compacted at ~%d tokens]\n", tokensBefore)
+}
+
+// OnGoalUpdated implements agent.GoalHook: goal transitions surface on stderr
+// in print mode.
+func (h *printHooks) OnGoalUpdated(g agent.Goal) {
+	fmt.Fprintf(os.Stderr, "\n[goal %s] %s\n", g.Status, g.Objective)
 }
 
 var _ = filepath.Join
