@@ -9,6 +9,7 @@ import (
 
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
+	"github.com/FreePeak/xdev/internal/lsp"
 	"github.com/FreePeak/xdev/internal/memlimit"
 )
 
@@ -72,6 +73,7 @@ func main() {
   xdev print [flags] "prompt"  same as above
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
+  xdev lsp-config [list|validate]  language servers, resolved binaries
 
 Flags:
 `, version)
@@ -120,7 +122,7 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "tui" {
@@ -192,6 +194,10 @@ Flags:
 
 	if mode == "config" {
 		os.Exit(runConfig(args, settings))
+	}
+
+	if mode == "lsp-config" {
+		os.Exit(lsp.ConfigCommand(args, os.Stdout, os.Stderr, settings))
 	}
 
 	switch mode {
