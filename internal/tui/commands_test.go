@@ -3,6 +3,8 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -443,4 +445,97 @@ type withFresh struct{ *fakeAPI }
 func (w withFresh) FreshSession() error {
 	w.freshed++
 	return nil
+}
+
+// writeSkillPack drops a discoverable SKILL.md pack under root/<name>.
+func writeSkillPack(t *testing.T, root, name, description, body string) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "---\nname: " + name + "\ndescription: " + description + "\n---\n\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDispatchSkillCommand: "/skill:<name> [args]" sends the skill body
+// (frontmatter stripped) with the args appended as a "User:" line.
+func TestDispatchSkillCommand(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	proj := t.TempDir()
+	writeSkillPack(t, filepath.Join(proj, ".xdev", "skills"), "fmt", "formatting conventions", "Use tabs.")
+
+	f := &fakeAPI{dir: proj}
+	if !dispatch(f, "/skill:fmt run the gofmt pass") {
+		t.Fatal("/skill: was not consumed")
+	}
+	want := "Use tabs.\n\nUser: run the gofmt pass"
+	if len(f.sent) != 1 || f.sent[0] != want {
+		t.Fatalf("sent = %q, want %q", f.sent, want)
+	}
+	if len(f.blocks) != 0 {
+		t.Fatalf("a resolved skill must not warn: %v", f.blocks)
+	}
+
+	// No args: the body goes out on its own, with no empty "User:" line.
+	bare := &fakeAPI{dir: proj}
+	dispatch(bare, "/skill:fmt")
+	if len(bare.sent) != 1 || bare.sent[0] != "Use tabs." {
+		t.Fatalf("bare invocation = %q", bare.sent)
+	}
+}
+
+// TestAppSkillCommandSubmit drives the real submit path: typing
+// "/skill:fmt ..." fills the composer, Enter routes it through dispatch,
+// and the expanded prompt reaches onSend.
+func TestAppSkillCommandSubmit(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	proj := t.TempDir()
+	writeSkillPack(t, filepath.Join(proj, ".xdev", "skills"), "fmt", "formatting conventions", "Use tabs.")
+	app, _ := newTestApp(t, 80, 24)
+	app.SetCommandDir(proj)
+	var sent []string
+	app.SetHandlers(func(text string) { sent = append(sent, text) }, func() {}, func() {})
+
+	for _, r := range "/skill:fmt run the tests" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if len(sent) != 1 || sent[0] != "Use tabs.\n\nUser: run the tests" {
+		t.Fatalf("sent = %q", sent)
+	}
+}
+
+// TestDispatchUnknownSkillIsNotice: a typo'd skill name is consumed as a
+// notice — never sent to the model as a turn.
+func TestDispatchUnknownSkillIsNotice(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	f := &fakeAPI{dir: t.TempDir()}
+	if !dispatch(f, "/skill:nope") {
+		t.Fatal("an unknown /skill: name must still be consumed")
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("unknown skill must not send a prompt: %q", f.sent)
+	}
+	if len(f.blocks) != 1 || !strings.Contains(f.blocks[0], "nope") {
+		t.Fatalf("notice missing: %v", f.blocks)
+	}
+}
+
+// TestSkillSuggestionsListDiscoveredSkills: discovered packs reach the "/"
+// dropdown as /skill:<name> rows carrying their description.
+func TestSkillSuggestionsListDiscoveredSkills(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	proj := t.TempDir()
+	writeSkillPack(t, filepath.Join(proj, ".xdev", "skills"), "fmt", "formatting conventions", "Use tabs.")
+
+	rows := skillSuggestions(proj)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Name != "/skill:fmt" || rows[0].Description != "formatting conventions" || rows[0].Tag != "skill" {
+		t.Fatalf("row = %+v", rows[0])
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -264,6 +265,11 @@ func dispatch(app CommandAPI, input string) bool {
 		}
 		return true
 	}
+	// "/skill:<name> [args]" — the skill protocol's command form. Checked
+	// before the extension branch: the skill: namespace is reserved.
+	if strings.HasPrefix(name, "skill:") {
+		return skillCommand(app, strings.TrimPrefix(name, "skill:"), raw)
+	}
 	if strings.Contains(name, ":") {
 		// Extension command ("/server:cmd args").
 		if out, err := app.RunExtensionCommand(name, raw); err != nil {
@@ -283,6 +289,50 @@ func dispatch(app CommandAPI, input string) bool {
 	// Unknown name: not consumed — the caller submits it as literal prompt
 	// text (issue #11: "/foo" is never rejected).
 	return false
+}
+
+// skillCommand runs "/skill:<name> [args]": the skill's body (frontmatter
+// stripped by discovery) goes out as a prompt with the user's args appended
+// as a "User:" line. An unknown name is a notice — a typo'd skill must
+// never become a model turn.
+func skillCommand(app CommandAPI, name, raw string) bool {
+	s, ok := skills.Find(skills.Discover(app.CommandDir()), name)
+	if !ok {
+		app.AddSystemBlock(fmt.Sprintf("no skill named %q — discovered: %s", name, skillNames(app.CommandDir())))
+		return true
+	}
+	prompt := s.Body
+	if raw != "" {
+		prompt += "\n\nUser: " + raw
+	}
+	app.SendPrompt(prompt)
+	return true
+}
+
+// skillSuggestions lists discovered skills as "/skill:<name>" dropdown
+// rows. Hidden skills are listed too: hide only removes them from the
+// model's prompt list, and the command stays the explicit way in.
+func skillSuggestions(cwd string) []suggestion {
+	list := skills.Discover(cwd)
+	out := make([]suggestion, 0, len(list))
+	for _, s := range list {
+		out = append(out, suggestion{Name: "/skill:" + s.Name, Description: s.Description, Tag: "skill"})
+	}
+	return out
+}
+
+// skillNames renders the discovered skill names for the unknown-skill
+// notice.
+func skillNames(cwd string) string {
+	list := skills.Discover(cwd)
+	if len(list) == 0 {
+		return "none"
+	}
+	names := make([]string, 0, len(list))
+	for _, s := range list {
+		names = append(names, s.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // Session lifecycle runs through SessionOps (the store lives in cmd);
