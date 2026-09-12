@@ -51,6 +51,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	}
 
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
+	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
@@ -78,7 +79,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	h.agent = &agent.Agent{
 		Provider: prov, Tools: reg, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
-		TTSR:       agent.NewTTSR(lastSettings().TTSR),
+		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, provName, modelName),

@@ -109,6 +109,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// for the user — /plan off resolves accept, any next prompt is the
 	// revision note. Headless runs auto-accept (nil reviewer).
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode)
+	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
@@ -1379,7 +1380,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// through an indirection: a direct field copy would
 					// capture the nil func at literal time.
 					Hooks:      memoryTurnHooks(&tuiHooks{ts: ts, feed: func() { feedAdvisor() }}, lastSettings()),
-					TTSR:       agent.NewTTSR(lastSettings().TTSR),
+					TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 					MaxTokens:  opts.MaxTokens,
 					MaxTurns:   opts.MaxTurns,
 					Model:      lm,
