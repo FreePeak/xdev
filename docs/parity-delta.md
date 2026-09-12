@@ -79,13 +79,14 @@ drift) plus the authoritative `cli-reference.md`. Method: mechanical surface dif
 | `glob` rejected omp's path-only shape; `read` said "file not found" for a selector-shaped path; malformed `ast_grep` patterns reported "no matches" | T2 F10/F4/F11 | all three fixed; the ast case documents its heuristic ceiling |
 | `-export <session.jsonl>` overwrote the transcript with HTML | T4/T5 | refuses any existing non-HTML target; re-export over a previous export stays allowed |
 
-Still open from T3 — corrected 2026-09-13 against HEAD: three of these were fixed by the
-4ed9920/6038f28 waves — hooks payload names (`toolName`/`input`/`content`/`isError` now
-ship; only `toolCallId` remains, #92), hub processes orphaned (StopAll deferred in all
+Still open from T3 — corrected 2026-09-13 against HEAD: four of these no longer stand.
+Fixed by the 4ed9920/6038f28 waves: hooks payload names (`toolName`/`input`/`content`/`isError`
+now ship; only `toolCallId` remains, #92), hub processes orphaned (StopAll deferred in all
 four modes), and the TTSR `condition` field on discovered rules (`ttsrConfig` merge, #95).
+Reclassified as documented-by-design, not a defect: goal budget "lag" — spend is counted at
+message end before the turn's tools, so the only drift is the crash window #40 records.
 Still genuinely open: task batch wire shape `{context, tasks[]}` + `task.disabledAgents` +
-no-`yield` child completion (#91), goal budget lag (#40 — accounting timing, see agent
-audit), and the items in the tables below (#104, #105).
+no-`yield` child completion (#91), and the items in the tables below (#104, #105).
 
 ## Subcommands: missing in xdev
 
