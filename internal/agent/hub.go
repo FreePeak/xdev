@@ -494,6 +494,20 @@ func (h *Hub) Result(id string) (*SubagentResult, bool) {
 	}
 }
 
+// StopProcesses terminates every supervised child process (hub start). The
+// run modes defer it on exit: xdev has no persist/detach concept, so a
+// process the model started is session-scoped by definition and must not
+// outlive the session as an orphan (parity finding T3 #8).
+func (h *Hub) StopProcesses() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	t := h.procs
+	h.mu.Unlock()
+	t.StopAll()
+}
+
 // Procs returns the hub's process table (named long-running child
 // processes, M11 research §2), created on first use.
 func (h *Hub) Procs() *ProcTable {

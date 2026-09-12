@@ -319,6 +319,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- tools ---
 	planMode := &agent.PlanMode{Active: opts.Plan || opts.PlanYolo}
 	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef), planMode)
+	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 
 	// MCP servers (optional; absent config = nothing happens).
 	mgr := attachMCP(context.Background(), reg, true)
@@ -391,7 +392,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
-	ag.TTSR = agent.NewTTSR(settings.TTSR)
+	ag.TTSR = agent.NewTTSR(ttsrConfig(settings))
 	// Handoff (M5 #23): the document side request mirrors the live turn's
 	// transform on the @smol role, and settings handoff.saveToDisk mirrors
 	// the document under <dataDir>/handoffs.
@@ -1442,6 +1443,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	reg.Register(tool.NewSecurityScanTool(cwd))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
+	sharedHub = hub
 	reg.Register(&agent.TaskTool{
 		// M11 #39: task.agentAdvisor — per-subagent advisor (on|off|model).
 		ChildAdvisor: buildChildAdvisorFactory(settings),
@@ -1556,6 +1558,20 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	}
 
 	return reg
+}
+
+// sharedHub is the session's agent hub (one per process, like
+// loadedSettings): the run modes reach it on exit to stop the processes the
+// model started through the hub tool.
+var sharedHub *agent.Hub
+
+// closeSharedHub stops every hub-started child process. Every run mode defers
+// it right after building its registry — without it, `hub start` leaves the
+// process running after xdev exits (parity finding T3 #8).
+func closeSharedHub() {
+	if sharedHub != nil {
+		sharedHub.StopProcesses()
+	}
 }
 
 // lastSettings returns the layered settings main() resolved for this run

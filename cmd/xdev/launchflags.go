@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/rules"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -484,4 +485,55 @@ func chdirTo(dir string) error {
 		return fmt.Errorf("cwd %q: %w", dir, err)
 	}
 	return nil
+}
+
+// ttsrConfig resolves the stream-rule config for this run: the settings
+// `ttsr` group plus every DISCOVERED rule file that carries a `condition:`.
+// The rules parser stores that field verbatim and nothing consumed it, so a
+// rulebook rule like
+//
+// (condition: "SK-SECRET")
+//
+// was silently inert (parity finding T3 #39). A settings-declared rule of the
+// same name wins, so the merge never overrides an explicit declaration.
+func ttsrConfig(s *config.Settings) *config.TTSRSettings {
+	if s == nil {
+		return nil
+	}
+	base := s.TTSR
+	if base == nil {
+		// A rulebook condition with no `ttsr` group still needs an engine;
+		// the shipped defaults (enabled, interrupt always) apply.
+		on := true
+		base = &config.TTSRSettings{Enabled: &on}
+	}
+	declared := map[string]bool{}
+	for _, r := range base.Rules {
+		declared[r.Name] = true
+	}
+	merged := *base
+	merged.Rules = append([]config.TTSRRule(nil), base.Rules...)
+	for _, dr := range rules.Active() {
+		if dr.Condition == "" || declared[dr.Name] {
+			continue
+		}
+		merged.Rules = append(merged.Rules, config.TTSRRule{
+			Name:          dr.Name,
+			Condition:     dr.Condition,
+			InterruptMode: ttsrModeOrInherit(dr.InterruptMode),
+			Message:       dr.Description,
+		})
+	}
+	return &merged
+}
+
+// ttsrModeOrInherit keeps only the modes the engine understands; a typo in a
+// rulebook inherits the group policy instead of reaching the matcher raw
+// (settings rules are validated at load; discovered files are not).
+func ttsrModeOrInherit(m string) string {
+	switch m {
+	case "always", "prose-only", "tool-only", "never":
+		return m
+	}
+	return ""
 }

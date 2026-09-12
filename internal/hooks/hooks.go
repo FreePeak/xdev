@@ -254,10 +254,23 @@ func (h Hook) matches(event string, payload map[string]any) bool {
 	return true
 }
 
-// matchSubject is the string a stage-2 matcher tests: the payload's "tool"
-// field when present (tool events), else the payload's compact JSON.
+// payloadToolName reads the tool name out of a hook payload under either
+// spelling: omp's toolName (what the bus emits) or the legacy tool key (what
+// other emitters may still send). Both are checked in one place so a payload
+// rename cannot silently disable every matcher and `if` filter.
+func payloadToolName(payload map[string]any) string {
+	for _, k := range []string{"toolName", "tool"} {
+		if v, ok := payload[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// matchSubject is the string a stage-2 matcher tests: the payload's tool
+// name when present (tool events), else the payload's compact JSON.
 func matchSubject(payload map[string]any) string {
-	if tool, ok := payload["tool"].(string); ok && tool != "" {
+	if tool := payloadToolName(payload); tool != "" {
 		return tool
 	}
 	b, err := json.Marshal(payload)
@@ -270,7 +283,7 @@ func matchSubject(payload map[string]any) string {
 // ifMatch evaluates an `if` prefilter against a tool payload; a payload
 // without a tool name never matches.
 func ifMatch(spec string, payload map[string]any) bool {
-	name, _ := payload["tool"].(string)
+	name := payloadToolName(payload)
 	if name == "" {
 		return false
 	}
@@ -340,6 +353,11 @@ func (b *Bus) Run(ctx context.Context, event string, payload map[string]any) (ma
 		}
 		if repl, ok := res["text"]; ok {
 			current["text"] = repl
+		}
+		// omp's tool_result mutation key: a hook replaces the result content
+		// through `content` (a block list or a plain string), not `text`.
+		if repl, ok := res["content"]; ok {
+			current["content"] = repl
 		}
 		if msg, ok := res["message"]; ok {
 			current["message"] = msg

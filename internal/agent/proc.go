@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/logx"
 	"sync"
 	"time"
 )
@@ -263,6 +265,30 @@ func (t *ProcTable) Logs(name string, n int) ([]string, bool) {
 		lines = lines[len(lines)-n:]
 	}
 	return append([]string(nil), lines...), true
+}
+
+// StopAll terminates every still-running supervised process (SIGTERM, then
+// the escalation Stop performs). xdev has no persist/detach concept, so a
+// hub-started process is session-scoped by definition; without this the
+// children outlive the run as orphans (parity finding T3 #8). Called by every
+// run mode on exit.
+func (t *ProcTable) StopAll() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	names := make([]string, 0, len(t.procs))
+	for name, p := range t.procs {
+		if p.running() {
+			names = append(names, name)
+		}
+	}
+	t.mu.Unlock()
+	for _, name := range names {
+		if err := t.Stop(name, "SIGTERM"); err != nil {
+			logx.Errorf("proc %s: stop on exit: %v", name, err)
+		}
+	}
 }
 
 // Stop terminates a running process: signal "" (or SIGKILL) kills it, while

@@ -51,6 +51,7 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	// Tools are rooted at the agent's working directory: an editor spawns
 	// `xdev acp` in the workspace, which is what session/new also asks for.
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
+	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 	mgr := attachMCP(context.Background(), reg, false)
 	if mgr != nil {
 		defer mgr.Close()
@@ -208,7 +209,7 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 	ag := &agent.Agent{
 		Provider: h.prov, Tools: h.reg, Store: s.store, Model: h.modelName,
 		MaxTokens: h.maxTokens, MaxTurns: h.maxTurns, Hooks: s.hooks(),
-		TTSR:       agent.NewTTSR(lastSettings().TTSR),
+		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(h.cfg, h.provName, h.modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(h.cfg, h.provName, h.modelName),
