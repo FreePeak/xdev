@@ -1424,6 +1424,7 @@ func noteMemoryTurn(mem memoryBackend, history []ai.Message) {
 	if !ok || h.Off() || len(history) == 0 {
 		return
 	}
+	_ = ok
 	last := history[len(history)-1]
 	if last.Role != ai.RoleUser {
 		return
@@ -1432,6 +1433,24 @@ func noteMemoryTurn(mem memoryBackend, history []ai.Message) {
 		h.NoteUserTurn(text)
 	}
 	h.RetainAsync()
+}
+
+// observeFriction feeds one user turn to the sharpshooter backend (M15 #73,
+// #89): repeats and post-failure instructions are what its detector scores,
+// and it has no cadence of its own, so every mode must call it per turn.
+// `failed` is whether the PREVIOUS turn ended badly — an aborted run making
+// this instruction a friction signal. Returns whether the turn crossed the
+// detector's threshold (a decision is now due); false for every other
+// backend, which has no friction feed at all.
+func observeFriction(mem memoryBackend, text string, failed bool) bool {
+	ss, ok := mem.(*memory.SharpShooter)
+	if !ok || ss.Off() {
+		return false
+	}
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	return ss.Observe(memory.Turn{Text: text, AfterFailure: failed})
 }
 
 // mnemopiTurnHooks feeds the mnemopi turn counter (M12 #44): every

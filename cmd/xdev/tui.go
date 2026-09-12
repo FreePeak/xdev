@@ -131,6 +131,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	var (
 		agentMu  sync.Mutex
 		curAgent *agent.Agent
+		// lastTurnFailed marks whether the previous turn ended badly
+		// (aborted or provider error): the instruction that follows a failure
+		// is a friction signal for the sharpshooter backend (#89).
+		lastTurnFailed atomic.Bool
 	)
 	routeToLiveAgent := func(call func(*agent.Agent, string)) func(text string) {
 		return func(text string) {
@@ -1399,6 +1403,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// never fed it, so retainEveryNTurns could not fire and queued
 			// retains sat until exit.
 			noteMemoryTurn(sessionMemory, []ai.Message{msg})
+			// #89: the friction detector had no TUI feed at all, so decision
+			// files only ever accumulated in print runs.
+			observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
 			ctx, cancel := context.WithCancel(baseCtx)
 			// Published so a full-link guest's interrupt can cancel the
 			// live turn (baseCancel would kill every future turn).
@@ -1501,6 +1508,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// picker lists, and they are the ones stuck with "tui
 				// <timestamp>". Async on purpose: the user's next keystroke
 				// must not wait on a title request.
+				lastTurnFailed.Store(err != nil)
 				if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
 					go generateTitle(cfg, lastSettings(), cwd, store,
 						append(append([]ai.Message(nil), hist...), *finalMsg))
