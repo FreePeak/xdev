@@ -81,7 +81,8 @@ drags a scrolled viewport (the `▲ n ▼ n` indicator shows hidden rows):
 |---|---|
 | PgUp / PgDn | half-page up / down |
 | Ctrl+B / Ctrl+F | half-page up / down (emacs-style) |
-| ↑ / ↓ | line up / down (while idle) |
+| ↑ / ↓ | recall the previous / next prompt (once history exists) |
+| Shift+↑ / Shift+↓ | line up / down |
 | Home / End | jump to top / back to live |
 
 **Slash commands** — dispatched at input-submit, never sent to the model:
@@ -91,10 +92,21 @@ drags a scrolled viewport (the `▲ n ▼ n` indicator shows hidden rows):
 | `/new` | fresh session file + cleared transcript |
 | `/clear` | reset context in place (durable `reset_boundary`; history kept on disk) |
 | `/drop` | delete the session file and start fresh |
-| `/help` | list commands |
+| `/rename <title>` | title this session (a manual title beats the generated one) |
+| `/resume [id]`, `/fork`, `/branch`, `/tree` | session picker, fork, and the tree navigator |
+| `/model [@role\|ref]` | switch the active model or assign a role (Alt+M opens the selector) |
+| `/goal [create\|evidence\|complete\|drop]` | drive the session objective and its token budget |
+| `/plan`, `/vibe`, `/prewalk`, `/advisor`, `/handoff` | run-mode controls |
+| `/memory`, `/skill:<name>`, `/settings`, `/theme`, `/hotkeys`, `/hub` (Alt+A), `/stats`, `/export`, `/share`, `/collab` | knowledge, chrome and sharing |
+| `/help` | list every command |
 | `/quit`, `/q` | quit |
 
-Lifecycle commands refuse while a turn is running (Esc cancels first).
+Lifecycle commands refuse while a turn is running (Esc cancels first, Ctrl+C
+quits). `xdev -h` lists the launch flags; the flags an omp user expects
+(`-p/-c/-r/-e`, `--approval-mode`, `--smol/--slow/--plan-model`, `--models`,
+`--provider`, `--add-dir`, `--allow-home`, `--yolo`, `--no-prewalk`,
+`--plugin-dir`) are accepted with the same meanings, and
+`docs/parity-delta.md` records every deliberate difference from the baseline.
 
 **Custom markdown commands** — drop `*.md` files into `<cwd>/.xdev/commands/`
 (project) or `~/.xdev/agent/commands/` (user; project wins on name
