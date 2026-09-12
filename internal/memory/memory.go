@@ -74,6 +74,17 @@ var (
 // Off reports whether the backend is disabled.
 func (b *Backend) Off() bool { return b == nil || b.Dir == "" }
 
+// PipelineStore is the wider contract the two-phase memory pipeline needs:
+// a backend it can consolidate INTO (create the storage, replace the
+// summary). The local markdown backend and the mnemopi SQLite backend
+// satisfy it; the friction-gated SharpShooter does not, because its
+// decision files are written by the friction detector, not by the pipeline.
+type PipelineStore interface {
+	Store
+	Ensure() error
+	WriteSummary(text string) error
+}
+
 func (b *Backend) paths() (summary, lessons string) {
 	return filepath.Join(b.Dir, "MEMORY.md"), filepath.Join(b.Dir, "learned.md")
 }
