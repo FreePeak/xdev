@@ -80,9 +80,12 @@ type Settings struct {
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
 	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
-	// Memory selects the long-term memory backend (M12 F1): "off"
-	// (default) or "local" (MEMORY.md + learned.md under the data dir,
-	// with the memory:// read seam and the learn tool).
+	// Memory selects the long-term memory backend (M12 F1, M15 #73): "off"
+	// (default), "local" (MEMORY.md + learned.md under the data dir, with the
+	// memory:// read seam and the learn tool), or "sharpshooter"
+	// (friction-gated decision files under <dataDir>/memories, consolidated in
+	// the background through the @smol role). Both live backends expose the
+	// same seam, so memory:// and /memory work unchanged.
 	Memory string `yaml:"memory"`
 	// MemoryPipeline enables the local backend's two-phase consolidation
 	// pipeline (M12 #13): "on" or "off" (the default). The YAML key is

@@ -40,6 +40,37 @@ const (
 	DefaultLessonCap       = 20
 )
 
+// Store is the backend contract every memory consumer programs against:
+// prompt injection (GuidanceBlock), the memory:// read seam (Read), the
+// learn tool (SaveLesson), and /memory (Summary/Stats/Paths/Clear). The
+// local Backend and the friction-gated SharpShooter both implement it, so
+// memory.backend selects storage without touching a single caller.
+type Store interface {
+	// Off reports whether the backend is disabled (nil-safe).
+	Off() bool
+	// Summary is the text injected as Memory Guidance.
+	Summary() string
+	// GuidanceBlock wraps Summary in the injected block shape ("" = nothing).
+	GuidanceBlock() string
+	// Read resolves a memory:// URL to text.
+	Read(uri string) (string, error)
+	// Stats is the /memory stats report.
+	Stats() string
+	// Clear drops the backend's stored data (/memory clear).
+	Clear() error
+	// Paths exposes the backend's artifact paths for diagnostics.
+	Paths() (summary, lessons string)
+	// SaveLesson records one durable lesson (the learn tool).
+	SaveLesson(text, context string) error
+}
+
+// Both shipped backends satisfy the seam; a compile-time check, so a
+// signature drift is a build failure, not a runtime nil.
+var (
+	_ Store = (*Backend)(nil)
+	_ Store = (*SharpShooter)(nil)
+)
+
 // Off reports whether the backend is disabled.
 func (b *Backend) Off() bool { return b == nil || b.Dir == "" }
 
@@ -79,12 +110,7 @@ func (b *Backend) Summary() string {
 // GuidanceBlock wraps the summary in the Memory Guidance shape omp
 // injects, or "" when there is nothing to inject.
 func (b *Backend) GuidanceBlock() string {
-	s := b.Summary()
-	if s == "" {
-		return ""
-	}
-	return "# Memory Guidance\n\nHeuristic context from earlier sessions — not authoritative. " +
-		"When it changes your plan, read the source (memory://root) and cite it.\n\n" + s
+	return guidanceBlock(b.Summary())
 }
 
 // SaveLesson appends a lesson (newest last) with a timestamp header.
@@ -234,9 +260,15 @@ func fileSize(path string) int64 {
 	return st.Size()
 }
 
-// capText truncates on a line boundary with an explicit marker, so the
-// model can tell the summary was clipped.
+// capText truncates on a line boundary with an explicit marker, so the model
+// can tell the summary was clipped.
 func capText(s string, max int) string {
+	return capTextHint(s, max, "read memory://root/MEMORY.md for the rest")
+}
+
+// capTextHint is capText with a backend-specific "where is the rest" pointer;
+// an empty hint leaves just the truncation ellipsis.
+func capTextHint(s string, max int, hint string) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
@@ -244,7 +276,10 @@ func capText(s string, max int) string {
 	if i := strings.LastIndex(cut, "\n"); i > 0 {
 		cut = cut[:i]
 	}
-	return cut + "\n… (summary capped; read memory://root/MEMORY.md for the rest)"
+	if hint == "" {
+		return cut + "…"
+	}
+	return cut + "\n… (summary capped; " + hint + ")"
 }
 
 // tailLines returns the last n non-empty lines.
@@ -262,6 +297,16 @@ func tailLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// guidanceBlock is the Memory Guidance shape omp injects, shared by every
+// backend so the header text stays identical across seam consumers.
+func guidanceBlock(summary string) string {
+	if summary == "" {
+		return ""
+	}
+	return "# Memory Guidance\n\nHeuristic context from earlier sessions — not authoritative. " +
+		"When it changes your plan, read the source (memory://root) and cite it.\n\n" + summary
 }
 
 func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
