@@ -23,6 +23,14 @@ type GoogleGenAIProvider struct {
 	extraHeaders map[string]string
 	model        string // default model when a request omits Model
 	name         string
+	// apiLabel overrides the wire name reported by API() (google-vertex and
+	// gemini-cli reuse this adapter's request/SSE mapping).
+	apiLabel string
+	// normalizeTools runs NormalizeSchemaForGoogle over the tool schemas.
+	normalizeTools bool
+	// unwrapResponse reads the GenerateContentResponse from the Code Assist
+	// "response" envelope instead of the bare chunk.
+	unwrapResponse bool
 }
 
 // NewGoogleGenAIProvider builds a provider. A nil hc uses the shared
@@ -38,7 +46,12 @@ func NewGoogleGenAIProvider(name, baseURL, apiKey string, headers map[string]str
 }
 
 func (p *GoogleGenAIProvider) Name() string { return p.name }
-func (p *GoogleGenAIProvider) API() string  { return APIGoogleGenerativeAI }
+func (p *GoogleGenAIProvider) API() string {
+	if p.apiLabel != "" {
+		return p.apiLabel
+	}
+	return APIGoogleGenerativeAI
+}
 
 // --- request wire shapes ---
 
@@ -128,7 +141,7 @@ func (p *GoogleGenAIProvider) buildRequest(req StreamRequest) ([]byte, error) {
 		model = p.model
 	}
 	if model == "" {
-		return nil, fmt.Errorf("google-generative-ai: model is required")
+		return nil, fmt.Errorf("%s: model is required", p.API())
 	}
 	g := googleRequest{}
 	if req.System != "" {
@@ -185,9 +198,13 @@ func (p *GoogleGenAIProvider) buildRequest(req StreamRequest) ([]byte, error) {
 			g.Contents = append(g.Contents, googleContent{Role: "model", Parts: parts})
 		}
 	}
-	if len(req.Tools) > 0 {
-		decls := make([]googleToolDeclaration, 0, len(req.Tools))
-		for _, t := range req.Tools {
+	tools := req.Tools
+	if p.normalizeTools {
+		tools = NormalizeToolsForAPI(p.API(), tools)
+	}
+	if len(tools) > 0 {
+		decls := make([]googleToolDeclaration, 0, len(tools))
+		for _, t := range tools {
 			decls = append(decls, googleToolDeclaration{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
 		}
 		g.Tools = decls
@@ -230,17 +247,28 @@ func (p *GoogleGenAIProvider) headers() map[string]string {
 
 // Stream implements Provider.
 func (p *GoogleGenAIProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {
+	model, err := p.resolveModel(req)
+	if err != nil {
+		return nil, err
+	}
 	body, err := p.buildRequest(req)
 	if err != nil {
 		return nil, err
 	}
-	model := req.Model
-	if model == "" {
-		model = p.model
+	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", p.baseURL, model, p.apiKey)
+	return p.streamAt(ctx, req, url, p.headers(), body)
+}
+
+// streamAt is the shared request path of the Google family: POST the body to
+// the variant's URL and map the SSE chunks onto unified events. The body is a
+// parameter because the Code Assist variant wraps it in its own envelope.
+func (p *GoogleGenAIProvider) streamAt(ctx context.Context, req StreamRequest, url string, headers map[string]string, body []byte) (<-chan Event, error) {
+	model, err := p.resolveModel(req)
+	if err != nil {
+		return nil, err
 	}
 	sctx, cancel := context.WithCancel(ctx)
-	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", p.baseURL, model, p.apiKey)
-	resp, err := wirePost(sctx, p.httpClient, url, p.headers(), body, APIGoogleGenerativeAI)
+	resp, err := wirePost(sctx, p.httpClient, url, headers, body, p.API())
 	if err != nil {
 		cancel()
 		return nil, err
@@ -254,6 +282,17 @@ func (p *GoogleGenAIProvider) Stream(ctx context.Context, req StreamRequest) (<-
 		p.stream(sctx, resp.Body, model, ch, start)
 	}()
 	return withWatchdog(ctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
+}
+
+// resolveModel is the shared "request model or provider default" resolution.
+func (p *GoogleGenAIProvider) resolveModel(req StreamRequest) (string, error) {
+	if req.Model != "" {
+		return req.Model, nil
+	}
+	if p.model != "" {
+		return p.model, nil
+	}
+	return "", fmt.Errorf("%s: model is required", p.API())
 }
 
 // stream maps the SSE chunk stream onto the unified event contract:
@@ -333,9 +372,12 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 		if data == "" || data == "[]" {
 			continue
 		}
+		if p.unwrapResponse {
+			data = unwrapCodeAssistChunk(data)
+		}
 		var gr googleResponse
 		if err := json.Unmarshal([]byte(data), &gr); err != nil {
-			fail(Event{Type: EventError, Err: fmt.Errorf("google-generative-ai: bad chunk: %w", err)})
+			fail(Event{Type: EventError, Err: fmt.Errorf("%s: bad chunk: %w", p.API(), err)})
 			return
 		}
 		if gr.Error != nil && gr.Error.Message != "" {

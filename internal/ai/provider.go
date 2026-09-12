@@ -40,8 +40,22 @@ type Provider interface {
 
 // APINames are the supported wire adapters.
 const (
-	APIAnthropicMessages  = "anthropic-messages"
-	APIOpenAICompletions  = "openai-completions"
-	APIOpenAIResponses    = "openai-responses"
-	APIGoogleGenerativeAI = "google-generative-ai"
+	APIAnthropicMessages    = "anthropic-messages"
+	APIOpenAICompletions    = "openai-completions"
+	APIOpenAIResponses      = "openai-responses"
+	APIGoogleGenerativeAI   = "google-generative-ai"
+	APIAzureOpenAIResponses = "azure-openai-responses"
+	APIOpenAICodexResponses = "openai-codex-responses"
+	APIGoogleVertex         = "google-vertex"
+	APIGeminiCLI            = "gemini-cli"
 )
+
+// SupportedAPIs is the wire-adapter catalog in declaration order; config
+// validation and error messages read it so adding an adapter updates both.
+func SupportedAPIs() []string {
+	return []string{
+		APIAnthropicMessages, APIOpenAICompletions, APIOpenAIResponses,
+		APIAzureOpenAIResponses, APIOpenAICodexResponses,
+		APIGoogleGenerativeAI, APIGoogleVertex, APIGeminiCLI,
+	}
+}

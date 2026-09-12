@@ -57,6 +57,19 @@ type ProviderConfig struct {
 	// OAuth configures the browser login flow for this provider (xdev login
 	// <provider>). Absent = not an OAuth provider.
 	OAuth *OAuthConfig `yaml:"oauth,omitempty"`
+	// Project/Location are the GCP coordinates: google-vertex needs both
+	// (Location defaults to "global"), gemini-cli uses Project when the Code
+	// Assist account has one.
+	Project  string `yaml:"project,omitempty"`
+	Location string `yaml:"location,omitempty"`
+	// Deployment/APIVersion configure azure-openai-responses: the Azure
+	// deployment name (empty = the model id) and the api-version query value.
+	Deployment string `yaml:"deployment,omitempty"`
+	APIVersion string `yaml:"apiVersion,omitempty"`
+	// ToolsFormat pins an in-band tool-call dialect for models that cannot
+	// emit native structured calls (hermes, deepseek, glm, ...). Empty =
+	// native: the provider's own structured tool calls.
+	ToolsFormat string `yaml:"toolsFormat,omitempty"`
 }
 
 // OAuthConfig is one provider's browser-login flow.
@@ -144,10 +157,17 @@ func (c *Config) RegisterProvider(name string, pc *ProviderConfig) error {
 		return fmt.Errorf("config: register_provider %q: baseUrl is required", name)
 	}
 	switch pc.API {
-	case ai.APIOpenAICompletions, ai.APIOpenAIResponses, ai.APIAnthropicMessages, ai.APIGoogleGenerativeAI:
+	case ai.APIOpenAICompletions, ai.APIOpenAIResponses, ai.APIAzureOpenAIResponses,
+		ai.APIOpenAICodexResponses, ai.APIAnthropicMessages, ai.APIGoogleGenerativeAI,
+		ai.APIGoogleVertex, ai.APIGeminiCLI:
 	default:
-		return fmt.Errorf("config: register_provider %q: unsupported api %q (want %s|%s|%s|%s)",
-			name, pc.API, ai.APIOpenAICompletions, ai.APIOpenAIResponses, ai.APIAnthropicMessages, ai.APIGoogleGenerativeAI)
+		return fmt.Errorf("config: register_provider %q: unsupported api %q (want %s)",
+			name, pc.API, strings.Join(ai.SupportedAPIs(), "|"))
+	}
+	// toolsFormat is validated here so a typo fails before any request instead
+	// of silently falling back to native tool calls.
+	if _, err := ai.ParseToolFormat(pc.ToolsFormat); err != nil {
+		return fmt.Errorf("config: register_provider %q: %w", name, err)
 	}
 	models := 0
 	for _, m := range pc.Models {
