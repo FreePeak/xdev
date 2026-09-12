@@ -233,6 +233,52 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cwd string) {
 		ag.WireCatalog(reg.Catalog())
 	}
 	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
+	// #108: a rulebook rule scoped by globs (globs: *.go) was discovered,
+	// listed in the prompt and rendered as an edit/write "shorthand", but
+	// nothing consumed it. The matched guidance now rides the tool result of
+	// the change it applies to, which is where the model acts on it.
+	ag.Rulebook = rulebookNoteFor
+}
+
+// rulebookBudget caps one injected rulebook notice: rules can be long, and
+// the tool result also carries the edit summary the model needs.
+const rulebookBudget = 2400
+
+// rulebookNoteFor renders the rules scoped to one touched path. Empty when
+// nothing matches (the common case) so no noise enters the transcript.
+func rulebookNoteFor(path string) string {
+	matched := rules.ForPath(path)
+	if len(matched) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "rulebook rules for %s (scoped by glob — these apply to this file):", path)
+	used := 0
+	for _, r := range matched {
+		body := strings.TrimSpace(r.Content)
+		if body == "" {
+			continue
+		}
+		if r.Description != "" {
+			body = r.Description + "\n\n" + body
+		}
+		if used+len(body) > rulebookBudget {
+			fmt.Fprintf(&b, "\n\n[%d more scoped rule(s) omitted for space: %s]",
+				len(matched)-1, strings.Join(ruleNames(matched), " "))
+			break
+		}
+		used += len(body)
+		fmt.Fprintf(&b, "\n\n### %s (%s)\n%s", r.Name, r.Source, body)
+	}
+	return b.String()
+}
+
+func ruleNames(rs []rules.Rule) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.Name
+	}
+	return out
 }
 
 // advisorDrainCap bounds the final headless review at run exit. Thirty
