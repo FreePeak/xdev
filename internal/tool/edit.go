@@ -135,6 +135,20 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("edit: cannot read %s: %v", display, err)}, nil
 	}
+	// Notebooks (M13 #47) are edited through the virtual text read renders,
+	// never through their raw JSON; the write path below re-serializes cells
+	// and preserves every field the edit did not touch.
+	var nb *notebookDoc
+	if isNotebookPath(resolved) {
+		if doc, ok := notebookFromLines(lines); ok {
+			virtual := doc.renderLines()
+			if msg := notebookRawJSONRefusal(t.reg, resolved, display, wantTag, lines, virtual); msg != "" {
+				return Result{IsError: true, Text: msg}, nil
+			}
+			nb = doc
+			lines = virtual
+		}
+	}
 	linesBefore := len(lines)
 
 	// Freshness guard + arg repair: compare the file against what read/
@@ -209,7 +223,15 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	}
 
 	if lineOps > 0 {
-		if err := WriteLinesAtomic(resolved, lines); err != nil {
+		if nb != nil {
+			out, serr := nb.serializeVirtualText(lines)
+			if serr != nil {
+				return Result{IsError: true, Text: fmt.Sprintf("edit: %s: %v", display, serr)}, nil
+			}
+			if err := writeBytesAtomic(resolved, out); err != nil {
+				return Result{IsError: true, Text: fmt.Sprintf("edit: write failed: %v", err)}, nil
+			}
+		} else if err := WriteLinesAtomic(resolved, lines); err != nil {
 			return Result{IsError: true, Text: fmt.Sprintf("edit: write failed: %v", err)}, nil
 		}
 	}
