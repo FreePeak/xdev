@@ -72,7 +72,10 @@ type Settings struct {
 	MaxTurns     int    `yaml:"maxTurns"`
 	// Compaction tunes context maintenance (compaction.methodOrder).
 	Compaction CompactionSettings `yaml:"compaction"`
-	ModelRoles map[string]string  `yaml:"modelRoles"`
+	// Retry tunes the resilience ladder (M5 #25): the fallback chain
+	// table, the usage-reserve policy, and the revert-to-primary policy.
+	Retry      RetrySettings     `yaml:"retry"`
+	ModelRoles map[string]string `yaml:"modelRoles"`
 	// ToolsApproval sets an action per tool (allow|deny|prompt).
 	ToolsApproval map[string]string `yaml:"toolsApproval"`
 	// BashPatterns are ordered command rules, "deny:rm -rf *" style.
@@ -521,6 +524,10 @@ func (s *Settings) merge(layer *Settings) error {
 			s.WebSearch.APIKeys = map[string]string{}
 		}
 		s.WebSearch.APIKeys[k] = v
+	}
+	// Retry group last: its validation must see the fully merged layer.
+	if err := s.mergeRetry(layer); err != nil {
+		return err
 	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout

@@ -1,9 +1,10 @@
 package agent
 
 import (
+	"time"
+
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/logx"
-	"github.com/FreePeak/xdev/internal/session"
 )
 
 // FailoverTarget is one backup model in the resilience chain (M5 #6).
@@ -48,10 +49,24 @@ func (a *Agent) promotionTarget() int {
 }
 
 // nextFailoverTarget returns the next chain index for outage failover,
-// -1 when the chain is exhausted.
+// skipping targets still inside a cooldown window or whose provider has a
+// banked quota reset pending (M5 #25: the ladder must not bounce straight
+// back onto the provider that just refused). -1 when the chain is
+// exhausted.
 func (a *Agent) nextFailoverTarget() int {
-	if a.curTarget < len(a.Failovers) {
-		return a.curTarget + 1
+	if a.curTarget >= len(a.Failovers) {
+		return -1
+	}
+	now := time.Now()
+	for i := a.curTarget + 1; i <= len(a.Failovers); i++ {
+		t := a.Failovers[i-1]
+		if t.Provider == nil {
+			continue
+		}
+		if a.Fallback.suppressed(t.Provider.Name()+"/"+t.Model, now) {
+			continue
+		}
+		return i
 	}
 	return -1
 }
@@ -61,6 +76,10 @@ func (a *Agent) nextFailoverTarget() int {
 // into the session store. Run is single-goroutine, so no lock is needed.
 func (a *Agent) switchTarget(i int, reason string) {
 	t := a.Failovers[i-1]
+	prev := ""
+	if a.Provider != nil {
+		prev = a.Provider.Name() + "/" + a.Model
+	}
 	a.curTarget = i
 	a.Provider = t.Provider
 	a.Model = t.Model
@@ -68,7 +87,7 @@ func (a *Agent) switchTarget(i int, reason string) {
 		a.Compaction.ContextWindow = t.ContextWindow
 	}
 	logx.Errorf("%s: switched to %s/%s (window %d)", reason, t.Provider.Name(), t.Model, t.ContextWindow)
-	if a.Store != nil {
-		_ = a.Store.Append(&session.ModelChangeEntry{Model: t.Provider.Name() + "/" + t.Model})
-	}
+	sel := t.Provider.Name() + "/" + t.Model
+	a.Fallback.onSwitch(prev, reason, time.Now())
+	a.recordModelChange(sel, fallbackReasons[reason])
 }
