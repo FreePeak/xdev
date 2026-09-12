@@ -317,3 +317,77 @@ func (p *blockingProvider) Stream(ctx context.Context, _ ai.StreamRequest) (<-ch
 
 func (p *blockingProvider) Name() string { return "blocking" }
 func (p *blockingProvider) API() string  { return "blocking" }
+
+// Mode parity for the deferred-tool catalog (#79): tool_call bridges into the
+// agent's own call path in EVERY mode. Print wired this; TUI, RPC and ACP did
+// not, so a catalogued tool refused with "no runner installed" in three of the
+// four modes while the prompt index advertised it.
+func TestACPModeWiresTheDeferredCatalog(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	prov := &stubProvider{scripts: [][]ai.Event{
+		{
+			{Type: ai.EventStart, Provider: "stub", Model: "m"},
+			{Type: ai.EventToolcallStart, ToolCallID: "c1", ToolName: "tool_call", StreamIndex: 0},
+			{Type: ai.EventToolcallEnd, StreamIndex: 0, PartialJSON: `{"name":"checkpoint","args":{"goal":"catalog parity probe"}}`},
+			ai.Donef(ai.StopReasonStop, nil, &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop}),
+		},
+		{
+			{Type: ai.EventStart, Provider: "stub", Model: "m"},
+			ai.Donef(ai.StopReasonStop, nil, &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+				Content: []ai.Block{ai.TextBlock{Text: "done"}}}),
+		},
+	}}
+
+	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil)
+	h := newACPHandler(cwd, &config.Config{}, prov, "stub", "m", reg, func() string { return "system" }, nil, 0, 0)
+	t.Cleanup(h.close)
+	c := startACPClient(t, h)
+
+	c.send(1.0, acp.MethodInitialize, map[string]any{"protocolVersion": 1})
+	c.await("initialize", func(m map[string]any) bool { return m["id"] != nil })
+	c.send(2.0, acp.MethodNewSession, map[string]any{"cwd": cwd})
+	newRes := acpObject(t, c.await("session/new", func(m map[string]any) bool {
+		id, ok := m["id"].(float64)
+		return ok && id == 2
+	})["result"])
+	sessionID, _ := newRes["sessionId"].(string)
+	if sessionID == "" {
+		t.Fatal("no sessionId")
+	}
+	c.send(3.0, acp.MethodPrompt, map[string]any{"sessionId": sessionID, "prompt": []any{
+		map[string]any{"type": "text", "text": "probe"},
+	}})
+
+	// Collect every tool_call_update / tool result frame for this prompt and
+	// assert the deferred tool actually ran (no "no runner installed").
+	var sawResult map[string]any
+	var frames []string
+	c.await("prompt response", func(m map[string]any) bool {
+		if method, _ := m["method"].(string); strings.Contains(method, "update") {
+			if raw, ok := m["params"].(map[string]any); ok {
+				blob, _ := json.Marshal(raw)
+				frames = append(frames, string(blob))
+				if strings.Contains(string(blob), "checkpoint") || strings.Contains(string(blob), "no runner") {
+					sawResult = raw
+				}
+			}
+		}
+		id, ok := m["id"].(float64)
+		return ok && id == 3
+	})
+	t.Logf("update frames (%d):\n%s", len(frames), strings.Join(frames, "\n"))
+	all := strings.Join(frames, "\n")
+	// Silence would pass a pure negative check, so require BOTH: the call
+	// produced a result, and that result is the deferred tool's own answer
+	// (its arg validation here) rather than the unwired-catalog refusal.
+	if frames == nil || !strings.Contains(all, "checkpoint:") {
+		t.Fatalf("the deferred tool never ran; update frames:\n%s", all)
+	}
+	if strings.Contains(all, "no runner installed") {
+		t.Fatalf("catalog bridge missing in ACP:\n%s", all)
+	}
+	_ = sawResult
+}
