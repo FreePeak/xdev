@@ -865,6 +865,14 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	if mem := buildMemory(settings); mem != nil {
 		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
 	}
+	// M12 #45: experimental notes-backed context windows — context_notes (a
+	// branch-scoped 16 KiB notebook) and new_context (rollover). The state is
+	// built from the finished registry: notes-backed rollover stays disabled
+	// unless context_notes, new_context, read and grep are all active.
+	notes := agent.NewNotesState(reg, nil)
+	reg.Register(&agent.NotesTool{Notes: notes})
+	reg.Register(&agent.NewContextTool{Notes: notes})
+	tool.RegisterURIScheme("history", notes.ResolveHistory)
 
 	return reg
 }
@@ -1003,6 +1011,13 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 	if t, ok := reg.Get(agent.GoalToolName); ok {
 		if gt, ok := t.(*agent.GoalTool); ok {
 			gt.Goals.Bind(store)
+		}
+	}
+	// M12 #45: bind the notebook to the active session (again on /resume and
+	// session switches — a new session starts with its own notebook).
+	if t, ok := reg.Get(agent.ContextNotesToolName); ok {
+		if nt, ok := t.(*agent.NotesTool); ok {
+			nt.Notes.Bind(store)
 		}
 	}
 }
