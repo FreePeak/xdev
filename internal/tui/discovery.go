@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/marketplace"
 )
 
 // MarkdownCommand is one slash command discovered from a markdown file.
@@ -34,6 +35,10 @@ func DiscoverCommands(cwd string) []MarkdownCommand {
 	if dir := userCommandsDir(); dir != "" {
 		roots = append(roots, filepath.Join(dir, "commands"))
 	}
+	// Installed plugins last: they never shadow authored content, so a name
+	// collision resolves to the project/user/managed root and the plugin only
+	// supplies names nobody else claims (#85).
+	roots = append(roots, marketplace.CommandDirs()...)
 	// os.ReadDir sorts entries lexically, so the first file claiming a name
 	// within a root is the lexical winner; earlier roots shadow later ones.
 	for _, root := range roots {

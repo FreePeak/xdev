@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/marketplace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -73,6 +74,9 @@ func DiscoverAgents(cwd string) ([]AgentDefinition, []string) {
 	if dir := userAgentsDir(); dir != "" {
 		roots = append(roots, dir)
 	}
+	// Installed plugin agent dirs, appended last so a plugin never shadows an
+	// authored definition (#85).
+	roots = append(roots, marketplace.AgentDirs()...)
 	for _, root := range roots {
 		entries, err := os.ReadDir(root)
 		if err != nil {

@@ -6,6 +6,7 @@ package skills
 
 import (
 	"fmt"
+	"github.com/FreePeak/xdev/internal/marketplace"
 	"os"
 	"path/filepath"
 	"sort"
@@ -111,6 +112,10 @@ func Roots(cwd string) []SkillRoot {
 			dir = filepath.Join(cwd, dir)
 		}
 		out = append(out, SkillRoot{Dir: filepath.Clean(dir), Source: "custom"})
+	}
+	// Plugin skill roots last: lowest precedence, never shadowing (#85).
+	for _, dir := range marketplace.SkillRoots() {
+		out = append(out, SkillRoot{Dir: dir, Source: "plugin"})
 	}
 	return out
 }
