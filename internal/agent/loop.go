@@ -147,6 +147,11 @@ type Agent struct {
 	// to a bigger window, a drained retry ladder fails over to the next
 	// target. nil disables both ladders.
 	Failovers []FailoverTarget
+	// Fallback is the retry.fallbackChains state (M5 #25): chain cooldowns,
+	// usage-aware reserve fallback, credential rotation, and the
+	// revert-to-primary policy. nil disables the whole feature (see
+	// fallback_recovery.go).
+	Fallback *FallbackState
 	// Model is the provider-specific model id passed as StreamRequest.Model.
 	Model string
 	// Store is the session mirror of record. When set, it feeds compaction
@@ -422,6 +427,10 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	a.ttsrBeginTurn()
 	// A turn that burned its interrupt budget stays quiet until it ends.
 	defer a.ttsrSetQuiet(false)
+	// Fallback machinery (M5 #25): a fallback cooldown may have expired
+	// (revert to the primary), and the usage-reserve policy is checked
+	// before a turn is spent on a near-quota target.
+	a.fallbackPreTurn()
 	policy := a.Retry
 	if policy.MaxRetries == 0 && policy.BaseDelay == 0 {
 		policy = DefaultRetryPolicy()
@@ -444,6 +453,13 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			if interrupted >= ttsrMaxInterruptsPerTurn {
 				a.ttsrSetQuiet(true)
 			}
+			continue
+		}
+		// Usage-limit recovery (M5 #25): a spent quota is not a blip —
+		// rotate to a sibling credential or step the chain before the
+		// backoff ladder burns its attempts on a target that cannot serve.
+		if a.recoverUsageLimit(err) {
+			attempt = 0
 			continue
 		}
 		switch ai.Classify(err) {
@@ -484,7 +500,10 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// just fit; each overflow climbs one ladder step. At the top
 			// compaction owns recovery, once.
 			if nxt := a.promotionTarget(); nxt > 0 {
-				a.switchTarget(nxt, "recovery")
+				// "promotion" (not "recovery"): a window upgrade is a
+				// deliberate, persistent climb, not a fallback — it must
+				// not arm the revert-to-primary policy (M5 #25).
+				a.switchTarget(nxt, "promotion")
 				continue
 			}
 			if compacted {
