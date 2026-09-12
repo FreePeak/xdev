@@ -2,17 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
+	"github.com/FreePeak/xdev/internal/share"
 )
 
 // terminalKey identifies the terminal/pane + directory for the
@@ -121,6 +124,97 @@ func dumpSession(store *session.Store) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// --- /export + /share + --export (issue #61) ---
+
+// exportSession renders the transcript as one self-contained HTML file and
+// returns the path written ("" = ~/.xdev/agent/exports/<shortid>.html). The
+// walk is internal/share's FromStore, which keeps EVERY entry — /dump's
+// BuildContext path drops the entries the model no longer sees (compaction
+// summaries, branch markers, custom records), which an archive must keep.
+// systemPrompt and model come from the live session when the caller runs one
+// ("" falls back to what the store records: the last model_change, else the
+// model of the last assistant turn).
+func exportSession(store *session.Store, systemPrompt, model, outPath string) (string, error) {
+	return share.Export(store, share.Options{SystemPrompt: systemPrompt, Model: model}, outPath)
+}
+
+// runExport implements --export <file>: resolve the session to export, write
+// its HTML, and report the path. An export only reads: with no session
+// selector it takes the newest session of this directory, and none existing
+// is an error rather than a fresh empty session.
+func runExport(outPath string, opts printOptions) error {
+	if strings.TrimSpace(outPath) == "" {
+		return errors.New("export needs a file path (xdev -export session.html)")
+	}
+	cwd := mustGetwd()
+	store, err := exportSourceSession(cwd, opts)
+	if err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			logx.Errorf("session close: %v", cerr)
+		}
+	}()
+	path, err := exportSession(store, "", "", outPath)
+	if err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	fmt.Println("Exported to: " + path)
+	return nil
+}
+
+// exportSourceSession resolves the session an --export run reads. --fork
+// resolves to its SOURCE: an export must not leave a fork behind.
+func exportSourceSession(cwd string, opts printOptions) (*session.Store, error) {
+	if opts.ForkID != "" {
+		if st, err := os.Stat(opts.ForkID); err == nil && !st.IsDir() {
+			return session.Open(opts.ForkID)
+		}
+		path, err := resolveResumeID(cwd, opts.ForkID)
+		if err != nil {
+			return nil, err
+		}
+		return session.Open(path)
+	}
+	if opts.ResumePrefix != "" || opts.ContinueLast || opts.FromClaude != "" || opts.FromCodex != "" {
+		return openStartupSession(cwd, opts)
+	}
+	path, err := resolveResumeID(cwd, "")
+	if err != nil {
+		return nil, err
+	}
+	return session.Open(path)
+}
+
+// liveShare is the process's one live share server (nil = nothing shared).
+var (
+	shareMu   sync.Mutex
+	liveShare *share.Server
+)
+
+// shareLive seals the session as an E2E-encrypted snapshot and serves it on
+// loopback, returning the view-only link (the AES-256-GCM key rides in the
+// URL fragment, so the server never holds the plaintext in a response). A
+// second /share replaces the first: one live link per process, so a stale
+// snapshot is never left serving.
+// ponytail: loopback only — the link dies with this process. The upgrade
+// path is a POST of the same sealed blob to share.serverUrl.
+func shareLive(store *session.Store, systemPrompt, model string) (string, error) {
+	srv, err := share.Publish(store, share.Options{SystemPrompt: systemPrompt, Model: model}, 0)
+	if err != nil {
+		return "", err
+	}
+	shareMu.Lock()
+	prev := liveShare
+	liveShare = srv
+	shareMu.Unlock()
+	if prev != nil {
+		_ = prev.Close()
+	}
+	return srv.Link(), nil
 }
 
 // --- foreign-session import + --fork startup (issues #28, #11) ---
