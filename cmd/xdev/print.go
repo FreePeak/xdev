@@ -610,6 +610,12 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		}(),
 	})
 	reg.Register(&agent.HubTool{Hub: hub})
+	// M11 #42: cross-session mailbox — persisted agent-to-agent channel,
+	// distinct from the same-process hub. Owner session id is stamped by
+	// wireTaskParent once the session opens.
+	mailbox := agent.NewMailbox(config.DataDir())
+	reg.Register(&agent.SendMessageTool{Mailbox: mailbox})
+	reg.Register(&agent.InboxTool{Mailbox: mailbox})
 	if mem := buildMemory(settings); mem != nil {
 		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
 	}
@@ -734,6 +740,13 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 	if t, ok := reg.Get(agent.TaskToolName); ok {
 		if tt, ok := t.(*agent.TaskTool); ok {
 			tt.ParentSessionID = store.ID()
+		}
+	}
+	// M11 #42: bind the mailbox to the active session; called again on
+	// /resume and session switches so the owner follows the live session.
+	if t, ok := reg.Get(agent.InboxToolName); ok {
+		if it, ok := t.(*agent.InboxTool); ok {
+			it.Mailbox.SetOwner(store.ID())
 		}
 	}
 }
