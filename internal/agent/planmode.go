@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -24,6 +25,21 @@ type PlanMode struct {
 	// toolDefs and routes calls to it ONLY while plan mode is a live
 	// sub-state — it never appears in the normal-mode registry.
 	Propose tool.Tool
+	// Pending is the latest submitted plan while the decision is open:
+	// the xd://propose device serves it, and acceptance (reviewer, device,
+	// or a new proposal replacing it) consumes it.
+	Pending string
+	// Yolo auto-approves the FIRST proposal (--plan-yolo): the reviewer
+	// callback still fires for the host to observe, but its answer cannot
+	// block the first acceptance.
+	Yolo bool
+	// OnAccept (optional) fires once when a proposal is accepted —
+	// --plan-yolo-into uses it to hand the run to the execution model.
+	// It runs on the tool-execution goroutine, like the propose call.
+	OnAccept func()
+	// yoloUsed marks the auto-approval as spent: later proposals take the
+	// reviewer path.
+	yoloUsed bool
 }
 
 // proposeTool ends the plan phase: the model submits its plan and the
@@ -63,15 +79,27 @@ func (p *proposeTool) Execute(ctx context.Context, args json.RawMessage) (tool.R
 	if err := json.Unmarshal(args, &a); err != nil {
 		return tool.Result{Text: "propose: malformed arguments: " + err.Error(), IsError: true}, nil
 	}
-	if p.OnPropose == nil {
+	// Publish the proposal while the decision is open: the xd://propose
+	// device serves this text, and acceptance consumes it.
+	p.pm.Pending = a.Plan
+	switch {
+	case p.OnPropose == nil:
 		// No host decision wired (headless/print): accept — a plan nobody
 		// can review must not trap the run in read-only forever.
-		p.pm.Active = false
+		p.pm.accept()
 		return tool.Result{Text: "plan accepted (no reviewer wired) — plan mode off; implement it now"}, nil
+	case p.pm.Yolo && !p.pm.yoloUsed:
+		// --plan-yolo: the first proposal is pre-approved. The reviewer
+		// still fires (hosts observe/display the submission), but its
+		// answer cannot block the run.
+		p.pm.yoloUsed = true
+		p.OnPropose(ctx, a.Plan)
+		p.pm.accept()
+		return tool.Result{Text: "plan approved automatically (--plan-yolo) — plan mode off; implement it now"}, nil
 	}
 	accept, note := p.OnPropose(ctx, a.Plan)
 	if accept {
-		p.pm.Active = false
+		p.pm.accept()
 		if note == "" {
 			note = "plan approved — plan mode off; implement it now"
 		}
@@ -83,13 +111,114 @@ func (p *proposeTool) Execute(ctx context.Context, args json.RawMessage) (tool.R
 	return tool.Result{Text: "plan rejected — " + note + ". Revise the plan and propose again.", IsError: false}, nil
 }
 
+// accept leaves plan mode, consumes the pending proposal, and fires the
+// one-shot OnAccept hook (the --plan-yolo execution-model handoff). It is
+// the single acceptance transition for both the propose tool and the
+// xd://resolve device, so the two cannot diverge.
+func (pm *PlanMode) accept() {
+	pm.Active = false
+	pm.Pending = ""
+	if pm.OnAccept != nil {
+		sw := pm.OnAccept
+		pm.OnAccept = nil // one-shot: only the first acceptance switches
+		sw()
+	}
+}
+
+// --- xd:// proposal devices (M11 #36, omp naming parity) ---
+//
+// omp exposes plan finalization as URI devices. xdev's propose tool stays
+// the primary submission path; these are the additional access path: read
+// xd://propose returns the pending plan, and writing xd://resolve /
+// xd://reject with a one-sentence reason finalizes it. cmd registers all
+// three on the URI seam (tool.RegisterURIScheme / RegisterWriteDevice).
+
+// DeviceRead serves the xd:// read device (read xd://propose).
+func (pm *PlanMode) DeviceRead(uri string) (string, error) {
+	switch xdDevice(uri) {
+	case "propose":
+		if pm.Pending == "" {
+			return "no pending proposal — the propose tool submits one", nil
+		}
+		return pm.Pending, nil
+	default:
+		return "", fmt.Errorf("unknown xd:// read device %q (xd://propose returns the pending plan; finalize with a write to xd://resolve or xd://reject)", uri)
+	}
+}
+
+// ResolveDevice approves the pending proposal — the write-device form of
+// the reviewer's accept (write xd://resolve "<one sentence>").
+func (pm *PlanMode) ResolveDevice(_, content string) (string, error) {
+	return pm.finalize(true, content)
+}
+
+// RejectDevice declines it, leaving plan mode on so the model revises
+// (write xd://reject "<one sentence>").
+func (pm *PlanMode) RejectDevice(_, content string) (string, error) {
+	return pm.finalize(false, content)
+}
+
+// finalize resolves the pending proposal through the accept transition
+// (or the reject revision note) and consumes the pending text.
+func (pm *PlanMode) finalize(accept bool, content string) (string, error) {
+	if pm.Pending == "" {
+		verb := "reject"
+		if accept {
+			verb = "resolve"
+		}
+		return "", fmt.Errorf("no pending proposal to %s", verb)
+	}
+	reason := firstLine(content)
+	if !accept {
+		if reason == "" {
+			reason = "the host asked for revisions"
+		}
+		pm.Pending = ""
+		return "plan rejected — " + reason + ". Revise the plan and propose again.", nil
+	}
+	pm.accept()
+	if reason == "" {
+		return "plan approved — plan mode off; implement it now", nil
+	}
+	return "plan approved (" + reason + ") — plan mode off; implement it now", nil
+}
+
+// xdDevice returns the device name of an xd:// URI ("propose", "resolve").
+func xdDevice(uri string) string {
+	if i := strings.Index(uri, "://"); i >= 0 {
+		return strings.ToLower(strings.TrimSpace(uri[i+3:]))
+	}
+	return strings.ToLower(strings.TrimSpace(uri))
+}
+
+// firstLine narrows a resolution reason to the one sentence the device
+// contract asks for.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
+}
+
+// SwitchToModel hands the run to target (the --plan-yolo execution-model
+// handoff). The target joins the failover chain as the current one, so the
+// provider/model swap, the compaction window, and the persisted
+// ModelChangeEntry all come from switchTarget — the same machinery
+// prewalkSwitch uses, so prewalk and plan-yolo compose instead of fighting
+// over a.Model.
+func (a *Agent) SwitchToModel(t FailoverTarget, reason string) {
+	a.Failovers = append(a.Failovers, t)
+	a.switchTarget(len(a.Failovers), reason)
+}
+
 // planModeSystemReminder is appended to the system prompt while plan
 // mode is active (opencode system-reminder shape).
 func planModeSystemReminder(note string) string {
 	s := "Plan mode is ACTIVE. You are the plan agent: explore with read-only tools (read, grep, glob), " +
 		"map the change surface, and verify feasibility — but do NOT edit, write, or run state-changing commands. " +
 		"When the design is ready, call propose with the full implementation plan. " +
-		"If a tool call is denied with a plan-mode message, that is the read-only boundary working."
+		"If a tool call is denied with a plan-mode message, that is the read-only boundary working. " +
+		"While a proposal awaits review, read xd://propose to re-read it."
 	if note != "" {
 		s += "\n" + note
 	}

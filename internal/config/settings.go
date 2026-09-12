@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/tool"
 	"gopkg.in/yaml.v3"
 )
 
@@ -55,6 +56,12 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// Ask configures the ask tool (M11 #36): ask.timeout bounds how long
+	// a headless run waits for an answer before the recommended option
+	// proceeds.
+	Ask struct {
+		Timeout int `yaml:"timeout"`
+	} `yaml:"ask"`
 }
 
 // defaultSettings is the schema-defaults layer.
@@ -85,6 +92,15 @@ func defaultSettings() *Settings {
 // unset follows the schema default (on).
 func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
+}
+
+// AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
+// or the tool's schema default when unset.
+func (s *Settings) AskTimeout() time.Duration {
+	if s == nil || s.Ask.Timeout <= 0 {
+		return tool.DefaultAskTimeout
+	}
+	return time.Duration(s.Ask.Timeout) * time.Second
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -187,6 +203,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	if layer.Ask.Timeout != 0 {
+		s.Ask.Timeout = layer.Ask.Timeout
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
@@ -326,6 +345,9 @@ func List(s *Settings, globalPath string) []string {
 	out = append(out, "config "+globalPath)
 	if len(s.DisabledProviders) > 0 {
 		out = append(out, "disabledProviders "+strings.Join(s.DisabledProviders, ","))
+	}
+	if s.Ask.Timeout > 0 {
+		out = append(out, "ask.timeout "+fmt.Sprint(s.Ask.Timeout))
 	}
 	return out
 }
