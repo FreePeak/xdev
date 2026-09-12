@@ -47,30 +47,33 @@ type App struct {
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops            *SessionOps
-	modelOps       *ModelOps         // session lifecycle, wired by cmd (nil → notices)
-	planOps        *PlanOps          // /plan, wired by cmd (nil → notices)
-	advisorOps     *AdvisorOps       // /advisor, wired by cmd (nil → notices)
-	memoryOps      *MemoryOps        // /memory, wired by cmd (nil → notices)
-	themeOps       *ThemeOps         // /theme, wired by cmd (nil → notices)
-	prewalkOps     *PrewalkOps       // /prewalk, wired by cmd (nil → notices)
-	spick          *sessionPicker    // /resume selector (nil = closed)
-	onPickerResume func(id string)   // wired by cmd: performs the resume
-	settingsOps    *SettingsOps      // /settings, wired by cmd (nil → notices)
-	cwdLabel       string            // welcome top bar (last two path components)
-	branch         string            // git branch for the welcome top bar ("" when none)
-	commandDir     string            // markdown command discovery root
-	pathRoot       string            // @-completion root (empty disables the menu)
-	pathScan       func() []string   // shared FS-scan cache-backed file source
-	extCommands    map[string]string // "/server:cmd" -> description
-	extRun         ExtensionCommand
-	renderers      map[string]RenderSpec   // tool name -> declarative render spec
-	sessionTree    func() string           // /tree display
-	sessionBranch  func(args string) error // /branch to an entry id
-	resumeList     func(cwd string) error  // /resume session listing
-	onSend         func(text string)
-	onCancel       func()
-	onQuit         func()
+	ops               *SessionOps
+	modelOps          *ModelOps                       // session lifecycle, wired by cmd (nil → notices)
+	planOps           *PlanOps                        // /plan, wired by cmd (nil → notices)
+	advisorOps        *AdvisorOps                     // /advisor, wired by cmd (nil → notices)
+	memoryOps         *MemoryOps                      // /memory, wired by cmd (nil → notices)
+	themeOps          *ThemeOps                       // /theme, wired by cmd (nil → notices)
+	prewalkOps        *PrewalkOps                     // /prewalk, wired by cmd (nil → notices)
+	spick             *sessionPicker                  // /resume selector (nil = closed)
+	onPickerResume    func(id string)                 // wired by cmd: performs the resume
+	onPickerSearch    func(query string) []PickerItem // wired by cmd: prompt-text matches (nil → local id+title filter)
+	onPickerPinToggle func(id string)                 // wired by cmd: persists the pin sidecar
+	onPickerDelete    func(id string) error           // wired by cmd: deletes JSONL + artifacts after confirmation
+	settingsOps       *SettingsOps                    // /settings, wired by cmd (nil → notices)
+	cwdLabel          string                          // welcome top bar (last two path components)
+	branch            string                          // git branch for the welcome top bar ("" when none)
+	commandDir        string                          // markdown command discovery root
+	pathRoot          string                          // @-completion root (empty disables the menu)
+	pathScan          func() []string                 // shared FS-scan cache-backed file source
+	extCommands       map[string]string               // "/server:cmd" -> description
+	extRun            ExtensionCommand
+	renderers         map[string]RenderSpec   // tool name -> declarative render spec
+	sessionTree       func() string           // /tree display
+	sessionBranch     func(args string) error // /branch to an entry id
+	resumeList        func(cwd string) error  // /resume session listing
+	onSend            func(text string)
+	onCancel          func()
+	onQuit            func()
 
 	keyq      chan tcell.Event
 	dirty     chan struct{}
@@ -180,6 +183,19 @@ func (a *App) SetSessionTree(fn func() string) {
 // SetPickerResume wires what Enter on a picker row does: cmd performs
 // the actual store swap (same path as /resume <id>).
 func (a *App) SetPickerResume(fn func(id string)) { a.onPickerResume = fn }
+
+// SetPickerSearch wires prompt-text search: cmd returns ranked rows for
+// the query (may include matches from session JSONL bodies); nil falls
+// back to the picker's local id+title token filter.
+func (a *App) SetPickerSearch(fn func(query string) []PickerItem) { a.onPickerSearch = fn }
+
+// SetPickerPinToggle wires Ctrl+P in the picker (bare 'p' stays search
+// text): cmd persists session-pins.json (nil → pin toggle is a no-op).
+func (a *App) SetPickerPinToggle(fn func(id string)) { a.onPickerPinToggle = fn }
+
+// SetPickerDelete wires the confirmed delete (Backspace-on-empty twice):
+// cmd removes the session JSONL + artifacts (nil → delete disabled).
+func (a *App) SetPickerDelete(fn func(id string) error) { a.onPickerDelete = fn }
 
 func (a *App) SetResumeList(fn func(cwd string) error) {
 	a.mu.Lock()
