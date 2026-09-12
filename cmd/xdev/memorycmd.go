@@ -83,10 +83,19 @@ func memoryCmd(args []string, in io.Reader, out, errOut io.Writer, settings *con
 // creating a store the agent would never read.
 func memoryCLIBackend(settings *config.Settings) (*memory.Backend, error) {
 	dir := filepath.Join(config.DataDir(), "memory")
+	// This CLI reads and writes MEMORY.md/learned.md, which only the markdown
+	// backend keeps. A store that lives elsewhere has no files to print, and
+	// saying "memory is off" about it would be a lie: name its own surface.
+	switch {
+	case settings != nil && settings.Memory == "mnemopi":
+		return nil, fmt.Errorf("the mnemopi backend keeps its facts in SQLite, not in %s — use /memory view|stats|queue|sync|enqueue in the TUI", dir)
+	case settings != nil && settings.Memory == "hindsight":
+		return nil, fmt.Errorf("the hindsight backend keeps its memories on the server — use /memory view|stats|diagnose|enqueue in the TUI")
+	}
 	on := settings != nil && settings.Memory == "local"
 	if !on {
 		if _, err := os.Stat(dir); err != nil {
-			return nil, fmt.Errorf("memory is off — enable it with `xdev config set memory local` (nothing stored at %s)", dir)
+			return nil, fmt.Errorf("memory is off — enable it with `xdev config set memory local` (or mnemopi|hindsight) (nothing stored at %s)", dir)
 		}
 	}
 	return &memory.Backend{Dir: dir}, nil

@@ -107,11 +107,12 @@ func validateKey(key, value string) error {
 		}
 		return fmt.Errorf("approvalMode must be always-ask|write|yolo, got %q", value)
 	case "memory":
-		switch value {
-		case "off", "local":
+		// The vocabulary lives in config: settings validation and this CLI
+		// must accept exactly the same backends.
+		if config.ValidMemoryBackend(value) {
 			return nil
 		}
-		return fmt.Errorf("memory must be off|local, got %q", value)
+		return fmt.Errorf("memory must be off|local|mnemopi|hindsight|sharpshooter, got %q", value)
 	case "showThinking", "advisor":
 		switch value {
 		case "true", "false":

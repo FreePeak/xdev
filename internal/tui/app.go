@@ -541,33 +541,16 @@ func (a *App) Theme(args string) error {
 	return nil
 }
 
-// Memory implements CommandAPI /memory: view|stats|clear.
+// Memory implements CommandAPI /memory: view|stats|clear plus the
+// backend-specific verbs (queue|sync|enqueue for the mnemopi store, diagnose
+// for the remote Hindsight backend). The grammar lives in MemoryOps.Dispatch
+// so every backend answers the same verbs through one place.
 func (a *App) Memory(args string) error {
-	if a.memoryOps == nil {
-		return fmt.Errorf("memory not wired (set memory: local in settings)")
+	block, err := a.memoryOps.Dispatch(args)
+	if err != nil {
+		return err
 	}
-	switch strings.TrimSpace(args) {
-	case "", "view":
-		if a.memoryOps.View == nil {
-			return fmt.Errorf("memory view not wired")
-		}
-		a.AddSystemBlock(a.memoryOps.View())
-	case "stats":
-		if a.memoryOps.Stats == nil {
-			return fmt.Errorf("memory stats not wired")
-		}
-		a.AddSystemBlock(a.memoryOps.Stats())
-	case "clear":
-		if a.memoryOps.Clear == nil {
-			return fmt.Errorf("memory clear not wired")
-		}
-		if err := a.memoryOps.Clear(); err != nil {
-			return err
-		}
-		a.AddSystemBlock("memory cleared")
-	default:
-		return fmt.Errorf("memory: use view|stats|clear")
-	}
+	a.AddSystemBlock(block)
 	return nil
 }
 
