@@ -77,6 +77,9 @@ type Settings struct {
 	ToolsApproval map[string]string `yaml:"toolsApproval"`
 	// BashPatterns are ordered command rules, "deny:rm -rf *" style.
 	BashPatterns []string `yaml:"bashPatterns"`
+	// Bash is the `bash` group (M13 #56): the compound-command opt-in and
+	// the external interceptor.
+	Bash BashSettings `yaml:"bash"`
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
 	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
@@ -156,6 +159,22 @@ type SkillsSettings struct {
 	// relative entry resolves against the project cwd; a missing or
 	// unreadable directory is skipped, never fatal.
 	CustomDirectories []string `yaml:"customDirectories"`
+}
+
+// BashSettings is the `bash` group (M13 #56).
+type BashSettings struct {
+	// AllowCompoundCommands matches a compound command against bashPatterns
+	// as one string before falling back to per-segment resolution. A
+	// pointer, so a project layer can express "off" over a global "on";
+	// nil/unset keeps the shipped default (off) — see
+	// tool.ApprovalPolicy.AllowCompoundCommands for the tradeoff.
+	AllowCompoundCommands *bool `yaml:"allowCompoundCommands"`
+	// Interceptor is an external command that reviews a proposed bash
+	// command before the approval policy runs (hook-style: JSON request on
+	// stdin, JSON verdict on stdout). Empty means off, and any failure of
+	// a configured interceptor denies the call; see
+	// internal/tool/interceptor.go.
+	Interceptor string `yaml:"interceptor"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -266,6 +285,13 @@ func defaultSettings() *Settings {
 // unset follows the schema default (on).
 func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
+}
+
+// AllowCompoundCommandsOn reports the effective bash.allowCompoundCommands
+// (nil-safe: the shipped default is off, and a layer that never set it
+// can't turn it on).
+func (s *Settings) AllowCompoundCommandsOn() bool {
+	return s != nil && s.Bash.AllowCompoundCommands != nil && *s.Bash.AllowCompoundCommands
 }
 
 // MemoryPipelineOn reports whether the local backend's two-phase pipeline
@@ -385,6 +411,12 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.BashPatterns != nil {
 		s.BashPatterns = append([]string(nil), layer.BashPatterns...)
+	}
+	if layer.Bash.AllowCompoundCommands != nil {
+		s.Bash.AllowCompoundCommands = layer.Bash.AllowCompoundCommands
+	}
+	if layer.Bash.Interceptor != "" {
+		s.Bash.Interceptor = layer.Bash.Interceptor
 	}
 	for k, v := range layer.Hooks {
 		s.Hooks[k] = v
@@ -653,6 +685,7 @@ func List(s *Settings, globalPath string) []string {
 	out := []string{
 		"theme " + s.Theme,
 		"approvalMode " + s.ApprovalMode,
+		"bash.allowCompoundCommands " + fmt.Sprint(s.AllowCompoundCommandsOn()),
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),

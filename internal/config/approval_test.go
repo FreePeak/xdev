@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,5 +90,68 @@ bashPatterns:
 	}
 	if dec.Action != tool.ActionDeny {
 		t.Fatalf("configured deny rule did not fire: %s", dec.Action)
+	}
+}
+
+func TestSettingsBashGroupReachesPolicy(t *testing.T) {
+	// The `bash` group (M13 #56) decodes through the layering merge and lands
+	// in the resolved policy: the compound opt-in reaches the pattern
+	// resolver, and the interceptor command is trimmed.
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	on := filepath.Join(dir, "on.yml")
+	if err := os.WriteFile(on, []byte("bash:\n  allowCompoundCommands: true\n  interceptor: \"  /bin/review.sh  \"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSettings(dir, []string{on})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := s.Policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pol.AllowCompoundCommands {
+		t.Fatal("bash.allowCompoundCommands did not reach the policy")
+	}
+	if pol.BashInterceptor.Command != "/bin/review.sh" {
+		t.Fatalf("interceptor = %q, want it trimmed", pol.BashInterceptor.Command)
+	}
+
+	// A later layer can turn the opt-in back off (the pointer exists for
+	// exactly this) without wiping the interceptor beside it.
+	off := filepath.Join(dir, "off.yml")
+	if err := os.WriteFile(off, []byte("bash:\n  allowCompoundCommands: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := LoadSettings(dir, []string{on, off})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2pol, err := s2.Policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2pol.AllowCompoundCommands {
+		t.Fatal("a later layer must be able to disable the opt-in")
+	}
+	if s2pol.BashInterceptor.Command != "/bin/review.sh" {
+		t.Fatalf("a partial layer wiped the interceptor: %q", s2pol.BashInterceptor.Command)
+	}
+}
+
+func TestSettingsBashDefaultsAreConservative(t *testing.T) {
+	// Shipped defaults: per-segment resolution and no interceptor.
+	t.Setenv("HOME", t.TempDir())
+	s, err := LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := s.Policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol.AllowCompoundCommands || !pol.BashInterceptor.Off() {
+		t.Fatalf("default bash policy = %+v", pol)
 	}
 }
