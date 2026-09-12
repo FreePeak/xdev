@@ -213,3 +213,134 @@ func TestParsePolicyRules(t *testing.T) {
 		t.Fatal("empty pattern must error")
 	}
 }
+
+func TestPolicyCompoundWholeMatchOptIn(t *testing.T) {
+	// The same rules, the same compound, both settings of
+	// bash.allowCompoundCommands.
+	rules := []PolicyRule{
+		{Pattern: "npm test *", Action: ActionAllow},
+		{Pattern: "docker *", Action: ActionPrompt},
+	}
+	off := ApprovalPolicy{Mode: AlwaysAsk, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: AlwaysAsk, BashPatterns: rules, AllowCompoundCommands: true}
+
+	// Off (the shipped default): a rule written for the whole chain never
+	// fires, so the chain is prompt-worthy under always-ask.
+	if dec, _ := off.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionPrompt {
+		t.Fatalf("opt-in off: got %s, want the per-segment verdict (prompt)", dec.Action)
+	}
+	// On: the compound is matched as ONE string first, so the whole-chain
+	// allow decides it — this is the feature.
+	if dec, _ := on.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionAllow {
+		t.Fatalf("opt-in on: got %s, want the whole-chain allow to decide", dec.Action)
+	}
+	// No whole-command rule matches: resolution falls back to segments, so
+	// the prompt rule on the second command still fires.
+	if dec, _ := on.Decide("bash", policyBashArgs(t, "echo hi && docker build .")); dec.Action != ActionPrompt {
+		t.Fatalf("no whole match must fall back to segments: got %s", dec.Action)
+	}
+}
+
+func TestPolicyCompoundSmugglingStaysDenied(t *testing.T) {
+	// A smuggling case: an allow rule for the compound must never lift the
+	// verdict on a denied segment, with the opt-in off or on. Deny rules are
+	// absolute in both regimes.
+	rules := []PolicyRule{
+		{Pattern: "npm test *", Action: ActionAllow},
+		{Pattern: "rm -rf *", Action: ActionDeny},
+	}
+	off := ApprovalPolicy{Mode: Yolo, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: Yolo, BashPatterns: rules, AllowCompoundCommands: true}
+	for name, p := range map[string]ApprovalPolicy{"off": off, "on": on} {
+		if dec, _ := p.Decide("bash", policyBashArgs(t, "npm test && rm -rf /tmp/x")); dec.Action != ActionDeny {
+			t.Errorf("%s: compound smuggled a denied command: %s", name, dec.Action)
+		}
+	}
+}
+
+func TestPolicyCompoundWholeCommandRuleForms(t *testing.T) {
+	// The operator forms the per-segment resolver must not miss, and the
+	// rules the whole-command layer covers instead. `|` and `$(…)` are
+	// segments, so their commands are judged by the per-segment rules with
+	// the opt-in off; a rule written for the whole chain only fires with it
+	// on.
+	rules := []PolicyRule{
+		{Pattern: "rm -rf *", Action: ActionDeny},
+		{Pattern: "npm test && git push *", Action: ActionPrompt},
+	}
+	off := ApprovalPolicy{Mode: Yolo, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: Yolo, BashPatterns: rules, AllowCompoundCommands: true}
+
+	// Pipelines, subshells, command substitution and backgrounding: denied
+	// in BOTH regimes (the split covers them, so no whole rule is needed).
+	for _, cmd := range []string{
+		"echo hi | rm -rf /tmp/x",
+		"echo hi & rm -rf /tmp/x",
+		"(cd /tmp && rm -rf /tmp/x)",
+		"echo $(rm -rf /tmp/x)",
+		"echo `rm -rf /tmp/x`",
+		"true; rm -rf /tmp/x",
+		"true || rm -rf /tmp/x",
+	} {
+		for name, p := range map[string]ApprovalPolicy{"off": off, "on": on} {
+			if dec, _ := p.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionDeny {
+				t.Errorf("%s: %q = %s, want deny", name, cmd, dec.Action)
+			}
+		}
+	}
+
+	// A rule written across the operator only matches the whole chain...
+	const chain = "npm test && git push origin main"
+	if dec, _ := off.Decide("bash", policyBashArgs(t, chain)); dec.Action != ActionAllow {
+		t.Errorf("opt-in off: whole-chain rule should not fire, got %s", dec.Action)
+	}
+	dec, _ := on.Decide("bash", policyBashArgs(t, chain))
+	if dec.Action != ActionPrompt || !strings.Contains(dec.Reason, "whole command") {
+		t.Errorf("opt-in on: whole-chain prompt rule should fire, got %+v", dec)
+	}
+}
+
+func TestPolicyCompoundOptInPreservesPrecedence(t *testing.T) {
+	// Whole-command matching is the bash-pattern layer, so it stays under an
+	// explicit per-tool rule and keeps prompt above allow.
+	p := ApprovalPolicy{
+		Mode:                  Yolo,
+		AllowCompoundCommands: true,
+		PerTool:               map[string]Action{"bash": ActionPrompt},
+		BashPatterns: []PolicyRule{
+			{Pattern: "npm test *", Action: ActionAllow},
+			{Pattern: "npm *", Action: ActionPrompt},
+		},
+	}
+	if dec, _ := p.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionPrompt {
+		t.Fatalf("per-tool rule must outrank the whole-command layer: %s", dec.Action)
+	}
+	// Within the layer, prompt beats allow regardless of order.
+	q := ApprovalPolicy{
+		Mode:                  Yolo,
+		AllowCompoundCommands: true,
+		BashPatterns: []PolicyRule{
+			{Pattern: "npm test *", Action: ActionAllow},
+			{Pattern: "npm *", Action: ActionPrompt},
+		},
+	}
+	if dec, _ := q.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionPrompt {
+		t.Fatalf("prompt must outrank allow at the whole-command layer: %s", dec.Action)
+	}
+}
+
+func TestPolicyCompoundWholeDenyOnlyFiresWhenOptedIn(t *testing.T) {
+	// A deny rule written across the operators protects the compound it
+	// describes; with the opt-in off the per-segment resolver cannot see it,
+	// which is exactly why deny wants an explicit per-segment rule too.
+	rules := []PolicyRule{{Pattern: "npm test && rm -rf *", Action: ActionDeny}}
+	off := ApprovalPolicy{Mode: Yolo, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: Yolo, BashPatterns: rules, AllowCompoundCommands: true}
+	const cmd = "npm test && rm -rf /tmp/x"
+	if dec, _ := off.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionAllow {
+		t.Errorf("opt-in off: got %s, want allow (rule doesn't match a segment)", dec.Action)
+	}
+	if dec, _ := on.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionDeny {
+		t.Errorf("opt-in on: whole-command deny did not fire: %s", dec.Action)
+	}
+}

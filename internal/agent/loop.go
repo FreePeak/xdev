@@ -803,8 +803,45 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		a.Hooks.OnToolEnd(call, denied, time.Since(started))
 		return toolResultMsg(call, denied)
 	}
+	// bash.interceptor (M13 #56): a settings-declared external review of the
+	// proposed command, run at the same seam as the pattern rules. It is
+	// fail-closed (a broken, hung, or unreadable interceptor denies) and
+	// never an approver: "allow" only means "no objection" — the policy
+	// below still decides — and a rewrite is judged here like a freshly
+	// proposed command, so a rewrite into a denied command is still denied.
+	interceptReason := ""
+	if call.Name == "bash" {
+		verdict, rewritten, verr := a.Policy.ReviewBash(ctx, args)
+		if verr != nil {
+			res := tool.Result{Text: "tool call denied: " + verr.Error(), IsError: true}
+			a.Hooks.OnToolEnd(call, res, time.Since(started))
+			return toolResultMsg(call, res)
+		}
+		if verdict.Action == tool.ActionDeny {
+			res := tool.Result{Text: "tool call denied: " + verdict.Reason, IsError: true}
+			a.Hooks.OnToolEnd(call, res, time.Since(started))
+			return toolResultMsg(call, res)
+		}
+		if verdict.Action == tool.ActionPrompt {
+			interceptReason = verdict.Reason
+		}
+		if len(rewritten) > 0 {
+			args = rewritten
+			call.Arguments = rewritten
+		}
+	}
 	// Approval policy: deny/prompt are resolved before anything runs.
-	if dec, err := a.Policy.Decide(call.Name, args); err == nil && dec.Action != tool.ActionAllow {
+	dec, decErr := a.Policy.Decide(call.Name, args)
+	if decErr != nil {
+		dec = tool.Decision{Action: tool.ActionAllow}
+	}
+	if interceptReason != "" && dec.Action == tool.ActionAllow {
+		// The interceptor asked for a human verdict and cannot grant one
+		// itself: this prompt runs even under yolo, and an unattended run
+		// refuses (no approver) rather than treating it as an allow.
+		dec = tool.Decision{Action: tool.ActionPrompt, Reason: interceptReason}
+	}
+	if dec.Action != tool.ActionAllow {
 		if dec.Action == tool.ActionDeny {
 			res := tool.Result{Text: "tool call denied: " + dec.Reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
