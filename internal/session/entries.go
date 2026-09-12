@@ -60,6 +60,12 @@ const (
 	// model it; foreign readers keep the line as an opaque chain node.
 	TypeGoalUpdated = "goal_updated"
 
+	// TypeCheckpoint is a named session-tree bookmark (M13 #51): the entry
+	// id rewind branches back to, the name it is found by, and a note.
+	// omp does not model it; foreign readers keep the line as an opaque
+	// chain node.
+	TypeCheckpoint = "checkpoint"
+
 	// TypeBranch is xdev's persisted branch marker (a CustomEntry whose
 	// CustomType is "branch" with data {"to":entryID}); it is how Open
 	// reconstructs the leaf pointer across restarts.
@@ -152,6 +158,28 @@ type GoalUpdatedEntry struct {
 
 func (e *GoalUpdatedEntry) Envelope() Envelope { return e.Env }
 
+// CheckpointPayload is the bookmark carried by CheckpointEntry: Name is how
+// a later rewind finds it, EntryID is the leaf the session branched from,
+// and Note is free-form context for the human/model reading the list.
+type CheckpointPayload struct {
+	Name    string `json:"name"`
+	EntryID string `json:"entryId"`
+	Note    string `json:"note,omitempty"`
+}
+
+// CheckpointEntry records one named checkpoint (M13 #51). The entry is
+// metadata: context conversion ignores it, and the leaf pointer is never
+// moved by creating one — rewind moves the leaf back to EntryID. EntryID
+// may name a compaction-dropped (windowed) entry, in which case rewind
+// fails loudly rather than silently branching from the wrong place.
+// Wire: {"type":"checkpoint",...,"checkpoint":{"name":...,"entryId":...}}.
+type CheckpointEntry struct {
+	Env        Envelope
+	Checkpoint CheckpointPayload
+}
+
+func (e *CheckpointEntry) Envelope() Envelope { return e.Env }
+
 // UnknownEntry preserves an entry type outside xdev's parsed set while
 // keeping the parent chain intact — real omp files carry title_change /
 // thinking_level_change / service_tier_change entries mid-chain, and
@@ -220,15 +248,16 @@ type entryWire struct {
 	ParentID  *string  `json:"parentId"`
 	Timestamp wireTime `json:"timestamp"`
 
-	Message          json.RawMessage `json:"message,omitempty"`
-	Model            *string         `json:"model,omitempty"`
-	ResolvedFallback *bool           `json:"resolvedModelIsFallback,omitempty"`
-	Summary          json.RawMessage `json:"summary,omitempty"`
-	FirstKeptEntryID *string         `json:"firstKeptEntryId,omitempty"`
-	TokensBefore     *int64          `json:"tokensBefore,omitempty"`
-	CustomType       string          `json:"customType,omitempty"`
-	Data             map[string]any  `json:"data,omitempty"`
-	Goal             *GoalPayload    `json:"goal,omitempty"`
+	Message          json.RawMessage    `json:"message,omitempty"`
+	Model            *string            `json:"model,omitempty"`
+	ResolvedFallback *bool              `json:"resolvedModelIsFallback,omitempty"`
+	Summary          json.RawMessage    `json:"summary,omitempty"`
+	FirstKeptEntryID *string            `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     *int64             `json:"tokensBefore,omitempty"`
+	CustomType       string             `json:"customType,omitempty"`
+	Data             map[string]any     `json:"data,omitempty"`
+	Goal             *GoalPayload       `json:"goal,omitempty"`
+	Checkpoint       *CheckpointPayload `json:"checkpoint,omitempty"`
 }
 
 func (w entryWire) envelope() Envelope {
@@ -268,6 +297,9 @@ func MarshalEntry(e Entry) ([]byte, error) {
 	case *GoalUpdatedEntry:
 		w.Type = TypeGoalUpdated
 		w.Goal = &t.Goal
+	case *CheckpointEntry:
+		w.Type = TypeCheckpoint
+		w.Checkpoint = &t.Checkpoint
 	default:
 		return nil, fmt.Errorf("%w: cannot marshal %T", ErrUnknownEntryType, e)
 	}
@@ -326,6 +358,12 @@ func ParseEntry(line []byte) (Entry, error) {
 		e := &GoalUpdatedEntry{Env: env}
 		if w.Goal != nil {
 			e.Goal = *w.Goal
+		}
+		return e, nil
+	case TypeCheckpoint:
+		e := &CheckpointEntry{Env: env}
+		if w.Checkpoint != nil {
+			e.Checkpoint = *w.Checkpoint
 		}
 		return e, nil
 	default:
