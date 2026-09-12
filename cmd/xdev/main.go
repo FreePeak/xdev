@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/lsp"
@@ -41,6 +42,14 @@ var loadedSettings *config.Settings
 // appliedLimit is the process memory limit actually set, for the usage
 // footer (the closure runs before the value exists).
 var appliedLimit int64
+
+// subcommands are the first-arg names that select a mode instead of a
+// prompt. One entry per subcommand keeps merges (and reviews) trivial.
+var subcommands = map[string]bool{
+	"print": true, "tui": true, "rpc": true, "config": true,
+	"lsp-config": true, "say": true, "plugin": true, "join": true,
+	"login": true, "logout": true, "version": true,
+}
 
 func main() {
 	fs := flag.NewFlagSet("xdev", flag.ContinueOnError)
@@ -81,6 +90,7 @@ func main() {
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
+  xdev join "<link>"           mirror a shared session (collab guest)
   xdev lsp-config [list|validate]  language servers, resolved binaries
   xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
 
@@ -153,9 +163,21 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "say" || args[0] == "plugin" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	// Subcommand names select a mode; anything else is a prompt. Keep this a
+	// set, not a chained || — every new subcommand adds one line (and merges
+	// cleanly instead of colliding on a single long expression).
+	if len(args) > 0 && subcommands[args[0]] {
 		mode, args = args[0], args[1:]
 	}
+	if mode == "join" {
+		// Collab guest: mirror a shared session (M14 #59).
+		if err := collab.Run(args); err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
 	if mode == "tui" {
 		code, err := runTUI(printOptions{
 			Model:        *model,
