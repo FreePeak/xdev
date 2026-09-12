@@ -1,0 +1,8 @@
+{"type":"mode","mode":"normal","sessionId":"11111111-2222-3333-4444-555555555555"}
+{"parentUuid":null,"isSidechain":false,"type":"user","timestamp":"2026-09-06T15:20:53.314Z","message":{"role":"user","content":"does the router support multiple sessions running concurrently?"}}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","timestamp":"2026-09-06T15:21:28.134Z","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"Let me check the router code.","signature":"sig"}]}}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","timestamp":"2026-09-06T15:21:29.000Z","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Checking the session manager."},{"type":"tool_use","id":"toolu_01","name":"Grep","input":{"pattern":"session","path":"internal"}}]}}
+{"parentUuid":"a1","isSidechain":false,"type":"user","timestamp":"2026-09-06T15:21:30.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":"store.go: session registry"}]}]}}
+{"parentUuid":"a1","isSidechain":true,"type":"user","timestamp":"2026-09-06T15:21:31.000Z","message":{"role":"user","content":"sidechain prompt should be skipped"}}
+{"parentUuid":"a1","isSidechain":false,"type":"user","timestamp":"2026-09-06T15:22:00.000Z","message":{"role":"user","content":"thanks, that answers it"}}
+{"type":"ai-title","aiTitle":"router concurrent sessions","sessionId":"11111111-2222-3333-4444-555555555555"}
