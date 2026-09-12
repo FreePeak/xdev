@@ -178,6 +178,13 @@ type Agent struct {
 	// Policy is the approval configuration; Approve prompts the user when a
 	// decision requires it (nil means an unattended run: prompts deny).
 	Policy tool.ApprovalPolicy
+	// Rulebook returns the guidance of rules scoped to a touched path (globs
+	// from .cursor/rules, RULES.md, plugin rulebooks). Called after a
+	// successful edit/write so a path-scoped rulebook reaches the model on the
+	// turn that made the change instead of only being advertised in the
+	// prompt (parity finding #108: rules.ForPath had no consumer). nil =
+	// advisory prompt block only, which was the whole behavior before.
+	Rulebook func(path string) string
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
@@ -909,6 +916,12 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 			}
 		}
 	}
+	if note := a.rulebookNote(call, res); note != "" {
+		// A glob-scoped rule (globs: *.go) is guidance tied to the file the
+		// model just changed: it rides the tool result, where the model will
+		// act on it, rather than sitting unused in the prompt index.
+		res.Text = strings.TrimRight(res.Text, "\n") + "\n\n" + note
+	}
 	if rem := a.ttsrReminder(call.StreamIndex); rem != "" {
 		// Non-interrupting tool match (M11 #35): the rule may not cut the
 		// call short, so its notice rides along in the tool result.
@@ -957,6 +970,27 @@ func redactMessages(msgs []ai.Message, r Redactor) []ai.Message {
 		out[i].Content = blocks
 	}
 	return out
+}
+
+// rulebookNote renders the path-scoped rulebook guidance for one completed
+// tool call: only edit/write carry a target path, and a failing call has no
+// path worth advising on.
+func (a *Agent) rulebookNote(call ai.ToolCallBlock, res tool.Result) string {
+	if a.Rulebook == nil || res.IsError {
+		return ""
+	}
+	switch call.Name {
+	case "edit", "write":
+	default:
+		return ""
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(call.Arguments, &args) != nil || strings.TrimSpace(args.Path) == "" {
+		return ""
+	}
+	return strings.TrimSpace(a.Rulebook(args.Path))
 }
 
 // redactToolMessage hides secrets in a tool result before it enters the
