@@ -30,7 +30,7 @@ func TestWireAgentModeInstallsBothSeams(t *testing.T) {
 
 	reg := tool.NewRegistry()
 	ag := &agent.Agent{Tools: reg, Model: "m"}
-	wireAgentMode(ag, reg, cwd)
+	wireAgentMode(ag, reg, &config.Config{}, &config.Settings{}, "", cwd)
 
 	// 1. Redactor: the secret leaves context as a placeholder and comes back
 	// on the way in (the reversible round trip is the whole contract).
@@ -54,11 +54,11 @@ func TestWireAgentModeInstallsBothSeams(t *testing.T) {
 func TestWireAgentModeToleratesNilRegistry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, t.TempDir())
+	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", t.TempDir())
 	if ag.Redactor == nil {
 		t.Fatal("redactor must still be installed with no registry")
 	}
-	wireAgentMode(nil, nil, t.TempDir()) // must not panic
+	wireAgentMode(nil, nil, &config.Config{}, &config.Settings{}, "", t.TempDir()) // must not panic
 }
 
 // The config the redactor reads is the project one, so a secret declared in
@@ -77,8 +77,57 @@ func TestWireAgentModeUsesGlobalSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, t.TempDir())
+	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", t.TempDir())
 	if got := ag.Redactor.Apply("token " + secret); strings.Contains(got, secret) {
 		t.Fatalf("global secret not masked: %q", got)
+	}
+}
+
+// #84: a declared retry.fallbackChains order must drive the failover list —
+// the engine resolved chains but no production path ever consulted settings, so
+// the order a user wrote was overridden by context-window size.
+func TestFailoverChainHonoursDeclaredOrder(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"small": {API: "openai-completions", BaseURL: "http://127.0.0.1:1/v1", APIKey: "k",
+			Models: []config.ModelConfig{{ID: "s1", ContextWindow: 1000}}},
+		"big": {API: "openai-completions", BaseURL: "http://127.0.0.1:2/v1", APIKey: "k",
+			Models: []config.ModelConfig{{ID: "b1", ContextWindow: 900000}}},
+		"mid": {API: "openai-completions", BaseURL: "http://127.0.0.1:3/v1", APIKey: "k",
+			Models: []config.ModelConfig{{ID: "m1", ContextWindow: 50000}}},
+	}}
+	s := &config.Settings{Retry: config.RetrySettings{
+		FallbackChains: map[string][]string{"onegw/x": {"mid/m1", "small/s1"}},
+	}}
+	got := failoverChain(cfg, s, "", "onegw", "x")
+	if len(got) == 0 {
+		t.Skip("providers unbuildable in this environment")
+	}
+	// Declared order wins over the window ranking (big would otherwise be first).
+	if len(got) < 2 {
+		t.Fatalf("chain = %d targets", len(got))
+	}
+	if !strings.Contains(got[0].Model, "m1") {
+		t.Fatalf("first target = %q, want the declared mid/m1 (not window-ranked)", got[0].Model)
+	}
+	// With no chain declared, the window ranking still applies.
+	plain := failoverChain(cfg, &config.Settings{}, "", "onegw", "x")
+	if len(plain) == 0 || plain[0].Model != "b1" {
+		t.Fatalf("undeclared chain = %+v, want the biggest window first", plain)
+	}
+}
+
+// Arms the fallback state so the reserve/rotation machinery has a live object.
+func TestWireAgentModeArmsFallbackState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag := &agent.Agent{Model: "m"}
+	st := wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "smol", t.TempDir())
+	if st == nil {
+		t.Fatal("fallback state not armed — retry.fallbackChains/reserve/revert stay unreachable")
+	}
+	if st.Role != "smol" {
+		t.Fatalf("role = %q, want the active role", st.Role)
+	}
+	if st.Rotate == nil {
+		t.Fatal("credential rotation seam unwired: a spent apiKeys key fails the run")
 	}
 }

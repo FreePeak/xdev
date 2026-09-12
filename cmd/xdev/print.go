@@ -225,19 +225,31 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // tool args). Both were once print-only — modes that hand-build an agent drift
 // silently, which is why the wiring lives in one function with one test
 // (#79 catalog, #80 redactor).
-func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cwd string) {
+func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, role, cwd string) *agent.FallbackState {
 	if ag == nil {
-		return
+		return nil
 	}
 	if reg != nil {
 		ag.WireCatalog(reg.Catalog())
 	}
 	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
+	// M5 #25 depth (#84): arm the fallback state so the reserve policy,
+	// cooldown revert and credential rotation actually run — the engine was
+	// complete and unit-tested with no production caller, so a spent key
+	// failed the run instead of stepping to its apiKeys sibling.
+	st := ag.ArmFallback(settings, role)
+	if st != nil {
+		st.Rotate = func(provider string) (ai.Provider, bool) {
+			return rotateProviderCredential(cfg, provider, ag.Model)
+		}
+	}
+	return st
 	// #108: a rulebook rule scoped by globs (globs: *.go) was discovered,
 	// listed in the prompt and rendered as an edit/write "shorthand", but
 	// nothing consumed it. The matched guidance now rides the tool result of
 	// the change it applies to, which is where the model acts on it.
 	ag.Rulebook = rulebookNoteFor
+	return st
 }
 
 // rulebookBudget caps one injected rulebook notice: rules can be long, and
@@ -279,6 +291,21 @@ func ruleNames(rs []rules.Rule) []string {
 		out[i] = r.Name
 	}
 	return out
+}
+
+// modelRoleRef returns the role name a model reference was resolved from
+// ("" for a literal provider/model). retry.fallbackChains keys can name a
+// role, so the chain engine needs this to find a role-scoped chain after a
+// role reassignment.
+func modelRoleRef(ref string) string {
+	if !strings.HasPrefix(ref, "@") {
+		return ""
+	}
+	name := strings.TrimPrefix(ref, "@")
+	if i := strings.IndexByte(name, ':'); i >= 0 {
+		name = name[:i]
+	}
+	return name
 }
 
 // advisorDrainCap bounds the final headless review at run exit. Thirty
@@ -431,7 +458,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// enqueues a consolidation the exit drain below applies.
 	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
 	hooks := memoryTurnHooks(ph, settings)
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, settings, modelRoleRef(opts.Model), provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -459,7 +486,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, reg, cwd)
+	wireAgentMode(ag, reg, cfg, settings, modelRoleRef(opts.Model), cwd)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
@@ -670,6 +697,9 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 	credReq := config.CredentialRequest{
 		Provider: name, ProviderCfg: pc, CLIKey: cliAPIKey(),
 		Refresh: refreshFunc(name, cfg),
+		// M5 #25: the credential rotation position for this provider
+		// (apiKeys pool). 0 unless a fallback has already rotated it.
+		PoolIndex: poolIndexOf(name),
 	}
 	resolved, credErr := config.ResolveCredential(credReq)
 	// auth: none — a local server (ollama, lm-studio) is configured by
@@ -928,6 +958,52 @@ func hasStoredCredential(provider string) bool {
 	}
 	c, ok := store[provider]
 	return ok && (strings.TrimSpace(c.APIKey) != "" || strings.TrimSpace(c.AccessToken) != "")
+}
+
+// poolIdx tracks the credential rotation position per provider (M5 #25,
+// retry.fallbackChains depth). The engine's Rotate seam advances it and
+// rebuilds the provider, so a spent key steps to its apiKeys sibling instead
+// of failing the run. Guarded because a background agent can rotate while the
+// primary turn reads its own provider.
+var (
+	poolMu  sync.Mutex
+	poolIdx = map[string]int{}
+)
+
+func poolIndexOf(name string) int {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	return poolIdx[name]
+}
+
+// rotateProviderCredential advances the provider to its next models.yml
+// credential and rebuilds it. ok=false when the pool is exhausted (the caller
+// then falls back to another provider instead).
+func rotateProviderCredential(cfg *config.Config, provider, model string) (ai.Provider, bool) {
+	pc := cfg.Providers[provider]
+	if pc == nil {
+		return nil, false
+	}
+	pool := config.CredentialPool(pc, model)
+	poolMu.Lock()
+	next := poolIdx[provider] + 1
+	if pool == nil || next >= len(pool) {
+		poolMu.Unlock()
+		return nil, false
+	}
+	poolIdx[provider] = next
+	poolMu.Unlock()
+	prov, err := buildProvider(provider, pc, model, cfg)
+	if err != nil {
+		// The rebuilt provider failed: undo the step so the next attempt (or
+		// the primary) keeps the credential that worked.
+		poolMu.Lock()
+		poolIdx[provider] = next - 1
+		poolMu.Unlock()
+		return nil, false
+	}
+	logx.Debugf("retry: rotated %s to credential %d/%d", provider, next+1, len(pool))
+	return prov, true
 }
 
 // cliAPIKey holds the -api-key value for the run (set once in main before
@@ -1949,7 +2025,71 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 // chain in order; overflow promotion picks the smallest window that
 // fits). Providers are built eagerly — the HTTP clients stay idle until
 // a failover actually streams.
-func failoverChain(cfg *config.Config, primaryProv, primaryModel string) []agent.FailoverTarget {
+// failoverChain is the ordered failover target list for one model. A declared
+// retry.fallbackChains entry for the active model (or its role) wins and is
+// resolved through the chain engine, so a hand-written order is honored
+// instead of being overridden by window size (#84). With no chain configured
+// — the common case — every configured provider/model is offered, best window
+// first.
+func failoverChain(cfg *config.Config, settings *config.Settings, role, primaryProv, primaryModel string) []agent.FailoverTarget {
+	if settings != nil && len(settings.Retry.FallbackChains) > 0 {
+		targets := agent.ResolveFallbackChain(settings, role, primaryProv, primaryModel,
+			agent.ConfigCatalog{Config: cfg}, declaredChainTargets(cfg, primaryProv, primaryModel))
+		if out := buildChainTargets(cfg, targets); len(out) > 0 {
+			return out
+		}
+	}
+	return defaultFailoverTargets(cfg, primaryProv, primaryModel)
+}
+
+// buildChainTargets turns resolved chain entries into live failover targets.
+// An entry whose provider is unknown or cannot be built is REPORTED, never
+// silently dropped: a typo in a chain is otherwise invisible until the primary
+// fails and the chain turns out to be empty.
+func buildChainTargets(cfg *config.Config, targets []agent.ChainTarget) []agent.FailoverTarget {
+	out := make([]agent.FailoverTarget, 0, len(targets))
+	for _, t := range targets {
+		pc := cfg.Providers[t.Provider]
+		if pc == nil {
+			logx.Errorf("retry.fallbackChains: unknown provider %q skipped", t.Provider)
+			continue
+		}
+		prov, err := buildProvider(t.Provider, pc, t.Model, cfg)
+		if err != nil {
+			logx.Errorf("retry.fallbackChains: %s/%s unavailable: %v", t.Provider, t.Model, err)
+			continue
+		}
+		out = append(out, agent.FailoverTarget{Provider: prov, Model: t.Model, ContextWindow: t.ContextWindow})
+	}
+	return out
+}
+
+// declaredChainTargets is the unconstrained chain (provider name, model id,
+// window) the chain engine dedupes a declared order against.
+func declaredChainTargets(cfg *config.Config, primaryProv, primaryModel string) []agent.ChainTarget {
+	out := []agent.ChainTarget{}
+	names := make([]string, 0, len(cfg.Providers))
+	for k := range cfg.Providers {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, pname := range names {
+		pc := cfg.Providers[pname]
+		if pc == nil {
+			continue
+		}
+		for _, m := range pc.Models {
+			if pname == primaryProv && m.ID == primaryModel {
+				continue
+			}
+			out = append(out, agent.ChainTarget{Provider: pname, Model: m.ID, ContextWindow: m.ContextWindow})
+		}
+	}
+	return out
+}
+
+// defaultFailoverTargets ranks every configured model by context window.
+func defaultFailoverTargets(cfg *config.Config, primaryProv, primaryModel string) []agent.FailoverTarget {
 	var out []agent.FailoverTarget
 	names := make([]string, 0, len(cfg.Providers))
 	for k := range cfg.Providers {
@@ -1958,6 +2098,9 @@ func failoverChain(cfg *config.Config, primaryProv, primaryModel string) []agent
 	sort.Strings(names)
 	for _, pname := range names {
 		pc := cfg.Providers[pname]
+		if pc == nil {
+			continue
+		}
 		prov, err := buildProvider(pname, pc, "", cfg)
 		if err != nil {
 			continue
