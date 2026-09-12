@@ -157,6 +157,14 @@ type Agent struct {
 	curTarget int
 	// Compaction configures context maintenance; ContextWindow 0 disables.
 	Compaction CompactionConfig
+
+	// compactIdle is the previous step boundary's wall clock: the idle
+	// compaction trigger measures the gap between two of them (M5 #24,
+	// compact.go). Single-goroutine Run, like everything else here.
+	compactIdle time.Time
+	// compactAsync holds the one background summarize the async trigger
+	// may have in flight (nil = none; see compact_async.go).
+	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
 	MaxTurns int
 	// Intercept routes tool calls/results through the extension bus
@@ -164,11 +172,11 @@ type Agent struct {
 	Intercept Interceptor
 	// Policy is the approval configuration; Approve prompts the user when a
 	// decision requires it (nil means an unattended run: prompts deny).
-	Policy  tool.ApprovalPolicy
+	Policy tool.ApprovalPolicy
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
-	Approve ApprovalFunc
+	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model role. nil asks for none.
 	Thinking *ai.ThinkingBudget
