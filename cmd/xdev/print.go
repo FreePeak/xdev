@@ -15,6 +15,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/ext"
 	hookbus "github.com/FreePeak/xdev/internal/hooks"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -571,6 +572,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		&tool.GlobTool{CWD: cwd},
 		&tool.ASTGrepTool{CWD: cwd},
 		&tool.ASTEditTool{CWD: cwd},
+		eval.NewTool(cwd),
 	} {
 		reg.Register(t)
 	}
@@ -596,6 +598,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 			&tool.GlobTool{CWD: cwd},
 			&tool.ASTGrepTool{CWD: cwd},
 			&tool.ASTEditTool{CWD: cwd},
+			eval.NewTool(cwd),
 		},
 		// M11 #12: named task agents discovered from markdown files
 		// (.xdev/agents/, ~/.xdev/agent/agents/). The task tool resolves
