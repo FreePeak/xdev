@@ -1,6 +1,6 @@
 # xdev
 
-**xdev** is a lightweight coding-agent harness in Go: the session/chat core of [pi](https://github.com/earendil-works/pi) and Oh My Pi (omp) — provider streaming, the agent loop, JSONL session persistence, tool execution, and a terminal UI — rebuilt as a **single static, CGO-free binary** (~10–15 MB on disk) with a **hard <100 MB RSS budget**, roughly 3–8× lighter than a JS-runtime harness. It ports the proven pi/omp data model (append-only JSONL session tree, unified stream contract, context reconstruction, compaction, output sinks) while replacing the expensive parts: no JS runtime, no in-process plugin VM, no unbounded queues.
+**xdev** is a lightweight coding-agent harness in Go: the session/chat core of [pi](https://github.com/earendil-works/pi) and Oh My Pi (omp) — provider streaming, the agent loop, JSONL session persistence, tool execution, and a terminal UI — rebuilt as a **single static, CGO-free binary** (~22 MB dev / ~29 MB installed with the SQLite-backed mnemopi memory backend linked in; a build without it is smaller) with a **hard <100 MB RSS budget**, roughly 3–8× lighter than a JS-runtime harness. It ports the proven pi/omp data model (append-only JSONL session tree, unified stream contract, context reconstruction, compaction, output sinks) while replacing the expensive parts: no JS runtime, no in-process plugin VM, no unbounded queues.
 
 ## Philosophy
 
