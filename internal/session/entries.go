@@ -55,6 +55,11 @@ const (
 	TypeResetBoundary = "reset_boundary"
 	TypeCustom        = "custom"
 
+	// TypeGoalUpdated is the session-scoped goal state snapshot (M11 #40),
+	// appended by the goal tool on every goal state change. omp does not
+	// model it; foreign readers keep the line as an opaque chain node.
+	TypeGoalUpdated = "goal_updated"
+
 	// TypeBranch is xdev's persisted branch marker (a CustomEntry whose
 	// CustomType is "branch" with data {"to":entryID}); it is how Open
 	// reconstructs the leaf pointer across restarts.
@@ -124,6 +129,28 @@ type CustomEntry struct {
 }
 
 func (e *CustomEntry) Envelope() Envelope { return e.Env }
+
+// GoalPayload is the goal snapshot carried by GoalUpdatedEntry (agent.Goal's
+// persisted shape; the session package must not import agent, so the fields
+// are mirrored here).
+type GoalPayload struct {
+	Objective   string    `json:"objective"`
+	Status      string    `json:"status"`
+	TokenBudget int64     `json:"tokenBudget,omitempty"`
+	Spent       int64     `json:"spent,omitempty"`
+	Evidence    []string  `json:"evidence,omitempty"`
+	Created     time.Time `json:"created"`
+}
+
+// GoalUpdatedEntry records one goal state change (M11 #40). Every transition
+// appends a full snapshot, so the last entry replays the current goal on
+// reopen. Wire: {"type":"goal_updated",...,"goal":{...}}.
+type GoalUpdatedEntry struct {
+	Env  Envelope
+	Goal GoalPayload
+}
+
+func (e *GoalUpdatedEntry) Envelope() Envelope { return e.Env }
 
 // UnknownEntry preserves an entry type outside xdev's parsed set while
 // keeping the parent chain intact — real omp files carry title_change /
@@ -201,6 +228,7 @@ type entryWire struct {
 	TokensBefore     *int64          `json:"tokensBefore,omitempty"`
 	CustomType       string          `json:"customType,omitempty"`
 	Data             map[string]any  `json:"data,omitempty"`
+	Goal             *GoalPayload    `json:"goal,omitempty"`
 }
 
 func (w entryWire) envelope() Envelope {
@@ -237,6 +265,9 @@ func MarshalEntry(e Entry) ([]byte, error) {
 		w.Type = TypeCustom
 		w.CustomType = t.CustomType
 		w.Data = t.Data
+	case *GoalUpdatedEntry:
+		w.Type = TypeGoalUpdated
+		w.Goal = &t.Goal
 	default:
 		return nil, fmt.Errorf("%w: cannot marshal %T", ErrUnknownEntryType, e)
 	}
@@ -291,6 +322,12 @@ func ParseEntry(line []byte) (Entry, error) {
 		return &ResetBoundaryEntry{Env: env}, nil
 	case TypeCustom:
 		return &CustomEntry{Env: env, CustomType: w.CustomType, Data: w.Data}, nil
+	case TypeGoalUpdated:
+		e := &GoalUpdatedEntry{Env: env}
+		if w.Goal != nil {
+			e.Goal = *w.Goal
+		}
+		return e, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownEntryType, w.Type)
 	}
