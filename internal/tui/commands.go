@@ -76,6 +76,10 @@ type ModelOps struct {
 	Models  func() []PickerItem
 	Set     func(ref string) error
 	SetRole func(role, ref string) error
+	// Cycle advances through --models patterns (omp Ctrl+P).
+	// ok=false when cycling is not configured (the chord stays
+	// menu-prev in that case).
+	Cycle func() (next string, ok bool)
 }
 
 // SettingsOps wires the /settings command to the config layer (lives in

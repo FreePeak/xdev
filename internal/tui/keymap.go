@@ -40,6 +40,8 @@ var BuiltinActions = []string{
 	"clear-input",
 	"app.session.tree",
 	"model-select", // Alt+M: the /model roles+models selector (omp app.model.select)
+	"model-cycle",  // Ctrl+P: cycle the active model through --models patterns
+	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
 
 // DefaultKeyMap is the factory chord table.
@@ -58,10 +60,14 @@ func DefaultKeyMap() *KeyMap {
 			"Escape":  "cancel",
 			"C-u":     "clear-input",
 			// Quit
-			"C-c":  "quit",
-			"C-d":  "quit",
-			"Tab":  "menu-accept",
-			"C-p":  "menu-prev",
+			"C-c": "quit",
+			"C-d": "quit",
+			"Tab": "menu-accept",
+			// omp's app.model.cycle: Ctrl+P advances the active model
+			// through --models patterns. While the slash dropdown is open
+			// the same chord moves its selection, so dispatch decides by
+			// context (the same trick as C-c quit/abort).
+			"C-p":  "model-cycle",
 			"C-n":  "menu-next",
 			"Up":   "menu-prev",
 			"Down": "menu-next",

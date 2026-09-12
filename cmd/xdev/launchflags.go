@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,9 +59,160 @@ type launchFlags struct {
 	NoSkills bool
 	// Advisor is --advisor: force the advisor runtime on.
 	Advisor bool
+	// ApprovalMode is --approval-mode <always-ask|write|yolo>: overrides
+	// tools.approvalMode for this session. AutoApprove (--auto-approve /
+	// --yolo) is the shorthand for yolo and wins when both are given.
+	ApprovalMode string
+	// NoPrewalk is --no-prewalk: force the handoff off even when the
+	// prewalk.enabled setting turns it on. omp has the same escape hatch.
+	NoPrewalk bool
+	// Smol/Slow/PlanModel are --smol / --slow / --plan-model: per-run role
+	// model overrides (omp spells the third --plan <model>; xdev keeps
+	// --plan for read-only plan mode and exposes the role as --plan-model).
+	Smol      string
+	Slow      string
+	PlanModel string
+	// Models are the --models patterns for Ctrl+P model cycling (omp
+	// parity). The catalog listing stays on the `models` subcommand.
+	Models []string
+	// Provider is --provider (legacy): force the provider when the model
+	// ref does not name one.
+	Provider string
+	// ExtraDirs are --add-dir roots: extra workspace directories beyond the
+	// launch cwd. They join path completion and context-file discovery, and
+	// are named in the prompt so the model knows they are in scope.
+	ExtraDirs []string
+	// AllowHome is --allow-home: start in $HOME without the temp-dir switch
+	// omp performs by default.
+	AllowHome bool
+	// NoPTY is --no-pty: accepted for omp parity. xdev's bash is pipe-based
+	// and never allocates a PTY, so the flag restates the existing behavior
+	// instead of changing it.
+	NoPTY bool
+	// Prewalk is --prewalk: force the handoff on for this run (the
+	// prewalk.enabled setting is the persistent form; NoPrewalk wins over
+	// both).
+	Prewalk bool
+	// Extensions are -e/--extension paths: explicit extension loads that do
+	// not depend on discovery. PluginDirs are --plugin-dir roots added to
+	// plugin discovery.
+	Extensions []string
+	PluginDirs []string
+}
+
+// absClean is filepath.Abs + Clean: the canonical form the workspace roots
+// and the home check compare and walk with.
+func absClean(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+// roleOverride returns the per-run model override for a role name
+// (smol|slow|plan), or "" when the flag was not given.
+func roleOverride(role string) string {
+	switch role {
+	case "smol":
+		return launch.Smol
+	case "slow":
+		return launch.Slow
+	case "plan":
+		return launch.PlanModel
+	}
+	return ""
+}
+
+// approvalModeOverride is the effective tools.approvalMode for this run:
+// --auto-approve/--yolo force yolo, else a validated --approval-mode, else
+// "" (the settings value stands).
+func approvalModeOverride() string {
+	if launch.AutoApprove {
+		return "yolo"
+	}
+	switch launch.ApprovalMode {
+	case "always-ask", "write", "yolo":
+		return launch.ApprovalMode
+	}
+	return ""
+}
+
+// workspaceDirs is the launch cwd plus every --add-dir root, deduped and
+// absolutized. Discovery walks these roots in order.
+func workspaceDirs(cwd string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, d := range append([]string{cwd}, launch.ExtraDirs...) {
+		if d == "" {
+			continue
+		}
+		abs, err := absClean(d)
+		if err != nil {
+			continue
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		out = append(out, abs)
+	}
+	return out
+}
+
+// homeSwitchDir reports whether the launch cwd is the user's home directory
+// and the run did not opt in with --allow-home. omp starts such runs in a
+// temp dir so state is not dropped into $HOME; the caller prints the notice.
+func homeSwitchDir(cwd string) (string, bool) {
+	if launch.AllowHome || cwd == "" {
+		return "", false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", false
+	}
+	abs, err := absClean(cwd)
+	if err != nil {
+		return "", false
+	}
+	homeAbs, err := absClean(home)
+	if err != nil {
+		return "", false
+	}
+	if abs != homeAbs {
+		return "", false
+	}
+	dir, err := os.MkdirTemp("", "xdev-home-*")
+	if err != nil {
+		return "", false
+	}
+	return dir, true
 }
 
 var launch launchFlags
+
+// Role model overrides (--smol / --slow / --plan-model). Process-wide for
+// the same reason as roleOverride: the resolution path is reached from free
+// functions that never see the parsed options.
+var (
+	smolModelFlag string
+	slowModelFlag string
+	planModelFlag string
+)
+
+// splitPatterns flattens the repeatable --models values, splitting each on
+// commas so `--models a,b --models c` and `--models a,b,c` agree.
+func splitPatterns(vals []string) []string {
+	out := []string{}
+	for _, v := range vals {
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
 
 // sessionDataDir is the data dir session storage and lookup resolve against:
 // the --session-dir override when set, else the install data dir. Sessions

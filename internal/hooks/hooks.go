@@ -196,7 +196,14 @@ func cliHooks(specs []string, disc []Hook) ([]Hook, []string) {
 			}
 		}
 		if !found {
-			warns = append(warns, fmt.Sprintf("--hook %q: no discovered hook with that name", s))
+			// omp's --hook takes a hook FILE; the bare word may be a path.
+			// parseHookFile owns the .yml/.yaml/.json shape, so the loader
+			// stays in one place.
+			if h, err := parseHookFile(s, "cli"); err == nil {
+				out = append(out, h)
+			} else {
+				warns = append(warns, fmt.Sprintf("--hook %q: no discovered hook with that name, and not a readable hook file (%v)", s, err))
+			}
 		}
 	}
 	return out, warns

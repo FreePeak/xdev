@@ -335,8 +335,16 @@ type Settings struct {
 	StatusLine   *StatusLineSettings `yaml:"statusLine"`
 	DefaultModel string              `yaml:"defaultModel"`
 	ApprovalMode string              `yaml:"approvalMode"` // always-ask|write|yolo
-	MemoryLimit  int64               `yaml:"memoryLimit"`
-	MaxTurns     int                 `yaml:"maxTurns"`
+	// Prewalk turns the one-shot model handoff on for every run
+	// (prewalk.enabled); prewalk.into is the handoff target (a model ref or
+	// @role, default @smol). The -prewalk flag forces it on and
+	// -no-prewalk forces it off.
+	Prewalk PrewalkSettings `yaml:"prewalk"`
+	// Models tunes runtime model switching (models.cycle): the ordered
+	// patterns Ctrl+P / --models cycles through.
+	Models      ModelsSettings `yaml:"models"`
+	MemoryLimit int64          `yaml:"memoryLimit"`
+	MaxTurns    int            `yaml:"maxTurns"`
 	// Compaction tunes context maintenance (compaction.methodOrder).
 	Compaction CompactionSettings `yaml:"compaction"`
 	// Retry tunes the resilience ladder (M5 #25): the fallback chain
@@ -697,6 +705,21 @@ func ValidMemoryBackend(name string) bool {
 	return false
 }
 
+// PrewalkSettings is the prewalk.* group: the handoff default and its
+// target. The -prewalk / -no-prewalk flags override Enabled; -prewalk-into
+// overrides Into.
+type PrewalkSettings struct {
+	Enabled bool   `yaml:"enabled"`
+	Into    string `yaml:"into"`
+}
+
+// ModelsSettings is the models.* group. Cycle is the ordered pattern list
+// Ctrl+P (and --models) advances through: a pattern matches a model ref or
+// bare id by substring, and the first catalog entry wins.
+type ModelsSettings struct {
+	Cycle []string `yaml:"cycle"`
+}
+
 func defaultSettings() *Settings {
 	show := true
 	return &Settings{
@@ -712,6 +735,7 @@ func defaultSettings() *Settings {
 		ShowThinking:       &show,
 		Personality:        "default",
 		AdvisorImmuneTurns: 3,
+		Prewalk:            PrewalkSettings{Into: "@smol"},
 		// The group ships enabled but rule-less (no rules = inert).
 		TTSR: &TTSRSettings{Enabled: &show, InterruptMode: "always", ContextMode: "discard", RepeatGap: 3},
 	}
@@ -928,6 +952,15 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ApprovalMode != "" {
 		s.ApprovalMode = layer.ApprovalMode
+	}
+	if layer.Prewalk.Enabled {
+		s.Prewalk.Enabled = true
+	}
+	if layer.Prewalk.Into != "" {
+		s.Prewalk.Into = layer.Prewalk.Into
+	}
+	if len(layer.Models.Cycle) > 0 {
+		s.Models.Cycle = append([]string(nil), layer.Models.Cycle...)
 	}
 	if layer.MemoryLimit != 0 {
 		s.MemoryLimit = layer.MemoryLimit
@@ -1392,6 +1425,22 @@ func yamlScalar(v string) any {
 // sorted by key, and every grouped key the session actually enforces is
 // listed, minus hook bodies — those carry arbitrary commands, so only the
 // configured event count is reported. Credential-bearing values are never
+// prewalkIntoOrDefault renders the handoff target for the settings list.
+func prewalkIntoOrDefault(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "@smol"
+	}
+	return v
+}
+
+// cycleOrDefault renders the models.cycle pattern list ("off" when unset).
+func cycleOrDefault(v []string) string {
+	if len(v) == 0 {
+		return "off"
+	}
+	return strings.Join(v, ",")
+}
+
 // part of Settings, but any key whose name suggests a secret is masked.
 func List(s *Settings, globalPath string) []string {
 	mm := s.MnemopiConfig()
@@ -1399,6 +1448,9 @@ func List(s *Settings, globalPath string) []string {
 		"theme " + s.Theme,
 		"colorBlindMode " + fmt.Sprint(s.ColorBlindMode),
 		"approvalMode " + s.ApprovalMode,
+		"prewalk.enabled " + fmt.Sprint(s.Prewalk.Enabled),
+		"prewalk.into " + prewalkIntoOrDefault(s.Prewalk.Into),
+		"models.cycle " + cycleOrDefault(s.Models.Cycle),
 		"bash.allowCompoundCommands " + fmt.Sprint(s.AllowCompoundCommandsOn()),
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),

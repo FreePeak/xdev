@@ -2,11 +2,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 
 	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
@@ -76,6 +79,48 @@ func handoffSaveDir(s *config.Settings) string {
 	return filepath.Join(config.DataDir(), "handoffs")
 }
 
+// rootUsage is the root usage body (the Fprintf format: one %s for the
+// version). A package-level constant so usage_test.go can assert that
+// every subcommands entry is documented and that no merge marker
+// survives in the text users read.
+const rootUsage = `xdev %s — lightweight coding agent (Go)
+
+  xdev                         interactive TUI (bare invocation, TTY)
+  xdev [flags] "prompt"        one-shot print run
+  xdev print [flags] "prompt"  same as above
+  xdev tui                     interactive TUI (Grok-CLI look)
+  xdev rpc                     JSONL-over-stdio RPC server (embedders)
+  xdev acp                     ACP server on stdio (editors)
+  xdev join "<link>"           mirror a shared session (collab guest)
+  xdev config <sub>            settings: list | get K | set K V | reset K | path
+  xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
+  xdev models [query]          resolved model catalog (--refresh re-discovers)
+  xdev login | logout          Claude Pro/Max and Codex OAuth (PKCE browser flow)
+  xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev memory <sub>            show | stats | lessons | add | edit | export | import | scratchpad | clear
+  xdev stats [--summary|--json|--serve]  usage over the local session store
+  xdev usage [--provider P]    provider accounts/limits + observed usage
+  xdev token <sub>             list | show | rotate the per-install service tokens
+  xdev search <query>          search local sessions (--regex, --here, --json)
+  xdev gallery|render [id]     list sessions, render one to HTML (--html)
+  xdev compress [--dry-run]    compact a session through the compaction ladder
+  xdev cleanse [--dry-run]     redact secrets from a transcript (writes .bak)
+  xdev gc [--yes]              storage GC: orphaned blobs/artifacts/subagents
+  xdev commit [--apply]        commit message from the staged diff (@commit role)
+  xdev worktree|wt <sub>       git worktrees: list | add | remove | prune
+  xdev plugin <sub>            plugins: list | search | install | remove | info
+  xdev share [id|path]         serve an E2E-encrypted view-only snapshot
+  xdev serve <svc>             auth-broker | auth-gateway | browser-relay
+  xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
+  xdev update [--channel C]    check for and install updates (stable | canary)
+  xdev setup                   onboarding: data dir, starter config, next steps
+  xdev bench [--turns N]       TTFT + decode p50/p95 through the provider seam
+  xdev completions <shell>     bash | zsh | fish completion script
+  xdev version                 print the version
+
+Flags:
+`
+
 func main() {
 	fs := flag.NewFlagSet("xdev", flag.ContinueOnError)
 	configOverlays := repeatable{}
@@ -97,7 +142,7 @@ func main() {
 	verbose := fs.Bool("verbose", false, "log to stderr")
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write once a plan todo list exists")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
-	prewalkInto := fs.String("prewalk-into", "@smol", "prewalk target: model ref or @role (default @smol)")
+	prewalkInto := fs.String("prewalk-into", "", "prewalk target: model ref or @role (default: prewalk.into, else @smol)")
 	noRules := fs.Bool("no-rules", false, "disable rules discovery (.omp/rules, RULES.md, third-party rulebooks)")
 	hookFlag := repeatable{}
 	fs.Var(&hookFlag, "hook", "hook to run: event=command, or the name of a discovered hook (repeatable)")
@@ -115,7 +160,8 @@ func main() {
 	sessionDir := fs.String("session-dir", "", "session storage and lookup root for this run (default: the install data dir; sessions live under <dir>/sessions)")
 	noSession := fs.Bool("no-session", false, "don't save the session (ephemeral: nothing is written to disk)")
 	noTitle := fs.Bool("no-title", false, "skip the mechanical session-title stamp")
-	modelsFlag := fs.Bool("models", false, "print the resolved model catalog and exit")
+	modelsPatterns := repeatable{}
+	fs.Var(&modelsPatterns, "models", "comma-separated model patterns for Ctrl+P cycling (the catalog listing is the `models` subcommand)")
 	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the model role's effort)")
 	hideThinking := fs.Bool("hide-thinking", false, "hide thinking blocks in TUI output (display only; model thinking is unaffected)")
 	printThoughts := fs.Bool("print-thoughts", false, "include thinking blocks in print-mode output")
@@ -123,44 +169,53 @@ func main() {
 	noTools := fs.Bool("no-tools", false, "disable all built-in tools")
 	noLSP := fs.Bool("no-lsp", false, "disable the lsp tool (no language server is started)")
 	autoApprove := fs.Bool("auto-approve", false, "auto-approve every tool call (approval mode yolo; explicit per-tool denies and bash patterns still apply)")
+	fs.BoolVar(autoApprove, "yolo", false, "alias for --auto-approve")
+	approvalModeFlag := fs.String("approval-mode", "", "approval mode for this run: always-ask | write | yolo (overrides tools.approvalMode)")
 	advisorFlag := fs.Bool("advisor", false, "enable the advisor runtime (a background reviewer; needs modelRoles.advisor)")
 	maxTimeFlag := fs.String("max-time", "", "stop the run after this duration (600 = 600s, 10m, 1h)")
 	noExtensions := fs.Bool("no-extensions", false, "disable extension discovery (no extension tool, command, or policy hook loads)")
 	skillsFlag := fs.String("skills", "", "comma-separated glob patterns filtering which skills are advertised (e.g. git-*,docker)")
 	noSkills := fs.Bool("no-skills", false, "disable skills discovery (nothing is advertised to the model)")
+	// --- omp CLI parity (docs/parity-delta.md): the aliases and flags the
+	// baseline accepts, each with a real consumer below.
+	printModeFlag := fs.Bool("print", false, "force headless print mode (alias: -p)")
+	fs.BoolVar(printModeFlag, "p", false, "alias for --print")
+	fs.BoolVar(continueLast, "c", false, "alias for --continue")
+	fs.StringVar(resumePrefix, "r", "", "alias for --resume (session id prefix)")
+	fs.StringVar(resumePrefix, "session", "", "resume a session by id prefix (alias: --session)")
+	fs.StringVar(&smolModelFlag, "smol", "", "role override: model for the @smol role (alias for the fast model)")
+	fs.StringVar(&slowModelFlag, "slow", "", "role override: model for the @slow / @plan role")
+	fs.StringVar(&planModelFlag, "plan-model", "", "role override: model for the @plan role (omp spells this --plan <model>)")
+	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
+	providerFlag := fs.String("provider", "", "force the provider when the model ref does not name one")
+	addDirs := repeatable{}
+	fs.Var(&addDirs, "add-dir", "extra workspace root beyond the launch cwd: joins context-file discovery and is named in the prompt (repeatable)")
+	allowHome := fs.Bool("allow-home", false, "start in $HOME without the temp-dir switch (default: switch, like omp)")
+	noPTY := fs.Bool("no-pty", false, "accepted for omp parity: xdev's bash is pipe-based and never allocates a PTY")
+	extensionPaths := repeatable{}
+	fs.Var(&extensionPaths, "extension", "load an explicit extension by path (repeatable)")
+	fs.Var(&extensionPaths, "e", "alias for --extension")
+	pluginDirs := repeatable{}
+	fs.Var(&pluginDirs, "plugin-dir", "extra plugin discovery root (repeatable)")
+	versionFlag := fs.Bool("version", false, "print the version and exit (alias: -v)")
+	fs.BoolVar(versionFlag, "v", false, "alias for --version")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
-
-  xdev                         interactive TUI (bare invocation, TTY)
-  xdev [flags] "prompt"        one-shot print run
-  xdev print [flags] "prompt"  same as above
-  xdev tui                     interactive TUI (Grok-CLI look)
-  xdev config <sub>            settings: list | get K | set K V | reset K | path
-  xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
-  xdev join "<link>"           mirror a shared session (collab guest)
-  xdev lsp-config [list|validate]  language servers, resolved binaries
-  xdev models [query]          resolved model catalog (--refresh re-discovers)
-  xdev search <query>          search local sessions (--regex, --here, --json)
-  xdev worktree|wt <sub>       git worktrees: list | add | remove | prune
-  xdev commit [--apply]        commit message from the staged diff (@commit role)
-  xdev compress [--dry-run]    compact a session through the compaction ladder
-  xdev cleanse [--dry-run]     redact secrets from a transcript (writes .bak)
-  xdev gallery|render [id]     list sessions, render one to HTML (--html)
-  xdev gc [--yes]              storage GC: orphaned blobs/artifacts/subagents
-  xdev usage [--provider P]    provider accounts/limits + observed usage
-  xdev ps                      xdev processes on this host (--json)
-  xdev token <sub>             list | show | rotate the per-install service tokens
-  xdev completions <shell>     bash | zsh | fish completion script
- @both
-
-Flags:
-`, version)
+		fmt.Fprintf(os.Stderr, rootUsage, version)
 		fs.PrintDefaults()
 	}
 	// NOTE: Go's flag package stops at the first positional arg, so flags
 	// must precede the subcommand: `xdev -continue tui`, not `xdev tui -continue`.
 	if err := fs.Parse(os.Args[1:]); err != nil {
+		// -h/--help is a successful query, not a usage error: exit 0 like
+		// omp so `xdev -h && …` composes. A real parse error stays 2.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		os.Exit(2)
+	}
+	if *versionFlag {
+		fmt.Printf("xdev %s\n", version)
+		os.Exit(0)
 	}
 	if *verbose {
 		logx.Enable(logx.LevelDebug)
@@ -231,11 +286,48 @@ Flags:
 		NoTools:         *noTools,
 		NoLSP:           *noLSP,
 		AutoApprove:     *autoApprove,
+		ApprovalMode:    *approvalModeFlag,
 		MaxTime:         maxTime,
 		NoExtensions:    *noExtensions,
 		Skills:          parseCSV(*skillsFlag),
 		NoSkills:        *noSkills,
 		Advisor:         *advisorFlag,
+		NoPrewalk:       *noPrewalk,
+		Smol:            smolModelFlag,
+		Slow:            slowModelFlag,
+		PlanModel:       planModelFlag,
+		Models:          splitPatterns(modelsPatterns),
+		Provider:        *providerFlag,
+		ExtraDirs:       addDirs,
+		AllowHome:       *allowHome,
+		NoPTY:           *noPTY,
+		Extensions:      extensionPaths,
+		PluginDirs:      pluginDirs,
+	}
+	// --- launch-flag overrides onto the layered settings. Each one is a
+	// documented flag, so each must win over the file: approval mode,
+	// per-role model overrides, and the prewalk off-switch.
+	if mode := approvalModeOverride(); mode != "" {
+		settings.ApprovalMode = mode
+	}
+	for _, role := range []string{"smol", "slow", "plan"} {
+		if m := roleOverride(role); m != "" {
+			settings.ModelRoles[role] = m
+		}
+	}
+	// --plugin-dir roots join plugin discovery (commands/skills/agents/hooks).
+	if len(launch.PluginDirs) > 0 {
+		marketplace.SetExtraRoots(launch.PluginDirs)
+	}
+	if launch.NoPrewalk {
+		settings.Prewalk.Enabled = false
+	} else if launch.Prewalk {
+		settings.Prewalk.Enabled = true
+	}
+	// --models patterns enable Ctrl+P cycling; the catalog print stays on
+	// the `models` subcommand (omp keeps the same split).
+	if len(launch.Models) > 0 {
+		settings.Models.Cycle = launch.Models
 	}
 	// Flag-vs-settings precedence: an explicit flag always wins.
 	if *themeName == "" {
@@ -269,18 +361,8 @@ Flags:
 		os.Exit(0)
 	}
 
-	// --- --models (issue #33): print the resolved catalog and exit. A
-	// read-only fast path like --export — it answers "which models can this
-	// install actually reach?" without starting a run.
-	if *modelsFlag {
-		cfg, cerr := config.LoadModelsLayered()
-		if cerr != nil {
-			fmt.Fprintln(os.Stderr, "xdev:", cerr)
-			os.Exit(2)
-		}
-		printModelCatalog(os.Stdout, cfg, settings)
-		os.Exit(0)
-	}
+	// NOTE: the --models flag is the Ctrl+P cycling pattern list (omp
+	// parity); the resolved catalog listing is the `models` subcommand.
 
 	args := fs.Args()
 	mode := "print"
@@ -292,6 +374,28 @@ Flags:
 	}
 	if *modeFlag != "" {
 		mode = *modeFlag
+	}
+	// -p/--print forces headless print mode regardless of how the mode was
+	// selected (bare invocation, subcommand, or a --mode value).
+	if *printModeFlag {
+		mode = "print"
+	}
+	// --- --allow-home (omp parity): a RUN started in $HOME switches to a
+	// temp dir so session state and stray tool output do not land in the
+	// home directory. --allow-home opts out, and utility subcommands
+	// (config, stats, search, completions, …) keep the real cwd — moving
+	// those would silently re-bucket what they report. Gated on the run
+	// modes for the same reason: `xdev config list` from $HOME must answer
+	// about $HOME.
+	switch mode {
+	case "print", "tui", "rpc", "acp", "join":
+		if dir, switched := homeSwitchDir(mustGetwd()); switched {
+			if err := os.Chdir(dir); err != nil {
+				fmt.Fprintln(os.Stderr, "xdev:", err)
+				os.Exit(2)
+			}
+			fmt.Fprintf(os.Stderr, "xdev: starting in %s (home directory; --allow-home to stay)\n", dir)
+		}
 	}
 	if mode == "serve" {
 		os.Exit(serve.Dispatch(args, version))
@@ -476,10 +580,20 @@ Flags:
 	case "version":
 		fmt.Printf("xdev %s\n", version)
 	case "print":
-		prompt := ""
-		if len(args) > 0 {
-			prompt = args[0]
+		// Positional handling, omp parity: a leading `--` is the separator,
+		// every remaining argument joins into one prompt (omp -p "A" "B"
+		// sends both), and a lone --help/-h asks for usage rather than
+		// being sent to the model.
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
 		}
+		for _, a := range args {
+			if a == "--help" || a == "-h" {
+				fs.Usage()
+				os.Exit(0)
+			}
+		}
+		prompt := strings.Join(args, " ")
 		if prompt == "" && !*continueLast && *resumePrefix == "" && *forkID == "" && *fromClaude == "" && *fromCodex == "" {
 			if stdinIsTerminal() {
 				// Bare interactive invocation: open the TUI.
@@ -557,11 +671,9 @@ Flags:
 }
 
 // stdinIsTerminal reports whether stdin is an interactive TTY (as opposed
-// to a pipe or file feeding a prompt).
+// to a pipe or file feeding a prompt). os.ModeCharDevice is not enough:
+// /dev/null IS a char device, and `xdev </dev/null` must fall through to the
+// stdin/usage path instead of trying to open a TUI on it.
 func stdinIsTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }

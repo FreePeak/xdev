@@ -677,6 +677,22 @@ func (a *App) Reset() {
 // degrade the /new /clear /drop commands to notices.
 func (a *App) SetSessionOps(ops *SessionOps) { a.ops = ops }
 
+// cycleModel advances the active model through the configured cycle
+// patterns. It reports whether the chord was claimed: false means cycling is
+// not wired or has nowhere to go, so the chord keeps its other meaning
+// (menu-prev) instead of silently doing nothing.
+func (a *App) cycleModel() bool {
+	if a.modelOps == nil || a.modelOps.Cycle == nil {
+		return false
+	}
+	next, ok := a.modelOps.Cycle()
+	if !ok {
+		return false
+	}
+	a.AddSystemBlock("active model: " + next)
+	return true
+}
+
 // SwitchModel implements CommandAPI /model: with no argument it opens the
 // interactive selector (roles + models); with an argument it switches
 // directly, accepting anything the -model flag accepts (a concrete
@@ -1153,7 +1169,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Unlock()
 			a.poke()
 			return
-		case "menu-prev", "menu-next":
+		case "menu-prev", "menu-next", "model-cycle":
+			// model-cycle rides the dropdown first: with the slash menu
+			// open, Ctrl+P means "previous entry", which is what omp does
+			// there too.
 			delta := -1
 			if action == "menu-next" {
 				delta = 1
@@ -1189,6 +1208,11 @@ func (a *App) handleKey(ev tcell.Event) {
 		return
 	case "model-select":
 		a.OpenModelPicker()
+		return
+	case "model-cycle":
+		// Unwired cycling is a no-op, not an error: the chord is bound by
+		// default and most sessions configure no pattern list.
+		a.cycleModel()
 		return
 	case "quit":
 		if running {
