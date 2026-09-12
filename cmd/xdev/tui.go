@@ -16,6 +16,7 @@ import (
 
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/fscache"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -752,10 +753,167 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return nil
 		},
 	})
+	// --- collab (M14 #59): E2E-encrypted live session sharing -----------
+	// Hosting serves this session over an in-process WebSocket relay
+	// (internal/collab): guests receive the sealed transcript and, with a
+	// full link, prompt through this process — the host stays authoritative
+	// and runs every tool. A joined guest renders a native replica of the
+	// host transcript in this TUI and forwards typed prompts to the host.
+	// ponytail: entry fan-out polls the store (internal/session has no
+	// append observer), so an entry reaches guests within one poll tick;
+	// streaming deltas, ui-request, bus, and agents frames have working
+	// protocol support but no producers wired yet.
+	var (
+		collabMu         sync.Mutex
+		collabHost       *collab.Host
+		collabGuest      *collab.Guest
+		collabTurnCancel context.CancelFunc
+	)
+	tui.Collab = &tui.CollabOps{
+		Start: func(mode tui.CollabMode) (string, error) {
+			collabMu.Lock()
+			defer collabMu.Unlock()
+			if collabHost != nil {
+				return collabShareText(collabHost, mode.View), nil
+			}
+			addr := mode.Addr
+			if addr == "" {
+				addr = os.Getenv("XDEV_COLLAB_ADDR")
+			}
+			h, err := collab.NewHost(collab.HostConfig{
+				Addr: addr,
+				// Binding beyond loopback is the explicit opt-in
+				// (issue #59): /collab remote or XDEV_COLLAB_ADDR.
+				AllowRemote: mode.Remote || addr != "",
+				Name:        collab.DefaultName(),
+				Backend: collab.Backend{
+					Snapshot: func() []byte { return collabSnapshot(store) },
+					Prompt: func(name, text string) {
+						app.AddSystemBlock("· collab " + name + ": " + text)
+						app.SendPrompt(text)
+					},
+					Interrupt: func() {
+						collabMu.Lock()
+						cancel := collabTurnCancel
+						collabMu.Unlock()
+						if cancel != nil {
+							cancel()
+						}
+					},
+				},
+				Entries: func() [][]byte { return collabEntries(store) },
+				Logf:    func(f string, a ...any) { logx.Debugf("collab: "+f, a...) },
+			})
+			if err != nil {
+				return "", err
+			}
+			if _, err := h.ListenAndServe(); err != nil {
+				return "", err
+			}
+			collabHost = h
+			return collabShareText(h, mode.View), nil
+		},
+		Status: func() string {
+			collabMu.Lock()
+			h, g := collabHost, collabGuest
+			collabMu.Unlock()
+			switch {
+			case h != nil:
+				return collabStatusText(h)
+			case g != nil:
+				return "· collab: guest in room " + g.RoomID() + " — replica " + collab.ReplicaPath(g.RoomID())
+			default:
+				return "· collab: not sharing (run /collab to share, /join <link> to mirror someone else)"
+			}
+		},
+		Stop: func() error {
+			collabMu.Lock()
+			h, g := collabHost, collabGuest
+			collabHost, collabGuest = nil, nil
+			collabMu.Unlock()
+			if g != nil {
+				_ = g.Close()
+			}
+			if h != nil {
+				return h.Stop()
+			}
+			return nil
+		},
+		Join: func(link string) (string, error) {
+			l, err := collab.ParseLink(link)
+			if err != nil {
+				return "", err
+			}
+			collabMu.Lock()
+			if collabGuest != nil {
+				collabMu.Unlock()
+				return "", fmt.Errorf("already joined room %s — /collab stop leaves first", collabGuest.RoomID())
+			}
+			collabMu.Unlock()
+			var g *collab.Guest
+			g, err = collab.Join(baseCtx, collab.GuestConfig{
+				Link: l,
+				Name: collab.DefaultName(),
+				// The replica renders through the same context builder
+				// /resume uses, so the guest transcript is native.
+				OnSnapshot: func(data []byte) {
+					app.AddSystemBlock("· collab room " + l.RoomID + " — replica " + collab.ReplicaPath(l.RoomID))
+					replayTranscript(app, collab.Messages(data))
+				},
+				OnEntry: func(line []byte) { replayTranscript(app, collab.Messages(line)) },
+				OnEvent: func(raw json.RawMessage) {
+					if txt := collab.NoticeText(raw); txt != "" {
+						app.AddSystemBlock("· collab: " + txt)
+					}
+				},
+				OnClose: func(cerr error) {
+					collabMu.Lock()
+					if collabGuest == g {
+						collabGuest = nil
+					}
+					collabMu.Unlock()
+					if cerr != nil {
+						app.AddSystemBlock("· collab disconnected: " + cerr.Error())
+					}
+				},
+			})
+			if err != nil {
+				return "", err
+			}
+			collabMu.Lock()
+			collabGuest = g
+			collabMu.Unlock()
+			go func() { _ = g.Run(baseCtx) }()
+			perm := "view-only"
+			if g.Writable() {
+				perm = "full control"
+			}
+			return "· joining collab room " + l.RoomID + " (" + perm + ")", nil
+		},
+		Forward: func(text string) bool {
+			collabMu.Lock()
+			g := collabGuest
+			collabMu.Unlock()
+			if g == nil {
+				return false
+			}
+			// A guest's typed prompt belongs to the host session: send it
+			// over the room instead of starting a local turn.
+			if err := g.Prompt(text); err != nil {
+				app.AddSystemBlock("· collab: " + err.Error())
+			}
+			return true
+		},
+	}
 	app.SetCommandDir(cwd)
 
 	app.SetHandlers(
 		func(text string) {
+			// Joined as a guest: the host owns the turn, so send the
+			// prompt over the room instead of starting one here.
+			if tui.Collab != nil && tui.Collab.Forward != nil && tui.Collab.Forward(text) {
+				return
+			}
 			if !running.CompareAndSwap(false, true) {
 				app.AddSystemBlock("a turn is already running — Esc cancels it")
 				return
@@ -772,9 +930,19 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				logx.Errorf("persist user message: %v", err)
 			}
 			ctx, cancel := context.WithCancel(baseCtx)
+			// Published so a full-link guest's interrupt can cancel the
+			// live turn (baseCancel would kill every future turn).
+			collabMu.Lock()
+			collabTurnCancel = cancel
+			collabMu.Unlock()
 			go func() {
 				defer cancel()
 				defer running.Store(false)
+				defer func() {
+					collabMu.Lock()
+					collabTurnCancel = nil
+					collabMu.Unlock()
+				}()
 				app.SetRunning(true)
 				feedAdvisor := func() {}
 				modelMu.Lock()
@@ -1337,4 +1505,93 @@ func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskRes
 	}
 	s.app.AddSystemBlock(b.String())
 	return s.fallback.Ask(ctx, req)
+}
+
+// --- collab helpers (M14 #59) ---
+
+// collabSnapshot returns the session as JSONL bytes: the session file
+// verbatim when it exists (guests replay it through the session store's
+// context builder, so compaction and branches behave natively), else the
+// in-memory entries re-marshaled (a session that never materialized).
+func collabSnapshot(store *session.Store) []byte {
+	if store == nil {
+		return nil
+	}
+	if path := store.Path(); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return data
+		}
+	}
+	var out []byte
+	for _, line := range collabEntries(store) {
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	return out
+}
+
+// collabEntries returns every current entry line in order; the relay diffs
+// this list against the lines it already broadcast.
+func collabEntries(store *session.Store) [][]byte {
+	if store == nil {
+		return nil
+	}
+	entries := store.Entries()
+	out := make([][]byte, 0, len(entries))
+	for _, e := range entries {
+		line, err := session.MarshalEntry(e)
+		if err != nil {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// collabShareText renders the /collab instructions for a live relay. A
+// view-only share never prints the full link: possession of the token is
+// what grants control.
+func collabShareText(h *collab.Host, view bool) string {
+	full, viewLink := h.URL(true), h.URL(false)
+	var b strings.Builder
+	if view {
+		b.WriteString("· collab live — view-only link (guests read, cannot prompt)\n")
+		fmt.Fprintf(&b, "  link  %s\n", viewLink)
+		fmt.Fprintf(&b, "  join  xdev join \"%s\"\n", viewLink)
+		b.WriteString("  /collab stop ends sharing; restart without `view` to grant control")
+		return b.String()
+	}
+	b.WriteString("· collab live — full-control link (prompt + interrupt)\n")
+	fmt.Fprintf(&b, "  full       %s\n", full)
+	fmt.Fprintf(&b, "  view-only  %s\n", viewLink)
+	fmt.Fprintf(&b, "  join       xdev join \"%s\"\n", full)
+	if !collab.IsLoopback(strings.TrimPrefix(strings.TrimPrefix(full, "wss://"), "ws://")) {
+		b.WriteString("  note: bound beyond loopback — guests must reach that address (use your LAN IP if you bound 0.0.0.0)")
+	}
+	return b.String()
+}
+
+// collabStatusText renders the active room, its links, and its guests.
+func collabStatusText(h *collab.Host) string {
+	parts := h.Participants()
+	names := make([]string, 0, len(parts))
+	writable := 0
+	for _, p := range parts {
+		label := p.Name
+		if p.Writable {
+			writable++
+			label += " (full)"
+		} else {
+			label += " (view-only)"
+		}
+		names = append(names, label)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "· collab room %s — %d guest(s)", h.RoomID(), len(parts))
+	if len(names) > 0 {
+		fmt.Fprintf(&b, ", %d writable: %s", writable, strings.Join(names, ", "))
+	}
+	fmt.Fprintf(&b, "\n  full       %s", h.URL(true))
+	fmt.Fprintf(&b, "\n  view-only  %s", h.URL(false))
+	return b.String()
 }
