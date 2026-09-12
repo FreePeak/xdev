@@ -20,6 +20,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/memory"
+	"github.com/FreePeak/xdev/internal/rules"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -363,6 +364,13 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 
 func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem *memory.Backend) func() string {
 	ctxFiles := agent.LoadContextFiles(cwd)
+	var ruleSet []rules.Rule
+	if noRulesFlag {
+		rules.Set(nil)
+	} else {
+		ruleSet = rules.Discover(cwd, lastSettings().EnabledProviders)
+		rules.Set(ruleSet)
+	}
 	return func() string {
 		defs := reg.Defs()
 		named := make([]agent.NamedToolDef, 0, len(defs))
@@ -370,6 +378,9 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 			named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
 		}
 		sys := agent.BuildSystemPrompt(base, ctxFiles, named)
+		if rb := agent.BuildRulesBlock(ruleSet); rb != "" {
+			sys += "\n\n" + rb
+		}
 		if sb := skillPromptBlock(cwd); sb != "" {
 			sys += "\n\n" + sb
 		}
@@ -542,6 +553,7 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 // re-registering replaces the resolver (tests, repeated startup).
 func registerURISchemes() {
 	tool.RegisterURIScheme("skill", skills.Resolve)
+	tool.RegisterURIScheme("rule", rules.Resolve)
 }
 
 // buildMemory returns the configured memory backend (nil = off).
@@ -557,6 +569,11 @@ func buildMemory(settings *config.Settings) *memory.Backend {
 	tool.RegisterURIScheme("memory", b.Read)
 	return b
 }
+
+// noRulesFlag mirrors the --no-rules CLI flag (main sets it after flag
+// parsing): it disables rulebook discovery, prompt injection, and the
+// rule:// read seam.
+var noRulesFlag bool
 
 func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode) *tool.Registry {
 	registerURISchemes()

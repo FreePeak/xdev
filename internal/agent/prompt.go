@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/FreePeak/xdev/internal/rules"
 )
 
 // SystemPromptBase is the <1000-token system prompt (pi philosophy: minimal;
@@ -251,4 +254,75 @@ func LoadContextFiles(cwd string) string {
 		total += len(content)
 	}
 	return b.String()
+}
+
+// Per-rule and total prompt caps for injected rules (issue #31): a
+// single rule renders at most MaxRuleBytes; the whole block at most
+// MaxRulesBytes, dropping lowest-priority rules first.
+const (
+	MaxRuleBytes  = 8 << 10
+	MaxRulesBytes = 32 << 10
+)
+
+// BuildRulesBlock renders the discovered rulebook into the system-prompt
+// tail next to the project-context block. Always-apply and glob-less
+// rules render in full, priority-first; glob-scoped rules are listed
+// with their edit/write shorthand only — their bodies stay reachable
+// via rule://<name>, keeping the static prompt cheap while the path
+// gating decision happens at edit/write time (rules.ForPath).
+func BuildRulesBlock(rs []rules.Rule) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	sorted := append([]rules.Rule(nil), rs...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Priority != sorted[j].Priority {
+			return sorted[i].Priority > sorted[j].Priority
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	var full []string // priority-desc rendered rules subject to the drop loop
+	for _, r := range sorted {
+		if !r.AlwaysApply && len(r.Globs) > 0 {
+			continue // conditional: shorthand listing below, not full text
+		}
+		content := r.Content
+		if len(content) > MaxRuleBytes {
+			content = string([]rune(content[:MaxRuleBytes])) + "\n… [truncated]"
+		}
+		full = append(full, fmt.Sprintf("## %s\n\n%s", r.Name, strings.TrimRight(content, "\n")))
+	}
+	var gated []string
+	for _, r := range sorted {
+		if sh := r.Shorthand(); sh != "" {
+			entry := "- rule://" + r.Name + " — " + sh
+			if r.Description != "" {
+				entry += " — " + r.Description
+			}
+			gated = append(gated, entry)
+		}
+	}
+	render := func(blocks []string) string {
+		var b strings.Builder
+		b.WriteString("# Rules\n")
+		for _, blk := range blocks {
+			b.WriteString("\n\n")
+			b.WriteString(blk)
+		}
+		if len(gated) > 0 {
+			b.WriteString("\n\nConditional rules — they gate specific paths; read the body with rule://<name> before editing a matching file:\n")
+			for _, g := range gated {
+				b.WriteString("\n" + g)
+			}
+		}
+		return b.String()
+	}
+	// Overflow drops the lowest-priority rendered rule first (sorted
+	// priority-desc, so the tail goes).
+	out := render(full)
+	for len(full) > 0 && len(out) > MaxRulesBytes {
+		full = full[:len(full)-1]
+		out = render(full)
+	}
+	return out
 }
