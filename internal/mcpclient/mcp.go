@@ -19,23 +19,31 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gopkg.in/yaml.v3"
 
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
-// ServerConfig is one entry of mcp.yml.
+// ServerConfig is one entry of mcp.yml — and the shape of an MCP server
+// entry in a Gemini extension manifest (M13 #57).
 type ServerConfig struct {
 	// Command + Args launch a stdio server (mutually exclusive with URL).
 	Command string            `yaml:"command,omitempty"`
 	Args    []string          `yaml:"args,omitempty"`
 	Env     map[string]string `yaml:"env,omitempty"`
+	// Cwd is the working directory for a stdio server (empty = inherit).
+	Cwd string `yaml:"cwd,omitempty"`
 	// URL points at a streamable-HTTP server.
 	URL     string            `yaml:"url,omitempty"`
 	Headers map[string]string `yaml:"headers,omitempty"`
 	// Disabled keeps the entry but skips connecting.
 	Disabled bool `yaml:"disabled,omitempty"`
+	// Enabled is the explicit form; when set it decides (and a top-level
+	// enabledServers list can force it on).
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// Timeout is the per-server tool-call budget in milliseconds; 0 means
+	// no client-side deadline, absent means the shared default.
+	TimeoutMs *int `yaml:"timeout,omitempty"`
 	// ExcludeTools drops the named tools after listing (filter noisy or
 	// duplicate servers, e.g. browser automation when a built-in exists).
 	ExcludeTools []string `yaml:"excludeTools,omitempty"`
@@ -44,28 +52,49 @@ type ServerConfig struct {
 	// InitTimeoutSec bounds connect+list per server (default 5: a server
 	// that starts but never answers `initialize` must not stall startup).
 	InitTimeoutSec int `yaml:"initTimeoutSec,omitempty"`
+	// Source names the file (or gemini:<extension>) the entry came from.
+	// The loader sets it; it is never read from the file.
+	Source string `yaml:"-"`
 }
 
-// Config is the parsed mcp.yml.
+// IsEnabled reports whether the server should connect: an explicit
+// `enabled:` decides, otherwise `disabled:` (or nothing) does.
+func (sc *ServerConfig) IsEnabled() bool {
+	if sc.Enabled != nil {
+		return *sc.Enabled
+	}
+	return !sc.Disabled
+}
+
+// requestTimeout is one tool call's budget: the per-server `timeout` in
+// milliseconds when set (0 = no deadline), else the shared default.
+func (sc *ServerConfig) requestTimeout() time.Duration {
+	if sc.TimeoutMs == nil {
+		return mcpToolTimeout
+	}
+	if *sc.TimeoutMs <= 0 {
+		return 0
+	}
+	return time.Duration(*sc.TimeoutMs) * time.Millisecond
+}
+
+// Config is the parsed mcp.yml, after LoadConfig has merged imports and
+// Gemini extension manifests into it.
 type Config struct {
 	Servers map[string]*ServerConfig `yaml:"servers"`
-}
-
-// LoadConfig reads mcp.yml from path; a missing file is not an error
-// (MCP simply stays off).
-func LoadConfig(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &Config{}, nil
-		}
-		return nil, err
-	}
-	var c Config
-	if err := yaml.Unmarshal(raw, &c); err != nil {
-		return nil, fmt.Errorf("mcp: parse %s: %w", path, err)
-	}
-	return &c, nil
+	// Imports lists other mcp.yml files merged under this one: the file
+	// that names an import outranks what it imports.
+	Imports []string `yaml:"imports,omitempty"`
+	// DisabledServers is the highest-precedence denylist (it hides a
+	// server from any source); EnabledServers force-enables an entry whose
+	// own `enabled: false`. Disabled wins.
+	DisabledServers []string `yaml:"disabledServers,omitempty"`
+	EnabledServers  []string `yaml:"enabledServers,omitempty"`
+	// CommandDirs and SkillDirs are the command and skill directories
+	// declared by Gemini extension manifests — extra discovery roots the
+	// host folds in at the lowest priority (see ExtensionRoots).
+	CommandDirs []string `yaml:"-"`
+	SkillDirs   []string `yaml:"-"`
 }
 
 // Manager owns the live sessions and their exported tools.
@@ -92,7 +121,7 @@ func (m *Manager) Connect(ctx context.Context, cfg *Config) (connected int, errs
 	sort.Strings(names)
 	for _, name := range names {
 		sc := cfg.Servers[name]
-		if sc == nil || sc.Disabled {
+		if sc == nil || !sc.IsEnabled() {
 			continue
 		}
 		timeout := 15 * time.Second
@@ -135,6 +164,7 @@ func connect(ctx context.Context, name string, sc *ServerConfig) (*mcp.ClientSes
 		for k, v := range sc.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
+		cmd.Dir = sc.Cwd
 		transport = &mcp.CommandTransport{Command: cmd}
 	case sc.URL != "":
 		transport = &mcp.StreamableClientTransport{Endpoint: sc.URL}
@@ -163,7 +193,7 @@ func connect(ctx context.Context, name string, sc *ServerConfig) (*mcp.ClientSes
 		if exclude[t.Name] || (len(include) > 0 && !include[t.Name]) {
 			continue
 		}
-		out = append(out, &remoteTool{server: name, sess: sess, spec: t})
+		out = append(out, &remoteTool{server: name, sess: sess, spec: t, timeout: sc.requestTimeout()})
 	}
 	return sess, out, nil
 }
@@ -197,9 +227,10 @@ func (m *Manager) Close() {
 // namespaced ("<server>_<tool>") so remote and built-in tools can never
 // collide in one registry.
 type remoteTool struct {
-	server string
-	sess   *mcp.ClientSession
-	spec   *mcp.Tool
+	server  string
+	sess    *mcp.ClientSession
+	spec    *mcp.Tool
+	timeout time.Duration // per-server `timeout`; 0 = no client-side deadline
 }
 
 func (t *remoteTool) Name() string { return t.server + "_" + t.spec.Name }
@@ -234,7 +265,12 @@ func (t *remoteTool) Execute(ctx context.Context, args json.RawMessage) (tool.Re
 			return tool.Result{Text: "mcp: malformed arguments: " + err.Error(), IsError: true}, nil
 		}
 	}
-	cctx, cancel := context.WithTimeout(ctx, mcpToolTimeout)
+	// `timeout: 0` disables the client-side deadline; absent means the
+	// shared default (set on the tool when the server was dialed).
+	cctx, cancel := ctx, func() {}
+	if t.timeout > 0 {
+		cctx, cancel = context.WithTimeout(ctx, t.timeout)
+	}
 	defer cancel()
 	res, err := t.sess.CallTool(cctx, &mcp.CallToolParams{Name: t.spec.Name, Arguments: arguments})
 	if err != nil {
