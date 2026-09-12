@@ -43,15 +43,15 @@ func TestParseThemeComplete(t *testing.T) {
 func TestParseThemeGroupedMissingError(t *testing.T) {
 	raw := validThemeJSON(t, func(doc map[string]any) {
 		colors := doc["colors"].(map[string]any)
-		delete(colors, TextPrimary)
-		delete(colors, BgBase)
+		delete(colors, Text)
+		delete(colors, SyntaxComment)
 	})
 	_, err := ParseTheme([]byte(raw), "custom")
 	if err == nil {
 		t.Fatal("missing slots must error")
 	}
 	// One error naming every missing slot (fix in one pass).
-	for _, want := range []string{TextPrimary, BgBase, "2 missing"} {
+	for _, want := range []string{Text, SyntaxComment, "2 missing"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error must name %q: %v", want, err)
 		}

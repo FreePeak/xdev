@@ -236,7 +236,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		y := yComposerTop - h - 2
 		panelW := min(w-2, hubPanelWidth(w, visible)+3)
 		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
-		hubRosterBox(s, y, h, hubPanelWidth(w, visible), brdSt)
+		hubRosterBox(s, y, h, hubPanelWidth(w, visible), a.th.Box(), brdSt)
 		drawText(s, 3, y+1, rosterSnippet("transcript · "+rosterNameByID(ui, ui.viewID)+" ("+ui.viewID+")", printW(panelW, 3)), dimSt)
 		for i, ln := range visible {
 			drawText(s, 3, y+2+i, rosterLine(ln.Role, ln.Text, panelW), fgSt)
@@ -269,7 +269,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	// must not bleed through the overlay (same discipline as the picker).
 	panelW := min(w-2, wid+3)
 	fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
-	hubRosterBox(s, y, h, wid, brdSt)
+	hubRosterBox(s, y, h, wid, a.th.Box(), brdSt)
 	drawText(s, 3, y+1, rosterSnippet("AGENT HUB — ↑↓ select · Enter transcript · k kill · p park · r revive · Esc close", printW(panelW, 3)), dimSt)
 	for i, text := range texts {
 		rowStyle := rowSt
@@ -306,12 +306,12 @@ func windowRoster(rows []HubAgent, sel, n int) ([]HubAgent, int) {
 	return rows[start : start+n], sel - start
 }
 
-// hubRosterBox draws the overlay's rounded border; the panel occupies
-// y..y+h+1 with content rows y+1..y+h.
-func hubRosterBox(s tcell.Screen, y, h, wid int, st tcell.Style) {
-	edge := "─"
-	top := "╭" + strings.Repeat(edge, max(1, wid)) + "╮"
-	bot := "╰" + strings.Repeat(edge, max(1, wid)) + "╯"
+// hubRosterBox draws the overlay's border (theme box glyphs, passed by the
+// caller that holds the theme); the panel occupies y..y+h+1 with content
+// rows y+1..y+h.
+func hubRosterBox(s tcell.Screen, y, h, wid int, box theme.BoxChars, st tcell.Style) {
+	top := box.TopLeft + strings.Repeat(box.Horizontal, max(1, wid)) + box.TopRight
+	bot := box.BottomLeft + strings.Repeat(box.Horizontal, max(1, wid)) + box.BottomRight
 	drawText(s, 2, y, top, st)
 	drawText(s, 2, y+h+1, bot, st)
 }
