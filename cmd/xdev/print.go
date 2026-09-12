@@ -73,7 +73,7 @@ type printOptions struct {
 // reviewer model comes from the @advisor role; a missing role warns and
 // disables (never fails the run).
 func buildAdvisor(cfg *config.Config, settings *config.Settings) *agent.Advisor {
-	if settings == nil || !settings.Advisor {
+	if settings == nil || (!settings.Advisor && !launch.Advisor) {
 		return nil
 	}
 	ref, _, err := resolveModel("@advisor", cfg, settings)
@@ -270,6 +270,10 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// --thinking overrides whatever the model role pinned.
+	if effortRef, err = applyThinkingFlag(launch.Thinking, effortRef); err != nil {
+		return 2, err
+	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
 		return 2, err
@@ -332,7 +336,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	// M12 #44: mnemopi counts turns; every retainEveryNTurns turns this
 	// enqueues a consolidation the exit drain below applies.
-	hooks := memoryTurnHooks(&printHooks{store: store, showThinking: settings.ShowThinkingOn()}, settings)
+	hooks := memoryTurnHooks(&printHooks{store: store, showThinking: showThinkingOn(settings)}, settings)
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
@@ -387,6 +391,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	// --max-time bounds the whole run (signal handling still cancels too).
+	ctx, cancelTimeout := withMaxTime(ctx, launch.MaxTime)
+	defer cancelTimeout()
 	// -handoff (M5 #23): document the resumed session before the prompt, so
 	// the run streams the handoff document instead of the raw history.
 	if handoffMode && len(store.Entries()) > 0 {
@@ -421,7 +428,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// model is told to use (see TestPromptReflectsLiveRegistry).
 	final, err := ag.Run(ctx, hookBus.Context(ctx, buildSys()), history)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "\nxdev: -max-time %s exceeded\n", launch.MaxTime)
+		} else {
+			fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
+		}
 		exitCode = 1
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
@@ -825,7 +836,13 @@ func registerProvider(cfg *config.Config, a ext.Action) {
 	logx.Infof("ext: register_provider: %q registered (session-scoped)", name)
 }
 
+// attachExtensions loads extension processes from the install's extensions
+// dir. --no-extensions skips discovery entirely, so no extension tool,
+// command, or policy hook loads in any mode.
 func attachExtensions(ctx context.Context, reg *tool.Registry, steer, followUp func(text string), cfg *config.Config) *ext.Manager {
+	if launch.NoExtensions {
+		return nil
+	}
 	mgr := ext.NewManager()
 	mgr.BindHost(actionRouter(steer, followUp, cfg))
 	if err := mgr.Load(ctx, extensionsDir()); err != nil {
@@ -1378,9 +1395,13 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	registerMemoryTools(reg, buildMemory(settings))
 	// M13 #52: language-server queries. Servers launch lazily on the first
 	// lsp call (lsp.lazy: false opts into eager warmup).
-	lspTool := lsp.NewTool(cwd, settings)
-	reg.Register(lspTool)
-	lspTool.Prewarm()
+	// --no-lsp: never register it, so no server is spawned and Prewarm is
+	// not reached.
+	if !launch.NoLSP {
+		lspTool := lsp.NewTool(cwd, settings)
+		reg.Register(lspTool)
+		lspTool.Prewarm()
+	}
 	// M15 #68: local speech synthesis (macOS say, Linux spd-say/espeak-ng,
 	// Windows PowerShell SAPI), voice/rate from the tts: settings group. A
 	// platform without a backend still registers: the model gets the
@@ -1425,6 +1446,12 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M13 #50: browser — CDP attach to an already-running Chrome. Never
 	// launches a browser; screenshots land in the session blob store.
 	reg.Register(browser.NewTool(settings.BrowserConfig(), session.NewBlobStore(config.DataDir())))
+	// --tools / --no-tools (issue #33): narrow the built-in set before any
+	// prompt or agent sees it. A name that matched nothing is reported —
+	// silently narrowing less than asked is how a launch flag lies.
+	for _, unknown := range applyToolFilter(reg, launch.Tools, launch.NoTools) {
+		logx.Errorf("tools: no tool named %q (see -h for the built-in set)", unknown)
+	}
 
 	return reg
 }
@@ -1494,6 +1521,17 @@ func settingsPolicy(settings *config.Settings) tool.ApprovalPolicy {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		return tool.ApprovalPolicy{}
 	}
+	return autoApprovePolicy(pol)
+}
+
+// autoApprovePolicy applies --auto-approve: the MODE becomes yolo, so no call
+// is held for a prompt. The written rules survive — a per-tool deny or a bash
+// pattern is an explicit decision, and a launch flag that silently overruled
+// it would turn a deny rule into decoration.
+func autoApprovePolicy(pol tool.ApprovalPolicy) tool.ApprovalPolicy {
+	if launch.AutoApprove {
+		pol.Mode = tool.Yolo
+	}
 	return pol
 }
 
@@ -1504,7 +1542,7 @@ func agentPolicy() tool.ApprovalPolicy {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		return tool.ApprovalPolicy{}
 	}
-	return pol
+	return autoApprovePolicy(pol)
 }
 
 func applyPolicy(ag *agent.Agent, settings *config.Settings) {
@@ -1516,7 +1554,7 @@ func applyPolicy(ag *agent.Agent, settings *config.Settings) {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		return
 	}
-	ag.Policy = pol
+	ag.Policy = autoApprovePolicy(pol)
 }
 
 // childModel resolves the @task role for subagents (M9: roles resolve
@@ -1621,8 +1659,8 @@ func failoverChain(cfg *config.Config, primaryProv, primaryModel string) []agent
 }
 
 // openSession resumes the latest session in cwd (--continue) or starts a new
-// one. New sessions auto-persist into the cwd bucket when the first
-// assistant message lands.
+// one. New sessions auto-persist into the cwd bucket when the first assistant
+// message lands — unless --no-session asked for an ephemeral one.
 func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
 	if resumePrefix != "" {
 		// Explicit --resume wins over everything: prefix resolution
@@ -1644,7 +1682,7 @@ func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, er
 			}
 		}
 
-		metas, err := session.List(config.DataDir())
+		metas, err := session.List(sessionDataDir())
 		if err == nil {
 			for _, m := range metas {
 				if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
@@ -1659,15 +1697,24 @@ func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, er
 	// Titles are mechanical (M10 #32): no ai-title call exists yet, so
 	// TITLE_SYSTEM.md is discovered but unused — agent.SystemPromptOverrides
 	// .TitleSystemPrompt() is where a model-generated title would read its
-	// prompt override.
+	// prompt override. --no-title skips the stamp, so the listing carries no
+	// generated title.
 	title := "print " + time.Now().Format("2006-01-02 15:04")
 	if cont {
 		title = "continued " + title
 	}
+	if launch.NoTitle {
+		title = ""
+	}
 	s := session.OpenMem(cwd, title)
+	if launch.NoSession {
+		// --no-session: memory-only. Nothing is written, no breadcrumb path
+		// is produced, and the store's Path() stays empty.
+		return s, nil
+	}
 	now := time.Now().UTC()
 	s.EnableAutoPersist(
-		session.SessionFilePath(config.DataDir(), cwd, now, s.ID()),
+		session.SessionFilePath(sessionDataDir(), cwd, now, s.ID()),
 		session.Options{},
 	)
 	return s, nil
@@ -1785,12 +1832,14 @@ var _ = filepath.Join
 // skillPromptBlock lists discovered skills for the model: name +
 // description only, with the full body reachable via read skill://name.
 // Hidden and model-invocation-disabled skills stay out of the list but
-// remain reachable explicitly.
+// remain reachable explicitly. --skills globs and --no-skills (issue #33)
+// filter what is advertised: discovery is the surface the model acts on, so
+// filtering it is what makes the flags mean something.
 func skillPromptBlock(cwd string) string {
 	list := skills.Discover(cwd)
 	var b strings.Builder
 	for _, s := range list {
-		if s.Hide || s.DisableModelInvocation {
+		if s.Hide || s.DisableModelInvocation || !skillAllowed(s.Name) {
 			continue
 		}
 		fmt.Fprintf(&b, "\n%s: %s", s.Name, s.Description)

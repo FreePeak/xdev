@@ -43,6 +43,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// --thinking overrides whatever the model role pinned (the live holder
+	// below reads the resolved value).
+	if effortRef, err = applyThinkingFlag(launch.Thinking, effortRef); err != nil {
+		return 2, err
+	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
 		return 2, err
@@ -175,9 +180,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer setCursorReset()
 
 	app := tui.New(scr, th, modelRef, store.ID())
-	// showThinking drives the reasoning display (issue #20); the resolved
-	// layered config is the source of truth at startup.
-	app.SetShowThinking(lastSettings().ShowThinkingOn())
+	// showThinking drives the reasoning display (issue #20): the layered
+	// config is the source of truth, with --hide-thinking / --print-thoughts
+	// overriding it for this run (display only — the model still thinks).
+	app.SetShowThinking(showThinkingOn(lastSettings()))
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
@@ -233,7 +239,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return res.Messages
 	}
 
-	baseCtx, baseCancel := context.WithCancel(context.Background())
+	// --max-time bounds the session: every turn shares baseCtx, so the
+	// deadline (and Esc, below) releases the same tree.
+	baseCtx, baseCancel := withMaxTime(context.Background(), launch.MaxTime)
 	defer baseCancel()
 
 	var running atomic.Bool
@@ -401,7 +409,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return deleteSessionByShortID(id, store.Path())
 	})
 	app.SetResumeList(func(cwd string) error {
-		metas, err := session.List(config.DataDir())
+		metas, err := session.List(sessionDataDir())
 		if err != nil {
 			return err
 		}
@@ -602,12 +610,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// source file to copy.
 			if store.Path() == "" {
 				if _, err := store.EnsureOnDisk(
-					session.SessionFilePath(config.DataDir(), cwd, time.Now(), store.ID()), session.Options{}); err != nil {
+					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), store.ID()), session.Options{}); err != nil {
 					return err
 				}
 			}
 			fork, err := session.ForkSession(store.Path(),
-				session.SessionFilePath(config.DataDir(), cwd, time.Now(), session.NewSessionID()), "")
+				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), session.NewSessionID()), "")
 			if err != nil {
 				return err
 			}
@@ -1469,7 +1477,7 @@ func roleNamesSorted(m map[string]string) []string {
 // session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
 // browsing while the picker windows to 8 visible rows.
 func resumePickerItems(cwd string) []tui.PickerItem {
-	metas, err := session.List(config.DataDir())
+	metas, err := session.List(sessionDataDir())
 	if err != nil {
 		return nil
 	}
@@ -1550,7 +1558,7 @@ func countSessionFileTokens(shortID string, tokens []string) int {
 		return 0
 	}
 	paths := make([]string, 0, 4)
-	root := session.SessionsRoot(config.DataDir())
+	root := session.SessionsRoot(sessionDataDir())
 	buckets, err := os.ReadDir(root)
 	if err != nil {
 		return 0
