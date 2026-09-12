@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -627,15 +628,26 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 // providerModels merges pinned + discovered models once per provider per
 // process: discovery is best-effort (a down server must not affect
 // startup), and the result is cached so a stalled endpoint is not retried
-// on every model lookup.
-var providerModelCache = map[string][]config.ModelConfig{}
+// on every model lookup. The cache is mutex-guarded because the TUI warms
+// discovery providers on a background goroutine while the key thread may
+// read any provider's catalog through /model's picker.
+var (
+	providerModelCacheMu sync.Mutex
+	providerModelCache   = map[string][]config.ModelConfig{}
+)
 
 func providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig {
-	if cached, ok := providerModelCache[name]; ok {
+	providerModelCacheMu.Lock()
+	cached, ok := providerModelCache[name]
+	providerModelCacheMu.Unlock()
+	if ok {
 		return cached
 	}
 	out := pc.Models
 	if pc.Discovery != nil {
+		// Network I/O stays outside the lock: two racers may both probe a
+		// cold provider, and the second write just overwrites an equal
+		// result.
 		ctx, cancel := context.WithTimeout(context.Background(), config.DiscoveryTimeout)
 		found, err := config.DiscoverModels(ctx, pc)
 		cancel()
@@ -645,7 +657,9 @@ func providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig
 			out = found
 		}
 	}
+	providerModelCacheMu.Lock()
 	providerModelCache[name] = out
+	providerModelCacheMu.Unlock()
 	return out
 }
 
@@ -1491,7 +1505,99 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 	if ref == "" {
 		return "", "", fmt.Errorf("no model configured: add ~/.xdev/agent/models.yml, set defaultModel, or pass -model provider/model")
 	}
-	return ref, "", nil
+	// A literal ":effort" suffix belongs to the request, not the model id:
+	// forwarding "dev:high" to the wire 404s one turn later.
+	effort := ""
+	if base, suffix, ok := strings.Cut(ref, ":"); ok && slices.Contains(config.EffortLevels, suffix) {
+		ref, effort = base, suffix
+	}
+	// A bare id ("dev") resolves against the configured catalogs, the same
+	// convenience omp's model resolver offers for `-model`.
+	if !strings.Contains(ref, "/") {
+		expanded, err := expandBareModelID(cfg, ref)
+		if err != nil {
+			return "", "", err
+		}
+		ref = expanded
+	}
+	// Gateways routinely serve far more than models.yml pins, so an
+	// explicit provider/model ref is accepted even when the catalog does
+	// not list it — rejecting it here would make unpinned-but-served
+	// models unusable. The catalog check stays advisory (logged); the hard
+	// guards are the bare-id resolution above and seedModelFromSession,
+	// which refuses to adopt history refs that do not resolve. The picker
+	// itself only ever offers catalog rows, so the interactive path cannot
+	// produce a typo.
+	if err := validateModelRef(cfg, ref); err != nil {
+		logx.Debugf("model %q not in the configured catalog: %v", ref, err)
+	}
+	return ref, effort, nil
+}
+
+// expandBareModelID resolves a bare model id against every provider's
+// merged catalog (pinned + discovered, providerModels' cache). One match
+// wins; zero or several are an error naming the candidates.
+func expandBareModelID(cfg *config.Config, id string) (string, error) {
+	if cfg == nil {
+		return id, nil
+	}
+	var hits []string
+	for _, name := range providerKeys(cfg) {
+		pc := cfg.Providers[name]
+		if pc == nil {
+			continue
+		}
+		for _, m := range providerModels(name, pc) {
+			if strings.EqualFold(m.ID, id) {
+				hits = append(hits, name+"/"+m.ID)
+			}
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], nil
+	case 0:
+		return "", fmt.Errorf("unknown model %q (add it to models.yml or use provider/model)", id)
+	default:
+		return "", fmt.Errorf("model %q matches %s — use provider/model", id, strings.Join(hits, ", "))
+	}
+}
+
+// validateModelRef reports a ref whose model id is not in the provider's
+// merged catalog. Callers decide severity: resolveModel logs it (explicit
+// refs may name models the gateway serves but models.yml does not pin),
+// while seedModelFromSession treats it as fatal for that seed. A provider
+// with an empty catalog (override-only, no discovery block) never fails —
+// there is nothing to compare against.
+func validateModelRef(cfg *config.Config, ref string) error {
+	if cfg == nil {
+		return nil
+	}
+	pname, mname, err := config.ParseModelRef(ref)
+	if err != nil {
+		return err
+	}
+	pc, ok := cfg.Providers[pname]
+	if !ok {
+		return fmt.Errorf("unknown provider %q (have: %v)", pname, providerKeys(cfg))
+	}
+	catalog := providerModels(pname, pc)
+	if len(catalog) == 0 {
+		return nil
+	}
+	for _, m := range catalog {
+		if m.ID == mname {
+			return nil
+		}
+	}
+	ids := make([]string, 0, len(catalog))
+	for _, m := range catalog {
+		ids = append(ids, m.ID)
+	}
+	if len(ids) > 6 {
+		ids = append(ids[:6], "…")
+	}
+	return fmt.Errorf("unknown model %q for provider %q (configured: %s)", mname, pname, strings.Join(ids, ", "))
 }
 
 // applyPolicy attaches the configured approval policy to an agent. Print

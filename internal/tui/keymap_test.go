@@ -158,12 +158,15 @@ func TestHotkeysRendersEveryAction(t *testing.T) {
 }
 
 // The newline action must advertise the portable chord first: Ctrl+J
-// (0x0A) reaches every terminal, Shift-Enter needs the kitty protocol.
+// (0x0A) reaches every terminal. The aliases are real chords, not
+// decoration: Alt-Enter arrives from terminals that report it, and
+// Shift-Enter from kitty/CSI-u terminals (chordOf's shift branch includes
+// KeyEnter), so the table lists only chords the runtime can resolve.
 func TestChordsPreferPortableNewline(t *testing.T) {
 	m := DefaultKeyMap()
 	chords := m.Chords("newline")
 	if len(chords) < 3 {
-		t.Fatalf("newline chords = %v, want Ctrl+J plus aliases", chords)
+		t.Fatalf("newline chords = %v, want Ctrl+J plus Alt-Enter and Shift-Enter aliases", chords)
 	}
 	if chords[0] != "C-j" {
 		t.Fatalf("first newline chord = %q, want C-j", chords[0])

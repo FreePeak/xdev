@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"strings"
 )
 
 func TestChildModelRole(t *testing.T) {
@@ -26,8 +27,12 @@ func TestChildModelRole(t *testing.T) {
 }
 
 func TestResolveModelPrecedence(t *testing.T) {
+	resetProviderModelCache()
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
-		"onegw": {Models: []config.ModelConfig{{ID: "yml-default"}}},
+		// "flag" is in the catalog: resolveModel now validates literal refs
+		// against the merged catalog so a typo fails here instead of 404ing
+		// on the next turn.
+		"onegw": {Models: []config.ModelConfig{{ID: "yml-default"}, {ID: "flag"}}},
 	}}
 	s := &config.Settings{
 		DefaultModel: "onegw/from-settings",
@@ -45,6 +50,83 @@ func TestResolveModelPrecedence(t *testing.T) {
 	// Bogus role surfaces rather than silently using the default.
 	if _, _, err := resolveModel("@nope", cfg, s); err == nil {
 		t.Fatal("unknown role must error")
+	}
+}
+
+// TestResolveModelAcceptance pins what the -model flag and /model accept:
+// bare model ids resolve against the merged catalogs, a literal ":effort"
+// suffix is split off the id (it used to reach the wire as part of the model
+// name and 404 one turn later), and an id the provider does not declare is
+// rejected up front instead of silently accepted.
+func TestResolveModelAcceptance(t *testing.T) {
+	// providerModelCache is keyed by provider name for the whole process:
+	// another test's fixture for the same name must not leak in (and these
+	// discoveries must not leak out).
+	resetProviderModelCache()
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw": {Models: []config.ModelConfig{{ID: "free"}, {ID: "dev"}}},
+		"empty": {}, // override-only provider: no catalog to validate against
+		"a":     {Models: []config.ModelConfig{{ID: "dup"}}},
+		"b":     {Models: []config.ModelConfig{{ID: "dup"}}},
+	}}
+	tests := []struct {
+		name       string
+		in         string
+		wantRef    string
+		wantEffort string
+		wantErr    string
+	}{
+		{name: "concrete ref", in: "onegw/dev", wantRef: "onegw/dev"},
+		{name: "bare id", in: "dev", wantRef: "onegw/dev"},
+		{name: "bare id case-insensitive", in: "DEV", wantRef: "onegw/dev"},
+		{name: "effort suffix", in: "onegw/dev:high", wantRef: "onegw/dev", wantEffort: "high"},
+		{name: "bare id with effort", in: "dev:low", wantRef: "onegw/dev", wantEffort: "low"},
+		// The catalog check is advisory for typed refs (gateways serve more
+		// than models.yml pins); the hard guards are bare-id expansion below.
+		{name: "unknown suffix stays in the id", in: "onegw/dev:turbo", wantRef: "onegw/dev:turbo"},
+		{name: "unknown id for a known provider", in: "onegw/nope", wantRef: "onegw/nope"},
+		{name: "unknown bare id", in: "nope", wantErr: "unknown model"},
+		{name: "ambiguous bare id", in: "dup", wantErr: "matches a/dup, b/dup"},
+		{name: "override-only provider skips validation", in: "empty/anything", wantRef: "empty/anything"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ref, effort, err := resolveModel(tc.in, cfg, &config.Settings{})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ref != tc.wantRef || effort != tc.wantEffort {
+				t.Fatalf("got %q/%q, want %q/%q", ref, effort, tc.wantRef, tc.wantEffort)
+			}
+		})
+	}
+}
+
+// TestTitleFromPrompt pins the session-title derivation: first line only,
+// whitespace collapsed, capped so a pasted paragraph cannot become a title.
+func TestTitleFromPrompt(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "first line wins", in: "fix the picker\nand the rest", want: "fix the picker"},
+		{name: "whitespace collapsed", in: "  fix   the\tpicker ", want: "fix the picker"},
+		{name: "capped", in: strings.Repeat("x", 60), want: strings.Repeat("x", 40) + "…"},
+		{name: "empty", in: "   \n  ", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := titleFromPrompt(tc.in); got != tc.want {
+				t.Fatalf("titleFromPrompt(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

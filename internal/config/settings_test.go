@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -337,5 +338,63 @@ func TestCompactionMethodOrderUnknownKeyIsRejected(t *testing.T) {
 		"compaction:\n  methodOder: threshold\n")
 	if _, err := LoadSettings(t.TempDir(), []string{bad}); err == nil {
 		t.Fatal("a typo inside the compaction block must be rejected")
+	}
+}
+
+// TestListRendersTheEnforcedSurface: `xdev config list` is how a user sees
+// what the session will actually enforce, so every grouped key (per-role
+// effort, per-tool approval, bash patterns, hooks) must appear — map groups
+// sorted, hook bodies never dumped. The empty case pins the base line set.
+func TestListRendersTheEnforcedSurface(t *testing.T) {
+	const path = "/tmp/xdev/config.yml"
+	tests := []struct {
+		name string
+		s    *Settings
+		want []string
+	}{
+		{
+			name: "empty settings: the base lines plus the config path",
+			s:    &Settings{},
+			want: []string{
+				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
+				"showThinking true", "advisor false", "memory off",
+				"config " + path,
+			},
+		},
+		{
+			name: "enforced groups: sorted by key, hooks as a count",
+			s: &Settings{
+				ModelRolesEffort: map[string]string{"smol": "low", "advisor": "high"},
+				ToolsApproval:    map[string]string{"read": "allow", "bash": "prompt", "write": "allow"},
+				BashPatterns:     []string{"deny:rm -rf *", "allow:ls"},
+				Hooks:            map[string]any{"post-tool": "secret-hook-body"},
+			},
+			want: []string{
+				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
+				"showThinking true", "advisor false", "memory off",
+				"modelRolesEffort.advisor high",
+				"modelRolesEffort.smol low",
+				"toolsApproval.bash prompt",
+				"toolsApproval.read allow",
+				"toolsApproval.write allow",
+				"bashPatterns deny:rm -rf *, allow:ls",
+				"hooks 1 configured", // the hook body is never part of the list
+				"config " + path,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Repeat: an unsorted group ranges the map in a new random order
+			// each time, so a single run could pass by luck.
+			for range 4 {
+				lines := List(tc.s, path)
+				for _, want := range tc.want {
+					if !slices.Contains(lines, want) {
+						t.Fatalf("List is missing %q:\n%s", want, strings.Join(lines, "\n"))
+					}
+				}
+			}
+		})
 	}
 }

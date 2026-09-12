@@ -2,37 +2,279 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
-
 	"github.com/FreePeak/xdev/internal/theme"
+	"github.com/gdamore/tcell/v2"
 )
 
-// Session picker (M10 residual, omp /resume parity): /resume with no
-// argument opens an interactive selector above the composer instead of a
-// text listing. Up/Down move, Enter resumes the selected session, Esc
-// closes. Tab toggles current-folder ↔ all-projects scope (never
-// auto-switched); typing filters rows — every whitespace-separated token
-// must match id or title, and cmd may rank prompt-text matches in via
-// SetPickerSearch; Backspace on an empty query arms a delete that a
-// second Backspace confirms; Ctrl+P pins. Bare 'p' stays search text —
-// the picker is a filter box, so a printable pin shortcut would make
-// queries starting with "p" untypeable. Lifecycle
-// status badges stay unrendered: SessionMeta carries no status field, so
-// rows show only pin marker + title + mtime + size.
-// The data (id/title/mtime/entries/pins) lives in cmd; the TUI owns
-// selection and rendering only.
+// PickerItem is one selectable row of a picker view.
+type PickerItem struct {
+	Label   string // left column: "@smol", "onegw/dev"
+	Detail  string // dim second column: "→ onegw/free", "Free · 1M ctx"
+	Value   string // opaque value handed to the view's OnSelect
+	Section string // group header drawn above the first row of the group ("" = none)
+	Current bool   // marks the value this session is running on
+}
+
+// PickerView is one tab of a picker. The model selector opens a roles view
+// plus one view per provider (omp: an all-models view plus one per
+// provider), so views are tabs rather than a nested menu.
+//
+// Action names what Enter does in this view ("use", "set", "resume"); it is
+// the footer's verb. OnSelect overrides PickerOptions.OnSelect, which is how
+// one picker offers two semantics — the roles tab assigns, a model tab
+// switches — without a second key that would fight the type-to-filter.
+type PickerView struct {
+	Name     string
+	Items    []PickerItem
+	Action   string
+	OnSelect func(value string)
+}
+
+// PickerOptions configures one modal list.
+type PickerOptions struct {
+	Title    string
+	Views    []PickerView
+	OnSelect func(value string) // Enter, unless the view overrides it
+}
+
+// picker is the modal list state: filter-as-you-type, view tabs, section
+// headers, and a row window anchored to the selection.
+type picker struct {
+	opts    PickerOptions
+	view    int
+	query   string
+	match   []int // indices into the active view's Items
+	sel     int
+	visible int
+}
+
+// pickerMaxRows caps the visible row window; the panel never eats the
+// transcript — the list scrolls instead.
+const pickerMaxRows = 12
+
+func newPicker(opts PickerOptions) *picker {
+	p := &picker{opts: opts, visible: pickerMaxRows}
+	p.refresh()
+	p.selectCurrent()
+	return p
+}
+
+// selectCurrent parks the selection on the active value: opening the
+// selector should show the user where they are instead of making them hunt.
+func (p *picker) selectCurrent() {
+	for i, idx := range p.match {
+		if p.item(idx).Current {
+			p.sel = i
+			return
+		}
+	}
+}
+
+func (p *picker) active() *PickerView {
+	if p.view < 0 || p.view >= len(p.opts.Views) {
+		return nil
+	}
+	return &p.opts.Views[p.view]
+}
+
+func (p *picker) item(idx int) PickerItem {
+	v := p.active()
+	if v == nil || idx < 0 || idx >= len(v.Items) {
+		return PickerItem{}
+	}
+	return v.Items[idx]
+}
+
+// refresh re-ranks the active view against the typed filter. An empty query
+// keeps the configured order (providers in models.yml order): the picker is
+// a menu, not a search result page.
+func (p *picker) refresh() {
+	v := p.active()
+	p.match = p.match[:0]
+	if v == nil {
+		p.sel = 0
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(p.query))
+	for i, it := range v.Items {
+		if q == "" {
+			p.match = append(p.match, i)
+			continue
+		}
+		hay := strings.ToLower(it.Label + " " + it.Detail + " " + it.Section)
+		if fuzzyScore(it.Label, q) >= 0 || strings.Contains(hay, q) {
+			p.match = append(p.match, i)
+		}
+	}
+	if p.sel >= len(p.match) {
+		p.sel = max(0, len(p.match)-1)
+	}
+	if p.sel < 0 {
+		p.sel = 0
+	}
+}
+
+// move changes the selection by delta, clamped to the list. It does not
+// wrap: the row window is anchored to the selection, so wrapping would jump
+// the whole panel.
+func (p *picker) move(delta int) {
+	n := len(p.match)
+	if n == 0 {
+		return
+	}
+	p.sel = min(max(0, p.sel+delta), n-1)
+}
+
+// switchView changes the tab, wrapping around, and resets the filter (a
+// filter typed for one view usually matches nothing in the next).
+func (p *picker) switchView(delta int) {
+	n := len(p.opts.Views)
+	if n < 2 {
+		return
+	}
+	p.view = ((p.view+delta)%n + n) % n
+	p.query = ""
+	p.sel = 0
+	p.refresh()
+	p.selectCurrent()
+}
+
+func (p *picker) selected() (PickerItem, bool) {
+	if p.sel < 0 || p.sel >= len(p.match) {
+		return PickerItem{}, false
+	}
+	return p.item(p.match[p.sel]), true
+}
+
+// typeFilter appends a rune to the filter and re-ranks.
+func (p *picker) typeFilter(r rune) {
+	p.query += string(r)
+	p.sel = 0
+	p.refresh()
+}
+
+// backspace drops the last filter rune.
+func (p *picker) backspace() {
+	if p.query == "" {
+		return
+	}
+	r := []rune(p.query)
+	p.query = string(r[:len(r)-1])
+	p.sel = 0
+	p.refresh()
+}
+
+// pickerLine is one rendered line: either a section header or a row.
+type pickerLine struct {
+	header  bool
+	text    string
+	item    PickerItem
+	itemIdx int // index into the view's Items (-1 for a header)
+}
+
+// lines expands the filtered matches into display lines. Section headers
+// appear only without a filter: while searching the user wants rows.
+func (p *picker) lines() []pickerLine {
+	v := p.active()
+	if v == nil {
+		return nil
+	}
+	out := make([]pickerLine, 0, len(p.match))
+	lastSection := ""
+	for _, idx := range p.match {
+		it := v.Items[idx]
+		if p.query == "" && it.Section != "" && it.Section != lastSection {
+			out = append(out, pickerLine{header: true, text: it.Section, itemIdx: -1})
+			lastSection = it.Section
+		}
+		out = append(out, pickerLine{item: it, itemIdx: idx})
+	}
+	return out
+}
+
+// window returns the display lines to draw, the index of the first drawn
+// line, and the display index of the selection (-1 when nothing matches).
+func (p *picker) window(rows int) (lines []pickerLine, start, selLine int) {
+	all := p.lines()
+	selLine = -1
+	for i, ln := range all {
+		if !ln.header && p.sel < len(p.match) && ln.itemIdx == p.match[p.sel] {
+			selLine = i
+			break
+		}
+	}
+	if selLine < 0 {
+		return nil, 0, -1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	start = 0
+	if selLine >= rows {
+		start = selLine - rows + 1
+	}
+	if start > len(all)-rows {
+		start = max(0, len(all)-rows)
+	}
+	end := min(start+rows, len(all))
+	return all[start:end], start, selLine
+}
+
+// footer renders the status/hint line: the filter (or the item count) on
+// the left, the key hints on the right.
+func (p *picker) footer() (left, right string) {
+	pos := strconv.Itoa(p.sel+1) + "/" + strconv.Itoa(len(p.match))
+	if p.query != "" {
+		left = "/" + p.query + "  " + pos
+	} else {
+		left = pos + " items"
+	}
+	hints := []string{"↑↓ move"}
+	if p.viewCount() > 1 {
+		if v := p.active(); v != nil {
+			hints = append(hints, "⇥ "+v.Name)
+		}
+	}
+	hints = append(hints, "⏎ "+p.action())
+	hints = append(hints, "esc cancel")
+	return left, strings.Join(hints, " · ")
+}
+
+// action is the active view's Enter verb ("select" when it has none).
+func (p *picker) action() string {
+	if v := p.active(); v != nil && v.Action != "" {
+		return v.Action
+	}
+	return "select"
+}
+
+// choose runs the Enter action for the selected row: the view's own
+// callback when it set one, else the picker's default. It reports whether a
+// selection was made.
+func (p *picker) choose() (func(value string), bool) {
+	if _, ok := p.selected(); !ok {
+		return nil, false
+	}
+	if v := p.active(); v != nil && v.OnSelect != nil {
+		return v.OnSelect, true
+	}
+	return p.opts.OnSelect, p.opts.OnSelect != nil
+}
+
+func (p *picker) viewCount() int { return len(p.opts.Views) }
 
 const (
 	pickerIdleCap   = 12 // rows shown without an active query
 	pickerSearchCap = 50 // rows allowed while a query is active
 )
 
-// PickerItem is one row of the session picker. Size is preformatted by
+// SessionPickerItem is one row of the session picker. Size is preformatted by
 // cmd (SessionMeta exposes bytes, not entry counts, and counting lines per
 // row would stat-read up to a dozen large files per keypress).
-type PickerItem struct {
+type SessionPickerItem struct {
 	ID     string // short id (8 hex)
 	Title  string
 	Mtime  string // formatted, e.g. "Jan 02 15:04"
@@ -43,8 +285,8 @@ type PickerItem struct {
 
 type sessionPicker struct {
 	open    bool
-	src     []PickerItem // cmd-provided rows, all projects, pin-sorted
-	view    []PickerItem // rows for the current scope + query
+	src     []SessionPickerItem // cmd-provided rows, all projects, pin-sorted
+	view    []SessionPickerItem // rows for the current scope + query
 	sel     int
 	query   string
 	allProj bool
@@ -60,9 +302,9 @@ func (p *sessionPicker) move(delta int) {
 	p.sel = (p.sel + delta + len(p.view)) % len(p.view)
 }
 
-func (p *sessionPicker) selected() (PickerItem, bool) {
+func (p *sessionPicker) selected() (SessionPickerItem, bool) {
 	if !p.active() || p.sel >= len(p.view) {
-		return PickerItem{}, false
+		return SessionPickerItem{}, false
 	}
 	return p.view[p.sel], true
 }
@@ -71,7 +313,7 @@ func (p *sessionPicker) selected() (PickerItem, bool) {
 // the text-listing fallback honest: nothing to pick means nothing opens).
 // Rows default to the current-folder scope; with zero InCwd rows the
 // picker renders the Tab hint instead of auto-switching scope.
-func (a *App) OpenSessionPicker(items []PickerItem) {
+func (a *App) OpenSessionPicker(items []SessionPickerItem) {
 	if len(items) == 0 {
 		return
 	}
@@ -92,7 +334,7 @@ func (a *App) SessionPickerOpen() bool {
 }
 
 // SessionPickerSelection returns the currently highlighted item.
-func (a *App) SessionPickerSelection() (PickerItem, bool) {
+func (a *App) SessionPickerSelection() (SessionPickerItem, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.spick.selected()
@@ -112,8 +354,8 @@ func (a *App) CloseSessionPicker() {
 // pickerLocalView computes the visible rows for the local (no search
 // hook) path: scope filter, then token filter, pins floated first, and
 // the idle cap when not searching.
-func pickerLocalView(src []PickerItem, allProj bool, query string) []PickerItem {
-	view := scopePickerItems(src, allProj)
+func pickerLocalView(src []SessionPickerItem, allProj bool, query string) []SessionPickerItem {
+	view := scopeSessionPickerItems(src, allProj)
 	if query != "" {
 		view = tokenFilterItems(view, query)
 	}
@@ -128,13 +370,13 @@ func pickerLocalView(src []PickerItem, allProj bool, query string) []PickerItem 
 	return view
 }
 
-// scopePickerItems keeps all rows in all-projects scope, else only the
+// scopeSessionPickerItems keeps all rows in all-projects scope, else only the
 // launcher's folder.
-func scopePickerItems(items []PickerItem, allProj bool) []PickerItem {
+func scopeSessionPickerItems(items []SessionPickerItem, allProj bool) []SessionPickerItem {
 	if allProj {
 		return items
 	}
-	out := make([]PickerItem, 0, len(items))
+	out := make([]SessionPickerItem, 0, len(items))
 	for _, it := range items {
 		if it.InCwd {
 			out = append(out, it)
@@ -145,12 +387,12 @@ func scopePickerItems(items []PickerItem, allProj bool) []PickerItem {
 
 // tokenFilterItems keeps rows where EVERY whitespace-separated token
 // appears (case-insensitive) in the id or the title.
-func tokenFilterItems(items []PickerItem, query string) []PickerItem {
+func tokenFilterItems(items []SessionPickerItem, query string) []SessionPickerItem {
 	tokens := strings.Fields(strings.ToLower(query))
 	if len(tokens) == 0 {
 		return items
 	}
-	out := make([]PickerItem, 0, len(items))
+	out := make([]SessionPickerItem, 0, len(items))
 	for _, it := range items {
 		hay := strings.ToLower(it.ID + " " + it.Title)
 		ok := true
@@ -169,8 +411,8 @@ func tokenFilterItems(items []PickerItem, query string) []PickerItem {
 
 // pinSortItems stably floats pinned rows first (mtime order within each
 // group, or search ranking when cmd supplied one).
-func pinSortItems(items []PickerItem) []PickerItem {
-	out := make([]PickerItem, 0, len(items))
+func pinSortItems(items []SessionPickerItem) []SessionPickerItem {
+	out := make([]SessionPickerItem, 0, len(items))
 	for _, it := range items {
 		if it.Pinned {
 			out = append(out, it)
@@ -197,13 +439,13 @@ func (a *App) pickerRefresh() {
 	q, allProj, src := p.query, p.allProj, p.src
 	a.mu.Unlock()
 
-	var view []PickerItem
+	var view []SessionPickerItem
 	switch {
 	case q == "":
 		view = pickerLocalView(src, allProj, "")
 	case a.onPickerSearch != nil:
 		// cmd ranks prompt-text matches; re-apply scope + pin-first.
-		view = pinSortItems(scopePickerItems(a.onPickerSearch(q), allProj))
+		view = pinSortItems(scopeSessionPickerItems(a.onPickerSearch(q), allProj))
 	default:
 		view = pickerLocalView(src, allProj, q)
 	}
@@ -221,7 +463,7 @@ func (a *App) pickerRefresh() {
 
 // handlePickerKey routes keys while the session picker is open. Returns
 // handled=true when the key belonged to the picker.
-func (a *App) handlePickerKey(key *tcell.EventKey) (handled bool) {
+func (a *App) handleSessionPickerKey(key *tcell.EventKey) (handled bool) {
 	if !a.SessionPickerOpen() {
 		return false
 	}
@@ -332,7 +574,7 @@ func (a *App) pickerConfirmDelete(id string, fn func(id string) error) {
 	}
 	a.mu.Lock()
 	if p := a.spick; p != nil {
-		kept := make([]PickerItem, 0, len(p.src))
+		kept := make([]SessionPickerItem, 0, len(p.src))
 		for _, it := range p.src {
 			if it.ID != id {
 				kept = append(kept, it)
@@ -376,8 +618,8 @@ func (a *App) pickerTogglePin() {
 	a.pickerRefresh() // rebuild from canonical src: pins float, order stays stable
 }
 
-// pickerRowText renders one row: id — title — mtime — size.
-func pickerRowText(it PickerItem) string {
+// sessionPickerRowText renders one row: id — title — mtime — size.
+func sessionPickerRowText(it SessionPickerItem) string {
 	title := it.Title
 	if title == "" {
 		title = "(untitled)"
@@ -444,7 +686,7 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 		if it.Pinned {
 			pin = "★"
 		}
-		return mark + pin + " " + pickerRowText(it)
+		return mark + pin + " " + sessionPickerRowText(it)
 	}
 	inner := width(label)
 	for i := range rows {
