@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/marketplace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,6 +48,7 @@ func Discover(cwd string, trustedExtensions []string) ([]Hook, []string) {
 	}
 	roots := []root{{filepath.Join(cwd, ".xdev", "hooks"), "project"}}
 	var warns []string
+	pluginDirs := marketplace.HookDirs()
 	if dir := config.DataDir(); dir != "" {
 		roots = append(roots, root{filepath.Join(dir, "hooks"), "user"})
 		extRoot := filepath.Join(dir, "extensions")
@@ -67,6 +69,12 @@ func Discover(cwd string, trustedExtensions []string) ([]Hook, []string) {
 				roots = append(roots, root{dir, "extension:" + e.Name()})
 			}
 		}
+	}
+
+	// Plugin hooks come last: roots are first-wins above, and an installed
+	// plugin must never shadow a project, user or explicitly trusted hook.
+	for _, dir := range pluginDirs {
+		roots = append(roots, root{dir, "plugin"})
 	}
 
 	seen := map[string]bool{}
