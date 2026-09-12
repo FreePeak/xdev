@@ -162,6 +162,14 @@ type Agent struct {
 	curTarget int
 	// Compaction configures context maintenance; ContextWindow 0 disables.
 	Compaction CompactionConfig
+
+	// compactIdle is the previous step boundary's wall clock: the idle
+	// compaction trigger measures the gap between two of them (M5 #24,
+	// compact.go). Single-goroutine Run, like everything else here.
+	compactIdle time.Time
+	// compactAsync holds the one background summarize the async trigger
+	// may have in flight (nil = none; see compact_async.go).
+	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
 	MaxTurns int
 	// Intercept routes tool calls/results through the extension bus

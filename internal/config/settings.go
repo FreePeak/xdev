@@ -33,6 +33,16 @@ import (
 // this value; an empty setting means this order.
 const DefaultCompactionMethodOrder = "threshold,overflow,promotion"
 
+// CompactionMethodNames is the full compaction.methodOrder vocabulary: the
+// shipped ladder plus the M5 #24 method-ladder tails. threshold/overflow/
+// promotion are triggers, not products; remote, snapcompact, handoff, shake
+// and soft are the methods a boundary compaction can run, tried in the
+// order the user lists them (agent owns the implementations).
+var CompactionMethodNames = []string{
+	"threshold", "overflow", "promotion",
+	"remote", "snapcompact", "handoff", "shake", "soft",
+}
+
 // MethodOrderSetting is the compaction.methodOrder value: a comma-separated
 // strategy priority list. A scalar ("a,b") and a sequence (["a","b"]) both
 // decode, because `xdev config set` stores comma-separated values as a list
@@ -59,11 +69,19 @@ func (m *MethodOrderSetting) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// CompactionSettings holds context-maintenance knobs (PRD M5 #6).
+// CompactionSettings holds context-maintenance knobs (PRD M5 #6, #24).
 type CompactionSettings struct {
-	// MethodOrder is the strategy priority order
-	// (threshold|overflow|promotion); empty means the shipped default.
+	// MethodOrder is the strategy priority order; empty means the shipped
+	// default (CompactionMethodNames is the vocabulary).
 	MethodOrder MethodOrderSetting `yaml:"methodOrder"`
+	// IdleAfter compacts a session that sat idle between two runs for at
+	// least this long (a Go duration string, e.g. "10m"); empty disables
+	// the trigger.
+	IdleAfter string `yaml:"idleAfter"`
+	// Async runs the provider summarize in the background and applies it
+	// at the next step boundary instead of blocking the turn; nil (unset)
+	// keeps the synchronous ladder.
+	Async *bool `yaml:"async"`
 }
 
 type Settings struct {
@@ -402,6 +420,35 @@ func (s *Settings) CompactionMethodOrder() string {
 	return string(s.Compaction.MethodOrder)
 }
 
+// CompactionIdleAfter reports the idle-compaction gap; 0 disables the
+// trigger (nil-safe; a malformed value never reaches storage — merge rejects
+// it — so this only guards hand-built Settings).
+func (s *Settings) CompactionIdleAfter() time.Duration {
+	if s == nil {
+		return 0
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(s.Compaction.IdleAfter))
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// CompactionAsyncOn reports the compaction.async setting (nil-safe: the
+// shipped default is synchronous).
+func (s *Settings) CompactionAsyncOn() bool {
+	return s != nil && s.Compaction.Async != nil && *s.Compaction.Async
+}
+
+// idleAfterOrDefault renders the idle-compaction gap for the settings list
+// ("off" when the trigger is disabled).
+func idleAfterOrDefault(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "off"
+	}
+	return raw
+}
+
 // WebSearchConfig returns the webSearch block (nil-safe: the zero value is
 // a usable keyless chain, same rule as ShowThinkingOn's nil tolerance for
 // pre-main callers).
@@ -548,6 +595,22 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.Compaction.MethodOrder != "" {
 		s.Compaction.MethodOrder = layer.Compaction.MethodOrder
+	}
+	// compaction.idleAfter is validated here so a typo ("10 min") is
+	// reported instead of silently disabling the idle trigger; a
+	// non-positive duration is rejected the same way.
+	if v := strings.TrimSpace(layer.Compaction.IdleAfter); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("compaction.idleAfter %q: %w", v, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("compaction.idleAfter %q: want a positive duration (e.g. 10m)", v)
+		}
+		s.Compaction.IdleAfter = v
+	}
+	if layer.Compaction.Async != nil {
+		s.Compaction.Async = layer.Compaction.Async
 	}
 	for k, v := range layer.ModelRoles {
 		s.ModelRoles[k] = v
@@ -890,6 +953,8 @@ func List(s *Settings, globalPath string) []string {
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
 		"personality " + s.Personality,
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
+		"compaction.idleAfter " + idleAfterOrDefault(s.Compaction.IdleAfter),
+		"compaction.async " + fmt.Sprint(s.CompactionAsyncOn()),
 	}
 	if segs := s.StatusLineSegments(); segs != nil {
 		out = append(out, "statusLine.segments "+strings.Join(segs, ","))
