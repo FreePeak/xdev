@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/FreePeak/xdev/internal/websearch"
 )
 
 // Settings layering (M9 #10, research parity-session-ux §10): schema
@@ -126,6 +128,9 @@ type Settings struct {
 	// the built-in servers (gopls, rust-analyzer, typescript-language-server,
 	// pyright-langserver), all launched lazily on first use.
 	LSP *LSPConfig `yaml:"lsp"`
+	// WebSearch configures the web_search provider chain (M13 #48):
+	// ordered providers, per-provider timeout, API keys.
+	WebSearch WebSearchSettings `yaml:"webSearch"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -196,6 +201,13 @@ type LSPServer struct {
 	Disabled    bool           `yaml:"disabled"`
 }
 
+// WebSearchSettings is the webSearch config block: ordered providers,
+// per-provider timeout, API keys (M13 #48). It is the engine's own Settings
+// type, aliased rather than redeclared — internal/config imports
+// internal/tool through internal/agent, so the struct the registry hands to
+// the tool cannot live in either of those packages without an import cycle.
+type WebSearchSettings = websearch.Settings
+
 // defaultSettings is the schema-defaults layer.
 // memoryOrDefault reports the effective memory backend ("" = off).
 func memoryOrDefault(v string) string {
@@ -239,6 +251,16 @@ func (s *Settings) CompactionMethodOrder() string {
 		return ""
 	}
 	return string(s.Compaction.MethodOrder)
+}
+
+// WebSearchConfig returns the webSearch block (nil-safe: the zero value is
+// a usable keyless chain, same rule as ShowThinkingOn's nil tolerance for
+// pre-main callers).
+func (s *Settings) WebSearchConfig() websearch.Settings {
+	if s == nil {
+		return websearch.Settings{}
+	}
+	return s.WebSearch
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -428,6 +450,31 @@ func (s *Settings) merge(layer *Settings) error {
 		for k, v := range layer.LSP.Servers {
 			s.LSP.Servers[k] = v
 		}
+	}
+	// webSearch: the provider list is replaced wholesale (an overlay that
+	// names one provider means exactly that chain), keys merge per
+	// provider, and the timeout duration is validated here so a typo is
+	// reported instead of silently falling back to the default.
+	if layer.WebSearch.Providers != nil {
+		s.WebSearch.Providers = append([]string(nil), layer.WebSearch.Providers...)
+	}
+	if layer.WebSearch.Timeout != "" {
+		if _, err := time.ParseDuration(layer.WebSearch.Timeout); err != nil {
+			return fmt.Errorf("webSearch.timeout %q: %w", layer.WebSearch.Timeout, err)
+		}
+		s.WebSearch.Timeout = layer.WebSearch.Timeout
+	}
+	if layer.WebSearch.MaxResults != 0 {
+		if layer.WebSearch.MaxResults < 0 {
+			return fmt.Errorf("webSearch.maxResults must be positive, got %d", layer.WebSearch.MaxResults)
+		}
+		s.WebSearch.MaxResults = layer.WebSearch.MaxResults
+	}
+	for k, v := range layer.WebSearch.APIKeys {
+		if s.WebSearch.APIKeys == nil {
+			s.WebSearch.APIKeys = map[string]string{}
+		}
+		s.WebSearch.APIKeys[k] = v
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
