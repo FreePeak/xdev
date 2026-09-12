@@ -68,6 +68,7 @@ func main() {
 	fs.Var(&trustedExtension, "trusted-extension", "extension whose hooks/ directory is trusted and loaded (repeatable)")
 	planYolo := fs.Bool("plan-yolo", false, "plan mode with the first proposal auto-approved (implies -plan)")
 	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref or @role to switch to after the first approved proposal (default: stay)")
+	modeFlag := fs.String("mode", "", "run mode: print | tui | rpc | acp (alternative to the subcommand)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -77,6 +78,7 @@ func main() {
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev lsp-config [list|validate]  language servers, resolved binaries
+  xdev acp                     ACP server on stdio (Agent Client Protocol, for editors)
 
 Flags:
 `, version)
@@ -127,8 +129,11 @@ Flags:
 
 	args := fs.Args()
 	mode := "print"
-	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
+	if len(args) > 0 && (args[0] == "print" || args[0] == "tui" || args[0] == "rpc" || args[0] == "acp" || args[0] == "config" || args[0] == "lsp-config" || args[0] == "login" || args[0] == "logout" || args[0] == "version") {
 		mode, args = args[0], args[1:]
+	}
+	if *modeFlag != "" {
+		mode = *modeFlag
 	}
 	if mode == "tui" {
 		code, err := runTUI(printOptions{
@@ -171,6 +176,26 @@ Flags:
 			TrustedExtensions: trustedExtension,
 		}
 		code, err := runRPC(opts)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(code)
+		}
+		os.Exit(code)
+	}
+
+	if mode == "acp" {
+		opts := printOptions{
+			Model:        *model,
+			SystemPrompt: *systemPrompt,
+			AppendSystem: *appendSystemPrompt,
+			Personality:  *personality,
+			MaxTurns:     *maxTurns,
+			MaxTokens:    *maxTokens,
+
+			Hooks:             hookFlag,
+			TrustedExtensions: trustedExtension,
+		}
+		code, err := runACP(opts)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "xdev:", err)
 			os.Exit(code)
