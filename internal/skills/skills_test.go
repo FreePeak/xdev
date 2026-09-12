@@ -130,3 +130,78 @@ func TestFindIsExactCaseSensitive(t *testing.T) {
 		t.Fatal("case mismatch must not match")
 	}
 }
+
+// TestCustomDirectoriesDiscoveryAndPrecedence: settings-listed extra roots
+// are scanned after native/user/managed, resolve relative entries against
+// the cwd, and skip entries that are not directories.
+func TestCustomDirectoriesDiscoveryAndPrecedence(t *testing.T) {
+	home := t.TempDir()
+	SetDataDir(home)
+	t.Cleanup(func() { SetDataDir(defaultDataDir()) })
+	t.Cleanup(func() { SetCustomDirectories(nil) })
+
+	proj := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared-packs")
+	writeSkill(t, shared, "lint", "---\ndescription: shared lint\n---\nshared body")
+	writeSkill(t, shared, "agentpack", "---\ndescription: shared agentpack\n---\ns")
+	writeSkill(t, ManagedRoot(), "agentpack", "---\ndescription: learned agentpack\n---\nm")
+	writeSkill(t, filepath.Join(proj, "vendor-skills"), "rel", "---\ndescription: relative pack\n---\nr")
+	writeSkill(t, projectRoot(proj), "lint", "---\ndescription: project lint\n---\np")
+
+	SetCustomDirectories([]string{shared, "vendor-skills", "   ", filepath.Join(shared, "SKILL.md")})
+	list := Discover(proj)
+
+	lint, ok := Find(list, "lint")
+	if !ok || lint.Source != "native" || lint.Description != "project lint" {
+		t.Fatalf("native must outrank a custom root: %+v", lint)
+	}
+	rel, ok := Find(list, "rel")
+	if !ok || rel.Source != "custom" {
+		t.Fatalf("relative custom root not discovered: %+v", list)
+	}
+	if pack, ok := Find(list, "agentpack"); !ok || pack.Source != "managed" {
+		t.Fatalf("managed must outrank a custom root: %+v", pack)
+	}
+	if len(list) != 3 {
+		t.Fatalf("invalid custom entries must contribute nothing: %+v", list)
+	}
+}
+
+// TestConflictsReportTheShadowingPair pins the direction the learn tool
+// reports: an authored pack beats managed, a custom directory loses to it.
+func TestConflictsReportTheShadowingPair(t *testing.T) {
+	home := t.TempDir()
+	SetDataDir(home)
+	t.Cleanup(func() { SetDataDir(defaultDataDir()) })
+	t.Cleanup(func() { SetCustomDirectories(nil) })
+
+	proj := t.TempDir()
+	native := filepath.Join(projectRoot(proj), "native-pack", "SKILL.md")
+	writeSkill(t, projectRoot(proj), "native-pack", "---\ndescription: d\n---\nb")
+	shared := t.TempDir()
+	custom := filepath.Join(shared, "custom-only", "SKILL.md")
+	writeSkill(t, shared, "custom-only", "---\ndescription: d\n---\nb")
+	SetCustomDirectories([]string{shared})
+
+	cs := Conflicts(proj, "native-pack")
+	if len(cs) != 1 || !cs[0].BeatsManaged || cs[0].Skill.Path != native {
+		t.Fatalf("authored conflict = %+v", cs)
+	}
+	cs = Conflicts(proj, "custom-only")
+	if len(cs) != 1 || cs[0].BeatsManaged || cs[0].Skill.Path != custom {
+		t.Fatalf("custom conflict = %+v", cs)
+	}
+	if cs := Conflicts(proj, "absent"); len(cs) != 0 {
+		t.Fatalf("no collision expected: %+v", cs)
+	}
+}
+
+// TestDefaultDataDirHonorsAgentDirEnv: a sandboxed run (XDEV_AGENT_DIR) must
+// not read the real ~/.xdev/agent, the same override config.DataDir applies.
+func TestDefaultDataDirHonorsAgentDirEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dir)
+	if got := defaultDataDir(); got != dir {
+		t.Fatalf("defaultDataDir = %q, want %q", got, dir)
+	}
+}

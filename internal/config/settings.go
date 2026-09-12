@@ -144,6 +144,18 @@ type Settings struct {
 	Ask struct {
 		Timeout int `yaml:"timeout"`
 	} `yaml:"ask"`
+	// Skills configures SKILL.md discovery (M12 F2): customDirectories
+	// are extra roots scanned after native/user/managed, so an authored
+	// pack — and an agent-learned one — outranks them.
+	Skills SkillsSettings `yaml:"skills"`
+}
+
+// SkillsSettings is the `skills` group.
+type SkillsSettings struct {
+	// CustomDirectories are extra `<dir>/<name>/SKILL.md` roots. A
+	// relative entry resolves against the project cwd; a missing or
+	// unreadable directory is skipped, never fatal.
+	CustomDirectories []string `yaml:"customDirectories"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -409,6 +421,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.AdvisorImmuneTurns != 0 {
 		s.AdvisorImmuneTurns = layer.AdvisorImmuneTurns
+	}
+	if layer.Skills.CustomDirectories != nil {
+		s.Skills.CustomDirectories = append([]string(nil), layer.Skills.CustomDirectories...)
 	}
 	if layer.TaskAgentAdvisor != "" {
 		s.TaskAgentAdvisor = layer.TaskAgentAdvisor

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -17,6 +18,10 @@ type LearnTool struct {
 	Backend *Backend
 	// SkillsDir is the managed-skills root for `skill` payloads.
 	SkillsDir string
+	// Cwd is the project directory project-relative native skills are
+	// resolved against when reporting shadowing. Empty means the process
+	// working directory — the same anchor skill:// already uses.
+	Cwd string
 }
 
 const LearnToolName = "learn"
@@ -38,7 +43,7 @@ func (t *LearnTool) Parameters() json.RawMessage {
       "description": "optional managed skill to create or update alongside the lesson",
       "properties": {
         "action": {"type": "string", "enum": ["create", "update"]},
-        "name": {"type": "string", "description": "kebab-case: [a-z0-9][a-z0-9-]{0,63}"},
+        "name": {"type": "string", "description": "kebab-case: [a-z0-9][a-z0-9-]{0,63}; a create over an existing authored name still writes but is reported shadowed"},
         "description": {"type": "string", "description": "one line, when to use the skill"},
         "body": {"type": "string", "description": "the SKILL.md body (markdown, no frontmatter)"}
       },
@@ -71,6 +76,7 @@ func (t *LearnTool) Execute(_ context.Context, args json.RawMessage) (tool.Resul
 		return tool.Result{Text: "learn: " + err.Error(), IsError: true}, nil
 	}
 	out := "lesson recorded"
+	var details any
 	if a.Skill != nil {
 		path, err := writeManagedSkill(t.SkillsDir, *a.Skill)
 		if err != nil {
@@ -79,8 +85,44 @@ func (t *LearnTool) Execute(_ context.Context, args json.RawMessage) (tool.Resul
 			return tool.Result{Text: out + "; skill not written: " + err.Error(), IsError: false}, nil
 		}
 		out += "; skill written to " + path
+		if notice, d := t.shadow(a.Skill.Name, path); d != nil {
+			out += "; " + notice
+			details = d
+		}
 	}
-	return tool.Result{Text: out}, nil
+	return tool.Result{Text: out, Details: details}, nil
+}
+
+// shadow reports the first-wins collision a just-written managed skill has
+// with an authored pack. The write is never refused: the authored name is
+// kept, the collision is named, and discovery decides which pack a session
+// loads. It returns ("", nil) when nothing else carries the name.
+func (t *LearnTool) shadow(name, written string) (string, any) {
+	conflicts := skills.Conflicts(t.cwd(), name)
+	if len(conflicts) == 0 {
+		return "", nil
+	}
+	// Conflicts are in precedence order; the first one is the decisive
+	// pair with the managed root.
+	c := conflicts[0]
+	if c.BeatsManaged {
+		return fmt.Sprintf("shadowed: true — %s is discovered instead of the new managed skill (both files kept)", c.Skill.Path),
+			map[string]any{"shadowed": true, "skill": written, "by": c.Skill.Path}
+	}
+	return fmt.Sprintf("shadowed: true — the new managed skill is discovered instead of %s", c.Skill.Path),
+		map[string]any{"shadowed": true, "skill": c.Skill.Path, "by": written}
+}
+
+// cwd anchors project-relative native skills; empty means the process
+// working directory.
+func (t *LearnTool) cwd() string {
+	if t.Cwd != "" {
+		return t.Cwd
+	}
+	if d, err := os.Getwd(); err == nil {
+		return d
+	}
+	return "."
 }
 
 // writeManagedSkill creates or updates <root>/<name>/SKILL.md. create
