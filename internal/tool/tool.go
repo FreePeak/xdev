@@ -37,11 +37,14 @@ type Tool interface {
 }
 
 // Registry holds tools by name plus the file-freshness records the read/
-// write/edit tools share (see snapshot.go).
+// write/edit tools share (see snapshot.go). catalog holds the deferred-tool
+// view (M13 #54): catalogued tools stay in the map — Get and the policy path
+// see them — but leave Defs.
 type Registry struct {
-	mu    sync.RWMutex
-	tools map[string]Tool
-	snaps map[string]*fileSnapshot
+	mu      sync.RWMutex
+	tools   map[string]Tool
+	snaps   map[string]*fileSnapshot
+	catalog *Catalog
 }
 
 // NewRegistry returns an empty registry.
@@ -115,13 +118,18 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return t, ok
 }
 
-// Defs returns ai.ToolDef descriptors for every registered tool, ordered by
-// name for deterministic prompts.
+// Defs returns ai.ToolDef descriptors for every eager tool, ordered by name
+// for deterministic prompts. Catalogued (deferred) tools are omitted: they
+// reach the model through tool_search/tool_describe instead, and the prompt
+// indexes them with one line each (Registry.Deferred).
 func (r *Registry) Defs() []NamedDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.tools))
 	for n := range r.tools {
+		if r.deferred(n) {
+			continue
+		}
 		names = append(names, n)
 	}
 	sort.Strings(names)
