@@ -62,11 +62,20 @@ type CompactionSettings struct {
 }
 
 type Settings struct {
-	Theme        string `yaml:"theme"`
-	DefaultModel string `yaml:"defaultModel"`
-	ApprovalMode string `yaml:"approvalMode"` // always-ask|write|yolo
-	MemoryLimit  int64  `yaml:"memoryLimit"`
-	MaxTurns     int    `yaml:"maxTurns"`
+	Theme string `yaml:"theme"`
+	// ColorBlindMode moves the palette's red/green-only distinctions
+	// (error/success, diff add/remove) onto a blue/orange pair that
+	// survives protanopia and deuteranopia (M12 F4). Applied to the
+	// resolved theme at load.
+	ColorBlindMode bool `yaml:"colorBlindMode"`
+	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
+	// segment model): statusLine.segments lists the segments to render,
+	// in order. Unset keeps the shipped layout.
+	StatusLine   *StatusLineSettings `yaml:"statusLine"`
+	DefaultModel string              `yaml:"defaultModel"`
+	ApprovalMode string              `yaml:"approvalMode"` // always-ask|write|yolo
+	MemoryLimit  int64               `yaml:"memoryLimit"`
+	MaxTurns     int                 `yaml:"maxTurns"`
 	// Compaction tunes context maintenance (compaction.methodOrder).
 	Compaction CompactionSettings `yaml:"compaction"`
 	ModelRoles map[string]string  `yaml:"modelRoles"`
@@ -122,6 +131,57 @@ type Settings struct {
 	// TTSR is the stream-rules group (M11 #35): rule conditions are
 	// matched against the assistant deltas; see internal/agent/ttsr.go.
 	TTSR *TTSRSettings `yaml:"ttsr"`
+}
+
+// StatusLineSettings is the `statusLine` group (M12 F5). Segments is the
+// HUD segment order; the TUI knows the vocabulary (model, tokens, context,
+// cost, theme) and skips unknown names with a warning.
+type StatusLineSettings struct {
+	Segments StringList `yaml:"segments"`
+}
+
+// StringList is a list that also decodes the comma-separated scalar
+// `xdev config set` writes: a plain []string would reject the CLI's own
+// output and get the user's config quarantined as broken (the same trap
+// MethodOrderSetting documents).
+type StringList []string
+
+// UnmarshalYAML accepts a sequence (["a","b"]) or a scalar ("a,b").
+func (l *StringList) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		v := strings.TrimSpace(node.Value)
+		if v == "" {
+			*l = nil
+			return nil
+		}
+		parts := strings.Split(v, ",")
+		out := make(StringList, 0, len(parts))
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				out = append(out, s)
+			}
+		}
+		*l = out
+		return nil
+	case yaml.SequenceNode:
+		var out []string
+		if err := node.Decode(&out); err != nil {
+			return err
+		}
+		*l = out
+		return nil
+	}
+	return fmt.Errorf("statusLine.segments must be a list or a comma-separated value")
+}
+
+// StatusLineSegments returns the configured HUD segments in display order
+// (nil = the shipped layout, which the TUI owns).
+func (s *Settings) StatusLineSegments() []string {
+	if s == nil || s.StatusLine == nil {
+		return nil
+	}
+	return s.StatusLine.Segments
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -264,6 +324,20 @@ func readSettingsFile(path string) (*Settings, error) {
 func (s *Settings) merge(layer *Settings) error {
 	if layer.Theme != "" {
 		s.Theme = layer.Theme
+	}
+	if layer.ColorBlindMode {
+		// bool with a false default: only a layer that turns it ON
+		// contributes (same rule as advisor).
+		s.ColorBlindMode = true
+	}
+	if layer.StatusLine != nil {
+		if s.StatusLine == nil {
+			s.StatusLine = &StatusLineSettings{}
+		}
+		if layer.StatusLine.Segments != nil {
+			// A layer that lists segments means exactly that list.
+			s.StatusLine.Segments = append([]string(nil), layer.StatusLine.Segments...)
+		}
 	}
 	if layer.DefaultModel != "" {
 		s.DefaultModel = layer.DefaultModel
@@ -499,6 +573,7 @@ func yamlScalar(v string) any {
 func List(s *Settings, globalPath string) []string {
 	out := []string{
 		"theme " + s.Theme,
+		"colorBlindMode " + fmt.Sprint(s.ColorBlindMode),
 		"approvalMode " + s.ApprovalMode,
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
@@ -507,6 +582,9 @@ func List(s *Settings, globalPath string) []string {
 		"memory " + memoryOrDefault(s.Memory),
 		"personality " + s.Personality,
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
+	}
+	if segs := s.StatusLineSegments(); segs != nil {
+		out = append(out, "statusLine.segments "+strings.Join(segs, ","))
 	}
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)

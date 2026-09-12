@@ -56,9 +56,100 @@ func (c Color) RGBA() (uint32, uint32, uint32, uint32) {
 	return uint32(c.R) | uint32(c.R)<<8, uint32(c.G) | uint32(c.G)<<8, uint32(c.B) | uint32(c.B)<<8, 0xffff
 }
 
-// Slot names (PRD §3.5 — the single M4/M12 vocabulary). Not every Grok slot
-// exists yet; M4 defines what the MVP TUI draws. M12 generalizes.
+// Slot names. The second block is xdev's own vocabulary (PRD §3.5), the
+// first block is the omp token contract xdev adopted in M12 (research F4):
+// every token omp requires is required here too, so an imported theme is
+// complete by construction. A theme file may spell any slot either way —
+// canonical (`statusLineSep`), canonical snake (`status_line_sep`), or the
+// legacy xdev name (`gray_dim`) — and the loader mirrors both vocabularies
+// into Theme.Slots (custom.go is the single source for the mapping).
 const (
+	// Core text/borders (omp group of 11).
+	Accent       = "accent"
+	Border       = "border"
+	BorderAccent = "border_accent"
+	BorderMuted  = "border_muted"
+	Success      = "success"
+	Error        = "error"
+	Warning      = "warning"
+	Muted        = "muted"
+	Dim          = "dim"
+	Text         = "text"
+	ThinkingText = "thinking_text"
+
+	// Backgrounds (7).
+	SelectedBg      = "selected_bg"
+	UserMessageBg   = "user_message_bg"
+	CustomMessageBg = "custom_message_bg"
+	ToolPendingBg   = "tool_pending_bg"
+	ToolSuccessBg   = "tool_success_bg"
+	ToolErrorBg     = "tool_error_bg"
+	StatusLineBg    = "status_line_bg"
+
+	// Message / tool text (5).
+	UserMessageText    = "user_message_text"
+	CustomMessageText  = "custom_message_text"
+	CustomMessageLabel = "custom_message_label"
+	ToolTitle          = "tool_title"
+	ToolOutput         = "tool_output"
+
+	// Markdown (10).
+	MdHeading         = "md_heading"
+	MdLink            = "md_link"
+	MdLinkUrl         = "md_link_url"
+	MdCodeBlock       = "md_code_block"
+	MdCodeBlockBorder = "md_code_block_border"
+	MdQuote           = "md_quote"
+	MdQuoteBorder     = "md_quote_border"
+	MdHr              = "md_hr"
+	MdListBullet      = "md_list_bullet"
+
+	// Diff + syntax (12).
+	ToolDiffAdded     = "tool_diff_added"
+	ToolDiffRemoved   = "tool_diff_removed"
+	ToolDiffContext   = "tool_diff_context"
+	SyntaxComment     = "syntax_comment"
+	SyntaxKeyword     = "syntax_keyword"
+	SyntaxFunction    = "syntax_function"
+	SyntaxVariable    = "syntax_variable"
+	SyntaxString      = "syntax_string"
+	SyntaxNumber      = "syntax_number"
+	SyntaxType        = "syntax_type"
+	SyntaxOperator    = "syntax_operator"
+	SyntaxPunctuation = "syntax_punctuation"
+
+	// Thinking-mode rails (8 + 1 optional: ThinkingMax falls back to
+	// ThinkingXhigh when a theme omits it).
+	ThinkingOff     = "thinking_off"
+	ThinkingMinimal = "thinking_minimal"
+	ThinkingLow     = "thinking_low"
+	ThinkingMedium  = "thinking_medium"
+	ThinkingHigh    = "thinking_high"
+	ThinkingXhigh   = "thinking_xhigh"
+	ThinkingMax     = "thinking_max"
+	BashMode        = "bash_mode"
+	PythonMode      = "python_mode"
+
+	// Status line / HUD (13). The renderer consumes Sep, Model, Spend,
+	// Context and Cost today; the git/staged/untracked/subagents/output
+	// hues are required for contract completeness and reserved for the HUD
+	// segments that will carry them.
+	StatusLineSep       = "status_line_sep"
+	StatusLineModel     = "status_line_model"
+	StatusLinePath      = "status_line_path"
+	StatusLineGitClean  = "status_line_git_clean"
+	StatusLineGitDirty  = "status_line_git_dirty"
+	StatusLineContext   = "status_line_context"
+	StatusLineSpend     = "status_line_spend"
+	StatusLineStaged    = "status_line_staged"
+	StatusLineDirty     = "status_line_dirty"
+	StatusLineUntracked = "status_line_untracked"
+	StatusLineOutput    = "status_line_output"
+	StatusLineCost      = "status_line_cost"
+	StatusLineSubagents = "status_line_subagents"
+
+	// Legacy xdev slot names (PRD §3.5): still what the TUI passes to Get,
+	// mirrored from the canonical tokens at parse time.
 	BgBase             = "bg_base"
 	BgHighlight        = "bg_highlight"
 	BgTerminal         = "bg_terminal"
@@ -85,13 +176,19 @@ const (
 	LinkFg             = "link_fg"
 )
 
-// Theme is a named set of slot colors.
+// Theme is a named set of slot colors. Slots carries both vocabularies
+// (canonical omp tokens and the legacy xdev names the TUI reads), so Get
+// answers for either spelling.
 type Theme struct {
 	Name  string
 	Dark  bool
 	Slots map[string]Color
-	// Symbols carries the glyph preset and spinner frames from a custom
-	// JSON theme ("" = unicode default).
+	// Defaults marks slots the theme set to "" — the terminal default
+	// (`\x1b[39m`/`\x1b[49m`). Chrome that would otherwise paint a
+	// background checks this to stay transparent instead of painting black.
+	Defaults map[string]bool
+	// Symbols carries the glyph preset, box style and spinner frames from a
+	// custom JSON theme ("" = unicode round).
 	Symbols Symbols
 }
 
@@ -103,7 +200,27 @@ func (t *Theme) Get(slot string) Color {
 	if c, ok := t.Slots[TextPrimary]; ok {
 		return c
 	}
+	if c, ok := t.Slots[Text]; ok {
+		return c
+	}
 	return Color{0xe5, 0xe5, 0xe5}
+}
+
+// TerminalDefault reports whether slot resolved to the terminal default
+// ("" in a theme file) rather than an explicit color.
+func (t *Theme) TerminalDefault(slot string) bool {
+	return t != nil && t.Defaults[slot]
+}
+
+// Slot returns a slot's explicit color. ok is false when the theme leaves
+// the slot to the terminal default ("" in a theme file) or omits it — the
+// distinction Get cannot make, because Get has to answer with something.
+func (t *Theme) Slot(slot string) (Color, bool) {
+	if t == nil || t.Defaults[slot] {
+		return Color{}, false
+	}
+	c, ok := t.Slots[slot]
+	return c, ok
 }
 
 // groknightSlots — exact GrokNight palette from grok-build
@@ -135,6 +252,22 @@ func groknightSlots() map[string]Color {
 		MdCodeBg:           Hex("#1c1c1c"), // rgb(28,28,28)
 		MdMuted:            Hex("#6c6c6c"), // COMMENT
 		LinkFg:             Hex("#7aa6da"),
+		// Status-line hues: they keep the pre-segment rendering (model
+		// divider in gray_dim, counters in gray). StatusLineBg stays unset
+		// so the launch themes keep today's transparent status row.
+		StatusLineSep:       Hex("#585858"),
+		StatusLineModel:     Hex("#585858"),
+		StatusLinePath:      Hex("#6c6c6c"),
+		StatusLineGitClean:  Hex("#9ece6a"),
+		StatusLineGitDirty:  Hex("#f7768e"),
+		StatusLineContext:   Hex("#6c6c6c"),
+		StatusLineSpend:     Hex("#6c6c6c"),
+		StatusLineStaged:    Hex("#9ece6a"),
+		StatusLineDirty:     Hex("#f7768e"),
+		StatusLineUntracked: Hex("#6c6c6c"),
+		StatusLineOutput:    Hex("#6c6c6c"),
+		StatusLineCost:      Hex("#6c6c6c"),
+		StatusLineSubagents: Hex("#bb9af7"),
 	}
 }
 
@@ -166,6 +299,20 @@ func grokdaySlots() map[string]Color {
 		MdCodeBg:           Hex("#e4e4e4"), // rgb(228,228,228)
 		MdMuted:            Hex("#767676"), // COMMENT
 		LinkFg:             Hex("#2F64D2"), // BLUE
+		// Status-line hues (see groknightSlots); StatusLineBg unset.
+		StatusLineSep:       Hex("#a5a5a5"),
+		StatusLineModel:     Hex("#a5a5a5"),
+		StatusLinePath:      Hex("#767676"),
+		StatusLineGitClean:  Hex("#378E23"),
+		StatusLineGitDirty:  Hex("#cd3048"),
+		StatusLineContext:   Hex("#767676"),
+		StatusLineSpend:     Hex("#767676"),
+		StatusLineStaged:    Hex("#378E23"),
+		StatusLineDirty:     Hex("#cd3048"),
+		StatusLineUntracked: Hex("#767676"),
+		StatusLineOutput:    Hex("#767676"),
+		StatusLineCost:      Hex("#767676"),
+		StatusLineSubagents: Hex("#7D4BC6"),
 	}
 }
 
@@ -177,9 +324,10 @@ func Builtins() map[string]*Theme {
 	}
 }
 
-// Load resolves the theme by name ("groknight"|"grokday"; "" → auto via env
-// polarity). Only the env-based detection ships in M4 (OSC 11 query and OS
-// appearance polling are M12).
+// Load resolves the theme by name ("groknight"|"grokday"; "" → auto). Auto
+// polarity is XDEV_THEME, then the terminal's own answer to an OSC 11
+// background query, then COLORFGBG, then dark (Grok's default). OS
+// appearance polling is not implemented.
 func Load(name string) *Theme {
 	b := Builtins()
 	if name != "" {
@@ -193,6 +341,12 @@ func Load(name string) *Theme {
 	// Auto: XDEV_THEME > terminal polarity guess > dark (Grok's default).
 	if t := strings.ToLower(os.Getenv("XDEV_THEME")); t != "" {
 		if t == "light" || t == "day" {
+			return b["grokday"]
+		}
+		return b["groknight"]
+	}
+	if light, ok := DetectBackground(backgroundQueryTimeout); ok {
+		if light {
 			return b["grokday"]
 		}
 		return b["groknight"]

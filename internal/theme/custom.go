@@ -28,13 +28,25 @@ type ThemeFile struct {
 	Dark    *bool             `json:"dark"`
 	Colors  map[string]string `json:"colors"`
 	Vars    map[string]string `json:"vars"`
+	Export  ExportSlots       `json:"export"`
 	Symbols *Symbols          `json:"symbols"`
 }
 
-// Symbols selects glyph presets (F4): preset plus per-key overrides and
-// spinner frames.
+// ExportSlots is the optional export block (omp): the page/card/info
+// surfaces a theme names for embedding. xdev reads pageBg/cardBg as the
+// canvas defaults when a theme carries no legacy bg_* slots.
+type ExportSlots struct {
+	PageBg string `json:"pageBg"`
+	CardBg string `json:"cardBg"`
+	InfoBg string `json:"infoBg"`
+}
+
+// Symbols selects glyph presets (F4): preset, box style, per-glyph
+// overrides and spinner frames (flat list, or omp's {status,activity} —
+// see UnmarshalJSON).
 type Symbols struct {
 	Preset        string            `json:"preset"` // unicode | nerd | ascii
+	Box           string            `json:"box"`    // round | sharp
 	Overrides     map[string]string `json:"overrides"`
 	SpinnerFrames []string          `json:"spinnerFrames"`
 	Status        []string          `json:"status"`
@@ -71,7 +83,8 @@ func LoadCustom(dir, name string) (*Theme, error) {
 
 // ParseTheme validates one theme document: vars resolve (missing or
 // circular references error), every required slot is present (grouped
-// error), and color values parse as hex, 256-index, var ref, or "".
+// error), and color values parse as hex, 256-index, var ref, or ""
+// (terminal default).
 func ParseTheme(raw []byte, fallbackName string) (*Theme, error) {
 	var f ThemeFile
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
@@ -92,61 +105,206 @@ func ParseTheme(raw []byte, fallbackName string) (*Theme, error) {
 	if err != nil {
 		return nil, fmt.Errorf("theme %q: %w", name, err)
 	}
-	// Required slots: the tokens this renderer actually reads. A theme
-	// may add more; missing ones are collected into ONE error so a
-	// half-defined palette is fixed in one pass.
+	symbols := Symbols{}
+	if f.Symbols != nil {
+		if symbols, err = normalizeSymbols(*f.Symbols); err != nil {
+			return nil, fmt.Errorf("theme %q: %w", name, err)
+		}
+	}
+	// Required slots: the omp token contract. A theme may spell a slot
+	// canonically or with the legacy xdev name; missing ones are collected
+	// into ONE error so a half-defined palette is fixed in one pass.
 	var missing []string
 	slots := map[string]Color{}
+	defaults := map[string]bool{}
 	for _, slot := range RequiredSlots() {
-		value, ok := lookupSlot(f.Colors, slot)
+		raw, ok := lookupSlot(f.Colors, slot)
 		if !ok {
 			missing = append(missing, slot)
 			continue
 		}
-		c, cerr := parseColor(value, resolved)
+		c, cerr := parseColor(raw, resolved)
 		if cerr != nil {
 			return nil, fmt.Errorf("theme %q: color %s: %w", name, slot, cerr)
 		}
 		slots[slot] = c
+		if strings.TrimSpace(raw) == "" {
+			defaults[slot] = true // terminal default
+		}
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		return nil, fmt.Errorf("theme %q: %d missing color(s): %s", name, len(missing), strings.Join(missing, ", "))
 	}
+	// thinking_max is optional: omp falls back to thinking_xhigh.
+	slots[ThinkingMax] = slots[ThinkingXhigh]
+	// Mirror the legacy xdev names the TUI reads: an explicit legacy key
+	// wins; otherwise derive from the canonical token (or the documented
+	// extra chain for slots omp has no equivalent of). Extras are optional
+	// — with nothing to derive from, Get falls back.
+	for _, legacy := range legacyOrder {
+		raw, ok := f.Colors[legacy]
+		if !ok {
+			raw, ok = f.Colors[toCamel(legacy)] // camelCase spelling
+		}
+		if ok {
+			c, cerr := parseColor(raw, resolved)
+			if cerr != nil {
+				return nil, fmt.Errorf("theme %q: color %s: %w", name, legacy, cerr)
+			}
+			slots[legacy] = c
+			if strings.TrimSpace(raw) == "" {
+				defaults[legacy] = true
+			}
+			continue
+		}
+		if canon, ok := legacyToCanonical[legacy]; ok {
+			slots[legacy] = slots[canon]
+			continue
+		}
+		if src, ok := extraSlot(f, slots, legacy); ok {
+			slots[legacy] = src
+		}
+	}
 	dark := true
 	if f.Dark != nil {
 		dark = *f.Dark
 	}
-	return &Theme{Name: name, Dark: dark, Slots: slots, Symbols: symbolsOrDefault(f.Symbols)}, nil
+	return &Theme{Name: name, Dark: dark, Slots: slots, Defaults: defaults, Symbols: symbols}, nil
 }
 
-// RequiredSlots is the minimum a custom theme must define: the surfaces
-// the TUI paints every frame (canvas, text, accents, prompt chrome,
-// markdown, rail). The full omp token set is larger; xdev requires what
-// it reads, and extra keys are preserved by the loader without error.
+// extraSlot resolves one optional legacy slot from its documented chain
+// (see extraChains): first an export surface, then an already-parsed slot.
+func extraSlot(f ThemeFile, slots map[string]Color, legacy string) (Color, bool) {
+	for _, src := range extraChains[legacy] {
+		switch {
+		case strings.HasPrefix(src, "export."):
+			v := map[string]string{"export.pageBg": f.Export.PageBg, "export.cardBg": f.Export.CardBg, "export.infoBg": f.Export.InfoBg}[src]
+			if v == "" {
+				continue
+			}
+			if c, err := parseColor(v, nil); err == nil {
+				return c, true
+			}
+		default:
+			if c, ok := slots[src]; ok {
+				return c, true
+			}
+		}
+	}
+	return Color{}, false
+}
+
+// requiredSlots is the omp token contract (research F4 groups): every slot
+// a theme must define, in either spelling. Slots xdev does not paint yet
+// are still required — the contract is completeness, so an imported theme
+// carries the full palette and a half-defined one fails at load instead of
+// rendering with fallback colors.
+var requiredSlots = []string{
+	// Core text/borders (11).
+	Accent, Border, BorderAccent, BorderMuted, Success, Error, Warning,
+	Muted, Dim, Text, ThinkingText,
+	// Backgrounds (7).
+	SelectedBg, UserMessageBg, CustomMessageBg, ToolPendingBg, ToolSuccessBg,
+	ToolErrorBg, StatusLineBg,
+	// Message/tool text (5).
+	UserMessageText, CustomMessageText, CustomMessageLabel, ToolTitle, ToolOutput,
+	// Markdown (10).
+	MdHeading, MdLink, MdLinkUrl, MdCode, MdCodeBlock, MdCodeBlockBorder,
+	MdQuote, MdQuoteBorder, MdHr, MdListBullet,
+	// Diff + syntax (12).
+	ToolDiffAdded, ToolDiffRemoved, ToolDiffContext,
+	SyntaxComment, SyntaxFunction, SyntaxKeyword, SyntaxNumber,
+	SyntaxOperator, SyntaxPunctuation, SyntaxString, SyntaxType, SyntaxVariable,
+	// Thinking-mode rails (8; thinking_max is optional → thinking_xhigh).
+	ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh,
+	ThinkingXhigh, BashMode, PythonMode,
+	// Status line / HUD (13).
+	StatusLineSep, StatusLineModel, StatusLinePath, StatusLineGitClean,
+	StatusLineGitDirty, StatusLineContext, StatusLineSpend, StatusLineStaged,
+	StatusLineDirty, StatusLineUntracked, StatusLineOutput, StatusLineCost,
+	StatusLineSubagents,
+}
+
+// RequiredSlots is the token set a custom theme must define: the full omp
+// contract plus the spellings xdev reads. The legacy xdev-only surfaces
+// (bg_base, bg_terminal, accent_running, gray, gray_bright, md_heading_h2/h3)
+// are optional — each has a documented derivation chain (extraChains), and
+// Get falls back when a chain is empty.
 func RequiredSlots() []string {
-	return []string{
-		BgBase, BgHighlight, BgTerminal,
-		AccentUser, AccentAssistant, AccentThinking, AccentTool,
-		AccentError, AccentSuccess, AccentRunning,
-		TextPrimary, TextSecondary, GrayDim, Gray, GrayBright,
-		PromptBorder, PromptBorderActive,
-		MdHeading1, MdHeading2, MdHeading3, MdCode, MdCodeBg, MdMuted,
-		LinkFg,
-	}
+	out := make([]string, len(requiredSlots))
+	copy(out, requiredSlots)
+	return out
 }
 
-// lookupSlot accepts either exact slot names or omp's camelCase spelling
-// (textPrimary for text_primary), so imported themes load unchanged.
-func lookupSlot(colors map[string]string, slot string) (string, bool) {
-	if v, ok := colors[slot]; ok {
-		return v, true
-	}
-	camel := toCamel(slot)
-	if v, ok := colors[camel]; ok {
-		return v, true
+// legacyToCanonical maps the xdev slot names the TUI reads onto the
+// canonical token that satisfies them.
+var legacyToCanonical = map[string]string{
+	BgHighlight:        UserMessageBg,
+	AccentUser:         UserMessageText,
+	AccentAssistant:    Accent,
+	AccentThinking:     ThinkingText,
+	AccentTool:         ToolTitle,
+	AccentError:        Error,
+	AccentSuccess:      Success,
+	TextPrimary:        Text,
+	TextSecondary:      Muted,
+	GrayDim:            Dim,
+	PromptBorder:       Border,
+	PromptBorderActive: BorderAccent,
+	MdHeading1:         MdHeading,
+	MdCodeBg:           MdCodeBlock,
+	MdMuted:            MdListBullet,
+	LinkFg:             MdLink,
+}
+
+// legacyOrder is every xdev slot the TUI reads, in dependency order (gray
+// before gray_bright, md_heading before the h2/h3 extras).
+var legacyOrder = []string{
+	BgBase, BgHighlight, BgTerminal,
+	AccentUser, AccentAssistant, AccentThinking, AccentTool,
+	AccentError, AccentSuccess, AccentRunning,
+	TextPrimary, TextSecondary,
+	GrayDim, Gray, GrayBright,
+	PromptBorder, PromptBorderActive,
+	MdHeading1, MdHeading2, MdHeading3,
+	MdCode, MdCodeBg, MdMuted, LinkFg,
+}
+
+// extraChains: the optional legacy slots omp has no equivalent for, with
+// the derivation each falls back to. "export.*" reads the export block;
+// anything else is an already-parsed slot. Empty chain = Get falls back.
+var extraChains = map[string][]string{
+	BgBase:        {"export.pageBg", SelectedBg},
+	BgTerminal:    {"export.pageBg"},
+	AccentRunning: {Accent},
+	Gray:          {Muted},
+	GrayBright:    {Gray, Muted},
+	MdHeading2:    {MdHeading, MdHeading1},
+	MdHeading3:    {MdHeading, MdHeading1},
+}
+
+// lookupSlot returns the raw color for a canonical slot, accepting the
+// exact name, its camelCase spelling, or any legacy xdev name aliased to
+// it — so both vocabularies (and imported omp themes) load unchanged.
+func lookupSlot(colors map[string]string, canonical string) (string, bool) {
+	for _, key := range slotCandidates(canonical) {
+		if v, ok := colors[key]; ok {
+			return v, true
+		}
 	}
 	return "", false
+}
+
+// slotCandidates lists the color keys that satisfy one canonical token.
+func slotCandidates(canonical string) []string {
+	cands := []string{canonical, toCamel(canonical)}
+	for legacy, canon := range legacyToCanonical {
+		if canon == canonical {
+			cands = append(cands, legacy)
+		}
+	}
+	return cands
 }
 
 func toCamel(snake string) string {
@@ -161,8 +319,8 @@ func toCamel(snake string) string {
 	return out
 }
 
-// parseColor handles hex, 256-index, var reference, and "" (terminal
-// default).
+// parseColor handles hex, 256-index, var reference (xdev's `@name` or omp's
+// bare var name), and "" (terminal default).
 func parseColor(value string, vars map[string]string) (Color, error) {
 	v := strings.TrimSpace(value)
 	for depth := 0; strings.HasPrefix(v, "@"); depth++ {
@@ -194,6 +352,10 @@ func parseColor(value string, vars map[string]string) (Color, error) {
 			return Color{}, fmt.Errorf("256-color index %d out of range", idx)
 		}
 		return Xterm256(idx), nil
+	}
+	// omp spells a var reference as the bare var name (`"accent": "accent"`).
+	if raw, ok := vars[v]; ok {
+		return parseColor(raw, nil)
 	}
 	return Color{}, fmt.Errorf("color %q must be #RRGGBB, 0-255, @var, or empty", v)
 }
@@ -230,17 +392,6 @@ func resolveVars(vars map[string]string) (map[string]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// symbolsOrDefault fills the glyph preset (unicode by default).
-func symbolsOrDefault(s *Symbols) Symbols {
-	if s == nil {
-		s = &Symbols{}
-	}
-	if s.Preset == "" {
-		s.Preset = "unicode"
-	}
-	return *s
 }
 
 // Symbols exposes the theme's glyph preset.

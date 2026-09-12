@@ -89,7 +89,7 @@ func (a *App) renderMarkdown(src string, w int) []line {
 
 		// Thematic break: --- / *** / ___ → ─── muted.
 		if isHR(trimmed) {
-			out = append(out, textline(strings.Repeat("─", min(3, w)), ms.muted))
+			out = append(out, textline(strings.Repeat(a.th.Box().Horizontal, min(3, w)), ms.muted))
 			continue
 		}
 

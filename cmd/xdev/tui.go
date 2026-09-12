@@ -139,6 +139,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	// Screen.
 	th := theme.LoadNamed(themeName, theme.CustomDir())
+	if lastSettings().ColorBlindMode {
+		th = theme.ApplyColorBlindMode(th)
+	}
 	scr, err := tcell.NewScreen()
 	if err != nil {
 		return 2, fmt.Errorf("tui: screen: %w", err)
@@ -157,6 +160,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// showThinking drives the reasoning display (issue #20); the resolved
 	// layered config is the source of truth at startup.
 	app.SetShowThinking(lastSettings().ShowThinkingOn())
+	// HUD segments (settings statusLine.segments): unknown names are
+	// skipped with a warning, unset keeps the shipped layout.
+	app.SetStatusSegments(lastSettings().StatusLineSegments())
 	// /settings lists the resolved config; toggles persist to the global
 	// layer (the same file `xdev config set` edits) and update the
 	// in-memory settings so a later /settings sees them.
@@ -584,6 +590,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
 			modelMu.Unlock()
 			app.SetStatusModel(nprovName + "/" + nmodelName)
+			// The HUD context segment measures against the new window.
+			app.SetContextWindow(int64(modelWindow(cfg, nprovName, nmodelName)))
 			return nil
 		},
 	})
@@ -700,9 +708,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return gs.Describe()
 		},
 	})
+	// applyTheme runs every resolved palette through the color-blind remap
+	// (settings colorBlindMode) so startup, /theme and live reload agree.
+	applyTheme := func(t *theme.Theme) *theme.Theme {
+		if lastSettings().ColorBlindMode {
+			return theme.ApplyColorBlindMode(t)
+		}
+		return t
+	}
 	if themeName != "" {
 		stopWatch := theme.Watch(theme.CustomDir(), themeName, func(nt *theme.Theme) {
-			app.SetTheme(nt)
+			app.SetTheme(applyTheme(nt))
 		})
 		defer stopWatch()
 	}
@@ -716,14 +732,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// so a typo is reported rather than silently ignored.
 				for _, avail := range theme.AvailableThemes(theme.CustomDir()) {
 					if avail == name {
-						app.SetTheme(nt)
+						app.SetTheme(applyTheme(nt))
 						th = nt
 						return nil
 					}
 				}
 				return fmt.Errorf("unknown theme %q", name)
 			}
-			app.SetTheme(nt)
+			app.SetTheme(applyTheme(nt))
 			th = nt
 			return nil
 		},
@@ -774,6 +790,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// Intercept set below from exts (only when non-nil).
 					Policy: agentPolicy(),
 				}
+				// The HUD context segment measures against this window.
+				app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
 				prewalkMu.Lock()
 				pwOn, pwT := prewalkOn, *prewalkTarget
 				prewalkMu.Unlock()
@@ -875,6 +893,9 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		h.ts.app.EndAssistant()
 		if ev.Usage != nil {
 			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output)
+			if ev.Usage.Cost != nil {
+				h.ts.app.AddCost(ev.Usage.Cost.Total)
+			}
 		}
 	case ai.EventError:
 		h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error())
