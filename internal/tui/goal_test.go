@@ -25,7 +25,9 @@ func TestGoalCommandView(t *testing.T) {
 	}
 	blocks := app.Blocks()
 	last := blocks[len(blocks)-1]
-	if last.Kind != KindSystem || !strings.Contains(last.Text, "error: goal view not wired") {
+	// The wording is the seam's own; the contract is that an unwired goal
+	// surfaces as an error block rather than a silent no-op.
+	if last.Kind != KindSystem || !strings.Contains(last.Text, "not wired") {
 		t.Fatalf("nil-seam block = %+v", last)
 	}
 

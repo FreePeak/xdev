@@ -108,9 +108,88 @@ type PrewalkOps struct {
 }
 
 // GoalOps wires the /goal command to the live goal state (lives in cmd).
-// View renders the current goal and budget; nil ops degrade to a notice.
+// View renders the current goal and budget. The verbs mirror the goal tool's
+// ops so an interactive session can drive a goal without asking the model to
+// do it; a nil verb is reported as unwired, never a silent no-op.
 type GoalOps struct {
-	View func() string
+	View     func() string
+	Create   func(objective string) (string, error)
+	Resume   func(objective string) (string, error)
+	Evidence func(note string) (string, error)
+	Complete func(notes []string) (string, error)
+	Drop     func() (string, error)
+}
+
+// Dispatch runs one /goal subcommand and returns the block to display. With
+// no argument (or a view verb) it shows the current goal; an unknown verb is
+// a usage error naming the grammar, because silently viewing made
+// `/goal create …` look like a dead command.
+func (o *GoalOps) Dispatch(args string) (string, error) {
+	if o == nil || o.View == nil {
+		return "", errors.New("goal not wired")
+	}
+	trimmed := strings.TrimSpace(args)
+	verb, rest := trimmed, ""
+	if i := strings.IndexFunc(trimmed, func(r rune) bool { return r == ' ' || r == '\t' }); i >= 0 {
+		verb, rest = trimmed[:i], strings.TrimSpace(trimmed[i+1:])
+	}
+	switch verb {
+	case "", "view", "get", "status":
+		return o.View(), nil
+	case "create":
+		if o.Create == nil {
+			return "", errors.New("goal create not wired")
+		}
+		if rest == "" {
+			return "", errors.New("usage: /goal create <objective>")
+		}
+		return o.Create(rest)
+	case "resume":
+		if o.Resume == nil {
+			return "", errors.New("goal resume not wired")
+		}
+		if rest == "" {
+			return "", errors.New("usage: /goal resume <objective>")
+		}
+		return o.Resume(rest)
+	case "evidence":
+		if o.Evidence == nil {
+			return "", errors.New("goal evidence not wired")
+		}
+		if rest == "" {
+			return "", errors.New("usage: /goal evidence <what was verified>")
+		}
+		return o.Evidence(rest)
+	case "complete":
+		if o.Complete == nil {
+			return "", errors.New("goal complete not wired")
+		}
+		return o.Complete(splitGoalNotes(rest))
+	case "drop":
+		if o.Drop == nil {
+			return "", errors.New("goal drop not wired")
+		}
+		return o.Drop()
+	default:
+		return "", fmt.Errorf("unknown /goal verb %q (view | create <objective> | resume <objective> | evidence <note> | complete [notes] | drop)", verb)
+	}
+}
+
+// splitGoalNotes turns "a; b" or "a, b" into separate completion notes; a
+// plain sentence stays one note.
+func splitGoalNotes(v string) []string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(v, func(r rune) bool { return r == ';' || r == ',' })
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ThemeOps wires the /theme command (theme resolution lives in cmd).

@@ -507,13 +507,17 @@ func (a *App) Prewalk(args string) error {
 // SetGoalOps wires the /goal command (the goal state lives in cmd).
 func (a *App) SetGoalOps(ops *GoalOps) { a.goalOps = ops }
 
-// Goal implements CommandAPI /goal: it shows the current goal and budget
-// (create/complete go through the goal tool). A nil seam degrades to a notice.
-func (a *App) Goal(_ string) error {
-	if a.goalOps == nil || a.goalOps.View == nil {
-		return fmt.Errorf("goal view not wired")
+// Goal implements CommandAPI /goal: a bare /goal (or /goal view) shows the
+// current goal and budget; the verbs create/resume/evidence/complete/drop
+// drive the same state the goal tool owns, so an interactive session steers
+// its own objective without a model turn. The args used to be dropped, which
+// made `/goal create …` look like a dead command.
+func (a *App) Goal(args string) error {
+	block, err := a.goalOps.Dispatch(args)
+	if err != nil {
+		return err
 	}
-	a.AddSystemBlock(a.goalOps.View())
+	a.AddSystemBlock(block)
 	return nil
 }
 
@@ -1264,9 +1268,11 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 	}
 
-	// Empty editor: arrows scroll the transcript. Non-empty: the editor
-	// uses them for history recall.
-	if !running && strings.TrimSpace(a.ed.Text()) == "" && !menuOpen {
+	// Empty editor with nothing to recall: arrows scroll the transcript.
+	// Once history exists, Up/Down belong to the editor (omp/Claude Code:
+	// Up recalls the previous prompt whether or not the box is empty);
+	// scrolling stays on Shift+arrow, PgUp/PgDn and the mouse wheel.
+	if !running && strings.TrimSpace(a.ed.Text()) == "" && !menuOpen && !a.ed.HasHistory() {
 		switch key.Key() {
 		case tcell.KeyUp:
 			a.scroll(1, false)

@@ -302,10 +302,15 @@ func parseMaxTime(v string) (time.Duration, error) {
 // withMaxTime bounds ctx by --max-time (d <= 0 leaves it untouched). The
 // cancel func is always safe to call.
 func withMaxTime(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	if d <= 0 {
-		return parent, func() {}
+	// Always cancellable, deadline or not. Returning the parent with a no-op
+	// cancel when --max-time is unset made the TUI's cancel handle do
+	// nothing: Esc/Ctrl+C during a running turn could never abort it, because
+	// the only thing they call was that no-op (user-reported).
+	ctx, cancel := context.WithCancel(parent)
+	if d > 0 {
+		ctx, cancel = context.WithTimeout(ctx, d)
 	}
-	return context.WithTimeout(parent, d)
+	return ctx, cancel
 }
 
 // showThinkingOn resolves the reasoning display for this run: the settings
