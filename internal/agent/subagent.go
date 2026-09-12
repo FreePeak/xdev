@@ -239,6 +239,23 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 	final, err := ag.Run(cctx, spec.System, []ai.Message{user})
 	res.apply(yt, final, err, cctx)
 
+	// A child that ends its run WITHOUT calling yield returns loose prose,
+	// and "completed" made that indistinguishable from a real handoff for
+	// the parent (parity finding T3 #6). Nudge it — the same corrective-turn
+	// machinery the strict-schema repair uses — and when the nudges run out,
+	// say so in the Note the parent renders.
+	//
+	// ponytail: two nudges, not omp's three reminders: each one is a fresh
+	// provider round-trip per child, and the warning after the second is
+	// already the signal the parent acts on.
+	for n := 1; res.Status == "completed" && n <= yieldNudges; n++ {
+		f2, e2 := yieldNudge(ctx, ag, yt, spec, store, n)
+		res.apply(yt, f2, e2, ctx)
+	}
+	if res.Status == "completed" {
+		res.Note = fmt.Sprintf("child never called yield after %d reminders — the text is its loose final reply, not a structured handoff", yieldNudges)
+	}
+
 	// Output contract for schema-typed yields.
 	if done, yres, _ := yt.snapshot(); done && len(schema) > 0 {
 		note := validateTopLevel(schema, yres)
@@ -299,6 +316,35 @@ func (r *SubagentResult) setText(raw json.RawMessage) {
 	} else {
 		r.Yield = raw
 	}
+}
+
+// yieldNudges is how many times a child that finished without yielding is
+// asked to call the yield tool before the parent is warned.
+const yieldNudges = 2
+
+// yieldNudge runs one corrective turn: the child is told the handoff must go
+// through yield, and its answer re-enters the classification path. Mirrors
+// strictRetry's contract (re-arm the yield tool, rebuild history from the
+// store so the nudge is persisted and a resume sees the same transcript).
+func yieldNudge(ctx context.Context, ag *Agent, yt *yieldTool, spec SubagentSpec, store *session.Store, n int) (*ai.Message, error) {
+	msg := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{
+		Text: fmt.Sprintf("you finished without calling yield — call the yield tool now with your result (attempt %d of %d); a plain reply is not delivered to the caller", n, yieldNudges),
+	}}}
+	if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
+		return nil, err
+	}
+	yt.mu.Lock()
+	yt.done, yt.result, yt.files = false, nil, nil
+	cctx, cancel := context.WithCancel(ctx)
+	yt.cancel = cancel
+	yt.mu.Unlock()
+	defer cancel()
+	hist, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		return nil, err
+	}
+	final, rerr := ag.Run(cctx, spec.System, hist.Messages)
+	return final, rerr
 }
 
 // strictRetry grants the child one correction turn on schema mismatch.

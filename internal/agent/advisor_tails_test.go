@@ -394,7 +394,12 @@ func TestTaskToolAttachesChildAdvisor(t *testing.T) {
 	childAdv, rev, _ := newReviewer(t, reviewScripts(adviseEvents(AdviseConcern, "recheck the migration")))
 	var built *Advisor
 	tt := &TaskTool{
-		Provider:     &fakeProvider{calls: []fakeScript{{events: doneEvents("child step 1")}}},
+		// The child answers in prose, then yields when nudged (a no-yield
+		// child now gets corrective turns — see TestTaskToolNoYield*).
+		Provider: &fakeProvider{calls: []fakeScript{
+			{events: doneEvents("child step 1")},
+			{events: yieldEvents(`{"result":"child step 1"}`)},
+		}},
 		Model:        "m",
 		ChildTools:   []tool.Tool{echoTool{}},
 		MaxTurns:     3,

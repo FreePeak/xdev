@@ -330,6 +330,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if err != nil {
 			return err
 		}
+		// /new and /drop ARE session switches, so they fire the same hook
+		// events /resume does — they used to emit nothing, and a
+		// session_switch hook (archive, notify) silently never ran on them
+		// (parity finding T3 #16).
+		bus := buildHookBus(cwd, opts) // resolved per switch: /settings edits land
+		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
 		if drop && old.Path() != "" {
 			_ = old.Close()
 			if rmErr := os.Remove(old.Path()); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -344,6 +350,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.Reset()
 		saveBreadcrumb(breadcrumbPath(ns))
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
+		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
 		return nil
 	}
 

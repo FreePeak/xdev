@@ -366,12 +366,12 @@ func (h *Hub) Send(id, text string) error {
 	defer h.mu.Unlock()
 	j, ok := h.jobs[id]
 	if !ok {
-		return fmt.Errorf("hub: unknown job %q", id)
+		return fmt.Errorf("unknown job %q", id)
 	}
 	select {
 	case <-j.done:
 		if !j.parked {
-			return fmt.Errorf("hub: job %q already finished (park it to revive)", id)
+			return fmt.Errorf("job %q already finished (park it to revive)", id)
 		}
 		prior := ""
 		if j.Result != nil {
@@ -386,7 +386,7 @@ func (h *Hub) Send(id, text string) error {
 	default:
 	}
 	if j.Agent == nil {
-		return fmt.Errorf("hub: job %q has not started yet", id)
+		return fmt.Errorf("job %q has not started yet", id)
 	}
 	h.recordInboxLocked(id, text)
 	j.Agent.Steer(text)
@@ -420,15 +420,15 @@ func (h *Hub) Revive(id, text string) error {
 	defer h.mu.Unlock()
 	j, ok := h.jobs[id]
 	if !ok {
-		return fmt.Errorf("hub: unknown job %q", id)
+		return fmt.Errorf("unknown job %q", id)
 	}
 	select {
 	case <-j.done:
 	default:
-		return fmt.Errorf("hub: job %q is still running", id)
+		return fmt.Errorf("job %q is still running", id)
 	}
 	if !j.parked {
-		return fmt.Errorf("hub: job %q is not parked", id)
+		return fmt.Errorf("job %q is not parked", id)
 	}
 	prior := ""
 	if j.Result != nil {

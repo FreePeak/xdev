@@ -1213,6 +1213,11 @@ func (a *App) handleKey(ev tcell.Event) {
 	case "model-select":
 		a.OpenModelPicker()
 		return
+	case "app.agents.hub":
+		// The same path /hub takes; an unwired hub says so in the
+		// transcript rather than swallowing the chord.
+		_ = a.HubRoster()
+		return
 	case "model-cycle":
 		// Unwired cycling is a no-op, not an error: the chord is bound by
 		// default and most sessions configure no pattern list.

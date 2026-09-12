@@ -172,3 +172,117 @@ func (r *routingProvider) Stream(ctx context.Context, req ai.StreamRequest) (<-c
 
 func (r *routingProvider) Name() string { return "router" }
 func (r *routingProvider) API() string  { return "router" }
+
+// A child that ends without calling yield used to look identical to a real
+// handoff (status "completed", no signal). It is now nudged, and the parent
+// is told when the nudges run out (parity finding T3 #6).
+func TestTaskToolNoYieldChildWarnsParent(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: doneEvents("I did the thing, here are my thoughts")}, // no yield
+		{events: doneEvents("still no yield")},                        // nudge 1
+		{events: doneEvents("final prose")},                           // nudge 2
+	}}
+	res, err := taskTool(p).Execute(context.Background(), json.RawMessage(`{"prompt":"do it"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, "never called yield") {
+		t.Fatalf("parent must be warned about the unstructured handoff:\n%s", res.Text)
+	}
+	p.mu.Lock()
+	n := len(p.gotReqs)
+	p.mu.Unlock()
+	if n != 1+yieldNudges {
+		t.Fatalf("child was nudged %d times, want %d", n-1, yieldNudges)
+	}
+}
+
+// A child that yields after the first nudge needs no warning.
+func TestTaskToolNoYieldChildRecoversOnNudge(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: doneEvents("prose first")},
+		{events: yieldEvents(`{"result":"RECOVERED"}`)},
+	}}
+	res, err := taskTool(p).Execute(context.Background(), json.RawMessage(`{"prompt":"do it"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, "never called yield") {
+		t.Fatalf("a recovered yield must not warn:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "RECOVERED") {
+		t.Fatalf("the yielded result is missing:\n%s", res.Text)
+	}
+}
+
+// omp's batch wire shape ({context, tasks[]}) must spawn, not be rejected
+// with "prompt is required" (parity finding T3 #1).
+func TestTaskToolBatchShape(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: yieldEvents(`{"result":"ALPHA-DONE"}`)},
+		{events: yieldEvents(`{"result":"BETA-DONE"}`)},
+	}}
+	res, err := taskTool(p).Execute(context.Background(), json.RawMessage(
+		`{"context":"SHARED FRAMING","tasks":[{"name":"alpha","task":"do A"},{"name":"beta","task":"do B"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("batch rejected: %+v", res)
+	}
+	for _, want := range []string{"ALPHA-DONE", "BETA-DONE", "batch: 2 task(s), 0 failed", "· alpha", "· beta"} {
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("report missing %q:\n%s", want, res.Text)
+		}
+	}
+	// Both children saw the shared context — that is what `context` is for.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("requests = %d, want one per task", len(p.gotReqs))
+	}
+	for i, req := range p.gotReqs {
+		found := false
+		for _, m := range req.Messages {
+			for _, b := range m.Content {
+				if tb, ok := b.(ai.TextBlock); ok && strings.Contains(tb.Text, "SHARED FRAMING") {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("child %d never saw the batch context", i)
+		}
+	}
+}
+
+// A batch item missing its assignment is reported per item; the others still
+// run (one typo in a 5-item batch must not lose the other four).
+func TestTaskToolBatchItemWithoutTask(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: yieldEvents(`{"result":"OK-ONE"}`)},
+	}}
+	res, err := taskTool(p).Execute(context.Background(), json.RawMessage(
+		`{"tasks":[{"name":"good","task":"do it"},{"name":"empty","task":"  "}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("a partially bad batch must still report: %+v", res)
+	}
+	if !strings.Contains(res.Text, "OK-ONE") {
+		t.Fatalf("the good item was lost: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "1 failed") || !strings.Contains(res.Text, "empty") {
+		t.Fatalf("the bad item must be named as a failure: %s", res.Text)
+	}
+}
+
+// A bare {prompt:""} stays the loud error it always was — with the batch
+// grammar named, so a model following the docs can self-correct.
+func TestTaskToolSinglePromptErrorNamesBatch(t *testing.T) {
+	res, _ := taskTool(&fakeProvider{}).Execute(context.Background(), json.RawMessage(`{}`))
+	if !res.IsError || !strings.Contains(res.Text, "tasks[]") {
+		t.Fatalf("error must name both shapes: %+v", res)
+	}
+}

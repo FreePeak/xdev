@@ -43,6 +43,10 @@ const hubViewRows = 12
 
 // hubRosterUI is the overlay's live state (selection + transcript view).
 type hubRosterUI struct {
+	// open is the overlay's visibility: omp shows the roster even with an
+	// empty agent list (the pane is where you learn nothing is running), so
+	// "is it on screen" cannot be derived from a non-empty row list.
+	open    bool
 	rows    []HubAgent
 	sel     int
 	viewID  string
@@ -85,7 +89,7 @@ func (a *App) SetHubOps(ops *HubOps) {
 // HubRosterOpen reports whether the roster overlay is on screen.
 func (a *App) HubRosterOpen() bool {
 	st := a.hubState()
-	return st != nil && len(st.ui.rows) > 0
+	return st != nil && st.ui.open
 }
 
 // HubRoster implements CommandAPI /hub: open the live roster overlay.
@@ -95,13 +99,12 @@ func (a *App) HubRoster() error {
 		a.AddSystemBlock("hub: no agent hub wired for this session")
 		return nil
 	}
+	// An empty roster still opens (omp behavior): the overlay is the place
+	// that answers "what is running?", and refusing to show it leaves the
+	// user with a one-line notice and no chord that works.
 	rows := st.ops.Roster()
-	if len(rows) == 0 {
-		a.AddSystemBlock("hub: no background agents")
-		return nil
-	}
 	hubRegMu.Lock()
-	st.ui = hubRosterUI{rows: rows}
+	st.ui = hubRosterUI{open: true, rows: rows}
 	hubRegMu.Unlock()
 	a.poke()
 	return nil
@@ -112,7 +115,7 @@ func (a *App) HubRoster() error {
 // still fall through to the editor, matching the picker's discipline).
 func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 	st := a.hubState()
-	if st == nil || st.ops == nil || len(st.ui.rows) == 0 {
+	if st == nil || st.ops == nil || !st.ui.open {
 		return false
 	}
 	ops := st.ops
@@ -139,6 +142,9 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 			ui.sel++
 		}
 	case tcell.KeyEnter:
+		if len(ui.rows) == 0 {
+			return true // owned: Enter on an empty roster does nothing
+		}
 		handled = true
 		id := ui.rows[ui.sel].ID
 		switch {
@@ -168,6 +174,9 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 	default:
 		switch key.Rune() {
 		case 'k':
+			if len(ui.rows) == 0 {
+				return true
+			}
 			handled = true
 			id := ui.rows[ui.sel].ID
 			if ops.Kill != nil && ops.Kill(id) {
@@ -176,6 +185,9 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 				ui.msg = "kill: " + id + " not running"
 			}
 		case 'r':
+			if len(ui.rows) == 0 {
+				return true
+			}
 			handled = true
 			id := ui.rows[ui.sel].ID
 			if ops.Revive != nil && ops.Revive(id) {
@@ -184,6 +196,9 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 				ui.msg = "revive: " + id + " is not parked"
 			}
 		case 'p':
+			if len(ui.rows) == 0 {
+				return true
+			}
 			handled = true
 			id := ui.rows[ui.sel].ID
 			if ops.Park != nil && ops.Park(id) {
@@ -195,7 +210,7 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 	}
 	// Statuses are live: refresh the snapshot on every handled key that
 	// did not just close the overlay.
-	if handled && refresh && ui.viewID == "" && ops.Roster != nil {
+	if (handled || len(ui.rows) == 0) && refresh && ui.viewID == "" && ops.Roster != nil {
 		ui.rows = ops.Roster()
 		if ui.sel >= len(ui.rows) {
 			ui.sel = max(0, len(ui.rows)-1)
@@ -212,15 +227,28 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 // (draw does) — this must not re-lock a.mu.
 func (a *App) drawHubRoster(yComposerTop int) {
 	st := a.hubState()
-	if st == nil || len(st.ui.rows) == 0 {
+	if st == nil || !st.ui.open {
 		return
 	}
 	hubRegMu.Lock()
 	ui := st.ui
 	hubRegMu.Unlock()
-
 	s := a.scr
 	w := a.width
+	if len(ui.rows) == 0 {
+		// Empty roster: one panel line says so, with the chords that work.
+		h := 3
+		y := yComposerTop - h - 2
+		brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+		dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
+		hubRosterBox(s, y, h, 46, a.th.Box(), brdSt)
+		drawText(s, 3, y+1, "no background agents yet — spawn one with the task tool", dimSt)
+		drawText(s, 3, y+2, "Esc close · refreshes as agents start", dimSt)
+		return
+	}
+
 	selSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
