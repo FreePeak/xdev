@@ -1012,6 +1012,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M15 #65: computer — desktop control, off unless computer.enabled is
 	// set (parent-only: it drives the real desktop, not a sandbox).
 	reg.Register(computer.NewTool(computer.FromSettings(settings)))
+	// M15 #67: security_scan — merges the scanners the host has (go vet,
+	// govulncheck, semgrep, gitleaks); a missing binary is reported, not fatal.
+	reg.Register(tool.NewSecurityScanTool(cwd))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	reg.Register(&agent.TaskTool{
