@@ -38,6 +38,7 @@ var BuiltinActions = []string{
 	"history-prev", "history-next",
 	"expand", "collapse",
 	"clear-input",
+	"app.session.tree",
 }
 
 // DefaultKeyMap is the factory chord table.
@@ -75,6 +76,7 @@ func DefaultKeyMap() *KeyMap {
 			"C-l": "expand",
 			"C-e": "collapse",
 			"C-r": "history-prev",
+			"A-t": "app.session.tree",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
@@ -221,6 +223,8 @@ func isPrimaryChord(action, chord string) bool {
 		return chord == "C-c"
 	case "clear-input":
 		return chord == "C-u"
+	case "app.session.tree":
+		return chord == "A-t"
 	}
 	return false
 }
