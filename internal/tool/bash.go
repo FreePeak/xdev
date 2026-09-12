@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -30,12 +31,18 @@ const (
 	KillGrace = 2 * time.Second
 )
 
-// bashArgs mirrors pi's bash input schema.
+// bashArgs mirrors pi's bash input schema. Timeout is a pointer so an
+// EXPLICIT 0 ("no deadline", omp's semantic) is distinguishable from an
+// absent field (the 120s default) — json cannot tell those apart on a plain
+// int, and silently killing at 120s after promising no deadline is the
+// worst kind of lie.
 type bashArgs struct {
-	Command         string `json:"command"`
-	Timeout         int    `json:"timeout,omitempty"`
-	Workdir         string `json:"workdir,omitempty"`
-	RunInBackground bool   `json:"run_in_background,omitempty"`
+	Command         string            `json:"command"`
+	Timeout         *int              `json:"timeout,omitempty"`
+	Workdir         string            `json:"workdir,omitempty"`
+	Cwd             string            `json:"cwd,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	RunInBackground bool              `json:"run_in_background,omitempty"`
 }
 
 // RewriteBashCommand replaces the command in bash arguments, preserving the
@@ -55,6 +62,24 @@ func RewriteBashCommand(args json.RawMessage, command string) json.RawMessage {
 	}
 	return out
 }
+
+// resolveBashTimeout maps the parsed timeout field onto the run deadline:
+// absent → the default (an omp-shaped call that omits timeout keeps the
+// safety net); explicit 0 → no deadline (omp's documented semantic, only
+// distinguishable from absent with a pointer); >0 → clamped to the max.
+func resolveBashTimeout(t *int) time.Duration {
+	if t == nil {
+		return time.Duration(DefaultTimeoutSecs) * time.Second
+	}
+	if *t == 0 {
+		return 0
+	}
+	return time.Duration(min(*t, MaxTimeoutSecs)) * time.Second
+}
+
+// envKeyRe is the valid environment-variable name shape the bash tool's
+// env map accepts.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // bashDetails is persisted in Result.Details.
 type bashDetails struct {
@@ -117,11 +142,20 @@ func (b *BashTool) Parameters() json.RawMessage {
     },
     "timeout": {
       "type": "integer",
-      "description": "Optional timeout in seconds (default 120, max 600)"
+      "description": "Optional timeout in seconds (default 120, max 600; 0 disables the deadline — the run is then bounded only by the session interrupt)"
     },
     "workdir": {
       "type": "string",
       "description": "Optional working directory (relative paths resolve against the session cwd)"
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Alias of workdir (omp spelling). Giving both with different values is an error"
+    },
+    "env": {
+      "type": "object",
+      "description": "Extra KEY=VALUE environment entries for this command (keys must match [A-Za-z_][A-Za-z0-9_]*); merged over the hardened env — hardened keys (TERM, NO_COLOR, LC_ALL, ...) always win",
+      "additionalProperties": {"type": "string"}
     },
     "run_in_background": {
       "type": "boolean",
@@ -156,19 +190,48 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			return Result{}, fmt.Errorf("bash: workdir %q is not a directory", workdir)
 		}
 	}
+	// omp spells the working directory cwd. Both spellings with different
+	// values are an error: a silent winner is exactly the ambiguity that
+	// makes an omp-shaped call run somewhere the caller did not mean.
+	if a.Cwd != "" {
+		cwd := a.Cwd
+		if !filepath.IsAbs(cwd) {
+			cwd = filepath.Join(b.RootCwd, cwd)
+		}
+		cwd = filepath.Clean(cwd)
+		if a.Workdir != "" && cwd != workdir {
+			return Result{}, fmt.Errorf("bash: workdir %q and cwd %q disagree", a.Workdir, a.Cwd)
+		}
+		if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
+			return Result{}, fmt.Errorf("bash: cwd %q is not a directory", cwd)
+		}
+		workdir = cwd
+	}
+	// Extra per-call environment. Keys are validated here (not deep in the
+	// spawn) so a malformed entry fails the call instead of being dropped.
+	for k := range a.Env {
+		if !envKeyRe.MatchString(k) {
+			return Result{}, fmt.Errorf("bash: env key %q is not a valid environment name", k)
+		}
+	}
+	childEnv := ApplyCallEnv(HardenedEnv(), a.Env)
 
 	if a.RunInBackground {
-		return b.startBackground(a.Command, workdir)
+		return b.startBackground(a.Command, workdir, childEnv)
 	}
 
-	timeout := DefaultTimeoutSecs
-	if a.Timeout > 0 {
-		timeout = min(a.Timeout, MaxTimeoutSecs)
+	// timeout: absent → the 120s default; explicit 0 → no deadline (the
+	// run is bounded only by the session interrupt); >0 → clamped to the
+	// 600s max.
+	runCtx := ctx
+	timeout := resolveBashTimeout(a.Timeout)
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
 
-	res, execErr := runShell(ctx, runCtx, a.Command, workdir, b.jobs(), time.Duration(timeout)*time.Second)
+	res, execErr := runShell(ctx, runCtx, a.Command, workdir, childEnv, b.jobs(), timeout)
 	if execErr != nil {
 		return Result{}, fmt.Errorf("bash: %w", execErr)
 	}
@@ -182,14 +245,14 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 // startBackground launches the command detached and returns immediately: a
 // janitor reaps it, the job registry reports status/exit code/output tail,
 // and combined output streams to a temp file under the system temp dir.
-func (b *BashTool) startBackground(command, workdir string) (Result, error) {
+func (b *BashTool) startBackground(command, workdir string, env []string) (Result, error) {
 	f, err := os.CreateTemp("", "xdev-bg-*.log")
 	if err != nil {
 		return Result{}, fmt.Errorf("bash: background output file: %w", err)
 	}
 	name, argv := shellCommand(command)
 	cmd := exec.Command(name, argv...)
-	cmd.Env = HardenedEnv()
+	cmd.Env = env
 	cmd.Dir = workdir
 	prepareProcessGroup(cmd) // no-op on windows
 	cmd.Stdout = f
@@ -238,12 +301,12 @@ type runOutcome struct {
 // cancellation (agent stop, Ctrl+C) kills the process group; a runCtx
 // timeout does not — the live process is handed to the job registry with an
 // explicit notice, and its remaining output tees into a temp file.
-func runShell(abortCtx, runCtx context.Context, command, workdir string, jobs *BashJobs, timeout time.Duration) (runOutcome, error) {
+func runShell(abortCtx, runCtx context.Context, command, workdir string, env []string, jobs *BashJobs, timeout time.Duration) (runOutcome, error) {
 	start := time.Now()
 
 	name, argv := shellCommand(command)
 	cmd := exec.Command(name, argv...)
-	cmd.Env = HardenedEnv()
+	cmd.Env = env
 	cmd.Dir = workdir
 	prepareProcessGroup(cmd) // no-op on windows (see kill_windows.go)
 	stdout, err := cmd.StdoutPipe()

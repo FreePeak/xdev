@@ -114,7 +114,7 @@ func (t *ASTGrepTool) Execute(ctx context.Context, args json.RawMessage) (Result
 	if limit <= 0 {
 		limit = DefaultASTMaxMatches
 	}
-	matches, total, capped, err := runASTStream(ctx, bin, t.CWD, argv, a.Skip, limit)
+	matches, total, capped, err := runASTStream(ctx, bin, t.CWD, a.Pattern, argv, a.Skip, limit)
 	if err != nil {
 		return Result{Text: "ast_grep: " + err.Error(), IsError: true}, nil
 	}
@@ -185,7 +185,7 @@ func (t *ASTEditTool) Execute(ctx context.Context, args json.RawMessage) (Result
 	if !a.Apply {
 		preview := append(append([]string(nil), argv...), "--json=stream")
 		preview = append(preview, targets...)
-		matches, total, capped, err := runASTStream(ctx, bin, t.CWD, preview, 0, limit)
+		matches, total, capped, err := runASTStream(ctx, bin, t.CWD, a.Pattern, preview, 0, limit)
 		if err != nil {
 			return Result{Text: "ast_edit: " + err.Error(), IsError: true}, nil
 		}
@@ -251,9 +251,48 @@ func relList(paths []string, cwd string) []string {
 	return out
 }
 
+// patternBalanced is a cheap syntactic plausibility check for an ast-grep
+// pattern: brackets and quotes balance outside string literals. ast-grep
+// exits 1 with EMPTY stdout and stderr for a pattern that does not parse
+// (verified against 0.45.3), which is byte-for-byte its "no matches" shape —
+// without this check a typo'd pattern reports absence and the model
+// refactor-deletes live code against a query that never ran.
+// ponytail: syntactic balance, not a tree-sitter parse — a valid pattern
+// with an odd quote count would be mis-flagged as a parse issue; upgrade
+// path is a tree-sitter validation pass in ast-grep itself.
+func patternBalanced(p string) bool {
+	var stack []rune
+	inStr := false
+	escaped := false
+	for _, r := range p {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '"':
+			inStr = !inStr
+		case inStr:
+			// inside a literal: brackets do not count
+		case r == '(' || r == '[' || r == '{':
+			stack = append(stack, r)
+		case r == ')' || r == ']' || r == '}':
+			if len(stack) == 0 {
+				return false
+			}
+			open := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if (r == ')' && open != '(') || (r == ']' && open != '[') || (r == '}' && open != '{') {
+				return false
+			}
+		}
+	}
+	return !inStr && len(stack) == 0
+}
+
 // runASTStream decodes at most `limit` match lines after skipping `skip`,
 // stopping early (and killing the child) once the cap is reached.
-func runASTStream(ctx context.Context, bin, cwd string, argv []string, skip, limit int) (matches []astMatch, total int, capped bool, err error) {
+func runASTStream(ctx context.Context, bin, cwd, pattern string, argv []string, skip, limit int) (matches []astMatch, total int, capped bool, err error) {
 	kctx, kill := context.WithCancel(ctx)
 	defer kill()
 	cmd := exec.CommandContext(kctx, bin, argv...)
@@ -291,6 +330,14 @@ func runASTStream(ctx context.Context, bin, cwd string, argv []string, skip, lim
 		msg := strings.TrimSpace(stderr.String())
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) && ee.ExitCode() == 1 && msg == "" {
+			// Exit 1 with no output is both "no matches" and "pattern does
+			// not parse" — ast-grep cannot tell them apart. When the pattern
+			// is syntactically implausible, say so instead of reporting
+			// absence: a model that reads "no matches" for a broken query
+			// acts on evidence that was never collected.
+			if !patternBalanced(pattern) {
+				return nil, 0, false, errors.New("ast-grep: pattern does not parse (unbalanced brackets or quotes) — fix the pattern or tighten path before concluding anything")
+			}
 			return nil, 0, false, nil
 		}
 		if msg == "" {

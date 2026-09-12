@@ -365,6 +365,68 @@ func TestExportEmptySessionIsValidHTML(t *testing.T) {
 
 // TestRunExportNeverCreatesASession: --export reads a session; with nothing to
 // read it fails instead of exporting a brand-new empty one.
+// The -export refuse-to-clobber guard (docs/parity testers T4/T5): omp's
+// --export takes the SESSION as its argument, so an omp-following user points
+// xdev's output flag at the transcript itself and would destroy it. The
+// guard refuses any non-HTML target — a .jsonl session file is refused, a
+// re-export over a previous export is allowed (xdev emits lowercase
+// "<!doctype html>", which is why the check folds case).
+func TestRunExportRefusesNonHTMLTarget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	st := exportTestStore(t)
+
+	// A real disk session so -fork resolution works (exportSourceSession
+	// resolves ids against sessionDataDir(), cwd-matched).
+	dataDir := t.TempDir()
+	prev := launch
+	launch.SessionDir = dataDir
+	t.Cleanup(func() { launch = prev })
+	sid := session.NewSessionID()
+	cwd := mustGetwd()
+	p := session.SessionFilePath(dataDir, cwd, time.Now(), sid)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slot := session.MarshalTitleSlot("export guard test", session.TitleSourceAuto, time.Now())
+	hdr := session.MarshalHeader(session.SessionHeader{
+		Version: 3, ID: sid, Timestamp: time.Now(), CWD: cwd,
+		Title: "export guard test", TitleSource: session.TitleSourceAuto,
+	})
+	body := `{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}`
+	if err := os.WriteFile(p, []byte(string(slot)+string(hdr)+body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Case 1: the target is an existing JSONL transcript — must be refused
+	// and left byte-identical.
+	dir := t.TempDir()
+	jsonl := filepath.Join(dir, sid+".jsonl")
+	original := []byte(`{"type":"header","id":"` + st.ID() + `"}` + "\n")
+	if err := os.WriteFile(jsonl, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runExport(jsonl, printOptions{ForkID: sid})
+	if err == nil {
+		t.Fatal("runExport over a JSONL transcript must be refused")
+	}
+	if !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("refusal must say what it refused: %v", err)
+	}
+	if now, rerr := os.ReadFile(jsonl); rerr != nil || string(now) != string(original) {
+		t.Fatalf("refused export still modified the target: %v", rerr)
+	}
+
+	// Case 2: the target is a previous export (lowercase doctype) — a
+	// re-export must be allowed.
+	out := filepath.Join(dir, "again.html")
+	if _, err := exportSession(st, "", "", out); err != nil {
+		t.Fatal(err)
+	}
+	if err := runExport(out, printOptions{ForkID: sid}); err != nil {
+		t.Fatalf("re-export over a previous export must be allowed, got %v", err)
+	}
+}
+
 func TestRunExportNeverCreatesASession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	out := filepath.Join(t.TempDir(), "out.html")

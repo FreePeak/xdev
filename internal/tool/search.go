@@ -60,7 +60,8 @@ func (t *GrepTool) Parameters() json.RawMessage {
     "pattern": {"type": "string", "description": "regular expression to search for"},
     "path": {"type": "string", "description": "file or directory to search (default: cwd)"},
     "glob": {"type": "string", "description": "restrict to files matching this name pattern, e.g. *.go"},
-    "ignore_case": {"type": "boolean", "description": "case-insensitive match"},
+    "ignore_case": {"type": "boolean", "description": "case-insensitive match (default false)"},
+    "case": {"type": "boolean", "description": "omp spelling of the case preference: case:false matches case-insensitively (overrides ignore_case when present)"},
     "max_matches": {"type": "integer", "description": "cap on returned matches"}
   },
   "required": ["pattern"]
@@ -73,6 +74,19 @@ type grepArgs struct {
 	Glob       string `json:"glob"`
 	IgnoreCase bool   `json:"ignore_case"`
 	MaxMatches int    `json:"max_matches"`
+	// Case is omp's spelling: PRESENT means the caller specified a
+	// preference and overrides ignore_case (case:false = insensitive,
+	// case:true = sensitive); absent means ignore_case decides.
+	Case *bool `json:"case"`
+}
+
+// effectiveIgnoreCase resolves the omp-style `case` field over the native
+// ignore_case: an explicit case wins, else ignore_case stands.
+func (a grepArgs) effectiveIgnoreCase() bool {
+	if a.Case != nil {
+		return !*a.Case
+	}
+	return a.IgnoreCase
 }
 
 func (t *GrepTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
@@ -113,7 +127,7 @@ func (t *GrepTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 // on how many lines a file contributes.
 func (t *GrepTool) runRG(ctx context.Context, rg, root string, a grepArgs, limit int) (Result, bool) {
 	argv := []string{"--line-number", "--no-heading", "--color=never"}
-	if a.IgnoreCase {
+	if a.effectiveIgnoreCase() {
 		argv = append(argv, "--ignore-case")
 	}
 	if a.Glob != "" {
@@ -171,7 +185,7 @@ func (t *GrepTool) runRG(ctx context.Context, rg, root string, a grepArgs, limit
 // a line scan.
 func (t *GrepTool) runGo(ctx context.Context, root string, a grepArgs, limit int) (Result, error) {
 	expr := a.Pattern
-	if a.IgnoreCase {
+	if a.effectiveIgnoreCase() {
 		expr = "(?i)" + expr
 	}
 	re, err := regexp.Compile(expr)
@@ -317,8 +331,9 @@ func (t *GlobTool) Parameters() json.RawMessage {
   "type": "object",
   "properties": {
     "pattern": {"type": "string", "description": "name pattern; ** crosses directories, e.g. **/*_test.go"},
-    "path": {"type": "string", "description": "directory to search (default: cwd)"},
-    "max_results": {"type": "integer", "description": "cap on returned paths"}
+    "path": {"type": "string", "description": "directory to search (default: cwd). omp spelling: when pattern is absent, path IS the glob and the root falls back to cwd"},
+    "max_results": {"type": "integer", "description": "cap on returned paths"},
+    "limit": {"type": "integer", "description": "omp spelling of max_results"}
   },
   "required": ["pattern"]
 }`)
@@ -328,6 +343,8 @@ type globArgs struct {
 	Pattern    string `json:"pattern"`
 	Path       string `json:"path"`
 	MaxResults int    `json:"max_results"`
+	// Limit is omp's name for max_results.
+	Limit int `json:"limit"`
 }
 
 func (t *GlobTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
@@ -335,10 +352,21 @@ func (t *GlobTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if err := json.Unmarshal(args, &a); err != nil {
 		return Result{Text: "glob: malformed arguments: " + err.Error(), IsError: true}, nil
 	}
+	// omp's schema has no separate pattern field: path IS the glob
+	// ("src/**/*.ts"), with limit/hidden/gitignore knobs. xdev splits them
+	// (pattern + scan root). When only path arrives, honor the omp shape
+	// rather than rejecting a documented baseline call: the pattern is the
+	// path value and the scan root falls back to the session cwd.
+	if a.Pattern == "" && a.Path != "" {
+		a.Pattern, a.Path = a.Path, ""
+	}
 	if a.Pattern == "" {
 		return Result{Text: "glob: pattern is required", IsError: true}, nil
 	}
 	limit := a.MaxResults
+	if limit <= 0 {
+		limit = a.Limit
+	}
 	if limit <= 0 {
 		limit = t.MaxResults
 	}
