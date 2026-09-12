@@ -48,14 +48,19 @@ type App struct {
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
 	ops            *SessionOps
-	modelOps       *ModelOps         // session lifecycle, wired by cmd (nil → notices)
-	planOps        *PlanOps          // /plan, wired by cmd (nil → notices)
-	advisorOps     *AdvisorOps       // /advisor, wired by cmd (nil → notices)
-	memoryOps      *MemoryOps        // /memory, wired by cmd (nil → notices)
-	themeOps       *ThemeOps         // /theme, wired by cmd (nil → notices)
-	prewalkOps     *PrewalkOps       // /prewalk, wired by cmd (nil → notices)
-	spick          *sessionPicker    // /resume selector (nil = closed)
-	onPickerResume func(id string)   // wired by cmd: performs the resume
+	modelOps       *ModelOps          // session lifecycle, wired by cmd (nil → notices)
+	planOps        *PlanOps           // /plan, wired by cmd (nil → notices)
+	advisorOps     *AdvisorOps        // /advisor, wired by cmd (nil → notices)
+	memoryOps      *MemoryOps         // /memory, wired by cmd (nil → notices)
+	themeOps       *ThemeOps          // /theme, wired by cmd (nil → notices)
+	prewalkOps     *PrewalkOps        // /prewalk, wired by cmd (nil → notices)
+	spick          *sessionPicker     // /resume selector (nil = closed)
+	onPickerResume func(id string)    // wired by cmd: performs the resume
+	tpick          *treeSelector      // /tree selector (nil = closed)
+	treeData       func() []TreeEntry // entry snapshot, wired by cmd
+	treeLabelLoad  func() map[string]string
+	treeLabelSave  func(id, label string) error
+	treeLabels     map[string]string // id→label snapshot, refreshed on open
 	settingsOps    *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwdLabel       string            // welcome top bar (last two path components)
 	branch         string            // git branch for the welcome top bar ("" when none)
@@ -65,7 +70,6 @@ type App struct {
 	extCommands    map[string]string // "/server:cmd" -> description
 	extRun         ExtensionCommand
 	renderers      map[string]RenderSpec   // tool name -> declarative render spec
-	sessionTree    func() string           // /tree display
 	sessionBranch  func(args string) error // /branch to an entry id
 	resumeList     func(cwd string) error  // /resume session listing
 	onSend         func(text string)
@@ -167,13 +171,6 @@ func (a *App) AddUserBlock(text string) {
 // KeyMap returns the active keybinding map.
 func (a *App) KeyMap() *KeyMap { return a.keyMap }
 
-// SetSessionTree wires the /tree display to the store.
-func (a *App) SetSessionTree(fn func() string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.sessionTree = fn
-}
-
 // SetSessionBranch wires /branch to the store. The callback must rebuild
 // history and replay the transcript (like swapStoreTo) so the user sees the
 // new branch's content.
@@ -191,14 +188,6 @@ func (a *App) SetSessionBranch(fn func(args string) error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sessionBranch = fn
-}
-
-// SessionTree implements CommandAPI by rendering the store tree.
-func (a *App) SessionTree() string {
-	if a.sessionTree != nil {
-		return a.sessionTree()
-	}
-	return "no session tree available"
 }
 
 // BranchSession implements CommandAPI by switching the leaf pointer.
@@ -836,6 +825,11 @@ func (a *App) handleKey(ev tcell.Event) {
 	if a.handlePickerKey(key) {
 		return
 	}
+	// The tree selector is modal too: it owns every key while open
+	// (filters, search, labels, Enter/Esc).
+	if a.handleTreeKey(key) {
+		return
+	}
 
 	// Slash dropdown owns navigation while open (grok slash_dropdown).
 	if menuOpen {
@@ -890,6 +884,12 @@ func (a *App) handleKey(ev tcell.Event) {
 	case tcell.KeyEsc:
 		if running {
 			a.onCancel()
+			return
+		}
+		// Double-escape rewind: Esc on an empty composer opens the tree
+		// selector; a second Esc (handled by the selector) closes it.
+		if strings.TrimSpace(a.ed.Text()) == "" {
+			a.OpenTreeSelector()
 		}
 		return
 	case tcell.KeyPgUp, tcell.KeyCtrlB:
@@ -965,6 +965,13 @@ func (a *App) handleKey(ev tcell.Event) {
 			if running {
 				a.onCancel()
 			}
+			return
+		case "app.session.tree":
+			if running {
+				a.onCancel()
+				return
+			}
+			a.OpenTreeSelector()
 			return
 		case "quit":
 			if running {
@@ -1258,6 +1265,7 @@ func (a *App) draw() {
 		composerTop := h - 1 - a.composerRows()
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
+		a.drawTreeSelector(composerTop)
 		a.drawSlashDropdown(composerTop)
 		a.drawComposer(composerTop)
 		a.drawShortcuts(h - 1)
@@ -1368,6 +1376,7 @@ func (a *App) draw() {
 	// occupies composerRows() rows above the shortcuts line.
 	composerTop := h - 1 - cRows
 	a.drawSessionPicker(composerTop)
+	a.drawTreeSelector(composerTop)
 	a.drawSlashDropdown(composerTop)
 	a.drawComposer(composerTop)
 	a.drawShortcuts(h - 1)

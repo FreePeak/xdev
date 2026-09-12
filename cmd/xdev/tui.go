@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -325,7 +327,26 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.AddSystemBlock("sessions in " + cwd + " (use /resume <id-prefix>):\n" + strings.Join(lines, "\n"))
 		return nil
 	})
-	app.SetSessionTree(func() string { return store.Tree() })
+	// branchReplay rebuilds the transcript from the live leaf.
+	branchReplay := func() {
+		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		if err != nil {
+			return
+		}
+		app.Reset()
+		replayTranscript(app, res.Messages)
+		app.AddSystemBlock("· branched to " + store.LeafID()[:8] + " — replayed")
+	}
+	// branchToEntry moves the live leaf to an entry and replays the new
+	// branch's transcript into the TUI; shared by /branch and the tree
+	// selector's Enter.
+	branchToEntry := func(entryID string) error {
+		if err := store.Branch(entryID); err != nil {
+			return fmt.Errorf("branch: %v", err)
+		}
+		branchReplay()
+		return nil
+	}
 	app.SetSessionBranch(func(args string) error {
 		query := strings.TrimSpace(args)
 		if query == "" {
@@ -334,20 +355,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		for _, e := range store.Entries() {
 			env := e.Envelope()
 			if strings.HasPrefix(env.ID, query) {
-				if err := store.Branch(env.ID); err != nil {
-					return fmt.Errorf("branch: %v", err)
-				}
-				// Replay the new branch's transcript into the TUI.
-				if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
-					app.Reset()
-					replayTranscript(app, res.Messages)
-					app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
-				}
-				return nil
+				return branchToEntry(env.ID)
 			}
 		}
 		return fmt.Errorf("branch: no entry matching %q", query)
 	})
+	// /tree selector: entry rows built from the live store, labels from
+	// the dataDir sidecar (UI state — the session package stays label-free).
+	app.SetTreeData(func() []tui.TreeEntry { return treeEntries(store) })
+	app.SetTreeLabels(loadSessionLabels, saveSessionLabel)
 	app.SetLocation(cwd)
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
@@ -398,6 +414,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return err
 			}
 			return swapStoreTo(resumed)
+		},
+		// summarizeAndBranch appends the branch_summary AND moves the leaf;
+		// only the transcript refresh is left here (a second store.Branch
+		// would append a redundant marker branch).
+		SummarizeAndBranch: func(entryID string) error {
+			if err := summarizeAndBranch(store, entryID); err != nil {
+				return err
+			}
+			branchReplay()
+			return nil
 		},
 		New: func() error {
 			if !running.CompareAndSwap(false, true) {
@@ -910,4 +936,89 @@ func humanSize(n int64) string {
 		return fmt.Sprintf("%d KB", n>>10)
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// treeEntries snapshots the session entry graph as tree-selector rows:
+// file order, depth from the parent chain, active = current leaf.
+// ponytail: depth walks parents per entry (O(n·depth)); session files are
+// small — memoize if trees ever grow.
+func treeEntries(store *session.Store) []tui.TreeEntry {
+	entries := store.Entries()
+	leaf := store.LeafID()
+	parent := make(map[string]string, len(entries))
+	for _, e := range entries {
+		env := e.Envelope()
+		parent[env.ID] = env.ParentID
+	}
+	out := make([]tui.TreeEntry, 0, len(entries))
+	for _, e := range entries {
+		env := e.Envelope()
+		te := tui.TreeEntry{ID: env.ID, Type: env.Type, Active: env.ID == leaf}
+		for p := parent[env.ID]; p != "" && te.Depth < len(parent); p = parent[p] {
+			te.Depth++
+		}
+		switch t := e.(type) {
+		case *session.MessageEntry:
+			te.Role = string(t.Message.Role)
+			te.Summary = clipSummary(t.Message.Text(), 60)
+		case *session.CompactionEntry:
+			te.Summary = "(compaction)"
+		case *session.BranchSummaryEntry:
+			te.Summary = "(branch summary)"
+		case *session.ResetBoundaryEntry:
+			te.Summary = "(reset boundary)"
+		case *session.ModelChangeEntry:
+			te.Summary = t.Model
+		case *session.CustomEntry:
+			te.Summary = "(" + t.CustomType + ")"
+		}
+		out = append(out, te)
+	}
+	return out
+}
+
+// clipSummary collapses whitespace and truncates a one-line entry preview.
+func clipSummary(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+// sessionLabelsPath is the tree-selector label sidecar:
+// <dataDir>/session-labels.json, {"<entryId>": "label"}. UI state, so it
+// lives here next to the other dataDir files, not in the session store.
+func sessionLabelsPath() string {
+	return filepath.Join(config.DataDir(), "session-labels.json")
+}
+
+// loadSessionLabels returns the id→label map; a missing or malformed file
+// reads as empty (labels are advisory state, never worth failing over).
+func loadSessionLabels() map[string]string {
+	m := map[string]string{}
+	b, err := os.ReadFile(sessionLabelsPath())
+	if err != nil {
+		return m
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+// saveSessionLabel sets (or, with an empty label, clears) one entry's
+// label and rewrites the sidecar.
+func saveSessionLabel(id, label string) error {
+	m := loadSessionLabels()
+	if label == "" {
+		delete(m, id)
+	} else {
+		m[id] = label
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(sessionLabelsPath(), b, 0o644)
 }

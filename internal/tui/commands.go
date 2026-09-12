@@ -25,6 +25,10 @@ type SessionOps struct {
 	Fork             func() error
 	Dump             func() (string, error)
 	Resume           func(query string) error
+	// SummarizeAndBranch appends a branch_summary entry for the
+	// abandoned branch, then moves the leaf to entryID (tree selector
+	// Shift+Enter). nil degrades to a notice.
+	SummarizeAndBranch func(entryID string) error
 }
 
 // ModelOps wires the /model command to the live provider state (lives in
@@ -95,7 +99,7 @@ type CommandAPI interface {
 	ClearSession() error
 	DropSession() error
 	RunExtensionCommand(name, args string) (string, error)
-	SessionTree() string
+	OpenTreeSelector()
 	BranchSession(args string) error
 	KeyMap() *KeyMap
 	ForkSession() error
@@ -127,8 +131,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.DropSession() }},
 		{Name: "fork", Description: "branch the session into a new file",
 			Fn: func(app CommandAPI, args string) error { return app.ForkSession() }},
-		{Name: "tree", Description: "show the session tree",
-			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(app.SessionTree()); return nil }},
+		{Name: "tree", Description: "open the session tree navigator",
+			Fn: func(app CommandAPI, args string) error { app.OpenTreeSelector(); return nil }},
 		{Name: "branch", Description: "switch to an entry by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.BranchSession(args) }},
 		{Name: "dump", Description: "export the transcript to markdown",
