@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -50,6 +51,23 @@ type Advisor struct {
 	// boundary. Set by the host before the first Feed.
 	Primary *Agent
 
+	// Guidance (WATCHDOG.md discovery, M11 #39) is advisor-only review
+	// guidance appended to the reviewer's system prompt. Empty = none.
+	Guidance string
+	// ImmuneTurns (settings advisorImmuneTurns, default 3): after an
+	// interrupt reaches the primary, later concerns/blockers ride as
+	// non-interrupting asides for this many primary turns.
+	ImmuneTurns int
+	// SyncBacklog (settings advisorSyncBacklog, 0 = off): bounded
+	// catch-up. When the pending delta spans more than N primary turns —
+	// a backlog formed while detached or lagging — one review covers only
+	// the most recent N turns, capped at 30s.
+	SyncBacklog int
+	// Patterns (WATCHDOG.yml roster entry): when set, a delta matching no
+	// pattern is consumed without review. A pattern is a regex when it
+	// compiles, else a case-insensitive substring (see matchesPatterns).
+	Patterns []string
+
 	mu     sync.Mutex
 	cursor int // primary history length already fed
 	errs   int // consecutive feed failures (3 halts the advisor)
@@ -58,6 +76,12 @@ type Advisor struct {
 	halted       bool
 	guard        *emissionGuard
 	noteBuf      []note // notes delivered by the most recent review (for /advisor dump)
+	turns        int    // primary updates seen (the immuneTurns clock)
+	immuneUntil  int    // feed index through which interrupts ride as asides
+	// peers makes this Advisor a roster facade: Feed fans out to each
+	// peer whose Patterns match the delta (see NewAdvisorRoster). A
+	// facade's own Provider/Tools/cursor are unused.
+	peers []*Advisor
 }
 
 type note struct {
@@ -71,12 +95,39 @@ func NewAdvisor(prov ai.Provider, model string, reg *tool.Registry) *Advisor {
 	return &Advisor{Provider: prov, Model: model, Tools: reg, guard: newEmissionGuard()}
 }
 
+// NewAdvisorRoster builds a facade over the WATCHDOG.yml advisor roster
+// (M11 #39): Feed fans out to every peer whose Patterns match the delta,
+// so several named reviewers can watch the same run on different beats. A
+// peer without patterns reviews every delta. Primary set on the facade
+// propagates to its peers at feed time.
+func NewAdvisorRoster(peers []*Advisor) *Advisor {
+	return &Advisor{peers: peers}
+}
+
 // Feed reviews the primary history delta since the last call. One review
 // = one provider round-trip on a fresh single-turn session: stateless per
 // feed, so the advisor never sees its own past advice replayed. Safe to
 // call concurrently with the primary's turns (it only reads a snapshot).
 func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
-	if a == nil || a.Provider == nil || a.halted {
+	if a == nil {
+		return
+	}
+	if len(a.peers) > 0 {
+		// Roster facade: every peer reviews the same snapshot, each gated
+		// by its own patterns. One goroutine per peer — a review is its
+		// own provider round-trip and the peers are independent.
+		for _, p := range a.peers {
+			if p == nil {
+				continue
+			}
+			if p.Primary == nil {
+				p.Primary = a.Primary // the host sets Primary on the facade
+			}
+			go p.Feed(ctx, primaryHistory)
+		}
+		return
+	}
+	if a.Provider == nil || a.halted {
 		return
 	}
 	a.mu.Lock()
@@ -84,7 +135,24 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 		a.mu.Unlock()
 		return // nothing new
 	}
-	delta := renderAdvisorDelta(primaryHistory[a.cursor:])
+	a.turns++ // the immuneTurns clock ticks once per primary update
+	start := a.cursor
+	skipped := 0
+	if a.SyncBacklog > 0 {
+		// Bounded catch-up: one review covers at most N turns.
+		if n := countTurns(primaryHistory[start:]) - a.SyncBacklog; n > 0 {
+			start = indexAfterTurns(primaryHistory, start, n)
+			skipped = n
+		}
+	}
+	delta := renderAdvisorDelta(primaryHistory[start:])
+	if !matchesPatterns(a.Patterns, delta) {
+		// Not this reviewer's beat: consume the delta so it cannot pile
+		// up into every later review.
+		a.cursor = len(primaryHistory)
+		a.mu.Unlock()
+		return
+	}
 	a.cursorBefore = a.cursor
 	a.cursor = len(primaryHistory)
 	a.noteBuf = nil
@@ -104,16 +172,43 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 		if delivered.Add(1) > 1 {
 			return // one note per review (omp emission guard)
 		}
+		interrupting := sev == AdviseConcern || sev == AdviseBlocker
+		aside := false
 		a.mu.Lock()
 		a.noteBuf = append(a.noteBuf, note{Severity: sev, Text: text})
+		target := a.Primary
+		if target != nil && interrupting {
+			// A recent interrupt buys the primary quiet: later
+			// concerns/blockers ride as asides until the window closes
+			// (advisor.immuneTurns). The interrupt itself arms the window.
+			if a.turns <= a.immuneUntil {
+				aside = true
+			} else if n := a.effectiveImmuneTurns(); n > 0 {
+				a.immuneUntil = a.turns + n
+			}
+		}
 		a.mu.Unlock()
-		// All severities steer into the primary: the steering queue
-		// delivers at the next step boundary (the batched-aside
-		// channel). The severity rides the text so the primary can
-		// weigh it.
-		a.Primary.Steer("advisor (" + sev + "): " + text)
+		if target == nil {
+			return // unwired review: the note stays in the dump
+		}
+		// Every severity steers into the primary: the steering queue
+		// delivers at the next step boundary (the batched-aside channel).
+		// The severity rides the text so the primary can weigh it.
+		if aside {
+			target.Steer("advisor aside (" + sev + "): " + text)
+			return
+		}
+		target.Steer("advisor (" + sev + "): " + text)
 	})
 	defer adviseTool.setSink(nil)
+
+	// A bounded catch-up review is capped at 30s; an unbounded review
+	// rides the caller's context.
+	if a.SyncBacklog > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, advisorBacklogCap)
+		defer cancel()
+	}
 
 	ag := &Agent{
 		Provider: a.Provider,
@@ -124,7 +219,7 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 	hist := []ai.Message{
 		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "delta to review:\n\n" + delta}}},
 	}
-	if _, err := ag.Run(ctx, AdvisorSystemPrompt, hist); err != nil {
+	if _, err := ag.Run(ctx, a.sysPrompt(), hist); err != nil {
 		a.mu.Lock()
 		a.errs++
 		if a.errs >= 3 {
@@ -138,35 +233,67 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 	a.mu.Lock()
 	a.errs = 0
 	before := a.cursorBefore
-	total := len(primaryHistory)
 	a.mu.Unlock()
-	logx.Debugf("advisor: reviewed entries %d..%d, %d note(s)", before, total, delivered.Load())
+	logx.Debugf("advisor: reviewed entries %d..%d (%d turn(s) skipped), %d note(s)",
+		before, len(primaryHistory), skipped, delivered.Load())
 }
 
-// Halted reports whether repeated failures stopped the advisor.
+// Halted reports whether repeated failures stopped the advisor. On a
+// roster facade it reports halted only when every peer has halted.
 func (a *Advisor) Halted() bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.halted
+	peers, halted := a.peers, a.halted
+	a.mu.Unlock()
+	if len(peers) == 0 {
+		return halted
+	}
+	for _, p := range peers {
+		if p != nil && !p.Halted() {
+			return false
+		}
+	}
+	return true
 }
 
-// Dump returns the notes delivered by the most recent review.
+// Dump returns the notes delivered by the most recent review. A roster
+// facade aggregates its peers.
 func (a *Advisor) Dump() []note {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return append([]note(nil), a.noteBuf...)
+	peers := a.peers
+	out := append([]note(nil), a.noteBuf...)
+	a.mu.Unlock()
+	for _, p := range peers {
+		if p != nil {
+			out = append(out, p.Dump()...)
+		}
+	}
+	return out
 }
 
 // Reset rewinds the feed cursor (compaction / session switch / branch):
 // the advisor re-reads from the current history boundary, not the whole
-// transcript.
+// transcript. It also clears the immuneTurns window. A roster facade
+// resets every peer.
 func (a *Advisor) Reset(primaryHistory []ai.Message) {
+	if a == nil {
+		return
+	}
+	if len(a.peers) > 0 {
+		for _, p := range a.peers {
+			if p != nil {
+				p.Reset(primaryHistory)
+			}
+		}
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cursor = len(primaryHistory)
 	a.errs = 0
 	a.halted = false
 	a.noteBuf = nil
+	a.turns = 0
+	a.immuneUntil = 0
 	if g := a.guard; g != nil {
 		g.mu.Lock()
 		g.seen = map[string]bool{}
@@ -324,4 +451,50 @@ func (g *emissionGuard) allow(sev, text string) bool {
 		g.fifo = g.fifo[1:]
 	}
 	return true
+}
+
+// advisorBacklogCap bounds one catch-up review when SyncBacklog is on.
+const advisorBacklogCap = 30 * time.Second
+
+// effectiveImmuneTurns is the immune window actually applied (default 3).
+func (a *Advisor) effectiveImmuneTurns() int {
+	if a.ImmuneTurns > 0 {
+		return a.ImmuneTurns
+	}
+	return 3
+}
+
+// sysPrompt is the reviewer's contract plus WATCHDOG.md guidance.
+func (a *Advisor) sysPrompt() string {
+	if a.Guidance == "" {
+		return AdvisorSystemPrompt
+	}
+	return AdvisorSystemPrompt + "\n\nEspecially pay attention to:\n<attention>\n" + a.Guidance + "\n</attention>"
+}
+
+// countTurns counts primary turns in msgs: one assistant message each.
+func countTurns(msgs []ai.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Role == ai.RoleAssistant {
+			n++
+		}
+	}
+	return n
+}
+
+// indexAfterTurns returns the index just past the nth assistant message
+// at or after start, so a caller can skip that many whole turns.
+func indexAfterTurns(msgs []ai.Message, start, skip int) int {
+	seen := 0
+	for i := start; i < len(msgs); i++ {
+		if msgs[i].Role != ai.RoleAssistant {
+			continue
+		}
+		seen++
+		if seen == skip {
+			return i + 1
+		}
+	}
+	return start
 }

@@ -55,6 +55,19 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// AdvisorSyncBacklog (M11 #39; the omp key is advisor.syncBacklog):
+	// bounded catch-up for the advisor review — the number of primary
+	// turns one feed may span before older turns are skipped (a catch-up
+	// review is capped at 30s). 0 = off, else 1|3|5.
+	AdvisorSyncBacklog int `yaml:"advisorSyncBacklog"`
+	// AdvisorImmuneTurns (M11 #39; omp advisor.immuneTurns, default 3):
+	// after an advisor interrupt, later concerns/blockers ride as
+	// non-interrupting asides for this many primary turns.
+	AdvisorImmuneTurns int `yaml:"advisorImmuneTurns"`
+	// TaskAgentAdvisor (M11 #39; omp task.agentAdvisor) attaches an
+	// advisor to spawned subagents: "on" (the modelRoles.advisor model),
+	// "off" (the default), or an explicit model reference.
+	TaskAgentAdvisor string `yaml:"taskAgentAdvisor"`
 }
 
 // defaultSettings is the schema-defaults layer.
@@ -69,15 +82,16 @@ func memoryOrDefault(v string) string {
 func defaultSettings() *Settings {
 	show := true
 	return &Settings{
-		Theme:            "auto",
-		ApprovalMode:     "yolo",
-		MemoryLimit:      100 << 20,
-		MaxTurns:         200,
-		ModelRoles:       map[string]string{},
-		ToolsApproval:    map[string]string{},
-		ModelRolesEffort: map[string]string{},
-		Hooks:            map[string]any{},
-		ShowThinking:     &show,
+		Theme:              "auto",
+		ApprovalMode:       "yolo",
+		MemoryLimit:        100 << 20,
+		MaxTurns:           200,
+		ModelRoles:         map[string]string{},
+		ToolsApproval:      map[string]string{},
+		ModelRolesEffort:   map[string]string{},
+		Hooks:              map[string]any{},
+		ShowThinking:       &show,
+		AdvisorImmuneTurns: 3,
 	}
 }
 
@@ -187,6 +201,15 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	if layer.AdvisorSyncBacklog != 0 {
+		s.AdvisorSyncBacklog = layer.AdvisorSyncBacklog
+	}
+	if layer.AdvisorImmuneTurns != 0 {
+		s.AdvisorImmuneTurns = layer.AdvisorImmuneTurns
+	}
+	if layer.TaskAgentAdvisor != "" {
+		s.TaskAgentAdvisor = layer.TaskAgentAdvisor
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
@@ -323,6 +346,21 @@ func List(s *Settings, globalPath string) []string {
 	for _, k := range keys {
 		out = append(out, "modelRoles."+k+" "+maskCred(s.ModelRoles[k]))
 	}
+	backlog := "off"
+	if s.AdvisorSyncBacklog > 0 {
+		backlog = fmt.Sprint(s.AdvisorSyncBacklog)
+	}
+	immune := s.AdvisorImmuneTurns
+	if immune == 0 {
+		immune = 3
+	}
+	taskAdvisor := s.TaskAgentAdvisor
+	if taskAdvisor == "" {
+		taskAdvisor = "off"
+	}
+	out = append(out, "advisorSyncBacklog "+backlog,
+		"advisorImmuneTurns "+fmt.Sprint(immune),
+		"taskAgentAdvisor "+taskAdvisor)
 	out = append(out, "config "+globalPath)
 	if len(s.DisabledProviders) > 0 {
 		out = append(out, "disabledProviders "+strings.Join(s.DisabledProviders, ","))
