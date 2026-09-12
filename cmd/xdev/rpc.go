@@ -33,6 +33,10 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// --thinking overrides whatever the model role pinned.
+	if effortRef, err = applyThinkingFlag(launch.Thinking, effortRef); err != nil {
+		return 2, err
+	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
 		return 2, err
@@ -68,7 +72,8 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		cwd: cwd, buildSys: buildSys, reg: reg, cfg: cfg,
 		provName: provName, modelName: modelName,
 		maxTokens: opts.MaxTokens, maxTurns: opts.MaxTurns,
-		store: store,
+		maxTime: launch.MaxTime,
+		store:   store,
 	}
 	h.agent = &agent.Agent{
 		Provider: prov, Tools: reg, Store: store, Model: modelName,
@@ -125,6 +130,10 @@ type rpcHandler struct {
 	cfg                 *config.Config
 	provName, modelName string
 	maxTokens, maxTurns int
+	// maxTime is --max-time: one prompt may not outlive it (0 = uncapped).
+	// The server itself is long-lived, so the cap is per turn — bounding
+	// the process would end the session the client is still driving.
+	maxTime time.Duration
 }
 
 // --- rpc.Handler ---
@@ -146,7 +155,7 @@ func (h *rpcHandler) Prompt(id, text string) {
 	if err := h.store.Append(&session.MessageEntry{Message: user}); err != nil {
 		logx.Errorf("persist user message: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := boundedCtx(context.Background(), h.maxTime)
 	h.cancel = cancel
 	hist := h.historyLocked()
 	h.mu.Unlock()
