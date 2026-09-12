@@ -31,6 +31,9 @@ type printOptions struct {
 	ContinueLast bool
 	SystemPrompt string
 	AppendSystem string
+	// Personality is the preset tail (default|friendly|pragmatic|none);
+	// empty falls back to settings.personality. PERSONALITY.md beats it.
+	Personality  string
 	ResumePrefix string
 	MaxTurns     int
 	MaxTokens    int
@@ -149,6 +152,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 	// --- system prompt ---
 	overrides := agent.LoadSystemPromptOverrides(cwd)
+	preset := opts.Personality
+	if preset == "" && settings != nil {
+		preset = settings.Personality
+	}
+	if err := overrides.ApplyPersonalityPreset(preset); err != nil {
+		return 2, err
+	}
 	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
 		tailSystemPrompt(overrides, opts.AppendSystem), buildMemory(settings))
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
@@ -386,10 +396,14 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 }
 
 // tailSystemPrompt composes the after-tools tail of the system prompt:
-// PERSONALITY.md (who the agent is) then APPEND_SYSTEM.md / the flag
-// (extra instructions). A discovered PERSONALITY.md must actually reach
-// the prompt — the field was previously set but never consumed.
+// PERSONALITY.md (who the agent is, or the resolved personality preset —
+// see ApplyPersonalityPreset; the file beats the preset) then
+// APPEND_SYSTEM.md / the flag (extra instructions). A discovered
+// PERSONALITY.md must actually reach the prompt — the field was
+// previously set but never consumed. The flag goes through omp's
+// text-or-file resolution.
 func tailSystemPrompt(overrides agent.SystemPromptOverrides, flagAppend string) string {
+	flagAppend = resolvePromptFlag(flagAppend)
 	var b strings.Builder
 	if overrides.Personality != "" {
 		b.WriteString(overrides.Personality)
@@ -408,16 +422,36 @@ func tailSystemPrompt(overrides agent.SystemPromptOverrides, flagAppend string) 
 	return b.String()
 }
 
-// basePrompt resolves the system prompt base: --system-prompt flag →
-// SYSTEM.md (project, then user) → the built-in default.
+// basePrompt resolves the system prompt base: --system-prompt flag
+// (text, or a file path — see resolvePromptFlag) → SYSTEM.md (project,
+// then user) → the built-in default.
 func basePrompt(opts printOptions, cwd string) string {
 	if opts.SystemPrompt != "" {
-		return opts.SystemPrompt
+		if flagPrompt := resolvePromptFlag(opts.SystemPrompt); flagPrompt != "" {
+			return flagPrompt
+		}
 	}
 	if o := agent.LoadSystemPromptOverrides(cwd); o.System != "" {
 		return o.System
 	}
 	return agent.SystemPromptBase
+}
+
+// resolvePromptFlag applies omp's text-or-file semantics to the
+// --system-prompt / --append-system-prompt values: a single-line value
+// that names a readable file is loaded verbatim (relative paths resolve
+// against the process cwd, which is the session cwd); multi-line values
+// and unreadable paths stay literal. An unreadable path is not an error
+// — it is simply a literal prompt.
+func resolvePromptFlag(v string) string {
+	if v == "" || strings.ContainsRune(v, '\n') {
+		return v
+	}
+	raw, err := os.ReadFile(v)
+	if err != nil {
+		return v
+	}
+	return string(raw)
 }
 
 // hasStoredCredential reports whether credentials.json holds anything for a
@@ -803,6 +837,10 @@ func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, er
 			}
 		}
 	}
+	// Titles are mechanical (M10 #32): no ai-title call exists yet, so
+	// TITLE_SYSTEM.md is discovered but unused — agent.SystemPromptOverrides
+	// .TitleSystemPrompt() is where a model-generated title would read its
+	// prompt override.
 	title := "print " + time.Now().Format("2006-01-02 15:04")
 	if cont {
 		title = "continued " + title

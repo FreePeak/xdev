@@ -180,3 +180,79 @@ func TestPersonalityReachesThePrompt(t *testing.T) {
 		t.Fatalf("empty overrides should yield empty, got %q", got)
 	}
 }
+
+// TestSystemPromptFlagTextOrFile pins omp's text-or-file semantics for
+// --system-prompt / --append-system-prompt: a single-line value naming an
+// existing file loads the file, multi-line or unreadable values stay
+// literal.
+func TestSystemPromptFlagTextOrFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prompt.md")
+	os.WriteFile(path, []byte("file prompt"), 0o644)
+
+	if got := resolvePromptFlag(path); got != "file prompt" {
+		t.Fatalf("file value = %q", got)
+	}
+	if got := resolvePromptFlag("Be terse."); got != "Be terse." {
+		t.Fatalf("literal single line = %q", got)
+	}
+	multi := "line one\nline two"
+	if got := resolvePromptFlag(multi); got != multi {
+		t.Fatalf("multi-line must stay literal, got %q", got)
+	}
+	// An unreadable path is a literal prompt, never an error.
+	missing := filepath.Join(dir, "nope.md")
+	if got := resolvePromptFlag(missing); got != missing {
+		t.Fatalf("missing path = %q", got)
+	}
+	if got := resolvePromptFlag(""); got != "" {
+		t.Fatalf("empty = %q", got)
+	}
+}
+
+// TestPromptFlagsLoadFiles: the resolved file content is what
+// basePrompt/tailSystemPrompt hand the agent.
+func TestPromptFlagsLoadFiles(t *testing.T) {
+	proj := t.TempDir()
+	sysFile := filepath.Join(t.TempDir(), "sys.md")
+	appendFile := filepath.Join(t.TempDir(), "append.md")
+	os.WriteFile(sysFile, []byte("from the sys file"), 0o644)
+	os.WriteFile(appendFile, []byte("from the append file"), 0o644)
+
+	if got := basePrompt(printOptions{SystemPrompt: sysFile}, proj); got != "from the sys file" {
+		t.Fatalf("base = %q", got)
+	}
+	if got := tailSystemPrompt(agent.SystemPromptOverrides{}, appendFile); got != "from the append file" {
+		t.Fatalf("tail = %q", got)
+	}
+}
+
+// TestPersonalityPresetReachesThePrompt: the resolved preset paragraph is
+// composed into the tail, and a PERSONALITY.md file beats it.
+func TestPersonalityPresetReachesThePrompt(t *testing.T) {
+	proj := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+
+	ov := agent.LoadSystemPromptOverrides(proj)
+	if err := ov.ApplyPersonalityPreset("pragmatic"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tailSystemPrompt(ov, ""); got != agent.PersonalityPresets["pragmatic"] {
+		t.Fatalf("preset tail = %q", got)
+	}
+
+	// PERSONALITY.md beats the preset.
+	os.WriteFile(filepath.Join(proj, "PERSONALITY.md"), []byte("file persona"), 0o644)
+	ov = agent.LoadSystemPromptOverrides(proj)
+	if err := ov.ApplyPersonalityPreset("pragmatic"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tailSystemPrompt(ov, ""); got != "file persona" {
+		t.Fatalf("file should beat the preset, got %q", got)
+	}
+
+	// An unknown preset never reaches a run.
+	if err := (&agent.SystemPromptOverrides{}).ApplyPersonalityPreset("moody"); err == nil {
+		t.Fatal("unknown preset must error")
+	}
+}
