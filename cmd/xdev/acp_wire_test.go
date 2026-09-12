@@ -69,19 +69,14 @@ func startACPClient(t *testing.T, h acp.Handler) *acpClient {
 			if err != nil {
 				return
 			}
-			var length int
-			if _, err := fmt.Sscanf(strings.TrimSpace(line), "Content-Length: %d", &length); err != nil {
-				return
-			}
-			if _, err := r.ReadString('\n'); err != nil { // blank line
-				return
-			}
-			body := make([]byte, length)
-			if _, err := io.ReadFull(r, body); err != nil {
-				return
+			// Newline-delimited JSON: the ACP transport (T5). The client
+			// half speaks what an editor speaks, not what xdev used to emit.
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
 			}
 			var m map[string]any
-			if err := json.Unmarshal(body, &m); err != nil {
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
 				return
 			}
 			c.frames <- m
@@ -103,7 +98,7 @@ func (c *acpClient) send(id any, method string, params any) {
 	if err != nil {
 		c.t.Fatalf("marshal %s: %v", method, err)
 	}
-	if _, err := fmt.Fprintf(c.w, "Content-Length: %d\r\n\r\n%s", len(body), body); err != nil {
+	if _, err := fmt.Fprintf(c.w, "%s\n", body); err != nil {
 		c.t.Fatalf("write %s: %v", method, err)
 	}
 }

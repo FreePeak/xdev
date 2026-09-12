@@ -5,58 +5,83 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 )
 
-// maxFrame caps one decoded frame: a corrupt Content-Length must not make
-// xdev allocate it.
+// maxFrame caps one decoded frame: a runaway peer line must not make xdev
+// allocate without bound.
 const maxFrame = 16 << 20
 
-// writeFrame writes one Content-Length framed body.
+// errFrameTooLong ends the read loop when a single line exceeds maxFrame.
+var errFrameTooLong = errors.New("acp: frame exceeds the size cap")
+
+// writeFrame writes one newline-delimited JSON frame.
+//
+// ACP frames messages with a single '\n' after the JSON body — it is NOT the
+// LSP/DAP `Content-Length: <n>\r\n\r\n` header block. xdev spoke LSP framing
+// here (the comment said "LSP-style" and meant it), so an editor reading the
+// session stream line-by-line saw a header line, then a bare JSON body with no
+// delimiter it trusted: nothing parsed (parity finding T5; omp writes
+// `JSON.stringify(msg) + "\n"`).
 func writeFrame(w io.Writer, body []byte) error {
-	if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
+	if _, err := w.Write(body); err != nil {
 		return err
 	}
-	_, err := w.Write(body)
+	_, err := w.Write([]byte{'\n'})
 	return err
 }
 
-// readFrame reads one Content-Length framed body. Header names are matched
-// case-insensitively (the spec says so) and unknown headers are skipped. The
-// stream's end is reported as io.EOF.
+// newReader builds the frame reader with the size cap baked into the buffer,
+// so an over-long line fails fast instead of growing the buffer forever.
+func newReader(r io.Reader) *bufio.Reader {
+	return bufio.NewReaderSize(r, 64<<10)
+}
+
+// readFrame reads one newline-delimited JSON frame. Blank lines are skipped (a
+// peer may emit them between messages); the stream's end is reported as io.EOF
+// and an over-long line as errFrameTooLong.
+//
+// The line is assembled with ReadSlice, NOT ReadString: ReadString grows its
+// buffer to fit any line, so a peer that sends 16 MB of JSON with no newline
+// would be buffered in full before anything could reject it. ReadSlice returns
+// bufio.ErrBufferFull at the buffer boundary, which is what makes maxFrame
+// real.
 func readFrame(r *bufio.Reader) ([]byte, error) {
-	length := -1
+	var (
+		frame []byte
+		seen  int
+	)
 	for {
-		line, err := r.ReadString('\n')
+		chunk, err := r.ReadSlice('\n')
+		if len(chunk) > 0 {
+			seen += len(chunk)
+			if seen > maxFrame {
+				return nil, fmt.Errorf("%w (cap %d bytes)", errFrameTooLong, maxFrame)
+			}
+			// ReadSlice returns a slice valid only until the next read, so the
+			// bytes are copied into the growing frame.
+			frame = append(frame, chunk...)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue // long line so far: keep accumulating under the cap
+		}
 		if err != nil {
+			if errors.Is(err, io.EOF) && len(strings.TrimSpace(string(frame))) > 0 {
+				// A final line without a trailing newline is still a frame.
+				return trimFrame(frame), nil
+			}
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break // end of headers
+		trimmed := trimFrame(frame)
+		if len(trimmed) == 0 {
+			frame, seen = nil, 0
+			continue // blank separator line between messages
 		}
-		k, v, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(k), "Content-Length") {
-			n, err := strconv.Atoi(strings.TrimSpace(v))
-			if err != nil {
-				return nil, fmt.Errorf("bad Content-Length %q", v)
-			}
-			length = n
-		}
+		return trimmed, nil
 	}
-	if length < 0 {
-		return nil, errors.New("frame missing Content-Length")
-	}
-	if length > maxFrame {
-		return nil, fmt.Errorf("frame of %d bytes exceeds the %d byte cap", length, maxFrame)
-	}
-	body := make([]byte, length)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, err
-	}
-	return body, nil
+}
+
+// trimFrame strips the line terminator and surrounding space from one frame.
+func trimFrame(b []byte) []byte {
+	return []byte(strings.TrimSpace(strings.TrimRight(string(b), "\r\n")))
 }
