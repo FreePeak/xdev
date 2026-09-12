@@ -18,7 +18,6 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/fscache"
-	hookbus "github.com/FreePeak/xdev/internal/hooks"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/theme"
@@ -253,6 +252,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// transcript and points hooks/agent at it.
 	swapStoreTo = func(ns *session.Store) error {
 		old := store
+		bus := buildHookBus(cwd, opts) // resolved per switch: /settings edits land
+		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
 		store = ns
 		ts.store = ns
 		wireTaskParent(reg, ns)
@@ -262,6 +263,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			replayTranscript(app, res.Messages)
 		}
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
+		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
 		_ = old
 		return nil
 	}
@@ -750,12 +752,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				}
 				// Extension actions steer the live run: this agent is the
 				// target until the next submit replaces it.
+				// Hook bus per submit: --hook specs, settings `hooks`, discovered
+				// files. Extensions compose into the same fail-closed chain.
+				hookBus := buildHookBus(cwd, opts)
 				agentMu.Lock()
 				curAgent = ag
-				hookBus := hookbus.FromSettings(lastSettings().Hooks)
 				if c := agent.NewChain(hookBus, exts); c != nil {
 					ag.Intercept = c
 				}
+				ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
 				agentMu.Unlock()
 				defer func() {
 					agentMu.Lock()
@@ -765,7 +770,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				sessMu.Lock()
 				hist := rebuildHistory() // store mirror is authoritative
 				sessMu.Unlock()
-				_, err := ag.Run(ctx, buildSys(), hist)
+				_, err := ag.Run(ctx, hookBus.Context(ctx, buildSys()), hist)
 				app.EndAssistant()
 				app.FinishRun()
 				if err != nil {
@@ -1188,4 +1193,27 @@ func saveSessionLabel(id, label string) error {
 		return err
 	}
 	return os.WriteFile(sessionLabelsPath(), b, 0o644)
+}
+
+// switchEmitter is the slice of the hook bus the session-switch events
+// need. It is an interface (not *hooks.Bus) so tests can record emissions
+// with a stub; a nil bus is safe (Bus methods are nil-tolerant).
+type switchEmitter interface {
+	Emit(ctx context.Context, event string, payload any)
+}
+
+// emitSwitchEvents notifies the hook bus around a session switch (omp
+// `session_before_switch` / `session_switch`, research §4). before=true
+// fires ahead of the store swap so a hook can observe the outgoing
+// session; the second call fires once the new session is live. Emissions
+// are best-effort: a broken hook never blocks a switch.
+func emitSwitchEvents(bus switchEmitter, before bool, to, title string) {
+	if bus == nil {
+		return
+	}
+	event := "session_switch"
+	if before {
+		event = "session_before_switch"
+	}
+	bus.Emit(context.Background(), event, map[string]any{"session": to, "title": title})
 }
