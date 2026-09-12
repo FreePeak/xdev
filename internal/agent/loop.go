@@ -178,6 +178,10 @@ type Agent struct {
 	// Policy is the approval configuration; Approve prompts the user when a
 	// decision requires it (nil means an unattended run: prompts deny).
 	Policy tool.ApprovalPolicy
+	// MemoryContext returns the extra context a compaction summary must see
+	// (the remote backend's recalled memories). nil = nothing extra — the
+	// transcript alone. #86: CompactionContext existed with no caller.
+	MemoryContext func() string
 	// Rulebook returns the guidance of rules scoped to a touched path (globs
 	// from .cursor/rules, RULES.md, plugin rulebooks). Called after a
 	// successful edit/write so a path-scoped rulebook reaches the model on the

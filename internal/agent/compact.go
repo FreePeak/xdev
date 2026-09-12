@@ -270,15 +270,25 @@ func (a *Agent) persistCompaction(entry *session.CompactionEntry) error {
 // provider call (no tools; hard MaxTokens clamp). It is the in-turn
 // spelling of summarizeWith; the async trigger keeps its own snapshot.
 func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error) {
-	return summarizeWith(ctx, a.Provider, a.Model, msgs)
+	extra := ""
+	if a.MemoryContext != nil {
+		extra = strings.TrimSpace(a.MemoryContext())
+	}
+	return summarizeWith(ctx, a.Provider, a.Model, msgs, extra)
 }
 
 // summarizeWith is summarize against a provider/model snapshot: the async
 // job runs on its own goroutine, and a failover can move a.Provider or
 // a.Model while that call is in flight, so the background job must carry
 // copies rather than read the live fields.
-func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message) (string, error) {
+func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message, memoryContext string) (string, error) {
 	var b strings.Builder
+	if memoryContext != "" {
+		// #86: a compaction summary that forgets the recalled memories loses
+		// them for the rest of the session. The backend's context rides
+		// ahead of the transcript so the summarizer keeps what it must.
+		b.WriteString("Recalled memories to preserve:\n\n" + memoryContext + "\n\n")
+	}
 	b.WriteString("Conversation transcript:\n\n")
 	for i := range msgs {
 		role := string(msgs[i].Role)

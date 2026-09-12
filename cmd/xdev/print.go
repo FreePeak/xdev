@@ -244,6 +244,11 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 		ag.Compaction.IdleAfter = settings.CompactionIdleAfter()
 		ag.Compaction.Async = settings.CompactionAsyncOn()
 	}
+	// #86: a compaction summary must carry the memories the remote backend
+	// recalled, or they are lost for the rest of the session.
+	if h := hindsightFrom(settings); h != nil {
+		ag.MemoryContext = h.CompactionContext
+	}
 	st := ag.ArmFallback(settings, role)
 	if st != nil {
 		st.Rotate = func(provider string) (ai.Provider, bool) {

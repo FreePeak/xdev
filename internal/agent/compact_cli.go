@@ -95,7 +95,7 @@ func (p *CompactPlan) Compact(ctx context.Context, method string, provider ai.Pr
 		if provider == nil {
 			return ai.Message{}, fmt.Errorf("method handoff needs a reachable provider; use --method shake for an offline compaction")
 		}
-		text, err := summarizeWith(ctx, provider, model, span.msgs[:span.cut])
+		text, err := summarizeWith(ctx, provider, model, span.msgs[:span.cut], "")
 		if err != nil {
 			return ai.Message{}, fmt.Errorf("compaction: handoff: %w", err)
 		}
