@@ -22,6 +22,15 @@ type LearnTool struct {
 	// resolved against when reporting shadowing. Empty means the process
 	// working directory — the same anchor skill:// already uses.
 	Cwd string
+	// Redactor scrubs configured secrets from a lesson BEFORE it is written.
+	// Until now this was an instruction in the consolidation prompt only, so
+	// a model that ignored it stored a live credential in learned.md, which is
+	// re-injected into every later session (#88).
+	Redactor func(text string) string
+	// Disabled refuses the tool outright (settings autolearn.enabled=false):
+	// lesson capture is off, and the model is told rather than silently
+	// succeeding.
+	Disabled bool
 }
 
 const LearnToolName = "learn"
@@ -68,8 +77,19 @@ func (t *LearnTool) Execute(_ context.Context, args json.RawMessage) (tool.Resul
 	if err := json.Unmarshal(args, &a); err != nil {
 		return tool.Result{Text: "learn: malformed arguments: " + err.Error(), IsError: true}, nil
 	}
+	if t.Disabled {
+		return tool.Result{Text: "learn: disabled (set autolearn.enabled true to record lessons)", IsError: true}, nil
+	}
 	if strings.TrimSpace(a.Memory) == "" {
 		return tool.Result{Text: "learn: memory is required", IsError: true}, nil
+	}
+	if t.Redactor != nil {
+		a.Memory = t.Redactor(a.Memory)
+		a.Context = t.Redactor(a.Context)
+		if a.Skill != nil {
+			a.Skill.Body = t.Redactor(a.Skill.Body)
+			a.Skill.Description = t.Redactor(a.Skill.Description)
+		}
 	}
 	// The lesson is stored FIRST: a skill problem must not lose it.
 	if err := t.Backend.SaveLesson(a.Memory, a.Context); err != nil {

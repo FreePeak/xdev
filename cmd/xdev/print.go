@@ -232,7 +232,7 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	if reg != nil {
 		ag.WireCatalog(reg.Catalog())
 	}
-	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
+	ag.Redactor = redactorFor(cwd)
 	// M5 #25 depth (#84): arm the fallback state so the reserve policy,
 	// cooldown revert and credential rotation actually run — the engine was
 	// complete and unit-tested with no production caller, so a spent key
@@ -303,6 +303,26 @@ func ruleNames(rs []rules.Rule) []string {
 		out[i] = r.Name
 	}
 	return out
+}
+
+// redactorFor opens the secrets redactor for one workspace, memoized per
+// directory: the agent loop and the learn tool must scrub with the SAME
+// configured values, and re-reading secrets.yml per registration is a wasted
+// open on every model switch.
+var (
+	redactorMu    sync.Mutex
+	redactorCache = map[string]*config.Redactor{}
+)
+
+func redactorFor(cwd string) *config.Redactor {
+	redactorMu.Lock()
+	defer redactorMu.Unlock()
+	if r, ok := redactorCache[cwd]; ok {
+		return r
+	}
+	r := config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
+	redactorCache[cwd] = r
+	return r
 }
 
 // modelRoleRef returns the role name a model reference was resolved from
@@ -1237,6 +1257,9 @@ func buildLocalMemory(settings *config.Settings) *memory.Backend {
 		return nil
 	}
 	b := &memory.Backend{Dir: filepath.Join(config.DataDir(), "memory")}
+	if cap := settings.LessonCapOrDefault(); cap > 0 {
+		b.LessonCap = cap // #88: the prompt window was a constant, not a setting
+	}
 	if err := b.Ensure(); err != nil {
 		logx.Errorf("memory: cannot create %s, disabling: %v", b.Dir, err)
 		return nil
@@ -1476,11 +1499,20 @@ func (h mnemopiTurnHooks) OnTurnEnd(s ai.StopReason, err error) {
 // recall, retain, reflect and the bounded memory_edit, while the remote
 // Hindsight backend exposes recall/retain/reflect and deliberately no
 // memory_edit (upstream memories are not edited through this backend).
-func registerMemoryTools(reg *tool.Registry, mem memory.Store) {
+func registerMemoryTools(reg *tool.Registry, mem memory.Store, settings *config.Settings, cwd string) {
 	if reg == nil || mem == nil {
 		return
 	}
-	reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
+	reg.Register(&memory.LearnTool{
+		Backend:   mem,
+		SkillsDir: skills.ManagedRoot(),
+		// #88: secrets are scrubbed at write time (the prompt-level
+		// instruction alone let a live credential into learned.md, which is
+		// re-injected into every later session), and autolearn.enabled can
+		// turn the recorder off.
+		Redactor: func(text string) string { return redactorFor(cwd).Apply(text) },
+		Disabled: !settings.AutolearnOn(),
+	})
 	switch m := mem.(type) {
 	case *memory.Mnemopi:
 		reg.Register(&memory.MnemopiRecallTool{Mem: m})
@@ -1688,7 +1720,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// a branch summary; wireTaskParent binds the live session.
 	reg.Register(&tool.CheckpointTool{})
 	reg.Register(&tool.RewindTool{})
-	registerMemoryTools(reg, buildMemory(settings))
+	registerMemoryTools(reg, buildMemory(settings), settings, cwd)
 	// M13 #52: language-server queries. Servers launch lazily on the first
 	// lsp call (lsp.lazy: false opts into eager warmup).
 	// --no-lsp: never register it, so no server is spawned and Prewarm is
@@ -1711,9 +1743,15 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// built from the finished registry: notes-backed rollover stays disabled
 	// unless context_notes, new_context, read and grep are all active.
 	notes := agent.NewNotesState(reg, nil)
-	reg.Register(&agent.NotesTool{Notes: notes})
-	reg.Register(&agent.NewContextTool{Notes: notes})
-	tool.RegisterURIScheme("history", notes.ResolveHistory)
+	// #88: the gate now exists (omp ships these tools opt-in because
+	// rollover changes what the model sees mid-session). Unregistered tools
+	// also leave the notes-backed rollover unreachable, which is exactly the
+	// conservative default the gate asks for.
+	if settings.ExperimentalContextManagementOn() {
+		reg.Register(&agent.NotesTool{Notes: notes})
+		reg.Register(&agent.NewContextTool{Notes: notes})
+		tool.RegisterURIScheme("history", notes.ResolveHistory)
+	}
 	// M13 #54: deferred tool catalog. The long tail leaves the eager tool
 	// schema and the prompt recap (Registry.Defs omits it) and is listed as a
 	// one-line index instead; the model finds it with tool_search, reads its
