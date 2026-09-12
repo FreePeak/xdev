@@ -65,6 +65,8 @@ func (m *slashMenu) open(query string, cwd string, ext ...map[string]string) {
 			Name: "/" + c.Name, Description: c.Description,
 		})
 	}
+	// Discovered SKILL.md packs ride the dropdown as "/skill:<name>" rows.
+	m.items = append(m.items, skillSuggestions(cwd)...)
 	for _, mc := range DiscoverCommands(cwd) {
 		m.items = append(m.items, suggestion{
 			Name: "/" + mc.Name, Description: mc.Description, Tag: "markdown",

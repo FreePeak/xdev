@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/FreePeak/xdev/internal/skills"
 )
 
 // mem builds a memory:// URL at runtime: the literal is rewritten by the
@@ -132,6 +134,7 @@ func TestLessonCapKeepsNewest(t *testing.T) {
 }
 
 func TestLearnToolStoresLessonThenSkill(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	b := newTestBackend(t)
 	skillsDir := filepath.Join(t.TempDir(), "managed-skills")
 	lt := &LearnTool{Backend: b, SkillsDir: skillsDir}
@@ -157,6 +160,7 @@ func TestLearnToolStoresLessonThenSkill(t *testing.T) {
 }
 
 func TestLearnToolSkillFailureKeepsLesson(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	b := newTestBackend(t)
 	lt := &LearnTool{Backend: b, SkillsDir: filepath.Join(t.TempDir(), "sk")}
 	// create over an existing skill fails; the lesson must still land.
@@ -177,6 +181,7 @@ func TestLearnToolSkillFailureKeepsLesson(t *testing.T) {
 }
 
 func TestLearnToolRejectsBadSkillName(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	b := newTestBackend(t)
 	lt := &LearnTool{Backend: b, SkillsDir: t.TempDir()}
 	res, _ := lt.Execute(context.Background(), json.RawMessage(`{
@@ -191,5 +196,87 @@ func TestLearnToolRequiresMemory(t *testing.T) {
 	res, _ := lt.Execute(context.Background(), json.RawMessage(`{"memory":""}`))
 	if !res.IsError {
 		t.Fatalf("empty lesson must error: %q", res.Text)
+	}
+}
+
+// writeMemorySkill drops an authored pack at dir (a SKILL.md root like
+// .xdev/skills/<name> or a custom directory).
+func writeMemorySkill(t *testing.T, dir, name, description string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "---\nname: " + name + "\ndescription: " + description + "\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLearnToolCreateReportsShadowedAuthoredSkill: a managed create whose
+// name an authored pack already carries still writes both files and reports
+// shadowed:true — discovery first-wins keeps the authored one.
+func TestLearnToolCreateReportsShadowedAuthoredSkill(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	b := newTestBackend(t)
+	proj := t.TempDir()
+	writeMemorySkill(t, filepath.Join(proj, ".xdev", "skills", "gofmt"), "gofmt", "project pack")
+	lt := &LearnTool{Backend: b, SkillsDir: skills.ManagedRoot(), Cwd: proj}
+
+	res, err := lt.Execute(context.Background(), json.RawMessage(`{
+		"memory": "always run gofmt",
+		"skill": {"action":"create","name":"gofmt","description":"format Go","body":"gofmt -w ."}
+	}`))
+	if err != nil || res.IsError {
+		t.Fatalf("learn = %q err=%v", res.Text, err)
+	}
+	if !strings.Contains(res.Text, "shadowed: true") {
+		t.Fatalf("authored-name conflict must report shadowing: %q", res.Text)
+	}
+	authored := filepath.Join(proj, ".xdev", "skills", "gofmt", "SKILL.md")
+	managed := filepath.Join(skills.ManagedRoot(), "gofmt", "SKILL.md")
+	for _, p := range []string{authored, managed} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("both packs must exist, %s: %v", p, err)
+		}
+	}
+	d, ok := res.Details.(map[string]any)
+	if !ok || d["shadowed"] != true || d["by"] != authored {
+		t.Fatalf("details = %#v", res.Details)
+	}
+
+	// A unique name has no collision to report.
+	res2, err := lt.Execute(context.Background(), json.RawMessage(`{
+		"memory": "unique lesson",
+		"skill": {"action":"create","name":"unique-pack","description":"d","body":"b"}
+	}`))
+	if err != nil || strings.Contains(res2.Text, "shadowed") {
+		t.Fatalf("unshadowed create reported shadowing: %q err=%v", res2.Text, err)
+	}
+}
+
+// TestLearnToolCreateShadowsCustomRoot covers the reverse direction: a
+// managed pack outranks a same-named custom-directory pack.
+func TestLearnToolCreateShadowsCustomRoot(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	shared := t.TempDir()
+	skills.SetCustomDirectories([]string{shared})
+	t.Cleanup(func() { skills.SetCustomDirectories(nil) })
+
+	proj := t.TempDir()
+	writeMemorySkill(t, filepath.Join(shared, "deploy"), "deploy", "custom pack")
+	lt := &LearnTool{Backend: newTestBackend(t), SkillsDir: skills.ManagedRoot(), Cwd: proj}
+	res, err := lt.Execute(context.Background(), json.RawMessage(`{
+		"memory": "deploy lesson",
+		"skill": {"action":"create","name":"deploy","description":"learned deploy","body":"b"}
+	}`))
+	if err != nil || res.IsError {
+		t.Fatalf("learn = %q err=%v", res.Text, err)
+	}
+	if !strings.Contains(res.Text, "shadowed: true") || !strings.Contains(res.Text, filepath.Join(shared, "deploy", "SKILL.md")) {
+		t.Fatalf("custom-root shadowing must be reported: %q", res.Text)
+	}
+	d, ok := res.Details.(map[string]any)
+	if !ok || d["shadowed"] != true || d["skill"] != filepath.Join(shared, "deploy", "SKILL.md") {
+		t.Fatalf("details = %#v", res.Details)
 	}
 }

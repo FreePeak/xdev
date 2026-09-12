@@ -50,8 +50,9 @@ type frontmatter struct {
 // UserRoot is ~/.xdev/agent/skills — the user-level native root.
 func UserRoot() string { return filepath.Join(dataDir(), "skills") }
 
-// ManagedRoot is ~/.xdev/agent/managed-skills — agent-authored skills,
-// dead last in precedence (never override an authored skill).
+// ManagedRoot is ~/.xdev/agent/managed-skills — agent-authored skills.
+// They never override an authored pack (project/user roots), only the
+// configured custom directories.
 func ManagedRoot() string { return filepath.Join(dataDir(), "managed-skills") }
 
 // dataDir mirrors config.DataDir without importing it (avoids a cycle:
@@ -61,6 +62,12 @@ var dataDirFunc = defaultDataDir
 func dataDir() string { return dataDirFunc() }
 
 func defaultDataDir() string {
+	// XDEV_AGENT_DIR relocates the agent directory (config.DataDir honors
+	// it too); skills must follow the same override or a sandboxed run
+	// reads the real ~/.xdev/agent.
+	if v := os.Getenv("XDEV_AGENT_DIR"); v != "" {
+		return v
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ".xdev"
@@ -74,22 +81,55 @@ func SetDataDir(dir string) { dataDirFunc = func() string { return dir } }
 // projectRoot is <cwd>/.xdev/skills.
 func projectRoot(cwd string) string { return filepath.Join(cwd, ".xdev", "skills") }
 
-// Discover finds skills for cwd, first-wins by exact case-sensitive name
-// across roots in precedence order: project native, user native, managed.
-// Unreadable/malformed files skip without aborting discovery.
-func Discover(cwd string) []Skill {
-	roots := []struct {
-		dir    string
-		source string
-	}{
+// SkillRoot is one discovery root: the directory holding `<name>/SKILL.md`
+// and the source label that identifies it in diagnostics.
+type SkillRoot struct {
+	Dir    string
+	Source string
+}
+
+// customDirectories is the settings layer's extra root list
+// (skills.customDirectories), installed once at startup.
+var customDirectories []string
+
+// SetCustomDirectories installs the settings-sourced extra skill roots
+// (nil clears them). Entries are trimmed and empty ones dropped.
+func SetCustomDirectories(dirs []string) {
+	customDirectories = nil
+	for _, d := range dirs {
+		if d = strings.TrimSpace(d); d != "" {
+			customDirectories = append(customDirectories, d)
+		}
+	}
+}
+
+// Roots returns the discovery roots for cwd in precedence order: project
+// native, user native, managed (agent-authored), then the configured
+// custom directories — an authored or learned pack always outranks a
+// configured extra root. A relative custom entry resolves against cwd.
+func Roots(cwd string) []SkillRoot {
+	out := []SkillRoot{
 		{projectRoot(cwd), "native"},
 		{UserRoot(), "user"},
 		{ManagedRoot(), "managed"},
 	}
+	for _, dir := range customDirectories {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		out = append(out, SkillRoot{Dir: filepath.Clean(dir), Source: "custom"})
+	}
+	return out
+}
+
+// Discover finds skills for cwd, first-wins by exact case-sensitive name
+// across the roots in precedence order. Missing roots and
+// unreadable/malformed files skip without aborting discovery.
+func Discover(cwd string) []Skill {
 	byName := map[string]Skill{}
 	var out []Skill
-	for _, root := range roots {
-		for _, s := range scanRoot(root.dir, root.source) {
+	for _, root := range Roots(cwd) {
+		for _, s := range scanRoot(root.Dir, root.Source) {
 			if _, seen := byName[s.Name]; seen {
 				continue // earlier root wins
 			}
@@ -191,6 +231,36 @@ func Find(list []Skill, name string) (Skill, bool) {
 		}
 	}
 	return Skill{}, false
+}
+
+// Conflict is a same-named skill found outside the managed root, together
+// with the side first-wins discovery favors.
+type Conflict struct {
+	Skill Skill
+	// BeatsManaged is true for a root that outranks the managed root
+	// (native, user): that pack shadows an agent-authored one. Custom
+	// directories rank below managed, so their conflict is the reverse —
+	// the managed pack shadows them.
+	BeatsManaged bool
+}
+
+// Conflicts returns the same-named skills in the non-managed roots, in
+// precedence order. The learn tool reports these instead of refusing the
+// write: the authored name is kept and discovery first-wins decides which
+// pack a session actually loads.
+func Conflicts(cwd, name string) []Conflict {
+	var out []Conflict
+	for _, root := range Roots(cwd) {
+		if root.Source == "managed" {
+			continue
+		}
+		for _, s := range scanRoot(root.Dir, root.Source) {
+			if s.Name == name {
+				out = append(out, Conflict{Skill: s, BeatsManaged: root.Source != "custom"})
+			}
+		}
+	}
+	return out
 }
 
 // Resolve handles a skill:// URL: skill://<name> or skill://<name>/<rel>.
