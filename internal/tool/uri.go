@@ -8,7 +8,8 @@ import (
 )
 
 // URI schemes let the read tool reach non-filesystem resources: skills
-// (skill://) and long-term memory (memory://). omp exposes both through
+// (skill://), long-term memory (memory://) and raw session history
+// (history://current, history://full — M12 #45). omp exposes them through
 // read URLs, and the model discovers them from the system prompt.
 //
 // Registration is process-global (once, at cmd startup) because the
