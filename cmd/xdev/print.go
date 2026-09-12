@@ -86,7 +86,119 @@ func buildAdvisor(cfg *config.Config, settings *config.Settings) *agent.Advisor 
 	reg.Register(&tool.GrepTool{CWD: mustGetwd()})
 	reg.Register(&tool.GlobTool{CWD: mustGetwd()})
 	agent.RegisterAdviseTool(reg)
-	return agent.NewAdvisor(prov, mName, reg)
+	return buildAdvisorRuntime(cfg, settings, prov, mName, reg)
+}
+
+// buildAdvisorRuntime fills an advisor with the M11 #39 tails: settings
+// (immuneTurns, syncBacklog), WATCHDOG.md guidance, and the WATCHDOG.yml
+// roster. A roster replaces the single legacy reviewer with one named
+// reviewer per entry, each fed only the deltas matching its patterns.
+func buildAdvisorRuntime(cfg *config.Config, settings *config.Settings, prov ai.Provider, model string, reg *tool.Registry) *agent.Advisor {
+	wd, _ := os.Getwd()
+	entries, instructions := agent.DiscoverWatchdogRoster(wd, config.DataDir())
+	guidance := agent.DiscoverWatchdogGuidance(wd, config.DataDir())
+	if instructions != "" {
+		if guidance != "" {
+			guidance += "\n\n"
+		}
+		guidance += instructions
+	}
+	peer := func(p ai.Provider, m string, patterns []string, r *tool.Registry) *agent.Advisor {
+		a := agent.NewAdvisor(p, m, r)
+		a.Guidance = guidance
+		a.ImmuneTurns = settings.AdvisorImmuneTurns
+		a.SyncBacklog = settings.AdvisorSyncBacklog
+		a.Patterns = patterns
+		return a
+	}
+	if len(entries) == 0 {
+		return peer(prov, model, nil, reg)
+	}
+	peers := make([]*agent.Advisor, 0, len(entries))
+	for _, e := range entries {
+		p, m := prov, model
+		// An entry may name its own model; an unresolvable one falls back
+		// to the session's resolved reviewer model.
+		if e.Model != "" {
+			pName, mName, err := config.ParseModelRef(e.Model)
+			switch {
+			case err != nil:
+				logx.Errorf("advisor %s: %v; using %s", e.Name, err, model)
+			case cfg.Providers[pName] == nil:
+				logx.Errorf("advisor %s: unknown provider %q; using %s", e.Name, pName, model)
+			default:
+				np, perr := buildProvider(pName, cfg.Providers[pName], mName, cfg)
+				if perr != nil {
+					logx.Errorf("advisor %s: provider unavailable; using %s", e.Name, model)
+				} else {
+					p, m = np, mName
+				}
+			}
+		}
+		r := tool.NewRegistry()
+		r.Register(tool.NewReadTool())
+		r.Register(&tool.GrepTool{CWD: wd})
+		r.Register(&tool.GlobTool{CWD: wd})
+		agent.RegisterAdviseTool(r)
+		peers = append(peers, peer(p, m, e.Patterns, r))
+	}
+	return agent.NewAdvisorRoster(peers)
+}
+
+// buildChildAdvisorFactory resolves settings task.agentAdvisor (M11 #39)
+// into the ChildAdvisor seam on the task tool: "on" → the advisor role's
+// model, an explicit value → that model reference, "off"/unset → nil
+// (children run unadvised, the omp default). The model resolve is lazy so
+// a session that never spawns a child never pays for it.
+func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
+	v := ""
+	if settings != nil {
+		v = strings.TrimSpace(settings.TaskAgentAdvisor)
+	}
+	if v == "" || strings.EqualFold(v, "off") || strings.EqualFold(v, "false") {
+		return nil
+	}
+	ref := "@advisor"
+	if !strings.EqualFold(v, "on") && !strings.EqualFold(v, "true") {
+		ref = v
+	}
+	return func() *agent.Advisor {
+		cfg, err := config.LoadModelsLayered()
+		if err != nil {
+			logx.Errorf("task agentAdvisor %q: %v; children unadvised", v, err)
+			return nil
+		}
+		resolved, _, err := resolveModel(ref, cfg, settings)
+		if err != nil {
+			logx.Errorf("task agentAdvisor %q: %v; children unadvised", v, err)
+			return nil
+		}
+		pName, mName, err := config.ParseModelRef(resolved)
+		if err != nil {
+			logx.Errorf("task agentAdvisor %q: %v; children unadvised", v, err)
+			return nil
+		}
+		pc, ok := cfg.Providers[pName]
+		if !ok {
+			logx.Errorf("task agentAdvisor %q: unknown provider %q; children unadvised", v, pName)
+			return nil
+		}
+		prov, err := buildProvider(pName, pc, mName, cfg)
+		if err != nil {
+			logx.Errorf("task agentAdvisor %q: provider unavailable: %v; children unadvised", v, err)
+			return nil
+		}
+		wd, _ := os.Getwd()
+		reg := tool.NewRegistry()
+		reg.Register(tool.NewReadTool())
+		reg.Register(&tool.GrepTool{CWD: wd})
+		reg.Register(&tool.GlobTool{CWD: wd})
+		agent.RegisterAdviseTool(reg)
+		adv := agent.NewAdvisor(prov, mName, reg)
+		adv.Guidance = agent.DiscoverWatchdogGuidance(wd, config.DataDir())
+		adv.ImmuneTurns = settings.AdvisorImmuneTurns
+		return adv
+	}
 }
 
 // resolvePrewalk builds the handoff target for a run. Returns nil when
@@ -673,12 +785,14 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	reg.Register(&agent.TaskTool{
-		Hub:      hub,
-		Policy:   pol,
-		Thinking: thinking,
-		Provider: prov,
-		Model:    childModel(settings, provName, modelName),
-		CWD:      cwd,
+		// M11 #39: task.agentAdvisor — per-subagent advisor (on|off|model).
+		ChildAdvisor: buildChildAdvisorFactory(settings),
+		Hub:          hub,
+		Policy:       pol,
+		Thinking:     thinking,
+		Provider:     prov,
+		Model:        childModel(settings, provName, modelName),
+		CWD:          cwd,
 		// Children live in their own subtree: session.List(config.DataDir())
 		// must never surface them to --continue/--resume.
 		DataDir: filepath.Join(config.DataDir(), "subagents"),

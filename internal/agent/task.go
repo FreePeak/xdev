@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -53,6 +54,12 @@ type TaskTool struct {
 	// Hub enables background task dispatch (hub tool, research §2). nil
 	// makes background:true fall back to a synchronous spawn.
 	Hub *Hub
+	// ChildAdvisor (M11 #39, settings taskAgentAdvisor) builds the reviewer
+	// attached to every spawned child; nil keeps children unadvised. The
+	// host wires it (cmd/xdev/print.go): "on" resolves the advisor role's
+	// model, an explicit value is a model reference. Additive: nil leaves
+	// the spawn path exactly as it was.
+	ChildAdvisor func() *Advisor
 }
 
 // TaskToolName is the tool name the model calls.
@@ -172,6 +179,7 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				Depth:           t.Depth + 1,
 				AgentName:       agentArg,
 				Hub:             t.Hub,
+				ChildAdvisor:    t.ChildAdvisor,
 			})
 		}
 	}
@@ -189,6 +197,11 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		Policy:          t.Policy,
 		Approve:         t.Approve,
 		Thinking:        t.Thinking,
+	}
+	// task.agentAdvisor (M11 #39): give the child its own reviewer, wired
+	// into the child's transcript before the run starts.
+	if t.ChildAdvisor != nil {
+		attachChildAdvisor(ctx, &spec, t.ChildAdvisor)
 	}
 	if a.Background {
 		if t.Hub == nil {
@@ -277,4 +290,63 @@ func renderSubagentResult(res *SubagentResult) string {
 		fmt.Fprintf(&b, "\nsession: %s\n", res.SessionID[:min(8, len(res.SessionID))])
 	}
 	return b.String()
+}
+
+// attachChildAdvisor wires a per-child reviewer (M11 #39 task.agentAdvisor)
+// into a spawn: the reviewer gets the child as its steering target and sees
+// the child's transcript deltas through the turn hooks. Each delta triggers
+// one background review — the same shape as the session-level advisor, so a
+// slow reviewer never blocks the child.
+func attachChildAdvisor(ctx context.Context, spec *SubagentSpec, build func() *Advisor) {
+	base := spec.OnRun
+	spec.OnRun = func(ag *Agent) {
+		if base != nil {
+			base(ag) // the hub registers the live child here
+		}
+		adv := build()
+		if adv == nil {
+			return
+		}
+		adv.Primary = ag
+		// The reviewer's view of the child: the task itself plus every
+		// assistant/tool-result message in hook order (which is the child's
+		// own history order). Synthetic user messages — steering,
+		// continuations — stay out, since the advisor should not review its
+		// own injected advice.
+		var mu sync.Mutex
+		hist := []ai.Message{{
+			Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: spec.Prompt}},
+		}}
+		feed := func() {
+			mu.Lock()
+			snap := append([]ai.Message(nil), hist...)
+			mu.Unlock()
+			go adv.Feed(ctx, snap)
+		}
+		// Preserve the hooks SpawnChild installed (the child's session
+		// mirror) and add the delta mirror on top.
+		var wrapped TurnHooksFunc
+		if f, ok := ag.Hooks.(TurnHooksFunc); ok {
+			wrapped = f
+		}
+		prevMsg, prevTool := wrapped.OnMessageEndF, wrapped.OnToolResultMsgF
+		wrapped.OnMessageEndF = func(m *ai.Message) {
+			if prevMsg != nil {
+				prevMsg(m)
+			}
+			mu.Lock()
+			hist = append(hist, *m)
+			mu.Unlock()
+			feed()
+		}
+		wrapped.OnToolResultMsgF = func(m *ai.Message) {
+			if prevTool != nil {
+				prevTool(m)
+			}
+			mu.Lock()
+			hist = append(hist, *m)
+			mu.Unlock()
+		}
+		ag.Hooks = wrapped
+	}
 }
