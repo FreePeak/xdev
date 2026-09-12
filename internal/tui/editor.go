@@ -14,6 +14,10 @@ type Editor struct {
 	cur     int
 	history []string
 	histIdx int // len(history) = not browsing
+	// draft holds the text that was in the box when browsing began, so
+	// Down past the newest entry returns to it instead of dropping it —
+	// the readline/zsh behavior that lets an Up recall be undone.
+	draft []rune
 }
 
 // Text returns the current input.
@@ -125,17 +129,20 @@ func (e *Editor) insert(r rune) {
 }
 
 // recall moves through history; only when the buffer holds no newline
-// (multi-line drafts are not clobbered by history navigation).
+// (multi-line drafts are not clobbered by history navigation). An in-progress
+// draft never blocks recall — the baseline (omp/Claude Code) recalls on Up
+// whatever is in the box — it is stashed in e.draft instead and restored when
+// browsing comes back past the newest entry.
 func (e *Editor) recall(dir int) {
 	if strings.ContainsRune(e.Text(), '\n') {
 		return
 	}
 	if dir < 0 {
-		if e.histIdx == 0 {
+		if e.histIdx == 0 || len(e.history) == 0 {
 			return
 		}
-		if e.histIdx == len(e.history) && e.Text() != "" {
-			return // don't clobber a fresh draft
+		if e.histIdx == len(e.history) {
+			e.draft = append([]rune(nil), e.buf...) // stash before the first move
 		}
 		e.histIdx--
 	} else {
@@ -144,13 +151,19 @@ func (e *Editor) recall(dir int) {
 		}
 		e.histIdx++
 	}
-	if e.histIdx < len(e.history) {
+	switch {
+	case e.histIdx < len(e.history):
 		e.buf = []rune(e.history[e.histIdx])
-	} else {
-		e.buf = nil
+	default:
+		e.buf = e.draft // back at the newest slot: the draft returns
+		e.draft = nil
 	}
 	e.cur = len(e.buf)
 }
+
+// HasHistory reports whether anything can be recalled (the app keeps
+// Up/Down for transcript scrolling until the first prompt is sent).
+func (e *Editor) HasHistory() bool { return len(e.history) > 0 }
 
 // HistoryPrev/HistoryNext recall older/newer prompts. They exist so the
 // keymap's history-prev/history-next actions reach the same machinery the

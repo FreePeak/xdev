@@ -564,3 +564,28 @@ func hasToolContaining(list []string, sub string) bool {
 	}
 	return false
 }
+
+// TestWithMaxTimeIsAlwaysCancellable pins the root cause of "cannot cancel a
+// running session": with --max-time unset the helper returned the parent with
+// a no-op cancel, and the TUI's Esc/Ctrl+C handler calls exactly that, so a
+// running turn could never be aborted (user-reported).
+func TestWithMaxTimeIsAlwaysCancellable(t *testing.T) {
+	ctx, cancel := withMaxTime(context.Background(), 0)
+	cancel()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("cancel with no deadline did nothing; the TUI's Esc handler would be inert")
+	}
+}
+
+// The deadline still applies when --max-time is set.
+func TestWithMaxTimeAppliesDeadline(t *testing.T) {
+	ctx, cancel := withMaxTime(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("deadline never fired")
+	}
+}

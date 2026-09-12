@@ -37,6 +37,15 @@ type PlanMode struct {
 	// --plan-yolo-into uses it to hand the run to the execution model.
 	// It runs on the tool-execution goroutine, like the propose call.
 	OnAccept func()
+	// PlanOnly makes a proposal END the run instead of opening
+	// implementation: the headless `-plan` (without --plan-yolo) semantic,
+	// where nobody can approve and the plan itself is the deliverable.
+	// Auto-accepting there would void the read-only guarantee the flag
+	// advertises (parity finding T3 #27).
+	PlanOnly bool
+	// proposed marks that a PlanOnly run has submitted its plan; the loop
+	// stops at the turn boundary and the host prints the document.
+	proposed bool
 	// yoloUsed marks the auto-approval as spent: later proposals take the
 	// reviewer path.
 	yoloUsed bool
@@ -83,9 +92,15 @@ func (p *proposeTool) Execute(ctx context.Context, args json.RawMessage) (tool.R
 	// device serves this text, and acceptance consumes it.
 	p.pm.Pending = a.Plan
 	switch {
+	case p.pm.PlanOnly:
+		// A plan-only run stops at the proposal: the model is told the run
+		// ends here, so it cannot drift into mutating work the session was
+		// never permitted to start.
+		p.pm.proposed = true
+		return tool.Result{Text: "plan submitted — this run ends here (headless plan mode). Re-run with --plan-yolo to auto-approve and implement."}, nil
 	case p.OnPropose == nil:
-		// No host decision wired (headless/print): accept — a plan nobody
-		// can review must not trap the run in read-only forever.
+		// No host decision wired and the run is not plan-only: accept — a
+		// plan nobody can review must not trap the run in read-only forever.
 		p.pm.accept()
 		return tool.Result{Text: "plan accepted (no reviewer wired) — plan mode off; implement it now"}, nil
 	case p.pm.Yolo && !p.pm.yoloUsed:
@@ -115,6 +130,10 @@ func (p *proposeTool) Execute(ctx context.Context, args json.RawMessage) (tool.R
 // one-shot OnAccept hook (the --plan-yolo execution-model handoff). It is
 // the single acceptance transition for both the propose tool and the
 // xd://resolve device, so the two cannot diverge.
+// Proposed reports whether a PlanOnly run has submitted its plan (the loop
+// stop signal; see PlanMode.PlanOnly).
+func (pm *PlanMode) Proposed() bool { return pm != nil && pm.proposed }
+
 func (pm *PlanMode) accept() {
 	pm.Active = false
 	pm.Pending = ""

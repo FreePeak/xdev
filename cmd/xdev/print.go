@@ -218,6 +218,21 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 	}
 }
 
+// advisorDrainCap bounds the final headless review at run exit. Thirty
+// seconds matches the TUI's error drain; a stalled reviewer must not hold
+// the process.
+const advisorDrainCap = 30 * time.Second
+
+// advisorHistory rebuilds the reviewer's feed snapshot from the session
+// store — the same authoritative view the TUI feeds.
+func advisorHistory(store *session.Store) []ai.Message {
+	res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		return nil
+	}
+	return res.Messages
+}
+
 // resolvePrewalk builds the handoff target for a run. Returns nil when
 // prewalk is off or the target cannot resolve (warn, start unarmed — the
 // run proceeds on the primary model).
@@ -350,10 +365,22 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	// M12 #44: mnemopi counts turns; every retainEveryNTurns turns this
 	// enqueues a consolidation the exit drain below applies.
-	hooks := memoryTurnHooks(&printHooks{store: store, showThinking: showThinkingOn(settings)}, settings)
+	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
+	hooks := memoryTurnHooks(ph, settings)
 	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
+	}
+	// Advisor (M11 #12; parity finding T3 #20): the reviewer used to have
+	// exactly one caller — the TUI — so --advisor and `advisor: true` were
+	// inert in print runs, which is where a long unattended run most wants
+	// a watchdog. Feed after each clean turn; a bounded final review runs at
+	// exit (below) because steering into a finished run is impossible — the
+	// notes are printed instead.
+	adv := buildAdvisor(cfg, settings)
+	if adv != nil {
+		adv.Primary = ag
+		ph.advisorFeed = func() { adv.Feed(context.Background(), advisorHistory(store)) }
 	}
 	applyPolicy(ag, settings)
 	// M13 #54: tool_call bridges into this agent's own call path, so a
@@ -377,6 +404,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// in read-only). --plan-yolo keeps that and hands the run to the
 	// execution model on the first acceptance (#36).
 	planMode.Propose = agent.NewProposeTool(planMode, nil)
+	if opts.Plan && !opts.PlanYolo {
+		// T3 #27: print runs have no reviewer, and auto-accepting made
+		// `--plan` silently implement the plan — the flag's read-only
+		// promise, voided. A plain headless --plan now ENDS at the
+		// proposal; --plan-yolo keeps the approve-and-build behavior
+		// explicit.
+		planMode.PlanOnly = true
+	}
 	if opts.PlanYolo {
 		planMode.Yolo = true
 		if opts.PlanYoloInto != "" {
@@ -448,6 +483,21 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
 		}
 		exitCode = 1
+	}
+	// Advisor exit drain (T3 #20): a headless run cannot steer a finished
+	// turn, so the last review is taken synchronously (30s cap) and printed.
+	if adv != nil {
+		dctx, dcancel := context.WithTimeout(context.Background(), advisorDrainCap)
+		adv.Feed(dctx, advisorHistory(store))
+		dcancel()
+		for _, n := range adv.Dump() {
+			fmt.Fprintf(os.Stderr, "advisor (%s): %s\n", n.Severity, n.Text)
+		}
+	}
+	if planMode.Proposed() && planMode.Pending != "" {
+		// The plan was the run's output: print it (the transcript shows the
+		// propose call, not its argument).
+		fmt.Fprintln(os.Stdout, planMode.Pending)
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"code": exitCode}})
@@ -1916,6 +1966,11 @@ type printHooks struct {
 	// showThinking mirrors settings.showThinking: off suppresses the
 	// stderr reasoning stream (issue #20).
 	showThinking bool
+	// advisorFeed snapshots the history for the background reviewer after
+	// each turn (nil = no advisor). Assigned after the agent exists — the
+	// reviewer needs the run to steer into, and the run needs the hooks at
+	// construction — the same late-assignment the TUI uses.
+	advisorFeed func()
 }
 
 func (h *printHooks) OnStart(req ai.StreamRequest) {}
@@ -1971,7 +2026,13 @@ func (h *printHooks) OnToolResultMessage(msg *ai.Message) {
 	}
 }
 
-func (h *printHooks) OnTurnEnd(reason ai.StopReason, err error) {}
+func (h *printHooks) OnTurnEnd(reason ai.StopReason, err error) {
+	// A failed turn has nothing worth reviewing (the retry ladder owns
+	// that path); feed the delta only after a clean one.
+	if h.advisorFeed != nil && err == nil {
+		go h.advisorFeed()
+	}
+}
 func (h *printHooks) OnCompaction(tokensBefore int64) {
 	fmt.Fprintf(os.Stderr, "\n[context compacted at ~%d tokens]\n", tokensBefore)
 }

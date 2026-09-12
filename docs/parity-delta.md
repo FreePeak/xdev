@@ -61,6 +61,28 @@ installed `xdev -h`, then per-item semantic check against the omp reference.
 | `--mode json`, `--mode rpc-ui` | xdev's structured surfaces are `rpc` (JSONL over stdio) and `acp`; a `--mode json` alias is cheap but redundant — recorded, not added |
 | `--alias <name>` | **semantic divergence kept:** xdev's `--alias` binds a mailbox/agent identity (its own documented feature). omp's "create a shell shortcut for a profile and exit" is not implemented; `--profile` exists for relocation |
 
+## Behavioral fixes from the audit wave (agents + user-reported)
+
+| Finding | Source | Fix |
+| --- | --- | --- |
+| `--advisor` / `advisor: true` were inert in print runs (`buildAdvisor` had exactly one caller: the TUI) | T3 #20 | runPrint builds the reviewer, feeds it after each clean turn, and runs a bounded (30s) final review whose notes print at exit |
+| Headless `-plan` auto-accepted the first proposal, so the plan was implemented despite the read-only flag | T3 #27 | `PlanMode.PlanOnly`: a headless `--plan` (without `--plan-yolo`) ends at the proposal and prints the plan; `--plan-yolo` keeps approve-and-build |
+| `agent_end` hooks received a nil payload (literal `null` on stdin) | T3 #15 | the event carries `{model, turns, stopReason, error?}` |
+| `/goal <verb>` dropped its arguments — `/goal create …` looked dead | user-reported | GoalOps verbs `create/resume/evidence/complete/drop` wired to the live GoalState; unknown verbs report the grammar |
+| Up/Down never recalled the previous prompt (empty box scrolled; a typed draft blocked recall) | user-reported | readline-style: Up always recalls, the stashed draft returns on Down; scrolling stays on Shift+arrow/PgUp/PgDn/wheel |
+| Esc / Ctrl+C could not cancel or terminate a running turn | user-reported | root cause in `withMaxTime`: with `--max-time` unset it returned the parent plus a **no-op cancel**, and the TUI's cancel handler calls exactly that. It now always returns a cancellable context |
+| `grep` silently ignored omp's `case` field | T2 F8 | accepted (`case:false` = insensitive) on both the rg and Go paths |
+| `bash` silently dropped omp's `cwd`/`env` and turned `timeout:0` into a 120s kill | T2 F1/F2 | `cwd` alias with a disagree-error, `env` map with key validation, `*int` timeout (0 = no deadline), `ApplyCallEnv` layering that preserves hardening |
+| `glob` rejected omp's path-only shape; `read` said "file not found" for a selector-shaped path; malformed `ast_grep` patterns reported "no matches" | T2 F10/F4/F11 | all three fixed; the ast case documents its heuristic ceiling |
+| `-export <session.jsonl>` overwrote the transcript with HTML | T4/T5 | refuses any existing non-HTML target; re-export over a previous export stays allowed |
+
+Still open from T3 (recorded, not yet fixed): hooks payload field names (`tool`/`args`/`text`
+vs omp's `toolName`/`toolCallId`/`input`/`content`/`isError` — the rename is a
+cross-package interface change), hub processes orphaned at session exit, the
+TTSR `condition` field on discovered rules parsed but never consumed, task
+batch wire shape `{context, tasks[]}`, `task.disabledAgents`, goal budget
+accounting lagging one turn, and a no-`yield` child completing silently.
+
 ## Subcommands: missing in xdev
 
 | omp command | Purpose | Note |

@@ -260,7 +260,7 @@ func (a *Agent) drainSteering() []Steering {
 // On budget exhaustion it asks the model for one wrap-up message instead of
 // failing the run.
 // Returns the terminal assistant message.
-func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
+func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (final *ai.Message, runErr error) {
 	if a.Hooks == nil {
 		a.Hooks = TurnHooksFunc{} // no-op: an unwired agent must not panic mid-turn
 	}
@@ -273,10 +273,23 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 	emit("session_start", map[string]any{"model": a.Model})
 	emit("before_agent_start", map[string]any{"model": a.Model, "system": system})
 	emit("agent_start", map[string]any{"model": a.Model})
+	var lastAssistant *ai.Message
+	turnsUsed := 0
+	// agent_end carries the run outcome. A nil payload reached hooks as
+	// literal `null` (parity finding T3 #15), so an agent_end hook could
+	// never match, report, or log anything about the run it closes.
 	defer func() {
-		if a.Intercept != nil {
-			a.Intercept.Emit(ctx, "agent_end", nil)
+		if a.Intercept == nil {
+			return
 		}
+		payload := map[string]any{"model": a.Model, "turns": turnsUsed}
+		if final != nil {
+			payload["stopReason"] = string(final.StopReason)
+		}
+		if runErr != nil {
+			payload["error"] = runErr.Error()
+		}
+		a.Intercept.Emit(ctx, "agent_end", payload)
 	}()
 	// Plan mode reminder: teach the read-only shape for this run.
 	if a.PlanMode != nil && a.PlanMode.Active {
@@ -306,7 +319,6 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			a.persist(m)
 		}
 	}
-	var lastAssistant *ai.Message
 	limit := a.effectiveMaxTurns()
 	for turn := 0; turn < limit; turn++ {
 		select {
@@ -315,6 +327,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 		default:
 		}
 
+		turnsUsed = turn + 1
 		emit("turn_start", map[string]any{"turn": turn})
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
@@ -378,6 +391,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (*
 			a.Hooks.OnToolResultMessage(&rm)
 		}
 		a.prewalkNote(results)
+		// Plan-only run (headless -plan): the proposal is the deliverable,
+		// so the run ends at this boundary rather than continuing toward
+		// implementation it was never allowed to start.
+		if a.PlanMode.Proposed() {
+			emit("turn_end", map[string]any{"turn": turn})
+			return msg, nil
+		}
 		emit("turn_end", map[string]any{"turn": turn})
 	}
 	// Budget exhausted: ask for one wrap-up message rather than erroring.

@@ -1041,6 +1041,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
+	// /goal drives the same GoalState the goal tool owns: the verbs mutate
+	// through the tool's own seam (so the session entry + the per-turn
+	// reminder stay consistent) and echo the resulting state.
 	app.SetGoalOps(&tui.GoalOps{
 		View: func() string {
 			gs := agent.GoalStateOf(reg)
@@ -1048,6 +1051,56 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return "goal: not wired"
 			}
 			return gs.Describe()
+		},
+		Create: func(objective string) (string, error) {
+			gs := agent.GoalStateOf(reg)
+			if gs == nil {
+				return "", fmt.Errorf("goal not wired")
+			}
+			if _, err := gs.Create(objective, 0); err != nil {
+				return "", err
+			}
+			return "goal created\n" + gs.Describe(), nil
+		},
+		Resume: func(objective string) (string, error) {
+			gs := agent.GoalStateOf(reg)
+			if gs == nil {
+				return "", fmt.Errorf("goal not wired")
+			}
+			if _, err := gs.Resume(objective); err != nil {
+				return "", err
+			}
+			return "goal resumed\n" + gs.Describe(), nil
+		},
+		Evidence: func(note string) (string, error) {
+			gs := agent.GoalStateOf(reg)
+			if gs == nil {
+				return "", fmt.Errorf("goal not wired")
+			}
+			if _, err := gs.AddEvidence(note); err != nil {
+				return "", err
+			}
+			return "evidence recorded\n" + gs.Describe(), nil
+		},
+		Complete: func(notes []string) (string, error) {
+			gs := agent.GoalStateOf(reg)
+			if gs == nil {
+				return "", fmt.Errorf("goal not wired")
+			}
+			if _, err := gs.Complete(notes); err != nil {
+				return "", err
+			}
+			return gs.Describe(), nil
+		},
+		Drop: func() (string, error) {
+			gs := agent.GoalStateOf(reg)
+			if gs == nil {
+				return "", fmt.Errorf("goal not wired")
+			}
+			if _, err := gs.Drop(); err != nil {
+				return "", err
+			}
+			return "goal dropped\n" + gs.Describe(), nil
 		},
 	})
 	// applyTheme runs every resolved palette through the color-blind remap
