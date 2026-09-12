@@ -320,6 +320,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
 	applyPolicy(ag, settings)
+	// M13 #54: tool_call bridges into this agent's own call path, so a
+	// catalogued call is gated exactly like a direct one.
+	ag.WireCatalog(reg.Catalog())
 	// M13 #55: secrets.yml redaction — placeholders out, real values in.
 	ag.Redactor = config.OpenRedactor(cwd, func(w string) { logx.Debugf("%s", w) })
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
@@ -569,6 +572,9 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 			named = append(named, agent.NamedToolDef{Name: d.Name, Description: d.Description})
 		}
 		sys := agent.BuildSystemPrompt(base, ctxFiles, named)
+		// M13 #54: the index keeps deferred tools discoverable without
+		// putting their schemas in the eager tool list (empty when none).
+		sys += agent.BuildDeferredIndex(reg.Deferred())
 		if rb := agent.BuildRulesBlock(ruleSet); rb != "" {
 			sys += "\n\n" + rb
 		}
@@ -1008,6 +1014,31 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	reg.Register(&agent.NotesTool{Notes: notes})
 	reg.Register(&agent.NewContextTool{Notes: notes})
 	tool.RegisterURIScheme("history", notes.ResolveHistory)
+	// M13 #54: deferred tool catalog. The long tail leaves the eager tool
+	// schema and the prompt recap (Registry.Defs omits it) and is listed as a
+	// one-line index instead; the model finds it with tool_search, reads its
+	// schema with tool_describe, and runs it through tool_call, which re-enters
+	// the normal call path (approval policy, interception, hooks).
+	for _, d := range []struct {
+		name  string
+		index string
+		tags  []string
+	}{
+		{"ast_grep", "structural code search with ast-grep patterns", []string{"search", "code"}},
+		{"ast_edit", "AST-aware codemod rewrites", []string{"edit", "codemod", "code"}},
+		{"github", "GitHub operations: PRs, issues, files, search, Actions", []string{"git", "pr", "remote"}},
+		{agent.HubToolName, "message and inspect the subagents running in this session", []string{"subagent", "agent"}},
+		{agent.SendMessageToolName, "send a message to another xdev session (mailbox)", []string{"mailbox", "agent"}},
+		{agent.InboxToolName, "read messages other sessions sent this one (mailbox)", []string{"mailbox", "agent"}},
+		{tool.CheckpointToolName, "bookmark the session tree at this point", []string{"session", "rewind"}},
+		{tool.RewindToolName, "return the session to an earlier checkpoint", []string{"session", "rewind"}},
+	} {
+		reg.Defer(d.name, d.index, d.tags...)
+	}
+	cat := reg.Catalog()
+	reg.Register(tool.NewToolSearchTool(cat))
+	reg.Register(tool.NewToolDescribeTool(cat))
+	reg.Register(tool.NewToolCallTool(cat))
 
 	return reg
 }

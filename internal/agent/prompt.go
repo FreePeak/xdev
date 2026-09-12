@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/FreePeak/xdev/internal/rules"
+	"github.com/FreePeak/xdev/internal/tool"
 )
 
 // SystemPromptBase is the <1000-token system prompt (pi philosophy: minimal;
@@ -215,6 +216,24 @@ func BuildSystemPrompt(base string, contextFiles string, defs []NamedToolDef) st
 			budget -= len(line)
 			fmt.Fprintf(&b, "\n%s\n", line)
 		}
+	}
+	return b.String()
+}
+
+// BuildDeferredIndex renders the one-line index of the tools a catalog keeps
+// out of the eager tool schema (M13 #54): one `name: summary` line each, plus
+// the bridge entry point. It is appended to the prompt next to the `# Tools`
+// recap, which is where a model looks for capability; empty when nothing is
+// deferred, so a catalog-free prompt stays byte-identical.
+func BuildDeferredIndex(entries []tool.Entry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n# Deferred tools\n")
+	b.WriteString("Not in the tool list. Call tool_search to find one, tool_describe <name> for its schema, tool_call {\"name\":<name>,\"args\":{...}} to run it.\n")
+	for _, e := range entries {
+		fmt.Fprintf(&b, "\n%s: %s\n", e.Name, e.Index)
 	}
 	return b.String()
 }
