@@ -289,7 +289,7 @@ func TestAppCommandHook(t *testing.T) {
 }
 
 // Stub implementations for the extended CommandAPI surface.
-func (f *fakeAPI) SessionTree() string             { return "" }
+func (f *fakeAPI) OpenTreeSelector()               {}
 func (f *fakeAPI) BranchSession(args string) error { return nil }
 
 func (f *fakeAPI) KeyMap() *KeyMap { return DefaultKeyMap() }
