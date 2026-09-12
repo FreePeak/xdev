@@ -264,7 +264,7 @@ func builtin() []Rule {
 		Source:      "builtin",
 		AlwaysApply: true,
 		Description: "Built-in workflow defaults",
-		Content: "- Stage explicit paths; never commit or push unasked.\n",
+		Content:     "- Stage explicit paths; never commit or push unasked.\n",
 	}}
 }
 

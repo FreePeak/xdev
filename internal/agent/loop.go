@@ -164,11 +164,11 @@ type Agent struct {
 	Intercept Interceptor
 	// Policy is the approval configuration; Approve prompts the user when a
 	// decision requires it (nil means an unattended run: prompts deny).
-	Policy  tool.ApprovalPolicy
+	Policy tool.ApprovalPolicy
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
-	Approve ApprovalFunc
+	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model role. nil asks for none.
 	Thinking *ai.ThinkingBudget
