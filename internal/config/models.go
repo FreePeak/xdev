@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 // DataDir returns the xdev agent data directory (~/.xdev/agent).
@@ -76,6 +78,52 @@ type OAuthConfig struct {
 type Config struct {
 	Providers    map[string]*ProviderConfig `yaml:"providers"`
 	DefaultModel string                     `yaml:"defaultModel,omitempty"` // "provider/model"
+}
+
+// RegisterProvider installs one provider block for the life of this process.
+// Extensions call it at runtime (ext action `register_provider`, PRD M7), so
+// the payload carries the same shape as a models.yml provider entry and the
+// validation happens here — before any request — instead of surfacing as an
+// opaque wire failure. Nothing is persisted: the next run re-registers, and
+// use-time gating (Settings.CheckProvider, disabledProviders) still applies
+// when the provider is built.
+func (c *Config) RegisterProvider(name string, pc *ProviderConfig) error {
+	if c == nil {
+		return fmt.Errorf("config: register_provider: no model registry")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("config: register_provider: name is required")
+	}
+	if strings.ContainsAny(name, "/ \t") {
+		return fmt.Errorf("config: register_provider: name %q must be a bare provider key (no \"/\" or spaces)", name)
+	}
+	if pc == nil {
+		return fmt.Errorf("config: register_provider %q: provider block is required", name)
+	}
+	if strings.TrimSpace(pc.BaseURL) == "" {
+		return fmt.Errorf("config: register_provider %q: baseUrl is required", name)
+	}
+	switch pc.API {
+	case ai.APIOpenAICompletions, ai.APIOpenAIResponses, ai.APIAnthropicMessages, ai.APIGoogleGenerativeAI:
+	default:
+		return fmt.Errorf("config: register_provider %q: unsupported api %q (want %s|%s|%s|%s)",
+			name, pc.API, ai.APIOpenAICompletions, ai.APIOpenAIResponses, ai.APIAnthropicMessages, ai.APIGoogleGenerativeAI)
+	}
+	models := 0
+	for _, m := range pc.Models {
+		if strings.TrimSpace(m.ID) != "" {
+			models++
+		}
+	}
+	if models == 0 {
+		return fmt.Errorf("config: register_provider %q: at least one model with an id is required", name)
+	}
+	if c.Providers == nil {
+		c.Providers = map[string]*ProviderConfig{}
+	}
+	c.Providers[name] = pc
+	return nil
 }
 
 // Resolve expands ${VAR} references in s against the process environment.

@@ -5,6 +5,7 @@ package memlimit
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -12,6 +13,13 @@ import (
 
 // DefaultLimitBytes is the hard worst-case ceiling: 100 MB.
 const DefaultLimitBytes = 100 << 20
+
+// HighPressure is the live-heap fraction of the memory limit at which the
+// agent forces compaction instead of waiting for the token threshold
+// (PRD §3.7). Slightly below 1 so a compaction starts while there is still
+// room to summarize, and above the steady-state heap of a normal session so
+// the trigger does not fire on startup.
+const HighPressure = 0.85
 
 // ApplyFrom sets the process memory limit from an already-resolved value
 // (layered settings), letting XDEV_MEMLIMIT still override it. n<=0 keeps
@@ -65,4 +73,27 @@ func ParseBytes(s string) (int64, error) {
 		return 0, fmt.Errorf("bad size %q", s)
 	}
 	return n * mult, nil
+}
+
+// liveHeap and memLimit are seams over the runtime: tests pin the ratio
+// without allocating for real or disturbing the process limit.
+var (
+	liveHeap = func() uint64 {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		return ms.HeapAlloc
+	}
+	// A negative value asks SetMemoryLimit to report the current limit
+	// without changing it.
+	memLimit = func() int64 { return debug.SetMemoryLimit(-1) }
+)
+
+// Pressure reports live heap as a fraction of the process memory limit
+// (0 when no limit is set, so the trigger stays inert).
+func Pressure() float64 {
+	limit := memLimit()
+	if limit <= 0 {
+		return 0
+	}
+	return float64(liveHeap()) / float64(limit)
 }
