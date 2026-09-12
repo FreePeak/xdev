@@ -33,22 +33,39 @@ Rules:
 - Finish by calling the yield tool exactly once, as your last action, with the result the caller asked for.
 - Your transcript is not visible to the caller — put everything it needs into the yield result.`
 
-// SystemPromptOverrides discovers SYSTEM.md/APPEND_SYSTEM.md/PERSONALITY.md
-// from the project directory first, then the user data dir. No ancestor
-// walk — unlike AGENTS.md, system prompts are workspace-scoped by design.
-// Both return "" when no override exists.
+// SystemPromptOverrides discovers SYSTEM.md/APPEND_SYSTEM.md/
+// PERSONALITY.md/TITLE_SYSTEM.md from the project directory first, then
+// the user data dir. No ancestor walk — unlike AGENTS.md, system prompts
+// are workspace-scoped by design. All fields return "" when no override
+// exists.
 type SystemPromptOverrides struct {
 	System, Append string
 	Personality    string
+	// Title is TITLE_SYSTEM.md content: the system prompt for ai-title
+	// generation (omp parity, M10 #32). xdev titles are purely mechanical
+	// today — openSession in cmd/xdev/print.go stamps "print <timestamp>"
+	// and /fork derives from the parent — so nothing consumes this yet.
+	// When the ai-title call lands it reads its prompt override here
+	// (fallback: the built-in title prompt) and normalizes the model's
+	// answer: first line, strip quotes/<title>/punctuation, "none" or
+	// "<title/>" = no title, >80 chars or >12 words rejected.
+	Title string
 }
 
+// TitleSystemPrompt returns the TITLE_SYSTEM.md content for ai-title
+// generation, "" when absent (the caller falls back to its default
+// prompt). No ai-title call exists yet — see the Title field comment
+// for where this plugs in.
+func (o SystemPromptOverrides) TitleSystemPrompt() string { return o.Title }
+
 // LoadSystemPromptOverrides checks project SYSTEM.md/APPEND_SYSTEM.md/
-// PERSONALITY.md then their user-level counterparts.
+// PERSONALITY.md/TITLE_SYSTEM.md then their user-level counterparts.
 func LoadSystemPromptOverrides(cwd string) SystemPromptOverrides {
 	var o SystemPromptOverrides
 	o.System = findSystemPromptFile(cwd, "SYSTEM.md")
 	o.Append = findSystemPromptFile(cwd, "APPEND_SYSTEM.md")
 	o.Personality = findSystemPromptFile(cwd, "PERSONALITY.md")
+	o.Title = findSystemPromptFile(cwd, "TITLE_SYSTEM.md")
 	return o
 }
 
@@ -71,6 +88,43 @@ func userAgentDir() string {
 		return filepath.Join(home, ".xdev", "agent")
 	}
 	return ""
+}
+
+// PersonalityPresets maps the `personality` settings key / --personality
+// flag to the prompt-tail paragraph it injects (condensed from omp's
+// PERSONALITY_SPECS). "none" injects nothing; "" is the unset flag value
+// and behaves like "none" (the real path defaults it from
+// settings.personality first). A discovered PERSONALITY.md always beats
+// the preset.
+var PersonalityPresets = map[string]string{
+	"":          "",
+	"default":   "Tone: evidence-first terse engineer. Every sentence carries a fact, decision, or risk; no filler, hedging, or narration of obvious steps. Conclusion first, evidence next; name the tradeoff and pick the boring, safe option. Push back on risk-hidden plans or wrong claims with evidence; if overruled, execute the user's call.",
+	"friendly":  "Tone: warm, supportive collaborator. Adjust depth and pacing to the user, invite input, and keep momentum and confidence up. Basic questions must feel safe — never curt, dismissive, or patronizing. When something looks wrong, acknowledge the valid points first, then explain the concern. Assume a technical reader; warmth never means dumbing down.",
+	"pragmatic": "Tone: pragmatic senior engineer — concise, respectful, task-focused; actionable guidance first (assumptions, prerequisites, next steps). Engineering quality is non-negotiable and reasoning must be defensible, but never cheerlead or pad explanations of your own work. Challenge weak assumptions with demonstrable reasoning, then work with the user's call.",
+	"none":      "",
+}
+
+// ValidPersonality reports whether v is a personality preset value
+// (default|friendly|pragmatic|none). Settings-layer and flag validation
+// share this enum.
+func ValidPersonality(v string) bool {
+	_, ok := PersonalityPresets[v]
+	return ok
+}
+
+// ApplyPersonalityPreset resolves the effective personality tail into
+// the overrides: a discovered PERSONALITY.md (o.Personality already
+// set) wins; otherwise the preset paragraph fills it; "none" and ""
+// leave the tail empty. Unknown presets are an error — a typo'd flag
+// must not silently run without its persona.
+func (o *SystemPromptOverrides) ApplyPersonalityPreset(preset string) error {
+	if !ValidPersonality(preset) {
+		return fmt.Errorf("unknown personality %q (want default|friendly|pragmatic|none)", preset)
+	}
+	if o.Personality == "" {
+		o.Personality = PersonalityPresets[preset]
+	}
+	return nil
 }
 
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.

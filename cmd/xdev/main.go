@@ -47,6 +47,7 @@ func main() {
 	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
+	personality := fs.String("personality", "", "personality preset: default | friendly | pragmatic | none (default: settings.personality)")
 	themeName := fs.String("theme", "", "TUI theme: groknight | grokday (default: auto)")
 	maxTurns := fs.Int("max-turns", 0, "max agent turns per run (0 = default 200)")
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
@@ -104,6 +105,9 @@ Flags:
 	if *maxTurns == 0 {
 		*maxTurns = settings.MaxTurns
 	}
+	if *personality == "" {
+		*personality = settings.Personality
+	}
 
 	args := fs.Args()
 	mode := "print"
@@ -117,6 +121,7 @@ Flags:
 			ResumePrefix: *resumePrefix,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
+			Personality:  *personality,
 			MaxTokens:    *maxTokens,
 			MaxTurns:     *maxTurns,
 			Prewalk:      *prewalkFlag,
@@ -136,6 +141,7 @@ Flags:
 			ResumePrefix: *resumePrefix,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
+			Personality:  *personality,
 			MaxTurns:     *maxTurns,
 			MaxTokens:    *maxTokens,
 		}
@@ -186,6 +192,7 @@ Flags:
 					ContinueLast: *continueLast,
 					SystemPrompt: *systemPrompt,
 					AppendSystem: *appendSystemPrompt,
+					Personality:  *personality,
 					MaxTokens:    *maxTokens,
 				}, *themeName)
 				if err != nil {
@@ -216,6 +223,7 @@ Flags:
 			ResumePrefix: *resumePrefix,
 			SystemPrompt: *systemPrompt,
 			AppendSystem: *appendSystemPrompt,
+			Personality:  *personality,
 			MaxTurns:     *maxTurns,
 			MaxTokens:    *maxTokens,
 			Prewalk:      *prewalkFlag,

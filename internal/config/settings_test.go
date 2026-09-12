@@ -216,3 +216,33 @@ func TestSetRefusesUnparseableFile(t *testing.T) {
 		t.Fatal("refusal must leave the file untouched")
 	}
 }
+
+// TestSettingsPersonality pins the `personality` key: schema default,
+// layer override, and rejection of a value outside the enum.
+func TestSettingsPersonality(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Personality != "default" {
+		t.Fatalf("schema default = %q, want default", s.Personality)
+	}
+
+	writeFile(t, projectSettingsPath(cwd), "personality: friendly\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Personality != "friendly" {
+		t.Fatalf("project layer = %q", s.Personality)
+	}
+
+	writeFile(t, projectSettingsPath(cwd), "personality: moody\n")
+	if _, err := LoadSettings(cwd, nil); err == nil || !strings.Contains(err.Error(), "personality") {
+		t.Fatalf("unknown preset must be rejected, got %v", err)
+	}
+}
