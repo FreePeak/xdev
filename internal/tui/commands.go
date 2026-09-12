@@ -101,6 +101,35 @@ type AdvisorOps struct {
 	Dump    func() string
 }
 
+// CollabOps wires /collab and /join to the live session sharing (the relay
+// lives in cmd). Start begins hosting and returns the join instructions
+// (mode.View publishes a view-only link, mode.Remote binds beyond loopback);
+// Status renders the active room; Stop ends hosting; Join joins a link and
+// returns the notice line. nil ops degrade to a notice.
+type CollabOps struct {
+	Start  func(mode CollabMode) (string, error)
+	Status func() string
+	Stop   func() error
+	Join   func(link string) (string, error)
+	// Forward routes a prompt typed while joined as a guest to the host
+	// session; it reports true when the guest path consumed the input (a
+	// local turn must then not start).
+	Forward func(text string) bool
+}
+
+// CollabMode selects how /collab hosts: a view-only link grants read access
+// only, and Remote is the explicit opt-in for binding a non-loopback address.
+type CollabMode struct {
+	View   bool
+	Remote bool
+	Addr   string // explicit bind address ("" = loopback, random port)
+}
+
+// Collab is the process-wide /collab implementation. It is a package-level
+// slot (like BashJobs) so the command seam lives entirely in this file: cmd
+// installs it at startup, tests may override it, and nil degrades to a notice.
+var Collab *CollabOps
+
 // ExtensionCommand runs one "/ext:cmd" and returns its output. Wired by
 // cmd from the extension manager; nil when no extensions are loaded.
 type ExtensionCommand func(name, args string) (string, error)
@@ -185,6 +214,10 @@ func builtinCommands() []Command {
 				app.AddSystemBlock(BashJobs())
 				return nil
 			}},
+		{Name: "collab", Description: "share this session live: /collab [view|remote]|status|stop",
+			Fn: func(app CommandAPI, args string) error { return collabCommand(app, args) }},
+		{Name: "join", Description: "join a shared session as a guest: /join <link>",
+			Fn: func(app CommandAPI, args string) error { return joinCommand(app, args) }},
 		{Name: "help", Description: "show available commands",
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(builtinCommands())); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
@@ -430,4 +463,71 @@ func helpText(cmds []Command) string {
 		fmt.Fprintf(&b, "\n  %-*s %s", maxLen, names[i], c.Description)
 	}
 	return b.String()
+}
+
+// collabCommand parses "/collab [view|remote]|status|stop". Hosting is
+// started by bare /collab (full control) or /collab view (read-only link);
+// "remote" is the explicit opt-in for binding beyond loopback.
+func collabCommand(app CommandAPI, args string) error {
+	if Collab == nil {
+		app.AddSystemBlock("collab is not wired in this build")
+		return nil
+	}
+	mode := CollabMode{}
+	for _, word := range strings.Fields(args) {
+		switch strings.ToLower(word) {
+		case "":
+		case "view", "view-only":
+			mode.View = true
+		case "remote":
+			mode.Remote = true
+		case "status":
+			if Collab.Status == nil {
+				app.AddSystemBlock("collab status is not wired in this build")
+				return nil
+			}
+			app.AddSystemBlock(Collab.Status())
+			return nil
+		case "stop":
+			if Collab.Stop == nil {
+				app.AddSystemBlock("collab stop is not wired in this build")
+				return nil
+			}
+			if err := Collab.Stop(); err != nil {
+				return err
+			}
+			app.AddSystemBlock("· collab stopped")
+			return nil
+		default:
+			return fmt.Errorf("usage: /collab [view|remote] | /collab status | /collab stop (got %q)", word)
+		}
+	}
+	if Collab.Start == nil {
+		app.AddSystemBlock("collab hosting is not wired in this build")
+		return nil
+	}
+	out, err := Collab.Start(mode)
+	if err != nil {
+		return err
+	}
+	app.AddSystemBlock(out)
+	return nil
+}
+
+// joinCommand parses "/join <link>" and joins as a guest.
+func joinCommand(app CommandAPI, args string) error {
+	link := strings.TrimSpace(args)
+	if link == "" {
+		return fmt.Errorf(`usage: /join "<link>" — the link printed by /collab`)
+	}
+	if Collab == nil || Collab.Join == nil {
+		app.AddSystemBlock("collab joining is not wired in this build")
+		return nil
+	}
+	out, err := Collab.Join(link)
+	if err != nil {
+		return err
+	}
+	app.AddSystemBlock(out)
+	return nil
 }
