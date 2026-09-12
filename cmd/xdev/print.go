@@ -298,8 +298,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err := overrides.ApplyPersonalityPreset(preset); err != nil {
 		return 2, err
 	}
+	mem := buildMemory(settings)
+	// M15 #73: the sharpshooter backend consolidates friction through the
+	// smol role, resolved here where the config is in hand.
+	if ss, ok := mem.(*memory.SharpShooter); ok {
+		ss.Complete = memoryRoleComplete(cfg, settings, "@smol")
+	}
 	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
-		tailSystemPrompt(overrides, opts.AppendSystem), buildMemory(settings))
+		tailSystemPrompt(overrides, opts.AppendSystem), mem)
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
 	// --- session ---
@@ -364,6 +370,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	// M15 #73: a resumed session keeps its friction history — replay the
+	// persisted user turns before this run's own turn is appended.
+	if ss, ok := mem.(*memory.SharpShooter); ok {
+		if err := ss.Replay(store); err != nil {
+			logx.Errorf("memory: sharpshooter replay: %v", err)
+		}
+	}
+
 	history, err := initialHistory(store, prompt)
 	if err != nil {
 		return 2, err
@@ -383,8 +397,18 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"code": exitCode}})
 	// M12 F1: local memory pipeline runs after the session ends, off the
 	// critical path (off unless memory: local + memoryPipeline: on).
-	if pipe := buildMemoryPipeline(cfg, settings, buildMemory(settings)); pipe != nil {
+	if pipe := buildMemoryPipeline(cfg, settings, buildLocalMemory(settings)); pipe != nil {
 		pipe.StartBackground(context.Background())
+	}
+	// M15 #73: sharpshooter's friction feed. A print run is one user turn; an
+	// aborted run makes the next instruction a friction signal. Wait blocks
+	// until the background consolidation landed — the process exits here.
+	if ss, ok := mem.(*memory.SharpShooter); ok {
+		if ag.Store != nil {
+			ss.Session = ag.Store.ID()
+		}
+		ss.Observe(memory.Turn{Text: prompt, AfterFailure: exitCode != 0})
+		ss.Wait()
 	}
 	// Text is already streamed live via OnEvent; only close the line.
 	if final != nil {
@@ -557,7 +581,7 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 	return promptFnWithMemory(base, cwd, reg, appendSystem, nil)
 }
 
-func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem *memory.Backend) func() string {
+func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem memory.Store) func() string {
 	ctxFiles := agent.LoadContextFiles(cwd)
 	var ruleSet []rules.Rule
 	if noRulesFlag {
@@ -816,8 +840,36 @@ func registerURISchemes() {
 	tool.RegisterURIScheme("rule", rules.Resolve)
 }
 
-// buildMemory returns the configured memory backend (nil = off).
-func buildMemory(settings *config.Settings) *memory.Backend {
+// buildMemory returns the configured memory backend (nil = off). The Store
+// seam keeps every consumer — prompt injection, the memory:// read seam, the
+// learn tool, /memory — backend-agnostic across local and sharpshooter.
+func buildMemory(settings *config.Settings) memory.Store {
+	if settings == nil {
+		return nil
+	}
+	switch settings.Memory {
+	case "local":
+		b := buildLocalMemory(settings)
+		if b == nil {
+			return nil
+		}
+		return b
+	case "sharpshooter":
+		// M15 #73: friction-gated decision files under <dataDir>/memories.
+		ss := &memory.SharpShooter{Dir: filepath.Join(config.DataDir(), "memories")}
+		if err := ss.Ensure(); err != nil {
+			logx.Errorf("memory: cannot create %s, disabling: %v", ss.Dir, err)
+			return nil
+		}
+		tool.RegisterURIScheme("memory", ss.Read)
+		return ss
+	}
+	return nil
+}
+
+// buildLocalMemory is the local backend alone: the two-phase pipeline writes
+// MEMORY.md/learned.md, so its Backend field stays local-specific.
+func buildLocalMemory(settings *config.Settings) *memory.Backend {
 	if settings == nil || settings.Memory != "local" {
 		return nil
 	}
@@ -838,54 +890,7 @@ func buildMemoryPipeline(cfg *config.Config, settings *config.Settings, backend 
 	if backend == nil || settings == nil || !settings.MemoryPipelineOn() {
 		return nil
 	}
-	complete := func(role string) func(context.Context, string) (string, error) {
-		ref, _, err := resolveModel(role, cfg, settings)
-		if err != nil {
-			logx.Errorf("memory pipeline: %s unresolved: %v", role, err)
-			return nil
-		}
-		pName, mName, err := config.ParseModelRef(ref)
-		if err != nil {
-			logx.Errorf("memory pipeline: %v", err)
-			return nil
-		}
-		pc, ok := cfg.Providers[pName]
-		if !ok {
-			logx.Errorf("memory pipeline: unknown provider %q", pName)
-			return nil
-		}
-		prov, err := buildProvider(pName, pc, mName, cfg)
-		if err != nil {
-			logx.Errorf("memory pipeline: provider unavailable: %v", err)
-			return nil
-		}
-		return func(ctx context.Context, prompt string) (string, error) {
-			ch, err := prov.Stream(ctx, ai.StreamRequest{
-				Messages:  []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: prompt}}}},
-				Model:     mName,
-				MaxTokens: 2048,
-			})
-			if err != nil {
-				return "", err
-			}
-			var text strings.Builder
-			for ev := range ch {
-				switch ev.Type {
-				case ai.EventTextDelta:
-					text.WriteString(ev.Delta)
-				case ai.EventError:
-					return "", ev.Err
-				case ai.EventDone:
-					if ev.Message != nil && ev.Message.Text() != "" {
-						return ev.Message.Text(), nil
-					}
-					return text.String(), nil
-				}
-			}
-			return text.String(), nil
-		}
-	}
-	bySmol := complete("@smol")
+	bySmol := memoryRoleComplete(cfg, settings, "@smol")
 	if bySmol == nil {
 		return nil
 	}
@@ -902,6 +907,61 @@ func buildMemoryPipeline(cfg *config.Config, settings *config.Settings, backend 
 		Complete:    bySmol,
 		Consolidate: bySmol,
 		OnError:     func(err error) { logx.Errorf("memory pipeline: %v", err) },
+	}
+}
+
+// memoryRoleComplete resolves a model role into a one-shot completion seam
+// (prompt in, text out) — the shared model-call plumbing for every memory
+// background pass (the pipeline's extraction/consolidation, sharpshooter's
+// friction consolidation). nil when the role is unresolvable.
+func memoryRoleComplete(cfg *config.Config, settings *config.Settings, role string) func(context.Context, string) (string, error) {
+	if cfg == nil || settings == nil {
+		return nil
+	}
+	ref, _, err := resolveModel(role, cfg, settings)
+	if err != nil {
+		logx.Errorf("memory: %s unresolved: %v", role, err)
+		return nil
+	}
+	pName, mName, err := config.ParseModelRef(ref)
+	if err != nil {
+		logx.Errorf("memory pipeline: %v", err)
+		return nil
+	}
+	pc, ok := cfg.Providers[pName]
+	if !ok {
+		logx.Errorf("memory pipeline: unknown provider %q", pName)
+		return nil
+	}
+	prov, err := buildProvider(pName, pc, mName, cfg)
+	if err != nil {
+		logx.Errorf("memory pipeline: provider unavailable: %v", err)
+		return nil
+	}
+	return func(ctx context.Context, prompt string) (string, error) {
+		ch, err := prov.Stream(ctx, ai.StreamRequest{
+			Messages:  []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: prompt}}}},
+			Model:     mName,
+			MaxTokens: 2048,
+		})
+		if err != nil {
+			return "", err
+		}
+		var text strings.Builder
+		for ev := range ch {
+			switch ev.Type {
+			case ai.EventTextDelta:
+				text.WriteString(ev.Delta)
+			case ai.EventError:
+				return "", ev.Err
+			case ai.EventDone:
+				if ev.Message != nil && ev.Message.Text() != "" {
+					return ev.Message.Text(), nil
+				}
+				return text.String(), nil
+			}
+		}
+		return text.String(), nil
 	}
 }
 
