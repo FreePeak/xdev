@@ -467,6 +467,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	planMode.Propose = agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
 		return false, "awaiting user review — the user will /plan off to approve or send revision feedback"
 	})
+	// ask (#36): surface the question in the transcript. The blocking card
+	// that lets the user pick an option is #46's scope, so this sink is
+	// deliberately one-way — it shows the question and lets the headless
+	if at, ok := reg.Get(tool.AskToolName); ok {
+		if at2, isAsk := at.(*tool.AskTool); isAsk {
+			at2.Sink = &askCardSink{app: app, fallback: tool.NewHeadlessAskSink(lastSettings().AskTimeout())}
+		}
+	}
 	if mem := buildMemory(lastSettings()); mem != nil {
 		app.SetMemoryOps(&tui.MemoryOps{
 			View: func() string {
@@ -910,4 +918,31 @@ func humanSize(n int64) string {
 		return fmt.Sprintf("%d KB", n>>10)
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// askCardSink is the ask tool's TUI answer path (#36): the question is
+// surfaced as a system block, then the headless timeout→recommended policy
+// answers it. The interactive option card is #46.
+type askCardSink struct {
+	app      *tui.App
+	fallback tool.AskSink
+}
+
+func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskResponse, error) {
+	var b strings.Builder
+	b.WriteString("ask: " + req.Question)
+	for _, o := range req.Options {
+		b.WriteString("\n  - " + o.Label)
+		if o.Description != "" {
+			b.WriteString(": " + o.Description)
+		}
+	}
+	if req.Multi {
+		b.WriteString("\n  (multi-select)")
+	}
+	if len(req.Recommended) > 0 {
+		b.WriteString("\n  recommended: " + strings.Join(req.Recommended, ", "))
+	}
+	s.app.AddSystemBlock(b.String())
+	return s.fallback.Ask(ctx, req)
 }

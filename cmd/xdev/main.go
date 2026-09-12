@@ -55,6 +55,8 @@ func main() {
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
 	prewalkInto := fs.String("prewalk-into", "@smol", "prewalk target: model ref or @role (default @smol)")
+	planYolo := fs.Bool("plan-yolo", false, "plan mode with the first proposal auto-approved (implies -plan)")
+	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref or @role to switch to after the first approved proposal (default: stay)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `xdev %s — lightweight coding agent (Go)
 
@@ -221,6 +223,11 @@ Flags:
 			Prewalk:      *prewalkFlag,
 			PrewalkInto:  *prewalkInto,
 			Plan:         *planFlag,
+			PlanYolo:     *planYolo,
+			PlanYoloInto: *planYoloInto,
+		}
+		if *planYoloInto != "" && !*planYolo {
+			fmt.Fprintln(os.Stderr, "xdev: -plan-yolo-into has no effect without -plan-yolo")
 		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {
