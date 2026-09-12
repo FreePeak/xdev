@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 func TestLoadModelsWithEnvExpansion(t *testing.T) {
@@ -118,6 +120,7 @@ func TestRegisterProviderValidates(t *testing.T) {
 		{"nil block", "ext", nil, "provider block is required"},
 		{"missing baseUrl", "ext", &ProviderConfig{API: "openai-completions", Models: []ModelConfig{{ID: "free"}}}, "baseUrl is required"},
 		{"unsupported api", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "telepathy", Models: []ModelConfig{{ID: "free"}}}, "unsupported api"},
+		{"unknown tool format", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "openai-completions", ToolsFormat: "telepathy", Models: []ModelConfig{{ID: "free"}}}, "unknown tool format"},
 		{"no models", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "openai-completions"}, "at least one model"},
 		{"blank model id", "ext", &ProviderConfig{BaseURL: "http://x/v1", API: "openai-completions", Models: []ModelConfig{{ID: "  "}}}, "at least one model"},
 	}
@@ -152,5 +155,26 @@ func TestRegisterProviderValidates(t *testing.T) {
 	}
 	if cfg.Providers["ext"] != pc {
 		t.Fatalf("provider not installed: %v", cfg.Providers)
+	}
+}
+
+// TestRegisterProviderAcceptsV2Adapters pins that the M14 transports and the
+// in-band tool-format names are valid registration payloads.
+func TestRegisterProviderAcceptsV2Adapters(t *testing.T) {
+	for _, api := range ai.SupportedAPIs() {
+		cfg := &Config{Providers: map[string]*ProviderConfig{}}
+		pc := &ProviderConfig{
+			BaseURL:     "https://api.example.com",
+			API:         api,
+			Project:     "proj",
+			Location:    "europe-west4",
+			Deployment:  "deploy",
+			APIVersion:  "2025-04-01-preview",
+			ToolsFormat: "hermes",
+			Models:      []ModelConfig{{ID: "m"}},
+		}
+		if err := cfg.RegisterProvider("p-"+api, pc); err != nil {
+			t.Fatalf("api %q: %v", api, err)
+		}
 	}
 }
