@@ -74,6 +74,10 @@ func (v verboseTool) Execute(context.Context, json.RawMessage) (tool.Result, err
 // must be capped at the choke point so one verbose server cannot bust
 // PRD §1 Goal 4.
 func TestPromptBudgetWithLateRegistrants(t *testing.T) {
+	// The budget governs the bundled surface: isolate ambient user rules
+	// (~/.agent/rules, ~/.xdev/agent/rules) so the developer's own
+	// rulebook does not count against PRD §1 Goal 4.
+	t.Setenv("HOME", t.TempDir())
 	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
 	for i := range 3 {
 		reg.Register(verboseTool{name: fmt.Sprintf("late_%d", i)})
@@ -89,6 +93,7 @@ func TestPromptBudgetWithLateRegistrants(t *testing.T) {
 }
 
 func TestBundledPromptStaysUnderBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // ambient rules are user content, not bundled prose
 	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
 	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
 	tokens := len([]rune(got)) / 4
