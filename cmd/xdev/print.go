@@ -376,6 +376,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"code": exitCode}})
+	// M12 F1: local memory pipeline runs after the session ends, off the
+	// critical path (off unless memory: local + memoryPipeline: on).
+	if pipe := buildMemoryPipeline(cfg, settings, buildMemory(settings)); pipe != nil {
+		pipe.StartBackground(context.Background())
+	}
 	// Text is already streamed live via OnEvent; only close the line.
 	if final != nil {
 		fmt.Println()
@@ -817,6 +822,74 @@ func buildMemory(settings *config.Settings) *memory.Backend {
 	return b
 }
 
+// buildMemoryPipeline constructs the two-phase local memory pipeline
+// (M12 F1): extraction over changed sessions by the @smol model, then
+// consolidation into MEMORY.md/learned.md. nil = off (memory backend
+// absent, memoryPipeline not "on", or the role unresolvable).
+func buildMemoryPipeline(cfg *config.Config, settings *config.Settings, backend *memory.Backend) *memory.Pipeline {
+	if backend == nil || settings == nil || !settings.MemoryPipelineOn() {
+		return nil
+	}
+	complete := func(role string) func(context.Context, string) (string, error) {
+		ref, _, err := resolveModel(role, cfg, settings)
+		if err != nil {
+			logx.Errorf("memory pipeline: %s unresolved: %v", role, err)
+			return nil
+		}
+		pName, mName, err := config.ParseModelRef(ref)
+		if err != nil {
+			logx.Errorf("memory pipeline: %v", err)
+			return nil
+		}
+		pc, ok := cfg.Providers[pName]
+		if !ok {
+			logx.Errorf("memory pipeline: unknown provider %q", pName)
+			return nil
+		}
+		prov, err := buildProvider(pName, pc, mName, cfg)
+		if err != nil {
+			logx.Errorf("memory pipeline: provider unavailable: %v", err)
+			return nil
+		}
+		return func(ctx context.Context, prompt string) (string, error) {
+			ch, err := prov.Stream(ctx, ai.StreamRequest{
+				Messages:  []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: prompt}}}},
+				Model:     mName,
+				MaxTokens: 2048,
+			})
+			if err != nil {
+				return "", err
+			}
+			var text strings.Builder
+			for ev := range ch {
+				switch ev.Type {
+				case ai.EventTextDelta:
+					text.WriteString(ev.Delta)
+				case ai.EventError:
+					return "", ev.Err
+				case ai.EventDone:
+					if ev.Message != nil && ev.Message.Text() != "" {
+						return ev.Message.Text(), nil
+					}
+					return text.String(), nil
+				}
+			}
+			return text.String(), nil
+		}
+	}
+	bySmol := complete("@smol")
+	if bySmol == nil {
+		return nil
+	}
+	return &memory.Pipeline{
+		Backend:     backend,
+		DataDir:     config.DataDir(),
+		Complete:    bySmol,
+		Consolidate: bySmol,
+		OnError:     func(err error) { logx.Errorf("memory pipeline: %v", err) },
+	}
+}
+
 // noRulesFlag mirrors the --no-rules CLI flag (main sets it after flag
 // parsing): it disables rulebook discovery, prompt injection, and the
 // rule:// read seam.
@@ -906,6 +979,11 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// token budget. The agent loop reads the same state for the per-turn
 	// reminder and budget accounting; wireTaskParent binds the store.
 	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
+	// M13 #51: checkpoint/rewind — named session-tree bookmarks. rewind
+	// re-points the leaf at a checkpoint and records the caller's report as
+	// a branch summary; wireTaskParent binds the live session.
+	reg.Register(&tool.CheckpointTool{})
+	reg.Register(&tool.RewindTool{})
 	if mem := buildMemory(settings); mem != nil {
 		reg.Register(&memory.LearnTool{Backend: mem, SkillsDir: skills.ManagedRoot()})
 	}
@@ -1069,6 +1147,11 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 			nt.Notes.Bind(store)
 		}
 	}
+	// M13 #51: bind checkpoint/rewind to the active session (again on
+	// /resume and session switches). The running probe stays nil here: a
+	// model rewind runs inside its own turn, so a run-wide probe would
+	// refuse every call. See tool.WireCheckpoint.
+	tool.WireCheckpoint(reg, store, nil)
 }
 
 // failoverChain builds the M5 resilience chain from models.yml: every

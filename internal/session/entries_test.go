@@ -117,6 +117,10 @@ func TestEntryRoundTripAllTypes(t *testing.T) {
 			Data:       map[string]any{"toolCallId": "call_9", "toolName": "read"},
 		},
 		&CustomEntry{Env: env(TypeCustom, "20101010", "10101010", ts0), CustomType: "session_exit"},
+		&CheckpointEntry{
+			Env:        env(TypeCheckpoint, "30101010", "20101010", ts0),
+			Checkpoint: CheckpointPayload{Name: "before-refactor", EntryID: "87654321", Note: "state to return to"},
+		},
 	}
 	for _, e := range entries {
 		line, err := MarshalEntry(e)
@@ -134,6 +138,33 @@ func TestEntryRoundTripAllTypes(t *testing.T) {
 		if string(line) != string(again) {
 			t.Fatalf("%T: round-trip mismatch:\n%s\n%s", e, line, again)
 		}
+	}
+}
+
+// TestCheckpointEntryWireShape pins the line a foreign reader sees: the
+// bookmark rides under "checkpoint" with a camelCase entryId (M13 #51).
+func TestCheckpointEntryWireShape(t *testing.T) {
+	want := CheckpointPayload{Name: "save", EntryID: "abcd1234", Note: "before refactor"}
+	e := &CheckpointEntry{Env: env(TypeCheckpoint, "c0ffee00", "abcd1234", ts0), Checkpoint: want}
+	got, err := MarshalEntry(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"checkpoint","id":"c0ffee00","parentId":"abcd1234","timestamp":"2026-09-07T03:20:45.220Z",` +
+		`"checkpoint":{"name":"save","entryId":"abcd1234","note":"before refactor"}}`
+	if string(got) != line {
+		t.Fatalf("wire mismatch:\n got %s\nwant %s", got, line)
+	}
+	parsed, err := ParseEntry(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, ok := parsed.(*CheckpointEntry)
+	if !ok {
+		t.Fatalf("parsed %T, want *CheckpointEntry", parsed)
+	}
+	if cp.Checkpoint != want {
+		t.Fatalf("payload = %+v, want %+v", cp.Checkpoint, want)
 	}
 }
 
