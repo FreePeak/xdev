@@ -52,11 +52,32 @@ func TestRunInputLastWins(t *testing.T) {
 	}
 }
 
-func TestRunFailsClosedOnBadCommand(t *testing.T) {
-	b := FromSettings(map[string]any{"tool_call": "exit 3"})
-	if _, err := b.Run(context.Background(), "tool_call", map[string]any{}); err == nil {
-		t.Fatal("non-zero exit must fail closed")
+// Exit-code contract (#92): 2 blocks with the stderr reason, any other
+// non-zero is a non-blocking warning. This test used to pin "exit 3 fails
+// closed", which is precisely the over-blocking the issue reports.
+func TestRunExitCodeContract(t *testing.T) {
+	// Exit 2 blocks, and the reason is the hook's stderr.
+	b := FromSettings(map[string]any{"tool_call": "echo 'rm -rf is not allowed' >&2; exit 2"})
+	_, err := b.Run(context.Background(), "tool_call", map[string]any{})
+	if err == nil {
+		t.Fatal("exit 2 must block the call")
 	}
+	if !strings.Contains(err.Error(), "rm -rf is not allowed") {
+		t.Fatalf("the block reason must be the stderr text, got %v", err)
+	}
+	// Any other non-zero exit warns and lets the call through.
+	for _, code := range []string{"1", "3"} {
+		b := FromSettings(map[string]any{"tool_call": "echo boom >&2; exit " + code})
+		res, err := b.Run(context.Background(), "tool_call", map[string]any{})
+		if err != nil {
+			t.Fatalf("exit %s must not block a call (ported advisory hook): %v", code, err)
+		}
+		if res == nil {
+			t.Fatalf("exit %s must still return the payload", code)
+		}
+	}
+	// Malformed stdout stays fail-closed: a pre-hook whose verdict cannot be
+	// read must not be treated as an approval.
 	b2 := FromSettings(map[string]any{"tool_call": "echo not-json"})
 	if _, err := b2.Run(context.Background(), "tool_call", map[string]any{}); err == nil {
 		t.Fatal("non-JSON stdout must fail closed")

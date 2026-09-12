@@ -116,7 +116,7 @@ func TestBashExplicitZeroTimeoutRunsLong(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := bt.Execute(ctx, args(t, map[string]any{
-		"command":  "sleep 1; echo done",
+		"command": "sleep 1; echo done",
 		"timeout": 0,
 	}))
 	if err != nil {
