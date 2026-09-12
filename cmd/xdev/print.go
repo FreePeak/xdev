@@ -14,6 +14,7 @@ import (
 
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/computer"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/ext"
@@ -930,6 +931,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M13 #48: web_search — ordered provider chain (keys from env or
 	// settings); keyless DuckDuckGo keeps it answering without config.
 	reg.Register(tool.NewWebSearchTool(settings.WebSearchConfig()))
+	// M15 #65: computer — desktop control, off unless computer.enabled is
+	// set (parent-only: it drives the real desktop, not a sandbox).
+	reg.Register(computer.NewTool(computer.FromSettings(settings)))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	reg.Register(&agent.TaskTool{
