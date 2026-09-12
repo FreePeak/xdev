@@ -148,6 +148,12 @@ type Settings struct {
 	// are extra roots scanned after native/user/managed, so an authored
 	// pack — and an agent-learned one — outranks them.
 	Skills SkillsSettings `yaml:"skills"`
+	// Plugins configures the marketplace/plugin manager (M13 #53):
+	// marketplaces lists catalog locations (a local directory or a git URL)
+	// for `xdev plugin list|search|install`. Installed plugins live in
+	// <dataDir>/plugins and contribute commands/skills/agents/hooks at the
+	// lowest discovery priority.
+	Plugins PluginsSettings `yaml:"plugins"`
 }
 
 // SkillsSettings is the `skills` group.
@@ -156,6 +162,15 @@ type SkillsSettings struct {
 	// relative entry resolves against the project cwd; a missing or
 	// unreadable directory is skipped, never fatal.
 	CustomDirectories []string `yaml:"customDirectories"`
+}
+
+// PluginsSettings is the `plugins` group.
+type PluginsSettings struct {
+	// Marketplaces are catalog locations in precedence order: a local
+	// directory holding a catalog manifest, or a git URL that is cloned into
+	// <dataDir>/plugins/marketplaces. A relative path resolves against the
+	// process working directory.
+	Marketplaces []string `yaml:"marketplaces"`
 }
 
 // TTSRSettings is the `ttsr` group. Rule-level fields override the group
@@ -424,6 +439,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.Skills.CustomDirectories != nil {
 		s.Skills.CustomDirectories = append([]string(nil), layer.Skills.CustomDirectories...)
+	}
+	if layer.Plugins.Marketplaces != nil {
+		s.Plugins.Marketplaces = append([]string(nil), layer.Plugins.Marketplaces...)
 	}
 	if layer.TaskAgentAdvisor != "" {
 		s.TaskAgentAdvisor = layer.TaskAgentAdvisor
