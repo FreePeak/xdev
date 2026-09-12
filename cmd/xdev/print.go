@@ -237,6 +237,13 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	// cooldown revert and credential rotation actually run — the engine was
 	// complete and unit-tested with no production caller, so a spent key
 	// failed the run instead of stepping to its apiKeys sibling.
+	// #82: the two compaction triggers were parsed, validated and listed in
+	// `config list`, but no build site copied them into CompactionConfig, so
+	// neither the idle boundary nor the async summarize could ever fire.
+	if settings != nil {
+		ag.Compaction.IdleAfter = settings.CompactionIdleAfter()
+		ag.Compaction.Async = settings.CompactionAsyncOn()
+	}
 	st := ag.ArmFallback(settings, role)
 	if st != nil {
 		st.Rotate = func(provider string) (ai.Provider, bool) {

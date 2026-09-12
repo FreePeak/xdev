@@ -330,6 +330,11 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	for turn := 0; turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
+			// An abort also drops any in-flight background summarize: nothing
+			// it produces would be applied, and leaving it running spends a
+			// provider round-trip on a conversation the user just stopped
+			// (#82 — CancelAsyncCompaction had no caller).
+			a.CancelAsyncCompaction()
 			return lastAssistant, ctx.Err()
 		default:
 		}
