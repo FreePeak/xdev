@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/FreePeak/xdev/internal/websearch"
 )
 
 // Settings layering (M9 #10, research parity-session-ux §10): schema
@@ -55,7 +57,17 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// WebSearch configures the web_search provider chain (M13 #48):
+	// ordered providers, per-provider timeout, API keys.
+	WebSearch WebSearchSettings `yaml:"webSearch"`
 }
+
+// WebSearchSettings is the webSearch config block: ordered providers,
+// per-provider timeout, API keys (M13 #48). It is the engine's own Settings
+// type, aliased rather than redeclared — internal/config imports
+// internal/tool through internal/agent, so the struct the registry hands to
+// the tool cannot live in either of those packages without an import cycle.
+type WebSearchSettings = websearch.Settings
 
 // defaultSettings is the schema-defaults layer.
 // memoryOrDefault reports the effective memory backend ("" = off).
@@ -85,6 +97,16 @@ func defaultSettings() *Settings {
 // unset follows the schema default (on).
 func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
+}
+
+// WebSearchConfig returns the webSearch block (nil-safe: the zero value is
+// a usable keyless chain, same rule as ShowThinkingOn's nil tolerance for
+// pre-main callers).
+func (s *Settings) WebSearchConfig() websearch.Settings {
+	if s == nil {
+		return websearch.Settings{}
+	}
+	return s.WebSearch
 }
 
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
@@ -187,6 +209,31 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	// webSearch: the provider list is replaced wholesale (an overlay that
+	// names one provider means exactly that chain), keys merge per
+	// provider, and the timeout duration is validated here so a typo is
+	// reported instead of silently falling back to the default.
+	if layer.WebSearch.Providers != nil {
+		s.WebSearch.Providers = append([]string(nil), layer.WebSearch.Providers...)
+	}
+	if layer.WebSearch.Timeout != "" {
+		if _, err := time.ParseDuration(layer.WebSearch.Timeout); err != nil {
+			return fmt.Errorf("webSearch.timeout %q: %w", layer.WebSearch.Timeout, err)
+		}
+		s.WebSearch.Timeout = layer.WebSearch.Timeout
+	}
+	if layer.WebSearch.MaxResults != 0 {
+		if layer.WebSearch.MaxResults < 0 {
+			return fmt.Errorf("webSearch.maxResults must be positive, got %d", layer.WebSearch.MaxResults)
+		}
+		s.WebSearch.MaxResults = layer.WebSearch.MaxResults
+	}
+	for k, v := range layer.WebSearch.APIKeys {
+		if s.WebSearch.APIKeys == nil {
+			s.WebSearch.APIKeys = map[string]string{}
+		}
+		s.WebSearch.APIKeys[k] = v
 	}
 	switch s.ApprovalMode {
 	case "always-ask", "write", "yolo":
