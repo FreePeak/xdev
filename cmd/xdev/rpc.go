@@ -87,6 +87,13 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
 	wireAgentMode(h.agent, reg, cwd)
+	// #90: mailbox arrivals become follow-ups in this session's agent (one
+	// long-lived agent per RPC process, so no indirection is needed).
+	setInboxSink(func(m agent.Message) bool {
+		h.agent.FollowUp(inboxFollowUp(m))
+		return true
+	})
+	defer setInboxSink(nil)
 
 	// Extension processes: tools join the registry, and the manager is the
 	// agent's fail-closed policy interceptor; actions steer the live run.

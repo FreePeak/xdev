@@ -219,6 +219,12 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
 	wireAgentMode(ag, h.reg, h.cwd)
+	// NOTE (#90): ACP deliberately installs no mailbox sink. An ACP host can
+	// hold several sessions in one process, and there is one mailbox owner per
+	// process — routing every arrival to whichever agent was built last would
+	// deliver to the wrong session. Declining instead leaves messages UNREAD
+	// (the poller's contract), so `inbox` and any mode that does listen still
+	// see them.
 	// A compaction also reaches the bus as session_compact.
 	ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
 	return ag
