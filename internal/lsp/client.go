@@ -3,10 +3,13 @@
 // client are hand-rolled on bufio + encoding/json — xdev carries no LSP
 // dependency, and a server is a plain subprocess.
 //
-// Only what the `lsp` tool needs is implemented: initialize, didOpen /
-// didChange, definition, references, hover, documentSymbol, workspace/symbol
-// and the cached publishDiagnostics stream. Nothing here mutates the user's
-// code (no rename / code actions).
+// Only what the `lsp` tool needs is implemented: initialize (whose
+// capabilities are kept for the `capabilities` op), didOpen / didChange,
+// definition, references, hover, documentSymbol, workspace/symbol, rename and
+// codeAction QUERIES, and the cached publishDiagnostics stream. Nothing here
+// mutates the user's code: rename and code actions are reported, not applied,
+// so every write keeps going through the edit/write tools where the approval
+// gate, the freshness check and secret redaction live.
 package lsp
 
 import (
@@ -17,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,6 +154,11 @@ type Client struct {
 
 	docMu sync.Mutex
 	docs  map[string]docState
+
+	// caps is the server's `initialize` result capabilities, kept for the
+	// `capabilities` op: without it, "why did that op do nothing?" has no
+	// answer in a session that already paid for the handshake.
+	caps json.RawMessage
 
 	diagMu sync.Mutex
 	diags  map[string][]Diagnostic
@@ -323,6 +332,48 @@ func marshalParams(params any) (json.RawMessage, error) {
 
 // Close performs the LSP shutdown handshake then stops the process: graceful
 // first, process group killed only if it does not exit.
+// CapabilitiesSummary renders the stored initialize capabilities as a
+// sorted, dot-path list of what the server offers ("renameProvider",
+// "codeActionProvider", …). Empty when the server reported none.
+func (c *Client) CapabilitiesSummary() string {
+	c.mu.Lock()
+	raw := c.caps
+	c.mu.Unlock()
+	if len(raw) == 0 {
+		return ""
+	}
+	var caps map[string]any
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		return capText(string(raw), 400)
+	}
+	var paths []string
+	var walk func(prefix string, m map[string]any)
+	walk = func(prefix string, m map[string]any) {
+		for k, v := range m {
+			path := k
+			if prefix != "" {
+				path = prefix + "." + k
+			}
+			// `false` means "not offered" — the answer a caller needs is the
+			// ABSENCE, so a declined provider is dropped.
+			if b, ok := v.(bool); ok && !b {
+				continue
+			}
+			// An options object ({"resolveProvider":true}) is itself proof
+			// the capability exists: list it, and its sub-keys too. A nested
+			// object whose every leaf is false would otherwise vanish and
+			// read as "not supported".
+			paths = append(paths, path)
+			if sub, ok := v.(map[string]any); ok {
+				walk(path, sub)
+			}
+		}
+	}
+	walk("", caps)
+	sort.Strings(paths)
+	return strings.Join(paths, "\n")
+}
+
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
