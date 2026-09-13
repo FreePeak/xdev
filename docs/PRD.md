@@ -368,12 +368,17 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 The tree selector could own the keyboard while painting nothing: `handleTreeKey`
 returned handled for every key and had no `Ctrl+C` case, and two routes left it
 open with no panel drawn (a filter/search matching no row, and a panel with no
-room above a tall composer). Sequence: a usage error empties the composer → Esc
-opens the selector → every key, including the quit chord, is swallowed →
-process alive, terminal dead. Guards: the quit chord is never modal-owned, and
+room above a tall composer). A modal trap that reproduces the reported symptom
+exactly — usage error empties the composer → Esc opens the selector → every key
+including the quit chord is swallowed → process alive, terminal dead. Recorded as
+symptom-matching, not as an observed trace of the user's own session: the
+selector declines to open with zero entries, so their instance also needed a
+filter/room route to go invisible, and the watchdog below is what names any
+recurrence definitively. Guards: the quit chord is never modal-owned, and
 open implies painted (an empty result set renders "no rows match · Ctrl+O
 changes filter · …"; a panel with no room closes the selector). Each guard has a
-test that fails against the specific line it guards, verified live end to end.
+test that fails against the specific line it guards; the fixed behavior is
+verified live (empty-result panel paints with its way out, Ctrl+C exits 0).
 Related: the UI loop now heartbeats and writes `dumps/tui-stall-<ts>.txt`
 (goroutine stacks, mode 0600, collected by `xdev gc`) if one iteration exceeds
 5s, so any future stall diagnoses itself instead of being unreproducible
