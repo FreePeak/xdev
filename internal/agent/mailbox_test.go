@@ -315,16 +315,36 @@ func TestInboxPollerLeavesUndeliveredUnread(t *testing.T) {
 	// Accepting it now consumes it exactly once.
 	p2 := NewInboxPoller(mb)
 	p2.Interval = 10 * time.Millisecond
-	var got []Message
-	p2.OnMessage = func(m Message) bool { got = append(got, m); return true }
+	// The poller invokes OnMessage on its own goroutine, so the test's
+	// counter needs the same lock the callback writes under (a bare slice
+	// append raced the read under -race).
+	var (
+		gotMu     sync.Mutex
+		delivered int
+	)
+	p2.OnMessage = func(m Message) bool {
+		gotMu.Lock()
+		delivered++
+		gotMu.Unlock()
+		return true
+	}
 	p2.Start()
 	deadline := time.Now().Add(2 * time.Second)
-	for len(got) == 0 && time.Now().Before(deadline) {
+	for {
+		gotMu.Lock()
+		n := delivered
+		gotMu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	p2.Stop()
-	if len(got) != 1 {
-		t.Fatalf("accepted delivery = %d, want 1", len(got))
+	gotMu.Lock()
+	n := delivered
+	gotMu.Unlock()
+	if n != 1 {
+		t.Fatalf("accepted delivery = %d, want 1", n)
 	}
 	if left, _ := mb.Unread(); len(left) != 0 {
 		t.Fatalf("an accepted message must be marked read: %+v", left)

@@ -1807,11 +1807,14 @@ var sharedMailbox *agent.Mailbox
 // newToolRegistry and deferred by each run mode.
 var stopInbox func()
 
-// closeSharedHub stops every hub-started child process. Every run mode defers
-// it right after building its registry — without it, `hub start` leaves the
-// process running after xdev exits (parity finding T3 #8).
+// closeSharedHub stops every background subagent and every hub-started child
+// process. Every run mode defers it right after building its registry:
+// `hub start` used to leave the process running after xdev exited (T3 #8),
+// and now that jobs are detached from the turn that spawned them, the session
+// boundary is the only thing that reaps them (#93 sibling of that finding).
 func closeSharedHub() {
 	if sharedHub != nil {
+		sharedHub.Close()
 		sharedHub.StopProcesses()
 	}
 }
