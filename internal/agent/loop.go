@@ -696,11 +696,14 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	}
 	// ttsrAbort tears the stream down and reports the interrupt upward
 	// (oneTurnWithRecovery owns the retry-with-injection path).
+	// lastDigest remembers the tool-call digest that most recently fed the
+	// engine, so the interrupt notice can name the file a rule fired on.
+	var lastDigest string
 	ttsrAbort := func(m *TTSRMatch) (*ai.Message, error) {
 		closeBlock() // flush streamed text/thinking into msg.Content
 		cancel()
 		ai.Drain(ch) // let the provider goroutine exit
-		ti := &ttsrInterrupt{match: m}
+		ti := &ttsrInterrupt{match: m, path: ttsrRulePath(m.Kind, lastDigest)}
 		if len(msg.Content) > 0 {
 			partial := msg
 			partial.Role = ai.RoleAssistant
@@ -741,6 +744,7 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 			if tc := toolCalls[ev.StreamIndex]; tc != nil {
 				tc.PartialArgs = ev.PartialJSON
 			}
+			lastDigest = ev.PartialJSON
 			if m := a.ttsrObserve(ctx, ttsrTool, ev.PartialJSON, ev.StreamIndex); m != nil {
 				return ttsrAbort(m)
 			}
@@ -958,8 +962,10 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	}
 	if rem := a.ttsrReminder(call.StreamIndex); rem != "" {
 		// Non-interrupting tool match (M11 #35): the rule may not cut the
-		// call short, so its notice rides along in the tool result.
-		res.Text = strings.TrimRight(res.Text, "\n") + "\n\n" + rem
+		// call short, so its notice rides along in the tool result — LEADING
+		// it, like omp, because the reminder is the thing the model must not
+		// miss in a long output (T3 #40 had it appended and buried).
+		res.Text = rem + "\n\n" + strings.TrimLeft(res.Text, "\n")
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
 	return toolResultMsg(call, res)

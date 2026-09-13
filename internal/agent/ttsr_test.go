@@ -237,7 +237,8 @@ func TestTTSRInterruptDiscardVsKeep(t *testing.T) {
 			t.Fatalf("provider calls = %d, want abort+retry", len(p.gotReqs))
 		}
 		got := requestText(lastReq(p))
-		if !strings.Contains(got, "<system-interrupt>") || !strings.Contains(got, "no-secret") {
+		// omp's attributed tag form (#95): reason + rule name, quoted.
+		if !strings.Contains(got, `<system-interrupt reason="rule_violation" rule="no-secret">`) {
 			t.Fatalf("retry request missing the system-interrupt notice:\n%s", got)
 		}
 		if strings.Contains(got, "writing SECRET") {
@@ -281,11 +282,16 @@ func TestTTSRToolReminderFoldedIntoResult(t *testing.T) {
 		t.Fatalf("tool results = %d", len(*results))
 	}
 	rm := (*results)[0]
-	if !strings.Contains(rm.Text(), "<system-reminder>") || !strings.Contains(rm.Text(), "no-rm") {
+	if !strings.Contains(rm.Text(), `<system-reminder reason="rule_violation" rule="no-rm">`) {
 		t.Fatalf("tool result missing the folded reminder:\n%s", rm.Text())
 	}
 	if !strings.Contains(rm.Text(), "rm -rf /") {
 		t.Fatalf("reminder replaced the tool output:\n%s", rm.Text())
+	}
+	// The reminder LEADS the result (omp order): a long tool output must not
+	// bury the one line the rule exists to surface.
+	if !strings.HasPrefix(rm.Text(), "<system-reminder") {
+		t.Fatalf("reminder must lead the tool result:\n%s", rm.Text())
 	}
 	if len(p.gotReqs) != 2 {
 		t.Fatalf("provider calls = %d, want no abort (never interrupts)", len(p.gotReqs))
@@ -417,5 +423,26 @@ func TestTTSRSettingsLoad(t *testing.T) {
 	}
 	if _, err := load(t, "ttsr:\n  rules:\n    - condition: x\n"); err == nil {
 		t.Fatal("unnamed rule was accepted")
+	}
+}
+
+// #95: an interrupt that fired on a tool call names the file it fired on, so
+// the model can act on the right path instead of guessing from prose.
+func TestTTSRInterruptNamesTheToolPath(t *testing.T) {
+	rule := config.TTSRRule{Name: "no-tmp", Condition: `"/tmp/secret`, InterruptMode: "always"}
+	on := true
+	eng := NewTTSR(&config.TTSRSettings{Enabled: &on, Rules: []config.TTSRRule{rule}})
+	match := eng.observe(context.Background(), ttsrTool, `{"path":"/tmp/secret"}`, 0)
+	if match == nil || !match.Interrupt {
+		t.Fatalf("rule did not fire on the tool digest: %+v", match)
+	}
+	note := ttsrNotice(ttsrInterruptTag, rule, ttsrRulePath(match.Kind, `{"path":"/tmp/secret"}`))
+	if !strings.Contains(note, `path="/tmp/secret"`) {
+		t.Fatalf("notice must carry the path attribute: %s", note)
+	}
+	// A prose match has no file: no path attribute rather than an empty one.
+	prose := ttsrNotice(ttsrInterruptTag, rule, ttsrRulePath(ttsrProse, `{"path":"/tmp/secret"}`))
+	if strings.Contains(prose, "path=") {
+		t.Fatalf("prose notices must not claim a path: %s", prose)
 	}
 }
