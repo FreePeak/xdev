@@ -32,9 +32,13 @@ func (p *cancelLeakProvider) Stream(ctx context.Context, _ ai.StreamRequest) (<-
 	// Hold the stream open on a TEST-owned channel — deliberately not
 	// ctx.Done(), which would let an entirely broken cancel path pass by never
 	// reaching execution at all. Releasing after the cancel has been sent makes
-	// the ordering a fact rather than a race: the loop is guaranteed to reach
-	// runTools with an already-cancelled context, so the guard must fire and a
-	// missing guard cannot hide behind timing.
+	// the ordering a fact rather than a race: runTools is guaranteed to be
+	// reached with an already-cancelled context. What that pins is cancel
+	// PROPAGATION — execution is reached, and the tool's own entry check
+	// (write.go:57-60) refuses it. It does NOT discriminate the loop guard:
+	// with that guard neutralised this test still passes 0/15, because write
+	// self-checks the same window. A non-cooperating tool is needed for that;
+	// see #126.
 	if p.release != nil {
 		<-p.release
 	}
@@ -70,8 +74,8 @@ func TestACPCancelStopsToolExecution(t *testing.T) {
 		t.Fatal("the prompt never opened a stream")
 	}
 	c.send(nil, acp.MethodCancel, map[string]any{"sessionId": sid})
-	// Let the stream finish now that cancellation is in: execution is reached
-	// with a cancelled context, which is exactly the window the guard closes.
+	// Let the stream finish now that cancellation is in, so execution is
+	// reached with a cancelled context (propagation, per the note above).
 	close(p.release)
 	// PromptResult resolves only when the turn ends or is cancelled, after every
 	// session/update has gone out. Awaiting that edge bounds the check by
