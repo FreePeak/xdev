@@ -30,7 +30,7 @@ func TestRenameRacingAppendsStaysConsistent(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 400; i++ {
+		for i := range 400 {
 			if err := st.Append(userMsg("m", "", strings.Repeat("payload", 16))); err != nil {
 				errs <- err
 				return
@@ -42,7 +42,7 @@ func TestRenameRacingAppendsStaysConsistent(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 400; i++ {
+		for i := range 400 {
 			title := "title number"
 			if i%2 == 0 {
 				title = "a far longer manual title than the slot's original content was"

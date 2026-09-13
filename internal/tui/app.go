@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -97,9 +98,15 @@ type App struct {
 	onCancel          func()
 	onQuit            func()
 
-	keyq      chan tcell.Event
-	dirty     chan struct{}
-	quitCh    chan struct{}
+	keyq   chan tcell.Event
+	dirty  chan struct{}
+	quitCh chan struct{}
+
+	// UI-loop stall detection (stall.go). loopBeat is written from the loop
+	// and read by the watchdog, so it is atomic rather than mutex-guarded: a
+	// watchdog that took App.mu could not report a loop stuck holding it.
+	loopBeat  atomic.Int64
+	stallDir  string
 	lineCache map[blockKey][]line
 
 	// Welcome-screen Game of Life backdrop (UI thread; guarded by mu).
@@ -1029,6 +1036,8 @@ func (a *App) Run() {
 	a.width, a.height = a.scr.Size()
 	tick := time.NewTicker(33 * time.Millisecond) // ~30fps
 	defer tick.Stop()
+	a.beat()
+	a.startStallWatchdog()
 
 	// Feed tcell events into keyq.
 	go func() {
@@ -1047,6 +1056,7 @@ func (a *App) Run() {
 
 	a.draw()
 	for {
+		a.beat()
 		select {
 		case <-a.quitCh:
 			return
