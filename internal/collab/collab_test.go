@@ -157,7 +157,7 @@ func TestLinkRoundTripAndParse(t *testing.T) {
 	if !full.Full() {
 		t.Fatal("full link reports view-only")
 	}
-	if !room.ViewOnly().Full() == false {
+	if room.ViewOnly().Full() {
 		t.Fatal("view-only link reports full control")
 	}
 	for _, raw := range []string{full.String(), full.Room()} {
