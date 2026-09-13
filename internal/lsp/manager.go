@@ -99,6 +99,49 @@ type startResult struct {
 	err error
 }
 
+// startCall is one in-flight launch, shared by every caller that arrived
+// while it was running. A single result channel cannot be shared: the first
+// waiter takes the buffered value and every later waiter sees the zero value
+// from the closed channel, i.e. a nil *startResult — which the caller then
+// dereferenced (a real panic when two tool calls raced the first gopls
+// launch). Each waiter gets its own one-shot delivery instead.
+type startCall struct {
+	mu      sync.Mutex
+	done    bool
+	res     *startResult
+	waiters []chan *startResult
+}
+
+// add returns the channel one waiter should read; it is answered
+// immediately when the launch already finished.
+func (sc *startCall) add() chan *startResult {
+	ch := make(chan *startResult, 1)
+	sc.mu.Lock()
+	if sc.done {
+		ch <- sc.res
+	} else {
+		sc.waiters = append(sc.waiters, ch)
+	}
+	sc.mu.Unlock()
+	return ch
+}
+
+// finish publishes the result to every waiter exactly once.
+func (sc *startCall) finish(res *startResult) {
+	sc.mu.Lock()
+	if sc.done {
+		sc.mu.Unlock()
+		return
+	}
+	sc.done, sc.res = true, res
+	waiters := sc.waiters
+	sc.waiters = nil
+	sc.mu.Unlock()
+	for _, ch := range waiters {
+		ch <- res
+	}
+}
+
 type entry struct {
 	c     *Client
 	timer *time.Timer // fires IdleTimeout after the last use; nil = never
@@ -113,7 +156,7 @@ type Manager struct {
 
 	mu       sync.Mutex
 	servers  map[string]*entry
-	starting map[string]chan *startResult
+	starting map[string]*startCall
 	closed   bool
 
 	// start is the launch seam, swappable for tests.
@@ -126,7 +169,7 @@ func NewManager(cfg Config, cwd string) *Manager {
 		cfg:      cfg,
 		cwd:      cwd,
 		servers:  map[string]*entry{},
-		starting: map[string]chan *startResult{},
+		starting: map[string]*startCall{},
 		start:    startServer,
 	}
 }
@@ -171,13 +214,18 @@ func (m *Manager) clientAt(ctx context.Context, name string, spec ServerSpec, ro
 			return e.c, nil
 		}
 	}
-	if ch, ok := m.starting[key]; ok {
+	if sc, ok := m.starting[key]; ok {
 		m.mu.Unlock()
-		res := <-ch
+		res := <-sc.add()
+		// res is non-nil by construction now (every waiter is answered),
+		// but a nil result must never become a nil-dereference.
+		if res == nil {
+			return nil, fmt.Errorf("lsp/%s: launch produced no result", name)
+		}
 		return res.c, res.err
 	}
-	ch := make(chan *startResult, 1)
-	m.starting[key] = ch
+	sc := &startCall{}
+	m.starting[key] = sc
 	m.mu.Unlock()
 
 	c, err := m.start(ctx, name, spec, root)
@@ -193,8 +241,7 @@ func (m *Manager) clientAt(ctx context.Context, name string, spec ServerSpec, ro
 	}
 	m.mu.Unlock()
 
-	ch <- &startResult{c: c, err: err}
-	close(ch)
+	sc.finish(&startResult{c: c, err: err})
 	return c, err
 }
 

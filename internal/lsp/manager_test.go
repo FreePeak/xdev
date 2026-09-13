@@ -318,3 +318,68 @@ func TestIdleDropRearmsWhenTouched(t *testing.T) {
 	default:
 	}
 }
+
+// Concurrent first calls for the same (server, root) must ALL get the one
+// launched client. The old shared-result channel handed the value to the
+// first waiter and the zero value to everyone else — a nil *startResult the
+// caller dereferenced, panicking the tool goroutine. That is exactly what
+// happened when two lsp calls raced the first gopls launch.
+func TestConcurrentFirstLaunchSharesResult(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	writeFile(t, filepath.Join(dir, "a.go"), "package x\n")
+
+	f := newFakeLSP(t, echoResponder(nil))
+	// The seam holds every waiter inside the launch, so the race is forced
+	// rather than incidental.
+	gate := make(chan struct{})
+	calls := 0
+	var mu sync.Mutex
+	mgr := NewManager(Config{Lazy: true, IdleTimeout: time.Minute, Servers: DefaultServers()}, dir)
+	mgr.start = func(context.Context, string, ServerSpec, string) (*Client, error) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			<-gate // hold the launch until every waiter has registered
+		}
+		return f.client, nil
+	}
+	defer mgr.Close()
+
+	const waiters = 16
+	var wg sync.WaitGroup
+	starting := make(chan struct{})
+	results := make([]*Client, waiters)
+	errs := make([]error, waiters)
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-starting
+			results[i], _, errs[i] = mgr.ClientFor(context.Background(), filepath.Join(dir, "a.go"))
+		}(i)
+	}
+	close(starting)
+	time.Sleep(100 * time.Millisecond) // let all waiters pile into the launch
+	close(gate)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("waiter %d: %v", i, err)
+		}
+	}
+	for i, c := range results {
+		if c == nil {
+			t.Fatalf("waiter %d got a nil client (the shared-launch result was lost)", i)
+		}
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("launches = %d, want 1 (concurrent first calls must share)", n)
+	}
+}
