@@ -66,30 +66,9 @@ is view-only. The replica is written under ~/.xdev/collab/.
 		Link: link,
 		Name: *name,
 		OnWelcome: func(f Frame) {
-			host := f.Name
-			if host == "" {
-				host = "host"
-			}
-			// The first welcome frame always says Writable:false: the write
-			// token lives in the URL fragment, which a client never sends
-			// over HTTP, so capability is proven afterwards by FrameHello.
-			// Trusting that frame made every full link announce itself as
-			// view-only and then correct itself two lines later. The link
-			// parsed locally is the authority on what was handed to us.
-			switch {
-			case !welcomed:
-				welcomed = true
-				mode := "view-only (ask the host for the full link to prompt)"
-				if link.Full() {
-					mode = "full control (you can prompt and interrupt)"
-				}
-				print("· joined " + host + " in room " + link.RoomID + " — " + mode)
-				if !link.Full() {
-					print("· view-only link: typed lines are not sent")
-				}
-			case f.Writable && !link.Full():
-				print("· write permission granted")
-			}
+			var greeting []string
+			greeting, welcomed = joinWelcomeLines(link, f, welcomed)
+			print(greeting...)
 		},
 		OnSnapshot: func(data []byte) {
 			msgs := Messages(data)
@@ -126,6 +105,46 @@ is view-only. The replica is written under ~/.xdev/collab/.
 		print("· the host stopped sharing")
 	}
 	return nil
+}
+
+// joinWelcomeLines renders the guest's banner for one welcome frame and
+// reports the new "have we greeted yet" state.
+//
+// The protocol sends TWO welcome frames: the connect-time one carries
+// Writable:false for EVERY guest (it exists so the guest learns RoomID and
+// host name before encrypting its hello, since a URL fragment never crosses
+// HTTP), and a second with Writable:true after the write token in FrameHello
+// verifies. Deriving the mode from the first frame made every full-control
+// join announce itself view-only and contradict itself two lines later, so the
+// mode comes from the link parsed locally — what was actually handed to us.
+//
+// That makes the banner optimistic: a full link whose hello is REJECTED (stale
+// room, token failing constant-time compare) still greets as full control, and
+// the host's view-only notice is the correction. That notice arrives as an
+// event frame and is forwarded elsewhere, which is why this function must
+// never claim the mode again.
+func joinWelcomeLines(link Link, f Frame, welcomed bool) (lines []string, now bool) {
+	host := f.Name
+	if host == "" {
+		host = "host"
+	}
+	if !welcomed {
+		mode := "view-only (ask the host for the full link to prompt)"
+		if link.Full() {
+			mode = "full control (you can prompt and interrupt)"
+		}
+		lines = append(lines, "· joined "+host+" in room "+link.RoomID+" — "+mode)
+		if !link.Full() {
+			lines = append(lines, "· view-only link: typed lines are not sent")
+		}
+		return lines, true
+	}
+	// The second welcome is only news when the link did not already claim
+	// write access; for a full link it confirms what the banner said.
+	if f.Writable && !link.Full() {
+		lines = append(lines, "· write permission granted")
+	}
+	return lines, welcomed
 }
 
 // forwardStdin sends typed lines to the host as prompts (full links only).
