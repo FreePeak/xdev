@@ -1,14 +1,17 @@
 // Package acp is the agent side of the Agent Client Protocol (M14 #60):
-// JSON-RPC 2.0 over stdio with LSP-style Content-Length framing, so an editor
-// (Zed, or anything else speaking ACP) can drive an xdev session.
+// JSON-RPC 2.0 over stdio, so an editor (Zed, or anything else speaking ACP)
+// can drive an xdev session.
+//
+// ACP delimits messages with a single '\n' after the JSON body — it is NOT the
+// LSP/DAP `Content-Length: <n>\r\n\r\n` header block (see framing.go, parity
+// finding T5). Framing and JSON-RPC are hand-rolled on bufio + encoding/json;
+// internal/lsp speaks the header-block framing for its own subprocess client and
+// keeps that code private, and xdev carries no protocol dependency.
 //
 // The method set is the baseline every agent must support — initialize,
 // session/new, session/prompt, session/cancel — plus session/update
 // notifications streaming the turn (message chunks, thought chunks, tool
-// calls) and session/request_permission for tool approvals. Framing and
-// JSON-RPC are hand-rolled on bufio + encoding/json: internal/lsp frames the
-// same way but keeps that code private to its subprocess client, and xdev
-// carries no protocol dependency.
+// calls) and session/request_permission for tool approvals.
 package acp
 
 import (
