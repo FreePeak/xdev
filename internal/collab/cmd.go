@@ -70,18 +70,24 @@ is view-only. The replica is written under ~/.xdev/collab/.
 			if host == "" {
 				host = "host"
 			}
+			// The first welcome frame always says Writable:false: the write
+			// token lives in the URL fragment, which a client never sends
+			// over HTTP, so capability is proven afterwards by FrameHello.
+			// Trusting that frame made every full link announce itself as
+			// view-only and then correct itself two lines later. The link
+			// parsed locally is the authority on what was handed to us.
 			switch {
 			case !welcomed:
 				welcomed = true
 				mode := "view-only (ask the host for the full link to prompt)"
-				if f.Writable {
+				if link.Full() {
 					mode = "full control (you can prompt and interrupt)"
 				}
 				print("· joined " + host + " in room " + link.RoomID + " — " + mode)
-				if !f.Writable {
+				if !link.Full() {
 					print("· view-only link: typed lines are not sent")
 				}
-			case f.Writable:
+			case f.Writable && !link.Full():
 				print("· write permission granted")
 			}
 		},
