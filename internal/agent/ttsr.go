@@ -227,7 +227,7 @@ func (t *TTSR) observe(ctx context.Context, kind ttsrKind, delta string, streamI
 		t.seen[r.Name] = true
 		t.last[r.Name] = t.turn
 		if reminder {
-			t.pending[streamIndex] = append(t.pending[streamIndex], ttsrNotice(ttsrReminderTag, r))
+			t.pending[streamIndex] = append(t.pending[streamIndex], ttsrNotice(ttsrReminderTag, r, ""))
 		}
 		return &TTSRMatch{Rule: r, Kind: kind, StreamIndex: streamIndex, Interrupt: interrupt}
 	}
@@ -249,13 +249,39 @@ func ttsrAction(mode string, kind ttsrKind) (interrupt, reminder bool) {
 	}
 }
 
-// ttsrNotice renders one hidden notice (interrupt or reminder).
-func ttsrNotice(tag string, r config.TTSRRule) string {
+// ttsrNotice renders one hidden notice (interrupt or reminder). The tag
+// carries omp's attributes — reason, rule and the file path when the rule
+// fired on a tool call — so a reader (model or transcript) can tell WHICH
+// rule matched and on what, without parsing prose (parity T3 #40).
+func ttsrNotice(tag string, r config.TTSRRule, path string) string {
 	msg := strings.TrimSpace(r.Message)
 	if msg == "" {
 		msg = "stop and adjust before continuing"
 	}
-	return "<" + tag + ">rule " + strconv.Quote(r.Name) + ": " + msg + "</" + tag + ">"
+	var b strings.Builder
+	b.WriteString("<")
+	b.WriteString(tag)
+	b.WriteString(` reason="rule_violation" rule=`)
+	b.WriteString(strconv.Quote(r.Name))
+	if path != "" {
+		b.WriteString(" path=")
+		b.WriteString(strconv.Quote(path))
+	}
+	b.WriteString(">")
+	b.WriteString(msg)
+	b.WriteString("</")
+	b.WriteString(tag)
+	b.WriteString(">")
+	return b.String()
+}
+
+// ttsrRulePath resolves the file a rule fired on: the path named by a tool
+// call's digest ("" for prose matches, which have no file).
+func ttsrRulePath(kind ttsrKind, digest string) string {
+	if kind != ttsrTool {
+		return ""
+	}
+	return ttsrDigestPath(digest)
 }
 
 // ttsrPathRe pulls a file path out of a tool-call digest. Regex rather than
@@ -371,7 +397,7 @@ func (a *Agent) ttsrResume(ctx context.Context, ti *ttsrInterrupt, history []ai.
 	}
 	notice := ai.Message{
 		Role:        ai.RoleUser,
-		Content:     []ai.Block{ai.TextBlock{Text: ttsrNotice(ttsrInterruptTag, ti.match.Rule)}},
+		Content:     []ai.Block{ai.TextBlock{Text: ttsrNotice(ttsrInterruptTag, ti.match.Rule, ti.path)}},
 		Attribution: "user",
 	}
 	history = append(history, notice)
@@ -383,6 +409,9 @@ func (a *Agent) ttsrResume(ctx context.Context, ti *ttsrInterrupt, history []ai.
 type ttsrInterrupt struct {
 	match   *TTSRMatch
 	partial *ai.Message // streamed assistant content at abort time
+	// path is the file the rule fired on ("" for a prose match); it becomes
+	// the notice's path attribute.
+	path string
 }
 
 func (e *ttsrInterrupt) Error() string {
