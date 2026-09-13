@@ -81,6 +81,23 @@ func (p *syncProvider) deltaPrompt() string {
 	return ""
 }
 
+// allDeltaPrompts joins every review opening. The child can be reviewed
+// more than once (a yield nudge means two runs of the same child, each
+// feeding the advisor), and the feeds are concurrent, so an assertion about
+// what the advisor saw must look at all of them rather than the first.
+func (p *syncProvider) allDeltaPrompts() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var b strings.Builder
+	for _, req := range p.reqs {
+		if len(req.Messages) == 1 && strings.Contains(messageText(req.Messages[0]), "delta to review") {
+			b.WriteString(messageText(req.Messages[0]))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // reviews counts review openings (each opening is a single-message
 // request; the wrap-up turn replays the transcript plus the tool result).
 func (p *syncProvider) reviews() int {
@@ -413,7 +430,7 @@ func TestTaskToolAttachesChildAdvisor(t *testing.T) {
 		t.Fatal("task.agentAdvisor never built a child advisor")
 	}
 	waitFor(t, "child advisor review", func() bool { return rev.reviews() >= 1 })
-	prompt := rev.deltaPrompt()
+	prompt := rev.allDeltaPrompts()
 	if !strings.Contains(prompt, "review the migration script") {
 		t.Errorf("child advisor never saw the task:\n%s", prompt)
 	}

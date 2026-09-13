@@ -446,3 +446,44 @@ func TestTTSRInterruptNamesTheToolPath(t *testing.T) {
 		t.Fatalf("prose notices must not claim a path: %s", prose)
 	}
 }
+
+// #95: reasoning is out of the matched lanes unless the group opts in (omp's
+// default), and disabledRules switches a configured or discovered rule off
+// without editing its file.
+func TestTTSRThinkingLaneAndDisabledRules(t *testing.T) {
+	on := true
+	rule := config.TTSRRule{Name: "leak", Condition: `SK-\w+`, InterruptMode: "always"}
+
+	// Default: a secret in reasoning does not fire.
+	off := NewTTSR(&config.TTSRSettings{Enabled: &on, Rules: []config.TTSRRule{rule}})
+	if m := off.observe(context.Background(), ttsrThinking, "drafting SK-DEADBEEF", 0); m != nil {
+		t.Fatal("thinking fired with the lane off")
+	}
+	// Text deltas still fire (the rule is alive, only the lane is off).
+	if m := off.observe(context.Background(), ttsrProse, "output SK-DEADBEEF", 0); m == nil {
+		t.Fatal("prose must still fire")
+	}
+
+	// Opt-in: reasoning is scanned.
+	eng := NewTTSR(&config.TTSRSettings{
+		Enabled: &on, Rules: []config.TTSRRule{rule}, ScanThinking: &on,
+	})
+	if m := eng.observe(context.Background(), ttsrThinking, "reasoning SK-BEEF", 0); m == nil || !m.Interrupt {
+		t.Fatalf("scanThinking true must fire on reasoning: %+v", m)
+	}
+
+	// disabledRules shadows a configured rule of the same name.
+	dis := NewTTSR(&config.TTSRSettings{
+		Enabled: &on, Rules: []config.TTSRRule{rule}, DisabledRules: []string{"leak"},
+	})
+	if m := dis.observe(context.Background(), ttsrProse, "SK-DEADBEEF", 0); m != nil {
+		t.Fatal("a disabled rule must never fire")
+	}
+	// A different name is unaffected.
+	dis2 := NewTTSR(&config.TTSRSettings{
+		Enabled: &on, Rules: []config.TTSRRule{rule}, DisabledRules: []string{"other"},
+	})
+	if m := dis2.observe(context.Background(), ttsrProse, "SK-CAFEBABE", 0); m == nil {
+		t.Fatal("disabling an unrelated name must not silence this rule")
+	}
+}
