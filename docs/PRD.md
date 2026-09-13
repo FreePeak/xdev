@@ -361,6 +361,27 @@ Reconciliation audit method: 10 domain fan-outs re-verified every closed-sweep c
 3. **JS eval kernel** (#111): stays a by-design rejection (no JS runtime CGO-free); the py kernel and notebook virtual text shipped — but omp's `eval.py`/`eval.js` disable gates have no equivalent.
 4. **Chrome extension for browser-relay** (#112): the Go relay daemon shipped; the browser-side extension did not.
 5. **M4 structural frame-plan tail** (#78): all nine boxes re-verified open 2026-09-13 (frame-plan contract, block states, DSR resize, alt-buffer, sticky headers/folds/diff rows/highlighting, bracketed paste, compact toggle, hex verification, terminal matrix).
+6. **TTSR injection persistence** (#95): the §2 scope row for TTSR names
+   `ttsr_injection` persistence (a session entry recording an injected
+   rule-violation notice); no such entry type exists. `ttsr_injection` and
+   `Violations` have zero hits in Go, `internal/session/entries.go` enumerates
+   xdev's ten entry types without it, and the code states the alternative
+   outright at `cmd/xdev/print.go:544`: *"fired state is in-session only, never
+   persisted"*. So M11's "Complete" covers the engine (regex + `astCondition` +
+   per-kind `interruptMode` gating + the thinking lane), not this record.
+   Adding it means reversing that in-session-only decision on purpose (new
+   entry type, retention, cross-process read) — hence a ticket, not a quiet fix.
+
+**Build/portability ceiling (measured 2026-09-13):** the contract is the six CI
+targets (`.github/workflows/ci.yml:104-109`: darwin/linux/windows × amd64/arm64,
+all 64-bit) plus `linux/386` as a deliberate 32-bit extra — which is exactly
+what caught `internal/theme` initializing an `int` sentinel with `1 << 32`, a
+compile error wherever `int` is 32 bits (fixed in 6f53965). Sweeping wider
+produces failures that are not xdev's: `linux/arm`, `windows/arm` and similar
+die inside `internal/memory → modernc.org/sqlite → modernc.org/libc` with
+"build constraints exclude all Go files", i.e. **xdev's platform ceiling is
+whatever `modernc/libc` supports**, not `go tool dist list`. Recorded so a
+future sweep reads those as the known ceiling rather than new breakage.
 
 **Landed 2026-09-13 (parity sweep, 9081444 back through 48459fe):** #79 deferred-catalog runner wired in all four modes · #80 secrets redactor in TUI/RPC (one shared `wireAgentMode` seam so modes cannot drift again) · #90 mailbox push delivery (poller started; a declined message now stays unread instead of being consumed by a poller nobody listened to) · #107 ai-title cascade consuming TITLE_SYSTEM.md + `/rename` (in-place fixed-width slot rewrite) · #106 interactive ask card wired (it shipped with zero callers) · #108 glob-scoped rulebooks fire at edit/write time (`rules.ForPath` had no consumer) · #92 hook payload key names + the exit-2-vs-warning contract · #94 `ask` batch shape · #91 task batch shape + no-yield child nudge · #20-style inert-flag class: print-mode advisor, headless `-plan` read-only promise, `agent_end` nil payload, roster Alt+A + empty-roster open, `/goal` verbs, composer history recall, Esc/Ctrl+C cancel (`withMaxTime` returned a no-op cancel with no `--max-time`), ACP transport (was LSP `Content-Length` framing, now the spec's newline-delimited JSON, plus a real frame size cap). Second wave (a1bf404…9081444): #84 fallback depth armed (a declared `retry.fallbackChains` order wins over the window ranking, credential-pool rotation, TUI notify) · #85 installed plugins contribute commands/skills/agents/hooks · #86 hindsight cadence in the TUI and compaction carries the recalled memories · #82 `compaction.idleAfter`/`async` reach `CompactionConfig` and an abort cancels the in-flight summarize · #88 the notes-tools and autolearn gates have consumers, the lesson cap is a setting, and learn redacts at store time · #89 sharpshooter friction feed runs per TUI turn · #102 install-id is attached on the wire (Claude `metadata.user_id`, Codex `user`) with the broker's duplicate mint collapsed · #104 `auth-broker`/`auth-gateway`/`browser-relay`/`install` work at the top level · #92 `auto_retry_*` and `session_shutdown` have emission points. Wave 3 (b3d5043…6a19854): background subagents are no longer killed when the turn that spawned them ends (jobs detach from the tool context and are reaped at session close) · #83 branch summaries write a real note through @tiny/@smol behind `branchSummary.*` with the marker as the fallback, and snapcompact is gated on the model’s `vision` capability · `/theme list` aliases the listing · the whole "settings key exists, nothing reads it" class now has a guard test each.
 
