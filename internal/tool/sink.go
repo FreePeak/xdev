@@ -3,6 +3,7 @@ package tool
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // OutputSink accumulates a byte stream into fixed head+tail windows so the
@@ -10,6 +11,13 @@ import (
 // (PRD §3.6: fixed head+tail windows, bounded everything; MVP spills no
 // artifacts to disk — the truncation marker is the record).
 type OutputSink struct {
+	// mu guards the accumulated windows: a foreground copier writes while
+	// another goroutine reads. That is not hypothetical — on a timeout the
+	// run is HANDED OFF to the job registry (backgroundRun), which reads
+	// Total()/Result() for the job report while the still-running child keeps
+	// streaming into the same sink (a real -race failure).
+	mu sync.Mutex
+
 	headLimit int
 	tailLimit int
 
@@ -44,6 +52,8 @@ func NewOutputSink(headLimit, tailLimit int) *OutputSink {
 
 // Write implements io.Writer.
 func (s *OutputSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := len(p)
 	s.total += uint64(n)
 
@@ -71,6 +81,8 @@ func (s *OutputSink) Write(p []byte) (int, error) {
 // the truncation marker, then tail. Never exceeds
 // headLimit + tailLimit + marker in memory.
 func (s *OutputSink) Result() (text string, truncated bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.total == 0 {
 		return "", false
 	}
@@ -90,5 +102,7 @@ func (s *OutputSink) Result() (text string, truncated bool) {
 
 // Total returns the total number of bytes ever written to the sink.
 func (s *OutputSink) Total() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.total
 }
