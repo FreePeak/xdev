@@ -310,6 +310,48 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
 
 **Per-feature parity issues (2026-09-11 sweep):** #22 (M15 umbrella) · M5: #23 #24 #25 · M10: #26–#34 · M11: #35–#42 · M12: #43–#46 · M13: #47–#57 · M14: #58–#64 · M15: #65–#73. Milestone umbrellas (#6 #8 #9 #11–#15) carry cross-link comments. **Re-scoped after shipped-status audit** (13 issues narrowed to verified-missing slices: #26–#30, #32–#34, #36–#39, #41, #46). **#16 reopened**: todo tool + arg-repair + freshness gate + backgrounded bash are code-verified absent (only bash.patterns had landed). Sources pinned to installed omp **18.1.17** (prior parity research baseline: 18.0.7).
 
+**Landed 2026-09-13, live-verification wave (`3b5e8e8`→`1a554ba`):**
+
+- **Live collab verified end to end** — host plus a view-only guest and a
+  full-control guest joined over real sockets: both links print unwrapped,
+  guests mirror the host's turns as they stream (`▸ What is 12*9?` then `108`
+  appeared in the replica), view-only guests state their limits and their typed
+  lines are dropped, `/collab status` reports room + guest count, `/collab stop`
+  tears it down. Fixed: `xdev join <full-link>` opened by announcing itself
+  *view-only* and contradicted itself two lines later, because the banner read
+  the first welcome frame — which must say `Writable:false` for every guest,
+  since the write token rides `FrameHello` after the handshake (URL fragments
+  are never sent over HTTP). `Link.Full()`, parsed locally, is the authority.
+- **The host `ask` relay is documented rather than half-wired** (#99): both
+  ends exist and neither is called — `Host.RequestUI` (`host.go:267`) and
+  `Backend.UIResponse` (`host.go:31`, consumed at `414`) have zero callers, while
+  the frames and `Guest.UIResponse` work at the protocol level. The missing
+  third piece is input arbitration on the guest (its stdin lines *are* prompts),
+  which is a decision, not a wire — filed with line numbers instead of shipping
+  a relay that swallows guest input.
+- **`ai-title` now fires on a default install**: the `@tiny`→`@smol` cascade
+  reached nothing without configured roles (there is no built-in mapping), so
+  every session kept its `print <timestamp>` title. The session's own model is
+  the cascade's last resort; verified live with no roles configured
+  (`add git remote origin2`).
+- **17-subcommand CLI sweep** (empty store and populated): `gallery render
+  memory worktree plugin completions stats usage share gc bench update setup say
+  config` all return sane exit codes with actionable messages and no panics;
+  `render --html`, `share`, `stats --json`, `search --json` checked against real
+  sessions.
+- **Two crashes only live driving found**, both invisible to the suite:
+  `lsp code_actions` asserted a `Position` struct as a JSON map and panicked on
+  its first real request; `Manager.clientAt` shared one cap-1 result channel
+  among concurrent waiters, so the second waiter dereferenced nil when two lsp
+  calls raced the first gopls launch. Each has a test that fails against the old
+  code.
+- **Process lesson recorded**: a build break reached `main` when a chain used
+  `;` before the commit (`cat >>` had *created* a file holding only a
+  placeholder test, and removing the placeholder left a zero-byte `.go` file —
+  a parse error). The verifier printed the failure and the commit ran anyway.
+  Now: `&&` only, verifier last in its own call, and the pushed HEAD proven
+  buildable from a clean `git worktree` before installing.
+
 **Residual wiring debt — re-audited 2026-09-13 (full-tree consumer-proof pass; every row below carries a ticket):**
 
 Reconciliation audit method: 10 domain fan-outs re-verified every closed-sweep claim against the tree @ 4ed9920 with the "landed = has a production caller" bar; 34 follow-up issues filed (#79–#112), correction comments posted on the affected closed issues, and three stale closeout/docs claims corrected (hindsight AutoRecall IS live; TTSR `condition` IS consumed; hub processes ARE reaped — the goal-budget "lag" is only the documented crash-window). The high-severity finds:
