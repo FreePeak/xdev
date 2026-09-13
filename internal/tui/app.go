@@ -547,7 +547,10 @@ func (a *App) Theme(args string) error {
 		return fmt.Errorf("theme switching not wired")
 	}
 	name := strings.TrimSpace(args)
-	if name == "" {
+	// "/theme list" is the same query as bare "/theme": the listing verb is
+	// the obvious thing a user types, and erroring on it (while "list" is not
+	// a theme name) is a dead end.
+	if name == "" || strings.EqualFold(name, "list") {
 		lines := []string{"active theme: " + a.themeOps.Current(), "available:"}
 		if a.themeOps.List != nil {
 			for _, t := range a.themeOps.List() {

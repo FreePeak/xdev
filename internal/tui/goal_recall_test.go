@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -142,5 +143,30 @@ func TestEditorHasHistory(t *testing.T) {
 	e.PushHistory("x")
 	if !e.HasHistory() {
 		t.Fatal("after one prompt Up must belong to the editor, not the scroller")
+	}
+}
+
+// "/theme list" is the obvious thing to type and used to be treated as a
+// theme named "list" (error: unknown theme). Bare /theme and /theme list are
+// the same query.
+func TestThemeListVerb(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.SetThemeOps(&ThemeOps{
+		Current: func() string { return "probe" },
+		List:    func() []string { return []string{"auto", "groknight", "probe"} },
+		Set:     func(name string) error { return fmt.Errorf("unknown theme %q", name) },
+	})
+	if err := app.Theme("list"); err != nil {
+		t.Fatalf("/theme list errored: %v", err)
+	}
+	app.mu.Lock()
+	block := app.blocks[len(app.blocks)-1].Text
+	app.mu.Unlock()
+	if !strings.Contains(block, "active theme: probe") || !strings.Contains(block, "auto") {
+		t.Fatalf("listing block = %q", block)
+	}
+	// An unknown name still errors — the verb is the only alias.
+	if err := app.Theme("nosuchtheme"); err == nil {
+		t.Fatal("an unknown theme name must error")
 	}
 }
