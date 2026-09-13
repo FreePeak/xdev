@@ -101,7 +101,14 @@ func (h *Hub) Start(parent context.Context, spec SubagentSpec) (string, error) {
 	}
 	h.next++
 	id := fmt.Sprintf("hub-%d", h.next)
-	job := &hubJob{ID: id, Label: spec.Name, done: make(chan struct{}), spec: spec, parent: parent}
+	// A background job's lifetime is the SESSION, not the turn that
+	// dispatched it. `parent` here is the tool-call context, which is canceled
+	// the moment the turn ends — inheriting it killed every "background"
+	// subagent as soon as the parent stopped waiting (reproduced: a child
+	// running `sleep 25` reported `[killed: signal]` while the TUI was still
+	// open). Values survive WithoutCancel; only the cancel/deadline edge is
+	// dropped, and Close (session exit) or the roster's kill still end it.
+	job := &hubJob{ID: id, Label: spec.Name, done: make(chan struct{}), spec: spec, parent: context.WithoutCancel(parent)}
 	h.jobs[id] = job
 	h.launchLocked(job, spec.Prompt)
 	h.mu.Unlock()
@@ -459,6 +466,38 @@ func revivePrompt(prior, text string) string {
 
 // Cancel aborts a running job (its child run fails with a canceled
 // status); canceling a settled job is a no-op returning false.
+// Close cancels every still-running job. Jobs are detached from the turn
+// that spawned them (see Start), so this is the session-lifetime boundary:
+// each run mode calls it on exit, exactly like stopping the hub's supervised
+// processes. Waiting is deliberately bounded — a child that ignores its
+// context must not hang the exit.
+func (h *Hub) Close() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	var pending []chan struct{}
+	for _, j := range h.jobs {
+		select {
+		case <-j.done:
+		default:
+			if j.cancel != nil {
+				j.cancel()
+			}
+			pending = append(pending, j.done)
+		}
+	}
+	h.mu.Unlock()
+	deadline := time.After(2 * time.Second)
+	for _, d := range pending {
+		select {
+		case <-d:
+		case <-deadline:
+			return // a stubborn child is reaped by process exit anyway
+		}
+	}
+}
+
 func (h *Hub) Cancel(id string) bool {
 	h.mu.Lock()
 	j, ok := h.jobs[id]
