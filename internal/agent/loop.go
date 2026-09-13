@@ -936,6 +936,19 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 			call.Arguments = revised
 		}
 	}
+	// Cancellation is checked at the last possible instant — here, rather than
+	// only at the top of the next loop iteration — because a turn can be
+	// cancelled while the stream is still decoding, while a policy hook runs,
+	// or while an approval prompt parks this goroutine at a.Approve above.
+	// Anything earlier is race-losing by construction: the approval case in
+	// particular resolves and then executes. Checking before the call means a
+	// cancelled turn reports a cancelled result instead of writing files,
+	// running commands, or otherwise mutating state.
+	if cerr := ctx.Err(); cerr != nil {
+		res := tool.Result{Text: fmt.Sprintf("tool %q canceled before execution: %v", call.Name, cerr), IsError: true}
+		a.Hooks.OnToolEnd(call, res, time.Since(started))
+		return toolResultMsg(call, res)
+	}
 	res, err := t.Execute(ctx, args)
 	dur := time.Since(started)
 	if err != nil {
