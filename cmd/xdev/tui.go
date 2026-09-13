@@ -225,6 +225,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer setCursorReset()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	// A frozen TUI is otherwise undiagnosable after the fact: the UI loop is
+	// single-goroutine, so anything that fails to return there kills keys,
+	// Ctrl+C and output together while the process stays alive. If one loop
+	// iteration stalls, xdev now writes the goroutine stacks where `xdev gc`
+	// already collects them.
+	app.SetStallDumpDir(filepath.Join(config.DataDir(), "dumps"))
 	// showThinking drives the reasoning display (issue #20): the layered
 	// config is the source of truth, with --hide-thinking / --print-thoughts
 	// overriding it for this run (display only — the model still thinks).
