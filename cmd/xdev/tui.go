@@ -1510,7 +1510,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// must not wait on a title request.
 				lastTurnFailed.Store(err != nil)
 				if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
-					go generateTitle(cfg, lastSettings(), cwd, store,
+					go generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
 						append(append([]ai.Message(nil), hist...), *finalMsg))
 				}
 				if err != nil {
