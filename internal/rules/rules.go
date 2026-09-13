@@ -52,6 +52,42 @@ type Rule struct {
 	Source string
 }
 
+// AppliesToAgent reports whether a rule scoped with `agents:` applies to the
+// given agent name. An empty Agents list is unrestricted (the common case and
+// what every rule written before this field existed means). "*" is an explicit
+// wildcard. A named entry matches case-insensitively.
+//
+// The name for the main agent is "" (or whatever the caller passes for it), so
+// a rule naming only subagents — `agents: [reviewer]` — correctly does NOT
+// apply to the main agent instead of applying to everyone, which is the defect
+// this exists to remove (#108: the field was parsed and read by nobody).
+func (r Rule) AppliesToAgent(agent string) bool {
+	if len(r.Agents) == 0 {
+		return true
+	}
+	a := strings.TrimSpace(strings.ToLower(agent))
+	for _, want := range r.Agents {
+		w := strings.TrimSpace(strings.ToLower(want))
+		if w == "*" || w == a {
+			return true
+		}
+	}
+	return false
+}
+
+// ForPathAgent is ForPath filtered by agent identity: the rules that apply to
+// path AND to the named agent. Callers that know which agent is running should
+// prefer this over ForPath; ForPath stays for contexts with no agent identity.
+func ForPathAgent(p, agent string) []Rule {
+	var out []Rule
+	for _, r := range Active() {
+		if r.MatchesPath(p) && r.AppliesToAgent(agent) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // Shorthand renders a glob-scoped rule as its edit/write gating form
 // (issue #31: condition globs become tool:edit()/tool:write() shorthands
 // consumed at edit/write time). Rules without globs return "".
