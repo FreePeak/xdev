@@ -377,25 +377,18 @@ func TestRunExportRefusesNonHTMLTarget(t *testing.T) {
 
 	// A real disk session so -fork resolution works (exportSourceSession
 	// resolves ids against sessionDataDir(), cwd-matched).
+	// exportSourceSession resolves the -fork selector against sessionDataDir()
+	// and the process cwd, so the fixture session lives under a redirected
+	// store root for this test only.
 	dataDir := t.TempDir()
 	prev := launch
 	launch.SessionDir = dataDir
 	t.Cleanup(func() { launch = prev })
 	sid := session.NewSessionID()
-	cwd := mustGetwd()
-	p := session.SessionFilePath(dataDir, cwd, time.Now(), sid)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	slot := session.MarshalTitleSlot("export guard test", session.TitleSourceAuto, time.Now())
-	hdr := session.MarshalHeader(session.SessionHeader{
-		Version: 3, ID: sid, Timestamp: time.Now(), CWD: cwd,
-		Title: "export guard test", TitleSource: session.TitleSourceAuto,
-	})
-	body := `{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}`
-	if err := os.WriteFile(p, []byte(string(slot)+string(hdr)+body+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// The file's existing helper lays down a valid session (title slot +
+	// header + a MarshalEntry-encoded prompt line); hand-rolling the entry
+	// line skips the envelope the store expects on reload.
+	p := writePickerSession(t, mustGetwd(), sid, "export guard test", "hello")
 
 	// Case 1: the target is an existing JSONL transcript — must be refused
 	// and left byte-identical.
@@ -405,7 +398,7 @@ func TestRunExportRefusesNonHTMLTarget(t *testing.T) {
 	if err := os.WriteFile(jsonl, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := runExport(jsonl, printOptions{ForkID: sid})
+	err := runExport(jsonl, printOptions{ForkID: p})
 	if err == nil {
 		t.Fatal("runExport over a JSONL transcript must be refused")
 	}
@@ -422,7 +415,7 @@ func TestRunExportRefusesNonHTMLTarget(t *testing.T) {
 	if _, err := exportSession(st, "", "", out); err != nil {
 		t.Fatal(err)
 	}
-	if err := runExport(out, printOptions{ForkID: sid}); err != nil {
+	if err := runExport(out, printOptions{ForkID: p}); err != nil {
 		t.Fatalf("re-export over a previous export must be allowed, got %v", err)
 	}
 }
