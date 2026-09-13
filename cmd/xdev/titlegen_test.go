@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,5 +91,53 @@ func TestTitleSeed(t *testing.T) {
 	}
 	if asst != "latest answer" {
 		t.Fatalf("seed used %q, want the latest assistant reply", asst)
+	}
+}
+
+// The cascade must reach the session's own model. @tiny/@smol have no
+// built-in mapping, so a plain models.yml resolved neither and the title
+// stayed "print <timestamp>" for every default install — the feature existed
+// and never ran.
+func TestSessionModelRefIsTheLastResort(t *testing.T) {
+	if got := sessionModelRef("onegw", "free"); got != "onegw/free" {
+		t.Fatalf("ref = %q, want onegw/free", got)
+	}
+	for _, c := range [][2]string{{"", "free"}, {"onegw", ""}, {"  ", "  "}} {
+		if got := sessionModelRef(c[0], c[1]); got != "" {
+			t.Fatalf("sessionModelRef(%q,%q) = %q, want empty", c[0], c[1], got)
+		}
+	}
+	// An empty fallback ref is skipped rather than sent to the resolver
+	// (which would answer with an error naming the default model instead).
+	if modelRoleRef("onegw/free") != "" {
+		t.Fatal("a literal ref must not be read as a role")
+	}
+}
+
+// shouldGenerateTitle must accept a mechanical title whose timestamp form
+// varies by mode ("print …", "continued print …", "tui …", "imported: …") —
+// those are the titles every session actually starts with.
+func TestShouldGenerateTitleAcceptsMechanicalPrefixes(t *testing.T) {
+	dir := t.TempDir()
+	for _, mechanical := range []string{
+		"print 2026-09-13 04:12", "continued print 2026-09-13 04:12",
+		"tui 2026-09-13 04:12", "imported: claude-abc123",
+	} {
+		p := filepath.Join(dir, strings.ReplaceAll(mechanical[:5], " ", "_")+".jsonl")
+		st := session.OpenMem("/proj", mechanical)
+		if _, err := st.EnsureOnDisk(p, session.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := session.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !shouldGenerateTitle(reopened) {
+			t.Errorf("%q is mechanical and should be replaced", mechanical)
+		}
+		_ = reopened.Close()
 	}
 }

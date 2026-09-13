@@ -38,6 +38,13 @@ const (
 // fewer roles configured still gets a real title.
 var titleRoles = []string{"@tiny", "@smol"}
 
+// sessionModelRef is the cascade's last resort. Roles have no built-in
+// mapping — a plain models.yml with only `defaultModel` resolves neither
+// @tiny nor @smol — so without this the title generator never fires out of
+// the box and every listing stays "print <timestamp>". One 32-token request
+// against the model already running the session is a fair price for that;
+// the cost warning lives in the prompt (titleMaxTokens).
+
 // shouldGenerateTitle reports whether the session wants a generated title:
 // never for a subagent (its title marks the parent), never over a manual
 // rename, and only while the title still looks mechanical.
@@ -73,7 +80,7 @@ func readTitleLine(store *session.Store) []byte {
 // generateTitle asks the title cascade for a short title over the opening
 // exchange and stamps it. Safe to call on a goroutine: the store's own lock
 // serializes the slot rewrite against appends.
-func generateTitle(cfg *config.Config, settings *config.Settings, cwd string, store *session.Store, history []ai.Message) {
+func generateTitle(cfg *config.Config, settings *config.Settings, cwd, provider, model string, store *session.Store, history []ai.Message) {
 	if !shouldGenerateTitle(store) {
 		return
 	}
@@ -87,7 +94,11 @@ func generateTitle(cfg *config.Config, settings *config.Settings, cwd string, st
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), titleRequestCap)
 	defer cancel()
-	for _, ref := range titleRoles {
+	targets := append(append([]string{}, titleRoles...), sessionModelRef(provider, model))
+	for _, ref := range targets {
+		if ref == "" {
+			continue // no live session model to fall back to
+		}
 		prov, model, err := titleProvider(cfg, settings, ref)
 		if err != nil {
 			logx.Debugf("ai-title: %s unavailable: %v", ref, err)
@@ -110,6 +121,16 @@ func generateTitle(cfg *config.Config, settings *config.Settings, cwd string, st
 		logx.Debugf("ai-title: %s -> %q", ref, title)
 		return
 	}
+}
+
+// sessionModelRef names the session's own provider/model as a "provider/model"
+// ref so the cascade can fall back to it through the same resolver. Empty when
+// the caller has no live target (a hand-built agent).
+func sessionModelRef(provider, model string) string {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return ""
+	}
+	return provider + "/" + model
 }
 
 // defaultTitleSystem is the built-in title instruction, replaced by

@@ -658,7 +658,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// opened the run; final is the reply the title describes. Skipped by
 	// --no-title (no title work at all) and --no-session (nothing to stamp).
 	if !launch.NoTitle && !launch.NoSession && exitCode == 0 && final != nil {
-		generateTitle(cfg, settings, cwd, store, append(append([]ai.Message(nil), history...), *final))
+		generateTitle(cfg, settings, cwd, provName, modelName, store,
+			append(append([]ai.Message(nil), history...), *final))
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"code": exitCode}})
