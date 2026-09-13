@@ -352,6 +352,21 @@ Feasibility verdict (research Part V): every subsystem omp implements has a viab
   Now: `&&` only, verifier last in its own call, and the pushed HEAD proven
   buildable from a clean `git worktree` before installing.
 
+**Fixed 2026-09-13 — "the whole TUI freezes" after a failed command (5b999f0).**
+The tree selector could own the keyboard while painting nothing: `handleTreeKey`
+returned handled for every key and had no `Ctrl+C` case, and two routes left it
+open with no panel drawn (a filter/search matching no row, and a panel with no
+room above a tall composer). Sequence: a usage error empties the composer → Esc
+opens the selector → every key, including the quit chord, is swallowed →
+process alive, terminal dead. Guards: the quit chord is never modal-owned, and
+open implies painted (an empty result set renders "no rows match · Ctrl+O
+changes filter · …"; a panel with no room closes the selector). Each guard has a
+test that fails against the specific line it guards, verified live end to end.
+Related: the UI loop now heartbeats and writes `dumps/tui-stall-<ts>.txt`
+(goroutine stacks, mode 0600, collected by `xdev gc`) if one iteration exceeds
+5s, so any future stall diagnoses itself instead of being unreproducible
+(c3985bc).
+
 **Residual wiring debt — re-audited 2026-09-13 (full-tree consumer-proof pass; every row below carries a ticket):**
 
 Reconciliation audit method: 10 domain fan-outs re-verified every closed-sweep claim against the tree @ 4ed9920 with the "landed = has a production caller" bar; 34 follow-up issues filed (#79–#112), correction comments posted on the affected closed issues, and three stale closeout/docs claims corrected (hindsight AutoRecall IS live; TTSR `condition` IS consumed; hub processes ARE reaped — the goal-budget "lag" is only the documented crash-window). The high-severity finds:
