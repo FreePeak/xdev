@@ -2,7 +2,9 @@ package collab
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,11 +65,16 @@ func TestJoinWelcomeBannerDerivesModeFromTheLink(t *testing.T) {
 			want:     nil,
 		},
 		{
-			name:     "view-only link upgraded by the host",
+			// No such thing as "upgraded": writable = f.Writable &&
+			// Link.Full(), so a view-only link stays view-only. The old row
+			// pinned "write permission granted", which promised a capability
+			// Prompt() then refused — the banner must name the mismatch.
+			name:     "view-only link, host claims write granted",
 			link:     view,
 			frame:    Frame{Name: "hostbox", Writable: true},
 			welcomed: true,
-			want:     []string{"write permission granted"},
+			want:     []string{"carries no write token", "rejoin with the full link"},
+			deny:     []string{"write permission granted"},
 		},
 		{
 			name:     "full link confirmed by the second welcome",
@@ -84,6 +91,11 @@ func TestJoinWelcomeBannerDerivesModeFromTheLink(t *testing.T) {
 				t.Fatal("a welcome must always leave the greeting consumed")
 			}
 			joined := strings.Join(lines, "\n")
+			// An empty want/deny row MEANS "print nothing"; without this the
+			// loop would iterate zero times and pass vacuously.
+			if tc.want == nil && tc.deny == nil && lines != nil {
+				t.Errorf("this frame must print nothing; got %q", joined)
+			}
 			for _, w := range tc.want {
 				if !strings.Contains(joined, w) {
 					t.Errorf("banner missing %q; got %q", w, joined)
@@ -116,16 +128,25 @@ func TestFullControlGuestNeverHearsViewOnly(t *testing.T) {
 		t.Fatal("testHost must hand out a full link")
 	}
 
-	greeted := false
-	var banner []string
+	// The guest dispatches welcomes on its own goroutine, so the banner is
+	// shared state and must be guarded (the -race build caught this test
+	// reading it unlocked from the test goroutine).
+	var (
+		mu      sync.Mutex
+		greeted bool
+		banner  []string
+	)
+	welcome := func(f Frame) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines, now := joinWelcomeLines(link, f, greeted)
+		greeted = now
+		banner = append(banner, lines...)
+	}
 	g, err := Join(context.Background(), GuestConfig{
 		Link:       link,
 		ReplicaDir: t.TempDir(),
-		OnWelcome: func(f Frame) {
-			lines, now := joinWelcomeLines(link, f, greeted)
-			greeted = now
-			banner = append(banner, lines...)
-		},
+		OnWelcome:  welcome,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -135,16 +156,22 @@ func TestFullControlGuestNeverHearsViewOnly(t *testing.T) {
 	go func() { runErr <- g.Run(context.Background()) }()
 
 	deadline := time.After(5 * time.Second)
-	for !greeted || len(banner) < 1 {
+	got := false
+	for !got {
 		select {
 		case <-deadline:
-			t.Fatalf("no welcome arrived (banner=%v)", banner)
+			t.Fatal("no welcome arrived")
 		case <-time.After(20 * time.Millisecond):
 		}
+		mu.Lock()
+		got = greeted && len(banner) >= 1
+		mu.Unlock()
 	}
 	// Give any second welcome frame time to land before judging.
 	time.Sleep(300 * time.Millisecond)
 
+	mu.Lock()
+	defer mu.Unlock()
 	text := strings.Join(banner, "\n")
 	if strings.Contains(text, "view-only") {
 		t.Fatalf("full-control guest heard view-only:\n%s", text)
@@ -159,5 +186,131 @@ func TestFullControlGuestNeverHearsViewOnly(t *testing.T) {
 	select {
 	case <-runErr:
 	case <-time.After(3 * time.Second):
+	}
+}
+
+// The optimistic banner's counterpart: a FULL link whose hello is rejected
+// (wrong write token) still greets "full control", and the truth arrives
+// separately as an EVENT notice — which is why joinWelcomeLines must never
+// re-answer the mode. Frames flow through the real host, so this pins the
+// ordering (banner first, correction second) at the seam that actually
+// carries it.
+func TestRejectedHelloGreetsOptimisticallyThenGetsNoticed(t *testing.T) {
+	_, linkRaw := testHost(t, Backend{Snapshot: func() []byte { return nil }}, nil)
+	link, err := ParseLink(linkRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewRoom()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link.Write = other.Write // right length, wrong token: Full() stays true
+	if !link.Full() {
+		t.Fatal("fixture must still look like a full link")
+	}
+
+	var (
+		mu      sync.Mutex
+		banner  []string
+		notices []string
+		greeted bool
+	)
+	g, err := Join(context.Background(), GuestConfig{
+		Link:       link,
+		ReplicaDir: t.TempDir(),
+		OnWelcome: func(f Frame) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines, now := joinWelcomeLines(link, f, greeted)
+			greeted = now
+			banner = append(banner, lines...)
+		},
+		OnEvent: func(raw json.RawMessage) {
+			if txt := NoticeText(raw); txt != "" {
+				mu.Lock()
+				notices = append(notices, txt)
+				mu.Unlock()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	go func() { _ = g.Run(context.Background()) }()
+
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		mu.Lock()
+		done := greeted && strings.Contains(strings.Join(notices, "\n"), "not prompt")
+		mu.Unlock()
+		if done || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !greeted {
+		t.Fatal("no welcome arrived")
+	}
+	text := strings.Join(banner, "\n")
+	if !strings.Contains(text, "full control") {
+		t.Fatalf("banner should stay optimistic from the link, got %q", text)
+	}
+	if !strings.Contains(strings.Join(notices, "\n"), "not prompt") {
+		t.Fatalf("host's refusal notice never reached the guest (notices=%v)", notices)
+	}
+	// And the capability really is absent: prompting must fail locally.
+	if g.Writable() {
+		t.Fatal("guest became writable with a wrong token")
+	}
+	if err := g.Prompt("should be refused"); err == nil {
+		t.Fatal("Prompt accepted input the host would refuse")
+	}
+}
+
+// Security-relevant AND, asserted through the guest's own state: a hand-made
+// Writable:true welcome must not upgrade a VIEW-ONLY link. The host sends that
+// frame only after a token check it cannot pass, and a malicious relay could
+// simply lie — so writability is the conjunction, not the frame.
+func TestWelcomeCannotUpgradeAViewOnlyLink(t *testing.T) {
+	_, linkRaw := testHost(t, Backend{Snapshot: func() []byte { return nil }}, nil)
+	full, err := ParseLink(linkRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := Link{Relay: full.Relay, RoomID: full.RoomID, Key: full.Key} // no token
+	greeted := false
+	var banner []string
+	g, err := Join(context.Background(), GuestConfig{
+		Link:       view,
+		ReplicaDir: t.TempDir(),
+		OnWelcome: func(f Frame) {
+			lines, now := joinWelcomeLines(view, f, greeted)
+			greeted = now
+			banner = append(banner, lines...)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	go func() { _ = g.Run(context.Background()) }()
+	time.Sleep(400 * time.Millisecond)
+
+	if g.Writable() {
+		t.Fatal("a view-only link became writable")
+	}
+	if err := g.Prompt("nope"); err == nil {
+		t.Fatal("Prompt succeeded on a view-only link")
+	}
+	text := strings.Join(banner, "\n")
+	if strings.Contains(text, "full control") {
+		t.Fatalf("banner over-claimed for a tokenless link:\n%s", text)
+	}
+	if !strings.Contains(text, "view-only") {
+		t.Fatalf("banner should state view-only:\n%s", text)
 	}
 }

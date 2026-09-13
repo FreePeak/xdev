@@ -139,10 +139,16 @@ func joinWelcomeLines(link Link, f Frame, welcomed bool) (lines []string, now bo
 		}
 		return lines, true
 	}
-	// The second welcome is only news when the link did not already claim
-	// write access; for a full link it confirms what the banner said.
+	// A view-only link can NEVER prompt, whatever a welcome frame claims:
+	// guest.go sets writable = f.Writable && Link.Full(), because write access
+	// is the link's write token confirmed by the host — neither side alone
+	// upgrades a view-only guest. Saying "write permission granted" here told
+	// the user they could prompt while every line they typed was refused by
+	// Prompt() locally (and again server-side). Silence would be its own
+	// confusion, so name the mismatch and the remedy.
 	if f.Writable && !link.Full() {
-		lines = append(lines, "· write permission granted")
+		lines = append(lines,
+			"· host granted write, but this link carries no write token — rejoin with the full link")
 	}
 	return lines, welcomed
 }
