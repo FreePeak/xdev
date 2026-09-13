@@ -731,7 +731,7 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		case ai.EventThinkingDelta:
 			thinking.WriteString(ev.Delta)
 			emitted = true
-			if m := a.ttsrObserve(ctx, ttsrProse, ev.Delta, ev.StreamIndex); m != nil {
+			if m := a.ttsrObserve(ctx, ttsrThinking, ev.Delta, ev.StreamIndex); m != nil {
 				return ttsrAbort(m)
 			}
 		case ai.EventToolcallStart:

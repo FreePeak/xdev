@@ -605,6 +605,42 @@ type TTSRSettings struct {
 	ContextMode   string     `yaml:"contextMode"`   // discard|keep
 	RepeatGap     int        `yaml:"repeatGap"`     // turns between two fires
 	Rules         []TTSRRule `yaml:"rules"`
+	// DisabledRules names rules that must not run even though they are
+	// configured or discovered — the escape hatch for a rulebook rule a user
+	// wants off without editing its file (#95).
+	DisabledRules []string `yaml:"disabledRules"`
+	// ScanThinking opts model reasoning into the matched lanes. omp excludes
+	// thinking by default (it is model-internal text, and a rule that fires
+	// on it interrupts a turn the model never sent), so the default here is
+	// false; set it true to scan reasoning as well.
+	ScanThinking *bool `yaml:"scanThinking"`
+}
+
+// ttsrDisabledList is the disabledRules list of a possibly-absent group.
+func ttsrDisabledList(t *TTSRSettings) []string {
+	if t == nil {
+		return nil
+	}
+	return t.DisabledRules
+}
+
+// ScanThinkingOn reports whether reasoning deltas feed the rules (nil-safe:
+// the shipped default is off, matching omp).
+func (t *TTSRSettings) ScanThinkingOn() bool {
+	return t != nil && t.ScanThinking != nil && *t.ScanThinking
+}
+
+// IsDisabled reports whether a rule name is in disabledRules.
+func (t *TTSRSettings) IsDisabled(name string) bool {
+	if t == nil {
+		return false
+	}
+	for _, d := range t.DisabledRules {
+		if strings.TrimSpace(d) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TTSRRule is one stream rule: a regex condition, an optional astCondition
@@ -1163,6 +1199,12 @@ func (s *Settings) merge(layer *Settings) error {
 			if layer.TTSR.Enabled != nil {
 				s.TTSR.Enabled = layer.TTSR.Enabled
 			}
+			if layer.TTSR.ScanThinking != nil {
+				s.TTSR.ScanThinking = layer.TTSR.ScanThinking
+			}
+			if len(layer.TTSR.DisabledRules) > 0 {
+				s.TTSR.DisabledRules = append([]string(nil), layer.TTSR.DisabledRules...)
+			}
 		}
 	}
 	if s.TTSR != nil {
@@ -1536,6 +1578,8 @@ func List(s *Settings, globalPath string) []string {
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
 		"compaction.experimentalContextManagement " + fmt.Sprint(s.ExperimentalContextManagement),
 		"autolearn.enabled " + fmt.Sprint(s.AutolearnOn()),
+		"ttsr.scanThinking " + fmt.Sprint(s.TTSR.ScanThinkingOn()),
+		"ttsr.disabledRules " + strings.Join(ttsrDisabledList(s.TTSR), ","),
 		"lessonCap " + fmt.Sprint(s.LessonCapOrDefault()),
 		"memoryMnemopi.scope " + mm.Scope,
 		"memoryMnemopi.llmMode " + mm.LLMMode,

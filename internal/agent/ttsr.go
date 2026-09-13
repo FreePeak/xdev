@@ -72,16 +72,28 @@ const (
 type ttsrKind int
 
 const (
-	ttsrProse ttsrKind = iota // text and thinking deltas
-	ttsrTool                  // toolcall deltas
+	ttsrProse    ttsrKind = iota // assistant text deltas
+	ttsrThinking                 // reasoning deltas: prose policy, off by default
+	ttsrTool                     // toolcall deltas
+
+	// ttsrLaneCount sizes the per-lane carry-over windows; keep it last.
+	ttsrLaneCount
 )
 
 func (k ttsrKind) String() string {
-	if k == ttsrTool {
+	switch k {
+	case ttsrTool:
 		return "tool"
+	case ttsrThinking:
+		return "thinking"
 	}
 	return "prose"
 }
+
+// isProse reports the kind's policy class: reasoning follows the prose rules
+// (prose-only interrupts prose and reasoning alike) — the only difference is
+// that reasoning is off unless the group opts in.
+func (k ttsrKind) isProse() bool { return k == ttsrProse || k == ttsrThinking }
 
 // TTSR is the compiled rule set plus its live in-session state. Live state
 // is touched by the Run goroutine (streaming) and read by concurrent tool
@@ -91,9 +103,9 @@ type TTSR struct {
 	regexes []*regexp.Regexp // aligned with cfg.Rules; nil = unusable rule
 
 	turn    int
-	win     [2]string
-	seen    map[string]bool // fired in the current turn (per rule)
-	last    map[string]int  // rule name → turn of the last fire
+	win     [ttsrLaneCount]string // one carry-over window per policy lane
+	seen    map[string]bool       // fired in the current turn (per rule)
+	last    map[string]int        // rule name → turn of the last fire
 	pending map[int][]string
 	quiet   bool
 }
@@ -188,7 +200,9 @@ func (t *TTSR) repeatGap(r config.TTSRRule) int {
 // that just fired cannot fire again on the retried content).
 func (t *TTSR) beginTurn() {
 	t.turn++
-	t.win = [2]string{}
+	for i := range t.win {
+		t.win[i] = ""
+	}
 	t.seen = map[string]bool{}
 	t.pending = map[int][]string{}
 }
@@ -201,18 +215,29 @@ func (t *TTSR) observe(ctx context.Context, kind ttsrKind, delta string, streamI
 	if t.quiet || delta == "" {
 		return nil
 	}
-	w := t.win[kind] + delta
+	// Reasoning is out of the matched lanes unless the group opts in (#95,
+	// omp's default): a rule firing on model-internal text interrupts a turn
+	// the model never chose to send. It shares the prose window so a rule
+	// split across a text/thinking boundary still matches once enabled.
+	if kind == ttsrThinking && !t.cfg.ScanThinkingOn() {
+		return nil
+	}
+	kindWindow := kind
+	if kind == ttsrThinking {
+		kindWindow = ttsrProse
+	}
+	w := t.win[kindWindow] + delta
 	if len(w) > ttsrWindowBytes {
 		w = w[len(w)-ttsrWindowBytes:]
 	}
-	t.win[kind] = w
+	t.win[kindWindow] = w
 	for i := range t.cfg.Rules {
 		r := t.cfg.Rules[i]
 		interrupt, reminder := ttsrAction(t.mode(r), kind)
 		if !interrupt && !reminder {
 			continue
 		}
-		if t.regexes[i] == nil || t.seen[r.Name] {
+		if t.regexes[i] == nil || t.seen[r.Name] || t.cfg.IsDisabled(r.Name) {
 			continue
 		}
 		if last, ok := t.last[r.Name]; ok && t.turn-last < t.repeatGap(r) {
@@ -227,7 +252,7 @@ func (t *TTSR) observe(ctx context.Context, kind ttsrKind, delta string, streamI
 		t.seen[r.Name] = true
 		t.last[r.Name] = t.turn
 		if reminder {
-			t.pending[streamIndex] = append(t.pending[streamIndex], ttsrNotice(ttsrReminderTag, r, ""))
+			t.pending[streamIndex] = append(t.pending[streamIndex], ttsrNotice(ttsrReminderTag, r, ttsrRulePath(kind, w)))
 		}
 		return &TTSRMatch{Rule: r, Kind: kind, StreamIndex: streamIndex, Interrupt: interrupt}
 	}
@@ -237,11 +262,12 @@ func (t *TTSR) observe(ctx context.Context, kind ttsrKind, delta string, streamI
 // ttsrAction resolves an interrupt mode against a delta kind: interrupt
 // aborts the turn, reminder folds a notice into the tool result.
 func ttsrAction(mode string, kind ttsrKind) (interrupt, reminder bool) {
+	// Reasoning is judged as prose.
 	switch mode {
 	case TTSRModeAlways:
 		return true, false
 	case TTSRModeProseOnly:
-		return kind == ttsrProse, kind == ttsrTool
+		return kind.isProse(), kind == ttsrTool
 	case TTSRModeToolOnly:
 		return kind == ttsrTool, false
 	default: // never (or an unknown mode from a hand-built struct)
