@@ -73,7 +73,19 @@ jobs:
       - name: Memory proof (worst-case transcript, gctrace)
         env:
           GODEBUG: gctrace=1
-        run: go test -count=1 -run TestWorstCaseTranscriptStaysUnderBudget -v ./internal/session/ 2>&1 | tail -40
+        # The verifier must BE the exit status: GitHub's default shell has no
+        # pipefail, so `... | tail -40` made this step report tail's success and
+        # the M8 budget could regress green. The PASS assertion also catches a
+        # renamed test, which `-run` would otherwise turn into a silent no-op.
+        run: |
+          set -o pipefail
+          log="$(mktemp)"
+          if ! go test -count=1 -run TestWorstCaseTranscriptStaysUnderBudget -v ./internal/session/ >"$log" 2>&1; then
+            tail -40 "$log"
+            exit 1
+          fi
+          tail -40 "$log"
+          grep -q -- '--- PASS: TestWorstCaseTranscriptStaysUnderBudget' "$log"
 
       # M8: untrusted-input surfaces get a short fuzz pass on every run.
       # Longer campaigns are a release activity; this catches the
