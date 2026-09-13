@@ -212,8 +212,7 @@ check on xdev goals 1–2 and on the §5 decisions.
   use compatible loopback endpoints for model discovery and generation… a fully
   hermetic setup"), but only behind an endpoint that speaks fx's own gateway
   spec — plain `ollama` is incompatible. Other vendors are model-id *prefixes*
-  behind the gateway
-  with prefix-keyed capability policy (`vercel_model_policy.zig:6,39-41`).
+  behind the gateway, with prefix-keyed capability policy (`vercel_model_policy.zig:6,39-41`).
   ~480 KB of gateway code for 3 routes.
 - Events: `Event = union(enum){ content_delta, reasoning_delta,
   tool_started{id,name,label,arguments_json}, tool_input_delta }`, emitted
