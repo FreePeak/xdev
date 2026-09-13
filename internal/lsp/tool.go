@@ -60,12 +60,16 @@ func (t *Tool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "op": {"type": "string", "enum": ["diagnostics", "definition", "references", "hover", "symbols"], "description": "query to run"},
+    "op": {"type": "string", "enum": ["diagnostics", "definition", "references", "hover", "symbols", "rename", "code_actions", "capabilities"], "description": "query to run; rename and code_actions REPORT the workspace edit they would make and never write files — carry the change out with edit/write"},
     "file": {"type": "string", "description": "file path (relative to cwd); \"*\" for diagnostics = every file reported so far"},
     "line": {"type": "integer", "description": "1-based line of the position (omit when passing symbol)"},
     "col": {"type": "integer", "description": "1-based column (defaults to the first non-space character of the line)"},
     "symbol": {"type": "string", "description": "identifier to locate, e.g. \"resolveModel\" or \"resolveModel#2\" for the second occurrence; for op=symbols it becomes the workspace symbol query"},
-    "timeout": {"type": "integer", "description": "per-action timeout in seconds (5..300, default 30)"}
+    "timeout": {"type": "integer", "description": "per-action timeout in seconds (5..300, default 30)"},
+    "new_name": {"type": "string", "description": "op=rename: the new identifier"},
+    "query": {"type": "string", "description": "op=code_actions: filter the list by title substring (case-insensitive)"},
+    "index": {"type": "integer", "description": "op=code_actions: which filtered action to describe (0-based, default 0)"},
+    "apply": {"type": "boolean", "description": "accepted for forward compatibility and ignored: these ops never mutate files"}
   },
   "required": ["op"]
 }`)
@@ -85,6 +89,17 @@ type lspArgs struct {
 	Col     int    `json:"col"`
 	Symbol  string `json:"symbol"`
 	Timeout int    `json:"timeout"`
+	// NewName is the target of op "rename".
+	NewName string `json:"new_name"`
+	// Apply is accepted but always false in effect: rename and code_actions
+	// REPORT their workspace edit rather than writing it, so the only file
+	// mutations in a session keep going through the edit/write tools (where
+	// the approval gate, the freshness check and secret redaction live).
+	Apply bool `json:"apply"`
+	// Query filters op "code_actions" by title substring.
+	Query string `json:"query"`
+	// Index picks one code action to apply (0-based, after the filter).
+	Index int `json:"index"`
 }
 
 func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (tool.Result, error) {
@@ -112,11 +127,154 @@ func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (tool.Result, 
 		return t.positionQuery(ctx, strings.ToLower(strings.TrimSpace(a.Op)), a)
 	case "symbols":
 		return t.symbols(ctx, a)
+	case "rename":
+		return t.rename(ctx, a)
+	case "code_actions":
+		return t.codeActions(ctx, a)
+	case "capabilities":
+		return t.capabilities(ctx, a)
 	case "":
-		return errResult("lsp: op is required (diagnostics|definition|references|hover|symbols)"), nil
+		return errResult("lsp: op is required (diagnostics|definition|references|hover|symbols|rename|code_actions|capabilities)"), nil
 	default:
-		return errResult("lsp: unknown op " + a.Op + " (want diagnostics|definition|references|hover|symbols)"), nil
+		return errResult("lsp: unknown op " + a.Op + " (want diagnostics|definition|references|hover|symbols|rename|code_actions|capabilities)"), nil
 	}
+}
+
+// openAt resolves a file argument into a live client plus the LSP position
+// and document URI the positional ops send. Shared by rename and code_actions
+// so the three positional paths cannot drift apart.
+func (t *Tool) openAt(ctx context.Context, op string, a lspArgs) (*Client, string, map[string]any, error) {
+	if strings.TrimSpace(a.File) == "" {
+		return nil, "", nil, fmt.Errorf("lsp: %s needs a file", op)
+	}
+	abs, err := t.absPath(a.File)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	cl, langID, err := t.mgr.ClientFor(ctx, abs)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if err := cl.EnsureOpen(abs, langID); err != nil {
+		return nil, "", nil, err
+	}
+	pos, err := resolvePosition(abs, a.Line, a.Col, a.Symbol)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	uri := uriFromPath(abs)
+	return cl, uri, map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     pos,
+	}, nil
+}
+
+// rename computes textDocument/rename and reports the resulting workspace
+// edit: which files change and how many edits each carries.
+//
+// It deliberately does NOT write. Applying edits here would open a second
+// file-mutating path that bypasses the edit tool's approval gate, freshness
+// check and secret redaction — so the answer is the plan, and the model
+// carries it out with edit/write where the user can see it.
+func (t *Tool) rename(ctx context.Context, a lspArgs) (tool.Result, error) {
+	newName := strings.TrimSpace(a.NewName)
+	if newName == "" {
+		return errResult("lsp: rename needs new_name"), nil
+	}
+	cl, _, params, err := t.openAt(ctx, "rename", a)
+	if err != nil {
+		return errResult("lsp: " + err.Error()), nil
+	}
+	params["newName"] = newName
+	raw, err := cl.Call(ctx, "textDocument/rename", params)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	text := renderWorkspaceEdit(raw, t.CWD)
+	if strings.TrimSpace(text) == "" {
+		return tool.Result{Text: "rename to " + newName + " produces no edits"}, nil
+	}
+	return tool.Result{
+		Text: "rename " + newName + " would change:\n" + text +
+			"\n\napply it with the edit/write tools (this op reports the plan; it never edits files itself)",
+	}, nil
+}
+
+// codeActions lists (and optionally applies) the code actions offered at a
+// position — quick fixes and refactorings the server advertises.
+func (t *Tool) codeActions(ctx context.Context, a lspArgs) (tool.Result, error) {
+	cl, uri, params, err := t.openAt(ctx, "code_actions", a)
+	if err != nil {
+		return errResult("lsp: " + err.Error()), nil
+	}
+	// codeAction needs a RANGE, not a point: widen the position by one
+	// character (the server clamps an out-of-range end).
+	endPos := map[string]any{"line": params["position"].(map[string]any)["line"], "character": params["position"].(map[string]any)["character"].(float64) + 1}
+	params["range"] = map[string]any{"start": params["position"], "end": endPos}
+	delete(params, "position")
+	params["context"] = map[string]any{"diagnostics": []any{}}
+	raw, err := cl.Call(ctx, "textDocument/codeAction", params)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	actions, err := parseCodeActions(raw)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	if q := strings.ToLower(strings.TrimSpace(a.Query)); q != "" {
+		var kept []codeAction
+		for _, act := range actions {
+			if strings.Contains(strings.ToLower(act.Title), q) {
+				kept = append(kept, act)
+			}
+		}
+		actions = kept
+	}
+	if len(actions) == 0 {
+		return tool.Result{Text: "no code actions at that position"}, nil
+	}
+	if a.Index > 0 || (a.Apply && a.Index >= 0 && len(actions) > 1) {
+		if a.Index >= len(actions) {
+			return errResult(fmt.Sprintf("lsp: index %d out of range (%d actions)", a.Index, len(actions))), nil
+		}
+		actions = []codeAction{actions[a.Index]}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d code action(s):", len(actions))
+	for i, act := range actions {
+		fmt.Fprintf(&b, "\n  %d. %s", i, act.Title)
+		if act.Kind != "" {
+			fmt.Fprintf(&b, " [%s]", act.Kind)
+		}
+		if files := act.editFiles(); len(files) > 0 {
+			fmt.Fprintf(&b, " — touches %s", strings.Join(files, ", "))
+		}
+	}
+	_ = uri
+	b.WriteString("\n\nlike rename, this op reports; apply the change with edit/write")
+	return tool.Result{Text: capText(b.String(), MaxTextBytes)}, nil
+}
+
+// capabilities reports what the server for one file actually advertised —
+// the answer to "why did that op do nothing", and the raw escape hatch that
+// keeps an unusual server from being a dead end.
+func (t *Tool) capabilities(ctx context.Context, a lspArgs) (tool.Result, error) {
+	if strings.TrimSpace(a.File) == "" {
+		return errResult("lsp: capabilities needs a file"), nil
+	}
+	abs, err := t.absPath(a.File)
+	if err != nil {
+		return errResult("lsp: " + err.Error()), nil
+	}
+	cl, _, err := t.mgr.ClientFor(ctx, abs)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	text := cl.CapabilitiesSummary()
+	if text == "" {
+		return tool.Result{Text: "server reported no capabilities"}, nil
+	}
+	return tool.Result{Text: capText(text, MaxTextBytes)}, nil
 }
 
 func errResult(msg string) tool.Result {
@@ -631,4 +789,136 @@ func utf16Len(s string) int {
 		}
 	}
 	return n
+}
+
+// codeAction is one entry of a textDocument/codeAction response. A response
+// item is either a Command (no edit) or a CodeAction with an edit / edit
+// reference; both spellings are decoded.
+type codeAction struct {
+	Title string        `json:"title"`
+	Kind  string        `json:"kind"`
+	Edit  workspaceEdit `json:"edit"`
+	// Command is overloaded by the spec: a Command object's `command` is a
+	// string, a CodeAction's `command` is an object. RawMessage absorbs both,
+	// and commandName() reads whichever arrived.
+	Command json.RawMessage `json:"command"`
+}
+
+// commandName renders the command field whatever shape the server used.
+func (c codeAction) commandName() string {
+	if len(c.Command) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(c.Command, &s); err == nil && s != "" {
+		return s
+	}
+	var obj struct {
+		Command string `json:"command"`
+		Title   string `json:"title"`
+	}
+	if json.Unmarshal(c.Command, &obj) == nil {
+		if obj.Command != "" {
+			return obj.Command
+		}
+		return obj.Title
+	}
+	return ""
+}
+
+// editFiles lists the document URIs an action touches, absolute-path form.
+func (c codeAction) editFiles() []string {
+	if len(c.Edit.Changes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.Edit.Changes))
+	for uri := range c.Edit.Changes {
+		out = append(out, pathFromURI(uri))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// workspaceEdit is the LSP shape both rename and code actions return: either
+// `changes` keyed by document URI, or the document-diagram `documentChanges`
+// form. Only `changes` is decoded here; the diagram form is reported as a
+// count rather than pretending to understand annotations.
+type workspaceEdit struct {
+	Changes         map[string][]textEdit `json:"changes"`
+	DocumentChanges []struct {
+		Edits        []textEdit `json:"edits"`
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+	} `json:"documentChanges"`
+}
+
+type textEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
+}
+
+// parseCodeActions decodes a textDocument/codeAction response. The spec
+// allows an array of CodeAction objects OR an array of Commands, and a Command
+// decodes cleanly into the CodeAction shape (its `command` is a string), so
+// the two are told apart by whether a kind/edit is present — a bare Command is
+// labelled as such instead of showing up as a nameless, edit-less action.
+func parseCodeActions(raw json.RawMessage) ([]codeAction, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var actions []codeAction
+	if err := json.Unmarshal(raw, &actions); err != nil {
+		return nil, fmt.Errorf("unrecognized codeAction response: %s", capText(string(raw), 200))
+	}
+	for i := range actions {
+		if actions[i].Kind == "" && len(actions[i].Edit.Changes) == 0 {
+			if name := actions[i].commandName(); name != "" {
+				actions[i].Kind = "command:" + name
+			}
+		}
+	}
+	return actions, nil
+}
+
+// renderWorkspaceEdit describes an edit plan: one line per document with its
+// edit count and the first affected line, so a model can carry the change out
+// with the edit tool without guessing.
+func renderWorkspaceEdit(raw json.RawMessage, cwd string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var ed workspaceEdit
+	if err := json.Unmarshal(raw, &ed); err != nil {
+		return capText(string(raw), 400)
+	}
+	var b strings.Builder
+	for _, uri := range sortedChangeKeys(ed) {
+		edits := ed.Changes[uri]
+		file := pathFromURI(uri)
+		if rel, err := filepath.Rel(cwd, file); err == nil && !strings.HasPrefix(rel, "..") {
+			file = rel
+		}
+		fmt.Fprintf(&b, "  %s: %d edit(s)", file, len(edits))
+		if len(edits) > 0 {
+			fmt.Fprintf(&b, " (first at line %d)", edits[0].Range.Start.Line+1)
+		}
+		b.WriteString("\n")
+	}
+	for _, dc := range ed.DocumentChanges {
+		fmt.Fprintf(&b, "  %s: %d edit(s) (documentChanges)\n",
+			pathFromURI(dc.TextDocument.URI), len(dc.Edits))
+	}
+	return b.String()
+}
+
+// sortedChangeKeys keeps the rendered plan stable across servers (map order
+// is random, and a diff-like report must not reorder between runs).
+func sortedChangeKeys(ed workspaceEdit) []string {
+	out := make([]string, 0, len(ed.Changes))
+	for uri := range ed.Changes {
+		out = append(out, uri)
+	}
+	sort.Strings(out)
+	return out
 }

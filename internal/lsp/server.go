@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -69,6 +70,22 @@ func langIDFor(ext string) string {
 }
 
 // uriFromPath / uriToPath convert between file paths and file:// URIs.
+// pathFromURI is uriFromPath's inverse: a file URI back to a local path. A
+// non-file scheme (a server reporting an untitled or remote document) comes
+// back unchanged rather than being silently mangled.
+func pathFromURI(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil || (u.Scheme != "" && u.Scheme != "file") {
+		return uri
+	}
+	p := u.Path
+	if runtime.GOOS == "windows" {
+		p = strings.TrimPrefix(p, "/")
+		p = strings.ReplaceAll(p, "/", "\\")
+	}
+	return filepath.FromSlash(p)
+}
+
 func uriFromPath(path string) string {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -134,9 +151,22 @@ func startServer(ctx context.Context, name string, spec ServerSpec, root string)
 	if len(spec.InitOptions) > 0 {
 		params["initializationOptions"] = spec.InitOptions
 	}
-	if _, err := c.Call(ctx, "initialize", params); err != nil {
+	res, err := c.Call(ctx, "initialize", params)
+	if err != nil {
 		_ = c.Close()
 		return nil, err
+	}
+	// Keep the server's capabilities for the `capabilities` op. The LSP
+	// response wraps them as {"capabilities": {…}}.
+	if len(res) > 0 {
+		var init struct {
+			Capabilities json.RawMessage `json:"capabilities"`
+		}
+		if json.Unmarshal(res, &init) == nil && len(init.Capabilities) > 0 {
+			c.mu.Lock()
+			c.caps = init.Capabilities
+			c.mu.Unlock()
+		}
 	}
 	if err := c.Notify("initialized", map[string]any{}); err != nil {
 		_ = c.Close()

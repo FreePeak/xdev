@@ -218,9 +218,13 @@ func TestMissingServerIsToolError(t *testing.T) {
 
 func TestUnknownOpAndBadArgs(t *testing.T) {
 	tool, _, st := newTestTool(t, defaultTestConfig())
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"op":"rename","file":"a.go"}`))
-	if err != nil || !out.IsError || !strings.Contains(out.Text, "unknown op rename") {
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"op":"signatureHelp","file":"a.go"}`))
+	if err != nil || !out.IsError || !strings.Contains(out.Text, "unknown op signatureHelp") {
 		t.Fatalf("out = %+v err = %v", out, err)
+	}
+	// rename is a real op now (#96) and must still refuse without a name.
+	if out, _ := tool.Execute(context.Background(), json.RawMessage(`{"op":"rename","file":"a.go"}`)); !out.IsError || !strings.Contains(out.Text, "needs new_name") {
+		t.Fatalf("rename without new_name = %+v", out)
 	}
 	out, err = tool.Execute(context.Background(), json.RawMessage(`{"op":"definition"}`))
 	if err != nil || !out.IsError || !strings.Contains(out.Text, "needs a file") {
@@ -311,5 +315,62 @@ func TestSymbolSkipsComments(t *testing.T) {
 	// Line 4 (the func line), not line 3 (the doc comment).
 	if got != (Position{Line: 3, Character: 5}) {
 		t.Fatalf("position = %+v, want the declaration not the doc comment", got)
+	}
+}
+
+// The edit-plan renderers are pure decoding, so they are tested directly:
+// a rename's `changes` map, the documentChanges form, and the Command-shaped
+// codeAction array servers really send.
+func TestWorkspaceEditAndCodeActionDecoding(t *testing.T) {
+	ed := json.RawMessage(`{"changes":{"file:///w/a.go":[{"range":{"start":{"line":3,"character":0},"end":{"line":3,"character":4}},"newText":"newName"}]}}`)
+	text := renderWorkspaceEdit(ed, "/w")
+	if !strings.Contains(text, "a.go: 1 edit(s)") || !strings.Contains(text, "line 4") {
+		t.Fatalf("changes form rendered as: %q", text)
+	}
+	// A non-file URI must come back unchanged rather than be mangled.
+	if got := pathFromURI("untitled:a.go"); got != "untitled:a.go" {
+		t.Fatalf("non-file URI mangled: %q", got)
+	}
+	if got := pathFromURI("file:///w/a.go"); got != "/w/a.go" {
+		t.Fatalf("file URI decoded to %q", got)
+	}
+
+	// Object form with kinds and edits.
+	objs, err := parseCodeActions(json.RawMessage(`[{"title":"Extract function","kind":"refactor.extract","edit":{"changes":{"file:///w/b.go":[]}}}]`))
+	if err != nil || len(objs) != 1 {
+		t.Fatalf("object form: %v (%+v)", err, objs)
+	}
+	if objs[0].Title != "Extract function" || len(objs[0].editFiles()) != 1 {
+		t.Fatalf("action decoded as %+v", objs[0])
+	}
+	// Command form (no edit) is legal per the spec and must not error.
+	cmds, err := parseCodeActions(json.RawMessage(`[{"title":"Add import","command":"go.add.import"}]`))
+	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0].Kind, "go.add.import") {
+		t.Fatalf("command form: %v (%+v)", err, cmds)
+	}
+	// Empty and null responses decode to no actions, not an error.
+	if got, err := parseCodeActions(nil); err != nil || len(got) != 0 {
+		t.Fatalf("empty response: %v %v", got, err)
+	}
+}
+
+// CapabilitiesSummary lists what the server offered, dot-pathed and sorted,
+// and hides the providers it explicitly declined.
+func TestCapabilitiesSummary(t *testing.T) {
+	c := &Client{}
+	c.mu.Lock()
+	c.caps = json.RawMessage(`{"renameProvider":true,"codeActionProvider":{"resolveProvider":false},"hoverProvider":false}`)
+	c.mu.Unlock()
+	got := c.CapabilitiesSummary()
+	// An options object counts as the capability being offered, even when its
+	// only leaf (resolveProvider) is false; a declined scalar does not.
+	if !strings.Contains(got, "renameProvider") || !strings.Contains(got, "codeActionProvider") {
+		t.Fatalf("offered providers missing from %q", got)
+	}
+	if strings.Contains(got, "hoverProvider") {
+		t.Fatalf("a declined provider must not be listed: %q", got)
+	}
+	if strings.Contains(got, "codeActionProvider.resolveProvider") {
+		t.Fatalf("a false leaf must not be listed as offered: %q", got)
 	}
 }
