@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
@@ -431,22 +433,65 @@ func deleteSessionByShortID(shortID, activePath string) error {
 	return fmt.Errorf("no session %s", shortID)
 }
 
-// summarizeAndBranch records that the branch being left is summarized
-// away, then moves the leaf to entryID (tree selector Shift+Enter). The
-// summary is a fixed marker — no model round-trip.
-// ponytail: a real LLM-written summary would need a provider call from
-// cmd; upgrade path is the live target in runTUI next to /prewalk.
+// summarizeAndBranch records the branch being left, then moves the leaf to
+// entryID (tree selector Shift+Enter). The branch_summary is generated on the
+// cheap role when the branch carries enough context to be worth summarizing
+// (the engine's own threshold); every failure path — no role resolvable,
+// provider error, empty answer, budget off — falls back to the fixed marker
+// rather than failing the switch (#83: the seam existed with no caller, so
+// every summary was the marker).
 func summarizeAndBranch(store *session.Store, entryID string) error {
-	if store.Entry(entryID) == nil {
-		return fmt.Errorf("branch: no entry matching %q", entryID)
-	}
-	if err := store.Append(&session.BranchSummaryEntry{
-		Summary: ai.Message{
-			Role:    ai.RoleUser,
-			Content: []ai.Block{ai.TextBlock{Text: "(branch summary) the previous branch was abandoned for a tree-selector switch"}},
-		},
-	}); err != nil {
-		return err
-	}
-	return store.Branch(entryID)
+	ctx, cancel := context.WithTimeout(context.Background(), branchSummaryBudget)
+	defer cancel()
+	return agent.SummarizeBranchStore(ctx, store, entryID, branchSummarizer())
 }
+
+// branchSummaryBudget bounds the side request; a slow provider must not hang
+// a tree switch the user just asked for.
+const branchSummaryBudget = 20 * time.Second
+
+// branchSummarizer resolves the summary role into a callable, or nil when the
+// feature is off or the role cannot be reached (nil = marker only).
+func branchSummarizer() agent.BranchSummarizer {
+	settings := lastSettings()
+	if settings != nil && !settings.BranchSummaryOn() {
+		return nil
+	}
+	cfg, err := config.LoadModelsLayered()
+	if err != nil {
+		logx.Debugf("branch summary: config unavailable: %v", err)
+		return nil
+	}
+	for _, ref := range []string{"@tiny", "@smol"} {
+		resolved, _, err := resolveModel(ref, cfg, settings)
+		if err != nil {
+			continue
+		}
+		pName, mName, err := config.ParseModelRef(resolved)
+		if err != nil {
+			continue
+		}
+		pc, ok := cfg.Providers[pName]
+		if !ok {
+			continue
+		}
+		prov, err := buildProvider(pName, pc, mName, cfg)
+		if err != nil {
+			logx.Debugf("branch summary: provider %s unavailable: %v", pName, err)
+			continue
+		}
+		maxTokens := settings.BranchSummaryReserveTokens()
+		return func(ctx context.Context, prompt string) (string, error) {
+			msg, err := ai.Complete(ctx, prov, mName, branchSummarySystem, prompt, maxTokens)
+			if err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(msg.Text()), nil
+		}
+	}
+	logx.Debugf("branch summary: no role resolvable (@tiny/@smol), recording markers")
+	return nil
+}
+
+// branchSummarySystem is the writer instruction for a branch note.
+const branchSummarySystem = "You summarize the conversation branch a user is abandoning in a coding session. Write 2-4 sentences in the past tense: what was attempted, what was learned or changed, and anything left unfinished. Plain prose, no bullets, no preamble."
