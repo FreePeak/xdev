@@ -205,8 +205,14 @@ check on xdev goals 1–2 and on the §5 decisions.
   `chatgpt.com/backend-api/codex/responses`; Grok →
   `…/v1/responses` (`src/gateway/openai_codex.zig`, `xai_grok.zig`). **No
   Anthropic Messages transport, no OpenAI chat-completions transport, no
-  ollama/local** — `/v1/chat/completions` appears only in a loopback fixture
-  (`client.zig:7259`). Other vendors are model-id *prefixes* behind the gateway
+  vendor-direct route** — `/v1/chat/completions` appears only in a loopback
+  fixture (`client.zig:7259`), and the two gateway URL overrides
+  (`FX_GATEWAY_BASE_URL`, `FX_GATEWAY_CHAT_URL`) are rejected unless the host is
+  loopback. Local models therefore *do* work (`docs` Data-and-privacy: "fx can
+  use compatible loopback endpoints for model discovery and generation… a fully
+  hermetic setup"), but only behind an endpoint that speaks fx's own gateway
+  spec — plain `ollama` is incompatible. Other vendors are model-id *prefixes*
+  behind the gateway
   with prefix-keyed capability policy (`vercel_model_policy.zig:6,39-41`).
   ~480 KB of gateway code for 3 routes.
 - Events: `Event = union(enum){ content_delta, reasoning_delta,
@@ -721,7 +727,7 @@ The mirror image of xdev's recurring "engine landed, arming absent" class:
 | Memory ceiling | per-structure caps, **no process gate** | hard <100 MB RSS + CI proof + windowed materialization | xdev stronger |
 | Startup budget | 2 ms mean, Linux, hyperfine-gated | none | fx stronger |
 | Size control | base-vs-head delta warning + 7.800 MiB release ceiling + PGSO | static Go build, no size CI | fx stronger as *process* |
-| Providers | 3 routes, gateway-first, no local/ollama | 4 v1 + 4 v2 transports, any baseUrl, offline-bundled catalog | xdev stronger |
+| Providers | 3 gateway-shaped routes; no vendor-direct route, no chat-completions; local only behind a loopback endpoint speaking its own spec | 4 v1 + 4 v2 transports, any baseUrl, offline-bundled catalog | xdev stronger |
 | Approvals | 3 modes, default `auto` with LLM reviewer, no prompter ⇒ deny | 3 tiers, default YOLO, per-pattern rules | different philosophies; fx's reviewer is the missing piece |
 | Containment | lexical allowlist + 3-var scrubbed env | env-hardening list + documented external sandbox recipes | fx's scrubbed direct-exec is the cheap middle |
 | Extensibility | compiled-in only; 4 in-process hook events | subprocess JSONL extensions + hooks + MCP + custom commands | xdev stronger for third parties; fx's 4-event cut is the right minimal set |
