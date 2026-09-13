@@ -182,6 +182,10 @@ type Agent struct {
 	// (the remote backend's recalled memories). nil = nothing extra — the
 	// transcript alone. #86: CompactionContext existed with no caller.
 	MemoryContext func() string
+	// Vision reports whether the active model accepts image input. The
+	// snapcompact rung keeps the dropped span as text instead of a bitmap when
+	// the model cannot read one; nil means "unknown", which is treated as no.
+	Vision func() bool
 	// Rulebook returns the guidance of rules scoped to a touched path (globs
 	// from .cursor/rules, RULES.md, plugin rulebooks). Called after a
 	// successful edit/write so a path-scoped rulebook reaches the model on the

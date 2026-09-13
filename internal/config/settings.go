@@ -345,6 +345,10 @@ type Settings struct {
 	Models      ModelsSettings `yaml:"models"`
 	MemoryLimit int64          `yaml:"memoryLimit"`
 	MaxTurns    int            `yaml:"maxTurns"`
+	// BranchSummary tunes the note written when the tree selector abandons a
+	// branch (#83). Enabled defaults true (omp's branchSummary.enabled);
+	// ReserveTokens caps the summary request's output.
+	BranchSummary BranchSummarySettings `yaml:"branchSummary"`
 	// Compaction tunes context maintenance (compaction.methodOrder).
 	Compaction CompactionSettings `yaml:"compaction"`
 	// Retry tunes the resilience ladder (M5 #25): the fallback chain
@@ -718,6 +722,26 @@ func ValidMemoryBackend(name string) bool {
 	return false
 }
 
+// BranchSummarySettings is the branchSummary.* group.
+type BranchSummarySettings struct {
+	Enabled       *bool `yaml:"enabled"`
+	ReserveTokens int   `yaml:"reserveTokens"`
+}
+
+// BranchSummaryOn reports whether branch summaries may call a model
+// (nil-safe: the shipped default is on, so the marker is only the fallback).
+func (s *Settings) BranchSummaryOn() bool {
+	return s == nil || s.BranchSummary.Enabled == nil || *s.BranchSummary.Enabled
+}
+
+// BranchSummaryReserveTokens resolves the output cap for the summary request.
+func (s *Settings) BranchSummaryReserveTokens() int {
+	if s == nil || s.BranchSummary.ReserveTokens <= 0 {
+		return 512
+	}
+	return s.BranchSummary.ReserveTokens
+}
+
 // PrewalkSettings is the prewalk.* group: the handoff default and its
 // target. The -prewalk / -no-prewalk flags override Enabled; -prewalk-into
 // overrides Into.
@@ -995,6 +1019,12 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if len(layer.Models.Cycle) > 0 {
 		s.Models.Cycle = append([]string(nil), layer.Models.Cycle...)
+	}
+	if layer.BranchSummary.Enabled != nil {
+		s.BranchSummary.Enabled = layer.BranchSummary.Enabled
+	}
+	if layer.BranchSummary.ReserveTokens > 0 {
+		s.BranchSummary.ReserveTokens = layer.BranchSummary.ReserveTokens
 	}
 	if layer.MemoryLimit != 0 {
 		s.MemoryLimit = layer.MemoryLimit
@@ -1494,6 +1524,8 @@ func List(s *Settings, globalPath string) []string {
 		"prewalk.enabled " + fmt.Sprint(s.Prewalk.Enabled),
 		"prewalk.into " + prewalkIntoOrDefault(s.Prewalk.Into),
 		"models.cycle " + cycleOrDefault(s.Models.Cycle),
+		"branchSummary.enabled " + fmt.Sprint(s.BranchSummaryOn()),
+		"branchSummary.reserveTokens " + fmt.Sprint(s.BranchSummaryReserveTokens()),
 		"bash.allowCompoundCommands " + fmt.Sprint(s.AllowCompoundCommandsOn()),
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),

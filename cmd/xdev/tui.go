@@ -327,7 +327,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			PlanMode:   planMode,
 			Handoff:    handoffSettings(),
 		}
-		wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), cwd)
+		wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
 	// -handoff: document the resumed session before the first turn.
@@ -1447,7 +1447,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// Shared per-mode seams: catalog bridge + secrets redactor
 				// (#79/#80). The TUI is the daily driver; an unredacted tool
 				// result here is the case that mattered.
-				if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), cwd); st != nil {
+				if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd); st != nil {
 					// The TUI has a console: a silent provider swap or a
 					// cooldown revert is otherwise invisible to the user.
 					st.Notify = func(msg string) { app.AddSystemBlock("· " + msg) }

@@ -225,7 +225,7 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // tool args). Both were once print-only — modes that hand-build an agent drift
 // silently, which is why the wiring lives in one function with one test
 // (#79 catalog, #80 redactor).
-func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, role, cwd string) *agent.FallbackState {
+func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, role, provider, model, cwd string) *agent.FallbackState {
 	if ag == nil {
 		return nil
 	}
@@ -233,6 +233,8 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 		ag.WireCatalog(reg.Catalog())
 	}
 	ag.Redactor = redactorFor(cwd)
+	// #83: snapcompact's bitmap only helps a model that can read images.
+	ag.Vision = func() bool { return modelVision(cfg, provider, model) }
 	// M5 #25 depth (#84): arm the fallback state so the reserve policy,
 	// cooldown revert and credential rotation actually run — the engine was
 	// complete and unit-tested with no production caller, so a spent key
@@ -255,7 +257,6 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 			return rotateProviderCredential(cfg, provider, ag.Model)
 		}
 	}
-	return st
 	// #108: a rulebook rule scoped by globs (globs: *.go) was discovered,
 	// listed in the prompt and rendered as an edit/write "shorthand", but
 	// nothing consumed it. The matched guidance now rides the tool result of
@@ -303,6 +304,25 @@ func ruleNames(rs []rules.Rule) []string {
 		out[i] = r.Name
 	}
 	return out
+}
+
+// modelVision reports whether a provider's model entry declares image input
+// (models.yml `vision: true`). An unknown provider/model is false: the text
+// path always works, so the conservative answer is to skip the bitmap.
+func modelVision(cfg *config.Config, provider, model string) bool {
+	if cfg == nil {
+		return false
+	}
+	pc := cfg.Providers[provider]
+	if pc == nil {
+		return false
+	}
+	for _, m := range append(append([]config.ModelConfig(nil), pc.Models...), providerModels(provider, pc)...) {
+		if m.ID == model {
+			return m.Vision
+		}
+	}
+	return false
 }
 
 // redactorFor opens the secrets redactor for one workspace, memoized per
@@ -518,7 +538,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, reg, cfg, settings, modelRoleRef(opts.Model), cwd)
+	wireAgentMode(ag, reg, cfg, settings, modelRoleRef(opts.Model), provName, modelName, cwd)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).

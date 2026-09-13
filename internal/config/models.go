@@ -24,11 +24,15 @@ type DiscoveryConfig struct {
 
 // ModelConfig is one statically pinned model entry.
 type ModelConfig struct {
-	ID            string `yaml:"id"`
-	Name          string `yaml:"name,omitempty"`
-	Reasoning     bool   `yaml:"reasoning,omitempty"`
-	ContextWindow int    `yaml:"contextWindow,omitempty"`
-	MaxTokens     int    `yaml:"maxTokens,omitempty"`
+	ID        string `yaml:"id"`
+	Name      string `yaml:"name,omitempty"`
+	Reasoning bool   `yaml:"reasoning,omitempty"`
+	// Vision marks a model that accepts image input. snapcompact's bitmap is
+	// only useful to such a model (#83); without the flag the dropped text
+	// would ride along as bytes nothing can read.
+	Vision        bool `yaml:"vision,omitempty"`
+	ContextWindow int  `yaml:"contextWindow,omitempty"`
+	MaxTokens     int  `yaml:"maxTokens,omitempty"`
 	// BaseURL/APIKey/Headers override the provider-level values per model.
 	BaseURL string            `yaml:"baseUrl,omitempty"`
 	APIKey  string            `yaml:"apiKey,omitempty"`

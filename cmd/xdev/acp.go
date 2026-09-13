@@ -218,7 +218,7 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 		Approve:    s.approve,
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
-	wireAgentMode(ag, h.reg, h.cfg, lastSettings(), "", h.cwd)
+	wireAgentMode(ag, h.reg, h.cfg, lastSettings(), "", h.provName, h.modelName, h.cwd)
 	// NOTE (#90): ACP deliberately installs no mailbox sink. An ACP host can
 	// hold several sessions in one process, and there is one mailbox owner per
 	// process — routing every arrival to whichever agent was built last would

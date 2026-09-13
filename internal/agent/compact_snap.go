@@ -29,12 +29,20 @@ const (
 	snapCellWidth   = 6    // cell width in font pixels (5 + 1 spacing)
 	snapResultChars = 4000 // one tool result in the bitmap (the image is where detail lives)
 	snapTotalChars  = 24000
+	// snapTextFallbackChars bounds the text-only form of the dropped span.
+	snapTextFallbackChars = 6000
 )
 
 // methodSnapcompactRun retains the span as a bitmap plus a short caption. The
 // caption is what a text-only provider (or a human reading the session) sees;
-func methodSnapcompactRun(_ *Agent, _ context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
+func methodSnapcompactRun(a *Agent, _ context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
 	text := renderTranscript(span.msgs[:span.cut], snapResultChars, snapTotalChars)
+	// A text-only model cannot read a bitmap, so the dropped span is kept as
+	// a text excerpt instead of being encoded into bytes nobody can consume
+	// (#83; omp gates the same rung on model capability).
+	if !modelAcceptsImages(a) {
+		return snapcompactText(a, span, text)
+	}
 	img, rows, err := renderTextPNG(text)
 	if err != nil {
 		return nil, fmt.Errorf("snapcompact: render: %w", err)
@@ -231,4 +239,31 @@ var snapFont = [64]string{
 	".###./...#./...#./...#./...#./...#./.###.", // ]
 	"..#../.#.#./#...#/...../...../...../.....", // ^
 	"...../...../...../...../...../...../#####", // _
+}
+
+// modelAcceptsImages reports whether the active model declares image input
+// (models.yml `vision: true`). Unknown capability is treated as NO: the text
+// path always works, the image path only helps when the model can read it.
+func modelAcceptsImages(a *Agent) bool {
+	if a == nil || a.Vision == nil {
+		return false
+	}
+	return a.Vision()
+}
+
+// snapcompactText is the caption-only form: the same dropped-span detail, as
+// text, for a provider that cannot see images.
+func snapcompactText(_ *Agent, span *compactionSpan, text string) (*session.CompactionEntry, error) {
+	excerpt := text
+	if len(excerpt) > snapTextFallbackChars {
+		excerpt = excerpt[:snapTextFallbackChars]
+	}
+	summary := ai.Message{
+		Role: ai.RoleAssistant,
+		Content: []ai.Block{ai.TextBlock{Text: fmt.Sprintf(
+			"snapcompact (text-only model, no bitmap): %d dropped messages, %d chars retained as plain text:\n%s",
+			span.cut, len(excerpt), excerpt)}},
+		StopReason: ai.StopReasonStop,
+	}
+	return compactEntry(span, summary), nil
 }

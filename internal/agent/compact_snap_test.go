@@ -55,6 +55,7 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{}
 	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact"))
+	a.Vision = func() bool { return true } // the bitmap path needs a vision model
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
@@ -97,6 +98,7 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	// Deterministic: a second, identical history encodes to the same PNG.
 	p2 := &fakeProvider{}
 	a2, s2, _ := storeAgent(t, p2, ladderConfig("snapcompact"))
+	a2.Vision = func() bool { return true }
 	ladderFixture(t, s2)
 	_ = a2.maybeCompact(context.Background(), ladderHistory(t, s2))
 	again := compactionEntries(s2)
@@ -149,5 +151,39 @@ func TestSnapGlyphRenderingIsPixelFaithful(t *testing.T) {
 	}
 	if !ink(0, 3) {
 		t.Error("'A' must paint the crossbar row")
+	}
+}
+
+// #83: a text-only model cannot read a bitmap, so the rung keeps the dropped
+// span as text instead of shipping base64 nothing will decode.
+func TestSnapcompactTextOnlyForNonVisionModels(t *testing.T) {
+	stubPressure(t, 0)
+	p := &fakeProvider{}
+	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact"))
+	a.Vision = nil // unknown capability must take the text path
+	ladderFixture(t, s)
+	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
+
+	entries := compactionEntries(s)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	var img, text int
+	for _, b := range entries[0].Summary.Content {
+		switch b.(type) {
+		case ai.ImageBlock:
+			img++
+		case ai.TextBlock:
+			text++
+		}
+	}
+	if img != 0 {
+		t.Fatalf("a non-vision model was sent %d image block(s)", img)
+	}
+	if text == 0 {
+		t.Fatal("the text-only form dropped the retained detail entirely")
+	}
+	if !strings.Contains(entries[0].Summary.Text(), "text-only model") {
+		t.Fatalf("the caption must say why there is no bitmap: %s", entries[0].Summary.Text())
 	}
 }
