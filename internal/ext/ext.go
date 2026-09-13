@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -556,7 +557,8 @@ func (m *Manager) Emit(ctx context.Context, event string, payload any) {
 // subscribed extension may allow, block, or revise the arguments. A
 // timeout/crash DENIES the call unless that extension opted into failOpen.
 // Returns the final arguments or a blocking error.
-func (m *Manager) ToolCall(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+func (m *Manager) ToolCall(ctx context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	name, args := call.Name, call.Arguments
 	if m == nil {
 		return args, nil
 	}
@@ -565,7 +567,9 @@ func (m *Manager) ToolCall(ctx context.Context, name string, args json.RawMessag
 		if !x.subscribed(EventToolCall) {
 			continue
 		}
-		reply, err := x.sendEvent(ctx, EventToolCall, map[string]any{"tool": name, "arguments": current})
+		reply, err := x.sendEvent(ctx, EventToolCall, map[string]any{
+			"tool": name, "arguments": current, "callId": call.ID,
+		})
 		if err != nil {
 			if x.failOpen() {
 				logx.Errorf("ext: %s tool_call failed (fail-open): %v", x.Name, err)
@@ -589,7 +593,8 @@ func (m *Manager) ToolCall(ctx context.Context, name string, args json.RawMessag
 
 // ToolResult lets extensions patch a result. The last patch wins;
 // failures never block (the tool already ran).
-func (m *Manager) ToolResult(ctx context.Context, name string, args, result json.RawMessage) json.RawMessage {
+func (m *Manager) ToolResult(ctx context.Context, call ai.ToolCallBlock, result json.RawMessage, _ bool) json.RawMessage {
+	name, args := call.Name, call.Arguments
 	if m == nil {
 		return result
 	}
@@ -598,7 +603,9 @@ func (m *Manager) ToolResult(ctx context.Context, name string, args, result json
 		if !x.subscribed(EventToolResult) {
 			continue
 		}
-		reply, err := x.sendEvent(ctx, EventToolResult, map[string]any{"tool": name, "arguments": args, "result": out})
+		reply, err := x.sendEvent(ctx, EventToolResult, map[string]any{
+			"tool": name, "arguments": args, "result": out, "callId": call.ID,
+		})
 		if err != nil {
 			logx.Errorf("ext: %s tool_result failed: %v", x.Name, err)
 			continue

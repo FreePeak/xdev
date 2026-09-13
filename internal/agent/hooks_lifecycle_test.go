@@ -15,10 +15,10 @@ type recInterceptor struct {
 	events []string
 }
 
-func (r *recInterceptor) ToolCall(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+func (r *recInterceptor) ToolCall(_ context.Context, _ ai.ToolCallBlock) (json.RawMessage, error) {
 	return nil, nil
 }
-func (r *recInterceptor) ToolResult(_ context.Context, _ string, _, res json.RawMessage) json.RawMessage {
+func (r *recInterceptor) ToolResult(_ context.Context, _ ai.ToolCallBlock, res json.RawMessage, _ bool) json.RawMessage {
 	return res
 }
 func (r *recInterceptor) Emit(_ context.Context, event string, _ any) {

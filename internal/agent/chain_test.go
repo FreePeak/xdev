@@ -20,10 +20,11 @@ type echoRecorder struct {
 	events []string
 }
 
-func (r *echoRecorder) ToolCall(_ context.Context, _ string, args json.RawMessage) (json.RawMessage, error) {
+func (r *echoRecorder) ToolCall(_ context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	args := call.Arguments
 	return args, nil
 }
-func (r *echoRecorder) ToolResult(_ context.Context, _ string, _, result json.RawMessage) json.RawMessage {
+func (r *echoRecorder) ToolResult(_ context.Context, _ ai.ToolCallBlock, result json.RawMessage, _ bool) json.RawMessage {
 	return result
 }
 func (r *echoRecorder) Emit(_ context.Context, event string, _ any) {

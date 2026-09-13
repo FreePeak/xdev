@@ -14,14 +14,15 @@ import (
 // blockInterceptor refuses one tool name at the extension seam.
 type blockInterceptor struct{ name string }
 
-func (b blockInterceptor) ToolCall(_ context.Context, name string, _ json.RawMessage) (json.RawMessage, error) {
+func (b blockInterceptor) ToolCall(_ context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	name := call.Name
 	if name == b.name {
 		return nil, errors.New("blocked by test interceptor")
 	}
 	return nil, nil
 }
 
-func (b blockInterceptor) ToolResult(_ context.Context, _ string, _, _ json.RawMessage) json.RawMessage {
+func (b blockInterceptor) ToolResult(_ context.Context, _ ai.ToolCallBlock, _ json.RawMessage, _ bool) json.RawMessage {
 	return nil
 }
 

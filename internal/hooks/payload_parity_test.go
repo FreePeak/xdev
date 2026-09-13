@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 // Payload-shape parity (docs/parity/agent-system.md T3 #14): a hook ported
@@ -22,7 +24,7 @@ func TestToolCallPayloadUsesOmpKeyNames(t *testing.T) {
 		"tool_call": "cat >> " + sink,
 	})
 	args := json.RawMessage(`{"command":"echo hi"}`)
-	if _, err := b.ToolCall(context.Background(), "bash", args); err != nil {
+	if _, err := b.ToolCall(context.Background(), hookCall("bash", args)); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(sink)
@@ -35,6 +37,10 @@ func TestToolCallPayloadUsesOmpKeyNames(t *testing.T) {
 	}
 	if got["toolName"] != "bash" {
 		t.Fatalf(`payload must carry toolName (omp's key): %s`, raw)
+	}
+	// The call id lets a hook pair its tool_call and tool_result events.
+	if got["toolCallId"] != "tc-bash" {
+		t.Fatalf("payload must carry toolCallId: %s", raw)
 	}
 	if _, present := got["tool"]; present {
 		t.Fatalf("the legacy `tool` key must be gone: %s", raw)
@@ -53,7 +59,7 @@ func TestToolResultPayloadCarriesContentAndIsError(t *testing.T) {
 	})
 	rendered := json.RawMessage(`{"text":"file body","isError":true}`)
 	// A hook that only observes (no mutation keys) leaves the result as-is.
-	if out := b.ToolResult(context.Background(), "read", json.RawMessage(`{"path":"x"}`), rendered); string(out) != string(rendered) {
+	if out := b.ToolResult(context.Background(), hookCall("read", json.RawMessage(`{"path":"x"}`)), rendered, true); string(out) != string(rendered) {
 		t.Fatalf("an observing hook must leave the result untouched: %s", out)
 	}
 	raw, err := os.ReadFile(sink)
@@ -61,15 +67,19 @@ func TestToolResultPayloadCarriesContentAndIsError(t *testing.T) {
 		t.Fatalf("hook never ran: %v", err)
 	}
 	var got struct {
-		ToolName string `json:"toolName"`
-		IsError  bool   `json:"isError"`
-		Content  []struct {
+		ToolName   string `json:"toolName"`
+		ToolCallID string `json:"toolCallId"`
+		IsError    bool   `json:"isError"`
+		Content    []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("payload is not the expected object: %q", raw)
+	}
+	if got.ToolCallID != "tc-read" {
+		t.Fatalf("tool_result must carry toolCallId: %s", raw)
 	}
 	if got.ToolName != "read" || !got.IsError {
 		t.Fatalf("toolName/isError wrong: %s", raw)
@@ -85,8 +95,8 @@ func TestToolResultContentMutationApplies(t *testing.T) {
 	b := FromSettings(map[string]any{
 		"tool_result": `echo '{"content":"REDACTED BY HOOK"}'`,
 	})
-	out := b.ToolResult(context.Background(), "read",
-		json.RawMessage(`{"path":"x"}`), json.RawMessage(`{"text":"secret","isError":false}`))
+	out := b.ToolResult(context.Background(), hookCall("read", json.RawMessage(`{"path":"x"}`)),
+		json.RawMessage(`{"text":"secret","isError":false}`), false)
 	var p struct {
 		Text    string `json:"text"`
 		IsError bool   `json:"isError"`
@@ -130,4 +140,10 @@ func TestMutationTextJoinsContentBlocks(t *testing.T) {
 	if !ok || !strings.Contains(got, "one") || !strings.Contains(got, "two") {
 		t.Fatalf("blocks not joined: %q ok=%v", got, ok)
 	}
+}
+
+// hookCall builds the call block the widened interceptor seam carries; the id
+// is the field a hook correlates pre/post events on.
+func hookCall(name string, args json.RawMessage) ai.ToolCallBlock {
+	return ai.ToolCallBlock{ID: "tc-" + name, Name: name, Arguments: args}
 }

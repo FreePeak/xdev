@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	ai2 "github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -102,7 +103,7 @@ func TestHandshakeAnnouncesCapabilities(t *testing.T) {
 
 func TestToolCallBlocksFailClosed(t *testing.T) {
 	m, _ := loadOne(t, "block")
-	_, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /"}`))
+	_, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{"command":"rm -rf /"}`)))
 	if err == nil || !strings.Contains(err.Error(), "policy: no bash") {
 		t.Fatalf("expected block with reason, got %v", err)
 	}
@@ -110,7 +111,7 @@ func TestToolCallBlocksFailClosed(t *testing.T) {
 
 func TestToolCallRevisesArguments(t *testing.T) {
 	m, _ := loadOne(t, "revise")
-	got, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{"command":"echo ORIGINAL"}`))
+	got, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{"command":"echo ORIGINAL"}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestToolCallRevisesArguments(t *testing.T) {
 func TestToolResultPatches(t *testing.T) {
 	m, _ := loadOne(t, "ok")
 	original := json.RawMessage(`{"text":"raw output","isError":false}`)
-	got := m.ToolResult(context.Background(), "read", json.RawMessage(`{"path":"x"}`), original)
+	got := m.ToolResult(context.Background(), extCall("read", json.RawMessage(`{"path":"x"}`)), original, false)
 	if !strings.Contains(string(got), "patched by ext") {
 		t.Fatalf("result not patched: %s", got)
 	}
@@ -143,7 +144,7 @@ func TestHungExtensionIsKilled(t *testing.T) {
 		t.Fatal("hung extension should complete the handshake before hanging on events")
 	}
 	start := time.Now()
-	_, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{"command":"x"}`))
+	_, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{"command":"x"}`)))
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
@@ -171,7 +172,7 @@ func TestCrashedExtensionFailsClosed(t *testing.T) {
 	if n := len(m.list()); n != 1 {
 		t.Fatalf("crash fixture did not load (n=%d): %v", n, m.Failures())
 	}
-	_, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`))
+	_, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{}`)))
 	if err == nil || !strings.Contains(err.Error(), "blocked by extension") {
 		t.Fatalf("dead policy extension must fail closed, got %v", err)
 	}
@@ -186,7 +187,7 @@ func TestFailOpenOptIn(t *testing.T) {
 		t.Fatal("failOpen not parsed from capabilities")
 	}
 	// The fixture answers normally in failopen mode, so allow flows through.
-	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{"command":"x"}`)); err != nil {
+	if _, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{"command":"x"}`))); err != nil {
 		t.Fatalf("failopen allow failed: %v", err)
 	}
 }
@@ -300,14 +301,14 @@ func TestDeadExtensionIsRetiredNotLatching(t *testing.T) {
 		t.Fatal("fixture should load")
 	}
 	// First call: consulted, timed out, denied (fail-closed for that call).
-	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err == nil {
+	if _, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{}`))); err == nil {
 		t.Fatal("a timed-out policy extension must deny the call it was asked about")
 	}
 	if n := len(m.list()); n != 0 {
 		t.Fatalf("dead extension still in the chain (%d): denial would latch", n)
 	}
 	// Second call: the dead one can no longer deny anything.
-	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err != nil {
+	if _, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{}`))); err != nil {
 		t.Fatalf("after retirement the call must proceed, got %v", err)
 	}
 }
@@ -322,14 +323,14 @@ func TestErrorResponseKeepsTheExtensionAlive(t *testing.T) {
 	if err := m.Load(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err == nil {
+	if _, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{}`))); err == nil {
 		t.Fatal("an errored policy reply must deny that call")
 	}
 	if len(m.list()) != 1 {
 		t.Fatalf("extension died for answering with error; chain=%d", len(m.list()))
 	}
 	// Still usable for the next call (the fixture then allows).
-	if _, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{}`)); err != nil {
+	if _, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{}`))); err != nil {
 		t.Fatalf("live extension must keep serving: %v", err)
 	}
 }
@@ -354,8 +355,8 @@ func TestConcurrentToolCallsSerializeCleanly(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			out, err := m.ToolCall(context.Background(), "bash",
-				json.RawMessage(`{"command":"echo `+fmt.Sprint(i)+`"}`))
+			out, err := m.ToolCall(context.Background(), extCall("bash",
+				json.RawMessage(`{"command":"echo `+fmt.Sprint(i)+`"}`)))
 			got[i], errs[i] = string(out), err
 		}(i)
 	}
@@ -387,7 +388,7 @@ func TestPolicyOnlyExtensionIsCountedAndEnforces(t *testing.T) {
 		t.Fatalf("PolicyHooks = %d, want 1 for an events-only extension", got)
 	}
 	// And it really is in the enforcement path.
-	_, err := m.ToolCall(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /"}`))
+	_, err := m.ToolCall(context.Background(), extCall("bash", json.RawMessage(`{"command":"rm -rf /"}`)))
 	if err == nil {
 		t.Fatal("blocking extension did not deny the call")
 	}
@@ -467,4 +468,10 @@ func TestRunCommandErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// extCall builds the call block the widened interceptor seam takes (the id is
+// what tool_call/tool_result hooks correlate on).
+func extCall(name string, args json.RawMessage) ai2.ToolCallBlock {
+	return ai2.ToolCallBlock{ID: "call-" + name, Name: name, Arguments: args}
 }

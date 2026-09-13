@@ -128,8 +128,14 @@ type ApprovalFunc func(call ai.ToolCallBlock, reason string) bool
 // dies or times out denies the call unless it opted into fail-open — and
 // never runs foreign code in-process.
 type Interceptor interface {
-	ToolCall(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
-	ToolResult(ctx context.Context, name string, args, result json.RawMessage) json.RawMessage
+	// ToolCall gates one call before it runs and may revise its arguments.
+	// The whole call block travels (not just the name) so an interceptor can
+	// correlate pre and post events by id — hooks carry toolCallId (#92).
+	ToolCall(ctx context.Context, call ai.ToolCallBlock) (json.RawMessage, error)
+	// ToolResult sees the executed call's result after the fact. isError is
+	// separate because the rendered payload carries text, not the outcome
+	// class an interceptor needs to stay consistent with.
+	ToolResult(ctx context.Context, call ai.ToolCallBlock, result json.RawMessage, isError bool) json.RawMessage
 	Emit(ctx context.Context, event string, payload any)
 }
 
@@ -915,7 +921,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	if a.Intercept != nil {
 		// Fail-closed policy gate: a blocked call never executes, and a
 		// revised payload replaces what the model asked for.
-		revised, berr := a.Intercept.ToolCall(ctx, call.Name, args)
+		revised, berr := a.Intercept.ToolCall(ctx, call)
 		if berr != nil {
 			res := tool.Result{Text: "tool call blocked: " + berr.Error(), IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
@@ -934,7 +940,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	if a.Intercept != nil {
 		// Extensions may rewrite the text an already-run tool produced.
 		enc, _ := json.Marshal(map[string]any{"text": res.Text, "isError": res.IsError})
-		if patched := a.Intercept.ToolResult(ctx, call.Name, args, enc); len(patched) > 0 {
+		if patched := a.Intercept.ToolResult(ctx, call, enc, res.IsError); len(patched) > 0 {
 			var p struct {
 				Text    string `json:"text"`
 				IsError bool   `json:"isError"`

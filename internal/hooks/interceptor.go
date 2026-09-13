@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 // Interceptor adapter: the Bus rides the same agent.Interceptor surface
@@ -11,13 +13,14 @@ import (
 // tool_call pre-hooks are fail-closed; tool_result hooks may rewrite the
 // rendered text; Emit runs the event as a notification.
 
-func (b *Bus) ToolCall(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+func (b *Bus) ToolCall(ctx context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	name, args := call.Name, call.Arguments
 	// omp's tool_call payload names (toolName/input): a hook ported from the
 	// baseline reads event.toolName. xdev's old `tool` key silently matched
 	// nothing (parity finding T3 #14). `toolCallId` is the remaining gap —
 	// it needs the agent.Interceptor signature widened to carry the call,
 	// which no hook needs yet; recorded in docs/parity-delta.md.
-	payload := map[string]any{"toolName": name, "input": json.RawMessage(args)}
+	payload := map[string]any{"toolName": name, "toolCallId": call.ID, "input": json.RawMessage(args)}
 	res, err := b.Run(ctx, "tool_call", payload)
 	if err != nil {
 		return nil, err
@@ -32,14 +35,18 @@ func (b *Bus) ToolCall(ctx context.Context, name string, args json.RawMessage) (
 	return args, nil
 }
 
-func (b *Bus) ToolResult(ctx context.Context, name string, args, result json.RawMessage) json.RawMessage {
+func (b *Bus) ToolResult(ctx context.Context, call ai.ToolCallBlock, result json.RawMessage, isError bool) json.RawMessage {
+	name, args := call.Name, call.Arguments
 	// omp's tool_result payload: toolName/input/content/isError. The result
 	// the agent hands over is the rendered {text,isError} envelope, so
 	// unpack it here rather than leaking that shape to hook authors.
-	content, isError := unwrapResult(result)
+	// The loop renders the result as {"text":…,"isError":…}; unpack it for
+	// the payload but trust the explicit isError argument over the encoded
+	// one, since the chain also passes the real outcome.
+	content, encodedErr := unwrapResult(result)
 	res, err := b.Run(ctx, "tool_result", map[string]any{
-		"toolName": name, "input": json.RawMessage(args),
-		"content": content, "isError": isError,
+		"toolName": name, "toolCallId": call.ID, "input": json.RawMessage(args),
+		"content": content, "isError": isError || encodedErr,
 	})
 	if err != nil {
 		return result // post-hooks never block
