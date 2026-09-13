@@ -15,7 +15,7 @@ import (
 // that shape and require a dump that names the blocker.
 func TestStallWatchdogWritesDumpWhenLoopHangs(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dumps")
-	app := loopApp(80, 24)
+	app, _ := loopApp(80, 24)
 	app.SetStallDumpDir(dir)
 	app.beat()
 
@@ -70,7 +70,7 @@ func TestStallWatchdogWritesDumpWhenLoopHangs(t *testing.T) {
 // dir before the user can read the first one.
 func TestStallWatchdogDumpsOncePerEpisode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dumps")
-	app := loopApp(80, 24)
+	app, _ := loopApp(80, 24)
 	app.SetStallDumpDir(dir)
 	app.beat()
 	stop := make(chan struct{})
@@ -94,7 +94,7 @@ func TestStallWatchdogDumpsOncePerEpisode(t *testing.T) {
 // episode so a later hang is still reported.
 func TestStallWatchdogSilentWhenLoopHealthy(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dumps")
-	app := loopApp(80, 24)
+	app, _ := loopApp(80, 24)
 	app.SetStallDumpDir(dir)
 	app.beat()
 	stop := make(chan struct{})
@@ -125,7 +125,7 @@ func TestStallWatchdogSilentWhenLoopHealthy(t *testing.T) {
 // No dump dir means no watchdog and no surprise files.
 func TestStallWatchdogDisabledWithoutDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "never")
-	app := loopApp(80, 24)
+	app, _ := loopApp(80, 24)
 	app.SetStallDumpDir("")
 	app.beat()
 	stop := make(chan struct{})
