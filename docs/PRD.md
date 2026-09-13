@@ -361,7 +361,7 @@ Reconciliation audit method: 10 domain fan-outs re-verified every closed-sweep c
 3. **JS eval kernel** (#111): stays a by-design rejection (no JS runtime CGO-free); the py kernel and notebook virtual text shipped — but omp's `eval.py`/`eval.js` disable gates have no equivalent.
 4. **Chrome extension for browser-relay** (#112): the Go relay daemon shipped; the browser-side extension did not.
 5. **M4 structural frame-plan tail** (#78): all nine boxes re-verified open 2026-09-13 (frame-plan contract, block states, DSR resize, alt-buffer, sticky headers/folds/diff rows/highlighting, bracketed paste, compact toggle, hex verification, terminal matrix).
-6. **TTSR injection persistence** (#95): the §2 scope row for TTSR names
+6. **TTSR injection persistence** (#113): the §2 scope row for TTSR names
    `ttsr_injection` persistence (a session entry recording an injected
    rule-violation notice); no such entry type exists. `ttsr_injection` and
    `Violations` have zero hits in Go, `internal/session/entries.go` enumerates
@@ -370,7 +370,9 @@ Reconciliation audit method: 10 domain fan-outs re-verified every closed-sweep c
    persisted"*. So M11's "Complete" covers the engine (regex + `astCondition` +
    per-kind `interruptMode` gating + the thinking lane), not this record.
    Adding it means reversing that in-session-only decision on purpose (new
-   entry type, retention, cross-process read) — hence a ticket, not a quiet fix.
+   entry type, retention, cross-process read) — hence #113, split out of #35,
+   whose closeout comment now states the engine/arming landed and this pair
+   did not. (#95 covers a different TTSR slice: scope/globs + notice attrs.)
 
 **Build/portability ceiling (measured 2026-09-13):** the contract is the six CI
 targets (`.github/workflows/ci.yml:104-109`: darwin/linux/windows × amd64/arm64,
