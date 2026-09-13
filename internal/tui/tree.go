@@ -226,6 +226,15 @@ func (a *App) handleTreeKey(key *tcell.EventKey) (handled bool) {
 	if !a.TreeSelectorOpen() {
 		return false
 	}
+	// Ctrl+C is never the modal's to swallow. Every other key is consumed
+	// while the selector is open, and the selector can be open while showing
+	// nothing (a filter or search that matches no row) — a user who cannot see
+	// a panel and cannot quit has a frozen terminal, which is exactly how this
+	// was reported. Handing the quit chord back lets handleKey resolve it as
+	// cancel-or-quit like everywhere else in the app.
+	if key.Key() == tcell.KeyCtrlC {
+		return false
+	}
 	a.mu.Lock()
 	t := a.tpick
 	labels := a.treeLabels
@@ -373,6 +382,34 @@ func treeRowText(e TreeEntry, label string) string {
 	return strings.Repeat("  ", e.Depth) + mark + lab + e.ID[:min(8, len(e.ID))] + " " + e.Type + " " + e.Summary
 }
 
+// drawTreeEmpty renders the selector's panel with no rows: the same chrome as
+// a populated panel plus the two gestures that change the row set, so an open
+// modal is always visible and never a dead end. Callers hold a.mu.
+func (a *App) drawTreeEmpty(yComposerTop int) {
+	w := a.width
+	s := a.scr
+	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+	t := a.tpick
+	title := " session tree · filter:" + treeFilterNames[t.filter]
+	if t.query != "" {
+		title += " · search:" + t.query
+	}
+	hint := "no rows match · Ctrl+O changes filter · Backspace edits search · Esc closes"
+	boxW := min(w-4, 120)
+	y := yComposerTop - 4 // title row + hint row + two borders, clearing the composer
+	if y < 1 {
+		a.tpick = nil // same invariant as above: never open-and-invisible
+		return
+	}
+	box := a.th.Box()
+	drawText(s, 2, y, box.TopLeft+strings.Repeat(box.Horizontal, boxW)+box.TopRight, borderSt)
+	drawText(s, 4, y, title, dimSt)
+	drawText(s, 2, y+1, box.Vertical+strings.Repeat(" ", boxW)+box.Vertical, borderSt)
+	drawText(s, 4, y+1, hint, dimSt)
+	drawText(s, 2, y+2, box.BottomLeft+strings.Repeat(box.Horizontal, boxW)+box.BottomRight, borderSt)
+}
+
 // drawTreeSelector renders the navigator above the composer (same chrome
 // as the session picker). Callers hold a.mu (draw does) — no re-locking.
 func (a *App) drawTreeSelector(yComposerTop int) {
@@ -382,6 +419,11 @@ func (a *App) drawTreeSelector(yComposerTop int) {
 	}
 	vis := t.visibleIdx(a.treeLabels)
 	if len(vis) == 0 {
+		// An open selector that draws nothing is indistinguishable from a
+		// frozen terminal: it still swallows the keyboard, so the user has no
+		// visible reason why keys do nothing. Paint the panel anyway with the
+		// way out.
+		a.drawTreeEmpty(yComposerTop)
 		return
 	}
 	selRow := 0
@@ -417,7 +459,12 @@ func (a *App) drawTreeSelector(yComposerTop int) {
 	boxW := min(w-4, 120)
 	y := yComposerTop - (len(idxs) + 3) // bottom border must clear the composer's top border row
 	if y < 1 {
-		return // no room above the composer
+		// No room above the composer. Closing is the only honest option: a
+		// selector that stays open while it cannot paint owns the keyboard,
+		// and an invisible panel plus a swallowed quit chord is what the user
+		// experienced as a frozen terminal.
+		a.tpick = nil
+		return
 	}
 	box := a.th.Box()
 	drawText(s, 2, y, box.TopLeft+strings.Repeat(box.Horizontal, boxW)+box.TopRight, borderSt)

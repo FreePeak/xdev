@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func TestRenameUsageErrorCannotHangTheLoop(t *testing.T) {
 					errc <- fmt.Errorf("panic: %v", r)
 				}
 			}()
-			app := loopApp(w, h)
+			app, _ := loopApp(w, h)
 			// The reported keystrokes, through the same entry point the UI
 			// loop uses: type "/rename", press Enter, then keep typing.
 			for _, ch := range "/rename" {
@@ -89,7 +90,7 @@ func TestDrawTerminatesOnMarkupShapedContent(t *testing.T) {
 						errc <- fmt.Errorf("panic: %v", r)
 					}
 				}()
-				app := loopApp(w, 24)
+				app, _ := loopApp(w, 24)
 				app.AddSystemBlock(content)
 				app.draw()
 				// A resize rebuilds the line cache from scratch: a cached
@@ -112,12 +113,114 @@ func TestDrawTerminatesOnMarkupShapedContent(t *testing.T) {
 
 // loopApp is newTestApp with a live status line and handlers installed, so
 // handleKey behaves exactly as it does inside Run.
-func loopApp(w, h int) *App {
+func loopApp(w, h int) (*App, tcell.SimulationScreen) {
 	scr := tcell.NewSimulationScreen("UTF-8")
 	_ = scr.Init()
 	scr.SetSize(w, h)
 	app := New(scr, theme.Load("groknight"), "test/free", "sess1234")
 	app.SetHandlers(func(string) {}, func() {}, func() {})
 	app.width, app.height = w, h
-	return app
+	return app, scr
+}
+
+// The reported freeze, explained: an idle session, a failed command leaves the
+// composer empty, and the natural "nothing happened" reflex is Esc — which
+// opens the tree selector on an empty composer. While open it swallows EVERY
+// key (handleTreeKey returns true unconditionally) and has no Ctrl+C case, so
+// the quit chord dies with it. Two routes paint nothing while open: a filter
+// or search matching no row, and no room above a tall composer. Invisible panel
+// + dead Ctrl+C = "the whole TUI froze, I had to kill it".
+func TestTreeSelectorCannotTrapTheKeyboard(t *testing.T) {
+	// One entry so the selector is allowed to open, default filter showing it.
+	app, scr := loopApp(80, 24)
+	app.SetTreeData(func() []TreeEntry {
+		return []TreeEntry{{ID: "leaf1aaaaaaaaaa", Type: "message", Role: "user", Summary: "first prompt", Active: true}}
+	})
+	for _, ch := range "/rename" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, ch, tcell.ModNone))
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if app.ed.Text() != "" {
+		t.Fatalf("composer not cleared after a command: %q", app.ed.Text())
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if !app.TreeSelectorOpen() {
+		t.Fatal("expected Esc on an empty composer to open the selector")
+	}
+
+	// Invariant 1: open ⇒ visible. Type a search that matches nothing; the
+	// panel must still be drawn, because a modal the user cannot see reads as
+	// a hung terminal.
+	for _, ch := range "zzzznomatch" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, ch, tcell.ModNone))
+	}
+	app.draw()
+	text := screenText(scr)
+	if !strings.Contains(text, "session tree") {
+		t.Fatalf("selector open but nothing painted:\n%s", text)
+	}
+	if !strings.Contains(text, "no rows match") {
+		t.Fatalf("empty result set must explain itself and the way out:\n%s", text)
+	}
+
+	// Invariant 2: the quit chord is never swallowed by the modal.
+	handled := app.handleTreeKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	if handled {
+		t.Fatal("handleTreeKey consumed Ctrl+C — the user has no way out")
+	}
+	quit := false
+	app.SetHandlers(func(string) {}, func() {}, func() { quit = true })
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	if !quit {
+		t.Fatal("Ctrl+C did not reach the quit handler while the selector was open")
+	}
+}
+
+// Invariant 3: Esc always makes progress toward closing — the first clears a
+// search, the second closes. A modal that needs N unknown presses is the same
+// trap with extra steps.
+func TestTreeSelectorEscClosesAfterClearingSearch(t *testing.T) {
+	app, _ := loopApp(80, 24)
+	app.SetTreeData(func() []TreeEntry {
+		return []TreeEntry{{ID: "leaf1aaaaaaaaaa", Type: "message", Role: "user", Summary: "first prompt", Active: true}}
+	})
+	app.OpenTreeSelector()
+	for _, ch := range "zzz" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, ch, tcell.ModNone))
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if !app.TreeSelectorOpen() {
+		t.Fatal("first Esc should clear the search, not close blind")
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if app.TreeSelectorOpen() {
+		t.Fatal("second Esc must close the selector")
+	}
+	// And with it closed, the composer owns keys again.
+	for _, ch := range "hello" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, ch, tcell.ModNone))
+	}
+	if app.ed.Text() != "hello" {
+		t.Fatalf("composer rejected input after the modal closed: %q", app.ed.Text())
+	}
+}
+
+// A terminal too short to fit the panel above the composer must not be left
+// with an invisible keyboard-owning modal either.
+func TestTreeSelectorClosesWhenItCannotPaint(t *testing.T) {
+	app, _ := loopApp(80, 4) // composer + hints consume the screen
+	app.SetTreeData(func() []TreeEntry {
+		return []TreeEntry{{ID: "leaf1aaaaaaaaaa", Type: "message", Role: "user", Summary: "first prompt", Active: true}}
+	})
+	app.OpenTreeSelector()
+	if !app.TreeSelectorOpen() {
+		t.Skip("selector declined to open at this size — already safe")
+	}
+	app.draw()
+	app.mu.Lock()
+	open := app.tpick != nil
+	app.mu.Unlock()
+	if open {
+		t.Fatal("selector stayed open while it had no room to paint — keys swallowed, nothing visible")
+	}
 }
