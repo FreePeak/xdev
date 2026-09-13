@@ -73,7 +73,10 @@ extension.
 | `tool_call`      | **before** a tool executes               | `allow` / `reason` / `revise` — blocks or rewrites the call |
 | `tool_result`    | after a tool produced its result         | `patch` — rewrites the result text             |
 
-`tool_call` payload: `{"tool": "<name>", "arguments": {…}}` — the arguments are
+`tool_call` payload: `{"tool": "<name>", "arguments": {…}, "callId": "<id>"}` —
+`callId` is the provider-side tool-call id, so an extension can pair its
+`tool_call` and `tool_result` events for one call instead of guessing by name
+(the hooks seam carries the same value as `toolCallId`). The arguments are
 exactly what the model sent, and `revise` must return them in the same shape.
 
 Per-event timeout: 5 s (`DefaultEventTimeout`), then the extension is killed

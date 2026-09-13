@@ -20,10 +20,11 @@ type eventCollector struct {
 	events map[string][]map[string]any
 }
 
-func (c *eventCollector) ToolCall(_ context.Context, _ string, args json.RawMessage) (json.RawMessage, error) {
+func (c *eventCollector) ToolCall(_ context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	args := call.Arguments
 	return args, nil
 }
-func (c *eventCollector) ToolResult(_ context.Context, _ string, _, result json.RawMessage) json.RawMessage {
+func (c *eventCollector) ToolResult(_ context.Context, _ ai.ToolCallBlock, result json.RawMessage, _ bool) json.RawMessage {
 	return result
 }
 func (c *eventCollector) Emit(_ context.Context, event string, payload any) {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 // InterceptorChain routes one interception point through several
@@ -11,9 +12,10 @@ import (
 // An empty chain is a nil Interceptor for all purposes (nil-safe methods).
 type InterceptorChain []Interceptor
 
-func (c InterceptorChain) ToolCall(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+func (c InterceptorChain) ToolCall(ctx context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	args := call.Arguments
 	for _, i := range c {
-		revised, err := i.ToolCall(ctx, name, args)
+		revised, err := i.ToolCall(ctx, call)
 		if err != nil {
 			return nil, err
 		}
@@ -22,9 +24,9 @@ func (c InterceptorChain) ToolCall(ctx context.Context, name string, args json.R
 	return args, nil
 }
 
-func (c InterceptorChain) ToolResult(ctx context.Context, name string, args, result json.RawMessage) json.RawMessage {
+func (c InterceptorChain) ToolResult(ctx context.Context, call ai.ToolCallBlock, result json.RawMessage, isError bool) json.RawMessage {
 	for _, i := range c {
-		if patched := i.ToolResult(ctx, name, args, result); len(patched) > 0 {
+		if patched := i.ToolResult(ctx, call, result, isError); len(patched) > 0 {
 			result = patched
 		}
 	}
