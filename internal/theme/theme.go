@@ -393,9 +393,15 @@ func Quantize(c Color, capability int) Color {
 	}
 }
 
+// maxColorDistance is the "nothing compared yet" sentinel. It is a literal
+// rather than 1<<32 because int is 32 bits on linux/386, where that constant
+// overflows and the package stops compiling; the largest squared RGB distance
+// a Color can produce is 3*255*255 = 195075.
+const maxColorDistance = 1 << 30
+
 // nearest256 finds the closest entry in the xterm 256 palette.
 func nearest256(c Color) Color {
-	best, bestD := Color{}, 1<<32
+	best, bestD := Color{}, maxColorDistance
 	check := func(idx int, r, g, b uint8) {
 		d := sq(int(c.R)-int(r)) + sq(int(c.G)-int(g)) + sq(int(c.B)-int(b))
 		if d < bestD {
@@ -427,7 +433,7 @@ func nearestANSI(c Color) Color {
 		{128, 128, 128}, {255, 0, 0}, {0, 255, 0}, {255, 255, 0},
 		{0, 0, 255}, {255, 0, 255}, {0, 255, 255}, {255, 255, 255},
 	}
-	best, bestD := base[7], 1<<32
+	best, bestD := base[7], maxColorDistance
 	for _, b := range base {
 		d := sq(int(c.R)-int(b.R)) + sq(int(c.G)-int(b.G)) + sq(int(c.B)-int(b.B))
 		if d < bestD {
