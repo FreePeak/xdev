@@ -374,3 +374,61 @@ func TestCapabilitiesSummary(t *testing.T) {
 		t.Fatalf("a false leaf must not be listed as offered: %q", got)
 	}
 }
+
+// codeAction needs a RANGE, not a point. Building it used to type-assert the
+// JSON map form of a position the helper returns as a Position struct, so the
+// first real request panicked in the tool goroutine (#96, caught only by
+// driving a live gopls). The fake records the params it was sent.
+func TestCodeActionsSendsARangeNotAPoint(t *testing.T) {
+	tool, f, _ := newTestTool(t, defaultTestConfig())
+	f.setRespond(func(method string, params json.RawMessage) (json.RawMessage, error) {
+		if method == "textDocument/codeAction" {
+			return json.RawMessage(`[{"title":"Add import","kind":"quickfix"}]`), nil
+		}
+		return defaultResponder(method, params)
+	})
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"op":"code_actions","file":"a.go","line":3,"col":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.IsError {
+		t.Fatalf("code_actions errored: %s", out.Text)
+	}
+	var sent struct {
+		Range    *codeRange `json:"range"`
+		Position *Position  `json:"position"`
+	}
+	if err := json.Unmarshal(f.lastParams("textDocument/codeAction"), &sent); err != nil {
+		t.Fatalf("params decode: %v", err)
+	}
+	if sent.Range == nil {
+		t.Fatalf("no range in the codeAction request: %s", f.lastParams("textDocument/codeAction"))
+	}
+	// 1-based input becomes 0-based LSP, widened by one character.
+	if sent.Range.Start.Line != 2 || sent.Range.End.Line != 2 || sent.Range.End.Character != sent.Range.Start.Character+1 {
+		t.Fatalf("range = %+v, want line 2 widened by one character", sent.Range)
+	}
+	if sent.Position != nil {
+		t.Fatal("a codeAction request must not also send a bare position")
+	}
+	if !strings.Contains(out.Text, "Add import") || !strings.Contains(out.Text, "quickfix") {
+		t.Fatalf("listing dropped the action: %s", out.Text)
+	}
+}
+
+// defaultResponder answers the handshake and document requests the fake is
+// asked about, leaving the test's own responder to override any method.
+func defaultResponder(method string, params json.RawMessage) (json.RawMessage, error) {
+	switch method {
+	case "textDocument/codeAction":
+		return json.RawMessage(`[]`), nil
+	}
+	return nil, nil
+}
+
+// codeRange mirrors the wire shape for assertions (the package type is
+// exported as Range; this decodes the JSON that was SENT).
+type codeRange struct {
+	Start Position `json:"start"`
+	End   Position `json:"end"`
+}

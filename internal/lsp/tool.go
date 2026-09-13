@@ -143,30 +143,31 @@ func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (tool.Result, 
 // openAt resolves a file argument into a live client plus the LSP position
 // and document URI the positional ops send. Shared by rename and code_actions
 // so the three positional paths cannot drift apart.
-func (t *Tool) openAt(ctx context.Context, op string, a lspArgs) (*Client, string, map[string]any, error) {
+func (t *Tool) openAt(ctx context.Context, op string, a lspArgs) (*Client, string, Position, map[string]any, error) {
 	if strings.TrimSpace(a.File) == "" {
-		return nil, "", nil, fmt.Errorf("lsp: %s needs a file", op)
+		return nil, "", Position{}, nil, fmt.Errorf("lsp: %s needs a file", op)
 	}
 	abs, err := t.absPath(a.File)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", Position{}, nil, err
 	}
 	cl, langID, err := t.mgr.ClientFor(ctx, abs)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", Position{}, nil, err
 	}
 	if err := cl.EnsureOpen(abs, langID); err != nil {
-		return nil, "", nil, err
+		return nil, "", Position{}, nil, err
 	}
 	pos, err := resolvePosition(abs, a.Line, a.Col, a.Symbol)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", Position{}, nil, err
 	}
 	uri := uriFromPath(abs)
-	return cl, uri, map[string]any{
+	params := map[string]any{
 		"textDocument": map[string]any{"uri": uri},
 		"position":     pos,
-	}, nil
+	}
+	return cl, uri, pos, params, nil
 }
 
 // rename computes textDocument/rename and reports the resulting workspace
@@ -181,7 +182,7 @@ func (t *Tool) rename(ctx context.Context, a lspArgs) (tool.Result, error) {
 	if newName == "" {
 		return errResult("lsp: rename needs new_name"), nil
 	}
-	cl, _, params, err := t.openAt(ctx, "rename", a)
+	cl, _, _, params, err := t.openAt(ctx, "rename", a)
 	if err != nil {
 		return errResult("lsp: " + err.Error()), nil
 	}
@@ -203,14 +204,16 @@ func (t *Tool) rename(ctx context.Context, a lspArgs) (tool.Result, error) {
 // codeActions lists (and optionally applies) the code actions offered at a
 // position — quick fixes and refactorings the server advertises.
 func (t *Tool) codeActions(ctx context.Context, a lspArgs) (tool.Result, error) {
-	cl, uri, params, err := t.openAt(ctx, "code_actions", a)
+	cl, uri, pos, params, err := t.openAt(ctx, "code_actions", a)
 	if err != nil {
 		return errResult("lsp: " + err.Error()), nil
 	}
 	// codeAction needs a RANGE, not a point: widen the position by one
 	// character (the server clamps an out-of-range end).
-	endPos := map[string]any{"line": params["position"].(map[string]any)["line"], "character": params["position"].(map[string]any)["character"].(float64) + 1}
-	params["range"] = map[string]any{"start": params["position"], "end": endPos}
+	params["range"] = map[string]any{
+		"start": pos,
+		"end":   Position{Line: pos.Line, Character: pos.Character + 1},
+	}
 	delete(params, "position")
 	params["context"] = map[string]any{"diagnostics": []any{}}
 	raw, err := cl.Call(ctx, "textDocument/codeAction", params)
