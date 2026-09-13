@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -39,6 +40,9 @@ type client struct {
 	t      *testing.T
 	w      io.Writer
 	frames chan map[string]any
+
+	// seen buffers frames an earlier await passed over.
+	seen []map[string]any
 }
 
 // startServer runs a server over an in-memory transport and returns its client.
@@ -97,10 +101,21 @@ func (c *client) reply(id any, result any) {
 	}
 }
 
-// await returns the next frame matching pred, in arrival order.
+// await returns the next frame matching pred. Frames that do NOT match are
+// kept (c.seen) rather than discarded: two responses for one exchange can
+// arrive in either order — a cancel request's own reply races the prompt
+// goroutine's, since cancel() may complete the turn before the dispatch loop
+// writes its response — and an await that ate the early frame made the next
+// await hang forever (the flake this fix removes).
 func (c *client) await(what string, pred func(map[string]any) bool) map[string]any {
 	c.t.Helper()
-	deadline := time.After(5 * time.Second)
+	for _, m := range c.seen {
+		if pred(m) {
+			c.drop(m)
+			return m
+		}
+	}
+	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case m, ok := <-c.frames:
@@ -110,8 +125,19 @@ func (c *client) await(what string, pred func(map[string]any) bool) map[string]a
 			if pred(m) {
 				return m
 			}
+			c.seen = append(c.seen, m)
 		case <-deadline:
 			c.t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+// drop removes one already-seen frame.
+func (c *client) drop(gone map[string]any) {
+	for i, m := range c.seen {
+		if fmt.Sprint(m["id"]) == fmt.Sprint(gone["id"]) && m["method"] == gone["method"] {
+			c.seen = append(c.seen[:i], c.seen[i+1:]...)
+			return
 		}
 	}
 }
