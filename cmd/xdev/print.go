@@ -2231,9 +2231,29 @@ func defaultFailoverTargets(cfg *config.Config, primaryProv, primaryModel string
 }
 
 // openSession resumes the latest session in cwd (--continue) or starts a new
-// one. New sessions auto-persist into the cwd bucket when the first assistant
-// message lands — unless --no-session asked for an ephemeral one.
+// one, and reports whatever #122 had to discard to make that file appendable.
+// A record lost to an interrupted write is invisible damage unless the user
+// hears about it; the TUI shows the same notice in its transcript.
 func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
+	s, err := resolveSession(cwd, cont, resumePrefix)
+	if n := sessionRepairNotice(s); n != "" {
+		fmt.Fprintln(os.Stderr, "xdev: "+n)
+	}
+	return s, err
+}
+
+// sessionRepairNotice is the store's repair report, nil-safe so every call site
+// can ask without checking the store first.
+func sessionRepairNotice(s *session.Store) string {
+	if s == nil {
+		return ""
+	}
+	return s.RepairNotice()
+}
+
+// resolveSession is the layering itself: explicit --resume prefix, then
+// breadcrumb-first --continue, then a fresh auto-persisting session.
+func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
 	if resumePrefix != "" {
 		// Explicit --resume wins over everything: prefix resolution
 		// (case-insensitive startsWith, mtime desc). A prefix that
