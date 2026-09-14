@@ -1,6 +1,3 @@
-# xdev
-<p align="center"> <img src="assets/brand/xdev-logo.png" alt="xdev" width="560"> </p>
-
 <p align="center">
   <a href="https://github.com/FreePeak/xdev/actions/workflows/ci.yml"><img src="https://github.com/FreePeak/xdev/actions/workflows/ci.yml/badge.svg" alt="CI gate"></a>
   <a href="https://github.com/FreePeak/xdev/releases"><img src="https://img.shields.io/github/v/release/FreePeak/xdev?include_prereleases&label=release" alt="release"></a>
