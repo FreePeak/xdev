@@ -433,17 +433,19 @@ func deleteSessionByShortID(shortID, activePath string) error {
 	return fmt.Errorf("no session %s", shortID)
 }
 
-// summarizeAndBranch records the branch being left, then moves the leaf to
-// entryID (tree selector Shift+Enter). The branch_summary is generated on the
-// cheap role when the branch carries enough context to be worth summarizing
-// (the engine's own threshold); every failure path — no role resolvable,
-// provider error, empty answer, budget off — falls back to the fixed marker
-// rather than failing the switch (#83: the seam existed with no caller, so
-// every summary was the marker).
-func summarizeAndBranch(store *session.Store, entryID string) error {
+// summarizeAndBranch moves the leaf to targetID and records the branch being
+// left as a branch_summary entry on the new branch (tree selector
+// Shift+Enter; navigateTree computes the target — a user row rewinds to its
+// parent). The branch_summary is generated on the cheap role when the branch
+// carries enough context to be worth summarizing (the engine's own
+// threshold); every failure path — no role resolvable, provider error, empty
+// answer, budget off — falls back to the fixed marker rather than failing the
+// switch (#83: the seam existed with no caller, so every summary was the
+// marker).
+func summarizeAndBranch(store *session.Store, targetID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), branchSummaryBudget)
 	defer cancel()
-	return agent.SummarizeBranchStore(ctx, store, entryID, branchSummarizer())
+	return agent.SummarizeBranchStore(ctx, store, targetID, branchSummarizer())
 }
 
 // branchSummaryBudget bounds the side request; a slow provider must not hang

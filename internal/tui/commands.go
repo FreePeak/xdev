@@ -41,10 +41,16 @@ type SessionOps struct {
 	// view-only link (the key rides in the URL fragment).
 	Share  func() (string, error)
 	Resume func(query string) error
-	// SummarizeAndBranch appends a branch_summary entry for the
-	// abandoned branch, then moves the leaf to entryID (tree selector
-	// Shift+Enter). nil degrades to a notice.
-	SummarizeAndBranch func(entryID string) error
+	// NavigateTree rewinds the session to a point in the message tree
+	// (omp session.navigateTree, the tree selector's Enter / Shift+Enter):
+	// a user row moves the leaf to its PARENT and returns that prompt as
+	// the composer draft, so it can be edited and resent without
+	// duplicating the entry; any other row moves the leaf onto itself.
+	// With summarize the abandoned branch is first condensed into a
+	// branch_summary entry hung off the target (visible to the model on
+	// the new branch). The transcript is restored from the new leaf
+	// before the draft is returned. nil degrades to a notice.
+	NavigateTree func(entryID string, summarize bool) (draft string, err error)
 	// Handoff replaces the live context with a handoff document (M5 #23):
 	// the host generates the document through a side request, commits it as
 	// a compaction entry on this session, and returns the document text.

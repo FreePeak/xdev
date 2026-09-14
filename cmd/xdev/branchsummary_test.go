@@ -62,19 +62,24 @@ func TestSummarizeAndBranchFallsBackToMarker(t *testing.T) {
 	if err := summarizeAndBranch(st, leaf); err != nil {
 		t.Fatalf("summarizeAndBranch: %v", err)
 	}
-	var found bool
+	var summary *session.BranchSummaryEntry
 	for _, e := range st.Entries() {
 		if bs, ok := e.(*session.BranchSummaryEntry); ok {
-			found = true
-			if !strings.Contains(bs.Summary.Text(), "branch") && !strings.Contains(bs.Summary.Text(), "abandoned") {
-				t.Fatalf("unexpected marker text: %q", bs.Summary.Text())
-			}
+			summary = bs
 		}
 	}
-	if !found {
+	if summary == nil {
 		t.Fatal("no branch_summary entry recorded")
 	}
-	if st.LeafID() != leaf {
-		t.Fatalf("leaf = %q, want the switched branch point %q", st.LeafID(), leaf)
+	if !strings.Contains(summary.Summary.Text(), "branch") && !strings.Contains(summary.Summary.Text(), "abandoned") {
+		t.Fatalf("unexpected marker text: %q", summary.Summary.Text())
+	}
+	// omp branchWithSummary placement: the note rides the new branch
+	// (child of the target, the leaf), so the switched-to model reads it.
+	if summary.Env.ParentID != leaf {
+		t.Fatalf("branch_summary parent = %q, want the target %q", summary.Env.ParentID, leaf)
+	}
+	if st.LeafID() != summary.Env.ID {
+		t.Fatalf("leaf = %q, want the summary entry %q", st.LeafID(), summary.Env.ID)
 	}
 }

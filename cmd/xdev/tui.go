@@ -507,7 +507,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.OpenSessionPicker(items)
 		return nil
 	})
-	// branchReplay rebuilds the transcript from the live leaf.
+	// branchReplay rebuilds the transcript from the live leaf — the
+	// TUI-side twin of the re-render omp performs after every tree
+	// navigation. Silent: callers own their status notice.
 	branchReplay := func() {
 		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
 		if err != nil {
@@ -515,16 +517,44 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		app.Reset()
 		replayTranscript(app, res.Messages)
-		app.AddSystemBlock("· branched to " + store.LeafID()[:8] + " — replayed")
+	}
+	// navigateTree is the port of omp's session.navigateTree (the tree
+	// selector's Enter / Shift+Enter / Alt+S): the leaf lands on the
+	// selected entry, EXCEPT for user messages — those rewind to their
+	// PARENT (before the very first message: a fresh reset-boundary root)
+	// and the prompt comes back as the composer draft, so edit-and-resend
+	// never duplicates the entry. summarize first condenses the abandoned
+	// branch into a branch_summary entry hung off the target, where the
+	// new branch's model actually reads it. The transcript is restored
+	// from the new leaf either way.
+	navigateTree := func(entryID string, summarize bool) (string, error) {
+		e := store.Entry(entryID)
+		if e == nil {
+			return "", fmt.Errorf("no entry %q in this session", entryID)
+		}
+		target, draft := treeRewindTarget(e)
+		if summarize {
+			if err := summarizeAndBranch(store, target); err != nil {
+				return "", err
+			}
+		} else if target == "" {
+			if err := store.ResetLeaf(); err != nil {
+				return "", err
+			}
+		} else if err := store.Branch(target); err != nil {
+			return "", err
+		}
+		branchReplay()
+		return draft, nil
 	}
 	// branchToEntry moves the live leaf to an entry and replays the new
-	// branch's transcript into the TUI; shared by /branch and the tree
-	// selector's Enter.
+	// branch's transcript into the TUI (/branch <id-prefix>).
 	branchToEntry := func(entryID string) error {
 		if err := store.Branch(entryID); err != nil {
 			return fmt.Errorf("branch: %v", err)
 		}
 		branchReplay()
+		app.AddSystemBlock("· branched to " + entryID[:min(8, len(entryID))] + " — replayed")
 		return nil
 	}
 	app.SetSessionBranch(func(args string) error {
@@ -532,40 +562,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if query == "" {
 			return fmt.Errorf("branch: entry-id prefix required (ids are listed by /tree)")
 		}
-		// Only message entries are branch targets: a leaf on a marker
-		// (model_change, reset boundary) would terminate the context in a
-		// non-message, and prefixes must be unambiguous — first-match-wins
-		// silently picked a different entry than the user meant.
-		var (
-			match   session.Entry
-			matches int
-		)
+		// First prefix match wins (omp addresses entries by full id; the
+		// selector hands Enter the full id — the prefix form is a typed
+		// convenience).
 		for _, e := range store.Entries() {
-			env := e.Envelope()
-			if strings.HasPrefix(env.ID, query) {
+			if env := e.Envelope(); strings.HasPrefix(env.ID, query) {
 				return branchToEntry(env.ID)
 			}
 		}
-		if matches == 0 {
-			return fmt.Errorf("branch: no entry matching %q (entries before the last /clear or compaction are not addressable)", query)
-		}
-		if matches > 1 {
-			return fmt.Errorf("branch: %q matches %d entries — use a longer prefix", query, matches)
-		}
-		env := match.Envelope()
-		if _, ok := match.(*session.MessageEntry); !ok {
-			return fmt.Errorf("branch: %s is a %s entry — /branch switches to a message", env.ID[:8], env.Type)
-		}
-		if err := store.Branch(env.ID); err != nil {
-			return fmt.Errorf("branch: %v", err)
-		}
-		// Replay the new branch's transcript into the TUI.
-		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
-			app.Reset()
-			replayTranscript(app, res.Messages)
-			app.AddSystemBlock("· branched to " + env.ID[:8] + " — replayed")
-		}
-		return nil
+		return fmt.Errorf("branch: no entry matching %q (entries before the last /clear or compaction are not addressable)", query)
 	})
 	// /tree selector: entry rows built from the live store, labels from
 	// the dataDir sidecar (UI state — the session package stays label-free).
@@ -797,16 +802,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			return swapStoreTo(resumed)
 		},
-		// summarizeAndBranch appends the branch_summary AND moves the leaf;
-		// only the transcript refresh is left here (a second store.Branch
-		// would append a redundant marker branch).
-		SummarizeAndBranch: func(entryID string) error {
-			if err := summarizeAndBranch(store, entryID); err != nil {
-				return err
-			}
-			branchReplay()
-			return nil
-		},
+		NavigateTree: navigateTree,
 		New: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
@@ -2113,6 +2109,19 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%d B", n)
 }
 
+// treeRewindTarget maps the selected tree entry to where the leaf lands and
+// what returns to the composer — omp's session.navigateTree target rule: a
+// user message rewinds to its PARENT ("" for the very first message: a
+// fresh root) and its prompt comes back as the draft to edit and resend;
+// every other entry becomes the leaf itself with no draft.
+func treeRewindTarget(e session.Entry) (target, draft string) {
+	env := e.Envelope()
+	if msg, ok := e.(*session.MessageEntry); ok && msg.Message.Role == ai.RoleUser {
+		return env.ParentID, msg.Message.Text()
+	}
+	return env.ID, ""
+}
+
 // treeEntries snapshots the session entry graph as tree-selector rows:
 // file order, depth from the parent chain, active = current leaf.
 // ponytail: depth walks parents per entry (O(n·depth)); session files are
@@ -2136,15 +2145,10 @@ func treeEntries(store *session.Store) []tui.TreeEntry {
 		case *session.MessageEntry:
 			te.Role = string(t.Message.Role)
 			te.Summary = clipSummary(t.Message.Text(), 60)
-			if te.Role == "user" {
-				te.Text = t.Message.Text()
-			}
 		case *session.CompactionEntry:
 			te.Summary = "(compaction)"
 		case *session.BranchSummaryEntry:
 			te.Summary = "(branch summary)"
-		case *session.ResetBoundaryEntry:
-			te.Summary = "(reset boundary)"
 		case *session.ModelChangeEntry:
 			te.Summary = t.Model
 		case *session.CustomEntry:

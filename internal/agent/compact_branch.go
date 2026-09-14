@@ -45,30 +45,33 @@ type BranchSummarizer func(ctx context.Context, prompt string) (string, error)
 
 // SummarizeBranch is the Agent spelling of SummarizeBranchStore, against the
 // agent's own store.
-func (a *Agent) SummarizeBranch(ctx context.Context, entryID string, summarize BranchSummarizer) error {
+func (a *Agent) SummarizeBranch(ctx context.Context, targetID string, summarize BranchSummarizer) error {
 	if a.Store == nil {
 		return errors.New("branch summary: no session store")
 	}
-	return SummarizeBranchStore(ctx, a.Store, entryID, summarize)
+	return SummarizeBranchStore(ctx, a.Store, targetID, summarize)
 }
 
-// SummarizeBranchStore appends the branch_summary entry recording the branch
-// being left and then moves the leaf to entryID — the order the tree selector
-// needs: the note hangs off the abandoned leaf, the new leaf is the branch
-// target. It takes the store rather than the agent because the caller that
-// branches (the tree selector) holds a store, not the run.
+// SummarizeBranchStore moves the leaf to targetID and then appends the
+// branch_summary entry for the branch being left AS A CHILD OF THE TARGET —
+// omp's branchWithSummary shape, so the note rides on the new branch and
+// every future prompt there reads it (a note hung off the abandoned leaf is
+// archived away from the context). An empty targetID rewinds before the
+// first message (a fresh reset-boundary root). It takes the store rather
+// than the agent because the caller that branches (the tree selector)
+// holds a store, not the run.
 //
-// summarize may be nil. When set, it is called only for a branch carrying more
-// than BranchSummaryMinTokens of context, is fed a bounded transcript, and its
-// answer is bounded too; any failure is logged and falls back to the marker
-// rather than failing the switch. An unresolvable smol role must be passed as
-// nil for the same reason.
-func SummarizeBranchStore(ctx context.Context, store *session.Store, entryID string, summarize BranchSummarizer) error {
+// summarize may be nil. When set, it is called only for a branch carrying
+// more than BranchSummaryMinTokens of context, is fed a bounded transcript,
+// and its answer is bounded too; any failure is logged and falls back to
+// the marker rather than failing the switch. An unresolvable smol role must
+// be passed as nil for the same reason.
+func SummarizeBranchStore(ctx context.Context, store *session.Store, targetID string, summarize BranchSummarizer) error {
 	if store == nil {
 		return errors.New("branch summary: no session store")
 	}
-	if store.Entry(entryID) == nil {
-		return fmt.Errorf("branch: no entry matching %q", entryID)
+	if targetID != "" && store.Entry(targetID) == nil {
+		return fmt.Errorf("branch: no entry matching %q", targetID)
 	}
 	text := branchSummaryMarker
 	transcript, tokens := branchTranscript(store)
@@ -85,13 +88,17 @@ func SummarizeBranchStore(ctx context.Context, store *session.Store, entryID str
 			text = note
 		}
 	}
-	if err := store.Append(&session.BranchSummaryEntry{Summary: ai.Message{
+	if targetID == "" {
+		if err := store.ResetLeaf(); err != nil {
+			return fmt.Errorf("branch summary: %w", err)
+		}
+	} else if err := store.Branch(targetID); err != nil {
+		return err
+	}
+	return store.Append(&session.BranchSummaryEntry{Summary: ai.Message{
 		Role:    ai.RoleUser,
 		Content: []ai.Block{ai.TextBlock{Text: text}},
-	}}); err != nil {
-		return fmt.Errorf("branch summary: %w", err)
-	}
-	return store.Branch(entryID)
+	}})
 }
 
 // branchTranscript renders the branch being left (bounded) together with its

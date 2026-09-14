@@ -36,11 +36,11 @@ func branchSummaryEntry(t *testing.T, s *session.Store) *session.BranchSummaryEn
 }
 
 // TestSummarizeBranchUsesTheSeamAndMovesTheLeaf pins the generated path: the
-// note comes from the smol-role seam, the entry hangs off the branch being
-// left, and the leaf ends up on the branch target.
+// note comes from the smol-role seam, the entry hangs off the navigation
+// TARGET (omp branchWithSummary — the new branch's context carries it), and
+// the leaf ends up on the summary itself.
 func TestSummarizeBranchUsesTheSeamAndMovesTheLeaf(t *testing.T) {
 	a, s := branchStore(t, true)
-	abandoned := s.LeafID()
 	target := s.Entries()[0].Envelope().ID
 
 	var gotPrompt string
@@ -61,11 +61,11 @@ func TestSummarizeBranchUsesTheSeamAndMovesTheLeaf(t *testing.T) {
 	if entry.Summary.Text() != "the abandoned branch proved the parser was fine" {
 		t.Fatalf("summary = %q, want the seam's note, trimmed", entry.Summary.Text())
 	}
-	if entry.Env.ParentID != abandoned {
-		t.Fatalf("branch_summary parent = %q, want the abandoned leaf %q", entry.Env.ParentID, abandoned)
+	if entry.Env.ParentID != target {
+		t.Fatalf("branch_summary parent = %q, want the target %q", entry.Env.ParentID, target)
 	}
-	if got := s.LeafID(); got != target {
-		t.Fatalf("leaf = %q, want the branch target %q", got, target)
+	if got := s.LeafID(); got != entry.Env.ID {
+		t.Fatalf("leaf = %q, want the summary entry %q on the new branch", got, entry.Env.ID)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestSummarizeBranchKeepsMarkerForShortBranchesAndFailures(t *testing.T) {
 		if got := branchSummaryEntry(t, s).Summary.Text(); got != branchSummaryMarker {
 			t.Fatalf("summary = %q, want the marker", got)
 		}
-		if s.LeafID() != target {
-			t.Fatalf("leaf = %q, want the branch target", s.LeafID())
+		if summary := branchSummaryEntry(t, s); s.LeafID() != summary.Env.ID {
+			t.Fatalf("leaf = %q, want the summary entry %q on the new branch", s.LeafID(), summary.Env.ID)
 		}
 		if !strings.Contains(logs.String(), "smol role unavailable") {
 			t.Errorf("the failure must be logged, logs:\n%s", logs.String())
@@ -141,7 +141,6 @@ func TestSummarizeBranchRejectsUnknownTarget(t *testing.T) {
 // the entry placement and the leaf move.
 func TestSummarizeBranchStoreNeedsNoAgent(t *testing.T) {
 	_, s := branchStore(t, true)
-	abandoned := s.LeafID()
 	target := s.Entries()[0].Envelope().ID
 	if err := SummarizeBranchStore(context.Background(), s, target, func(context.Context, string) (string, error) {
 		return "branch note without an agent", nil
@@ -152,11 +151,11 @@ func TestSummarizeBranchStoreNeedsNoAgent(t *testing.T) {
 	if entry.Summary.Text() != "branch note without an agent" {
 		t.Fatalf("summary = %q", entry.Summary.Text())
 	}
-	if entry.Env.ParentID != abandoned {
-		t.Fatalf("parent = %q, want the abandoned leaf %q", entry.Env.ParentID, abandoned)
+	if entry.Env.ParentID != target {
+		t.Fatalf("parent = %q, want the navigation target %q", entry.Env.ParentID, target)
 	}
-	if s.LeafID() != target {
-		t.Fatalf("leaf = %q, want the target %q", s.LeafID(), target)
+	if s.LeafID() != entry.Env.ID {
+		t.Fatalf("leaf = %q, want the summary entry %q", s.LeafID(), entry.Env.ID)
 	}
 	// A nil store is a programming error, not a silent no-op.
 	if err := SummarizeBranchStore(context.Background(), nil, target, nil); err == nil {

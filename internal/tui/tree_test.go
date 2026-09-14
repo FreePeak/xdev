@@ -23,7 +23,7 @@ func screenRows(scr tcell.SimulationScreen) string {
 }
 func treeTestEntries() []TreeEntry {
 	return []TreeEntry{
-		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Text: "Start task", Depth: 0},
+		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Depth: 0},
 		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan", Depth: 1},
 		{ID: "33333333cccc", Type: "message", Role: "toolResult", Summary: "bash: ls", Depth: 2},
 		{ID: "44444444dddd", Type: "model_change", Summary: "onegw/free", Depth: 2},
@@ -229,19 +229,22 @@ func TestTreeSelectorLabelSetAndClear(t *testing.T) {
 
 func TestTreeSelectorEnterSwitchesAndSummarizes(t *testing.T) {
 	app, _, _ := openTreeTestApp(t, treeTestEntries(), nil)
-	var branched, summarized []string
-	app.SetSessionBranch(func(id string) error {
-		branched = append(branched, id)
-		return nil
-	})
-	app.SetSessionOps(&SessionOps{SummarizeAndBranch: func(id string) error {
-		summarized = append(summarized, id)
-		return nil
+	type nav struct {
+		id        string
+		summarize bool
+	}
+	var navs []nav
+	app.SetSessionOps(&SessionOps{NavigateTree: func(id string, summarize bool) (string, error) {
+		navs = append(navs, nav{id, summarize})
+		return "", nil
 	}})
 
+	// The selector opens on the active leaf: the "6666" row is a USER row,
+	// so Enter still navigates (omp rewinds the last prompt into the
+	// composer even when it is the leaf).
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-	if len(branched) != 1 || branched[0] != "66666666ffff" {
-		t.Fatalf("branched = %v", branched)
+	if len(navs) != 1 || navs[0] != (nav{"66666666ffff", false}) {
+		t.Fatalf("navigate = %+v", navs)
 	}
 	if app.TreeSelectorOpen() {
 		t.Fatal("Enter must close the selector")
@@ -249,18 +252,15 @@ func TestTreeSelectorEnterSwitchesAndSummarizes(t *testing.T) {
 
 	app.OpenTreeSelector()
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
-	if len(summarized) != 1 || summarized[0] != "66666666ffff" {
-		t.Fatalf("summarized = %v", summarized)
-	}
-	if len(branched) != 1 {
-		t.Fatalf("Shift+Enter must not take the plain branch path: %v", branched)
+	if len(navs) != 2 || navs[1] != (nav{"66666666ffff", true}) {
+		t.Fatalf("Shift+Enter navigate = %+v", navs)
 	}
 
 	// Alt+S is the portable alias (plain terminals cannot send Shift+Enter).
 	app.OpenTreeSelector()
 	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 's', tcell.ModAlt))
-	if len(summarized) != 2 || summarized[1] != "66666666ffff" {
-		t.Fatalf("Alt+S summarized = %v", summarized)
+	if len(navs) != 3 || navs[2] != (nav{"66666666ffff", true}) {
+		t.Fatalf("Alt+S navigate = %+v", navs)
 	}
 }
 
@@ -288,26 +288,43 @@ func TestTreeSelectorDoubleEscape(t *testing.T) {
 	}
 }
 
-// TestTreeRewindReprimesComposer pins the "resume" half of double-Esc
-// rewind: switching to a user row puts that prompt back in the composer so
-// it can be edited and resent; switching to a non-user row leaves it alone.
+// TestTreeRewindReprimesComposer pins the omp navigateTree draft contract:
+// navigating to a user row returns its prompt as a draft that re-primes the
+// composer (edit and resend without duplicating the entry) — but only over
+// an EMPTY composer; a typed or parked draft is never clobbered. Non-user
+// rows and failed navigations touch nothing.
 func TestTreeRewindReprimesComposer(t *testing.T) {
 	app, _, _ := openTreeTestApp(t, treeTestEntries(), nil)
-	var branched []string
-	app.SetSessionBranch(func(id string) error {
-		branched = append(branched, id)
-		return nil
-	})
+	var navs []string
+	app.SetSessionOps(&SessionOps{NavigateTree: func(id string, summarize bool) (string, error) {
+		navs = append(navs, id)
+		if id == "11111111aaaa" {
+			return "Start task", nil
+		}
+		return "", nil
+	}})
 
 	app.mu.Lock()
-	app.tpick.sel = 0 // "Start task" — user row with Text
+	app.tpick.sel = 0 // "Start task" — user row
 	app.mu.Unlock()
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-	if len(branched) != 1 || branched[0] != "11111111aaaa" {
-		t.Fatalf("branched = %v", branched)
+	if len(navs) != 1 || navs[0] != "11111111aaaa" {
+		t.Fatalf("navigate = %v", navs)
 	}
 	if app.ed.Text() != "Start task" {
 		t.Fatalf("composer = %q, want the rewound prompt re-primed", app.ed.Text())
+	}
+
+	// An existing draft wins: omp sets it only over an empty editor.
+	app.ed.Reset()
+	typeRunes(app, "my draft")
+	app.OpenTreeSelector()
+	app.mu.Lock()
+	app.tpick.sel = 0
+	app.mu.Unlock()
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if app.ed.Text() != "my draft" {
+		t.Fatalf("rewind clobbered the draft: %q", app.ed.Text())
 	}
 
 	// An assistant row switches but must not touch the composer.
@@ -322,9 +339,9 @@ func TestTreeRewindReprimesComposer(t *testing.T) {
 	}
 
 	// A failed switch must not fake a rewind either.
-	app.SetSessionBranch(func(id string) error {
-		return errors.New("branch failed")
-	})
+	app.SetSessionOps(&SessionOps{NavigateTree: func(string, bool) (string, error) {
+		return "Start task", errors.New("branch failed")
+	}})
 	app.OpenTreeSelector()
 	app.mu.Lock()
 	app.tpick.sel = 0
@@ -332,6 +349,39 @@ func TestTreeRewindReprimesComposer(t *testing.T) {
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 	if app.ed.Text() != "" {
 		t.Fatalf("failed switch re-primed the composer: %q", app.ed.Text())
+	}
+}
+
+// TestTreeSelectorAlreadyAtThisPoint pins omp's guard: re-picking the
+// active leaf navigates nowhere; a non-user row gets the status notice
+// instead of a pointless re-render. (A user row is still rewound — see
+// TestTreeSelectorEnterSwitchesAndSummarizes.)
+func TestTreeSelectorAlreadyAtThisPoint(t *testing.T) {
+	entries := []TreeEntry{
+		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Depth: 0},
+		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan", Depth: 1, Active: true},
+	}
+	app, _, _ := openTreeTestApp(t, entries, nil)
+	var navs []string
+	app.SetSessionOps(&SessionOps{NavigateTree: func(id string, summarize bool) (string, error) {
+		navs = append(navs, id)
+		return "", nil
+	}})
+
+	// The selector opens on the active assistant row: Enter is a no-op.
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if len(navs) != 0 {
+		t.Fatalf("active non-user row navigated: %v", navs)
+	}
+
+	// The older user row still navigates.
+	app.OpenTreeSelector()
+	app.mu.Lock()
+	app.tpick.sel = 0
+	app.mu.Unlock()
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if len(navs) != 1 || navs[0] != "11111111aaaa" {
+		t.Fatalf("navigate = %v, want the user row", navs)
 	}
 }
 

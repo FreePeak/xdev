@@ -18,11 +18,10 @@ import (
 // session store: depth and the active-leaf flag are graph properties the
 // TUI should not re-derive from envelopes.
 type TreeEntry struct {
-	ID      string // full entry id (what /branch and the store expect)
+	ID      string // full entry id (what NavigateTree and the store expect)
 	Type    string // wire type: message, compaction, model_change, custom, ...
 	Role    string // message role (user/assistant/toolResult); "" otherwise
 	Summary string // one-line preview
-	Text    string // full message text for user rows ("" otherwise); rewinding to one re-primes the composer
 	Depth   int    // indentation level
 	Active  bool   // current leaf (rendered with the → bullet)
 }
@@ -197,39 +196,39 @@ func (a *App) CloseTreeSelector() {
 	a.poke()
 }
 
-// treeSelect applies Enter/Shift+Enter: plain switch reuses the /branch
-// path; summarize-and-switch appends a branch_summary entry first (the
-// append+switch lives in cmd's SessionOps.SummarizeAndBranch). Rewinding
-// onto a user row re-primes the composer with that prompt, Claude-Code
-// style, so the turn can be resumed or edited before resending. The editor
-// is UI-thread-owned: touch it unlocked, like clear-input.
+// treeSelect applies Enter/Shift+Enter with omp's navigateTree semantics:
+// the leaf lands on the selected entry, except for user rows, which rewind
+// to their PARENT and hand the prompt back as a composer draft (Claude-Code
+// style resume-and-edit). Re-picking the active leaf is a no-op status, not
+// a re-render. The draft is primed only over an empty composer — a parked
+// or typed draft is never clobbered. The store move, the optional
+// branch_summary, and the transcript restore all live in cmd's NavigateTree.
+// The editor is UI-thread-owned: touch it unlocked, like clear-input.
 func (a *App) treeSelect(e TreeEntry, summarize bool) {
-	var err error
-	if summarize {
-		if a.ops == nil || a.ops.SummarizeAndBranch == nil {
-			a.AddSystemBlock("tree: summarize-and-switch not wired")
-			return
-		}
-		err = a.ops.SummarizeAndBranch(e.ID)
-	} else {
-		if a.sessionBranch == nil {
-			a.AddSystemBlock("tree: session branch not wired")
-			return
-		}
-		err = a.sessionBranch(e.ID)
+	if a.ops == nil || a.ops.NavigateTree == nil {
+		a.AddSystemBlock("tree: session branch not wired")
+		return
 	}
+	// omp's guard: selecting the leaf you are already at navigates nowhere
+	// (a user row still rewinds — its text belongs back in the composer).
+	if e.Active && e.Role != "user" {
+		a.AddSystemBlock("Already at this point")
+		return
+	}
+	draft, err := a.ops.NavigateTree(e.ID, summarize)
 	if err != nil {
 		a.AddSystemBlock("tree: " + err.Error())
 		return
 	}
-	if e.Role == "user" && e.Text != "" {
+	a.AddSystemBlock("Navigated to selected point")
+	if draft != "" && strings.TrimSpace(a.ed.Text()) == "" {
 		a.ed.Reset()
-		for _, r := range e.Text {
+		for _, r := range draft {
 			a.ed.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 		}
 		a.ed.HandleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone))
-		a.poke()
 	}
+	a.poke()
 }
 
 // handleTreeKey routes keys while the tree selector is open. Returns

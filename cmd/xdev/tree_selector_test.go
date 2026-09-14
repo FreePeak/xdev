@@ -10,8 +10,10 @@ import (
 )
 
 // TestSummarizeAndBranchAppendsAndSwitches pins the /tree Shift+Enter
-// contract: a branch_summary entry is recorded on the abandoned leaf, then
-// the leaf moves to the target.
+// contract (omp branchWithSummary): the leaf moves to the target, then the
+// branch_summary is appended AS A CHILD OF THE TARGET — the note must ride
+// the new branch's context, not dangle off the abandoned leaf where no
+// future prompt would ever read it.
 func TestSummarizeAndBranchAppendsAndSwitches(t *testing.T) {
 	st := session.OpenMem("/tmp/tree-selector", "t")
 	if err := st.Append(&session.MessageEntry{Message: ai.Message{
@@ -25,32 +27,63 @@ func TestSummarizeAndBranchAppendsAndSwitches(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	abandoned := st.LeafID()
 
 	if err := summarizeAndBranch(st, first); err != nil {
 		t.Fatal(err)
 	}
-	if got := st.LeafID(); got != first {
-		t.Fatalf("leaf = %q, want %q", got, first)
-	}
 
-	summaries := 0
+	var summary *session.BranchSummaryEntry
 	for _, e := range st.Entries() {
-		bs, ok := e.(*session.BranchSummaryEntry)
-		if !ok {
-			continue
-		}
-		summaries++
-		if bs.Env.ParentID != abandoned {
-			t.Errorf("branch_summary parent = %q, want the abandoned leaf %q", bs.Env.ParentID, abandoned)
+		if bs, ok := e.(*session.BranchSummaryEntry); ok {
+			summary = bs
 		}
 	}
-	if summaries != 1 {
-		t.Fatalf("branch_summary entries = %d, want 1", summaries)
+	if summary == nil {
+		t.Fatal("no branch_summary entry was appended")
+	}
+	if summary.Env.ParentID != first {
+		t.Errorf("branch_summary parent = %q, want the target %q", summary.Env.ParentID, first)
+	}
+	if got := st.LeafID(); got != summary.Env.ID {
+		t.Errorf("leaf = %q, want the summary (omp makes it the new tip)", got)
+	}
+	// The point of the placement: the note reaches the model's context.
+	res, err := session.BuildContext(st.Entries(), st.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Messages) != 2 || res.Messages[1].Text() == "" {
+		t.Fatalf("context = %+v, want [first, summary]", res.Messages)
 	}
 
+	before := len(st.Entries())
 	if err := summarizeAndBranch(st, "deadbeef"); err == nil {
 		t.Fatal("unknown entry id must error")
+	}
+	if len(st.Entries()) != before {
+		t.Fatal("failed summarize-and-branch must append nothing")
+	}
+}
+
+// TestTreeRewindTarget pins omp's navigateTree target rule: a user message
+// rewinds to its PARENT and returns its prompt as the composer draft (the
+// first message rewinds to the root, ""), every other entry lands on
+// itself with no draft.
+func TestTreeRewindTarget(t *testing.T) {
+	user := &session.MessageEntry{Message: ai.Message{
+		Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do the thing"}},
+	}}
+	user.Env = session.Envelope{ID: "aaaaaaaa", Type: session.TypeMessage}
+	assistant := &session.MessageEntry{Message: ai.Message{
+		Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "done"}},
+	}}
+	assistant.Env = session.Envelope{ID: "bbbbbbbb", ParentID: "aaaaaaaa", Type: session.TypeMessage}
+
+	if target, draft := treeRewindTarget(user); target != "" || draft != "do the thing" {
+		t.Fatalf("first user row: target=%q draft=%q, want root rewind + the prompt", target, draft)
+	}
+	if target, draft := treeRewindTarget(assistant); target != "bbbbbbbb" || draft != "" {
+		t.Fatalf("assistant row: target=%q draft=%q, want itself, no draft", target, draft)
 	}
 }
 
