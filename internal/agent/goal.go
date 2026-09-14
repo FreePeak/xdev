@@ -36,6 +36,19 @@ const (
 // the reminder rides in every turn's context, so it must stay small.
 const goalReminderObjectiveCap = 240
 
+// GoalContinuationAttribution tags the hidden prompt the loop injects to keep
+// an active goal running (omp's goal-continuation message). The user never
+// typed it, so the transcript skips it on replay.
+const GoalContinuationAttribution = "goal-continuation"
+
+// capObjective trims an objective to the reminder cap.
+func capObjective(obj string) string {
+	if r := []rune(obj); len(r) > goalReminderObjectiveCap {
+		return string(r[:goalReminderObjectiveCap]) + "…"
+	}
+	return obj
+}
+
 // Goal is one tracked objective.
 type Goal struct {
 	Objective string
@@ -155,10 +168,7 @@ func (g *GoalState) Reminder() string {
 	if cur == nil || cur.Status != GoalActive {
 		return ""
 	}
-	obj := cur.Objective
-	if r := []rune(obj); len(r) > goalReminderObjectiveCap {
-		obj = string(r[:goalReminderObjectiveCap]) + "…"
-	}
+	obj := capObjective(cur.Objective)
 	if cur.TokenBudget > 0 {
 		rem := cur.TokenBudget - spent
 		if rem < 0 {
@@ -167,6 +177,33 @@ func (g *GoalState) Reminder() string {
 		return fmt.Sprintf("goal reminder — objective: %s (token budget: %d of %d remaining; call the goal tool to complete when done)", obj, rem, cur.TokenBudget)
 	}
 	return fmt.Sprintf("goal reminder — objective: %s (call the goal tool to complete when done)", obj)
+}
+
+// ContinuationPrompt renders the hidden message that keeps an active goal
+// running (omp's goal-continuation prompt): the loop injects it when a turn
+// would otherwise end and leave the objective untouched. "" when the goal left
+// the active state — completing, dropping it, or spending the budget is what
+// stops a continuation run.
+func (g *GoalState) ContinuationPrompt() string {
+	g.mu.Lock()
+	cur, spent := g.current, g.spent
+	g.mu.Unlock()
+	if cur == nil || cur.Status != GoalActive {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "goal continuation — objective: %s", capObjective(cur.Objective))
+	if cur.TokenBudget > 0 {
+		rem := cur.TokenBudget - spent
+		if rem < 0 {
+			rem = 0
+		}
+		fmt.Fprintf(&b, "\nbudget: %d of %d tokens remaining (%d used)", rem, cur.TokenBudget, spent)
+	}
+	b.WriteString("\nThe goal is still active: take the next concrete step now — do not stop at a plan or a status report." +
+		" Record what verified progress with the goal tool (op \"evidence\") and call op \"complete\" once the objective is achieved," +
+		" or op \"drop\" if it is no longer wanted.")
+	return b.String()
 }
 
 // Describe renders the current goal for /goal.

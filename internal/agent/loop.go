@@ -230,6 +230,15 @@ type Agent struct {
 	// discovered from the tool registry on the first Run.
 	Goals *GoalState
 
+	// GoalContinuation lets an active goal keep the run going: a turn that
+	// ends with no tool calls injects the goal's continuation prompt and
+	// continues instead of idling (omp's goal-continuation message). Only a
+	// mode with a user sitting in front of it opts in — omp's
+	// goal.continuationModes defaults to interactive — because the loop runs
+	// until the goal is completed, dropped, budget-exhausted, or the run's
+	// turn budget is spent.
+	GoalContinuation bool
+
 	// Handoff configures the handoff-document compaction (M5 #23): the
 	// side-request target, the artifact mirror, and the per-branch reset
 	// seam. See handoff.go.
@@ -399,13 +408,33 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// Messages queued during the final turn continue the run
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
-			if len(queued) == 0 {
+			// Goal continuation (M11 #40 tail): an active goal must not idle.
+			// This yield would have ended the run with the objective
+			// untouched — the reminder only ever rode along with a turn the
+			// user started, so a goal created interactively did nothing.
+			// The continuation is a hidden user message (the user did not
+			// type it), persisted so a store rebuild keeps it; the goal's own
+			// complete/drop/budget_exhausted is what ends the run.
+			var cont string
+			if len(queued) == 0 && a.GoalContinuation && a.Goals != nil {
+				cont = a.Goals.ContinuationPrompt()
+			}
+			if len(queued) == 0 && cont == "" {
 				emit("turn_end", map[string]any{"turn": turn})
 				return msg, nil
 			}
 			history = append(history, *msg)
 			for _, s := range queued {
 				m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
+				history = append(history, m)
+				a.persist(m)
+			}
+			if cont != "" {
+				m := ai.Message{
+					Role:        ai.RoleUser,
+					Content:     []ai.Block{ai.TextBlock{Text: cont}},
+					Attribution: GoalContinuationAttribution,
+				}
 				history = append(history, m)
 				a.persist(m)
 			}

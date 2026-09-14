@@ -205,6 +205,90 @@ func TestGoalReminderInjectedEachTurn(t *testing.T) {
 	}
 }
 
+// An active goal must keep the run going. Before the continuation a turn that
+// yielded plain text ended the run, so a goal created interactively was never
+// acted on: the reminder only ever rode along with a turn the user started.
+func TestGoalContinuationKeepsTheRunGoing(t *testing.T) {
+	store := session.OpenMem("/proj", "goal continuation")
+	t.Cleanup(func() { _ = store.Close() })
+	gs := NewGoalState(store)
+	if _, err := gs.Create("keep working", 0); err != nil {
+		t.Fatal(err)
+	}
+	yield := func(text string) fakeScript {
+		return fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+			Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: text}},
+		})}}
+	}
+	// Turn 2 completes the goal (with the evidence completion demands), which
+	// is what ends the run — not the yield in turn 3.
+	complete := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{
+			ai.TextBlock{Text: "wrapping up"},
+			ai.ToolCallBlock{ID: "g1", Name: GoalToolName, Arguments: json.RawMessage(`{"op":"complete","evidence":["proved"]}`)},
+		},
+	})}}
+	reg := tool.NewRegistry()
+	reg.Register(&GoalTool{Goals: gs})
+	p := &fakeProvider{calls: []fakeScript{yield("just a plan"), complete, yield("all done"), yield("second run")}}
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, Goals: gs, GoalContinuation: true, Store: store}
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 3 {
+		t.Fatalf("stream requests = %d, want 3 (yield, goal complete, final)", len(p.gotReqs))
+	}
+	last := p.gotReqs[1].Messages[len(p.gotReqs[1].Messages)-1]
+	if last.Role != ai.RoleUser || !strings.Contains(last.Text(), "goal continuation") {
+		t.Fatalf("the continuation never reached the model: %+v", last)
+	}
+	// Hidden but persisted: a store rebuild keeps the turn it produced, and
+	// the transcript can tell it apart from something the user typed.
+	var hidden int
+	for _, e := range store.Entries() {
+		if me, ok := e.(*session.MessageEntry); ok && me.Message.Attribution == GoalContinuationAttribution {
+			hidden++
+		}
+	}
+	if hidden != 1 {
+		t.Fatalf("persisted continuations = %d, want 1", hidden)
+	}
+
+	// The goal is completed: a later yield ends the run instead of looping.
+	before := len(p.gotReqs)
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := len(p.gotReqs) - before; got != 1 {
+		t.Fatalf("a completed goal kept continuing: %d requests", got)
+	}
+}
+
+// Modes that did not opt in (print/RPC/ACP) must not spend turns of their own:
+// the same active goal ends the run at the yield.
+func TestGoalContinuationOffByDefault(t *testing.T) {
+	gs := NewGoalState(nil)
+	if _, err := gs.Create("quiet goal", 0); err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "done"}},
+	})}}}}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	reg.Register(&GoalTool{Goals: gs})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, Goals: gs}
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 1 {
+		t.Fatalf("stream requests = %d, want 1 (no continuation without opt-in)", len(p.gotReqs))
+	}
+}
+
 // The goal tool is discovered from the registry when the agent was wired
 // without an explicit state (Run's fallback path).
 func TestGoalDiscoveredFromRegistry(t *testing.T) {
