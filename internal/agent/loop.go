@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +179,9 @@ type Agent struct {
 	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
 	MaxTurns int
+	// CancelGrace bounds how long a cancelled turn waits for a tool that is
+	// already running (#126); 0 means DefaultCancelGrace.
+	CancelGrace time.Duration
 	// Intercept routes tool calls/results through the extension bus
 	// (nil disables interception).
 	Intercept Interceptor
@@ -845,6 +849,80 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 	return out
 }
 
+// DefaultCancelGrace is how long a cancelled turn waits for a tool that is
+// already in flight before abandoning it (#126).
+const DefaultCancelGrace = 5 * time.Second
+
+// toolOutcome carries one Execute result across the goroutine boundary,
+// including a panic: nothing in xdev recovers tool panics today, so moving the
+// call off the turn's goroutine must not quietly convert a crash into a
+// swallowed error.
+type toolOutcome struct {
+	res      tool.Result
+	err      error
+	panicVal any
+	stack    []byte
+}
+
+func (o toolOutcome) unwrap() (tool.Result, error) {
+	if o.panicVal != nil {
+		panic(fmt.Sprintf("tool panicked: %v\n%s", o.panicVal, o.stack))
+	}
+	return o.res, o.err
+}
+
+// executeTool runs one tool call, bounding how long a cancelled turn waits for
+// it. The loop already refuses to *start* a tool once cancelled; that answers
+// the question for every tool, including the ones with no entry check of their
+// own (grep, glob) and the third-party ext_*/mcp_* tools whose code we cannot
+// assume checks anything. It cannot un-start a call that was already running
+// when the cancel landed, and waiting on it forever means a stopped turn is not
+// stopped — the user pressed cancel and the harness is still blocked on
+// someone else's loop. So: wait for the tool, and if cancellation arrives first,
+// give it the grace period to notice, then stop waiting and say so. The
+// abandoned call keeps running (Go cannot kill a goroutine); its result is
+// dropped and any side effect it makes after this point is named as untracked
+// rather than reported as cancelled-clean.
+func (a *Agent) executeTool(ctx context.Context, t tool.Tool, args json.RawMessage) (tool.Result, error) {
+	done := make(chan toolOutcome, 1) // buffered: an abandoned tool never parks on the send
+	go func() {
+		out := toolOutcome{}
+		defer func() {
+			if p := recover(); p != nil {
+				out.panicVal, out.stack = p, debug.Stack()
+			}
+			done <- out
+		}()
+		out.res, out.err = t.Execute(ctx, args)
+	}()
+	select {
+	case o := <-done:
+		return o.unwrap()
+	case <-ctx.Done():
+	}
+	grace := a.CancelGrace
+	if grace <= 0 {
+		grace = DefaultCancelGrace
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case o := <-done:
+		return o.unwrap()
+	case <-timer.C:
+		// Signalled through the result, not the error: runOneTool's error
+		// branch renders a generic "tool failed", which would bury the one
+		// sentence the user needs. IsError keeps it honest to the model, and
+		// skipping the ToolResult interceptors is deliberate — an abandoned
+		// call has no result to hand third-party code (#115).
+		return tool.Result{
+			Text: fmt.Sprintf("tool %q was still running %s after cancellation and was abandoned: any side effect it makes from here is not reported by this turn",
+				t.Name(), grace),
+			IsError: true,
+		}, nil
+	}
+}
+
 func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Message {
 	started := time.Now()
 	a.Hooks.OnToolStart(call)
@@ -963,7 +1041,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
 		return toolResultMsg(call, res)
 	}
-	res, err := t.Execute(ctx, args)
+	res, err := a.executeTool(ctx, t, args)
 	dur := time.Since(started)
 	if err != nil {
 		res = tool.Result{Text: fmt.Sprintf("tool %q failed: %v", call.Name, err), IsError: true}
