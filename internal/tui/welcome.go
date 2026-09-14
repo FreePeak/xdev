@@ -250,7 +250,7 @@ func gitBranch(cwd string) string {
 
 // drawWelcome renders the start screen (grok welcome/mod.rs anatomy):
 // top bar (cwd:branch left, model right), vertically centered logo +
-// menu; the composer and shortcuts rows are drawn by the caller.
+// menu; the composer and status rows are drawn by the caller.
 func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	st := func(c theme.Color, bold bool) tcell.Style {
 		st := tcell.StyleDefault.Foreground(a.cellColor(c))
@@ -285,7 +285,7 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	}
 
 	// Logo + menu vertically centered in the content area (the composer
-	// + shortcuts occupy the bottom 4 rows).
+	// + status row occupy the bottom 4 rows).
 	contentTop, contentH := 2, h-8
 	logo := logoArt(w, contentH)
 	menu := welcomeMenuItems(len(a.blocks) > 0)
