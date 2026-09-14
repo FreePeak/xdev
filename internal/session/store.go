@@ -27,6 +27,14 @@ import (
 // stay memory-only until EnsureOnDisk (or the first assistant message with
 // auto-persist enabled) — no junk files for aborted starts. Any persistence
 // error is latched and rethrown on every later Append/Close; never silent.
+//
+// Torn-tail prevention (#122) sits on top of that: the store counts the bytes
+// it has committed, verifies the file is exactly at that boundary before every
+// write, cuts back to it when a write fails or a flush was interrupted, and
+// refuses to append at all when the extra bytes are complete records another
+// process wrote. Without it a single interrupted flush made the whole session
+// unresumable: Open failed on the unterminated last line, so every resume path
+// returned an error for a file that was 99% intact.
 type Store struct {
 	mu sync.Mutex
 
@@ -48,6 +56,14 @@ type Store struct {
 	strictFsync bool
 	latchErr    error // first persistence error, rethrown forever
 	closed      bool
+
+	// committed is the file length this store has written and verified; the
+	// three fields below are the #122 write-side accounting. tornTail is what
+	// Open declined to parse (an unterminated final line), repaired what the
+	// first append cut away, and notice reports both to whoever resumed.
+	committed int64
+	tornTail  int64
+	repaired  int64
 
 	autoPath string // when set, the first assistant message persists here
 	autoOpts Options
@@ -112,26 +128,57 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("session: open %s: %w", path, err)
 	}
 	defer f.Close()
+	if err := checkSessionLinks(path); err != nil {
+		return nil, err
+	}
 
 	s := &Store{file: path, byID: map[string]Entry{}, children: map[string][]string{}}
 	r := bufio.NewReaderSize(f, 64*1024)
 	lineNo := 0
 	for {
 		line, rerr := r.ReadBytes('\n')
-		if trimmed := bytes.TrimRight(line, "\r\n"); len(trimmed) > 0 {
+		// A JSON line never contains a raw newline (the encoder escapes it), so
+		// a final chunk without a terminator is exactly one thing: a flush that
+		// was interrupted mid-write. It is skipped and reported instead of
+		// failing the whole open, and it is never repaired at read time — the
+		// first append cuts it away, so listing or previewing a session keeps
+		// the file untouched.
+		terminated := rerr == nil || len(line) == 0 || line[len(line)-1] == '\n'
+		if trimmed := bytes.TrimRight(line, "\r\n"); terminated && len(trimmed) > 0 {
 			lineNo++
 			if err := s.loadLine(trimmed, lineNo); err != nil {
 				return nil, fmt.Errorf("session: %s line %d: %w", path, lineNo, err)
 			}
 		}
 		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				break
+			if !errors.Is(rerr, io.EOF) {
+				return nil, fmt.Errorf("session: read %s: %w", path, rerr)
 			}
-			return nil, fmt.Errorf("session: read %s: %w", path, rerr)
+			if !terminated {
+				s.tornTail = int64(len(line))
+			}
+			break
 		}
 	}
+	if st, err := f.Stat(); err == nil {
+		s.committed = st.Size() - s.tornTail
+	}
 	return s, nil
+}
+
+// RepairNotice describes what had to be discarded to keep the session usable:
+// an interrupted final line seen at open, and any tail cut by the first append.
+// Empty means the file was intact. A durability repair that nobody can see is
+// how a lost record becomes invisible, so the resume paths print this.
+func (s *Store) RepairNotice() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dropped := s.tornTail + s.repaired
+	if dropped == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s: dropped %d byte(s) left by an interrupted write; the session reopened at its last complete record, and the file was cut back to it",
+		filepath.Base(s.file), dropped)
 }
 
 // loadLine ingests one raw JSONL line during Open. Lines 1 and 2 are the
@@ -509,46 +556,132 @@ func setEnvelope(e Entry, env Envelope) {
 	}
 }
 
+// ErrConcurrentWriter means the file on disk is not the file this store is
+// appending to: it either grew by complete records this process did not write
+// (a second xdev resumed the same session) or shrank. Appending anyway would
+// fork the entry tree and quietly lose a branch, so the write path latches
+// instead (#122).
+var ErrConcurrentWriter = errors.New("session: concurrent writer")
+
 // appendLineLocked writes one marshaled entry and flushes (fsync optional).
+//
+// Every write is bracketed by the committed-byte boundary: verify the file ends
+// where we believe it does, and cut back to that boundary if the write, the
+// flush or the fsync fails, so a half-written line can never poison the record
+// that follows it.
 func (s *Store) appendLineLocked(e Entry, id string) error {
 	line, err := MarshalEntry(e)
 	if err != nil {
 		s.latchErr = fmt.Errorf("session: marshal entry %s: %w", id, err)
 		return s.latchErr
 	}
-	if _, err := s.w.Write(line); err != nil {
-		s.latchErr = fmt.Errorf("session: write entry %s: %w", id, err)
-		return s.latchErr
+	buf := append(line, '\n')
+	if err := s.alignLocked(); err != nil {
+		return err
 	}
-	if err := s.w.WriteByte('\n'); err != nil {
-		s.latchErr = fmt.Errorf("session: write entry %s: %w", id, err)
-		return s.latchErr
+	if _, err := s.w.Write(buf); err != nil {
+		return s.failWriteLocked(err, id, "write")
 	}
 	if err := s.w.Flush(); err != nil {
-		s.latchErr = fmt.Errorf("session: flush entry %s: %w", id, err)
-		return s.latchErr
+		return s.failWriteLocked(err, id, "flush")
 	}
 	if s.strictFsync {
 		if err := s.f.Sync(); err != nil {
-			s.latchErr = fmt.Errorf("session: fsync entry %s: %w", id, err)
-			return s.latchErr
+			return s.failWriteLocked(err, id, "fsync")
 		}
 	}
+	s.committed += int64(len(buf))
 	return nil
 }
 
-// openWriterLocked lazily attaches an append-mode writer to an existing
-// file (Open keeps the handle closed so read-only listings never need write
-// permission).
+// alignLocked makes the file end exactly at the last byte this store committed.
+func (s *Store) alignLocked() error {
+	st, err := s.f.Stat()
+	if err != nil {
+		s.latchErr = fmt.Errorf("session: stat %s: %w", s.file, err)
+		return s.latchErr
+	}
+	size := st.Size()
+	if size == s.committed {
+		return nil
+	}
+	if size < s.committed {
+		s.latchErr = fmt.Errorf("%w: %s shrank by %d byte(s) since the last append (%d committed, %d on disk)",
+			ErrConcurrentWriter, s.file, s.committed-size, s.committed, size)
+		return s.latchErr
+	}
+	extra := make([]byte, size-s.committed)
+	if _, err := s.f.ReadAt(extra, s.committed); err != nil && !errors.Is(err, io.EOF) {
+		s.latchErr = fmt.Errorf("session: read tail of %s: %w", s.file, err)
+		return s.latchErr
+	}
+	if len(extra) > 0 && extra[len(extra)-1] == '\n' {
+		// Complete records we did not write: another process is appending to
+		// this session. Cutting them away would delete someone else's history,
+		// and appending over them would fork the tree, so this store stops.
+		s.latchErr = fmt.Errorf("%w: %s holds %d byte(s) of records this session did not write — another xdev is using the same file",
+			ErrConcurrentWriter, filepath.Base(s.file), len(extra))
+		return s.latchErr
+	}
+	if err := s.f.Truncate(s.committed); err != nil {
+		s.latchErr = fmt.Errorf("session: cut the torn tail of %s: %w", s.file, err)
+		return s.latchErr
+	}
+	s.repaired += int64(len(extra))
+	return nil
+}
+
+// failWriteLocked latches a write-path failure and leaves the file at its last
+// committed record: truncate the partial bytes, discard the buffer (those bytes
+// were refused, not deferred), and drop the handles so Close cannot flush a
+// second time.
+func (s *Store) failWriteLocked(err error, id, what string) error {
+	s.latchErr = fmt.Errorf("session: %s entry %s: %w", what, id, err)
+	if s.f != nil {
+		if truncErr := s.f.Truncate(s.committed); truncErr != nil {
+			s.latchErr = fmt.Errorf("%w (and the rollback to %d bytes failed: %v)", s.latchErr, s.committed, truncErr)
+		}
+		_ = s.f.Close()
+	}
+	if s.w != nil {
+		s.w.Reset(io.Discard)
+	}
+	s.f, s.w = nil, nil
+	return s.latchErr
+}
+
+// openWriterLocked lazily attaches a writer to an existing file (Open keeps the
+// handle closed so read-only listings never need write permission). O_RDWR, not
+// O_WRONLY: the #122 boundary check reads the bytes past the committed offset to
+// tell a torn tail from a second writer's records, and O_APPEND so a write that
+// does happen lands at the end. The committed boundary is taken from the file
+// here, so a store opened read-only and written to later still starts from the
+// truth on disk.
 func (s *Store) openWriterLocked() error {
 	if s.file == "" {
 		return nil
 	}
-	f, err := os.OpenFile(s.file, os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(s.file, os.O_RDWR|os.O_APPEND, 0)
 	if err != nil {
 		s.latchErr = fmt.Errorf("session: open for append %s: %w", s.file, err)
 		return s.latchErr
 	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		s.latchErr = fmt.Errorf("session: stat %s: %w", s.file, err)
+		return s.latchErr
+	}
+	if s.committed == 0 {
+		// A store that materialized nothing and read nothing starts from the
+		// truth on disk.
+		s.committed = st.Size()
+	}
+	// A mismatch between committed and st.Size() is deliberately NOT repaired
+	// here: alignLocked runs before every append and is the only place that can
+	// tell this store's own torn tail from another process's committed records.
+	// Cutting the difference blind at open would delete a concurrent writer's
+	// history (#122).
 	s.f = f
 	s.w = bufio.NewWriter(f)
 	return nil
@@ -737,11 +870,27 @@ func (s *Store) ensureOnDiskLocked(path string, opts Options) (string, error) {
 		s.latchErr = fmt.Errorf("session: mkdir: %w", err)
 		return "", s.latchErr
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	// O_RDWR, not O_WRONLY: the committed-boundary check (#122) has to read the
+	// tail this store did not write in order to tell its own interrupted flush
+	// from another process's records.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
 	if err != nil {
 		s.latchErr = fmt.Errorf("session: create %s: %w", path, err)
 		return "", s.latchErr
 	}
+	complete := false
+	defer func() {
+		if complete {
+			return
+		}
+		// A half-materialized session file is worse than none: the caller still
+		// holds every entry in memory, a retry would hit O_EXCL against our own
+		// corpse, and a resume of the corpse would read a truncated history as
+		// if it were the whole session (#122).
+		_ = f.Close()
+		_ = os.Remove(path)
+		s.file, s.f, s.w = "", nil, nil
+	}()
 	s.file = path
 	s.f = f
 	s.strictFsync = opts.StrictFsync
@@ -791,6 +940,10 @@ func (s *Store) ensureOnDiskLocked(path string, opts Options) (string, error) {
 		}
 	}
 	s.w = w
+	if st, err := f.Stat(); err == nil {
+		s.committed = st.Size() // everything above is now on disk and verified
+	}
+	complete = true
 	return s.file, nil
 }
 

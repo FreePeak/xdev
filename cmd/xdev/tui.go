@@ -401,6 +401,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if vibeActive() {
 			return fmt.Errorf("vibe mode is active — /vibe off first")
 		}
+		// A session interrupted mid-write is repaired on open (#122); in the
+		// TUI the transcript is the only surface the user can actually read, so
+		// the notice goes there rather than to stderr under the alt screen.
+		if n := sessionRepairNotice(ns); n != "" {
+			app.AddSystemBlock(n)
+		}
 		old := store
 		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
