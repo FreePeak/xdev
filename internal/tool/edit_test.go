@@ -377,101 +377,97 @@ func TestEditCRLFFileKeepsLineEndings(t *testing.T) {
 	}
 }
 
-// TestEditAdvertisedOpsAreAccepted: Description() is the model's only
-// contract, and it used to advertise REM plus "<N"/">N"/"N*" anchors the
-// executor rejected ("unknown op \"REM\"", "range is required"). Every op in
-// the advertised vocabulary must execute, every documented form must land the
-// bytes it promises, and the text must not name an anchor the JSON schema
-// cannot express.
-func TestEditAdvertisedOpsAreAccepted(t *testing.T) {
-	et := NewEditTool()
-	var params struct {
-		Properties struct {
-			Ops struct {
-				Items struct {
-					Properties struct {
-						Op struct {
-							Enum []string `json:"enum"`
-						} `json:"op"`
-					} `json:"properties"`
-				} `json:"items"`
-			} `json:"ops"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(et.Parameters(), &params); err != nil {
-		t.Fatalf("Parameters() is not valid JSON: %v", err)
-	}
-	advertised := params.Properties.Ops.Items.Properties.Op.Enum
-	if len(advertised) == 0 {
-		t.Fatal("Parameters() advertises no ops")
-	}
-	forms := map[string]struct {
-		op   map[string]any
-		text string
-		want string
+// TestHashlineVerbsAreAdvertisedAndExecute: Description() is the model's only
+// contract, so every verb and every form it names must execute from patch text
+// and land the bytes it promises. The inverse guard matters as much: the prose
+// must not name an op the parser rejects (Description() once promised REM
+// while Execute answered `unknown op "REM"`, and later advertised "N*" anchors
+// the executor never implemented).
+func TestHashlineVerbsAreAdvertisedAndExecute(t *testing.T) {
+	cases := []struct {
+		verb, patch, text, want string
 	}{
-		"PUT": {map[string]any{"op": "PUT", "range": map[string]any{"start": 2, "end": 3}, "lines": []string{"+x"}}, "a\nb\nc\nd\n", "a\nx\nd\n"},
-		"CUT": {map[string]any{"op": "CUT", "range": map[string]any{"line": 2}}, "a\nb\nc\n", "a\nc\n"},
-		"REM": {map[string]any{"op": "REM", "range": map[string]any{"line": 2}}, "a\nb\nc\n", "a\nc\n"},
-		"MV":  {map[string]any{"op": "MV"}, "a\n", "a\n"},
+		{"PUT", "PUT 2.=3:\n+x\n", "a\nb\nc\nd\n", "a\nx\nd\n"},
+		{"PUT", "PUT 2:\n+x\n", "a\nb\nc\n", "a\nx\nc\n"},
+		{"PUT", "PUT 2.=3:\n", "a\nb\nc\nd\n", "a\nd\n"},
+		{"PUT", "PUT <1:\n+x\n", "a\nb\nc\n", "x\na\nb\nc\n"},
+		{"PUT", "PUT <2:\n+x\n", "a\nb\nc\n", "a\nx\nb\nc\n"},
+		{"PUT", "PUT >2:\n+x\n", "a\nb\nc\n", "a\nb\nx\nc\n"},
+		{"CUT", "CUT 2\n", "a\nb\nc\n", "a\nc\n"},
+		{"REM", "REM 2.=3\n", "a\nb\nc\nd\n", "a\nd\n"},
 	}
-	for _, tok := range advertised {
-		t.Run(tok, func(t *testing.T) {
-			form, ok := forms[tok]
-			if !ok {
-				t.Fatalf("Parameters() advertises op %q this test has no documented form for: implement it and add the form, or drop the token", tok)
-			}
-			path := editFile(t, t.TempDir(), "f.txt", form.text)
-			read := path
-			if tok == "MV" {
-				dest := filepath.Join(filepath.Dir(path), "moved.txt")
-				form.op["dest"] = dest
-				read = dest
-			}
+	for _, tc := range cases {
+		label := strings.SplitN(tc.patch, "\n", 2)[0]
+		t.Run(label, func(t *testing.T) {
+			dir := t.TempDir()
+			path := editFile(t, dir, "f.txt", tc.text)
+			et := NewEditTool()
 			res, err := et.Execute(t.Context(), fsToolArgs(t, map[string]any{
-				"path": path,
-				"ops":  []map[string]any{form.op},
+				"input": "[" + path + "]\n" + tc.patch,
 			}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if res.IsError {
-				t.Fatalf("advertised op %s rejected: %s", tok, res.Text)
+				t.Fatalf("%s rejected: %s", tc.verb, res.Text)
 			}
-			data, err := os.ReadFile(read)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(data) != form.want {
-				t.Fatalf("file = %q, want %q", data, form.want)
+			if data, err := os.ReadFile(path); err != nil || string(data) != tc.want {
+				t.Fatalf("file = %q (%v), want %q", data, err, tc.want)
 			}
 		})
 	}
-	// The prose and the schema must name one vocabulary; they shipped out of
-	// sync, with Description() promising REM while Execute answered
-	// `unknown op "REM"`.
+	// The prose names exactly the verbs that work, and the schema hands the
+	// patch through the field the prose says to use it on.
+	et := NewEditTool()
 	desc := et.Description()
-	known := map[string]bool{}
-	for _, tok := range advertised {
-		known[tok] = true
-	}
-	covered := map[string]bool{}
-	for _, tok := range opWordRe.FindAllString(desc, -1) {
-		if !known[tok] {
-			t.Errorf("Description() names %q, which the op schema does not advertise and the executor rejects", tok)
-			continue
-		}
-		covered[tok] = true
-	}
-	for _, tok := range advertised {
-		if !covered[tok] {
-			t.Errorf("Description() never mentions advertised op %q", tok)
+	for _, tok := range []string{"PUT", "CUT", "REM", "MV"} {
+		if !strings.Contains(desc, tok) {
+			t.Errorf("Description() never mentions %s, so a model is never told it exists", tok)
 		}
 	}
-	for _, lie := range []string{"<N", ">N", "N*"} {
-		if strings.Contains(desc, lie) {
-			t.Errorf("Description() promises the %q anchor, which the op schema cannot express", lie)
+	for _, word := range opWordRe.FindAllString(desc, -1) {
+		switch word {
+		case "PUT", "CUT", "REM", "MV":
+		default:
+			t.Errorf("Description() names %q, which the hashline grammar does not accept", word)
 		}
+	}
+	var params struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(et.Parameters(), &params); err != nil {
+		t.Fatalf("Parameters() is not valid JSON: %v", err)
+	}
+	if _, ok := params.Properties["input"]; !ok || !strings.Contains(desc, "input") {
+		t.Errorf("Parameters() advertises %v but the description says %q", params.Required, "input")
+	}
+}
+
+// TestHashlineMoveRenamesTheFile covers MV, whose destination has to be
+// reported back the way the structured form already does.
+func TestHashlineMoveRenamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := editFile(t, dir, "f.txt", "a\nb\n")
+	dest := filepath.Join(dir, "g.txt")
+	et := NewEditTool()
+	res, err := et.Execute(t.Context(), fsToolArgs(t, map[string]any{
+		"input": "[" + path + "]\nMV " + dest + "\n",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("MV rejected: %s", res.Text)
+	}
+	if !strings.HasPrefix(res.Text, "Moved ") {
+		t.Errorf("result text = %q, want a Moved report", res.Text)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "a\nb\n" {
+		t.Fatalf("moved file = %q (%v)", data, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the source is still there: %v", err)
 	}
 }
 

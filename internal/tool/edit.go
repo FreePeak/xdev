@@ -1,9 +1,11 @@
 package tool
 
-// EditTool: omp hashline edit UX ported to JSON ops (PRD §3.6). PUT/CUT/MV
-// over 1-based inclusive line ranges, applied sequentially with line
-// renumbering after each op; validation happens entirely in memory so a bad
-// op writes nothing.
+// EditTool: omp's hashline edit UX (PRD §3.6). A call carries the patch text
+// in "input" — a "[path#tag]" header, then PUT/CUT/REM/MV op lines over 1-based
+// line ranges, then "+" body rows. The same verbs also decode from a
+// structured {path, ops} object (decodeEditArgs), which is what the harness's
+// tests speak. Ops apply sequentially with line renumbering after each one,
+// and validation happens entirely in memory so a bad op writes nothing.
 
 import (
 	"context"
@@ -42,43 +44,26 @@ func (t *EditTool) setRegistry(r *Registry) { t.reg = r }
 func (t *EditTool) Name() string { return "edit" }
 
 // Description implements Tool.
+//
+// The recap in the system prompt is capped at agent.MaxToolDescriptionChars,
+// while the parameters schema goes to the provider verbatim — so this is the
+// one-line contract, and the grammar itself lives in Parameters().
 func (t *EditTool) Description() string {
-	return "Ordered line ops on one file; numbers refer to the state after each previous op. PUT replaces a range (start/end, or line) with body rows: final content, each prefixed \"+\" (\"++x\" writes a literal \"+x\"). PUT with no rows, CUT, or REM delete the range; to insert, PUT the anchor line again with new rows added. MV renames the file to dest. Numbers come from a fresh read; unanchorable ops are rejected."
+	return "Line-anchored edits on one file. Send the patch as input: a [path] header (or [path#tag] quoting a previous edit's header), then PUT/CUT/REM/MV op lines, each PUT followed by \"+\" body rows. PUT 3.=5: replaces lines 3-5; PUT 3: one line; PUT <3: / PUT >3: insert before or after line 3; CUT 3 / REM 3.=5: delete; MV new/path.go renames. Read the file before editing it."
 }
 
-// Parameters implements Tool.
+// Parameters implements Tool. The patch grammar is the model's whole interface
+// for this tool; the structured {path, ops} encoding (same verbs, honored by
+// decodeEditArgs) is deliberately not advertised: it is what the harness's own
+// tests and the argument-repair path speak.
 func (t *EditTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
-  "required": ["path", "ops"],
+  "required": ["input"],
   "properties": {
-    "path": {"type": "string", "description": "File to edit"},
-    "ops": {
-      "type": "array",
-      "minItems": 1,
-      "description": "Line operations, applied in order",
-      "items": {
-        "type": "object",
-        "required": ["op"],
-        "properties": {
-          "op": {"type": "string", "enum": ["PUT", "CUT", "REM", "MV"], "description": "PUT replaces the range with lines; CUT/REM delete the range; MV renames the file to dest"},
-          "range": {
-            "type": "object",
-            "description": "1-based inclusive line range; {\"line\":N} is single-line shorthand",
-            "properties": {
-              "start": {"type": "integer", "minimum": 1, "description": "First line"},
-              "end": {"type": "integer", "minimum": 1, "description": "Last line (inclusive; defaults to start)"},
-              "line": {"type": "integer", "minimum": 1, "description": "Single line"}
-            }
-          },
-          "lines": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "PUT body: final content of each line, each prefixed with '+' (use '++' for a literal leading '+'; a leading '-' is plain content and needs no escape)"
-          },
-          "dest": {"type": "string", "description": "MV: destination path"}
-        }
-      }
+    "input": {
+      "type": "string",
+      "description": "One patch for one file. Line 1 is a header naming the file: [path] or [path#tag], where the tag is quoted from the header a previous read or edit printed (never invent it). Each op line names 1-based lines of the file as the previous op left it, and a PUT's body rows sit under it:\n  PUT 3.=5:   replace lines 3 through 5 with the rows that follow\n  PUT 3:      replace one line (PUT with no rows deletes the range)\n  PUT <3:     insert the rows before line 3, keeping line 3\n  PUT >3:     insert the rows after line 3, keeping line 3\n  CUT 3       delete one line\n  REM 3.=5:   delete a range\n  MV new.go   rename the file\nA body row is final content carrying exactly one leading \"+\": '++x' writes '+x', a lone '+' writes a blank line, and a leading '-' is plain content, never a deletion (the range an op names says what disappears). Rows may be indented; the whitespace after the '+' is kept verbatim.\nExample:\n[src/a.go#1a2b]\nPUT 3.=4:\n+func main() {\n+\txdev.Run()\nREM 9\nMV cmd/main.go"
     }
   }
 }`)
@@ -97,11 +82,115 @@ type editOp struct {
 	Range *editRange `json:"range,omitempty"`
 	Lines []string   `json:"lines,omitempty"`
 	Dest  string     `json:"dest,omitempty"`
+	// Anchor names a splice point for the "PUT <N:" / "PUT >N:" insert forms
+	// ("before" / "after"): the named line is kept, not replaced.
+	Anchor string `json:"anchor,omitempty"`
 }
 
-type editArgs struct {
-	Path string   `json:"path"`
-	Ops  []editOp `json:"ops"`
+// lenientOps decodes the structured "ops" field. Live calls send it three
+// ways: the array, that array quoted as a JSON string, and patch text.
+type lenientOps struct {
+	ops   []editOp
+	input string
+}
+
+// UnmarshalJSON accepts an op array, a string holding one, or a string
+// holding patch text (which parseHashline reads downstream).
+func (l *lenientOps) UnmarshalJSON(b []byte) error {
+	if err := json.Unmarshal(b, &l.ops); err == nil {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(b, &s) != nil {
+		return fmt.Errorf("ops must be a list of operations or patch text")
+	}
+	if looksLikeHashline(s) {
+		l.input = s
+		return nil
+	}
+	var inner []editOp
+	if json.Unmarshal([]byte(s), &inner) == nil {
+		l.ops = inner
+		return nil
+	}
+	return fmt.Errorf("ops is neither a list of operations nor patch text this grammar can read")
+}
+
+// editCall is one edit invocation after its argument shape is normalised.
+type editCall struct {
+	Path string
+	Ops  []editOp
+}
+
+// editUsageHint is the failure text for a call that names nothing: it teaches
+// the accepted shape instead of only rejecting it.
+const editUsageHint = `edit: nothing to apply — send the patch as {"input": "[path#tag]\nPUT 3.=5:\n+content"}`
+
+// decodeEditArgs reads an edit call. The advertised interface is the hashline
+// patch text in "input"; the structured {path, ops} object is accepted too
+// because it carries the same verbs and the harness's tests speak it. The rest
+// are repairs for shapes seen in live sessions: the whole arguments blob sent
+// as a bare patch string, "ops" quoted as a JSON string, patch text inside
+// "ops", and "path" pushed into an op instead of the call.
+func decodeEditArgs(args json.RawMessage) (editCall, string) {
+	var probe struct {
+		Input string     `json:"input"`
+		Path  string     `json:"path"`
+		Ops   lenientOps `json:"ops"`
+	}
+	if err := json.Unmarshal(args, &probe); err != nil {
+		var whole string
+		if json.Unmarshal(args, &whole) == nil && looksLikeHashline(whole) {
+			sec, serr := parseHashline(whole, "")
+			if serr != nil {
+				return editCall{}, serr.Error()
+			}
+			return editCall{Path: sec.path, Ops: sec.ops}, ""
+		}
+		return editCall{}, "invalid arguments: " + err.Error() + " — " + strings.TrimPrefix(editUsageHint, "edit: ")
+	}
+	if text := strings.TrimSpace(probe.Input); text != "" {
+		sec, serr := parseHashline(text, strings.TrimSpace(probe.Path))
+		if serr != nil {
+			return editCall{}, serr.Error()
+		}
+		if len(probe.Ops.ops) > 0 {
+			return editCall{}, "patch text and structured ops cannot be mixed in one call"
+		}
+		return editCall{Path: sec.path, Ops: sec.ops}, ""
+	}
+	if text := strings.TrimSpace(probe.Ops.input); text != "" {
+		sec, serr := parseHashline(text, strings.TrimSpace(probe.Path))
+		if serr != nil {
+			return editCall{}, serr.Error()
+		}
+		return editCall{Path: sec.path, Ops: sec.ops}, ""
+	}
+	path := strings.TrimSpace(probe.Path)
+	if path == "" {
+		path = hoistOpPath(args)
+	}
+	return editCall{Path: path, Ops: probe.Ops.ops}, ""
+}
+
+// hoistOpPath recovers a "path" written inside an op object (the shape live
+// calls show when the model puts the file in the wrong place).
+func hoistOpPath(args json.RawMessage) string {
+	var raw struct {
+		Ops []map[string]json.RawMessage `json:"ops"`
+	}
+	if json.Unmarshal(args, &raw) != nil {
+		return ""
+	}
+	for _, op := range raw.Ops {
+		for _, key := range []string{"path", "file_path"} {
+			var s string
+			if v, ok := op[key]; ok && json.Unmarshal(v, &s) == nil && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
 }
 
 // mvPlan is a validated MV destination plus its 1-based op index.
@@ -116,15 +205,15 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if err := ctx.Err(); err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("edit: canceled: %v", err)}, nil
 	}
-	var a editArgs
-	if err := json.Unmarshal(args, &a); err != nil {
-		return Result{}, fmt.Errorf("edit: invalid arguments: %w", err)
+	a, fail := decodeEditArgs(args)
+	if fail != "" {
+		return Result{IsError: true, Text: "edit: " + fail}, nil
 	}
 	if a.Path == "" {
-		return Result{IsError: true, Text: "edit: path is required"}, nil
+		return Result{IsError: true, Text: editUsageHint}, nil
 	}
 	if len(a.Ops) == 0 {
-		return Result{IsError: true, Text: "edit: no ops provided"}, nil
+		return Result{IsError: true, Text: editUsageHint}, nil
 	}
 	display, wantTag := splitSnapshotTag(a.Path)
 	resolved, err := resolvePath(display)
@@ -202,13 +291,33 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			if rerr != nil {
 				return Result{IsError: true, Text: fmt.Sprintf("edit: op %d (%s): %v", i+1, kind, rerr)}, nil
 			}
+			// at..keep is the window the op rewrites. An insert anchor makes
+			// it empty, which is exactly "splice here, delete nothing": the
+			// line the op names survives.
+			at, keep := start-1, end
+			switch op.Anchor {
+			case "":
+			case "before":
+				if kind != "PUT" {
+					return Result{IsError: true, Text: fmt.Sprintf("edit: op %d (%s): only PUT takes an insert anchor", i+1, kind)}, nil
+				}
+				keep = at
+			case "after":
+				if kind != "PUT" {
+					return Result{IsError: true, Text: fmt.Sprintf("edit: op %d (%s): only PUT takes an insert anchor", i+1, kind)}, nil
+				}
+				at, keep = end, end
+			default:
+				return Result{IsError: true, Text: fmt.Sprintf("edit: op %d (%s): unknown insert anchor %q (want \"before\" or \"after\")", i+1, kind, op.Anchor)}, nil
+			}
 			body := []string(nil)
 			if kind == "PUT" {
 				body = make([]string, len(op.Lines))
 				for j, l := range op.Lines {
-					// The leading "+" is JSON transport for a verbatim
-					// line; "++x" means a literal "+x". A leading "-"
-					// carries no meaning here and is never stripped.
+					// A body row carries one leading "+" as transport for
+					// verbatim content in both encodings, so "++x" means a
+					// literal "+x". A leading "-" carries no meaning here and
+					// is never stripped.
 					row := strings.TrimPrefix(l, "+")
 					if crlf && !strings.HasSuffix(row, "\r") {
 						row += "\r"
@@ -216,17 +325,17 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 					body[j] = row
 				}
 			}
-			next := make([]string, 0, len(lines)-(end-start+1)+len(body))
-			next = append(next, lines[:start-1]...)
+			next := make([]string, 0, len(lines)-(keep-at)+len(body))
+			next = append(next, lines[:at]...)
 			next = append(next, body...)
-			next = append(next, lines[end:]...)
+			next = append(next, lines[keep:]...)
 			lines = next
 			lineOps++
 			if firstEdit == 0 {
-				firstEdit = start
+				firstEdit = at + 1
 			}
 			if len(summary) < 3 {
-				summary = append(summary, fmt.Sprintf("%d-%d: +%d lines -%d lines", start, end, len(body), end-start+1))
+				summary = append(summary, editOpSummary(op, start, end, len(body), keep-at))
 			}
 		case "MV":
 			// Planned above; executed after the line ops.
@@ -299,6 +408,17 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			"diffSummary":  summary,
 		},
 	}, nil
+}
+
+// editOpSummary renders one applied op's change for the result metadata. The
+// plain replace keeps the "start-end: +n lines -m lines" spelling the
+// transcript and the tests read; an insert anchor says what it did instead,
+// because its deleted window is empty by design.
+func editOpSummary(op editOp, start, end, added, deleted int) string {
+	if op.Anchor != "" {
+		return fmt.Sprintf("%d: +%d lines (insert %s)", start, added, op.Anchor)
+	}
+	return fmt.Sprintf("%d-%d: +%d lines -%d lines", start, end, added, deleted)
 }
 
 // normalizeEditRange resolves {line} / {start,end} shorthands and bounds-checks
