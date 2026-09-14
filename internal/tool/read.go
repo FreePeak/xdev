@@ -115,6 +115,13 @@ func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			return Result{IsError: true, Text: fmt.Sprintf("read: %q looks like an omp line selector, but xdev's read takes offset/limit fields instead — re-read with path=%q plus offset/limit", a.Path, base)}, nil
 		}
 	}
+	// A URI no resolver claims must not fall through to the filesystem:
+	// "file not found: memory://root/nope.md" reads as if that file were
+	// missing, so the model retries the call instead of learning the scheme
+	// is not available in this process. Name the scheme and what IS served.
+	if scheme, unknown := unknownURIScheme(a.Path); unknown {
+		return Result{IsError: true, Text: fmt.Sprintf("read: unknown scheme %q in %q — read serves %s", scheme, a.Path, supportedURISchemes())}, nil
+	}
 	// URI seam: skill:// and memory:// resolve to synthesized text, not
 	// files (omp exposes both through read).
 	if text, matched, uerr := resolveURI(a.Path); matched {
@@ -253,7 +260,7 @@ func (t *ReadTool) windowLines(resolved string, lines []string, offset, limit in
 	}
 	truncated := end < total
 	if truncated {
-		fmt.Fprintf(&b, "\n[Showing lines %d-%d of %d. Use :%d to continue]", start, end, total, end+1)
+		fmt.Fprintf(&b, "\n[Showing lines %d-%d of %d. Use offset=%d to continue]", start, end, total, end+1)
 	}
 	// Success path: the model now holds real line numbers for start..end.
 	window := make(map[int]string, end-start+1)

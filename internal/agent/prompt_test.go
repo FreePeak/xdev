@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"github.com/FreePeak/xdev/internal/tool"
 	"os"
 	"path/filepath"
@@ -73,8 +74,10 @@ func TestBuildSystemPromptCapsRemoteDescriptions(t *testing.T) {
 // either way. Bundled prose must fit by design.
 func TestBundledToolsFitTheCap(t *testing.T) {
 	reg := tool.NewRegistry()
+	wd := t.TempDir()
 	for _, td := range []tool.Tool{
 		tool.NewReadTool(), tool.NewWriteTool(), tool.NewEditTool(), tool.NewBashTool(t.TempDir()),
+		&tool.GrepTool{CWD: wd}, &tool.GlobTool{CWD: wd},
 	} {
 		reg.Register(td)
 	}
@@ -82,6 +85,12 @@ func TestBundledToolsFitTheCap(t *testing.T) {
 		if n := len([]rune(d.Description)); n > MaxToolDescriptionChars {
 			t.Fatalf("core tool %q has a %d-char description (cap %d): it is silently clipped in the prompt",
 				d.Name, n, MaxToolDescriptionChars)
+		}
+		// A malformed parameters schema once aborted every live run at
+		// stream start (json.Marshal fails the whole request); no unit
+		// test touched the raw blobs, so check validity for every tool.
+		if !json.Valid(d.Parameters) {
+			t.Fatalf("core tool %q has invalid parameters JSON: %s", d.Name, d.Parameters)
 		}
 	}
 }

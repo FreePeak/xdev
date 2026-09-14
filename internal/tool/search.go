@@ -158,13 +158,22 @@ func (t *GrepTool) runRG(ctx context.Context, rg, root string, a grepArgs, limit
 	matches := 0
 	for sc.Scan() {
 		matches++
+		if matches > limit {
+			// One match past the cap is how we KNOW the answer is
+			// truncated; the extra line is counted, never rendered.
+			// Stopping AT the cap (the old `matches >= limit`) looked
+			// identical to an exact-limit result, so a capped rg answer
+			// arrived with no note and read as complete.
+			break
+		}
 		if _, werr := sink.Write(append(sc.Bytes(), '\n')); werr != nil {
 			break
 		}
-		if matches >= limit {
-			break // bounded: stop reading and let the deferred cancel kill rg
-		}
 	}
+	// Cancel before waiting: rg can still be blocked writing into a pipe
+	// nobody drains, and cmd.Wait would hang on it. Once the stream hit EOF
+	// the child has already exited, so this changes no exit status.
+	stopRG()
 	readDone := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(readDone) }()
 	<-readDone
@@ -178,7 +187,7 @@ func (t *GrepTool) runRG(ctx context.Context, rg, root string, a grepArgs, limit
 		return Result{}, false
 	}
 	text, _ := sink.Result() // the sink marks its own truncation inline
-	return renderGrep(text, root, t.CWD, limit, "rg"), true
+	return renderGrep(text, t.CWD, limit, matches, "rg"), true
 }
 
 // runGo is the pure-Go fallback: the FS-scan cache for the file list, then
@@ -255,17 +264,15 @@ func (t *GrepTool) runGo(ctx context.Context, root string, a grepArgs, limit int
 
 var errStopScan = fmt.Errorf("grep: stop")
 
-// renderGrep formats rg output, capping the line count. Paths are rewritten
-// relative to cwd so the rg and pure-Go paths return byte-identical
-// answers (rg echoes the search root back as an absolute prefix).
-func renderGrep(out, root, cwd string, limit int, toolName string) Result {
+// renderGrep formats rg output. `matches` is what the stream yielded (one
+// past the limit when more matched), which is the only way a capped answer
+// can say so. Paths are rewritten relative to cwd so the rg and pure-Go
+// paths return byte-identical answers (rg echoes the search root back as an
+// absolute prefix).
+func renderGrep(out, cwd string, limit, matches int, toolName string) Result {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) == 1 && lines[0] == "" {
 		return Result{Text: "no matches"}
-	}
-	truncated := false
-	if len(lines) > limit {
-		lines, truncated = lines[:limit], true
 	}
 	var b strings.Builder
 	for _, ln := range lines {
@@ -273,10 +280,10 @@ func renderGrep(out, root, cwd string, limit int, toolName string) Result {
 		b.WriteByte('\n')
 	}
 	text := strings.TrimRight(b.String(), "\n")
-	if truncated {
+	if matches > limit {
 		text += fmt.Sprintf("\n[showing first %d matches]", limit)
 	}
-	return Result{Text: text, Details: map[string]any{"tool": toolName}}
+	return Result{Text: text, Details: map[string]any{"tool": toolName, "matches": matches}}
 }
 
 // grepLineRe matches ripgrep's `path:line:text` record. The path is
@@ -333,7 +340,8 @@ func (t *GlobTool) Parameters() json.RawMessage {
     "pattern": {"type": "string", "description": "name pattern; ** crosses directories, e.g. **/*_test.go"},
     "path": {"type": "string", "description": "directory to search (default: cwd). omp spelling: when pattern is absent, path IS the glob and the root falls back to cwd"},
     "max_results": {"type": "integer", "description": "cap on returned paths"},
-    "limit": {"type": "integer", "description": "omp spelling of max_results"}
+    "limit": {"type": "integer", "description": "omp spelling of max_results"},
+    "hidden": {"type": "boolean", "description": "include dotfiles and dot-directories (default false)"}
   },
   "required": ["pattern"]
 }`)
@@ -344,7 +352,8 @@ type globArgs struct {
 	Path       string `json:"path"`
 	MaxResults int    `json:"max_results"`
 	// Limit is omp's name for max_results.
-	Limit int `json:"limit"`
+	Limit  int  `json:"limit"`
+	Hidden bool `json:"hidden"`
 }
 
 func (t *GlobTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
@@ -381,15 +390,38 @@ func (t *GlobTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		root = filepath.Join(t.CWD, root)
 	}
 
+	// An absolute pattern carries its own root (the omp shape:
+	// "/tmp/r/**/*.txt"), so matching it against paths relative to `path`
+	// can never succeed — the answer was always the false "no files
+	// matched". Re-base it onto the wildcard-free directory prefix.
+	if filepath.IsAbs(a.Pattern) {
+		base, rel, ok := splitAbsGlob(a.Pattern)
+		if !ok {
+			// No wildcard: nothing is left to match a scan against, and
+			// guessing the filename is not a glob. Name both fields.
+			dir, name := filepath.Split(filepath.Clean(a.Pattern))
+			if name == "" {
+				name, dir = "**/*", string(filepath.Separator)
+			}
+			return Result{Text: fmt.Sprintf("glob: pattern %q is not a glob (no wildcard); call glob with pattern=%q and path=%q", a.Pattern, name, strings.TrimSuffix(dir, string(filepath.Separator))), IsError: true}, nil
+		}
+		root, a.Pattern = base, rel
+	}
+	// A file as `path` used to answer "no files matched", which reads the
+	// same as an empty directory.
+	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
+		return Result{Text: fmt.Sprintf("glob: path %q is not a directory", root), IsError: true}, nil
+	}
+
 	// Fast path: fd. Debian/Ubuntu ship the package as `fdfind`, so try
 	// both names before falling back to the cached walk.
 	if fd, err := lookPathFD(); err == nil {
-		if res, ok := t.runFD(ctx, fd, root, a.Pattern, limit); ok {
+		if res, ok := t.runFD(ctx, fd, root, a.Pattern, limit, a.Hidden); ok {
 			return res, nil
 		}
 	}
 
-	entries, truncated, _ := SharedFSCache().Scan(fscache.Options{Roots: []string{root}, RespectGitignore: true})
+	entries, truncated, _ := SharedFSCache().Scan(fscache.Options{Roots: []string{root}, RespectGitignore: true, IncludeHidden: a.Hidden})
 	type hit struct {
 		path string
 		mod  int64
@@ -429,8 +461,13 @@ func (t *GlobTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 }
 
 // runFD shells out to fd; ok=false falls back to the cache path.
-func (t *GlobTool) runFD(ctx context.Context, fd, root, pattern string, limit int) (Result, bool) {
+func (t *GlobTool) runFD(ctx context.Context, fd, root, pattern string, limit int, hidden bool) (Result, bool) {
 	argv := []string{"--color=never", "--type", "f", "--max-results", fmt.Sprint(limit)}
+	if hidden {
+		// fd prunes dot-entries unless asked; the cache path's
+		// IncludeHidden must agree or the two paths answer differently.
+		argv = append(argv, "--hidden")
+	}
 	// fd's pattern is a regex over the basename unless -g; use -g for
 	// glob semantics so `**/*.go` behaves like the Go fallback.
 	argv = append(argv, "-g", pattern, root)
@@ -478,6 +515,23 @@ func lookPathFD() (string, error) {
 		return p, nil
 	}
 	return lookPath("fdfind")
+}
+
+// splitAbsGlob re-bases an absolute glob into (scan root, relative
+// pattern): the wildcard-free directory prefix becomes the root and the
+// remainder the pattern. ok=false when the pattern has no wildcard at all.
+func splitAbsGlob(pattern string) (root, rel string, ok bool) {
+	parts := strings.Split(filepath.ToSlash(pattern), "/")
+	i := 0
+	for ; i < len(parts) && !strings.ContainsAny(parts[i], "*?["); i++ {
+	}
+	if i == len(parts) {
+		return "", "", false
+	}
+	if root = strings.Join(parts[:i], "/"); root == "" {
+		root = "/" // "/*.txt": the prefix is the volume root itself
+	}
+	return root, strings.Join(parts[i:], "/"), true
 }
 
 // matchGlob matches a slash path against a glob supporting `**`. The

@@ -140,7 +140,7 @@ func TestCatalogCallRunsThroughRunner(t *testing.T) {
 	// A tool that is not deferred is not bridgeable: tool_call is not a
 	// second door around the eager list.
 	res := cat.Call(context.Background(), "read", nil)
-	if !res.IsError || !strings.Contains(res.Text, "unknown tool") {
+	if !res.IsError || !strings.Contains(res.Text, "not a deferred tool") {
 		t.Fatalf("non-deferred name must refuse: %+v", res)
 	}
 	want := []string{`ast_grep {"q":"x"}`, `ast_grep {"q":"y"}`}

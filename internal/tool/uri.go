@@ -52,6 +52,40 @@ func resolveURI(uri string) (string, bool, error) {
 	return text, true, nil
 }
 
+// unknownURIScheme reports whether uri carries a scheme:// prefix that no
+// resolver claims. That case used to be indistinguishable from a plain
+// path, so read stat'ed it and answered "file not found: memory://..." for
+// a URI that was never a file — the write side already refuses to guess
+// (see WriteURI), and a read should not silently reinterpret it either.
+func unknownURIScheme(uri string) (scheme string, unknown bool) {
+	i := strings.Index(uri, "://")
+	if i <= 0 {
+		return "", false
+	}
+	scheme = strings.ToLower(uri[:i])
+	uriMu.RLock()
+	_, ok := uriResolvers[scheme]
+	uriMu.RUnlock()
+	return scheme, !ok
+}
+
+// supportedURISchemes renders the schemes this process resolves, for the
+// error an unknown scheme earns (writeDeviceNames does the same job for
+// write-devices).
+func supportedURISchemes() string {
+	uriMu.RLock()
+	names := make([]string, 0, len(uriResolvers))
+	for s := range uriResolvers {
+		names = append(names, s+"://")
+	}
+	uriMu.RUnlock()
+	if len(names) == 0 {
+		return "filesystem paths"
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ") + " and filesystem paths"
+}
+
 // URIWriter finalizes a write-device: content is the write payload, the
 // returned text is what the write tool reports back. Write-devices are
 // the omp xd:// transport — e.g. write xd://resolve "<reason>" finalizes
