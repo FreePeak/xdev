@@ -124,7 +124,7 @@ type GoalOps struct {
 }
 
 // Dispatch runs one /goal subcommand and returns the block to display. With
-// no argument (or a view verb) it shows the current goal; an unknown verb is
+// no argument (or any read verb) it shows the current goal; an unknown verb is
 // a usage error naming the grammar, because silently viewing made
 // `/goal create …` look like a dead command.
 func (o *GoalOps) Dispatch(args string) (string, error) {
@@ -136,8 +136,12 @@ func (o *GoalOps) Dispatch(args string) (string, error) {
 	if i := strings.IndexFunc(trimmed, func(r rune) bool { return r == ' ' || r == '\t' }); i >= 0 {
 		verb, rest = trimmed[:i], strings.TrimSpace(trimmed[i+1:])
 	}
+	// Read intent: every synonym for "show me the goal" routes to view. The
+	// command used to reject `check` / `show` outright while its help named no
+	// verb at all, so a user asking after the goal had only invented words to
+	// try (same class as `/theme list`).
 	switch verb {
-	case "", "view", "get", "status":
+	case "", "view", "get", "status", "show", "check", "list", "info":
 		return o.View(), nil
 	case "create":
 		if o.Create == nil {
@@ -400,7 +404,7 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit)",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
-		{Name: "goal", Description: "show the active goal and its token budget",
+		{Name: "goal", Description: "session objective + token budget: /goal view|create <objective>|resume|evidence <note>|complete [notes]|drop",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
 		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},

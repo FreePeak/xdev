@@ -716,3 +716,39 @@ func TestSkillSuggestionsListDiscoveredSkills(t *testing.T) {
 		t.Fatalf("row = %+v", rows[0])
 	}
 }
+
+// The router resolves a command by the first name/alias match, so a
+// duplicated entry silently shadows the one after it (an edit that replaced
+// the wrong row deleted /hub while every other test stayed green). Names and
+// aliases must therefore be unique, and every row must be dispatchable and
+// describable — /help and the "/" dropdown print the description verbatim.
+func commandRegistryProblems(cmds []Command) []string {
+	var problems []string
+	seen := map[string]string{}
+	for _, c := range cmds {
+		if c.Fn == nil {
+			problems = append(problems, "/"+c.Name+" has no handler")
+		}
+		if c.Description == "" {
+			problems = append(problems, "/"+c.Name+" has no description")
+		}
+		for _, n := range append([]string{c.Name}, c.Aliases...) {
+			if prev, dup := seen[n]; dup {
+				problems = append(problems, fmt.Sprintf("/%s claimed by %q and %q", n, prev, c.Name))
+			}
+			seen[n] = c.Name
+		}
+	}
+	return problems
+}
+
+func TestBuiltinCommandsAreUnique(t *testing.T) {
+	if problems := commandRegistryProblems(builtinCommands()); len(problems) > 0 {
+		t.Fatalf("command registry: %v", problems)
+	}
+	// Negative control: the check must actually see a shadowing duplicate.
+	dup := append(builtinCommands(), Command{Name: "hub", Description: "shadow"})
+	if problems := commandRegistryProblems(dup); len(problems) == 0 {
+		t.Fatal("a duplicated /hub must be reported")
+	}
+}

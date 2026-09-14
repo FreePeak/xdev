@@ -34,6 +34,14 @@ func TestGoalDispatchVerbs(t *testing.T) {
 	if _, err := ops.Dispatch("drop"); err != nil || dropped != "yes" {
 		t.Fatalf("drop must reach the op: %v", err)
 	}
+	// Read intent: every synonym for "show me the goal" views instead of
+	// erroring. `/goal check` used to be an unknown-verb error while no help
+	// surface named the read verb, so the only words to try were invented ones.
+	for _, verb := range []string{"check", "show", "status", "get", "list", "info", "view"} {
+		if got, err := ops.Dispatch(verb); err != nil || got != "goal: active" {
+			t.Fatalf("%q must view: %q %v", verb, got, err)
+		}
+	}
 	// An unknown verb is a usage error, not a silent view.
 	if _, err := ops.Dispatch("frobnicate x"); err == nil || !strings.Contains(err.Error(), "unknown /goal verb") {
 		t.Fatalf("unknown verb must report the grammar, got %v", err)
