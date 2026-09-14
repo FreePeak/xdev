@@ -11,6 +11,15 @@ import (
 // the primary button, release copies the covered text to the clipboard.
 // Works because the screen already runs with mouse capture enabled
 // (EnableMouse in cmd/xdev/tui.go), so button events reach the app.
+//
+// Shift is the native-selection escape hatch: omp documents it
+// ("native text selection becomes Shift+drag") and so does every
+// terminal that implements mouse reporting — while the app holds the
+// mouse, Shift+drag means "the terminal selects and copies, not the
+// app". The SGR reports still reach us with ModShift set, so the app
+// has to decline them: otherwise the release-time app copy clobbers
+// the terminal's native selection copy, and the paste comes out
+// wrong. Same contract as omp and Claude Code.
 
 type selPoint struct{ x, y int }
 
@@ -25,8 +34,22 @@ type selRow struct {
 // handleMouse routes mouse events for selection. Wheel stays with the
 // scroll model; the primary button drives the drag-select lifecycle
 // (press → drag with button held → release on ButtonNone). Caller: UI
-// thread (handleKey).
+// thread (handleKey). Shift-modified events are declined outright —
+// see the file comment: they belong to the terminal's native selection.
 func (a *App) handleMouse(m *tcell.EventMouse) {
+	if m.Modifiers()&tcell.ModShift != 0 {
+		// Decline the gesture, and drop an in-flight one: a plain drag
+		// that picks up Shift mid-stroke gets no release we can act on
+		// (tcell reports it Shift-modified too), so the highlight would
+		// stay stuck on screen while the terminal makes its own
+		// selection on top of ours.
+		if a.selActive {
+			a.selActive = false
+			a.selAnchor, a.selEnd = selPoint{}, selPoint{}
+			a.poke()
+		}
+		return
+	}
 	x, y := m.Position()
 	btn := m.Buttons()
 	switch {
