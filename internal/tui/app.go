@@ -120,6 +120,9 @@ type App struct {
 	selAnchor selPoint
 	selEnd    selPoint
 	selRows   []selRow
+	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
+	// divider — never on row 0, where it overwrote scrolled-to content.
+	scrollHint string
 }
 
 type blockKey struct {
@@ -1662,6 +1665,9 @@ func (a *App) draw() {
 	s := a.scr
 	w, h := a.width, a.height
 	s.Clear()
+	// The indicator is a per-frame fact about the viewport; a frame that draws
+	// no transcript (welcome, /clear) must not keep last frame's hint.
+	a.scrollHint = ""
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -1772,13 +1778,16 @@ func (a *App) draw() {
 	}
 	a.selRows = selRows
 	a.drawSelection()
-	// Scroll indicator (grok-style ▲n ▼n): rows hidden above/below.
+	// Scroll indicator (grok-style ▲n▼n): rows hidden above/below. It rides the
+	// composer's info divider — at y=0 it overwrote whatever content scrolled
+	// to the top row (a long thinking line, or the last prompt) and any
+	// right-aligned timestamp there, so the first line showed a hint glued to
+	// the text that never scrolled away. The divider is chrome: never content.
 	if up, down := a.sm.Indicator(len(rows), vp); up > 0 || down > 0 {
-		hint := fmt.Sprintf("▲ %d ▼ %d", up, down)
-		drawText(s, w-len(hint)-1, 0, hint,
-			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))))
+		a.scrollHint = fmt.Sprintf("▲ %d ▼ %d", up, down)
+	} else {
+		a.scrollHint = ""
 	}
-
 	// The composer's first input row sits below the transcript; the box
 	// occupies composerRows() rows above the shortcuts line.
 	composerTop := h - 1 - cRows
@@ -2123,7 +2132,7 @@ func (a *App) drawComposer(yTop int) {
 		}
 	}
 
-	// Info divider bottom border: ╰─ model · ⠋ ───────────╯
+	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
@@ -2144,6 +2153,22 @@ func (a *App) drawComposer(yTop int) {
 			infoSt = infoSt.Background(a.cellColor(infoBg))
 		}
 		drawText(a.scr, 2, yBottom, info, infoSt)
+	}
+	// The viewport hint (▲n▼n) rides this divider's right end. It used to be
+	// painted on transcript row 0, where it overwrote whatever content had
+	// scrolled to the top: a long thinking line, or the last prompt, looked
+	// like it had gone static in the first line. The divider is chrome, so it
+	// takes the pixels instead; when the divider is too narrow for both, the
+	// hint is dropped rather than eating the model name.
+	if hint := a.scrollHint; hint != "" {
+		hx := w - 3 - width(hint)
+		if hx > 2+width(info) {
+			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+			if hasInfoBg {
+				hintSt = hintSt.Background(a.cellColor(infoBg))
+			}
+			drawText(a.scr, hx, yBottom, hint, hintSt)
+		}
 	}
 	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
