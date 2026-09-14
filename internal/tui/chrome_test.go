@@ -44,8 +44,8 @@ func lastRow(text string) string {
 }
 
 // TestHUDDefaultKeepsTokenCounter pins the shipped layout: with no
-// statusLine.segments the HUD renders exactly the token counters, right
-// aligned, and nothing else.
+// statusLine.segments the HUD renders the session clock and the token
+// counters, right aligned, and nothing else.
 func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
 	app.AddUsage(1200, 340)
@@ -54,6 +54,9 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	text := screenText(scr)
 	if !strings.Contains(text, "↑1.2k │ ↓340") {
 		t.Fatalf("token counter missing:\n%s", text)
+	}
+	if !strings.Contains(text, "0s") {
+		t.Fatalf("session clock missing from the default layout:\n%s", text)
 	}
 	if strings.Contains(text, "ctx ") || strings.Contains(text, "$0.") {
 		t.Fatalf("unconfigured segments must not render:\n%s", text)
@@ -109,6 +112,39 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	}
 	if !strings.Contains(got, "$0.0123") {
 		t.Fatalf("cost segment must survive an unwired context window: %q", got)
+	}
+}
+
+// TestHUDTimeSegment counts total session time: the segment renders the
+// elapsed clock, re-bases on SetSessionStart, and hides when unanchored.
+func TestHUDTimeSegment(t *testing.T) {
+	app, scr := drawnApp(t, 200, 24)
+	app.SetStatusSegments([]string{"time", "tokens"})
+	app.AddUsage(1200, 340)
+
+	// Fresh app: the clock anchors at New (process start), so the first
+	// draw shows a live (sub-minute) session time, not an empty cell.
+	app.draw()
+	row := lastRow(screenText(scr))
+	if !strings.Contains(row, "s │ ↑") {
+		t.Fatalf("session clock missing from the row: %q", row)
+	}
+
+	// A re-based clock (session swap) shows the carried-over span.
+	app.SetSessionStart(time.Now().Add(-2*time.Hour - 5*time.Minute))
+	app.draw()
+	row = lastRow(screenText(scr))
+	if !strings.Contains(row, "2h05m") {
+		t.Fatalf("re-based session clock missing: %q", row)
+	}
+
+	// An unanchored clock hides instead of drawing an empty cell; the
+	// segments that do have data keep rendering.
+	app.SetSessionStart(time.Time{})
+	app.draw()
+	row = lastRow(screenText(scr))
+	if strings.Contains(row, " │ ↑") || !strings.Contains(row, "↑1.2k │ ↓340") {
+		t.Fatalf("unanchored clock must hide, tokens must survive: %q", row)
 	}
 }
 
