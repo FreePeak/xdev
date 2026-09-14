@@ -1356,7 +1356,8 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.clearRenderCache()
 			a.mu.Unlock()
 		}
-		// Mouse wheel scrolls the in-app transcript (tcell would otherwise
+		// Mouse wheel scrolls the in-app transcript (tcell would otherwise let
+		// the host terminal scroll its own pre-launch scrollback).
 		if m, ok := ev.(*tcell.EventMouse); ok {
 			// One press edge, computed here, so every consumer agrees on which
 			// event began the gesture (tcell does not report the motion bit).
