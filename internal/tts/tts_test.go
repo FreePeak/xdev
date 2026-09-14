@@ -488,6 +488,7 @@ func execTool(t *testing.T, tl *Tool, args string) tool.Result {
 
 func TestToolExecuteDryRunReportsChunks(t *testing.T) {
 	tl := NewTool(Settings{Rate: 200})
+	tl.Backend = sayBackend{} // pin the argv spelling: the host runner may resolve spd-say
 	tl.Lookup = func(string) (string, error) { t.Fatal("dry run must not resolve the backend"); return "", nil }
 	res := execTool(t, tl, `{"text":"First. Second.","dry_run":true}`)
 	if res.IsError {
@@ -550,6 +551,7 @@ func TestToolExecuteOverridesSettingsAndSpeaks(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "say.log")
 	bin := stubBinary(t, "say", log)
 	tl := NewTool(Settings{Voice: "Samantha", Rate: 180})
+	tl.Backend = sayBackend{} // the stub binary is named `say`, whatever the host resolves
 	tl.Lookup = func(string) (string, error) { return bin, nil }
 
 	res := execTool(t, tl, `{"text":"Configured voice."}`)
@@ -578,14 +580,24 @@ func TestToolExecuteOverridesSettingsAndSpeaks(t *testing.T) {
 // --- xdev say ---
 
 func TestSayDryRunPrintsPlan(t *testing.T) {
+	// Say resolves the backend from the host (ForGOOS), so the argv spelling is
+	// the host's own; what this pins is the CLI's plan line around it: one line,
+	// `[n/total]` prefix, the configured rate merged in, text after `--`.
+	host, err := ForGOOS("", nil)
+	if err != nil {
+		t.Fatalf("ForGOOS on the host: %v", err)
+	}
+	want := "[1/1] " + strings.Join(append([]string{host.Name()}, host.Args("One. Two.", Request{Rate: 200})...), " ") + "\n"
 	var out, errBuf strings.Builder
 	code := Say([]string{"--dry-run", "One.", "Two."}, &out, &errBuf, Settings{Rate: 200})
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr = %q", code, errBuf.String())
 	}
-	want := "[1/1] say -r 200 -- One. Two.\n"
 	if out.String() != want {
 		t.Fatalf("stdout = %q, want %q", out.String(), want)
+	}
+	if !strings.HasSuffix(out.String(), " -- One. Two.\n") {
+		t.Fatalf("plan must quote the text after the -- separator: %q", out.String())
 	}
 }
 
