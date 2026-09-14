@@ -1,0 +1,53 @@
+---
+name: "Feature request"
+about: "A capability xdev should have"
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [docs/PRD.md](../blob/main/docs/PRD.md) §1 first: several things
+        people ask for are deliberate non-goals (in-process plugins, a JS
+        runtime, built-in permission prompts, tree-sitter, a git library, a
+        marketplace). An issue arguing with a non-goal is welcome — a PR
+        implementing one is not.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem, not the solution
+      description: What are you trying to do that xdev makes hard or impossible? Concrete session, real task.
+      placeholder: |
+        I run xdev inside a container per repo, and …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would want instead
+      description: The behavior from the user's side. Skip the implementation unless you have one working.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today
+      description: Workaround, extension, MCP server, external tool, or "nothing".
+  - type: dropdown
+    id: parity
+    attributes:
+      label: Does omp/pi already do this?
+      description: >
+        xdev is a parity port — if the answer is yes, link the omp doc or issue
+        and the milestone moves up.
+      options:
+        - "Yes — omp/pi has it"
+        - "No — this is new ground"
+        - "Don't know"
+  - type: textarea
+    id: cost
+    attributes:
+      label: Cost you are willing to pay
+      description: >
+        Binary size, RSS, startup latency, and config surface are xdev's scarce
+        resources. Which of them may grow, and by how much?

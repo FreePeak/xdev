@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 96" width="560" height="96" role="img" aria-label="xdev">
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="96">
+      <stop offset="0" stop-color="#17171b"/><stop offset="1" stop-color="#0b0b0d"/>
+    </linearGradient>
+    <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="560" y2="96">
+      <stop offset="0" stop-color="#bb9af7"/><stop offset="1" stop-color="#7aa2f7"/>
+    </linearGradient>  </defs>
+  <rect x="16" y="16" width="64" height="64" rx="14" fill="url(#tile)"/>
+  <rect x="16.5" y="16.5" width="63" height="63" rx="13.5" fill="none" stroke="#2a2a31"/>
+  <rect x="31.75" y="28.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="34.25" y="28.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="36.75" y="28.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="39.25" y="28.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="53.00" y="28.00" width="1.25" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="28.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="56.75" y="28.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="59.25" y="28.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="61.75" y="28.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="36.75" y="33.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="39.25" y="33.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="41.75" y="33.00" width="1.25" height="5.00" fill="url(#mark)"/>
+  <rect x="51.75" y="33.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="33.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="56.75" y="33.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="59.25" y="33.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="39.25" y="38.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="41.75" y="38.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="50.50" y="38.00" width="1.25" height="5.00" fill="url(#mark)"/>
+  <rect x="51.75" y="38.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="38.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="39.25" y="43.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="41.75" y="43.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="44.25" y="43.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="46.75" y="45.50" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="49.25" y="43.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="51.75" y="43.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="43.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="39.25" y="48.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="41.75" y="48.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="44.25" y="48.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="46.75" y="48.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="49.25" y="48.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="51.75" y="48.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="50.50" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="38.00" y="53.00" width="1.25" height="5.00" fill="url(#mark)"/>
+  <rect x="39.25" y="53.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="41.75" y="53.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="49.25" y="53.00" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="51.75" y="53.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="53.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="34.25" y="60.50" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="36.75" y="58.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="39.25" y="58.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="54.25" y="58.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="56.75" y="58.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="59.25" y="60.50" width="2.50" height="2.50" fill="url(#mark)"/>
+  <rect x="31.75" y="63.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="34.25" y="63.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="36.75" y="63.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="56.75" y="63.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="59.25" y="63.00" width="2.50" height="5.00" fill="url(#mark)"/>
+  <rect x="61.75" y="65.50" width="2.50" height="2.50" fill="url(#mark)"/>
+  <text x="98" y="54" font-family="Menlo, monospace" font-size="40" font-weight="bold" letter-spacing="-1" fill="#e6e6e6">xdev</text>
+  <text x="99" y="76" font-family="Menlo, monospace" font-size="13" fill="#9a9aa4">a lightweight coding agent in one static Go binary</text>
+</svg>

@@ -1,4 +1,0 @@
-alpha
-bravo-2
-inserted-after-bravo
-charlie

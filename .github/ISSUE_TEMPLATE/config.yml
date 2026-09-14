@@ -1,0 +1,13 @@
+# Issue-form behavior for FreePeak/xdev.
+blank_issues_enabled: false
+contact_links:
+  - name: Security policy
+    url: https://github.com/FreePeak/xdev/blob/main/SECURITY.md
+    about: >
+      What counts as a vulnerability in a tool that runs arbitrary code by
+      design — and how to report one privately.
+  - name: Scope, architecture and status
+    url: https://github.com/FreePeak/xdev/blob/main/docs/PRD.md
+    about: >
+      The single PRD is the source of truth. Read it before proposing a feature
+      that touches a documented non-goal.
