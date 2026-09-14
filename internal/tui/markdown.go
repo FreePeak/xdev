@@ -149,64 +149,68 @@ func (a *App) renderMarkdown(src string, w int) []line {
 func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 	var runs []cell
 	var buf strings.Builder
-	flush := func(st tcell.Style) {
+	flush := func() {
 		if buf.Len() > 0 {
-			runs = append(runs, cell{text: buf.String(), style: st})
+			runs = append(runs, cell{text: buf.String(), style: ms.body})
 			buf.Reset()
 		}
 	}
-	rest := s
-	for rest != "" {
-		// `code`
-		if after, ok := cutMarker(rest, "`"); ok {
-			content, remainder, ok2 := cutClosing(after, "`")
-			if ok2 {
-				buf.WriteString(beforeOf(rest, "`"))
-				flush(ms.body)
-				runs = append(runs, cell{text: content, style: ms.inlineCode})
-				rest = remainder
-				continue
-			}
+	// The scan is linear in the source: jump to the next marker byte and copy
+	// the plain run in one go. Walking rune-at-a-time with
+	// `rest = string([]rune(rest)[1:])` re-decodes the whole remainder on every
+	// character — O(n²) per line, which measured 100 ms to re-render one
+	// 6000-rune streaming paragraph and is how a long session pins a core.
+	for len(s) > 0 {
+		i := strings.IndexAny(s, "`*[")
+		if i < 0 {
+			buf.WriteString(s)
+			break
 		}
-		// **bold**
-		if after, ok := cutMarker(rest, "**"); ok {
-			content, remainder, ok2 := cutClosing(after, "**")
-			if ok2 {
-				buf.WriteString(beforeOf(rest, "**"))
-				flush(ms.body)
-				runs = append(runs, cell{text: content, style: ms.bold})
-				rest = remainder
-				continue
-			}
-		}
-		// [text](url) — url hidden, text underlined.
-		if after, ok := cutMarker(rest, "["); ok {
-			if text, mid, ok2 := cutClosing(after, "]"); ok2 && strings.HasPrefix(mid, "(") {
-				if _, remainder, ok3 := cutClosing(mid[1:], ")"); ok3 {
-					buf.WriteString(beforeOf(rest, "["))
-					flush(ms.body)
-					runs = append(runs, cell{text: text, style: ms.link})
-					rest = remainder
-					continue
+		buf.WriteString(s[:i])
+		s = s[i:]
+		var (
+			content, rest string
+			st            tcell.Style
+			closed        bool
+		)
+		switch {
+		case strings.HasPrefix(s, "`"):
+			after, _ := cutMarker(s, "`")
+			content, rest, closed = cutClosing(after, "`")
+			st = ms.inlineCode
+		case strings.HasPrefix(s, "**"):
+			after, _ := cutMarker(s, "**")
+			content, rest, closed = cutClosing(after, "**")
+			st = ms.bold
+		case strings.HasPrefix(s, "["):
+			// [text](url): the url is dropped, the text carries the link style.
+			after, _ := cutMarker(s, "[")
+			if text, mid, ok := cutClosing(after, "]"); ok && strings.HasPrefix(mid, "(") {
+				if _, tail, ok2 := cutClosing(mid[1:], ")"); ok2 {
+					content, rest, closed = text, tail, true
+					st = ms.link
 				}
 			}
-		}
-		if after, ok := cutMarker(rest, "*"); ok && !strings.HasPrefix(after, "*") {
-			content, remainder, ok2 := cutClosing(after, "*")
-			if ok2 {
-				buf.WriteString(beforeOf(rest, "*"))
-				flush(ms.body)
-				runs = append(runs, cell{text: content, style: ms.italic})
-				rest = remainder
-				continue
+		case strings.HasPrefix(s, "*"):
+			after, _ := cutMarker(s, "*")
+			if !strings.HasPrefix(after, "*") { // "**" was bold's turn above
+				content, rest, closed = cutClosing(after, "*")
+				st = ms.italic
 			}
 		}
-		// No marker: consume one rune.
-		r := []rune(rest)[0]
-		buf.WriteRune(r)
-		rest = string([]rune(rest)[1:])
+		if !closed {
+			// An unclosed marker is literal text: a lone * in prose must not
+			// swallow the rest of the line. The marker byte is ASCII, so
+			// advancing one byte cannot split a rune.
+			buf.WriteByte(s[0])
+			s = s[1:]
+			continue
+		}
+		flush()
+		runs = append(runs, cell{text: content, style: st})
+		s = rest
 	}
-	flush(ms.body)
+	flush()
 	return runs
 }
 
@@ -279,15 +283,6 @@ func cutMarker(s, marker string) (after string, ok bool) {
 		return s[len(marker):], true
 	}
 	return s, false
-}
-
-// beforeOf returns the part of s before the first occurrence of marker
-// (used with cutMarker results to preserve unmatched text).
-func beforeOf(s, marker string) string {
-	if i := strings.Index(s, marker); i >= 0 {
-		return s[:i]
-	}
-	return ""
 }
 
 // cutClosing splits s at the next occurrence of closer → (content, after-closer, true).
