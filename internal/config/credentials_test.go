@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -172,5 +173,138 @@ func TestRedactNeverLeaksTheSecret(t *testing.T) {
 	res := ResolvedCredential{Value: secret, Source: "env:ONEGW_API_KEY"}
 	if !strings.Contains(res.Redacted(), "env:ONEGW_API_KEY") {
 		t.Fatalf("source missing from display: %q", res.Redacted())
+	}
+}
+
+// ---- #123: the file store is verified at read; a named auth style is exact
+
+// posixSecretGuards skips the two POSIX guarantees windows has no equivalent
+// of: NTFS ACLs decide who reads a file there, so verifySecretFile and the
+// directory mode deliberately defer to them.
+func posixSecretGuards(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX mode bits or link counts on windows; verifySecretFile defers to ACLs")
+	}
+}
+
+func writeCredFile(t *testing.T, body string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(DataDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(CredentialsPath(), []byte(body), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadCredentialsRefusesLooseMode(t *testing.T) {
+	posixSecretGuards(t)
+	t.Setenv("HOME", t.TempDir())
+	writeCredFile(t, `{"onegw":{"kind":"api_key","apiKey":"sk-loose-mode-12345"}}`, 0o644)
+	_, err := LoadCredentials()
+	if err == nil {
+		t.Fatal("a group-readable credential file must be refused, not trusted")
+	}
+	for _, want := range []string{"0644", "chmod 600", CredentialsPath()} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+	// The error names the repair, so doing it works.
+	if err := os.Chmod(CredentialsPath(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := LoadCredentials()
+	if err != nil {
+		t.Fatalf("after the repair the error named: %v", err)
+	}
+	if store["onegw"].APIKey != "sk-loose-mode-12345" {
+		t.Fatalf("store = %+v", store)
+	}
+}
+
+func TestLoadCredentialsRefusesSecondLink(t *testing.T) {
+	posixSecretGuards(t)
+	t.Setenv("HOME", t.TempDir())
+	writeCredFile(t, `{"onegw":{"kind":"api_key","apiKey":"sk-hardlinked-12345"}}`, 0o600)
+	second := filepath.Join(DataDir(), "reachable-elsewhere.json")
+	if err := os.Link(CredentialsPath(), second); err != nil {
+		t.Fatalf("hard link: %v", err)
+	}
+	if _, err := LoadCredentials(); err == nil || !strings.Contains(err.Error(), "hard link") {
+		t.Fatalf("a second path to the same secret must be refused, got %v", err)
+	}
+	if err := os.Remove(second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCredentials(); err != nil {
+		t.Fatalf("after the extra link is gone: %v", err)
+	}
+}
+
+func TestSaveCredentialTightensDataDir(t *testing.T) {
+	posixSecretGuards(t)
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveCredential("onegw", StoredCredential{APIKey: "sk-dir-mode"}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("data dir is %o after a secret write, want 0700 (which providers you are logged into was enumerable)", perm)
+	}
+}
+
+func TestAuthStyleIsAnExactAuthority(t *testing.T) {
+	t.Setenv("X_API_KEY", "sk-from-the-environment")
+	live := CredentialStore{"x": {Kind: "oauth", AccessToken: "tok-live"}}
+	empty := CredentialStore{"x": {Kind: "oauth"}}
+	keyLogin := CredentialStore{"x": {Kind: "api_key", APIKey: "sk-stored-login"}}
+	for _, tc := range []struct {
+		name, auth, wantSource, wantErr string
+		store                           CredentialStore
+	}{
+		{name: "oauth named, only an API key stored", auth: "oauth", store: keyLogin, wantErr: "auth: oauth"},
+		{name: "oauth named, nothing stored", auth: "oauth", store: CredentialStore{}, wantErr: "auth: oauth"},
+		{name: "oauth named, token stored but unusable", auth: "oauth", store: empty, wantErr: "unusable"},
+		{name: "oauth named and live", auth: "oauth", store: live, wantSource: "oauth"},
+		{name: "api_key named, an OAuth token stored", auth: "api_key", store: live, wantErr: "auth: api_key"},
+		{name: "api_key named and stored", auth: "api_key", store: keyLogin, wantSource: "login"},
+		{name: "unspecified keeps the whole chain", auth: "", store: keyLogin, wantSource: "login"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveCredential(CredentialRequest{
+				Provider:    "x",
+				ProviderCfg: &ProviderConfig{Auth: tc.auth},
+				Store:       tc.store,
+			})
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("resolved %q (%s); want the chain to stop", Redact(got.Value), got.Source)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %q, want it to name %q", err, tc.wantErr)
+				}
+				if got.Value != "" {
+					t.Errorf("a stopped chain must hand back no credential, got %q", Redact(got.Value))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveCredential: %v", err)
+			}
+			if got.Source != tc.wantSource {
+				t.Errorf("source = %q, want %q", got.Source, tc.wantSource)
+			}
+		})
 	}
 }
