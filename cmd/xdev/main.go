@@ -63,6 +63,8 @@ var subcommands = map[string]bool{
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
 	"usage": true, "ps": true, "token": true, "completions": true,
 	"worktree": true, "wt": true,
+	// Repository hook trust (#241): the review and the decision.
+	"trust": true, "distrust": true,
 	// `xdev help` prints usage; without this entry the word falls through
 	// to print mode and is sent to the model as a prompt.
 	"help": true,
@@ -104,6 +106,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev join "<link>"           mirror a shared session (collab guest)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
   xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
+  xdev trust|distrust      review and allow (or withhold) a repository's hooks (--list)
   xdev models [query]          resolved model catalog (--refresh re-discovers)
   xdev login | logout          Claude Pro/Max and Codex OAuth (PKCE browser flow)
   xdev lsp-config [list|validate]  language servers, resolved binaries
@@ -605,6 +608,9 @@ func main() {
 		// The script is generated from the root FlagSet parsed above, so
 		// completions stay current with every flag registration.
 		os.Exit(runCompletions(args, fs))
+	}
+	if mode == "trust" || mode == "distrust" {
+		os.Exit(runTrust(mode, args))
 	}
 
 	switch mode {

@@ -34,7 +34,7 @@ func TestEmitSwitchEvents(t *testing.T) {
 // run modes install (settings are empty under test).
 func TestBuildHookBusPlumbsCLI(t *testing.T) {
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
-	b := buildHookBus(t.TempDir(), printOptions{Hooks: []string{"turn_start=exit 0"}})
+	b := buildHookBus(t.TempDir(), printOptions{Hooks: []string{"turn_start=exit 0"}}, nil)
 	if b == nil || len(b.Hooks) != 1 || b.Hooks[0].Source != "cli" {
 		t.Fatalf("bus = %+v", b)
 	}

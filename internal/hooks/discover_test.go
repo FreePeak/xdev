@@ -46,6 +46,7 @@ func TestDiscoverPrecedenceAndShape(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	trustProject(t, cwd)
 	b, warns := Build(Options{CWD: cwd})
 	if len(warns) != 0 {
 		t.Fatalf("warnings = %v", warns)
@@ -126,6 +127,7 @@ func TestMatcherStageTwo(t *testing.T) {
 matcher: "^bash$"
 command: echo '{"input":"rewritten"}'
 `)
+	trustProject(t, cwd)
 	b, warns := Build(Options{CWD: cwd})
 	if len(warns) != 0 {
 		t.Fatalf("warnings = %v", warns)
@@ -158,6 +160,7 @@ func TestIfPrefilterUsesPolicyMatchers(t *testing.T) {
 if: "Bash(git *)"
 command: echo '{"block":true,"reason":"no git"}'
 `)
+	trustProject(t, cwd)
 	b, warns := Build(Options{CWD: cwd})
 	if len(warns) != 0 {
 		t.Fatalf("warnings = %v", warns)
@@ -191,6 +194,7 @@ func TestCLIHookSpecs(t *testing.T) {
 	writeFile(t, filepath.Join(cwd, ".xdev", "hooks", "guard.yml"),
 		"event: tool_call\ncommand: echo guard\n")
 
+	trustProject(t, cwd)
 	b, warns := Build(Options{CWD: cwd, CLI: []string{"turn_start=echo cli", "guard", "nope"}})
 	if len(warns) != 1 || !strings.Contains(warns[0], "no discovered hook") {
 		t.Fatalf("warnings = %v", warns)
@@ -222,5 +226,15 @@ func TestContextHookReplacesSystemPrompt(t *testing.T) {
 	bad := FromSettings(map[string]any{"context": "exit 1"})
 	if got := bad.Context(context.Background(), "orig"); got != "orig" {
 		t.Fatalf("failing hook must keep the prompt, got %q", got)
+	}
+}
+
+// trustProject approves cwd's repository hooks the way `xdev trust` does. The
+// tests here are about discovery, precedence and matching; the gate (#241) is
+// covered by its own tests in trust_test.go.
+func trustProject(t *testing.T, cwd string) {
+	t.Helper()
+	if _, err := TrustWorkspace(cwd); err != nil {
+		t.Fatalf("trust workspace: %v", err)
 	}
 }

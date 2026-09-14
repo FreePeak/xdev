@@ -374,7 +374,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// events /resume does — they used to emit nothing, and a
 		// session_switch hook (archive, notify) silently never ran on them
 		// (parity finding T3 #16).
-		bus := buildHookBus(cwd, opts) // resolved per switch: /settings edits land
+		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
 		if drop && old.Path() != "" {
 			_ = old.Close()
@@ -388,6 +388,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.store = ns
 		wireTaskParent(reg, ns) // children must link to the ACTIVE session
 		app.Reset()
+		app.SetSessionStart(sessionStart(ns))
 		saveBreadcrumb(breadcrumbPath(ns))
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
@@ -401,7 +402,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return fmt.Errorf("vibe mode is active — /vibe off first")
 		}
 		old := store
-		bus := buildHookBus(cwd, opts) // resolved per switch: /settings edits land
+		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
 		store = ns
 		ts.store = ns
@@ -413,6 +414,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			vibeScope.Restore(workers, on)
 		}
 		app.Reset()
+		app.SetSessionStart(sessionStart(ns))
 		saveBreadcrumb(breadcrumbPath(ns))
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
@@ -1480,7 +1482,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// target until the next submit replaces it.
 				// Hook bus per submit: --hook specs, settings `hooks`, discovered
 				// files. Extensions compose into the same fail-closed chain.
-				hookBus := buildHookBus(cwd, opts)
+				hookBus := buildHookBus(cwd, opts, app.AddSystemBlock)
 				agentMu.Lock()
 				curAgent = ag
 				if c := agent.NewChain(hookBus, exts); c != nil {
@@ -1676,6 +1678,24 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	case ai.EventError:
 		h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error())
 	}
+}
+
+// sessionStart anchors the HUD time segment for a store being adopted
+// mid-run: the span already on disk (header → newest entry) carries over,
+// so the segment shows total session time across resumes. A fresh or
+// empty store starts the clock now.
+func sessionStart(st *session.Store) time.Time {
+	now := time.Now()
+	first := st.StartedAt()
+	es := st.Entries()
+	if first.IsZero() || len(es) == 0 {
+		return now
+	}
+	span := es[len(es)-1].Envelope().Timestamp.Sub(first)
+	if span <= 0 {
+		return now
+	}
+	return now.Add(-span)
 }
 
 // shortSessionID renders the first 8 chars of a session id (matches the TUI

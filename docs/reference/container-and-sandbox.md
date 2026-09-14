@@ -175,11 +175,26 @@ default. And on a provider named by both files, the **profile's entry wins
 outright** — the project layer is applied first precisely so it cannot be the
 last word.
 
-### What a repository still reaches without a decision
+### What a repository can still make xdev run
 
-`.xdev/hooks/` is loaded and executed per event with no trust decision yet —
-the known remaining hole, tracked as #241 with the proposed `xdev trust` gate.
-Until that lands, the containment answer for an unfamiliar checkout is the rest
-of this page: run it in a container (§1–§3) or a host sandbox (§4–§5).
+`.xdev/hooks/` is the one root where a clone's file is *executed*, so it needs a
+decision rather than a policy: a hook's file name is its event, and
+`agent_start.sh` fires with your environment before your first prompt. xdev
+withholds those hooks until you review them (#241):
+
+```console
+$ xdev trust --list     # read what this repository wants to run, and when
+$ xdev trust            # record the decision for this workspace
+$ xdev distrust         # take it back
+```
+
+The record lives in your profile (`<dataDir>/trusted-workspaces.yml`, `0600`),
+never in the repository — a decision stored inside the thing it constrains is
+not a constraint — and it holds a digest per hook, so editing an approved script
+re-asks instead of inheriting the earlier yes. A headless run never blocks on
+the question: it withholds, says so, and names the repair. Hooks you installed
+yourself (`<dataDir>/hooks`), `--hook` specs, settings-declared hooks, trusted
+extensions and installed plugins are unaffected.
+
 Repository `.xdev/commands`, `.xdev/agents` and `.xdev/skills` are read the way
 `AGENTS.md` is: their text enters the model context, which is #81's territory.

@@ -130,6 +130,7 @@ func parseHookFile(path, source string) (Hook, error) {
 			Matcher: strings.TrimSpace(f.Matcher),
 			If:      strings.TrimSpace(f.If),
 			Source:  source,
+			Path:    path,
 		}
 		if h.Name == "" {
 			h.Name = stem
@@ -148,7 +149,7 @@ func parseHookFile(path, source string) (Hook, error) {
 		if st, err := os.Stat(path); err != nil || st.Mode().Perm()&0o111 == 0 {
 			return Hook{}, fmt.Errorf("script is not executable")
 		}
-		return Hook{Name: stem, Event: stem, Command: shellQuote(path), Source: source}, nil
+		return Hook{Name: stem, Event: stem, Command: shellQuote(path), Source: source, Path: path}, nil
 	default:
 		return Hook{}, fmt.Errorf("unsupported hook file %s (want .yml/.yaml/.json/.sh)", ext)
 	}
