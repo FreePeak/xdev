@@ -3,9 +3,11 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -338,7 +340,7 @@ func TestBashRunInBackgroundReturnsJob(t *testing.T) {
 func TestBashJobsBoundedEviction(t *testing.T) {
 	jobs := NewBashJobs()
 	for i := range bashJobsCap + 3 {
-		jobs.add(fmt.Sprintf("job %d", i), "", "")
+		jobs.add(fmt.Sprintf("job %d", i), "", "", 0, nil)
 	}
 	if jobs.Len() != bashJobsCap {
 		t.Fatalf("registry cap: len=%d, want %d", jobs.Len(), bashJobsCap)
@@ -349,5 +351,206 @@ func TestBashJobsBoundedEviction(t *testing.T) {
 	}
 	if !strings.Contains(jobs.Render(), "Background bash jobs") {
 		t.Fatalf("render missing header: %q", jobs.Render())
+	}
+}
+
+// TestBashEvictionKeepsRunningHandles pins which entry a full registry may
+// drop: a finished job's id is a record, a running job's id is the only way to
+// stop it (#127), so the running one must survive.
+func TestBashEvictionKeepsRunningHandles(t *testing.T) {
+	jobs := NewBashJobs()
+	running, _ := jobs.add("sleep forever", "", "", 4242, nil)
+	for i := range bashJobsCap + 1 {
+		j, _ := jobs.add(fmt.Sprintf("done %d", i), "", "", 0, nil)
+		j.finish(0, false)
+	}
+	if _, ok := jobs.Get(running.ID); !ok {
+		t.Fatal("a running job lost its handle while finished ones held slots")
+	}
+	list := jobs.List()
+	if list[0].ID != running.ID {
+		t.Fatalf("the surviving running job must be first, got #%d", list[0].ID)
+	}
+	if running.Done() {
+		t.Fatal("the survivor must still be running")
+	}
+}
+
+// waitFor polls a condition through the tool surface itself, so the test reads
+// the job the way a later turn would.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func (b *BashTool) call(t *testing.T, ctx context.Context, fields map[string]any) (Result, error) {
+	t.Helper()
+	return b.Execute(ctx, args(t, fields))
+}
+
+// TestBashJobControlAcrossCalls is #127's acceptance, through the model-facing
+// tool surface and not the TUI: start a detached job that waits for input, then
+// in later calls observe it, answer its prompt, read the reply, and stop it.
+func TestBashJobControlAcrossCalls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell loop and signals")
+	}
+	bt := NewBashTool(t.TempDir())
+	bt.Jobs = NewBashJobs()
+	ctx := context.Background()
+
+	res, err := bt.call(t, ctx, map[string]any{
+		"command":           "printf ready\\n; while IFS= read -r l; do printf \"got:%s\\n\" \"$l\"; done",
+		"run_in_background": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := res.Details.(*bashDetails)
+	id := d.JobID
+
+	// status with no job lists; status with the job reports the facts a later
+	// turn needs: state, pid, and whether its input is reachable.
+	live, err := bt.call(t, ctx, map[string]any{"action": "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(live.Text, fmt.Sprintf("#%d", id)) || !strings.Contains(live.Text, "Background bash jobs (1)") {
+		t.Fatalf("status listing = %q", live.Text)
+	}
+	one, err := bt.call(t, ctx, map[string]any{"action": "status", "job": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(one.Text, "pid "+fmt.Sprint(d.PID)) || !strings.Contains(one.Text, "stdin: writable") {
+		t.Fatalf("status(#%d) = %q", id, one.Text)
+	}
+	waitFor(t, "the job's own ready line", func() bool {
+		r, err := bt.call(t, ctx, map[string]any{"action": "logs", "job": id})
+		return err == nil && strings.Contains(r.Text, "ready")
+	})
+
+	// write: exact bytes to a detached stdin — the thing that makes a REPL or a
+	// y/N prompt reachable at all.
+	wr, err := bt.call(t, ctx, map[string]any{"action": "write", "job": id, "input": "hello\n"})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(wr.Text, "Sent 6 byte(s)") {
+		t.Fatalf("write = %q", wr.Text)
+	}
+	waitFor(t, "the job to answer on stdin", func() bool {
+		r, err := bt.call(t, ctx, map[string]any{"action": "logs", "job": id})
+		return err == nil && strings.Contains(r.Text, "got:hello")
+	})
+
+	// stop: the process group is gone, and the reply says which state it ended
+	// in rather than claiming success unconditionally.
+	st, err := bt.call(t, ctx, map[string]any{"action": "stop", "job": id})
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !strings.Contains(st.Text, "Stopped background job") || !strings.Contains(st.Text, "now signal") {
+		t.Fatalf("stop = %q", st.Text)
+	}
+	job, ok := bt.Jobs.Get(id)
+	if !ok || !job.Done() {
+		t.Fatalf("job #%d must be reaped after stop (ok=%v)", id, ok)
+	}
+	// A stopped job stays addressable (its exit is the answer to a later
+	// question), but its input is closed.
+	after, err := bt.call(t, ctx, map[string]any{"action": "write", "job": id, "input": "more\n"})
+	if err == nil {
+		t.Fatalf("writing a finished job must fail, got %q", after.Text)
+	}
+	if !strings.Contains(err.Error(), "already finished") {
+		t.Fatalf("err = %v", err)
+	}
+	// Stopping it twice is not an error worth a model turn: it is already true.
+	if _, err := bt.call(t, ctx, map[string]any{"action": "stop", "job": id}); err != nil {
+		t.Fatalf("re-stop: %v", err)
+	}
+}
+
+// TestBashJobControlRefusesUnknownIds is the loop-level assertion #127 asks
+// for: an id the registry does not hold is refused at the seam, so a model can
+// never read "stopped" about a process it never touched.
+func TestBashJobControlRefusesUnknownIds(t *testing.T) {
+	bt := NewBashTool(t.TempDir())
+	bt.Jobs = NewBashJobs()
+	ctx := context.Background()
+	for _, verb := range []string{"logs", "stop", "write"} {
+		fields := map[string]any{"action": verb, "job": int64(4242)}
+		if verb == "write" {
+			fields["input"] = "x\n"
+		}
+		_, err := bt.call(t, ctx, fields)
+		if err == nil || !errors.Is(err, ErrUnknownJob) {
+			t.Errorf("action=%s unknown id: err = %v, want ErrUnknownJob", verb, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "4242") {
+			t.Errorf("action=%s must name the refused id: %v", verb, err)
+		}
+	}
+	// A control verb with no job id says how to find one; an unknown verb and a
+	// command+action collision are errors, not silent no-ops.
+	if _, err := bt.call(t, ctx, map[string]any{"action": "stop"}); err == nil || !strings.Contains(err.Error(), "action=status lists") {
+		t.Errorf("missing job: err = %v", err)
+	}
+	if _, err := bt.call(t, ctx, map[string]any{"action": "destroy", "job": int64(1)}); err == nil || !strings.Contains(err.Error(), `unknown action "destroy"`) {
+		t.Errorf("unknown verb: err = %v", err)
+	}
+	if _, err := bt.call(t, ctx, map[string]any{"action": "status", "command": "echo x"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("action+command: err = %v", err)
+	}
+	if _, err := bt.call(t, ctx, map[string]any{"action": "write", "job": int64(1)}); err == nil || !strings.Contains(err.Error(), "needs input") {
+		t.Errorf("write with no input: err = %v", err)
+	}
+	// A plain call still needs a command, and the message names the verbs.
+	if _, err := bt.call(t, ctx, map[string]any{"command": "  "}); err == nil || !strings.Contains(err.Error(), "action=status|logs|stop|write") {
+		t.Errorf("empty command: err = %v", err)
+	}
+}
+
+// TestBashHandedOffJobReportsNoInput: a job the timeout handed to the registry
+// can be stopped and read, but its stdin was the pipeline's and is gone — the
+// write verb must say that instead of blocking on a pipe nobody answers.
+func TestBashHandedOffJobReportsNoInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX sleep and signals")
+	}
+	bt := NewBashTool(t.TempDir())
+	bt.Jobs = NewBashJobs()
+	ctx := context.Background()
+	res, err := bt.call(t, ctx, map[string]any{"command": "sleep 30", "timeout": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := res.Details.(*bashDetails)
+	if !d.Backgrounded {
+		t.Fatalf("the timed-out run must hand off: %+v", d)
+	}
+	if !strings.Contains(res.Text, "action=stop") {
+		t.Fatalf("the handoff notice must name the control: %q", res.Text)
+	}
+	status, err := bt.call(t, ctx, map[string]any{"action": "status", "job": d.JobID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status.Text, "not writable") {
+		t.Fatalf("status = %q", status.Text)
+	}
+	if _, err := bt.call(t, ctx, map[string]any{"action": "write", "job": d.JobID, "input": "y\n"}); err == nil || !strings.Contains(err.Error(), "foreground timeout") {
+		t.Fatalf("write on a handoff: err = %v", err)
+	}
+	if _, err := bt.call(t, ctx, map[string]any{"action": "stop", "job": d.JobID}); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 }
