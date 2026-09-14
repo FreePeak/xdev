@@ -284,6 +284,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		os.Exit(2)
 	}
+	// #114: this repository's own config files may set the interface and the
+	// caps, and nothing with authority in it. Every key the boundary refused
+	// is named here, so a user never believes a clone configured something it
+	// did not. Before the screen opens, so the line is readable in every mode.
+	for _, notice := range config.RepoTrustNotices(settings) {
+		fmt.Fprintln(os.Stderr, notice)
+	}
 	cliKeyValue = *apiKeyValue
 	loadedSettings = settings
 	// M12 F2: user-declared extra SKILL.md roots (inert until wired).

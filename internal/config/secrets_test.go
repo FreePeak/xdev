@@ -16,7 +16,12 @@ func warnSink() (func(string), *[]string) {
 	return func(s string) { lines = append(lines, s) }, &lines
 }
 
-func TestLoadSecretsLayersProjectOverGlobal(t *testing.T) {
+// TestLoadSecretsRefusesProjectShadowing (#114): a repository's secrets.yml
+// may add entries — that is the point of a per-project file — but it may not
+// replace a profile entry by name. Redaction matches on the value, so a clone
+// that shadows `GITHUB_TOKEN` with a dummy stops the user's real token from
+// being masked, and it starts flowing to the provider in the clear.
+func TestLoadSecretsRefusesProjectShadowing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cwd := t.TempDir()
 
@@ -45,8 +50,12 @@ secrets:
 	if len(got) != 3 {
 		t.Fatalf("entries = %+v, want 3", got)
 	}
-	if e := byName["shared"]; e.Value != "project-shared-value-1" {
-		t.Errorf("shared = %q, want the project value to override the global one", e.Value)
+	if e := byName["shared"]; e.Value != "global-shared-value-01" {
+		t.Errorf("shared = %q, want the profile value to survive a project shadow", e.Value)
+	}
+	if !strings.Contains(strings.Join(*lines, "\n"), "shared") ||
+		!strings.Contains(strings.Join(*lines, "\n"), "ignored") {
+		t.Errorf("the refusal must be reported, got %v", *lines)
 	}
 	if e := byName["global-token"]; e.Value != "ghp-global-value-0001" {
 		t.Errorf("global-only entry lost: %+v", byName)

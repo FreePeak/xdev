@@ -488,6 +488,10 @@ type Settings struct {
 	// (screenshot, pointer, keyboard) is opt-in, because synthetic input
 	// is a real-world side effect.
 	Computer ComputerSettings `yaml:"computer"`
+	// ignoredProject names the keys a repository's .xdev/config.yml tried to
+	// set that this layer refused (#114). It is not part of the schema: it
+	// never decodes and never marshals, only the startup notice reads it.
+	ignoredProject []string
 }
 
 // TTSSettings is the `tts` group. It is the engine's own Settings type,
@@ -971,54 +975,96 @@ func (s *Settings) ComputerTimeout() time.Duration {
 // GlobalSettingsPath is ~/.xdev/agent/config.yml.
 func GlobalSettingsPath() string { return filepath.Join(DataDir(), "config.yml") }
 
-// projectSettingsPath is <cwd>/.xdev/config.yml.
+// projectSettingsPath is the repository's own .xdev/config.yml under cwd.
 func projectSettingsPath(cwd string) string {
-	return filepath.Join(cwd, ".xdev", "config.yml")
+	return filepath.Join(cwd, projectSettingsName)
 }
 
-// LoadSettings layers defaults ← global ← project ← overlays.
+// IgnoredProjectKeys returns the keys <cwd>/.xdev/config.yml named that the
+// repo-trust boundary refused (#114). Empty means the repository configured
+// nothing it was not entitled to; the startup notice prints these so a drop
+// is never silent.
+func (s *Settings) IgnoredProjectKeys() []string {
+	if s == nil {
+		return nil
+	}
+	return s.ignoredProject
+}
+
+// RepoTrustNotice is the startup line naming what this repository's
+// .xdev/config.yml asked for and the boundary refused (#114). It prints
+// nothing when the repository asked for nothing it was not entitled to —
+// silence here means no key was dropped on the user's behalf.
+func (s *Settings) RepoTrustNotice() string {
+	if s == nil {
+		return ""
+	}
+	return ignoredKeyNotice(projectSettingsName, s.ignoredProject)
+}
+
+// configLayer is one settings file plus who to trust in it.
+type configLayer struct {
+	path    string
+	trusted bool
+}
+
+// LoadSettings layers defaults ← global ← project ← overlays. The project
+// layer is a stranger's: it ships inside the repository, so it is pruned to
+// repoSafeSettingsKeys before it merges (see reposafe.go, #114). An -config
+// overlay stays trusted — the user named that path on the command line.
 func LoadSettings(cwd string, overlays []string) (*Settings, error) {
 	s := defaultSettings()
-	paths := []string{GlobalSettingsPath(), projectSettingsPath(cwd)}
-	paths = append(paths, overlays...)
-	for _, p := range paths {
-		layer, err := readSettingsFile(p)
+	layers := []configLayer{
+		{GlobalSettingsPath(), true},
+		{projectSettingsPath(cwd), false},
+	}
+	for _, o := range overlays {
+		layers = append(layers, configLayer{o, true})
+	}
+	var ignored []string
+	for _, l := range layers {
+		layer, dropped, err := readSettingsFile(l.path, l.trusted)
 		if err != nil {
 			return nil, err
 		}
+		ignored = append(ignored, dropped...)
 		if layer == nil {
 			continue // absent file contributes nothing
 		}
 		if err := s.merge(layer); err != nil {
-			return nil, fmt.Errorf("config: %s: %w", p, err)
+			return nil, fmt.Errorf("config: %s: %w", l.path, err)
 		}
 	}
+	s.ignoredProject = ignored
 	return s, nil
 }
 
-// readSettingsFile decodes one layer; (nil, nil) when the file is absent.
-func readSettingsFile(path string) (*Settings, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+// readSettingsFile decodes one layer; (nil, nil, nil) when the file is
+// absent. An untrusted layer is pruned to the repo-safe key set first, and
+// the names it lost come back for the notice.
+func readSettingsFile(path string, trusted bool) (*Settings, []string, error) {
+	raw, ok, err := readYAMLLayer(path)
+	if err != nil || !ok {
+		return nil, nil, err
 	}
 	var s Settings
-	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
-	dec.KnownFields(true) // a typo'd key must be reported, not dropped
-	if err := dec.Decode(&s); err != nil {
+	var ignored []string
+	if trusted {
+		err = parseYAMLLayer(raw, &s)
+	} else {
+		ignored, err = pruneTo(raw, &s, pruneProjectSettings)
+	}
+	if err != nil {
 		// Persistent user config that will not parse is data loss waiting
 		// to happen: keep the bytes, then fail.
 		backup := filepath.Join(filepath.Dir(path),
 			fmt.Sprintf(".broken-%s-%s", timestampForBackup(), filepath.Base(path)))
 		if rerr := os.Rename(path, backup); rerr == nil {
-			return nil, fmt.Errorf("config: %s: %w (preserved as %s)", path, err, backup)
+			return nil, nil, fmt.Errorf("config: %s: %w (preserved as %s)", path, err, backup)
 		}
-		return nil, fmt.Errorf("config: %s: %w", path, err)
+		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
-	return &s, nil
+	return &s, ignored, nil
 }
 
 // merge applies a later layer over the receiver: maps deep-merge per key,

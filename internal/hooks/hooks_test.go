@@ -8,6 +8,7 @@ import (
 )
 
 func TestFromSettingsShapes(t *testing.T) {
+	isolated(t) // the emptiness assertions below hold only without a real ~/.xdev
 	if b := FromSettings(nil); b != nil {
 		t.Fatal("nil settings must give nil bus")
 	}
