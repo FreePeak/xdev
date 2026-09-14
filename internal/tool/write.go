@@ -78,6 +78,9 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("write: %v", err)}, nil
 	}
+	if err := CheckProtectedPath(a.Path, resolved); err != nil {
+		return Result{IsError: true, Text: "write: " + err.Error()}, nil
+	}
 	if st, err := os.Stat(resolved); err == nil && st.IsDir() {
 		return Result{IsError: true, Text: fmt.Sprintf("write: %s is a directory", a.Path)}, nil
 	}
