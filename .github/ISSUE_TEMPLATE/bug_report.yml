@@ -1,0 +1,82 @@
+---
+name: "Bug report"
+about: "Something xdev does is wrong, crashes, hangs, or misrenders"
+title: "fix: "
+labels: ["bug", "needs-repro"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        xdev runs commands and edits files by design — see
+        [SECURITY.md](../blob/main/SECURITY.md) before reporting anything you
+        think is a vulnerability, and use the private channel for it.
+  - type: input
+    id: version
+    attributes:
+      label: xdev version
+      description: "`xdev version` (a `-dev` suffix means a local build, say which commit)"
+      placeholder: "xdev 0.1.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where did it happen?
+      options:
+        - TUI
+        - print / headless (-p)
+        - RPC mode
+        - agent loop / tools
+        - provider or streaming
+        - session persistence (JSONL, resume, fork, tree)
+        - config / models.yml / auth
+        - update or install (xdev update, scripts/install.sh)
+        - MCP or extensions
+        - build / packaging
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, arch, terminal, and `$TERM` if the TUI is involved
+      placeholder: "macOS 25.6 arm64, ghostty, TERM=xterm-256color"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: What happened
+      description: |
+        The smallest sequence that reproduces it. Paste the transcript or the
+        session file's relevant entries where you can — sessions are append-only
+        JSONL, so a redacted excerpt is usually the fastest possible report.
+      placeholder: |
+        1. `xdev -model onegw/free "…"`
+        2. scroll up with the mouse
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Why the observed behavior is wrong (a link to the PRD or a doc helps).
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Output / logs
+      render: shell
+      description: Exact text. Truncate secrets — never paste an API key, even redacted-looking ones.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I am on the newest release (or I said which commit I built)
+          required: true
+        - label: I searched existing issues, including the milestone labels
+          required: true
