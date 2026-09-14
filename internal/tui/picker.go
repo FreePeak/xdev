@@ -226,6 +226,12 @@ func (p *picker) window(rows int) (lines []pickerLine, start, selLine int) {
 // footer renders the status/hint line: the filter (or the item count) on
 // the left, the key hints on the right.
 func (p *picker) footer() (left, right string) {
+	if len(p.match) == 0 {
+		if p.query != "" {
+			return "/" + p.query + " · no rows match", "Backspace edits search · esc cancel"
+		}
+		return "no rows match", "esc cancel"
+	}
 	pos := strconv.Itoa(p.sel+1) + "/" + strconv.Itoa(len(p.match))
 	if p.query != "" {
 		left = "/" + p.query + "  " + pos
@@ -234,7 +240,11 @@ func (p *picker) footer() (left, right string) {
 	}
 	hints := []string{"↑↓ move"}
 	if p.viewCount() > 1 {
-		if v := p.active(); v != nil {
+		// Tab advances, so the hint must name the view it moves TO. Naming
+		// the active one read as "⇥ Roles" while Roles was already showing —
+		// the key looked broken. switchView wraps, so mirror its arithmetic.
+		n := p.viewCount()
+		if v := p.opts.Views[((p.view+1)%n+n)%n]; v.Name != "" {
 			hints = append(hints, "⇥ "+v.Name)
 		}
 	}

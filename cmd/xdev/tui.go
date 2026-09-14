@@ -291,11 +291,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	// --max-time bounds the session: every turn shares baseCtx, so the
-	// deadline (and Esc, below) releases the same tree.
+	// deadline releases the whole tree. Esc must NOT: baseCancel kills every
+	// future turn too (see liveTurn).
 	baseCtx, baseCancel := withMaxTime(context.Background(), launch.MaxTime)
 	defer baseCancel()
 
 	var running atomic.Bool
+
+	// turn publishes the in-flight turn's cancel to the abort paths (Esc,
+	// Ctrl+C, a full-link guest's interrupt).
+	var turn liveTurn
 	// Serializes conversation accumulation across turns (one run at a time;
 	// guarded for the UI thread that reads nothing here).
 	var sessMu sync.Mutex
@@ -1228,10 +1233,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// streaming deltas, ui-request, bus, and agents frames have working
 	// protocol support but no producers wired yet.
 	var (
-		collabMu         sync.Mutex
-		collabHost       *collab.Host
-		collabGuest      *collab.Guest
-		collabTurnCancel context.CancelFunc
+		collabMu    sync.Mutex
+		collabHost  *collab.Host
+		collabGuest *collab.Guest
 	)
 	tui.Collab = &tui.CollabOps{
 		Start: func(mode tui.CollabMode) (string, error) {
@@ -1256,14 +1260,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 						app.AddSystemBlock("· collab " + name + ": " + text)
 						app.SendPrompt(text)
 					},
-					Interrupt: func() {
-						collabMu.Lock()
-						cancel := collabTurnCancel
-						collabMu.Unlock()
-						if cancel != nil {
-							cancel()
-						}
-					},
+					// Cancel the live turn, never baseCtx (see liveTurn).
+					Interrupt: func() { turn.abort() },
 				},
 				Entries: func() [][]byte { return collabEntries(store) },
 				Logf:    func(f string, a ...any) { logx.Debugf("collab: "+f, a...) },
@@ -1413,19 +1411,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// files only ever accumulated in print runs.
 			observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
 			ctx, cancel := context.WithCancel(baseCtx)
-			// Published so a full-link guest's interrupt can cancel the
-			// live turn (baseCancel would kill every future turn).
-			collabMu.Lock()
-			collabTurnCancel = cancel
-			collabMu.Unlock()
+			turn.set(cancel)
 			go func() {
+				// LIFO: clear runs FIRST so this turn can never nil a slot
+				// that a newer turn already claimed (running=false admits the
+				// next submit before cancel() unwinds).
 				defer cancel()
 				defer running.Store(false)
-				defer func() {
-					collabMu.Lock()
-					collabTurnCancel = nil
-					collabMu.Unlock()
-				}()
+				defer turn.clear()
 				app.SetRunning(true)
 				feedAdvisor := func() {}
 				modelMu.Lock()
@@ -1528,7 +1521,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				}
 			}()
 		},
-		func() { baseCancel() }, // Esc: abort the in-flight turn (all runs share baseCtx)
+		// Esc / Ctrl+C aborts the live turn only; see liveTurn. This handler
+		// used to call baseCancel(), which bricked every future turn after
+		// the first cancel while the TUI still looked alive.
+		func() { turn.abort() },
 
 		func() { app.Quit() },
 	)
@@ -1824,6 +1820,9 @@ func modelPickerViews(cfg *config.Config, s *config.Settings, current string, ap
 		copy(all, items)
 		views = append(views, tui.PickerView{Name: "All models", Items: all, Action: "use"})
 	}
+	// One provider needs no per-provider tab: it would be byte-identical to
+	// "All models" (live: /model showed onegw twice with a single provider).
+	var perProvider []tui.PickerView
 	for _, name := range providerKeys(cfg) {
 		pc := cfg.Providers[name]
 		if pc == nil || (s != nil && s.ProviderDisabled(name)) {
@@ -1836,8 +1835,11 @@ func modelPickerViews(cfg *config.Config, s *config.Settings, current string, ap
 			}
 		}
 		if len(mine) > 0 {
-			views = append(views, tui.PickerView{Name: name, Items: mine, Action: "use"})
+			perProvider = append(perProvider, tui.PickerView{Name: name, Items: mine, Action: "use"})
 		}
+	}
+	if len(perProvider) > 1 {
+		views = append(views, perProvider...)
 	}
 	return views
 }
@@ -2084,6 +2086,9 @@ func treeEntries(store *session.Store) []tui.TreeEntry {
 		case *session.MessageEntry:
 			te.Role = string(t.Message.Role)
 			te.Summary = clipSummary(t.Message.Text(), 60)
+			if te.Role == "user" {
+				te.Text = t.Message.Text()
+			}
 		case *session.CompactionEntry:
 			te.Summary = "(compaction)"
 		case *session.BranchSummaryEntry:
@@ -2327,4 +2332,34 @@ func orUnset(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// liveTurn publishes the in-flight turn's cancel to every abort path: Esc,
+// Ctrl+C, and a full-link guest's interrupt all abort THAT turn. The session
+// context must never be the abort target — each turn derives its own ctx from
+// baseCtx, so cancelling baseCtx leaves every later turn born already-canceled
+// and the TUI prints "· turn canceled" to every future message until restart.
+type liveTurn struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+func (t *liveTurn) set(cancel context.CancelFunc) {
+	t.mu.Lock()
+	t.cancel = cancel
+	t.mu.Unlock()
+}
+
+func (t *liveTurn) clear() { t.set(nil) }
+
+// abort cancels the live turn and reports whether one was running.
+func (t *liveTurn) abort() bool {
+	t.mu.Lock()
+	cancel := t.cancel
+	t.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }

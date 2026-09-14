@@ -401,14 +401,22 @@ func TestPickerChooseUsesViewOverride(t *testing.T) {
 	}
 }
 
+// The footer states two contracts: where you are (position) and what the two
+// acting keys do. Enter takes the ACTIVE view's verb ("set" on Roles); the
+// ⇥ hint names the tab Tab moves TO, not the one already bright — naming the
+// active one made Tab look dead.
 func TestPickerFooterNamesTheAction(t *testing.T) {
 	p := newPicker(PickerOptions{Title: "model", Views: modelViews("onegw/free")})
 	left, right := p.footer()
 	if left != "1/2 items" {
 		t.Errorf("footer left = %q, want the position", left)
 	}
-	if !contains(right, "⏎ set") || !contains(right, "⇥ Roles") {
-		t.Errorf("footer right = %q, want the view's verb and tab hint", right)
+	if !contains(right, "⏎ set") || !contains(right, "⇥ All models") {
+		t.Errorf("footer right = %q, want the active verb and the next tab", right)
+	}
+	p.switchView(1) // now on All models: the verb is "use", the hint wraps to Roles
+	if _, right := p.footer(); !contains(right, "⏎ use") || !contains(right, "⇥ Roles") {
+		t.Errorf("footer right after Tab = %q, want the next-tab hint", right)
 	}
 }
 
@@ -540,3 +548,61 @@ func TestOpenRolePickerAssigns(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// --- open implies painted ---
+//
+// draw() never called drawPicker, so /model and /resume opened a modal that
+// owned every key while painting nothing: the user pressed Enter, saw nothing
+// happen, and the terminal looked dead. Every assertion above checked
+// PickerOpen() — state, not screen — which is why the suite stayed green over
+// a feature that was invisible in practice.
+
+func TestPickerIsPaintedOnScreen(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	app.OpenPicker(PickerOptions{Title: "model", Views: modelViews("onegw/free")})
+	app.draw()
+	text := screenText(scr)
+	for _, want := range []string{"model", "Roles", "onegw/free", "esc cancel"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("picker panel not painted: no %q on screen\n%s", want, text)
+		}
+	}
+}
+
+// A panel that cannot fit must close rather than stay open-and-invisible —
+// the invariant 5b999f0 established for the tree selector, now enforced for
+// the picker stack (narrow width, and a terminal too short to float above
+// the composer).
+func TestPickerWithNoRoomClosesInsteadOfOwningKeys(t *testing.T) {
+	for _, size := range [][2]int{{20, 30}, {100, 6}} {
+		app, _ := newTestApp(t, size[0], size[1])
+		app.OpenPicker(PickerOptions{Title: "model", Views: modelViews("onegw/free")})
+		app.draw()
+		if app.PickerOpen() {
+			t.Fatalf("%dx%d: picker stayed open with nothing painted", size[0], size[1])
+		}
+	}
+}
+
+// With no configured models the selector has nothing to show, so the reason
+// is stated in the transcript instead of opening an empty panel.
+func TestEmptyModelSelectorReportsInsteadOfOpening(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.SetModelOps(&ModelOps{
+		Current: func() string { return "onegw/free" },
+		Views:   func() []PickerView { return []PickerView{{Name: "All models", Action: "use"}} },
+		Set:     func(string) error { return nil },
+	})
+	if err := app.SwitchModel(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.PickerOpen() {
+		t.Fatal("picker opened over zero rows")
+	}
+	app.mu.Lock()
+	last := app.blocks[len(app.blocks)-1]
+	app.mu.Unlock()
+	if last.Kind != KindSystem || !strings.Contains(last.Text, "no models to select") {
+		t.Fatalf("last block = %+v, want the no-models notice", last)
+	}
+}

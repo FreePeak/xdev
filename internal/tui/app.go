@@ -810,12 +810,32 @@ func (a *App) OpenModelPicker() {
 			views[i].Action = "use"
 		}
 	}
+	// A selector with no rows is the same dead end as an invisible one: with
+	// nothing configured (or discovery dead) the panel would own the keyboard
+	// over an empty list, so the answer lands in the transcript instead.
+	rows := 0
+	for i := range views {
+		rows += len(views[i].Items)
+	}
+	if rows == 0 {
+		cur := ""
+		if a.modelOps.Current != nil {
+			cur = a.modelOps.Current()
+		}
+		a.AddSystemBlock("no models to select — check ~/.xdev/agent/models.yml (active: " + cur + ")")
+		return
+	}
 	// Model rows switch the session; a roles row overrides OnSelect to
-	// assign instead (cmd wires that view).
-	// A failed switch must not vanish: the picker already closed, so the
-	// error lands in the transcript like any other command error.
+	// assign instead (cmd wires that view). Routed through SwitchModel so a
+	// pick reports the model that is actually live: the old callback called
+	// Set and stayed silent, which read as "Enter did nothing" whenever the
+	// panel had just closed. Errors still land in the transcript because the
+	// picker is already gone by then.
 	use := func(ref string) {
-		if err := a.modelOps.Set(ref); err != nil {
+		if strings.TrimSpace(ref) == "" {
+			return
+		}
+		if err := a.SwitchModel(ref); err != nil {
 			a.AddSystemBlock("error: " + err.Error())
 		}
 	}
@@ -1152,9 +1172,17 @@ func (a *App) handleKey(ev tcell.Event) {
 		return
 	}
 
-	// Esc on an empty composer opens the tree selector (double-escape
-	// rewind); a second Esc is handled by the selector itself.
-	if key.Key() == tcell.KeyEsc && !running && strings.TrimSpace(a.ed.Text()) == "" {
+	// Claude-Code double-Esc rewind: idle with a draft in the composer,
+	// the first Esc clears the draft; the next Esc (empty composer) opens
+	// the tree selector, where a user row is rewind-and-re-prime. An open
+	// slash/@-menu owns Esc first (close the menu), and the selector's own
+	// Esc handling is modal.
+	if key.Key() == tcell.KeyEsc && !running && !menuOpen {
+		if strings.TrimSpace(a.ed.Text()) != "" {
+			a.ed.Reset()
+			a.poke()
+			return
+		}
 		a.OpenTreeSelector()
 		return
 	}
@@ -1643,6 +1671,7 @@ func (a *App) draw() {
 		a.drawSessionPicker(composerTop)
 		a.drawHubRoster(composerTop)
 		a.drawTreeSelector(composerTop)
+		a.drawPicker(composerTop)
 		a.drawSlashDropdown(composerTop)
 		a.drawAskCard(composerTop)
 		a.drawComposer(composerTop)
@@ -1756,6 +1785,7 @@ func (a *App) draw() {
 	a.drawSessionPicker(composerTop)
 	a.drawHubRoster(composerTop)
 	a.drawTreeSelector(composerTop)
+	a.drawPicker(composerTop)
 	a.drawSlashDropdown(composerTop)
 	a.drawAskCard(composerTop)
 	a.drawComposer(composerTop)
@@ -1826,7 +1856,14 @@ func (a *App) drawPicker(yComposerTop int) {
 	}
 	p := a.pickers[len(a.pickers)-1]
 	w := a.width
-	if w < 24 || yComposerTop < 6 {
+	// Never open-and-invisible (the 5b999f0 invariant, restated for the
+	// picker stack): an unusable terminal width or no room above the
+	// composer must close the modal, not leave it owning the keyboard
+	// while painting nothing.
+	if w < 24 {
+		// Callers hold a.mu (draw does), so this pops directly —
+		// popPicker would re-lock and self-deadlock the UI thread.
+		a.pickers = a.pickers[:len(a.pickers)-1]
 		return
 	}
 	x0, x1 := 2, w-3
@@ -1843,6 +1880,7 @@ func (a *App) drawPicker(yComposerTop int) {
 	}
 	// The panel floats above the composer and never covers it.
 	if avail := yComposerTop - 1; avail-chrome < 1 {
+		a.pickers = a.pickers[:len(a.pickers)-1]
 		return
 	} else if rows > avail-chrome {
 		rows = avail - chrome
@@ -1922,8 +1960,14 @@ func (a *App) drawPicker(yComposerTop int) {
 		y++
 	}
 
-	// Footer: position/filter left, key hints right.
+	// Footer: position/filter left, key hints right. The row is cleared first
+	// — the row loop above fills its own cells, but the footer never did, so
+	// transcript glyphs showed straight through the panel ("T1/9 itemsich and
+	// I'll go." was the live symptom).
 	left, right := p.footer()
+	for x := x0 + 1; x < x1; x++ {
+		a.scr.SetContent(x, y, ' ', nil, rowBg)
+	}
 	drawText(a.scr, x0, y, "│", borderS)
 	drawText(a.scr, x1, y, "│", borderS)
 	drawText(a.scr, x0+2, y, clip(left, inner-2), footS)

@@ -23,7 +23,7 @@ func screenRows(scr tcell.SimulationScreen) string {
 }
 func treeTestEntries() []TreeEntry {
 	return []TreeEntry{
-		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Depth: 0},
+		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Text: "Start task", Depth: 0},
 		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan", Depth: 1},
 		{ID: "33333333cccc", Type: "message", Role: "toolResult", Summary: "bash: ls", Depth: 2},
 		{ID: "44444444dddd", Type: "model_change", Summary: "onegw/free", Depth: 2},
@@ -268,21 +268,70 @@ func TestTreeSelectorDoubleEscape(t *testing.T) {
 	app, _, _ := openTreeTestApp(t, treeTestEntries(), nil)
 	app.CloseTreeSelector()
 
-	// Non-empty composer: Esc leaves it alone.
+	// Claude-Code double-Esc: with a draft the first press only parks the
+	// draft; the next press (empty composer) opens the rewind picker.
 	typeRunes(app, "draft")
 	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
 	if app.TreeSelectorOpen() {
 		t.Fatal("Esc with a non-empty composer must not open the selector")
 	}
-
-	app.ed.Reset()
+	if app.ed.Text() != "" {
+		t.Fatalf("first Esc must clear the draft, got %q", app.ed.Text())
+	}
 	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
 	if !app.TreeSelectorOpen() {
-		t.Fatal("first Esc on an empty composer must open the selector")
+		t.Fatal("Esc on an empty composer must open the selector")
 	}
 	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
 	if app.TreeSelectorOpen() {
 		t.Fatal("second Esc must close the selector")
+	}
+}
+
+// TestTreeRewindReprimesComposer pins the "resume" half of double-Esc
+// rewind: switching to a user row puts that prompt back in the composer so
+// it can be edited and resent; switching to a non-user row leaves it alone.
+func TestTreeRewindReprimesComposer(t *testing.T) {
+	app, _, _ := openTreeTestApp(t, treeTestEntries(), nil)
+	var branched []string
+	app.SetSessionBranch(func(id string) error {
+		branched = append(branched, id)
+		return nil
+	})
+
+	app.mu.Lock()
+	app.tpick.sel = 0 // "Start task" — user row with Text
+	app.mu.Unlock()
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if len(branched) != 1 || branched[0] != "11111111aaaa" {
+		t.Fatalf("branched = %v", branched)
+	}
+	if app.ed.Text() != "Start task" {
+		t.Fatalf("composer = %q, want the rewound prompt re-primed", app.ed.Text())
+	}
+
+	// An assistant row switches but must not touch the composer.
+	app.ed.Reset()
+	app.OpenTreeSelector()
+	app.mu.Lock()
+	app.tpick.sel = 1 // assistant "Plan"
+	app.mu.Unlock()
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if app.ed.Text() != "" {
+		t.Fatalf("non-user switch changed the composer: %q", app.ed.Text())
+	}
+
+	// A failed switch must not fake a rewind either.
+	app.SetSessionBranch(func(id string) error {
+		return errors.New("branch failed")
+	})
+	app.OpenTreeSelector()
+	app.mu.Lock()
+	app.tpick.sel = 0
+	app.mu.Unlock()
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if app.ed.Text() != "" {
+		t.Fatalf("failed switch re-primed the composer: %q", app.ed.Text())
 	}
 }
 
