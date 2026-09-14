@@ -106,3 +106,43 @@ func TestScrollModelNoPanicDegenerate(t *testing.T) {
 	m.Start(-5, 0)
 	m.Indicator(-5, 0)
 }
+
+func TestScrollbar(t *testing.T) {
+	// Fits: no bar.
+	m := newScrollModel()
+	if _, _, ok := m.Scrollbar(15, 20); ok {
+		t.Fatal("scrollbar shown when content fits the viewport")
+	}
+	// total=100 vp=20 → thumb = vp*vp/total = 4 rows, maxOff = 80.
+	m = newScrollModel()
+	start, end, ok := m.Scrollbar(100, 20) // offset 0 = tail
+	if !ok || end != 20 || end-start != 4 {
+		t.Fatalf("at tail: got [%d,%d) ok=%v, want a 4-row thumb ending at 20", start, end, ok)
+	}
+	m.Top(100, 20) // offset = maxOff
+	start, end, _ = m.Scrollbar(100, 20)
+	if start != 0 || end != 4 {
+		t.Fatalf("at top: got [%d,%d), want [0,4)", start, end)
+	}
+	// Monotonic: scrolling up from the tail walks the thumb toward row 0.
+	m = newScrollModel()
+	prev := 1 << 30
+	for off := 0; off <= 80; off += 20 {
+		m.offset = off
+		s, e, ok := m.Scrollbar(100, 20)
+		if !ok {
+			t.Fatalf("bar vanished at offset %d", off)
+		}
+		if s > prev {
+			t.Fatalf("thumb moved down while scrolling up at offset %d (%d>%d)", off, s, prev)
+		}
+		if e-s != 4 {
+			t.Fatalf("thumb length = %d at offset %d, want 4", e-s, off)
+		}
+		prev = s
+	}
+	// A taller viewport than the thumb budget still shows at least one row.
+	if s, e, ok := m.Scrollbar(1000, 30); !ok || e-s < 1 {
+		t.Fatalf("degenerate thumb [%d,%d) ok=%v", s, e, ok)
+	}
+}

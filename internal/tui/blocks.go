@@ -36,6 +36,24 @@ type Block struct {
 // Width returns the display width of s in cells.
 func width(s string) int { return runewidth.StringWidth(s) }
 
+// truncateCells shortens s to at most maxW display cells, appending ell
+// (a single-width "…" by convention) when it had to cut.
+func truncateCells(s string, maxW int, ell string) string {
+	if width(s) <= maxW {
+		return s
+	}
+	return runewidth.Truncate(s, maxW, ell)
+}
+
+// fitWidth returns s padded (or truncated) to exactly n display cells, so a
+// column of box rows share one right edge.
+func fitWidth(s string, n int) string {
+	if width(s) > n {
+		s = truncateCells(s, n, "…")
+	}
+	return s + strings.Repeat(" ", max(0, n-width(s)))
+}
+
 // wrap breaks s into visual lines of at most maxW cells, preserving empty
 // lines. A maxW <= 0 yields one line per source line.
 func wrap(s string, maxW int) []string {

@@ -114,3 +114,39 @@ func (m *scrollModel) Indicator(total, vp int) (up, down int) {
 	}
 	return start, total - end
 }
+
+// Scrollbar computes the thumb region for a right-edge scrollbar. It returns
+// the viewport rows [start,end) — 0-based from the first visible row — that
+// should carry the thumb glyph. ok is false when the whole transcript fits,
+// so no bar is drawn at all.
+//
+// The thumb length is proportional to viewport/total (omp's ScrollView:
+// floor(vp*vp/total), never shorter than one row, never longer than the
+// track); its position tracks the current offset, thumb at the bottom means
+// following the tail and at the top means viewing the oldest row.
+func (m *scrollModel) Scrollbar(total, vp int) (start, end int, ok bool) {
+	vp = normVP(vp)
+	if total <= vp {
+		return 0, 0, false
+	}
+	thumb := vp * vp / total
+	if thumb < 1 {
+		thumb = 1
+	}
+	if thumb > vp {
+		thumb = vp
+	}
+	// offset counts rows above the tail: 0 = tail, maxOff = oldest row.
+	maxOff := total - vp
+	pos := vp - thumb // default: thumb pinned to the bottom (at the tail)
+	if maxOff > 0 {
+		pos = (maxOff - m.offset) * (vp - thumb) / maxOff
+	}
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > vp-thumb {
+		pos = vp - thumb
+	}
+	return pos, pos + thumb, true
+}

@@ -218,37 +218,58 @@ func TestSystemBlockRendersEveryLine(t *testing.T) {
 	}
 }
 
-// TestToolResultRendersFullOutput pins the fix for "bash output not
-// printed fully": the KindToolDone render must show every body line
-// (not a flattened 200-char preview) and cap huge outputs with the
-// head+tail row window, never a silent middle cut.
-func TestToolResultRendersFullOutput(t *testing.T) {
-	app, scr := newTestApp(t, 80, 24)
+// lineText concatenates every run of a rendered line, so assertions read the
+// whole visual row (the tool box splits each row into border/content/border
+// runs) instead of one run.
+func lineText(ln line) string {
+	var b strings.Builder
+	for _, r := range ln.runs {
+		b.WriteString(r.text)
+	}
+	return b.String()
+}
+
+// TestToolResultRendersBox pins the omp-parity frame: a finished tool result
+// renders as a rounded box whose top border carries "name · state (dur)", the
+// body keeps every output line (not a flattened preview), and the frame
+// closes on its own bottom border.
+func TestToolResultRendersBox(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
 	app.FinishTool("bash", false, "line-one\nline-two\nline-three", "5ms")
 	app.mu.Lock()
-	// Fit by scrolling up: the block is taller than the viewport but the
-	// render (blockLines) is what we assert on; drain a draw first.
 	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
 	app.mu.Unlock()
-	scr.Sync()
 
-	var got []string
-	for _, ln := range lines {
-		if len(ln.runs) == 1 {
-			got = append(got, ln.runs[0].text)
+	if len(lines) != 5 { // top + 3 body + bottom
+		t.Fatalf("boxed render = %d lines, want 5", len(lines))
+	}
+	top := lineText(lines[0])
+	for _, want := range []string{"╭", "bash", "ok", "5ms"} {
+		if !strings.Contains(top, want) {
+			t.Fatalf("top border %q missing %q", top, want)
 		}
 	}
-	joined := strings.Join(got, "\n")
-	for _, want := range []string{"↳ ok (5ms)", "line-one", "line-two", "line-three"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("tool result render missing %q; got:\n%s", want, joined)
+	bottom := lineText(lines[4])
+	if !strings.Contains(bottom, "╰") || !strings.Contains(bottom, "╯") {
+		t.Fatalf("bottom border %q not closed", bottom)
+	}
+	body := lineText(lines[1]) + lineText(lines[2]) + lineText(lines[3])
+	for _, want := range []string{"line-one", "line-two", "line-three"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q; got:\n%s", want, body)
+		}
+	}
+	// Every row shares one right edge: widths equal the requested 80 cells.
+	for i, ln := range lines {
+		if w := width(lineText(ln)); w != 80 {
+			t.Fatalf("row %d width = %d, want 80 (%q)", i, w, lineText(ln))
 		}
 	}
 }
 
-// TestToolResultRowWindow pins the bounded-render ceiling: outputs with
-// more rows than the window must keep the first 200 + last 50 rows and
-// announce the elided middle.
+// TestToolResultRowWindow pins the bounded-render ceiling inside the box:
+// outputs wider than the window keep the first 200 + last 50 rows and
+// announce the elided middle, all framed by the top and bottom borders.
 func TestToolResultRowWindow(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	var b strings.Builder
@@ -259,17 +280,18 @@ func TestToolResultRowWindow(t *testing.T) {
 	app.mu.Lock()
 	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
 	app.mu.Unlock()
-	if len(lines) != 200+50+1+1 { // head + tail + elision marker + header
-		t.Fatalf("windowed render = %d lines, want 252", len(lines))
+	// top + head(200) + elision + tail(50) + bottom
+	if len(lines) != 200+50+1+2 {
+		t.Fatalf("windowed render = %d lines, want 253", len(lines))
 	}
-	if lines[1].runs[0].text != "  row-001" {
-		t.Fatalf("first body line = %q", lines[1].runs[0].text)
+	if !strings.Contains(lineText(lines[1]), "row-001") {
+		t.Fatalf("first head row = %q", lineText(lines[1]))
 	}
-	if lines[len(lines)-1].runs[0].text != "  row-400" {
-		t.Fatalf("last body line = %q", lines[len(lines)-1].runs[0].text)
+	if !strings.Contains(lineText(lines[201]), "rows elided") {
+		t.Fatalf("elision marker missing: %q", lineText(lines[201]))
 	}
-	if !strings.Contains(lines[201].runs[0].text, "rows elided") {
-		t.Fatalf("elision marker missing: %q", lines[201].runs[0].text)
+	if !strings.Contains(lineText(lines[251]), "row-400") {
+		t.Fatalf("last tail row = %q", lineText(lines[251]))
 	}
 }
 

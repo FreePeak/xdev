@@ -25,8 +25,13 @@ type Status struct {
 	// Cost is the session spend in USD (0 when the provider reports none)
 	// and CtxWindow the model's context window (0 = unknown). Both feed the
 	// optional HUD segments (settings statusLine.segments).
-	Cost       float64
-	CtxWindow  int64
+	Cost      float64
+	CtxWindow int64
+	// Start anchors the HUD time segment: the moment the current session's
+	// clock began (process start; cmd re-bases it on every session swap so
+	// the segment shows total session time, not process uptime). Zero = the
+	// segment hides.
+	Start      time.Time
 	Running    bool
 	spinnerIdx int
 }
@@ -147,7 +152,7 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		keyMap:       km,
 		scr:          scr,
 		th:           th,
-		st:           Status{Model: model, SessionID: sessionID},
+		st:           Status{Model: model, SessionID: sessionID, Start: time.Now()},
 		showThinking: true,
 		width:        w, height: h,
 		keyq:      make(chan tcell.Event, 64),
@@ -395,6 +400,16 @@ func (a *App) AddCost(usd float64) {
 func (a *App) SetContextWindow(tokens int64) {
 	a.mu.Lock()
 	a.st.CtxWindow = tokens
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetSessionStart re-anchors the HUD time segment. Wired by cmd on session
+// swaps (/new, /drop, /resume, fork) so the clock follows the session, not
+// the process.
+func (a *App) SetSessionStart(t time.Time) {
+	a.mu.Lock()
+	a.st.Start = t
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1059,6 +1074,7 @@ func (a *App) Run() {
 	a.width, a.height = a.scr.Size()
 	tick := time.NewTicker(33 * time.Millisecond) // ~30fps
 	defer tick.Stop()
+	ticks := 0
 	a.beat()
 	a.startStallWatchdog()
 
@@ -1089,6 +1105,7 @@ func (a *App) Run() {
 		case <-a.dirty:
 			a.draw()
 		case <-tick.C:
+			ticks++
 			a.mu.Lock()
 			running := a.st.Running
 			if running {
@@ -1114,8 +1131,13 @@ func (a *App) Run() {
 					}
 				}
 			}
+			clock := a.hudHasClock()
 			a.mu.Unlock()
 			if running || animate {
+				a.draw()
+			} else if clock && ticks%30 == 0 {
+				// The session clock must keep counting while the UI is
+				// otherwise idle: repaint once a second (33ms × 30).
 				a.draw()
 			}
 		}
@@ -1150,7 +1172,6 @@ func (a *App) handleKey(ev tcell.Event) {
 	}
 	a.mu.Lock()
 	running := a.st.Running
-	h := a.height
 	menuOpen := a.smenu != nil && a.smenu.active()
 	a.mu.Unlock()
 	// The ask card (#46) is the topmost modal: it blocks the composer and
@@ -1298,10 +1319,10 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.scroll(1, true)
 		return
 	case "scroll-page-up":
-		a.scroll(h/2, false)
+		a.scrollPage(false)
 		return
 	case "scroll-page-down":
-		a.scroll(h/2, true)
+		a.scrollPage(true)
 		return
 	case "scroll-top":
 		a.scrollTo(false)
@@ -1452,6 +1473,24 @@ func (a *App) scroll(n int, down bool) {
 	a.poke()
 }
 
+// scrollPage moves the viewport a full page toward older (down=false) or
+// newer (down=true) rows, keeping one line of overlap so context survives the
+// jump (omp's ScrollView.page scrolls height-1, not half a screen — the old
+// h/2 step needed two presses to clear one viewport and felt sluggish).
+func (a *App) scrollPage(down bool) {
+	a.mu.Lock()
+	vp := normVP(a.viewportLinesLocked())
+	total := a.totalLinesLocked()
+	n := max(1, vp-1)
+	if down {
+		a.sm.ScrollDown(n, total, vp)
+	} else {
+		a.sm.ScrollUp(n, total, vp)
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
 // scrollTo jumps to the oldest (down=false) or newest (down=true) row.
 func (a *App) scrollTo(down bool) {
 	a.mu.Lock()
@@ -1572,49 +1611,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		ln.runs[0].style = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
 		lines = append(lines, ln)
 	case KindToolDone:
-		hdrSt := a.mdStyle().muted
-		st := a.mdStyle().muted
-		state := "ok"
-		if b.Err {
-			state = "error"
-			hdrSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
-			st = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
-		}
-		hdr := "↳ " + state
-		if b.Dur != "" {
-			hdr += " (" + b.Dur + ")"
-		}
-		lines = append(lines, textline(hdr, hdrSt))
-		// Body: the tool output as the model saw it (the tool layer bounds
-		// it: bash 16KB head+tail per stream, 8MB combined kill cap). The
-		// render window below keeps the resident line cache bounded (PRD
-		// row budget): ponytail ceiling — beyond head+tail rows the full
-		// text is only in the session JSONL, upgrade path is fold/expand.
-		body := strings.TrimRight(b.Text, "\n")
-		if body == "" {
-			if !b.Err {
-				lines = append(lines, textline("(no output)", a.mdStyle().muted))
-			}
-			break
-		}
-		const maxHeadRows, maxTailRows = 200, 50
-		rows := wrap(body, max(10, w-2))
-		draw := func(wl string) {
-			lines = append(lines, textline("  "+wl, st))
-		}
-		if len(rows) > maxHeadRows+maxTailRows+1 {
-			for _, wl := range rows[:maxHeadRows] {
-				draw(wl)
-			}
-			lines = append(lines, textline(fmt.Sprintf("  … %d rows elided (full output in the session log) …", len(rows)-maxHeadRows-maxTailRows), a.mdStyle().muted))
-			for _, wl := range rows[len(rows)-maxTailRows:] {
-				draw(wl)
-			}
-		} else {
-			for _, wl := range rows {
-				draw(wl)
-			}
-		}
+		lines = append(lines, a.toolBoxLines(b, w)...)
 	case KindSystem:
 		fg := theme.Gray
 		if strings.Contains(strings.ToLower(b.Text), "error") || strings.Contains(strings.ToLower(b.Text), "canceled") {
@@ -1646,6 +1643,91 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 	}
 	a.lineCache[key] = lines
 	return lines
+}
+
+// toolBoxLines renders one finished tool result inside a rounded frame, the
+// omp layout: a top border carrying "name · state (dur)", the output padded
+// between `│` side borders, a closing `╰───╯`. Errors tint the whole frame.
+// The result block carries no rail (draw.go), so the border is the line.
+func (a *App) toolBoxLines(b *Block, w int) []line {
+	state := "ok"
+	borderCol := theme.AccentTool
+	bodyCol := theme.TextSecondary
+	if b.Err {
+		state = "error"
+		borderCol = theme.AccentError
+		bodyCol = theme.AccentError
+	}
+	label := state
+	if b.ToolName != "" {
+		label = b.ToolName + " · " + state
+	}
+	if b.Dur != "" {
+		label += " (" + b.Dur + ")"
+	}
+
+	box := a.th.Box()
+	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(borderCol)))
+	labelSt := border.Bold(true)
+	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(bodyCol)))
+	mutedSt := a.mdStyle().muted
+
+	inner := max(1, w-4) // side borders + one pad cell each
+
+	// Top border: ╭─ <label> ───…───╮  (label truncated so ≥1 dash remains)
+	maxLabel := max(1, w-6)
+	if width(label) > maxLabel {
+		label = truncateCells(label, maxLabel, "…")
+	}
+	dashes := max(1, w-5-width(label))
+	top := line{runs: []cell{
+		{text: box.TopLeft + box.Horizontal + " ", style: border},
+		{text: label, style: labelSt},
+		{text: " " + strings.Repeat(box.Horizontal, dashes) + box.TopRight, style: border},
+	}}
+
+	// row wraps one body line to the frame, padding to the inner width so the
+	// right border lands on the same column for every row.
+	row := func(s string, st tcell.Style) line {
+		return line{runs: []cell{
+			{text: box.Vertical + " ", style: border},
+			{text: fitWidth(s, inner), style: st},
+			{text: " " + box.Vertical, style: border},
+		}}
+	}
+
+	var out []line
+	out = append(out, top)
+
+	// Body: the tool output as the model saw it (the tool layer bounds it:
+	// bash 16KB head+tail per stream, 8MB combined kill cap). The render
+	// window below keeps the resident line cache bounded (PRD row budget):
+	// ponytail ceiling — beyond head+tail rows the full text is only in the
+	// session JSONL, upgrade path is fold/expand.
+	body := strings.TrimRight(b.Text, "\n")
+	switch {
+	case body == "" && !b.Err:
+		out = append(out, row("(no output)", mutedSt))
+	case body != "":
+		const maxHeadRows, maxTailRows = 200, 50
+		rows := wrap(body, inner)
+		if len(rows) > maxHeadRows+maxTailRows+1 {
+			for _, wl := range rows[:maxHeadRows] {
+				out = append(out, row(wl, bodySt))
+			}
+			out = append(out, row(fmt.Sprintf("… %d rows elided (full output in the session log)", len(rows)-maxHeadRows-maxTailRows), mutedSt))
+			for _, wl := range rows[len(rows)-maxTailRows:] {
+				out = append(out, row(wl, bodySt))
+			}
+		} else {
+			for _, wl := range rows {
+				out = append(out, row(wl, bodySt))
+			}
+		}
+	}
+
+	out = append(out, textline(box.BottomLeft+strings.Repeat(box.Horizontal, max(1, w-2))+box.BottomRight, border))
+	return out
 }
 
 // stThinkingHdr styles the thinking header: muted bold, per grok thinking.rs.
@@ -1713,9 +1795,14 @@ func (a *App) draw() {
 		case KindThinking:
 			railCh = "┃"
 			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
-		case KindTool, KindToolDone:
+		case KindTool:
 			railCh = "┃"
 			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
+		case KindToolDone:
+			// The tool-result block draws its own rounded frame (blockLines),
+			// so it carries no leading rail — a `┃` beside the box border would
+			// read as a doubled line.
+			railCh = ""
 		case KindSystem:
 			railCh = "┃"
 			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
@@ -1742,12 +1829,22 @@ func (a *App) draw() {
 	if end > len(rows) {
 		end = len(rows)
 	}
+
+	// Proportional right-edge scrollbar (omp's ScrollView): while the
+	// transcript overflows the viewport, the last screen column carries a
+	// track/thumb that gives continuous position feedback. Reserve it so band
+	// rows never render a cell under the bar.
+	sbStart, sbEnd, sbOk := a.sm.Scrollbar(len(rows), vp)
+	bandLim := w
+	if sbOk {
+		bandLim = w - 1
+	}
 	selRows := make([]selRow, 0, end-start)
 	for y, r := range rows[start:end] {
 		if r.ln.bg != 0 {
 			// Band row (user prompt / code fence): fill the full width so
 			// the band reads as one continuous row (grok semantic band).
-			for bx := 0; bx < w; bx++ {
+			for bx := 0; bx < bandLim; bx++ {
 				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
 			}
 		}
@@ -1774,6 +1871,19 @@ func (a *App) draw() {
 				tsSt = tsSt.Background(r.ln.bg)
 			}
 			drawText(s, w-width(r.ts)-2, y, r.ts, tsSt)
+		}
+	}
+	// Paint the scrollbar over the reserved column, spanning the visible
+	// rows: the thumb marks the current window, the track fills the rest.
+	if sbOk {
+		trackSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+		thumbSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		for y := range end - start {
+			ch, st := "│", trackSt
+			if y >= sbStart && y < sbEnd {
+				ch, st = "█", thumbSt
+			}
+			drawText(s, w-1, y, ch, st)
 		}
 	}
 	a.selRows = selRows
@@ -2269,19 +2379,37 @@ func (a *App) drawHUD(y, hintsEnd int) {
 }
 
 // statusSegments is the HUD segment vocabulary (settings
-// statusLine.segments): model, tokens, context, cost, theme.
+// statusLine.segments): model, tokens, context, cost, theme, time.
 var statusSegments = map[string]bool{
 	"model":   true,
 	"tokens":  true,
 	"context": true,
 	"cost":    true,
 	"theme":   true,
+	"time":    true,
 }
 
-// defaultStatusSegments keeps the layout the HUD shipped with: the token
-// counters, right-aligned. The model keeps its composer divider slot, which
-// is chrome rather than a segment.
-var defaultStatusSegments = []string{"tokens"}
+// defaultStatusSegments is the shipped layout: the session clock and the
+// token counters, right-aligned (the clock reads leftmost so the token
+// pair's own " │ " stays the row's right edge). The model keeps its
+// composer divider slot, which is chrome rather than a segment.
+var defaultStatusSegments = []string{"time", "tokens"}
+
+// hudHasClock reports whether the effective HUD layout renders the time
+// segment (caller holds a.mu). When it does, the UI loop repaints at 1 Hz
+// even while idle so the clock stays live.
+func (a *App) hudHasClock() bool {
+	segs := a.statusSegs
+	if len(segs) == 0 {
+		segs = defaultStatusSegments
+	}
+	for _, s := range segs {
+		if s == "time" {
+			return true
+		}
+	}
+	return false
+}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -2314,6 +2442,11 @@ func (a *App) hudSegment(name string) (text, token string) {
 			return "", ""
 		}
 		return fmt.Sprintf("$%.4f", a.st.Cost), theme.StatusLineCost
+	case "time":
+		if a.st.Start.IsZero() {
+			return "", ""
+		}
+		return humanDur(time.Since(a.st.Start)), theme.StatusLineSpend
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
 	}
@@ -2356,6 +2489,19 @@ func humanTokens(n int64) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
 	default:
 		return fmt.Sprintf("%d", n)
+	}
+}
+
+// humanDur renders elapsed time compactly: "45s", "12m03s", "3h05m".
+func humanDur(d time.Duration) string {
+	s := int64(d.Seconds())
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm%02ds", s/60, s%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", s/3600, (s%3600)/60)
 	}
 }
 
