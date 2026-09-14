@@ -578,7 +578,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	exts := attachExtensions(context.Background(), reg, ag.Steer, ag.FollowUp, cfg)
 	// Hooks and extensions compose into one interceptor chain; hooks must
 	// fire even when no extensions are installed.
-	hookBus := buildHookBus(cwd, opts)
+	hookBus := buildHookBus(cwd, opts, nil)
 	if c := agent.NewChain(hookBus, exts); c != nil {
 		ag.Intercept = c
 	}
@@ -703,9 +703,16 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 
 // buildHookBus resolves the session hook bus: --hook specs, the settings
 // `hooks` record, and discovered hook files (project .xdev/hooks, user
-// <dataDir>/hooks, trusted extension dirs). Warnings are logged, never
+// <dataDir>/hooks, trusted extension dirs). Warnings are reported, never
 // fatal — a malformed hook file must not block a session.
-func buildHookBus(cwd string, opts printOptions) *hookbus.Bus {
+//
+// `warn` routes the notices to the surface the user is actually looking at:
+// nil means stderr, which is right for print/acp; the TUI passes a transcript
+// writer, because a bare stderr write there lands underneath the alternate
+// screen where nobody can read it. This cannot be left to logx: logging is
+// off by default, and a withheld repository hook is exactly the thing that
+// must never be withheld silently (#241).
+func buildHookBus(cwd string, opts printOptions, warn func(string)) *hookbus.Bus {
 	b, warns := hookbus.Build(hookbus.Options{
 		Settings:          lastSettings().Hooks,
 		CLI:               opts.Hooks,
@@ -714,6 +721,11 @@ func buildHookBus(cwd string, opts printOptions) *hookbus.Bus {
 	})
 	for _, w := range warns {
 		logx.Errorf("hooks: %s", w)
+		if warn != nil {
+			warn(w)
+			continue
+		}
+		fmt.Fprintln(os.Stderr, "xdev: hooks:"+w)
 	}
 	return b
 }

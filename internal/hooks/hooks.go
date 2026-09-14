@@ -67,6 +67,10 @@ type Hook struct {
 	// Source records where the hook came from (cli | settings | project |
 	// user | extension:<name>) for diagnostics.
 	Source string
+	// Path is the file a discovered hook was parsed from, empty for CLI and
+	// settings hooks. Workspace trust digests it (#241), so editing an approved
+	// hook re-asks instead of inheriting the earlier approval.
+	Path string
 
 	re *regexp.Regexp // compiled Matcher; nil = no stage-2 filter
 }
@@ -98,6 +102,10 @@ type Options struct {
 // conflict, then project, user, trusted extension.
 func Build(o Options) (*Bus, []string) {
 	disc, warns := Discover(o.CWD, o.TrustedExtensions)
+	// A repository's hooks are the only source not chosen by the person whose
+	// environment and credentials they would run under, so they are withheld
+	// until this workspace is explicitly trusted (#241).
+	disc = gateProjectHooks(disc, o.CWD, &warns)
 	cli, cliWarns := cliHooks(o.CLI, disc)
 	warns = append(warns, cliWarns...)
 

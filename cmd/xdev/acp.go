@@ -64,7 +64,7 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	// Hooks and extension processes compose into one interceptor chain, the
 	// same shape print mode uses; extensions' actions steer the live run.
 	exts := attachExtensions(context.Background(), reg, h.steer, h.followUp, cfg)
-	h.intercept = agent.NewChain(buildHookBus(cwd, opts), exts)
+	h.intercept = agent.NewChain(buildHookBus(cwd, opts, nil), exts)
 	if exts != nil {
 		defer exts.Close()
 	}
