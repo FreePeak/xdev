@@ -63,6 +63,9 @@ var subcommands = map[string]bool{
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
 	"usage": true, "ps": true, "token": true, "completions": true,
 	"worktree": true, "wt": true,
+	// `xdev help` prints usage; without this entry the word falls through
+	// to print mode and is sent to the model as a prompt.
+	"help": true,
 	// omp names these services at the top level; xdev ships them under
 	// `serve`, so the names dispatch there rather than reaching the model as
 	// a prompt (#104).
@@ -125,6 +128,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev bench [--turns N]       TTFT + decode p50/p95 through the provider seam
   xdev completions <shell>     bash | zsh | fish completion script
   xdev version                 print the version
+  xdev help                    print this usage and exit
 
 Flags:
 `
@@ -599,6 +603,9 @@ func main() {
 	switch mode {
 	case "version":
 		fmt.Printf("xdev %s\n", version)
+	case "help":
+		fs.Usage()
+		os.Exit(0)
 	case "print":
 		// Positional handling, omp parity: a leading `--` is the separator,
 		// every remaining argument joins into one prompt (omp -p "A" "B"

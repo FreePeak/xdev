@@ -120,6 +120,10 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 	}
 	ops := st.ops
 	hubRegMu.Lock()
+	// Deferred, because the empty-roster paths below returned early and left
+	// the process-wide registry locked: the next hubState() — which draw()
+	// calls every frame — then blocked forever and froze the whole TUI.
+	defer hubRegMu.Unlock()
 	ui := &st.ui
 	refresh := true
 	switch key.Key() {
@@ -216,7 +220,6 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 			ui.sel = max(0, len(ui.rows)-1)
 		}
 	}
-	hubRegMu.Unlock()
 	if handled {
 		a.poke()
 	}
