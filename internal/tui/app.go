@@ -140,14 +140,21 @@ type App struct {
 	// Mouse text selection: drag anywhere, release copies to the clipboard.
 	// selDown is the held button (a drag in flight); selShown keeps the
 	// highlight up after the release until the next click, like a terminal's
-	// own selection. selRows is the last frame's transcript rows with their
+	// own selection. Corners of a transcript gesture carry the document row
+	// under the pointer (selTop is the viewport's first row, kept so the drag
+	// can re-anchor after a scroll), and selCache holds the text of rows that
+	// have since scrolled out of sight — that is what lets one drag cover more
+	// than a screen. selRows is the last frame's transcript rows with their
 	// screen origins; rows outside that capture are read back from the grid.
 	// (UI thread; mu-guarded.)
-	selDown   bool
-	selShown  bool
-	selAnchor selPoint
-	selEnd    selPoint
-	selRows   []selRow
+	selDown    bool
+	selShown   bool
+	selDocMode bool
+	selTop     int
+	selAnchor  selCorner
+	selEnd     selCorner
+	selRows    []selRow
+	selCache   map[int]selRow
 	// selNotice is the copy confirmation (omp's showStatus for a copy); it
 	// rides the composer divider until selNoticeUntil.
 	selNotice      string
@@ -2032,7 +2039,10 @@ func (a *App) draw() {
 			drawText(s, w-1, y, ch, st)
 		}
 	}
-	a.selRows = selRows
+	a.selRows, a.selTop = selRows, start
+	if a.selDown {
+		a.selCacheRows(start) // keep the text a held drag has already passed
+	}
 	a.drawSelection()
 	// Scroll indicator (grok-style ▲n▼n): rows hidden above/below. It rides the
 	// composer's info divider — at y=0 it overwrote whatever content scrolled

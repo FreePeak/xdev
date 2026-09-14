@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +282,70 @@ func TestShiftCancelsAnInFlightSelection(t *testing.T) {
 	}
 	if got := string(scr.GetClipboardData()); got != "" {
 		t.Fatalf("clipboard = %q, want untouched (the terminal owns the copy)", got)
+	}
+}
+
+// TestDragPastTheEdgeScrollsAndStillCopies pins the one capability a
+// screen-relative selection cannot have: a drag pulled past the transcript's
+// bottom edge scrolls the view, and the rows that scrolled away with it still
+// reach the clipboard. That is what makes one gesture cover more than a screen,
+// which is how far an omp user can drag in the terminal's own selection.
+func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	lines := make([]string, 60)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("L%03d", i)
+	}
+	app.AddSystemBlock(strings.Join(lines, "\n"))
+
+	// Park the viewport well above the tail so there is room to scroll down.
+	app.mu.Lock()
+	_, vp := app.selViewport()
+	total := app.totalLinesLocked()
+	app.sm.ScrollUp(12, total, vp)
+	app.mu.Unlock()
+	app.draw()
+
+	app.mu.Lock()
+	top, vp := app.selViewport()
+	// The transcript is the block's own lines, one per row: pin that here so a
+	// layout change fails loudly instead of quietly rewriting the expectation.
+	for j := 0; j < vp && top+j < total; j++ {
+		if got := app.selRows[j].text; got != lines[top+j] {
+			app.mu.Unlock()
+			t.Fatalf("document row %d rendered as %q, want %q", top+j, got, lines[top+j])
+		}
+	}
+	app.mu.Unlock()
+
+	// Press on the top row, then pull the pointer down past the last transcript
+	// row: each event scrolls one row, exactly like a terminal's edge drag.
+	app.mu.Lock()
+	app.handleMouse(tcell.NewEventMouse(3, 0, tcell.Button1, tcell.ModNone))
+	app.mu.Unlock()
+	app.draw()
+
+	// The far corner lands on the last cell of a row, so the far row is taken in
+	// full too and the expectation stays about rows rather than about columns.
+	const scrolls, far = 5, 3 + len("L000") - 1
+	for range scrolls {
+		app.mu.Lock()
+		app.handleMouse(tcell.NewEventMouse(far, vp-1, tcell.Button1, tcell.ModNone))
+		app.mu.Unlock()
+		app.draw() // the UI loop draws after every event; the cache fills here
+	}
+	app.mu.Lock()
+	app.handleMouse(tcell.NewEventMouse(far, vp-1, tcell.ButtonNone, tcell.ModNone))
+	app.mu.Unlock()
+
+	got := strings.Split(string(scr.GetClipboardData()), "\n")
+	want := lines[top : top+vp+scrolls] // the anchor row plus everything revealed
+	if len(got) != len(want) {
+		t.Fatalf("copied %d rows, want %d (first %d: %q)", len(got), len(want), min(4, len(got)), got[:min(4, len(got))])
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d = %q, want %q (rows before the viewport must come from the cache)", i, got[i], want[i])
+		}
 	}
 }
