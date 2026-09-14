@@ -516,8 +516,9 @@ type SkillsSettings struct {
 }
 
 // StatusLineSettings is the `statusLine` group (M12 F5). Segments is the
-// HUD segment order; the TUI knows the vocabulary (model, tokens, context,
-// cost, theme) and skips unknown names with a warning.
+// HUD segment order; the vocabulary lives with the renderer
+// (tui.statusSegments: model, tokens, context, cost, rate, theme, time), which
+// skips unknown names with a warning rather than failing the config.
 type StatusLineSettings struct {
 	Segments StringList `yaml:"segments"`
 }
