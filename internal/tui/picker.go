@@ -49,6 +49,45 @@ type picker struct {
 	match   []int // indices into the active view's Items
 	sel     int
 	visible int
+	// Mouse hit-test, published by the painter every frame — the same table
+	// omp's SelectList rebuilds inside render(). hitY0 is the screen row of
+	// hitItem[0]; hitItem[i] is the item index that painted row shows, or -1
+	// for a section header. tabY is the tab strip's row (-1 when there are no
+	// tabs) and tabAt[i] is the column where view i's label starts.
+	hitY0   int
+	hitItem []int
+	tabY    int
+	tabAt   []int
+}
+
+// pickAt resolves a screen cell to the list row (item index) or tab (view
+// index) under it; both are -1 when the point misses the panel's targets.
+func (p *picker) pickAt(x, y int) (item, view int) {
+	item, view = -1, -1
+	if i := y - p.hitY0; p.hitItem != nil && i >= 0 && i < len(p.hitItem) {
+		item = p.hitItem[i]
+	}
+	if p.tabAt != nil && y == p.tabY {
+		for j, start := range p.tabAt {
+			if x >= start && (j+1 == len(p.tabAt) || x < p.tabAt[j+1]) {
+				view = j
+				break
+			}
+		}
+	}
+	return item, view
+}
+
+// selectItem parks the selection on the item the user pointed at (an index into
+// the active view's Items, so it survives the filter's re-ranking).
+func (p *picker) selectItem(itemIdx int) bool {
+	for i, mi := range p.match {
+		if mi == itemIdx {
+			p.sel = i
+			return true
+		}
+	}
+	return false
 }
 
 // pickerMaxRows caps the visible row window; the panel never eats the

@@ -606,3 +606,66 @@ func TestEmptyModelSelectorReportsInsteadOfOpening(t *testing.T) {
 		t.Fatalf("last block = %+v, want the no-models notice", last)
 	}
 }
+
+// TestPickerMouseWheelAndClick: the modal list answers the mouse the way omp's
+// SelectList does — the wheel moves the selection one row per notch, and a single
+// click on a row takes it and chooses it immediately (omp's clickItem calls
+// onSelect itself). A click inside the panel must also not start a text
+// selection on the transcript behind it.
+func TestPickerMouseWheelAndClick(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddSystemBlock("transcript behind the panel")
+	var chosen string
+	app.OpenPicker(PickerOptions{
+		Title: "model",
+		Views: []PickerView{{Name: "roles", Items: []PickerItem{
+			{Label: "one", Value: "v1"},
+			{Label: "two", Value: "v2"},
+			{Label: "three", Value: "v3"},
+		}}},
+		OnSelect: func(v string) { chosen = v },
+	})
+	app.draw()
+
+	press := tcell.NewEventMouse(0, 0, tcell.WheelDown, tcell.ModNone)
+	app.handleKey(press)
+	app.draw()
+	app.mu.Lock()
+	sel := app.pickers[len(app.pickers)-1].sel
+	app.mu.Unlock()
+	if sel != 1 {
+		t.Fatalf("wheel down left the selection at %d, want 1", sel)
+	}
+
+	// Click the last painted row of the list.
+	app.mu.Lock()
+	p := app.pickers[len(app.pickers)-1]
+	row := -1
+	for i, itemIdx := range p.hitItem {
+		if itemIdx >= 0 {
+			row = i
+		}
+	}
+	if row < 0 {
+		app.mu.Unlock()
+		t.Fatal("the painter published no clickable rows")
+	}
+	want := p.item(p.hitItem[row]).Value
+	y := p.hitY0 + row
+	app.mu.Unlock()
+
+	app.handleKey(tcell.NewEventMouse(6, y, tcell.Button1, tcell.ModNone))
+	app.handleKey(tcell.NewEventMouse(6, y, tcell.ButtonNone, tcell.ModNone))
+	if chosen != want {
+		t.Fatalf("click chose %q, want %q", chosen, want)
+	}
+	if app.PickerOpen() {
+		t.Fatal("the picker stayed open after a click chose a row")
+	}
+	app.mu.Lock()
+	shown := app.selShown
+	app.mu.Unlock()
+	if shown {
+		t.Fatal("the click also started a text selection behind the panel")
+	}
+}

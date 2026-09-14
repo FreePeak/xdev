@@ -63,8 +63,12 @@ type App struct {
 	// level; a selection pops them all. While non-empty the picker owns
 	// every key event and the dropdown is closed.
 	pickers []*picker
-	keyMap  *KeyMap // remappable keybinding layer
-	st      Status
+	// pickerBtnDown tracks the primary button across events, so a press is
+	// acted on once and the drag reports a terminal sends at the same cell do
+	// not choose the row repeatedly (tcell does not expose the motion bit).
+	pickerBtnDown bool
+	keyMap        *KeyMap // remappable keybinding layer
+	st            Status
 	// The decode window of the message being streamed: the first and last
 	// delta, and the runes between them. AddUsage closes the window and
 	// turns it into st.Rate; starting a run discards an unfinished one.
@@ -1025,6 +1029,75 @@ func (a *App) setRole(role, ref string) {
 	a.AddSystemBlock("@" + role + " → " + ref)
 }
 
+// handlePickerMouse routes a mouse event into the open modal list, with the
+// semantics omp's SelectList has: the wheel moves the selection one row per
+// notch, one click on a row takes it and chooses it (clickItem calls onSelect
+// straight away), and a click on a view tab switches view. Returns true when the
+// picker consumed the event, so the transcript neither scrolls nor starts a text
+// selection underneath the panel. Caller: UI thread; it takes a.mu itself.
+func (a *App) handlePickerMouse(m *tcell.EventMouse) bool {
+	wheel := 0
+	switch m.Buttons() {
+	case tcell.WheelUp:
+		wheel = -1
+	case tcell.WheelDown:
+		wheel = 1
+	}
+	held := m.Buttons()&tcell.Button1 != 0
+	x, y := m.Position()
+
+	a.mu.Lock()
+	if len(a.pickers) == 0 {
+		a.pickerBtnDown = false
+		a.mu.Unlock()
+		return false
+	}
+	p := a.pickers[len(a.pickers)-1]
+	press := held && !a.pickerBtnDown
+	a.pickerBtnDown = held
+	var (
+		act    func(string)
+		value  string
+		choose bool
+	)
+	switch {
+	case wheel != 0:
+		p.move(wheel)
+	case press && y == p.tabY:
+		if _, view := p.pickAt(x, y); view >= 0 {
+			p.switchView(view - p.view)
+		}
+	case press:
+		item, _ := p.pickAt(x, y)
+		if item < 0 {
+			// A header, border or blank cell inside the panel: consume it so
+			// the click cannot start a selection underneath the modal.
+			a.pickerBtnDown = held
+			a.mu.Unlock()
+			a.poke()
+			return true
+		}
+		if p.selectItem(item) {
+			if f, ok := p.choose(); ok {
+				if it, ok := p.selected(); ok {
+					act, value, choose = f, it.Value, true
+				}
+			}
+		}
+	default:
+		a.mu.Unlock()
+		return false
+	}
+	a.mu.Unlock()
+	a.poke()
+	if !choose {
+		return true
+	}
+	a.closePickers()
+	act(value)
+	return true
+}
+
 // handlePickerKey routes one key to the top picker. It reports whether the
 // event was consumed: while a picker is open the editor, scrolling, and the
 // quit chords are all inert, so a stray key can never leak into the
@@ -1290,6 +1363,12 @@ func (a *App) handleKey(ev tcell.Event) {
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise
 		// let the host terminal scroll its own pre-launch scrollback).
 		if m, ok := ev.(*tcell.EventMouse); ok {
+			// A modal list owns the mouse first: omp's SelectList moves the
+			// selection on the wheel and chooses the row under a click, so
+			// nothing underneath it should scroll or start a text selection.
+			if a.handlePickerMouse(m) {
+				return // the UI loop repaints after handleKey
+			}
 			switch m.Buttons() {
 			case tcell.WheelUp:
 				a.scroll(3, false)
@@ -2183,8 +2262,11 @@ func (a *App) drawPicker(yComposerTop int) {
 	drawText(a.scr, x1, yTop, "╮", borderS)
 	y := yTop + 1
 
-	// View tabs (omp's per-provider views): the active one is bright.
+	// View tabs (omp's per-provider views): the active one is bright. The tab
+	// strip's row is published for the mouse hit-test.
+	p.tabY, p.tabAt = -1, nil
 	if tabs {
+		p.tabY = y
 		a.drawPickerTabRow(p, y, x0, inner, rowBg, tcell.StyleDefault.Foreground(detailCol))
 		y++
 	}
@@ -2198,7 +2280,14 @@ func (a *App) drawPicker(yComposerTop int) {
 		}
 	}
 	labelW = min(labelW+2, 28)
+	// Publish the row map the mouse router hit-tests against, so a click lands
+	// on exactly the row the user saw.
+	p.hitY0, p.hitItem = y, make([]int, len(lines))
 	for i, ln := range lines {
+		p.hitItem[i] = -1 // a section header is not a target
+		if !ln.header {
+			p.hitItem[i] = ln.itemIdx
+		}
 		st := rowBg
 		if start+i == selLine {
 			st = selBg
@@ -2268,6 +2357,9 @@ func (a *App) drawPickerTabRow(p *picker, y, x0, inner int, bg, dim tcell.Style)
 		if x+width(v.Name) > x0+inner {
 			break
 		}
+		// Each tab owns its label plus the gap after it, so a click anywhere
+		// in that span switches to the view it names.
+		p.tabAt = append(p.tabAt, x)
 		st := dim
 		if i == p.view {
 			st = active
