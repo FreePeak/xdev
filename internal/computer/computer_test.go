@@ -637,7 +637,7 @@ func TestTimeoutBoundsOneOp(t *testing.T) {
 
 	// Through the tool: a slow platform tool is cut off at Config.Timeout.
 	dir := t.TempDir()
-	writeStub(t, dir, "osascript", "#!/bin/sh\nsleep 5\n")
+	writeStub(t, dir, "osascript", "#!/bin/sh\n/bin/sleep 5\n")
 	t.Setenv("PATH", dir)
 	tl := newToolFor(Config{Enabled: true, Dir: t.TempDir(), Timeout: 100 * time.Millisecond}, darwinBackend{}, nil)
 	start := time.Now()
