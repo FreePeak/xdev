@@ -173,7 +173,7 @@ func (g *GoalState) Reminder() string {
 func (g *GoalState) Describe() string {
 	v, ok := g.View()
 	if !ok {
-		return "goal: none — start one with the goal tool (op create)"
+		return "goal: none — start one with /goal create <objective> (or the goal tool, op create)"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "goal: %s\nobjective: %s", v.Status, v.Objective)

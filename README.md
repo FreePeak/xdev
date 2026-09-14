@@ -95,7 +95,7 @@ drags a scrolled viewport (the `▲ n ▼ n` indicator shows hidden rows):
 | `/rename <title>` | title this session (a manual title beats the generated one) |
 | `/resume [id]`, `/fork`, `/branch`, `/tree` | session picker, fork, and the tree navigator |
 | `/model [@role\|ref]` | switch the active model or assign a role (Alt+M opens the selector) |
-| `/goal [create\|evidence\|complete\|drop]` | drive the session objective and its token budget |
+| `/goal [view\|create <objective>\|resume <objective>\|evidence <note>\|complete [notes]\|drop]` | drive the session objective and its token budget; bare `/goal` (or `check`/`status`/`get`) shows it |
 | `/plan`, `/vibe`, `/prewalk`, `/advisor`, `/handoff` | run-mode controls |
 | `/memory`, `/skill:<name>`, `/settings`, `/theme`, `/hotkeys`, `/hub` (Alt+A), `/stats`, `/export`, `/share`, `/collab` | knowledge, chrome and sharing |
 | `/help` | list every command |
