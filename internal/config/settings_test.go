@@ -206,6 +206,46 @@ func TestSetGetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSetRefusesUnknownKey pins the P0 fix: `xdev config set <typo> <value>`
+// used to write the typo and report success, and the NEXT start then rejected
+// the file (per-layer loads are strict KnownFields), moved it aside as
+// .broken-* and came up on defaults — losing every setting the user had. The
+// key is checked against the Settings schema before anything is written, and
+// the result must still decode strictly. Open key sets (modelRoles.*,
+// modelRolesEffort.*, toolsApproval.*, hooks.*) stay settable: their names are
+// model roles, tool names and event names, not schema fields.
+func TestSetRefusesUnknownKey(t *testing.T) {
+	const original = "theme: groknight\n"
+	path := writeFile(t, filepath.Join(t.TempDir(), "config.yml"), original)
+	for _, key := range []string{
+		"typokey",
+		"advisore",
+		"bash.backgroundTimeoutSeconds", // a struct group: its subkeys are checked too
+		"a.",                            // empty segment
+	} {
+		if err := Set(path, key, "1"); err == nil {
+			t.Fatalf("Set(%q) must be refused", key)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(after) != original {
+		t.Fatalf("a refused Set must leave the file untouched:\n%s", after)
+	}
+	for _, kv := range [][2]string{
+		{"theme", "grokday"}, {"maxTurns", "42"}, {"advisor", "true"},
+		{"personality", "friendly"}, {"modelRoles.slow", "onegw/free"},
+		{"modelRolesEffort.slow", "high"}, {"toolsApproval.bash", "allow"},
+		{"memoryMnemopi.scope", "project"}, {"hooks.preToolUse", "true"},
+	} {
+		if err := Set(path, kv[0], kv[1]); err != nil {
+			t.Fatalf("Set(%q): %v", kv[0], err)
+		}
+	}
+	// What the command wrote must survive the load path it protects.
+	if _, err := LoadSettings(t.TempDir(), []string{path}); err != nil {
+		t.Fatalf("written file rejected on load: %v", err)
+	}
+}
+
 // TestSetRefusesUnparseableFile: editing a broken file must not overwrite
 // the user's bytes with a guess.
 func TestSetRefusesUnparseableFile(t *testing.T) {

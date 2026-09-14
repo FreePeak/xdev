@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -1524,8 +1527,14 @@ func timestampForBackup() string {
 }
 
 // Set writes one dotted key into the layer file at path (used by
-// `xdev config set`), preserving the other keys.
+// `xdev config set`), preserving the other keys. The key is checked against
+// the Settings schema first and the result is decoded strictly before it is
+// written: a rejected file is moved aside as *.broken-* on the next start, so
+// a typo here would silently cost the user their whole config.
 func Set(path, key, value string) error {
+	if !settingsKeyOK(key) {
+		return fmt.Errorf("config: unknown key %q in %s: the next start would reject the file, move it aside as *.broken-* and come up on defaults. `xdev config list` shows the schema; modelRoles.<name>, modelRolesEffort.<name>, toolsApproval.<tool> and hooks.* take any name.", key, path)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -1551,10 +1560,27 @@ func Set(path, key, value string) error {
 	if err != nil {
 		return err
 	}
+	if err := settingsRoundTrip(path, out); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(path, out, 0o644)
+}
+
+// settingsRoundTrip decodes a candidate file exactly the way the layered load
+// will, so `config set` fails on its own output instead of on the next start.
+func settingsRoundTrip(path string, out []byte) error {
+	var probe Settings
+	d := yaml.NewDecoder(bytes.NewReader(out))
+	d.KnownFields(true)
+	if err := d.Decode(&probe); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return fmt.Errorf("config: %s: refusing to write a file the next start would reject: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // yamlScalar interprets a CLI token as bool/int/string, so `set
