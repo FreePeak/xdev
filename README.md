@@ -67,6 +67,19 @@ an API key, not for a JWT. A `keychain:` reference that cannot be satisfied is a
 error naming the reference; xdev will not quietly use a different credential.
 `XDEV_DISABLE_KEYCHAIN=1` turns the lookup off. [Why, with measurements](docs/decisions/keychain-credential-source.md).
 
+## Install (Linux / macOS)
+
+One command — fetches the newest release for your platform, verifies its
+SHA-256, and installs to `~/.local/bin`. Re-running it auto-updates the
+installed binary to the newest release.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh
+```
+
+Variables for power users (same names as `xdev update`):
+`XDEV_UPDATE_REPO`, `XDEV_UPDATE_API`, `XDEV_INSTALL_DIR`.
+
 ## Onboarding, updates, benchmarks
 
 ```bash
