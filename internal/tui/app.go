@@ -118,9 +118,11 @@ type App struct {
 	// UI-loop stall detection (stall.go). loopBeat is written from the loop
 	// and read by the watchdog, so it is atomic rather than mutex-guarded: a
 	// watchdog that took App.mu could not report a loop stuck holding it.
-	loopBeat  atomic.Int64
-	stallDir  string
-	lineCache map[blockKey][]line
+	loopBeat atomic.Int64
+	stallDir string
+	// rowIdx is the transcript's row layout and per-block render cache; the
+	// per-frame cost is the viewport, not the session (see rowindex.go).
+	rowIdx rowIndex
 
 	// Welcome-screen Game of Life backdrop (UI thread; guarded by mu).
 	life       lifeGrid
@@ -148,6 +150,7 @@ type blockKey struct {
 	stream   bool
 	expanded bool // result box: the Ctrl+O state changed the row set
 	age      int64
+	trim     int8 // bounded middle trim: this block's render-window tier
 }
 
 // New creates the App over an initialized screen.
@@ -165,11 +168,10 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		st:           Status{Model: model, SessionID: sessionID, Start: time.Now()},
 		showThinking: true,
 		width:        w, height: h,
-		keyq:      make(chan tcell.Event, 64),
-		dirty:     make(chan struct{}, 1),
-		quitCh:    make(chan struct{}),
-		sm:        newScrollModel(),
-		lineCache: map[blockKey][]line{},
+		keyq:   make(chan tcell.Event, 64),
+		dirty:  make(chan struct{}, 1),
+		quitCh: make(chan struct{}),
+		sm:     newScrollModel(),
 	}
 }
 
@@ -198,7 +200,7 @@ func (a *App) SetHandlers(onSend func(text string), onCancel, onQuit func()) {
 // Invalidate clears the render cache (resize, theme change).
 func (a *App) Invalidate() {
 	a.mu.Lock()
-	a.lineCache = map[blockKey][]line{}
+	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
 }
@@ -608,7 +610,7 @@ func (a *App) SetTheme(th *theme.Theme) {
 	}
 	a.mu.Lock()
 	a.th = th
-	a.lineCache = map[blockKey][]line{}
+	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
 }
@@ -814,7 +816,7 @@ func (a *App) Reset() {
 	a.mu.Lock()
 	a.blocks = nil
 	a.sm = newScrollModel()
-	a.lineCache = map[blockKey][]line{}
+	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1065,7 +1067,7 @@ func (a *App) SetShowThinking(on bool) {
 		}
 		a.blocks = kept
 	}
-	a.lineCache = map[blockKey][]line{}
+	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1248,7 +1250,7 @@ func (a *App) handleKey(ev tcell.Event) {
 		if r, ok := ev.(*tcell.EventResize); ok {
 			a.mu.Lock()
 			a.width, a.height = r.Size()
-			a.lineCache = map[blockKey][]line{}
+			a.clearRenderCache()
 			a.mu.Unlock()
 		}
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise
@@ -1605,14 +1607,11 @@ func (a *App) scrollTo(down bool) {
 	a.poke()
 }
 
-// totalLinesLocked counts rendered lines across all blocks.
+// totalLinesLocked is the transcript's row count. The row index keeps the
+// running total, so a scroll key costs a stamp scan over blocks rather than a
+// re-render of every row in the session.
 func (a *App) totalLinesLocked() int {
-	w := a.contentWidth()
-	n := 0
-	for i := range a.blocks {
-		n += len(a.blockLines(i, a.blocks[i], w)) + 1 // separator
-	}
-	return n
+	return int(a.sync(a.contentWidth()))
 }
 
 func (a *App) viewportLinesLocked() int {
@@ -1629,19 +1628,24 @@ func (a *App) contentWidth() int {
 	return w
 }
 
-// blockLines renders a block to styled visual lines (cached per width/state).
+// blockLines returns block i's styled visual lines, rendering them only when
+// the block's stamp moved. The render lives in the row index — one entry per
+// block, a superseded render replaced in place rather than kept beside it, so
+// a long session's memory stays flat while a turn streams.
 func (a *App) blockLines(i int, b *Block, w int) []line {
-	// A running tool row carries a live elapsed that no field of the block
-	// changes, so its cache key ages in whole seconds: one row re-renders per
-	// tick and every other block keeps its cache.
-	var age int64
-	if b.Kind == KindTool && b.Status == "running" && !b.Ts.IsZero() {
-		age = int64(time.Since(b.Ts).Seconds())
+	x := &a.rowIdx
+	if x.w != w {
+		x.w = w
+		x.reset()
 	}
-	key := blockKey{idx: i, kind: b.Kind, width: w, tlen: len(b.Text), tool: b.ToolName, status: b.Status, stream: b.stream, expanded: b.Expanded, age: age}
-	if lines, ok := a.lineCache[key]; ok {
-		return lines
+	key := a.renderKey(i, b, w)
+	if i < len(x.rend) && x.rend[i].key == key {
+		return x.rend[i].lines
 	}
+	if i >= len(x.rend) {
+		x.grow(i + 1)
+	}
+	x.markDirty(i)
 	var lines []line
 	switch b.Kind {
 	case KindUser:
@@ -1687,17 +1691,18 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		if body == "" {
 			break
 		}
-		// Row budget mirrors the tool-output window (PRD row budget): the
-		// full reasoning always stays in the session JSONL.
+		// Bounded middle trim: the newest thinking blocks keep the full render
+		// window (PRD row budget); aged ones collapse to a head slice plus the
+		// elided-row count. The full reasoning always stays in the session JSONL.
 		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 		rows := wrap(body, max(10, w-4))
-		const thinkHeadRows, thinkTailRows = 100, 40
-		if len(rows) > thinkHeadRows+thinkTailRows+1 {
-			for _, wl := range rows[:thinkHeadRows] {
+		headRows, tailRows := thinkWindow(a.trimTier(i))
+		if len(rows) > headRows+tailRows+1 {
+			for _, wl := range rows[:headRows] {
 				lines = append(lines, textline("  "+wl, bodySt))
 			}
-			lines = append(lines, textline(fmt.Sprintf("  … %d rows elided (full reasoning in the session log) …", len(rows)-thinkHeadRows-thinkTailRows), stThinkingHdr(a, false)))
-			for _, wl := range rows[len(rows)-thinkTailRows:] {
+			lines = append(lines, textline(fmt.Sprintf("  … %d rows elided (full reasoning in the session log) …", len(rows)-headRows-tailRows), stThinkingHdr(a, false)))
+			for _, wl := range rows[len(rows)-tailRows:] {
 				lines = append(lines, textline("  "+wl, bodySt))
 			}
 		} else {
@@ -1770,7 +1775,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			lines = append(lines, wrapLine(ln, w)...)
 		}
 	}
-	a.lineCache[key] = lines
+	x.rend[i] = blockRend{key: key, lines: lines, rows: int32(len(lines)) + 1}
 	return lines
 }
 
@@ -1834,20 +1839,22 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	case body == "" && !b.Err:
 		out = append(out, row("(no output)", mutedSt))
 	case body != "":
-		const maxHeadRows, maxTailRows = 200, 50
+		// Aged results collapse to a head+tail window: the middle of the
+		// output is trimmed before anything else in the transcript is.
+		headRows, tailRows := toolWindow(a.trimTier(i))
 		rows := wrap(body, inner)
-		if b.Expanded || len(rows) <= maxHeadRows+maxTailRows+1 {
+		if b.Expanded || len(rows) <= headRows+tailRows+1 {
 			for _, wl := range rows {
 				out = append(out, row(wl, bodySt))
 			}
 		} else {
-			for _, wl := range rows[:maxHeadRows] {
+			for _, wl := range rows[:headRows] {
 				out = append(out, row(wl, bodySt))
 			}
 			// The notice sits at the hole it describes, between the head and
 			// the tail — omp prints its hidden-line count the same way.
-			out = append(out, row(fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-maxHeadRows-maxTailRows), dimSt))
-			for _, wl := range rows[len(rows)-maxTailRows:] {
+			out = append(out, row(fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-headRows-tailRows), dimSt))
+			for _, wl := range rows[len(rows)-tailRows:] {
 				out = append(out, row(wl, bodySt))
 			}
 		}
@@ -1925,70 +1932,32 @@ func (a *App) draw() {
 	}
 	contentW := a.contentWidth()
 
-	type row struct {
-		ln    line
-		rail  string
-		railS tcell.Style
-		ts    string // right-aligned timestamp (first row of user/assistant)
-	}
-	var rows []row
-	for i := range a.blocks {
-		b := a.blocks[i]
-		lines := a.blockLines(i, b, contentW)
-		var railCh string
-		var railS tcell.Style
-		switch b.Kind {
-		case KindUser:
-			railCh = "" // user rows carry their own ❯ band, no rail
-		case KindThinking:
-			railCh = "┃"
-			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
-		case KindTool:
-			railCh = "┃"
-			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
-		case KindToolDone:
-			// The tool-result block draws its own rounded frame (blockLines),
-			// so it carries no leading rail — a `┃` beside the box border would
-			// read as a doubled line.
-			railCh = ""
-		case KindSystem:
-			railCh = "┃"
-			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
-		default: // assistant
-			railCh = "┃"
-			railS = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant)))
-		}
-		for j, ln := range lines {
-			r := row{ln: ln, rail: railCh, railS: railS}
-			if j == 0 && !b.Ts.IsZero() && (b.Kind == KindUser || b.Kind == KindAssistant) {
-				r.ts = b.Ts.Format("3:04 PM")
-			}
-			rows = append(rows, r)
-		}
-		rows = append(rows, row{}) // separator
-	}
+	// The row index is this frame's plan: sync() re-renders only the blocks
+	// whose stamp moved and knows the first row of every block, so painting
+	// costs the viewport instead of the session.
+	total := int(a.sync(contentW))
 
 	// Feed the new row count through the model every frame: while following
 	// it stays pinned to the tail; while scrolled it preserves the user's
 	// position against streaming output.
-	a.sm.NewContent(len(rows), vp)
-	start := a.sm.Start(len(rows), vp)
+	a.sm.NewContent(total, vp)
+	start := a.sm.Start(total, vp)
 	end := start + vp
-	if end > len(rows) {
-		end = len(rows)
+	if end > total {
+		end = total
 	}
 
 	// Proportional right-edge scrollbar (omp's ScrollView): while the
 	// transcript overflows the viewport, the last screen column carries a
 	// track/thumb that gives continuous position feedback. Reserve it so band
 	// rows never render a cell under the bar.
-	sbStart, sbEnd, sbOk := a.sm.Scrollbar(len(rows), vp)
+	sbStart, sbEnd, sbOk := a.sm.Scrollbar(total, vp)
 	bandLim := w
 	if sbOk {
 		bandLim = w - 1
 	}
 	selRows := make([]selRow, 0, end-start)
-	for y, r := range rows[start:end] {
+	for y, r := range a.viewRows(int32(start), int32(end)) {
 		if r.ln.bg != 0 {
 			// Band row (user prompt / code fence): fill the full width so
 			// the band reads as one continuous row (grok semantic band).
@@ -2041,7 +2010,7 @@ func (a *App) draw() {
 	// to the top row (a long thinking line, or the last prompt) and any
 	// right-aligned timestamp there, so the first line showed a hint glued to
 	// the text that never scrolled away. The divider is chrome: never content.
-	if up, down := a.sm.Indicator(len(rows), vp); up > 0 || down > 0 {
+	if up, down := a.sm.Indicator(total, vp); up > 0 || down > 0 {
 		a.scrollHint = fmt.Sprintf("▲ %d ▼ %d", up, down)
 	} else {
 		a.scrollHint = ""
