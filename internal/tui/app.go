@@ -137,13 +137,21 @@ type App struct {
 	life       lifeGrid
 	lifeTick   int
 	sheenPhase int // welcome logo sheen sweep position (columns)
-	// Mouse text selection: drag across transcript rows, release copies
-	// to the clipboard. selRows is the last frame's rendered rows with
-	// their screen origins, kept for hit-testing (UI thread; mu-guarded).
-	selActive bool
+	// Mouse text selection: drag anywhere, release copies to the clipboard.
+	// selDown is the held button (a drag in flight); selShown keeps the
+	// highlight up after the release until the next click, like a terminal's
+	// own selection. selRows is the last frame's transcript rows with their
+	// screen origins; rows outside that capture are read back from the grid.
+	// (UI thread; mu-guarded.)
+	selDown   bool
+	selShown  bool
 	selAnchor selPoint
 	selEnd    selPoint
 	selRows   []selRow
+	// selNotice is the copy confirmation (omp's showStatus for a copy); it
+	// rides the composer divider until selNoticeUntil.
+	selNotice      string
+	selNoticeUntil time.Time
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
@@ -1244,6 +1252,11 @@ func (a *App) Run() {
 					}
 				}
 			}
+			// A copy confirmation is timed, and an idle UI does not repaint:
+			// the tick that finds it expired asks for the draw that drops it.
+			if a.selNotice != "" && a.copyHint() == "" {
+				animate = true
+			}
 			clock := a.hudHasClock()
 			a.mu.Unlock()
 			if running || animate {
@@ -1916,9 +1929,11 @@ func (a *App) draw() {
 	s := a.scr
 	w, h := a.width, a.height
 	s.Clear()
-	// The indicator is a per-frame fact about the viewport; a frame that draws
-	// no transcript (welcome, /clear) must not keep last frame's hint.
-	a.scrollHint = ""
+	// Per-frame facts about the viewport: a frame that draws no transcript
+	// (welcome, /clear) must not keep last frame's scroll hint, nor its
+	// selection capture — rows recorded before /clear would copy text that is
+	// no longer on screen.
+	a.scrollHint, a.selRows = "", nil
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -2400,8 +2415,15 @@ func (a *App) drawComposer(yTop int) {
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
 	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name.
-	if hint := a.scrollHint; hint != "" {
+	// hint is dropped rather than eating the model name. A fresh copy
+	// confirmation outranks it — that message is the only proof the mouse
+	// gesture did anything, since the app holds the mouse and the terminal
+	// stays quiet.
+	hint := a.copyHint()
+	if hint == "" {
+		hint = a.scrollHint
+	}
+	if hint != "" {
 		hx := w - 3 - width(hint)
 		if hx > 2+width(info) {
 			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
