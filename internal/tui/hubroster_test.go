@@ -229,3 +229,65 @@ func hubUI(a *App) hubRosterUI {
 	}
 	return st.ui
 }
+
+// TestHubRosterMouse: a click on an agent row focuses it and runs Enter's action
+// (omp's click-to-focus on live-agent cards), the wheel moves the selection in
+// the list and scrolls the transcript view once one is open, and the row map is
+// republished when the view closes.
+func TestHubRosterMouse(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	f := &hubFixture{rows: rosterRows()}
+	app.SetHubOps(f.ops())
+	if err := app.HubRoster(); err != nil {
+		t.Fatal(err)
+	}
+	app.AddSystemBlock("transcript behind the roster")
+	app.draw()
+
+	click := func(y int) {
+		app.mu.Lock()
+		app.handleHubRosterMouse(tcell.NewEventMouse(6, y, tcell.Button1, tcell.ModNone), true)
+		app.handleHubRosterMouse(tcell.NewEventMouse(6, y, tcell.ButtonNone, tcell.ModNone), false)
+		app.mu.Unlock()
+		app.draw()
+	}
+	// Row geometry comes from the painter, so the test follows the layout
+	// instead of pinning a coordinate.
+	app.mu.Lock()
+	yFirst := app.hubState().ui.hitY0
+	n := len(app.hubState().ui.hitIdx)
+	app.mu.Unlock()
+	if n < 2 {
+		t.Fatalf("roster published %d rows, want 2", n)
+	}
+
+	click(yFirst + 1) // the second agent: selected, and Enter runs on it
+	if ui := hubUI(app); ui.sel != 1 {
+		t.Fatalf("click selected %d, want 1", ui.sel)
+	}
+
+	click(yFirst) // hub-1 is the row with a transcript: it opens
+	if ui := hubUI(app); ui.viewID != "hub-1" || len(ui.view) != 2 {
+		t.Fatalf("click did not open the transcript: %+v", ui)
+	}
+
+	// In the transcript view the wheel scrolls that view, like the arrows do.
+	app.mu.Lock()
+	app.handleHubRosterMouse(tcell.NewEventMouse(6, 10, tcell.WheelDown, tcell.ModNone), false)
+	top := app.hubState().ui.viewTop
+	app.mu.Unlock()
+	if top != 1 {
+		t.Fatalf("wheel scrolled the view to %d, want 1", top)
+	}
+
+	// Esc back to the list, where the wheel moves the selection again.
+	pressRosterKey(app, tcell.KeyEsc, 0)
+	app.draw()
+	app.mu.Lock()
+	app.handleHubRosterMouse(tcell.NewEventMouse(6, 10, tcell.WheelUp, tcell.ModNone), false)
+	sel := app.hubState().ui.sel
+	app.mu.Unlock()
+	if sel != 0 {
+		t.Fatalf("wheel up left the selection at %d, want 0", sel)
+	}
+}

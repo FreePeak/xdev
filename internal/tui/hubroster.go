@@ -53,6 +53,12 @@ type hubRosterUI struct {
 	view    []HubTranscriptLine
 	viewTop int
 	msg     string // transient feedback line (kill/revive results)
+	// hitY0 and hitIdx are the row map the painter publishes each frame — omp's
+	// lists do the same inside render() — so a click lands on exactly the agent
+	// row the user saw: hitIdx[i] is the index into rows of the painted row at
+	// screen row hitY0+i.
+	hitY0  int
+	hitIdx []int
 }
 
 // The App struct lives in app.go, which another agent owns this wave, so
@@ -150,23 +156,7 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 			return true // owned: Enter on an empty roster does nothing
 		}
 		handled = true
-		id := ui.rows[ui.sel].ID
-		switch {
-		case ui.viewID == id:
-			ui.viewID, ui.view, ui.viewTop = "", nil, 0
-		case ops.Transcript == nil:
-			ui.msg = "no transcript source wired"
-		default:
-			lines, total, ok := ops.Transcript(id, 0)
-			if !ok {
-				ui.msg = "no transcript for " + id
-			} else {
-				ui.viewID = id
-				ui.view = lines
-				ui.viewTop = max(0, min(len(lines), total)-hubViewRows)
-				ui.msg = ""
-			}
-		}
+		rosterActivate(st, ui, ops, ui.sel)
 	case tcell.KeyEsc:
 		handled = true
 		if ui.viewID != "" {
@@ -226,6 +216,99 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 	return handled
 }
 
+// rosterActivate is Enter's action on one agent row: open its transcript, or
+// close it when it is already the open view. The keyboard and the mouse share it
+// so a click cannot drift from the chord. Caller holds hubRegMu.
+func rosterActivate(st *hubRosterState, ui *hubRosterUI, ops *HubOps, row int) {
+	if row < 0 || row >= len(ui.rows) {
+		return
+	}
+	ui.sel = row
+	id := ui.rows[row].ID
+	switch {
+	case ui.viewID == id:
+		ui.viewID, ui.view, ui.viewTop = "", nil, 0
+	case ops.Transcript == nil:
+		ui.msg = "no transcript source wired"
+	default:
+		lines, total, ok := ops.Transcript(id, 0)
+		if !ok {
+			ui.msg = "no transcript for " + id
+		} else {
+			ui.viewID = id
+			ui.view = lines
+			ui.viewTop = max(0, min(len(lines), total)-hubViewRows)
+			ui.msg = ""
+		}
+	}
+}
+
+// handleHubRosterMouse routes mouse events into the open roster, with the
+// semantics omp gives its live-agent surfaces: a click on a card focuses it
+// (omp's click-to-focus), which here means the same action as Enter on that row,
+// and the wheel moves the selection — inside a transcript view the wheel scrolls
+// that view instead, matching ↑↓. Returns true when the overlay consumed the
+// event, so the transcript behind it neither scrolls nor starts a selection.
+// Caller: UI thread, mu held (like handleMouse).
+func (a *App) handleHubRosterMouse(m *tcell.EventMouse, press bool) bool {
+	st := a.hubState()
+	if st == nil || st.ops == nil {
+		return false
+	}
+	hubRegMu.Lock()
+	defer hubRegMu.Unlock()
+	ui := &st.ui
+	if !ui.open {
+		return false
+	}
+	wheel := 0
+	switch m.Buttons() {
+	case tcell.WheelUp:
+		wheel = -1
+	case tcell.WheelDown:
+		wheel = 1
+	}
+	// The hit-test is by row, like omp's SelectList.hitTest(row): an agent
+	// row spans the panel, so the column carries no meaning here.
+	_, y := m.Position()
+	handled := true
+	switch {
+	case wheel != 0 && ui.viewID != "":
+		// Viewing one agent's transcript: the wheel scrolls it, like ↑↓.
+		if d := ui.viewTop + wheel; d >= 0 && d < len(ui.view) {
+			ui.viewTop = d
+		}
+	case wheel != 0:
+		if d := ui.sel + wheel; d >= 0 && d < len(ui.rows) {
+			ui.sel = d
+		}
+	case press:
+		// A click on a card focuses it, which is Enter on that row. A press
+		// that misses a row is left alone, so the transcript selection path
+		// can still copy whatever the overlay painted there.
+		if row := ui.rowAt(y); row >= 0 {
+			rosterActivate(st, ui, st.ops, row)
+		} else {
+			handled = false
+		}
+	default:
+		handled = false
+	}
+	if handled {
+		a.poke()
+	}
+	return handled
+}
+
+// rowAt maps a screen row to the agent row painted there, or -1.
+func (ui *hubRosterUI) rowAt(y int) int {
+	i := y - ui.hitY0
+	if i < 0 || ui.hitIdx == nil || i >= len(ui.hitIdx) {
+		return -1
+	}
+	return ui.hitIdx[i]
+}
+
 // drawHubRoster renders the overlay above the composer. Callers hold a.mu
 // (draw does) — this must not re-lock a.mu.
 func (a *App) drawHubRoster(yComposerTop int) {
@@ -233,7 +316,11 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	if st == nil || !st.ui.open {
 		return
 	}
+	// Every frame starts with no clickable rows; only the agent list below
+	// republishes them, so a click can never hit a stale row after the roster
+	// switches to its transcript view or empties out.
 	hubRegMu.Lock()
+	st.ui.hitY0, st.ui.hitIdx = 0, nil
 	ui := st.ui
 	hubRegMu.Unlock()
 	s := a.scr
@@ -310,6 +397,17 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		}
 		drawText(s, 3, y+2+i, rosterSnippet(text, printW(panelW, 3)), rowStyle)
 	}
+	// Publish the row map the mouse hit-tests against. `ui` is a copy taken
+	// without the registry lock (painting must never hold it — see
+	// handleHubRosterKey), so the table goes back in its own short section.
+	start := ui.sel - sel
+	idx := make([]int, len(rows))
+	for i := range rows {
+		idx[i] = start + i
+	}
+	hubRegMu.Lock()
+	st.ui.hitY0, st.ui.hitIdx = y+2, idx
+	hubRegMu.Unlock()
 	drawText(s, 3, y+h, rosterSnippet(ui.msg, printW(panelW, 3)), dimSt)
 }
 

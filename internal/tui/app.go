@@ -63,12 +63,13 @@ type App struct {
 	// level; a selection pops them all. While non-empty the picker owns
 	// every key event and the dropdown is closed.
 	pickers []*picker
-	// pickerBtnDown tracks the primary button across events, so a press is
-	// acted on once and the drag reports a terminal sends at the same cell do
-	// not choose the row repeatedly (tcell does not expose the motion bit).
-	pickerBtnDown bool
-	keyMap        *KeyMap // remappable keybinding layer
-	st            Status
+	// mouseBtnDown tracks the primary button across events, so a press is acted
+	// on once: tcell strips the SGR motion bit and exposes no accessor, so
+	// without this edge a single click would look like a press at every drag
+	// report the terminal sends along the way.
+	mouseBtnDown bool
+	keyMap       *KeyMap // remappable keybinding layer
+	st           Status
 	// The decode window of the message being streamed: the first and last
 	// delta, and the runes between them. AddUsage closes the window and
 	// turns it into st.Rate; starting a run discards an unfinished one.
@@ -1035,7 +1036,7 @@ func (a *App) setRole(role, ref string) {
 // straight away), and a click on a view tab switches view. Returns true when the
 // picker consumed the event, so the transcript neither scrolls nor starts a text
 // selection underneath the panel. Caller: UI thread; it takes a.mu itself.
-func (a *App) handlePickerMouse(m *tcell.EventMouse) bool {
+func (a *App) handlePickerMouse(m *tcell.EventMouse, press bool) bool {
 	wheel := 0
 	switch m.Buttons() {
 	case tcell.WheelUp:
@@ -1043,18 +1044,14 @@ func (a *App) handlePickerMouse(m *tcell.EventMouse) bool {
 	case tcell.WheelDown:
 		wheel = 1
 	}
-	held := m.Buttons()&tcell.Button1 != 0
 	x, y := m.Position()
 
 	a.mu.Lock()
 	if len(a.pickers) == 0 {
-		a.pickerBtnDown = false
 		a.mu.Unlock()
 		return false
 	}
 	p := a.pickers[len(a.pickers)-1]
-	press := held && !a.pickerBtnDown
-	a.pickerBtnDown = held
 	var (
 		act    func(string)
 		value  string
@@ -1072,7 +1069,6 @@ func (a *App) handlePickerMouse(m *tcell.EventMouse) bool {
 		if item < 0 {
 			// A header, border or blank cell inside the panel: consume it so
 			// the click cannot start a selection underneath the modal.
-			a.pickerBtnDown = held
 			a.mu.Unlock()
 			a.poke()
 			return true
@@ -1361,12 +1357,18 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Unlock()
 		}
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise
-		// let the host terminal scroll its own pre-launch scrollback).
 		if m, ok := ev.(*tcell.EventMouse); ok {
-			// A modal list owns the mouse first: omp's SelectList moves the
-			// selection on the wheel and chooses the row under a click, so
-			// nothing underneath it should scroll or start a text selection.
-			if a.handlePickerMouse(m) {
+			// One press edge, computed here, so every consumer agrees on which
+			// event began the gesture (tcell does not report the motion bit).
+			held := m.Buttons()&tcell.Button1 != 0
+			a.mu.Lock()
+			press := held && !a.mouseBtnDown
+			a.mouseBtnDown = held
+			a.mu.Unlock()
+			// A modal owns the mouse first: omp's lists move the selection on
+			// the wheel and choose the row under a click, so nothing underneath
+			// them should scroll or start a text selection.
+			if a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) {
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
