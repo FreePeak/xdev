@@ -636,8 +636,12 @@ func TestTimeoutBoundsOneOp(t *testing.T) {
 	}
 
 	// Through the tool: a slow platform tool is cut off at Config.Timeout.
+	// The stub is a two-stage pipeline on purpose: the shell forks a stage that
+	// inherits the op's output pipe, and that survivor is what used to hold
+	// Wait open — the deadline was reported, and the call came back only when
+	// the forked sleep finished on its own.
 	dir := t.TempDir()
-	writeStub(t, dir, "osascript", "#!/bin/sh\n/bin/sleep 5\n")
+	writeStub(t, dir, "osascript", "#!/bin/sh\n/bin/sleep 5 | /bin/sleep 5\n")
 	t.Setenv("PATH", dir)
 	tl := newToolFor(Config{Enabled: true, Dir: t.TempDir(), Timeout: 100 * time.Millisecond}, darwinBackend{}, nil)
 	start := time.Now()
@@ -645,7 +649,10 @@ func TestTimeoutBoundsOneOp(t *testing.T) {
 	if !res.IsError || !strings.Contains(res.Text, "timed out") {
 		t.Fatalf("slow op: %+v", res)
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
+	// 1s bounds the op at its 100 ms deadline plus the drain grace, with room
+	// for a loaded runner. A build that kills only the direct child lands here
+	// at 5s — the forked stage answering to nobody but itself.
+	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("timeout did not bound the op: %s", elapsed)
 	}
 }

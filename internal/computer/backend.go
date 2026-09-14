@@ -9,7 +9,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// ioDrainGrace bounds how long Wait keeps collecting an op's output after its
+// process group has been killed. A descendant that inherited the pipe must
+// not extend the op past computer.timeout; 250 ms is long enough to keep the
+// output of anything that exits on its own after the kill.
+const ioDrainGrace = 250 * time.Millisecond
 
 // op is one computer action.
 type op string
@@ -106,6 +113,17 @@ func runCmd(ctx context.Context, argv []string) ([]byte, error) {
 		return nil, missingTool(argv[0])
 	}
 	cmd := exec.CommandContext(ctx, path, argv[1:]...)
+	prepareProcessGroup(cmd)
+	// CommandContext's default Cancel signals only the direct child, and the
+	// platform tools are shells and scripting hosts that fork the real work:
+	// the survivor keeps the output pipe open, so Wait went on blocking after
+	// the deadline had been reported — and synthetic input outlived the op.
+	// Kill the whole group, and bound the drain for anything that survived it.
+	cmd.Cancel = func() error {
+		killProcessGroup(cmd.Process.Pid)
+		return nil
+	}
+	cmd.WaitDelay = ioDrainGrace
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
