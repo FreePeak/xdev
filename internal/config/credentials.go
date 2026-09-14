@@ -52,13 +52,23 @@ func (c StoredCredential) Expired() bool {
 type CredentialStore map[string]StoredCredential
 
 // LoadCredentials reads the store; an absent file is empty, a corrupt one is
-// an error (never silently ignored — losing every login is not a fallback).
+// an error (never silently ignored — losing every login is not a fallback),
+// and a file whose ownership guarantees no longer hold is refused (#123): the
+// 0600 that SaveCredential set is a fact about the write, not about now.
 func LoadCredentials() (CredentialStore, error) {
-	raw, err := os.ReadFile(CredentialsPath())
+	path := CredentialsPath()
+	fi, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return CredentialStore{}, nil
 		}
+		return nil, err
+	}
+	if err := verifySecretFile(path, fi); err != nil {
+		return nil, fmt.Errorf("credentials: refusing to read %w", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		return nil, err
 	}
 	var out CredentialStore
@@ -91,7 +101,7 @@ func SaveCredential(provider string, c StoredCredential) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(DataDir(), 0o755); err != nil {
+	if err := enforceDirPrivacy(DataDir(), 0o700); err != nil {
 		return err
 	}
 	return writeFilePrivate(CredentialsPath(), append(raw, '\n'))
@@ -184,6 +194,20 @@ func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 		}
 	}
 	stored := req.Store[req.Provider]
+	// A named auth style is an exact authority (#123). Falling back from the
+	// credential the user configured to one they did not can move a request to
+	// a different account, quota or team, so the chain stops here and says
+	// which rung is missing instead of quietly using another.
+	auth := ""
+	if pc := req.ProviderCfg; pc != nil {
+		auth = strings.ToLower(strings.TrimSpace(pc.Auth))
+	}
+	switch {
+	case auth == "oauth" && stored.Kind != "oauth":
+		return ResolvedCredential{}, fmt.Errorf("credentials: %s is configured auth: oauth but its stored login is %q — run: xdev login %s (xdev will not fall back to an API key)", req.Provider, stored.Kind, req.Provider)
+	case auth == "api_key" && stored.Kind == "oauth":
+		return ResolvedCredential{}, fmt.Errorf("credentials: %s is configured auth: api_key but its stored login is an OAuth token — run: xdev logout %s and store a key, or set auth: oauth", req.Provider, req.Provider)
+	}
 	switch stored.Kind {
 	case "oauth":
 		c := stored
@@ -207,6 +231,9 @@ func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 		if strings.TrimSpace(stored.APIKey) != "" {
 			return ResolvedCredential{Value: stored.APIKey, Source: "login", Kind: "api_key", Header: authHeader(req)}, nil
 		}
+	}
+	if auth == "oauth" {
+		return ResolvedCredential{}, fmt.Errorf("credentials: %s is configured auth: oauth and its stored token is unusable — run: xdev login %s", req.Provider, req.Provider)
 	}
 	for _, name := range envCandidates(req.Provider) {
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
