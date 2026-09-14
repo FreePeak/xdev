@@ -1707,16 +1707,23 @@ func shortSessionID(id string) string {
 	return id
 }
 
+// OnToolStart hands the transcript the call's raw arguments: the renderer
+// reads the naming field out of them (omp's `name · detail` row), so nothing
+// here pre-flattens the JSON into a preview the terminal then has to unpick.
 func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
-	preview := strings.Join(strings.Fields(string(call.Arguments)), " ")
-	if len(preview) > 120 {
-		preview = preview[:120] + "…"
-	}
-	h.ts.app.AddToolBlock(call.Name, preview)
+	h.ts.app.AddToolBlock(call.Name, string(call.Arguments))
 }
 
+// OnToolEnd passes the outcome facts the status footer shows — exit code and
+// dropped output — flattened from the tool's own structured details.
 func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Duration) {
-	h.ts.app.FinishTool(call.Name, res.IsError, res.Text, dur.Round(time.Millisecond).String())
+	out := tool.OutcomeOf(res.Details)
+	h.ts.app.FinishTool(call.Name, res.IsError, res.Text, tui.ToolOutcome{
+		Dur:       dur.Round(time.Millisecond).String(),
+		Exit:      out.Exit,
+		HasExit:   out.HasExit,
+		Truncated: out.Truncated,
+	})
 }
 
 // OnMessageEnd persists the assistant message (persistence on message_end).

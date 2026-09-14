@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -23,14 +24,20 @@ const (
 // on every draw (reflow on resize for free) with a small per-width cache.
 type Block struct {
 	Kind     BlockKind
-	Text     string
-	ToolName string
-	Status   string        // tool blocks: "running", "ok", "error"
-	Dur      string        // tool result blocks: formatted duration
-	Err      bool          // tool result blocks: error result
-	stream   bool          // assistant still receiving deltas (dim cursor at tail)
-	Ts       time.Time     // block timestamp (user/assistant, drawn right)
-	thinkDur time.Duration // thinking: frozen at EndThinking
+	Text     string // tool call blocks: the raw JSON arguments
+	ToolName string // tool blocks: the tool the model called
+	Status   string // tool blocks: "running", "ok", "error"
+	Dur      string // tool result blocks: formatted wall time
+	Err      bool   // tool result blocks: error result
+	Exit     int    // tool result blocks: process exit code, when HasExit
+	HasExit  bool   // tool result blocks: Exit is a real exit status
+	// Truncated marks a result whose tool dropped output the model never saw.
+	Truncated bool
+	// Expanded is a result box's Ctrl+O state: render every row.
+	Expanded bool
+	stream   bool      // assistant still receiving deltas (dim cursor at tail)
+	Ts       time.Time // block timestamp (user/assistant rows, tool start)
+	thinkDur time.Duration
 }
 
 // Width returns the display width of s in cells.
@@ -90,23 +97,55 @@ func wrap(s string, maxW int) []string {
 	return out
 }
 
-// toolSummary renders the one-line tool-call summary: name(args-preview).
-func toolSummary(b *Block, maxW int) string {
-	preview := strings.Join(strings.Fields(b.Text), " ")
-	if maxW > 3 && len(preview) > maxW*2 {
-		preview = preview[:maxW*2] + "…"
+// toolArgKeys name the argument that says what a call is ABOUT, in omp's
+// precedence (command, path, input) extended with xdev's search and fetch
+// tools. The first one present wins.
+var toolArgKeys = []string{"command", "path", "file_path", "pattern", "query", "url", "input"}
+
+// toolDetail renders one call's raw JSON arguments as the short phrase omp
+// prints after the tool name: the first line of the naming field, whitespace
+// collapsed, with " …" when the argument continued. Unparseable arguments, or
+// ones naming nothing, fall back to the flattened JSON so an unfamiliar tool
+// still says something instead of rendering an empty row.
+func toolDetail(rawArgs string) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(rawArgs), &fields) != nil {
+		return strings.Join(strings.Fields(rawArgs), " ")
 	}
-	s := "⟨" + b.ToolName + "⟩"
-	if preview != "" {
-		s += " " + preview
+	for _, k := range toolArgKeys {
+		v, ok := fields[k]
+		var s string
+		if !ok || json.Unmarshal(v, &s) != nil {
+			continue
+		}
+		head, rest, multiline := strings.Cut(strings.TrimRight(s, "\n"), "\n")
+		if len(head) > 400 {
+			// A write call's first line can be enormous; the row shows a
+			// phrase, so stop working past what any terminal can display.
+			head, multiline = head[:400], true
+		}
+		head = strings.Join(strings.Fields(head), " ")
+		if head == "" {
+			continue
+		}
+		if multiline && strings.TrimSpace(rest) != "" {
+			head += " …"
+		}
+		return head
 	}
-	switch b.Status {
-	case "running":
-		s += " …"
-	case "error":
-		s += " [error]"
+	return strings.Join(strings.Fields(rawArgs), " ")
+}
+
+// toolSummary splits the call row into the two runs it renders: the tool name
+// (bold) and its detail, truncated so the row fits maxW cells.
+func toolSummary(b *Block, maxW int) (name, detail string) {
+	name = b.ToolName
+	if detail = toolDetail(b.Text); maxW > 0 {
+		if budget := maxW - width(name) - 6; width(detail) > budget {
+			detail = truncateCells(detail, max(1, budget), "…")
+		}
 	}
-	return s
+	return name, detail
 }
 
 // blockAccent picks the rail/accent slot for a block.

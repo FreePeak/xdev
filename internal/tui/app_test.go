@@ -128,7 +128,7 @@ func TestStreamingBlocksAndTools(t *testing.T) {
 	app.AppendThinking("pondering")
 	app.EndThinking()
 	app.AddToolBlock("read", `{"path":"a.txt"}`)
-	app.FinishTool("read", false, "1:hi\n2:there", "3ms")
+	app.FinishTool("read", false, "1:hi\n2:there", ToolOutcome{Dur: "3ms"})
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -229,35 +229,59 @@ func lineText(ln line) string {
 	return b.String()
 }
 
-// TestToolResultRendersBox pins the omp-parity frame: a finished tool result
-// renders as a rounded box whose top border carries "name · state (dur)", the
-// body keeps every output line (not a flattened preview), and the frame
-// closes on its own bottom border.
-func TestToolResultRendersBox(t *testing.T) {
+// TestToolCallRowShowsNamedArgument pins omp's call row: the tool name and
+// the naming argument as a phrase, never the raw JSON the model sent.
+func TestToolCallRowShowsNamedArgument(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.FinishTool("bash", false, "line-one\nline-two\nline-three", "5ms")
+	app.AddToolBlock("bash", `{"command":"seq 1 400","timeout":120}`)
 	app.mu.Lock()
-	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	lines := app.blockLines(0, app.blocks[0], 80)
 	app.mu.Unlock()
 
-	if len(lines) != 5 { // top + 3 body + bottom
-		t.Fatalf("boxed render = %d lines, want 5", len(lines))
+	if len(lines) != 1 {
+		t.Fatalf("call row = %d lines, want 1", len(lines))
+	}
+	got := lineText(lines[0])
+	if !strings.Contains(got, "bash") || !strings.Contains(got, "seq 1 400") {
+		t.Fatalf("call row = %q, want the tool name and its command", got)
+	}
+	if strings.Contains(got, `"command"`) || strings.Contains(got, "timeout") {
+		t.Fatalf("call row leaked the raw arguments: %q", got)
+	}
+}
+
+// TestToolResultRendersBox pins the frame for a result standing alone (no call
+// row above it): a rounded box whose top border names the tool, whose body
+// keeps every output line, and whose wall time prints in omp's footer row
+// rather than in the border.
+func TestToolResultRendersBox(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.FinishTool("bash", false, "line-one\nline-two\nline-three", ToolOutcome{Dur: "5ms"})
+	app.mu.Lock()
+	i := len(app.blocks) - 1
+	lines := app.blockLines(i, app.blocks[i], 80)
+	app.mu.Unlock()
+
+	if len(lines) != 6 { // top + 3 body + footer + bottom
+		t.Fatalf("boxed render = %d lines, want 6:\n%s", len(lines), joinLines(lines))
 	}
 	top := lineText(lines[0])
-	for _, want := range []string{"╭", "bash", "ok", "5ms"} {
+	for _, want := range []string{"╭", "bash"} {
 		if !strings.Contains(top, want) {
 			t.Fatalf("top border %q missing %q", top, want)
 		}
-	}
-	bottom := lineText(lines[4])
-	if !strings.Contains(bottom, "╰") || !strings.Contains(bottom, "╯") {
-		t.Fatalf("bottom border %q not closed", bottom)
 	}
 	body := lineText(lines[1]) + lineText(lines[2]) + lineText(lines[3])
 	for _, want := range []string{"line-one", "line-two", "line-three"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q; got:\n%s", want, body)
 		}
+	}
+	if footer := lineText(lines[4]); !strings.Contains(footer, "Wall: 5ms") {
+		t.Fatalf("footer = %q, want the wall time", footer)
+	}
+	if bottom := lineText(lines[5]); !strings.Contains(bottom, "╰") || !strings.Contains(bottom, "╯") {
+		t.Fatalf("bottom border %q not closed", bottom)
 	}
 	// Every row shares one right edge: widths equal the requested 80 cells.
 	for i, ln := range lines {
@@ -267,32 +291,91 @@ func TestToolResultRendersBox(t *testing.T) {
 	}
 }
 
-// TestToolResultRowWindow pins the bounded-render ceiling inside the box:
-// outputs wider than the window keep the first 200 + last 50 rows and
-// announce the elided middle, all framed by the top and bottom borders.
+// TestToolResultExitCodeSitsInTheFooter pins omp's division of labour: the
+// frame under its own call row repeats no name, the body keeps the output
+// without the marker the footer now reports, and the exit code appears exactly
+// once — as a status, not as prose inside the result.
+func TestToolResultExitCodeSitsInTheFooter(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddToolBlock("bash", `{"command":"sh -c 'exit 9'"}`)
+	app.FinishTool("bash", true, "boom\n[exit code 9]", ToolOutcome{Dur: "80ms", Exit: 9, HasExit: true})
+	app.mu.Lock()
+	i := len(app.blocks) - 1
+	lines := app.blockLines(i, app.blocks[i], 80)
+	app.mu.Unlock()
+
+	if len(lines) != 4 { // top + "boom" + footer + bottom
+		t.Fatalf("frame = %d lines, want 4:\n%s", len(lines), joinLines(lines))
+	}
+	if top := lineText(lines[0]); strings.Contains(top, "bash") {
+		t.Fatalf("top border repeats what the call row above already said: %q", top)
+	}
+	body := lineText(lines[1])
+	if !strings.Contains(body, "boom") || strings.Contains(body, "exit code") {
+		t.Fatalf("body = %q, want the output without the exit marker", body)
+	}
+	footer := lineText(lines[2])
+	for _, want := range []string{"Wall: 80ms", "Exit: 9"} {
+		if !strings.Contains(footer, want) {
+			t.Fatalf("footer %q missing %q", footer, want)
+		}
+	}
+}
+
+// TestToolResultRowWindow pins the bounded render window and the Ctrl+O
+// affordance that closes it: head rows, the hidden-line notice at the hole it
+// describes, tail rows — and every row once expanded, with no notice.
 func TestToolResultRowWindow(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	var b strings.Builder
 	for i := 1; i <= 400; i++ {
 		fmt.Fprintf(&b, "row-%03d\n", i)
 	}
-	app.FinishTool("bash", false, strings.TrimSuffix(b.String(), "\n"), "9ms")
-	app.mu.Lock()
-	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
-	app.mu.Unlock()
-	// top + head(200) + elision + tail(50) + bottom
-	if len(lines) != 200+50+1+2 {
-		t.Fatalf("windowed render = %d lines, want 253", len(lines))
+	app.FinishTool("bash", false, strings.TrimSuffix(b.String(), "\n"), ToolOutcome{Dur: "9ms"})
+	render := func() []line {
+		app.mu.Lock()
+		defer app.mu.Unlock()
+		i := len(app.blocks) - 1
+		return app.blockLines(i, app.blocks[i], 80)
+	}
+
+	lines := render()
+	if len(lines) != 200+50+1+3 { // top + head + notice + tail + footer + bottom
+		t.Fatalf("windowed render = %d lines, want 254", len(lines))
 	}
 	if !strings.Contains(lineText(lines[1]), "row-001") {
 		t.Fatalf("first head row = %q", lineText(lines[1]))
 	}
-	if !strings.Contains(lineText(lines[201]), "rows elided") {
-		t.Fatalf("elision marker missing: %q", lineText(lines[201]))
+	if notice := lineText(lines[201]); !strings.Contains(notice, "150 lines hidden") || !strings.Contains(notice, "Ctrl+O") {
+		t.Fatalf("hidden notice = %q", notice)
 	}
 	if !strings.Contains(lineText(lines[251]), "row-400") {
 		t.Fatalf("last tail row = %q", lineText(lines[251]))
 	}
+
+	if !app.ToggleToolExpand() {
+		t.Fatal("Ctrl+O found no tool result to expand")
+	}
+	lines = render()
+	if len(lines) != 400+3 { // top + every row + footer + bottom
+		t.Fatalf("expanded render = %d lines, want 403", len(lines))
+	}
+	if strings.Contains(lineText(lines[201]), "hidden") {
+		t.Fatalf("expanded frame still hides rows: %q", lineText(lines[201]))
+	}
+	if !strings.Contains(lineText(lines[400]), "row-400") {
+		t.Fatalf("last row after expand = %q", lineText(lines[400]))
+	}
+}
+
+// joinLines renders a line slice as text for failure messages.
+func joinLines(lines []line) string {
+	var b strings.Builder
+	for _, ln := range lines {
+		b.WriteString(lineText(ln))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func TestScrollClamps(t *testing.T) {

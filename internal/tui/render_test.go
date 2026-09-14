@@ -68,13 +68,13 @@ func TestAppFinishToolUsesRenderer(t *testing.T) {
 		"ext_x_info": {Kind: "card", Spec: json.RawMessage(`{"title":"status"}`)},
 	})
 	a.AddToolBlock("ext_x_info", "{}")
-	a.FinishTool("ext_x_info", false, `{"status":"all green"}`, "1ms")
+	a.FinishTool("ext_x_info", false, `{"status":"all green"}`, ToolOutcome{Dur: "1ms"})
 	b := a.blocks[len(a.blocks)-1]
 	if b.Kind != KindToolDone || b.Text != "all green" {
 		t.Fatalf("result block = %+v", b)
 	}
 	// Errors keep the raw text: a failing tool is not being decorated.
-	a.FinishTool("ext_x_info", true, `{"status":"broken"}`, "1ms")
+	a.FinishTool("ext_x_info", true, `{"status":"broken"}`, ToolOutcome{Dur: "1ms"})
 	if got := a.blocks[len(a.blocks)-1].Text; got != `{"status":"broken"}` {
 		t.Fatalf("error result was rewritten: %q", got)
 	}
