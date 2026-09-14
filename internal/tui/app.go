@@ -2417,57 +2417,69 @@ func (a *App) drawComposer(yTop int) {
 // drawShortcuts renders the bottom hint row: bold keys, gray labels, dim │
 // separators (grok shortcuts_bar.rs), with the configured HUD segments
 // (settings statusLine.segments) right-aligned on the same row.
+// drawShortcuts renders the bottom hint row: the chords the live
+// KeyMap binds (so a keybindings.yml remap moves the glyph instead
+// of leaving a stale promise), bold keys, gray labels, dim │
+// separators (grok shortcuts_bar.rs), with the configured HUD
+// segments (settings statusLine.segments) right-aligned on the same
+// row. On a narrow row the metrics win: the session clock and the
+// decode rate get the row first, and the hotkeys shrink from the right
+// until those essential segments fit.
 func (a *App) drawShortcuts(y int) {
 	keyStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
 	lblStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 	sepStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 
-	type hint struct{ key, label string }
-	hints := []hint{
-		{"Enter", "send"},
-		{"Ctrl+J", "newline"},
-		{"Esc", "cancel"},
-		{"Ctrl+C", "quit"},
-	}
+	// The session clock and the decode rate are what the row is for
+	// during a run, so they claim the space first: the hotkeys shrink
+	// to what is left and drop from the right when the essential
+	// segments need the room. Nothing advertised is hard-coded — every
+	// glyph is the live KeyMap chord for the action, so a remap in
+	// keybindings.yml moves the bar instead of leaving a stale promise.
+	parts := a.hudParts()
+	budget := a.width - 2 - hudEssentialWidth(parts) - 1
 	x := 2
-	for i, hh := range hints {
-		if i > 0 {
+	drawn := false
+	for _, ha := range ShortcutActions {
+		glyph := a.keyMap.Display(ha.Action)
+		if glyph == "" {
+			continue
+		}
+		w := width(glyph) + 1 + width(ha.Label)
+		if drawn {
+			w += 5
+		}
+		if x+w > budget {
+			break
+		}
+		if drawn {
 			drawText(a.scr, x, y, "  │  ", sepStyle)
 			x += 5
 		}
-		drawText(a.scr, x, y, hh.key, keyStyle)
-		x += width(hh.key)
-		drawText(a.scr, x, y, ":", lblStyle)
+		drawText(a.scr, x, y, glyph, keyStyle)
+		x += width(glyph)
+		drawText(a.scr, x, y, " ", lblStyle)
 		x++
-		drawText(a.scr, x, y, hh.label, lblStyle)
-		x += width(hh.label)
+		drawText(a.scr, x, y, ha.Label, lblStyle)
+		x += width(ha.Label)
+		drawn = true
 	}
-	a.drawHUD(y, x)
+	a.drawHUD(y, x, parts)
 }
 
 // drawHUD renders the configured status segments right-aligned on the
 // shortcuts row (caller holds a.mu). Segment colors come from the
 // statusLine* tokens, the separators from statusLineSep, and statusLineBg
-// fills the row when the theme sets one. The keyboard hints win a narrow
-// row: segments are dropped from the left until the rest fit.
-func (a *App) drawHUD(y, hintsEnd int) {
-	segs := a.statusSegs
-	if len(segs) == 0 {
-		segs = defaultStatusSegments
-	}
-	type part struct{ text, token string }
-	var parts []part
-	for _, name := range segs {
-		text, token := a.hudSegment(name)
-		if text != "" {
-			parts = append(parts, part{text, token})
-		}
-	}
+// fills the row when the theme sets one. The metrics win a narrow row:
+// the hotkeys are drawn first against the space the essential segments
+// need, and any segment that still does not fit is dropped by keep-rank
+// (theme and model first, the session clock and the rate last).
+func (a *App) drawHUD(y, hintsEnd int, parts []hudPart) {
 	if len(parts) == 0 {
 		return
 	}
 	const sep = " │ "
-	widthOf := func(ps []part) int {
+	widthOf := func(ps []hudPart) int {
 		n := 0
 		for i, p := range ps {
 			if i > 0 {
@@ -2479,7 +2491,13 @@ func (a *App) drawHUD(y, hintsEnd int) {
 	}
 	end := a.width - 2
 	for len(parts) > 0 && end-widthOf(parts) < hintsEnd+1 {
-		parts = parts[1:]
+		drop := 0
+		for i, p := range parts {
+			if statusKeepRank[p.name] < statusKeepRank[parts[drop].name] {
+				drop = i
+			}
+		}
+		parts = append(parts[:drop], parts[drop+1:]...)
 	}
 	if len(parts) == 0 {
 		return
@@ -2596,6 +2614,69 @@ func (a *App) hudSegment(name string) (text, token string) {
 		return a.th.Name, theme.StatusLineSep
 	}
 	return "", ""
+}
+
+// hudPart is one rendered HUD segment, carrying the segment name the
+// keep-rank drop loop keys on.
+type hudPart struct {
+	name, text, token string
+}
+
+// hudSep separates HUD segments on the status row.
+const hudSep = " │ "
+
+// hudParts renders the configured segments (settings statusLine.segments),
+// in order, dropping the ones with nothing to show (an unwired cost or
+// context window hides rather than drawing an empty cell).
+func (a *App) hudParts() []hudPart {
+	segs := a.statusSegs
+	if len(segs) == 0 {
+		segs = defaultStatusSegments
+	}
+	parts := make([]hudPart, 0, len(segs))
+	for _, name := range segs {
+		text, token := a.hudSegment(name)
+		if text != "" {
+			parts = append(parts, hudPart{name, text, token})
+		}
+	}
+	return parts
+}
+
+// hudEssentialWidth is the space the metrics that must always survive a
+// narrow row take: the session clock and the decode rate, separated by a
+// HUD separator. The rest of the HUD (and the hotkeys) give way to them.
+func hudEssentialWidth(parts []hudPart) int {
+	essential := make([]hudPart, 0, 2)
+	for _, p := range parts {
+		if statusKeepRank[p.name] >= 5 {
+			essential = append(essential, p)
+		}
+	}
+	if len(essential) == 0 {
+		return 0
+	}
+	n := 0
+	for i, p := range essential {
+		if i > 0 {
+			n += width(hudSep)
+		}
+		n += width(p.text)
+	}
+	return n
+}
+
+// statusKeepRank orders segments by how essential they are when the row
+// runs out of width. The decode rate and the session clock are what the
+// user reads during a run, so they are dropped last.
+var statusKeepRank = map[string]int{
+	"theme":   0,
+	"model":   1,
+	"tokens":  2,
+	"context": 3,
+	"cost":    4,
+	"time":    5,
+	"rate":    6,
 }
 
 // boxRune is the first rune of a themed box glyph ("" = a space).
