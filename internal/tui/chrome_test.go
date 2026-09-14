@@ -76,7 +76,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	app.draw()
 
 	text := screenText(scr)
-	for _, want := range []string{"groknight", "test/free", "ctx 50%", "↑50.0k │ ↓50.0k", "$0.0123"} {
+	for _, want := range []string{"groknight", "test/free", "ctx 100k/200k", "↑50k │ ↓50k", "$0.0123"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("configured segment %q missing:\n%s", want, text)
 		}
@@ -84,13 +84,27 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	// Order is the configured order, left to right on the row.
 	row := lastRow(text)
 	at := -1
-	for _, seg := range []string{"groknight", "test/free", "ctx 50%", "↑50.0k", "$0.0123"} {
+	for _, seg := range []string{"groknight", "test/free", "ctx 100k/200k", "↑50k", "$0.0123"} {
 		i := strings.Index(row, seg)
 		if i < 0 || i < at {
 			t.Fatalf("segment %q out of order in %q", seg, row)
 		}
 		at = i
 	}
+
+	// The meter reads the LAST request, not the session total: a second turn
+	// of 1.5k in + 500 out re-bases it to 2k/200k, while the cumulative token
+	// counters keep counting up.
+	app.AddUsage(1500, 500)
+	app.draw()
+	row = lastRow(screenText(scr))
+	if !strings.Contains(row, "ctx 2k/200k") {
+		t.Fatalf("context meter must track the latest request, not the sum of all turns: %q", row)
+	}
+	if !strings.Contains(row, "↑51.5k │ ↓50.5k") {
+		t.Fatalf("token counters must stay cumulative: %q", row)
+	}
+
 	// An unknown name is skipped, not rendered, and the rest still draw.
 	app.SetStatusSegments([]string{"model", "hologram"})
 	app.draw()

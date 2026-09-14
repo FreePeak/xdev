@@ -28,7 +28,14 @@ type Status struct {
 	// All three feed the optional HUD segments (statusLine.segments).
 	Cost      float64
 	CtxWindow int64
-	Rate      float64
+	// CtxUsed is the LIVE context occupancy: input+output of the most recent
+	// completed request (the provider's own count, so it covers the system
+	// prompt, the whole visible history and the tool schemas). The HUD's
+	// context segment reads this against CtxWindow — deliberately NOT the
+	// cumulative TokensIn/TokensOut, which count every turn the session ever
+	// sent and so run far past the window.
+	CtxUsed int64
+	Rate    float64
 	// Start anchors the HUD time segment: the moment the current session's
 	// clock began (process start; cmd re-bases it on every session swap so
 	// the segment shows total session time, not process uptime). Zero = the
@@ -471,10 +478,13 @@ func (a *App) ToggleToolExpand() bool {
 // the same rule internal/dist/bench.go measures with). A message with no
 // usable window — nothing streamed, or a sub-100ms burst — keeps the previous
 // rate rather than inventing one.
+// It also refreshes CtxUsed, the live occupancy behind the HUD's context
+// segment.
 func (a *App) AddUsage(in, out int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
+	a.st.CtxUsed = in + out
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
 		a.st.Rate = float64(out) / window.Seconds()
 	}
@@ -2551,10 +2561,13 @@ func (a *App) hudSegment(name string) (text, token string) {
 		}
 		return fmt.Sprintf("↑%s │ ↓%s", humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut)), theme.StatusLineSpend
 	case "context":
-		if a.st.CtxWindow <= 0 || a.st.TokensIn+a.st.TokensOut == 0 {
+		// used/total of the LIVE context: what the next request costs against
+		// the model's window. Hidden until both halves are known — an
+		// undiscovered window (0) or a session that never ran makes no claim.
+		if a.st.CtxWindow <= 0 || a.st.CtxUsed == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("ctx %d%%", (a.st.TokensIn+a.st.TokensOut)*100/a.st.CtxWindow), theme.StatusLineContext
+		return fmt.Sprintf("ctx %s/%s", humanTokens(a.st.CtxUsed), humanTokens(a.st.CtxWindow)), theme.StatusLineContext
 	case "cost":
 		if a.st.Cost <= 0 {
 			return "", ""
@@ -2612,13 +2625,17 @@ func shortID(id string) string {
 	return id
 }
 
-// humanTokens renders 1234 as "1.2k".
+// humanTokens renders 1234 as "1.2k" and a round 200000 as "200k": the HUD
+// meter shows round windows and round spend, where ".0" is pure noise in a
+// row that is always competing with the keyboard hints for width.
 func humanTokens(n int64) string {
 	switch {
 	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+		s := fmt.Sprintf("%.1f", float64(n)/1_000_000)
+		return strings.TrimSuffix(s, ".0") + "M"
 	case n >= 1000:
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
+		s := fmt.Sprintf("%.1f", float64(n)/1000)
+		return strings.TrimSuffix(s, ".0") + "k"
 	default:
 		return fmt.Sprintf("%d", n)
 	}
