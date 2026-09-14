@@ -288,6 +288,14 @@ func (s *Store) CWD() string {
 	return s.cwd
 }
 
+// StartedAt returns the session header timestamp — when the session was
+// created. Zero for a fresh store until the header reaches disk.
+func (s *Store) StartedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.headerTS
+}
+
 // Title returns the current session title.
 func (s *Store) Title() string {
 	s.mu.Lock()
