@@ -1,4 +1,13 @@
 # xdev
+<p align="center"> <img src="assets/brand/xdev-logo.png" alt="xdev" width="560"> </p>
+
+<p align="center">
+  <a href="https://github.com/FreePeak/xdev/actions/workflows/ci.yml"><img src="https://github.com/FreePeak/xdev/actions/workflows/ci.yml/badge.svg" alt="CI gate"></a>
+  <a href="https://github.com/FreePeak/xdev/releases"><img src="https://img.shields.io/github/v/release/FreePeak/xdev?include_prereleases&label=release" alt="release"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="license: Apache-2.0"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-00ADD8" alt="Go 1.25"></a>
+  <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/platforms-linux%20%C2%B7%20macos%20%C2%B7%20windows-blue" alt="linux, macos, windows"></a>
+</p>
 
 **xdev** is a lightweight coding-agent harness in Go: the session/chat core of [pi](https://github.com/earendil-works/pi) and Oh My Pi (omp) — provider streaming, the agent loop, JSONL session persistence, tool execution, and a terminal UI — rebuilt as a **single static, CGO-free binary** (~22 MB dev / ~29 MB installed with the SQLite-backed mnemopi memory backend linked in; a build without it is smaller) with a **hard <100 MB RSS budget**, roughly 3–8× lighter than a JS-runtime harness. It ports the proven pi/omp data model (append-only JSONL session tree, unified stream contract, context reconstruction, compaction, output sinks) while replacing the expensive parts: no JS runtime, no in-process plugin VM, no unbounded queues.
 
@@ -212,6 +221,10 @@ Hard target: worst case **<100 MB RSS** (~30–70 MB estimated in normal use).
 | M12 | Knowledge & chrome: memory backend + `/memory`, skills (`skill://`), theme engine, TUI chrome (status line, overlays) | memory summary injects at start; `/skill:` expands; theme live-reloads with all 66 tokens enforced |
 | M13 | Extended tools: eval kernel, notebook, web_search, github, ast-grep, browser, checkpoint/rewind, secrets redaction, LSP, MCP extensions | eval cell persists state; web_search/github/ast-grep answer real queries |
 | M14 | v2 modes & polish: vibe mode, E2E-encrypted collab, multi-provider discovery, profiles, `/export` `/share`, goal mode | vibe session completes delegated multi-worker task; collab guest mirrors host |
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). Security reporting: [SECURITY.md](SECURITY.md).
 
 ## Name
 
