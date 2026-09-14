@@ -12,6 +12,7 @@ import (
 // config set` writes (which must never quarantine the user's config), and
 // the colorBlindMode boolean.
 func TestStatusLineAndColorBlindSettings(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir()) // keep the user's real config out
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
 	doc := "theme: groknight\ncolorBlindMode: true\nstatusLine:\n  segments: [model, tokens, theme]\n"

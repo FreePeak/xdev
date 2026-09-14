@@ -131,6 +131,9 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("edit: %v", err)}, nil
 	}
+	if err := CheckProtectedPath(display, resolved); err != nil {
+		return Result{IsError: true, Text: "edit: " + err.Error()}, nil
+	}
 	lines, err := ReadLines(resolved)
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("edit: cannot read %s: %v", display, err)}, nil

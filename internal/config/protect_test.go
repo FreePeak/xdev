@@ -27,8 +27,8 @@ func TestProfileInitInstallsTheDataRoot(t *testing.T) {
 	}
 	// A settings write must be refused by the file tools on the strength of the
 	// registration alone.
-	if err := tool.CheckProtectedPath(filepath.Join(dir, "config.yml")); err == nil ||
-		!strings.Contains(err.Error(), "cannot be written through the file tools") {
+	if err := tool.CheckProtectedPath(filepath.Join(dir, "config.yml"), filepath.Join(dir, "config.yml")); err == nil ||
+		!strings.Contains(err.Error(), "harness state that xdev owns") {
 		t.Fatalf("config.yml in the data dir was not refused: %v", err)
 	}
 }
@@ -72,7 +72,7 @@ func TestHarnessWritersAreUnaffected(t *testing.T) {
 		t.Fatalf("the profile file the config CLI writes must load: %v", err)
 	}
 	// …while the model-facing seam still refuses it.
-	if err := tool.CheckProtectedPath(filepath.Join(dir, "config.yml")); err == nil {
+	if err := tool.CheckProtectedPath(filepath.Join(dir, "config.yml"), filepath.Join(dir, "config.yml")); err == nil {
 		t.Fatal("the file tools must still refuse it")
 	}
 }
