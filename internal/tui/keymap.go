@@ -252,6 +252,63 @@ func isPrimaryChord(action, chord string) bool {
 	return false
 }
 
+// ShortcutAction is one entry of the bottom status row's hint bar.
+type ShortcutAction struct{ Action, Label string }
+
+// ShortcutActions are the chords the status row advertises, in order. The row
+// renders them through the live KeyMap, so a remap in keybindings.yml moves
+// the glyph in the bar instead of leaving a stale promise there.
+var ShortcutActions = []ShortcutAction{
+	{"submit", "send"},
+	{"newline", "newline"},
+	{"cancel", "cancel"},
+	{"quit", "quit"},
+}
+
+// Display renders an action's preferred chord in the compact form the status
+// row uses: C-j -> ^J, Enter -> ⏎, A-t -> ⌥T. "" means the action is unbound,
+// and the bar skips it rather than advertise a dead key.
+func (m *KeyMap) Display(action string) string {
+	chords := m.Chords(action)
+	if len(chords) == 0 {
+		return ""
+	}
+	return chordGlyph(chords[0])
+}
+
+// chordGlyph spells one chord in 1-3 columns. Modifier prefixes decode left to
+// right; a chord this table doesn't know rides through verbatim and the row's
+// fit check decides whether it has room for it.
+func chordGlyph(chord string) string {
+	parts := strings.Split(chord, "-")
+	var b strings.Builder
+	for _, mod := range parts[:len(parts)-1] {
+		switch mod {
+		case "C":
+			b.WriteString("^")
+		case "A":
+			b.WriteString("\u2325")
+		case "S":
+			b.WriteString("\u21e7")
+		default:
+			return chord
+		}
+	}
+	key := parts[len(parts)-1]
+	if g, ok := keyGlyphs[key]; ok {
+		key = g
+	} else if len(key) == 1 && key[0] >= 'a' && key[0] <= 'z' {
+		key = strings.ToUpper(key)
+	}
+	b.WriteString(key)
+	return b.String()
+}
+
+var keyGlyphs = map[string]string{
+	"Enter": "\u23ce", "Escape": "\u238b", "Tab": "\u21e5", "Backspace": "\u232b",
+	"Up": "\u2191", "Down": "\u2193", "Left": "\u2190", "Right": "\u2192",
+}
+
 func (m *KeyMap) sortedChords() []string {
 	out := make([]string, 0, len(m.bindings))
 	for c := range m.bindings {

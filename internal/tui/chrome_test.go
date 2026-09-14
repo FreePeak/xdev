@@ -216,6 +216,65 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 	}
 }
 
+// TestStatusRowKeepsRateAndTimeInNarrowRow pins the small-terminal
+// contract: the decode rate (⚡ t/s) and the total session clock share the
+// bottom row all the way down to a 40-column window, with the token counter
+// and then the hotkeys giving way to them. The hotkeys are the live KeyMap's
+// compact chords (⏎ / ^J / ⎋ / ^C), never the long "Ctrl+C:quit" labels that
+// used to eat the row.
+func TestStatusRowKeepsRateAndTimeInNarrowRow(t *testing.T) {
+	// seededStatusRow draws a HUD with a 2h05m clock and a measured 42.5 t/s.
+	seededStatusRow := func(t *testing.T, w int) string {
+		t.Helper()
+		app, scr := drawnApp(t, w, 4)
+		app.AddUsage(50000, 50000)
+		app.SetSessionStart(time.Now().Add(-2*time.Hour - 5*time.Minute))
+		app.mu.Lock()
+		app.st.Rate = 42.5
+		app.mu.Unlock()
+		app.draw()
+		return lastRow(screenText(scr))
+	}
+
+	narrow := seededStatusRow(t, 60)
+	if !strings.Contains(narrow, "2h05m") || !strings.Contains(narrow, "42.5 t/s") {
+		t.Fatalf("rate and total time must share a narrow row, got %q", narrow)
+	}
+	if strings.Contains(narrow, "↑50k") {
+		t.Fatalf("the token counter must drop before the metrics do: %q", narrow)
+	}
+	if !strings.Contains(narrow, "⏎ send") || !strings.Contains(narrow, "^J newline") {
+		t.Fatalf("hotkeys must render as live keymap chords: %q", narrow)
+	}
+	if strings.Contains(narrow, "^C quit") {
+		t.Fatalf("the hints must yield their right end to the metrics: %q", narrow)
+	}
+
+	// The row at 40 columns keeps the two metrics plus the one hotkey that
+	// still fits — the contract is that they never displace each other.
+	tiny := seededStatusRow(t, 40)
+	if !strings.Contains(tiny, "2h05m") || !strings.Contains(tiny, "42.5 t/s") {
+		t.Fatalf("40-column row lost the metrics: %q", tiny)
+	}
+
+	wide := seededStatusRow(t, 100)
+	for _, want := range []string{"⏎ send", "^J newline", "⎋ cancel", "^C quit", "2h05m", "↑50k │ ↓50k", "42.5 t/s"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide row missing %q: %q", want, wide)
+		}
+	}
+
+	// The advertised chord is the live KeyMap's, not a hard-coded string:
+	// a remap moves the glyph in the bar.
+	app, scr := drawnApp(t, 100, 4)
+	app.keyMap.clearAction("quit")
+	app.keyMap.bindings["C-q"] = "quit"
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "^Q quit") {
+		t.Fatalf("remapped chord not advertised: %q", row)
+	}
+}
+
 // TestBoxStyleFromTheme: boxRound keeps today's glyphs, boxSharp swaps the
 // outline, and the ascii preset degenerates it.
 func TestBoxStyleFromTheme(t *testing.T) {
