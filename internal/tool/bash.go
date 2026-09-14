@@ -92,9 +92,12 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // bashDetails is persisted in Result.Details.
 type bashDetails struct {
-	ExitCode    int    `json:"exitCode"`
-	DurationMs  int64  `json:"durationMs"`
-	Truncated   bool   `json:"truncated"`
+	ExitCode   int   `json:"exitCode"`
+	DurationMs int64 `json:"durationMs"`
+	Truncated  bool  `json:"truncated"`
+	// Killed marks a child stopped by a signal: ExitCode then carries the
+	// signal number, which no renderer may label an exit status.
+	Killed      bool   `json:"killed,omitempty"`
 	StdoutBytes uint64 `json:"stdoutBytes"`
 	StderrBytes uint64 `json:"stderrBytes"`
 	Workdir     string `json:"workdir"`
@@ -557,6 +560,7 @@ func runShell(abortCtx, runCtx context.Context, command, workdir string, env []s
 		return runOutcome{Text: text, Details: &bashDetails{
 			ExitCode: exitCode, DurationMs: durationMs,
 			Truncated:   outTrunc || errTrunc,
+			Killed:      true,
 			StdoutBytes: stdoutSink.Total(), StderrBytes: stderrSink.Total(),
 		}, IsError: true}, nil
 	case exitCode != 0:

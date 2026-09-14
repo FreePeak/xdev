@@ -22,11 +22,13 @@ type Status struct {
 	SessionID string
 	TokensIn  int64
 	TokensOut int64
-	// Cost is the session spend in USD (0 when the provider reports none)
-	// and CtxWindow the model's context window (0 = unknown). Both feed the
-	// optional HUD segments (settings statusLine.segments).
+	// Cost is the session spend in USD (0 when the provider reports none),
+	// CtxWindow the model's context window (0 = unknown) and Rate the last
+	// measured decode speed in output tokens/second (0 = never measured).
+	// All three feed the optional HUD segments (statusLine.segments).
 	Cost      float64
 	CtxWindow int64
+	Rate      float64
 	// Start anchors the HUD time segment: the moment the current session's
 	// clock began (process start; cmd re-bases it on every session swap so
 	// the segment shows total session time, not process uptime). Zero = the
@@ -55,6 +57,12 @@ type App struct {
 	pickers []*picker
 	keyMap  *KeyMap // remappable keybinding layer
 	st      Status
+	// The decode window of the message being streamed: the first and last
+	// delta, and the runes between them. AddUsage closes the window and
+	// turns it into st.Rate; starting a run discards an unfinished one.
+	// Guarded by mu.
+	deltaFirst, deltaLast time.Time
+	deltaRunes            int64
 
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
@@ -131,13 +139,15 @@ type App struct {
 }
 
 type blockKey struct {
-	idx    int
-	kind   BlockKind
-	width  int
-	tlen   int
-	tool   string
-	status string
-	stream bool
+	idx      int
+	kind     BlockKind
+	width    int
+	tlen     int
+	tool     string
+	status   string
+	stream   bool
+	expanded bool // result box: the Ctrl+O state changed the row set
+	age      int64
 }
 
 // New creates the App over an initialized screen.
@@ -279,6 +289,7 @@ func (a *App) AppendAssistant(delta string) {
 	if n := len(a.blocks); n > 0 && a.blocks[n-1].Kind == KindAssistant {
 		a.blocks[n-1].Text += delta
 	}
+	a.noteDelta(delta)
 	a.mu.Unlock()
 	a.poke()
 }
@@ -316,8 +327,32 @@ func (a *App) AppendThinking(delta string) {
 			break
 		}
 	}
+	a.noteDelta(delta)
 	a.mu.Unlock()
 	a.poke()
+}
+
+// noteDelta extends the decode window with one streamed delta. Callers hold
+// a.mu. Runes are counted for the live estimate only; the settled rate is the
+// provider's own token count over the same window.
+func (a *App) noteDelta(delta string) {
+	now := time.Now()
+	if a.deltaFirst.IsZero() {
+		a.deltaFirst = now
+	}
+	a.deltaLast = now
+	a.deltaRunes += int64(len([]rune(delta)))
+}
+
+// liveRate estimates the rate while a message is still streaming: the runes
+// received so far, at four to a token, over the window they arrived in. It is
+// replaced by the measured st.Rate the moment usage lands. Callers hold a.mu.
+func (a *App) liveRate() float64 {
+	window := a.deltaLast.Sub(a.deltaFirst)
+	if window < 100*time.Millisecond || a.deltaRunes == 0 {
+		return 0
+	}
+	return float64(a.deltaRunes/4) / window.Seconds()
 }
 
 // EndThinking closes the last streaming thinking block, freezing its
@@ -344,17 +379,34 @@ func (a *App) AddAssistantBlock(text string) {
 	a.poke()
 }
 
-// AddToolBlock appends a tool-call summary block (status running).
-func (a *App) AddToolBlock(name, argsPreview string) {
+// ToolOutcome is what the renderer needs from a finished tool call besides its
+// text: the wall time plus the two structured facts a status footer shows —
+// how the process ended, and whether the tool dropped output the model never
+// saw. cmd flattens tool-specific Details into it so the transcript never has
+// to type-switch over another package's payload.
+type ToolOutcome struct {
+	Dur       string // formatted wall time, e.g. "70ms" ("" = unknown)
+	Exit      int    // process exit code; read only when HasExit
+	HasExit   bool
+	Truncated bool
+}
+
+// AddToolBlock appends one tool-call row in the running state, carrying the
+// call's raw JSON arguments: the renderer reads the naming argument out of
+// them (omp's `name · detail`), so no flattened preview is baked in here.
+func (a *App) AddToolBlock(name, rawArgs string) {
 	a.mu.Lock()
-	a.blocks = append(a.blocks, &Block{Kind: KindTool, ToolName: name, Text: argsPreview, Status: "running"})
+	a.blocks = append(a.blocks, &Block{
+		Kind: KindTool, ToolName: name, Text: rawArgs,
+		Status: "running", Ts: time.Now(),
+	})
 	a.mu.Unlock()
 	a.poke()
 }
 
 // FinishTool marks the last running tool block done (ok/error) and appends
 // the tool-result block carrying the full (sink-windowed) output.
-func (a *App) FinishTool(name string, isErr bool, output, dur string) {
+func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome) {
 	a.mu.Lock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
@@ -375,16 +427,56 @@ func (a *App) FinishTool(name string, isErr bool, output, dur string) {
 			}
 		}
 	}
-	a.blocks = append(a.blocks, &Block{Kind: KindToolDone, ToolName: name, Text: text, Dur: dur, Err: isErr})
+	// omp keeps the outcome in the footer rather than in the body: the
+	// "[exit code N]" the tool appends for the model is dropped from the
+	// render once the footer reports the same number.
+	if out.HasExit && out.Exit != 0 {
+		text = strings.TrimSuffix(text, fmt.Sprintf("\n[exit code %d]", out.Exit))
+	}
+	a.blocks = append(a.blocks, &Block{
+		Kind: KindToolDone, ToolName: name, Text: text,
+		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
+		Truncated: out.Truncated,
+	})
 	a.mu.Unlock()
 	a.poke()
 }
 
-// AddUsage folds token usage into the status line.
+// ToggleToolExpand flips the Ctrl+O state of the newest tool result, the one
+// the user is looking at on a tail-following transcript. It reports whether
+// there was a result to toggle, so the caller can stay silent instead of
+// claiming to have expanded an empty transcript.
+func (a *App) ToggleToolExpand() bool {
+	a.mu.Lock()
+	var found bool
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		if b := a.blocks[i]; b.Kind == KindToolDone {
+			b.Expanded = !b.Expanded
+			found = true
+			break
+		}
+	}
+	a.mu.Unlock()
+	if found {
+		a.poke()
+	}
+	return found
+}
+
+// AddUsage folds token usage into the status line and measures the decode
+// rate the HUD's rate segment shows: the provider's own output-token count
+// over the window in which deltas actually arrived (omp's per-message math,
+// the same rule internal/dist/bench.go measures with). A message with no
+// usable window — nothing streamed, or a sub-100ms burst — keeps the previous
+// rate rather than inventing one.
 func (a *App) AddUsage(in, out int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
+	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
+		a.st.Rate = float64(out) / window.Seconds()
+	}
+	a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
 	a.mu.Unlock()
 }
 
@@ -441,10 +533,15 @@ func (a *App) SetStatusSegments(segs []string) {
 	a.poke()
 }
 
-// SetRunning toggles the spinner state.
+// SetRunning toggles the spinner state. Starting a run also discards a decode
+// window the last one never closed — an aborted stream would otherwise make
+// the next rate divide new tokens by old elapsed time.
 func (a *App) SetRunning(r bool) {
 	a.mu.Lock()
 	a.st.Running = r
+	if r {
+		a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
+	}
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1333,6 +1430,11 @@ func (a *App) handleKey(ev tcell.Event) {
 	case "redraw":
 		a.Invalidate()
 		return
+	case "expand":
+		// omp's ctrl+o. No result to reveal is silence, not a notice: the
+		// transcript must not claim to have expanded something.
+		a.ToggleToolExpand()
+		return
 	}
 
 	// Slash dropdown navigation: while the menu is open the arrows move the
@@ -1529,7 +1631,14 @@ func (a *App) contentWidth() int {
 
 // blockLines renders a block to styled visual lines (cached per width/state).
 func (a *App) blockLines(i int, b *Block, w int) []line {
-	key := blockKey{idx: i, kind: b.Kind, width: w, tlen: len(b.Text), tool: b.ToolName, status: b.Status, stream: b.stream}
+	// A running tool row carries a live elapsed that no field of the block
+	// changes, so its cache key ages in whole seconds: one row re-renders per
+	// tick and every other block keeps its cache.
+	var age int64
+	if b.Kind == KindTool && b.Status == "running" && !b.Ts.IsZero() {
+		age = int64(time.Since(b.Ts).Seconds())
+	}
+	key := blockKey{idx: i, kind: b.Kind, width: w, tlen: len(b.Text), tool: b.ToolName, status: b.Status, stream: b.stream, expanded: b.Expanded, age: age}
 	if lines, ok := a.lineCache[key]; ok {
 		return lines
 	}
@@ -1597,21 +1706,41 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			}
 		}
 	case KindTool:
-		fg := theme.AccentTool
+		// omp's call row: state bullet, bold tool name, and the naming
+		// argument as a phrase — never the raw JSON the model sent. While the
+		// call is in flight the bullet spins and the elapsed ticks; the
+		// settled wall time belongs to the result frame's footer.
+		name, detail := toolSummary(b, w)
+		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
-			fg = theme.AccentRunning
+			frames := a.th.SpinnerFrames()
+			bullet, fg = frames[a.st.spinnerIdx%len(frames)], theme.AccentRunning
 		case "error":
-			fg = theme.AccentError
+			bullet, fg = "✗", theme.AccentError
 		case "ok":
-			fg = theme.AccentSuccess
+			bullet, fg = "●", theme.AccentSuccess
 		}
-		// ◈ bullet colored by state; name+args in secondary text.
-		ln := textline("◈ "+toolSummary(b, w), tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))))
-		ln.runs[0].style = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
+		ln := textline(bullet+" ", tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))))
+		ln.runs = append(ln.runs, cell{
+			text:  name,
+			style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true),
+		})
+		if detail != "" {
+			ln.runs = append(ln.runs, cell{
+				text:  " · " + detail,
+				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))),
+			})
+		}
+		if b.Status == "running" && !b.Ts.IsZero() {
+			ln.runs = append(ln.runs, cell{
+				text:  "  " + humanDur(time.Since(b.Ts)),
+				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))),
+			})
+		}
 		lines = append(lines, ln)
 	case KindToolDone:
-		lines = append(lines, a.toolBoxLines(b, w)...)
+		lines = append(lines, a.toolBoxLines(i, b, w)...)
 	case KindSystem:
 		fg := theme.Gray
 		if strings.Contains(strings.ToLower(b.Text), "error") || strings.Contains(strings.ToLower(b.Text), "canceled") {
@@ -1645,49 +1774,45 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 	return lines
 }
 
-// toolBoxLines renders one finished tool result inside a rounded frame, the
-// omp layout: a top border carrying "name · state (dur)", the output padded
-// between `│` side borders, a closing `╰───╯`. Errors tint the whole frame.
-// The result block carries no rail (draw.go), so the border is the line.
-func (a *App) toolBoxLines(b *Block, w int) []line {
-	state := "ok"
-	borderCol := theme.AccentTool
-	bodyCol := theme.TextSecondary
+// toolBoxLines renders one finished tool result in omp's frame: a rounded box
+// of output, closed by footer rows that carry the outcome — the wall time and
+// exit code omp prints as `⟦Wall: 0.07s | Exit: 9⟧`, the truncation warning,
+// and the hidden-row notice with its Ctrl+O affordance. The top border names
+// the tool only when no call row above already did. Errors tint the frame.
+// The result block carries no rail (draw), so the border is the line.
+func (a *App) toolBoxLines(i int, b *Block, w int) []line {
+	borderCol, bodyCol := theme.AccentTool, theme.TextSecondary
 	if b.Err {
-		state = "error"
-		borderCol = theme.AccentError
-		bodyCol = theme.AccentError
+		borderCol, bodyCol = theme.AccentError, theme.AccentError
 	}
-	label := state
-	if b.ToolName != "" {
-		label = b.ToolName + " · " + state
-	}
-	if b.Dur != "" {
-		label += " (" + b.Dur + ")"
-	}
-
 	box := a.th.Box()
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(borderCol)))
-	labelSt := border.Bold(true)
 	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(bodyCol)))
+	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	mutedSt := a.mdStyle().muted
 
 	inner := max(1, w-4) // side borders + one pad cell each
 
-	// Top border: ╭─ <label> ───…───╮  (label truncated so ≥1 dash remains)
-	maxLabel := max(1, w-6)
-	if width(label) > maxLabel {
-		label = truncateCells(label, maxLabel, "…")
+	// The call row that omp folds into this box is a block of its own here, so
+	// the label is only needed when this result stands alone.
+	label := ""
+	if b.ToolName != "" && (i == 0 || a.blocks[i-1].Kind != KindTool || a.blocks[i-1].ToolName != b.ToolName) {
+		label = b.ToolName
 	}
-	dashes := max(1, w-5-width(label))
-	top := line{runs: []cell{
-		{text: box.TopLeft + box.Horizontal + " ", style: border},
-		{text: label, style: labelSt},
-		{text: " " + strings.Repeat(box.Horizontal, dashes) + box.TopRight, style: border},
-	}}
+	top := line{runs: []cell{{text: box.TopLeft, style: border}}}
+	switch {
+	case label == "":
+		top.runs = append(top.runs, cell{text: strings.Repeat(box.Horizontal, max(1, w-2)) + box.TopRight, style: border})
+	default:
+		label = truncateCells(label, max(1, w-6), "…")
+		top.runs = append(top.runs,
+			cell{text: box.Horizontal + " ", style: border},
+			cell{text: label, style: border.Bold(true)},
+			cell{text: " " + strings.Repeat(box.Horizontal, max(1, w-5-width(label))) + box.TopRight, style: border})
+	}
 
-	// row wraps one body line to the frame, padding to the inner width so the
-	// right border lands on the same column for every row.
+	// row wraps one line to the frame, padded so every right border lands on
+	// the same column.
 	row := func(s string, st tcell.Style) line {
 		return line{runs: []cell{
 			{text: box.Vertical + " ", style: border},
@@ -1700,10 +1825,10 @@ func (a *App) toolBoxLines(b *Block, w int) []line {
 	out = append(out, top)
 
 	// Body: the tool output as the model saw it (the tool layer bounds it:
-	// bash 16KB head+tail per stream, 8MB combined kill cap). The render
-	// window below keeps the resident line cache bounded (PRD row budget):
-	// ponytail ceiling — beyond head+tail rows the full text is only in the
-	// session JSONL, upgrade path is fold/expand.
+	// bash 16KB head+tail per stream, 8MB combined kill cap). Collapsed, the
+	// render window keeps the resident line cache bounded (PRD row budget);
+	// Ctrl+O drops the window and prints everything the tool kept, which is
+	// bounded by that sink cap rather than by this renderer.
 	body := strings.TrimRight(b.Text, "\n")
 	switch {
 	case body == "" && !b.Err:
@@ -1711,19 +1836,42 @@ func (a *App) toolBoxLines(b *Block, w int) []line {
 	case body != "":
 		const maxHeadRows, maxTailRows = 200, 50
 		rows := wrap(body, inner)
-		if len(rows) > maxHeadRows+maxTailRows+1 {
-			for _, wl := range rows[:maxHeadRows] {
-				out = append(out, row(wl, bodySt))
-			}
-			out = append(out, row(fmt.Sprintf("… %d rows elided (full output in the session log)", len(rows)-maxHeadRows-maxTailRows), mutedSt))
-			for _, wl := range rows[len(rows)-maxTailRows:] {
-				out = append(out, row(wl, bodySt))
-			}
-		} else {
+		if b.Expanded || len(rows) <= maxHeadRows+maxTailRows+1 {
 			for _, wl := range rows {
 				out = append(out, row(wl, bodySt))
 			}
+		} else {
+			for _, wl := range rows[:maxHeadRows] {
+				out = append(out, row(wl, bodySt))
+			}
+			// The notice sits at the hole it describes, between the head and
+			// the tail — omp prints its hidden-line count the same way.
+			out = append(out, row(fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-maxHeadRows-maxTailRows), dimSt))
+			for _, wl := range rows[len(rows)-maxTailRows:] {
+				out = append(out, row(wl, bodySt))
+			}
 		}
+	}
+
+	// Status footer: only the facts this result has. A signalled command
+	// reports no exit code (tool.Outcome says so), so it never shows a signal
+	// dressed up as a status.
+	var notes []string
+	if b.Dur != "" {
+		notes = append(notes, "Wall: "+b.Dur)
+	}
+	if b.HasExit && b.Exit != 0 {
+		notes = append(notes, fmt.Sprintf("Exit: %d", b.Exit))
+	}
+	if b.Truncated {
+		notes = append(notes, "output truncated")
+	}
+	if len(notes) > 0 {
+		notesSt := dimSt
+		if b.Err {
+			notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+		}
+		out = append(out, row("⟦"+strings.Join(notes, " | ")+"⟧", notesSt))
 	}
 
 	out = append(out, textline(box.BottomLeft+strings.Repeat(box.Horizontal, max(1, w-2))+box.BottomRight, border))
@@ -2379,21 +2527,22 @@ func (a *App) drawHUD(y, hintsEnd int) {
 }
 
 // statusSegments is the HUD segment vocabulary (settings
-// statusLine.segments): model, tokens, context, cost, theme, time.
+// statusLine.segments): model, tokens, context, cost, rate, theme, time.
 var statusSegments = map[string]bool{
 	"model":   true,
 	"tokens":  true,
 	"context": true,
 	"cost":    true,
+	"rate":    true,
 	"theme":   true,
 	"time":    true,
 }
 
-// defaultStatusSegments is the shipped layout: the session clock and the
-// token counters, right-aligned (the clock reads leftmost so the token
-// pair's own " │ " stays the row's right edge). The model keeps its
+// defaultStatusSegments is the shipped layout: the session clock, the token
+// counters and the decode speed, right-aligned (the clock reads leftmost so
+// the rate's own " │ " stays the row's right edge). The model keeps its
 // composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"time", "tokens"}
+var defaultStatusSegments = []string{"time", "tokens", "rate"}
 
 // hudHasClock reports whether the effective HUD layout renders the time
 // segment (caller holds a.mu). When it does, the UI loop repaints at 1 Hz
@@ -2447,6 +2596,20 @@ func (a *App) hudSegment(name string) (text, token string) {
 			return "", ""
 		}
 		return humanDur(time.Since(a.st.Start)), theme.StatusLineSpend
+	case "rate":
+		// omp's ⚡ tok/s: the decode speed of the last completed message, or a
+		// live estimate from the deltas arriving right now. Never measured is
+		// never displayed — the segment hides rather than show a fake zero.
+		rate := a.st.Rate
+		if a.st.Running {
+			if live := a.liveRate(); live > 0 {
+				rate = live
+			}
+		}
+		if rate <= 0 {
+			return "", ""
+		}
+		return fmt.Sprintf("⚡ %.1f t/s", rate), theme.StatusLineSpend
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
 	}
