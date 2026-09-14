@@ -86,7 +86,7 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		Thinking:   effortBudget(effortRef),
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
-	wireAgentMode(h.agent, reg, cfg, lastSettings(), modelRoleRef(opts.Model), provName, modelName, cwd)
+	wireAgentMode(h.agent, reg, cfg, lastSettings(), modelRoleRef(opts.Model), provName, modelName, cwd, false)
 	// #90: mailbox arrivals become follow-ups in this session's agent (one
 	// long-lived agent per RPC process, so no indirection is needed).
 	setInboxSink(func(m agent.Message) bool {

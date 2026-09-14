@@ -225,10 +225,16 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // tool args). Both were once print-only — modes that hand-build an agent drift
 // silently, which is why the wiring lives in one function with one test
 // (#79 catalog, #80 redactor).
-func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, role, provider, model, cwd string) *agent.FallbackState {
+//
+// interactive reports whether this mode has a console the user sits in front
+// of (the TUI). Only there may an active goal auto-continue between turns
+// (omp's goal.continuationModes defaults to interactive); a print/RPC/ACP run
+// must not spend turns of its own after its prompt is answered.
+func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, role, provider, model, cwd string, interactive bool) *agent.FallbackState {
 	if ag == nil {
 		return nil
 	}
+	ag.GoalContinuation = interactive
 	if reg != nil {
 		ag.WireCatalog(reg.Catalog())
 	}
@@ -538,7 +544,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, reg, cfg, settings, modelRoleRef(opts.Model), provName, modelName, cwd)
+	wireAgentMode(ag, reg, cfg, settings, modelRoleRef(opts.Model), provName, modelName, cwd, false)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).

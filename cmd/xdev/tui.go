@@ -338,7 +338,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			PlanMode:   planMode,
 			Handoff:    handoffSettings(),
 		}
-		wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd)
+		wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
 	// -handoff: document the resumed session before the first turn.
@@ -1099,6 +1099,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
+	// goalKick runs the goal's first turn. Setting a goal must actually start
+	// it: the goal state on its own only decorates the next user-driven turn,
+	// so `/goal create …` printed "goal created" and then nothing ran. The
+	// run continues from there (agent.Agent.GoalContinuation), and the
+	// objective becomes the session title and the first prompt the user sees.
+	// Safe before SetHandlers: SendPrompt is a no-op while onSend is unwired.
+	goalKick := func(objective string) { app.SendPrompt(objective) }
+
 	// /goal drives the same GoalState the goal tool owns: the verbs mutate
 	// through the tool's own seam (so the session entry + the per-turn
 	// reminder stay consistent) and echo the resulting state.
@@ -1118,6 +1126,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if _, err := gs.Create(objective, 0); err != nil {
 				return "", err
 			}
+			goalKick(objective)
 			return "goal created\n" + gs.Describe(), nil
 		},
 		Resume: func(objective string) (string, error) {
@@ -1125,9 +1134,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if gs == nil {
 				return "", fmt.Errorf("goal not wired")
 			}
-			if _, err := gs.Resume(objective); err != nil {
+			g, err := gs.Resume(objective)
+			if err != nil {
 				return "", err
 			}
+			goalKick(g.Objective)
 			return "goal resumed\n" + gs.Describe(), nil
 		},
 		Evidence: func(note string) (string, error) {
@@ -1448,7 +1459,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// Shared per-mode seams: catalog bridge + secrets redactor
 				// (#79/#80). The TUI is the daily driver; an unredacted tool
 				// result here is the case that mattered.
-				if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd); st != nil {
+				if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true); st != nil {
 					// The TUI has a console: a silent provider swap or a
 					// cooldown revert is otherwise invisible to the user.
 					st.Notify = func(msg string) { app.AddSystemBlock("· " + msg) }
@@ -1778,6 +1789,12 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 	for _, m := range msgs {
 		switch m.Role {
 		case ai.RoleUser:
+			// Goal-continuation prompts are harness text the user never
+			// typed: replaying them as ❯ blocks would invent turns that
+			// never happened.
+			if m.Attribution == agent.GoalContinuationAttribution {
+				continue
+			}
 			if txt := m.Text(); txt != "" {
 				app.AddUserBlock(txt)
 			}
