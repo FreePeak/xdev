@@ -166,7 +166,7 @@ type CredentialRequest struct {
 // ResolveCredential walks the chain in contract order.
 func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 	if strings.TrimSpace(req.CLIKey) != "" {
-		return ResolvedCredential{Value: req.CLIKey, Source: "cli", Kind: "api_key", Header: authHeader(req)}, nil
+		return req.configured(req.CLIKey, "cli")
 	}
 	if pc := req.ProviderCfg; pc != nil {
 		if req.PoolIndex > 0 {
@@ -174,23 +174,23 @@ func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 			if req.PoolIndex >= len(pool) {
 				return ResolvedCredential{}, fmt.Errorf("credentials: %s: no credential at rotation index %d (models.yml declares %d)", req.Provider, req.PoolIndex, len(pool))
 			}
-			return ResolvedCredential{Value: pool[req.PoolIndex], Source: fmt.Sprintf("models.yml (key %d)", req.PoolIndex+1), Kind: "api_key", Header: authHeader(req)}, nil
+			return req.configured(pool[req.PoolIndex], fmt.Sprintf("models.yml (key %d)", req.PoolIndex+1))
 		}
 		// A per-model apiKey overrides the provider-level one.
 		if req.Model != "" {
 			for _, m := range pc.Models {
 				if m.ID == req.Model && strings.TrimSpace(m.APIKey) != "" {
-					return ResolvedCredential{Value: m.APIKey, Source: "models.yml (model)", Kind: "api_key", Header: authHeader(req)}, nil
+					return req.configured(m.APIKey, "models.yml (model)")
 				}
 			}
 		}
 		if strings.TrimSpace(pc.APIKey) != "" {
-			return ResolvedCredential{Value: pc.APIKey, Source: "models.yml", Kind: "api_key", Header: authHeader(req)}, nil
+			return req.configured(pc.APIKey, "models.yml")
 		}
 		// A provider configured with only `apiKeys: [...]` still has a
 		// primary credential: the first pool entry (M5 #25).
 		if k := CredentialKey(pc, req.Model, 0); k != "" {
-			return ResolvedCredential{Value: k, Source: "models.yml", Kind: "api_key", Header: authHeader(req)}, nil
+			return req.configured(k, "models.yml")
 		}
 	}
 	stored := req.Store[req.Provider]
@@ -241,6 +241,30 @@ func ResolveCredential(req CredentialRequest) (ResolvedCredential, error) {
 		}
 	}
 	return ResolvedCredential{}, fmt.Errorf("credentials: no credential for provider %q (pass -api-key, set apiKey in models.yml, run /login, or export %s)", req.Provider, envCandidates(req.Provider)[0])
+}
+
+// configured turns a credential value the user wrote into the resolved
+// credential. Normally that value IS the secret; the `keychain:` form instead
+// names a macOS Keychain item whose secret is fetched at use time, so a
+// long-lived token never has to live in a file at all (keychain.go explains why
+// xdev only reads there and never writes).
+//
+// A reference that cannot be satisfied is an error, never a fall-through: the
+// next rung down is a different credential, which means a different account.
+func (req CredentialRequest) configured(value, source string) (ResolvedCredential, error) {
+	ref, isRef := parseKeychainRef(value)
+	if !isRef {
+		return ResolvedCredential{Value: value, Source: source, Kind: "api_key", Header: authHeader(req)}, nil
+	}
+	named := keychainPrefix + ref.Service
+	secret, err := keychainLookup(ref)
+	if err != nil {
+		return ResolvedCredential{}, fmt.Errorf("credentials: %s %s names %s: %w", req.Provider, source, named, err)
+	}
+	if strings.TrimSpace(secret) == "" {
+		return ResolvedCredential{}, fmt.Errorf("credentials: %s %s names %s, which holds nothing", req.Provider, source, named)
+	}
+	return ResolvedCredential{Value: secret, Source: named, Kind: "api_key", Header: authHeader(req)}, nil
 }
 
 // authHeader resolves the header a bearer-style token rides, honoring the

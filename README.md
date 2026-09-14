@@ -27,7 +27,7 @@ go build -o xdev ./cmd/xdev
 # providers:
 #   onegw:
 #     baseUrl: http://127.0.0.1:8080/v1
-#     apiKey: ${ONEGW_KEY}
+#     apiKey: ${ONEGW_KEY}         # macOS alternative: keychain:dev.xdev.credential.onegw
 #     api: openai-completions
 #     models: [{ id: free, name: Free, contextWindow: 1000000 }]
 # defaultModel: onegw/free
@@ -40,6 +40,32 @@ xdev tui                        # interactive mode (Grok-CLI look)
 xdev tui -theme grokday         # light variant (default: auto)
 # hard RSS backstop defaults to 100MB; set XDEV_MEMLIMIT to override
 ```
+
+### Where secrets live
+
+`~/.xdev/agent/credentials.json` (what `/login` stores) is written `0600` and
+**re-verified on every read** — mode `0600` and `nlink == 1`, because a
+write-time chmod says nothing about the file now. A file that fails either check
+is refused with the repair named, never silently trusted. The data directory is
+tightened to `0700` when a credential is saved.
+
+To keep a long-lived token off disk entirely on macOS, store it in the Keychain
+yourself (Keychain Access, `1password --read`, `op read`, or your own `security
+add-generic-password -w` call) and point a provider at it:
+
+```yaml
+providers:
+  openai:
+    apiKey: keychain:dev.xdev.credential.openai/linh   # service[/account]
+    api: openai-completions
+```
+
+xdev **reads** such an item and never writes one: `/usr/bin/security` accepts a
+secret either as an argument (visible in `ps` to every user on the machine) or
+through an interactive prompt that silently truncates at 128 bytes — enough for
+an API key, not for a JWT. A `keychain:` reference that cannot be satisfied is an
+error naming the reference; xdev will not quietly use a different credential.
+`XDEV_DISABLE_KEYCHAIN=1` turns the lookup off. [Why, with measurements](docs/decisions/keychain-credential-source.md).
 
 ## Onboarding, updates, benchmarks
 
