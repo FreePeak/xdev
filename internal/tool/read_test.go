@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -42,7 +44,7 @@ func TestReadWindowFooter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "1:L1\n2:L2\n3:L3\n4:L4\n[Showing lines 1-4 of 10. Use :5 to continue]"
+	want := "1:L1\n2:L2\n3:L3\n4:L4\n[Showing lines 1-4 of 10. Use offset=5 to continue]"
 	if res.Text != want {
 		t.Fatalf("text = %q, want %q", res.Text, want)
 	}
@@ -75,7 +77,7 @@ func TestReadOffsetWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = "3:L3\n4:L4\n[Showing lines 3-4 of 10. Use :5 to continue]"
+	want = "3:L3\n4:L4\n[Showing lines 3-4 of 10. Use offset=5 to continue]"
 	if res.Text != want {
 		t.Fatalf("text = %q, want %q", res.Text, want)
 	}
@@ -94,7 +96,7 @@ func TestReadDefaultLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(res.Text, "[Showing lines 1-2000 of 2001. Use :2001 to continue]") {
+	if !strings.HasSuffix(res.Text, "[Showing lines 1-2000 of 2001. Use offset=2001 to continue]") {
 		t.Fatalf("missing default-limit footer: %q", res.Text[len(res.Text)-80:])
 	}
 	if first := strings.SplitN(res.Text, "\n", 2)[0]; first != "1:line 1" {
@@ -250,4 +252,52 @@ func TestReadEmptyFile(t *testing.T) {
 	if res.Details.(map[string]any)["totalLines"] != 0 {
 		t.Fatalf("details = %v", res.Details)
 	}
+}
+
+// TestReadFooterContinuationIsActionable is the live symptom: the footer
+// told the model to use ":2001", and obeying it earned
+// "read: ... looks like an omp line selector" — a wasted turn every time a
+// big file is read. The footer must name a field the tool accepts, and the
+// line it points at must be the next one.
+func TestReadFooterContinuationIsActionable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.txt")
+	var sb strings.Builder
+	for i := range 3000 {
+		fmt.Fprintf(&sb, "L%d\n", i+1)
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := NewReadTool()
+	res, err := rt.Execute(t.Context(), fsToolArgs(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`\[Showing lines \d+-(\d+) of \d+\. Use (\w+)=(\d+) to continue\]`).FindStringSubmatch(res.Text)
+	if m == nil {
+		t.Fatalf("footer does not name an accepted field: %q", res.Text[len(res.Text)-120:])
+	}
+	if m[2] != "offset" {
+		t.Fatalf("footer points at the %q field, which read does not take: %q", m[2], m[0])
+	}
+	next := m[3]
+	cont, err := rt.Execute(t.Context(), fsToolArgs(t, map[string]any{"path": path, "offset": mustAtoi(t, next)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cont.IsError {
+		t.Fatalf("obeying the footer errored: %q", cont.Text)
+	}
+	if first := strings.SplitN(cont.Text, "\n", 2)[0]; first != m[3]+":L"+m[3] {
+		t.Fatalf("footer pointed at line %s, continuation returned %q", m[3], first)
+	}
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("%q is not a line number: %v", s, err)
+	}
+	return n
 }

@@ -1,8 +1,10 @@
 package tool
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -279,7 +281,7 @@ func TestEditUnknownOp(t *testing.T) {
 	path := editFile(t, t.TempDir(), "f.txt", "a\n")
 	res, err := NewEditTool().Execute(t.Context(), fsToolArgs(t, map[string]any{
 		"path": path,
-		"ops":  []map[string]any{{"op": "REM"}},
+		"ops":  []map[string]any{{"op": "DELETE"}},
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -299,3 +301,180 @@ func TestEditNoOps(t *testing.T) {
 		t.Fatal("expected IsError for empty ops")
 	}
 }
+
+// TestEditLiteralDashBodyLine: the row transport has exactly one prefix, "+",
+// so a leading "-" is ordinary content. Description() used to claim a literal
+// "-" had to be doubled, and a model that obeyed wrote an extra dash into the
+// file.
+func TestEditLiteralDashBodyLine(t *testing.T) {
+	path := editFile(t, t.TempDir(), "f.txt", "old\n")
+	res, err := NewEditTool().Execute(t.Context(), fsToolArgs(t, map[string]any{
+		"path": path,
+		"ops": []map[string]any{{
+			"op":    "PUT",
+			"range": map[string]any{"line": 1},
+			"lines": []string{"+- dash", "- bullet", "--flag", "++plus"},
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Text)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "- dash\n- bullet\n--flag\n+plus\n" {
+		t.Fatalf("file = %q, want dashes verbatim and exactly one \"+\" stripped", data)
+	}
+}
+
+// TestEditCRLFFileKeepsLineEndings: editing a CRLF file keeps it all-CRLF.
+// ReadLines leaves the "\r" on the rows it read while WriteLinesAtomic rejoins
+// with "\n", so a row the model typed landed as a bare LF — the live fixture
+// wrote mixed "first\r\nREPLACED\nthird\r\n" with nothing in the result saying
+// so.
+func TestEditCRLFFileKeepsLineEndings(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		line    int
+		lines   []string
+		want    string
+	}{
+		{"replace in the middle", "first\r\nsecond\r\nthird\r\n", 2, []string{"+REPLACED"}, "first\r\nREPLACED\r\nthird\r\n"},
+		{"append a row", "first\r\nsecond\r\n", 2, []string{"+second", "+third"}, "first\r\nsecond\r\nthird\r\n"},
+		{"a typed trailing CR is not doubled", "a\r\nb\r\n", 1, []string{"+x\r"}, "x\r\nb\r\n"},
+		{"an LF file stays LF", "first\nsecond\n", 1, []string{"+REPLACED"}, "REPLACED\nsecond\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := editFile(t, t.TempDir(), "f.txt", tc.content)
+			res, err := NewEditTool().Execute(t.Context(), fsToolArgs(t, map[string]any{
+				"path": path,
+				"ops": []map[string]any{{
+					"op":    "PUT",
+					"range": map[string]any{"line": tc.line},
+					"lines": tc.lines,
+				}},
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.IsError {
+				t.Fatalf("unexpected error: %s", res.Text)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != tc.want {
+				t.Fatalf("file = %q, want %q", data, tc.want)
+			}
+		})
+	}
+}
+
+// TestEditAdvertisedOpsAreAccepted: Description() is the model's only
+// contract, and it used to advertise REM plus "<N"/">N"/"N*" anchors the
+// executor rejected ("unknown op \"REM\"", "range is required"). Every op in
+// the advertised vocabulary must execute, every documented form must land the
+// bytes it promises, and the text must not name an anchor the JSON schema
+// cannot express.
+func TestEditAdvertisedOpsAreAccepted(t *testing.T) {
+	et := NewEditTool()
+	var params struct {
+		Properties struct {
+			Ops struct {
+				Items struct {
+					Properties struct {
+						Op struct {
+							Enum []string `json:"enum"`
+						} `json:"op"`
+					} `json:"properties"`
+				} `json:"items"`
+			} `json:"ops"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(et.Parameters(), &params); err != nil {
+		t.Fatalf("Parameters() is not valid JSON: %v", err)
+	}
+	advertised := params.Properties.Ops.Items.Properties.Op.Enum
+	if len(advertised) == 0 {
+		t.Fatal("Parameters() advertises no ops")
+	}
+	forms := map[string]struct {
+		op   map[string]any
+		text string
+		want string
+	}{
+		"PUT": {map[string]any{"op": "PUT", "range": map[string]any{"start": 2, "end": 3}, "lines": []string{"+x"}}, "a\nb\nc\nd\n", "a\nx\nd\n"},
+		"CUT": {map[string]any{"op": "CUT", "range": map[string]any{"line": 2}}, "a\nb\nc\n", "a\nc\n"},
+		"REM": {map[string]any{"op": "REM", "range": map[string]any{"line": 2}}, "a\nb\nc\n", "a\nc\n"},
+		"MV":  {map[string]any{"op": "MV"}, "a\n", "a\n"},
+	}
+	for _, tok := range advertised {
+		t.Run(tok, func(t *testing.T) {
+			form, ok := forms[tok]
+			if !ok {
+				t.Fatalf("Parameters() advertises op %q this test has no documented form for: implement it and add the form, or drop the token", tok)
+			}
+			path := editFile(t, t.TempDir(), "f.txt", form.text)
+			read := path
+			if tok == "MV" {
+				dest := filepath.Join(filepath.Dir(path), "moved.txt")
+				form.op["dest"] = dest
+				read = dest
+			}
+			res, err := et.Execute(t.Context(), fsToolArgs(t, map[string]any{
+				"path": path,
+				"ops":  []map[string]any{form.op},
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.IsError {
+				t.Fatalf("advertised op %s rejected: %s", tok, res.Text)
+			}
+			data, err := os.ReadFile(read)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != form.want {
+				t.Fatalf("file = %q, want %q", data, form.want)
+			}
+		})
+	}
+	// The prose and the schema must name one vocabulary; they shipped out of
+	// sync, with Description() promising REM while Execute answered
+	// `unknown op "REM"`.
+	desc := et.Description()
+	known := map[string]bool{}
+	for _, tok := range advertised {
+		known[tok] = true
+	}
+	covered := map[string]bool{}
+	for _, tok := range opWordRe.FindAllString(desc, -1) {
+		if !known[tok] {
+			t.Errorf("Description() names %q, which the op schema does not advertise and the executor rejects", tok)
+			continue
+		}
+		covered[tok] = true
+	}
+	for _, tok := range advertised {
+		if !covered[tok] {
+			t.Errorf("Description() never mentions advertised op %q", tok)
+		}
+	}
+	for _, lie := range []string{"<N", ">N", "N*"} {
+		if strings.Contains(desc, lie) {
+			t.Errorf("Description() promises the %q anchor, which the op schema cannot express", lie)
+		}
+	}
+}
+
+// opWordRe finds the op words a Description() can be naming (ops are spelled
+// in caps; prose that is not an op must not be).
+var opWordRe = regexp.MustCompile(`[A-Z]{2,}`)

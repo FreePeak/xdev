@@ -295,3 +295,44 @@ func TestSteeringInjection(t *testing.T) {
 		t.Fatalf("steer message missing from turn 2: %+v", req2.Messages)
 	}
 }
+
+// badSchemaTool carries a trailing-comma parameters blob — the exact shape
+// (an invalid json.RawMessage) that once made every provider call die at
+// stream start, killing all tools with it.
+type badSchemaTool struct{}
+
+func (badSchemaTool) Name() string        { return "bad_schema" }
+func (badSchemaTool) Description() string { return "malformed on purpose" }
+func (badSchemaTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"},},`)
+}
+func (badSchemaTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{}, nil
+}
+
+// TestToolDefsGuardsMalformedSchema: one bad schema degrades to {} and is
+// named in the log; it must not poison the rest of the request.
+func TestToolDefsGuardsMalformedSchema(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(tool.NewReadTool())
+	reg.Register(badSchemaTool{})
+	a := &Agent{Tools: reg}
+	defs := a.toolDefs()
+	if len(defs) != 2 {
+		t.Fatalf("defs = %d, want 2", len(defs))
+	}
+	var bad, read ai.ToolDef
+	for _, d := range defs {
+		if d.Name == "bad_schema" {
+			bad = d
+		} else {
+			read = d
+		}
+	}
+	if string(bad.Parameters) != "{}" {
+		t.Fatalf("bad schema went through unguarded: %s", bad.Parameters)
+	}
+	if !json.Valid(read.Parameters) || !strings.Contains(string(read.Parameters), "path") {
+		t.Fatalf("healthy tool schema altered: %s", read.Parameters)
+	}
+}

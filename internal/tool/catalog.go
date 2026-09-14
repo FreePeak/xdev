@@ -170,7 +170,7 @@ func (c *Catalog) Search(query string, limit int) []Entry {
 func (c *Catalog) Describe(name string) string {
 	e, ok := c.Lookup(name)
 	if !ok {
-		return unknownToolText(ToolDescribeName, name, c.Entries())
+		return c.missText(ToolDescribeName, name)
 	}
 	t, _ := c.reg.Get(name)
 	var b strings.Builder
@@ -191,7 +191,7 @@ func (c *Catalog) Describe(name string) string {
 // no runner installed, refuses instead of executing.
 func (c *Catalog) Call(ctx context.Context, name string, args json.RawMessage) Result {
 	if _, ok := c.Lookup(name); !ok {
-		return Result{Text: unknownToolText(ToolCallName, name, c.Entries()), IsError: true}
+		return Result{Text: c.missText(ToolCallName, name), IsError: true}
 	}
 	c.mu.RLock()
 	run := c.runner
@@ -246,9 +246,14 @@ func capEntries(es []Entry, limit int) []Entry {
 	return es
 }
 
-// unknownToolText is the shared miss message: it names the catalog contents
-// and hands back the lookup tool, so a wrong name costs one search.
-func unknownToolText(op, name string, entries []Entry) string {
+// missText is the shared name-miss message. It distinguishes the two kinds of
+// miss, because the wrong one sends the model hunting for a capability it
+// already has: live, `tool_describe {"name":"web_search"}` answered
+// `unknown tool "web_search"`, the model concluded the tool did not exist, and
+// it shelled out to curl instead. A registered-but-not-deferred name IS
+// callable directly; only a name the registry has never heard of is unknown.
+func (c *Catalog) missText(op, name string) string {
+	entries := c.Entries()
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		names = append(names, e.Name)
@@ -256,6 +261,9 @@ func unknownToolText(op, name string, entries []Entry) string {
 	list := "(empty)"
 	if len(names) > 0 {
 		list = strings.Join(names, ", ")
+	}
+	if _, eager := c.reg.Get(name); eager {
+		return fmt.Sprintf("%s: %q is not a deferred tool — it is advertised in your tool list, so call it directly (the deferred catalog holds: %s)", op, name, list)
 	}
 	return fmt.Sprintf("%s: unknown tool %q (not in the deferred catalog: %s); use %s to look for it",
 		op, name, list, ToolSearchName)
@@ -432,7 +440,7 @@ func (t *ToolDescribeTool) Execute(_ context.Context, args json.RawMessage) (Res
 		return Result{Text: ToolDescribeName + ": invalid arguments: " + err.Error(), IsError: true}, nil
 	}
 	if _, ok := t.Catalog.Lookup(a.Name); !ok {
-		return Result{Text: unknownToolText(ToolDescribeName, a.Name, t.Catalog.Entries()), IsError: true}, nil
+		return Result{Text: t.Catalog.missText(ToolDescribeName, a.Name), IsError: true}, nil
 	}
 	return Result{Text: t.Catalog.Describe(a.Name)}, nil
 }

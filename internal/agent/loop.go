@@ -796,7 +796,7 @@ func (a *Agent) toolDefs() []ai.ToolDef {
 	defs := a.Tools.Defs()
 	out := make([]ai.ToolDef, 0, len(defs)+1)
 	for _, d := range defs {
-		out = append(out, ai.ToolDef{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+		out = append(out, ai.ToolDef{Name: d.Name, Description: d.Description, Parameters: guardToolParams(d.Name, d.Parameters)})
 	}
 	// Plan mode exposes its exit tool only while the sub-state is live —
 	// normal-mode registries never contain propose.
@@ -806,10 +806,24 @@ func (a *Agent) toolDefs() []ai.ToolDef {
 			Description() string
 			Parameters() json.RawMessage
 		}); ok {
-			out = append(out, ai.ToolDef{Name: d.Name(), Description: d.Description(), Parameters: d.Parameters()})
+			out = append(out, ai.ToolDef{Name: d.Name(), Description: d.Description(), Parameters: guardToolParams(d.Name(), d.Parameters())})
 		}
 	}
 	return out
+}
+
+// guardToolParams keeps one malformed tool schema from poisoning the whole
+// request: a RawMessage with, say, a trailing comma makes json.Marshal fail
+// at stream start, and every tool — and the run — dies with it. MCP and
+// extension servers are outside our control, so the bad schema is swapped
+// for an empty object schema (that one tool degrades, loudly named in the
+// log) and the rest of the turn proceeds.
+func guardToolParams(name string, raw json.RawMessage) json.RawMessage {
+	if len(raw) > 0 && !json.Valid(raw) {
+		logx.Errorf("tool %q has a malformed parameters schema; sent as {} — fix the tool/provider: %s", name, string(raw))
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }
 
 // runTools executes calls concurrently (bounded), returning toolResult

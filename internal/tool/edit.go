@@ -43,7 +43,7 @@ func (t *EditTool) Name() string { return "edit" }
 
 // Description implements Tool.
 func (t *EditTool) Description() string {
-	return "Ordered line ops on one file; each op's line numbers refer to the state AFTER the previous op. PUT replaces a range or anchors an insert (<N before, >N after, N* = the block starting at N); body rows are final content already prefixed \"+\", so a literal leading \"-\"/\"+\" must be doubled. CUT deletes, MV renames, REM removes. Numbers come from a fresh read; unanchorable ops are rejected."
+	return "Ordered line ops on one file; numbers refer to the state after each previous op. PUT replaces a range (start/end, or line) with body rows: final content, each prefixed \"+\" (\"++x\" writes a literal \"+x\"). PUT with no rows, CUT, or REM delete the range; to insert, PUT the anchor line again with new rows added. MV renames the file to dest. Numbers come from a fresh read; unanchorable ops are rejected."
 }
 
 // Parameters implements Tool.
@@ -61,7 +61,7 @@ func (t *EditTool) Parameters() json.RawMessage {
         "type": "object",
         "required": ["op"],
         "properties": {
-          "op": {"type": "string", "enum": ["PUT", "CUT", "MV"], "description": "Operation kind"},
+          "op": {"type": "string", "enum": ["PUT", "CUT", "REM", "MV"], "description": "PUT replaces the range with lines; CUT/REM delete the range; MV renames the file to dest"},
           "range": {
             "type": "object",
             "description": "1-based inclusive line range; {\"line\":N} is single-line shorthand",
@@ -74,7 +74,7 @@ func (t *EditTool) Parameters() json.RawMessage {
           "lines": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "PUT body: final content of each line, each prefixed with '+' (use '++' for a literal leading '+')"
+            "description": "PUT body: final content of each line, each prefixed with '+' (use '++' for a literal leading '+'; a leading '-' is plain content and needs no escape)"
           },
           "dest": {"type": "string", "description": "MV: destination path"}
         }
@@ -149,6 +149,11 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 			lines = virtual
 		}
 	}
+	// The read file's dominant line ending, re-applied to the rows PUT
+	// writes: ReadLines keeps the "\r" on every row it read, so a row the
+	// model typed (which never carries one) would land as a bare LF and leave
+	// a CRLF file silently mixed — the defect the live fixture showed.
+	crlf := dominantCRLF(lines)
 	linesBefore := len(lines)
 
 	// Freshness guard + arg repair: compare the file against what read/
@@ -189,7 +194,7 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	lineOps := 0
 	for i, op := range a.Ops {
 		switch kind := strings.ToUpper(op.Op); kind {
-		case "PUT", "CUT":
+		case "PUT", "CUT", "REM":
 			start, end, rerr := normalizeEditRange(op.Range, len(lines))
 			if rerr != nil {
 				return Result{IsError: true, Text: fmt.Sprintf("edit: op %d (%s): %v", i+1, kind, rerr)}, nil
@@ -199,8 +204,13 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 				body = make([]string, len(op.Lines))
 				for j, l := range op.Lines {
 					// The leading "+" is JSON transport for a verbatim
-					// line; "++x" means a literal "+x".
-					body[j] = strings.TrimPrefix(l, "+")
+					// line; "++x" means a literal "+x". A leading "-"
+					// carries no meaning here and is never stripped.
+					row := strings.TrimPrefix(l, "+")
+					if crlf && !strings.HasSuffix(row, "\r") {
+						row += "\r"
+					}
+					body[j] = row
 				}
 			}
 			next := make([]string, 0, len(lines)-(end-start+1)+len(body))
@@ -218,7 +228,7 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		case "MV":
 			// Planned above; executed after the line ops.
 		default:
-			return Result{IsError: true, Text: fmt.Sprintf("edit: op %d: unknown op %q (want PUT, CUT, or MV)", i+1, op.Op)}, nil
+			return Result{IsError: true, Text: fmt.Sprintf("edit: op %d: unknown op %q (want PUT, CUT, REM, or MV)", i+1, op.Op)}, nil
 		}
 	}
 
@@ -311,6 +321,20 @@ func normalizeEditRange(r *editRange, total int) (start, end int, err error) {
 	return start, end, nil
 }
 
+// dominantCRLF reports whether the read file's rows were mostly CRLF-ended.
+// A row ending in "\r" was CRLF-terminated (or is the final row of a CRLF file
+// with no trailing newline, which ReadLines cannot distinguish), so a tie goes
+// to CRLF; a file with no "\r" anywhere is LF.
+func dominantCRLF(lines []string) bool {
+	crlf := 0
+	for _, l := range lines {
+		if strings.HasSuffix(l, "\r") {
+			crlf++
+		}
+	}
+	return crlf > 0 && crlf*2 >= len(lines)
+}
+
 // movePath renames src to dst, falling back to copy+delete across devices.
 func movePath(src, dst string) error {
 	defer func() { // both sides of a rename are stale regardless of outcome
@@ -378,7 +402,7 @@ func (t *EditTool) checkFreshness(resolved, display, wantTag string, ops []editO
 	for i := range ops {
 		op := &ops[i]
 		kind := strings.ToUpper(op.Op)
-		if kind != "PUT" && kind != "CUT" {
+		if kind != "PUT" && kind != "CUT" && kind != "REM" {
 			continue
 		}
 		start, end, ok := editRangeBounds(op.Range)
