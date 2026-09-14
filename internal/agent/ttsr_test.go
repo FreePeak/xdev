@@ -387,16 +387,16 @@ func TestTTSRRepeatGapEndToEnd(t *testing.T) {
 // leave the engine inert (print mode builds the engine from this shape).
 func TestTTSRSettingsLoad(t *testing.T) {
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir()) // isolate the global layer
-	load := func(t *testing.T, yaml string) (*config.Settings, error) {
+	// An overlay, not <cwd>/.xdev/config.yml: the group is profile-owned
+	// (#114 — a clone may not steer the assistant's stream), and this test is
+	// about the schema reaching the engine, not about which layer carried it.
+	load := func(t *testing.T, doc string) (*config.Settings, error) {
 		t.Helper()
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, ".xdev"), 0o755); err != nil {
+		path := filepath.Join(t.TempDir(), "overlay.yml")
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, ".xdev", "config.yml"), []byte(yaml), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return config.LoadSettings(dir, nil)
+		return config.LoadSettings(t.TempDir(), []string{path})
 	}
 
 	s, err := load(t, "ttsr:\n  contextMode: keep\n  repeatGap: 5\n  rules:\n    - name: no-secret\n      condition: SECRET\n      interruptMode: prose-only\n      message: never echo secrets\n")

@@ -33,13 +33,15 @@ modelRoles:
   smol: onegw/tiny
 disabledProviders: [bedrock]
 `)
+	// The repository layer sticks to what a clone may choose (#114); the
+	// per-key map merge below is exercised between two trusted layers.
 	writeFile(t, projectSettingsPath(cwd), `
 theme: grokday
-modelRoles:
-  smol: onegw/dev
 `)
 	overlay := writeFile(t, filepath.Join(t.TempDir(), "extra.yml"), `
 maxTurns: 7
+modelRoles:
+  smol: onegw/dev
 `)
 
 	s, err := LoadSettings(cwd, []string{overlay})
@@ -233,17 +235,19 @@ func TestSettingsPersonality(t *testing.T) {
 		t.Fatalf("schema default = %q, want default", s.Personality)
 	}
 
-	writeFile(t, projectSettingsPath(cwd), "personality: friendly\n")
-	s, err = LoadSettings(cwd, nil)
+	// personality is profile-owned (#114): a repository may not choose the
+	// assistant's persona, so the layers here are the user's own files.
+	friendly := writeFile(t, filepath.Join(t.TempDir(), "friendly.yml"), "personality: friendly\n")
+	s, err = LoadSettings(cwd, []string{friendly})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.Personality != "friendly" {
-		t.Fatalf("project layer = %q", s.Personality)
+		t.Fatalf("user overlay = %q", s.Personality)
 	}
 
-	writeFile(t, projectSettingsPath(cwd), "personality: moody\n")
-	if _, err := LoadSettings(cwd, nil); err == nil || !strings.Contains(err.Error(), "personality") {
+	moody := writeFile(t, filepath.Join(t.TempDir(), "moody.yml"), "personality: moody\n")
+	if _, err := LoadSettings(cwd, []string{moody}); err == nil || !strings.Contains(err.Error(), "personality") {
 		t.Fatalf("unknown preset must be rejected, got %v", err)
 	}
 }

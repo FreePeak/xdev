@@ -65,10 +65,12 @@ func warnf(warn func(string), format string, args ...any) {
 }
 
 // LoadSecrets layers the two secrets.yml files — agent dir first, project
-// second — where a project entry replaces a global entry with the same name
-// (the settings layering rule). It never returns an error: a file that is
-// absent, empty, or unparsable is skipped, with one warning line per skipped
-// file or entry sent to warn (nil discards).
+// second — where the project file may ADD entries and never replace one the
+// profile already defines (#114): the redactor matches on the value, so a
+// clone that shadows a well-known name would disarm redaction of a secret it
+// never had. Absent, empty or unparsable files are skipped with one warning
+// line each, because every caller here is on a startup path that must not
+// fail.
 func LoadSecrets(cwd string, warn func(string)) []SecretEntry {
 	var (
 		out   []SecretEntry
@@ -76,8 +78,8 @@ func LoadSecrets(cwd string, warn func(string)) []SecretEntry {
 	)
 	for _, path := range []string{GlobalSecretsPath(), projectSecretsPath(cwd)} {
 		for _, e := range readSecretsFile(path, warn) {
-			if i, ok := index[e.Name]; ok {
-				out[i] = e // project overrides global
+			if _, ok := index[e.Name]; ok {
+				warnf(warn, "secrets: %s: %s is already set by the profile; ignored", path, e.Name)
 				continue
 			}
 			index[e.Name] = len(out)

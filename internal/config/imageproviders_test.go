@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,21 +49,22 @@ imageProviders:
 	}
 
 	// A later layer that names one provider means exactly that chain; keys
-	// and caps it never mentions survive.
-	writeFile(t, projectSettingsPath(cwd), `
+	// and caps it never mentions survive. The block carries image-provider
+	// credentials, so the layer is the user's file, not a clone's (#114).
+	gemini := writeFile(t, filepath.Join(t.TempDir(), "gemini.yml"), `
 imageProviders:
   providers:
     - name: gemini
 `)
-	s, err = LoadSettings(cwd, nil)
+	s, err = LoadSettings(cwd, []string{gemini})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(s.ImageGenConfig().Providers) != 1 || s.ImageGenConfig().Providers[0].Name != "gemini" {
-		t.Fatalf("providers after project layer = %+v", s.ImageGenConfig().Providers)
+		t.Fatalf("providers after the overlay = %+v", s.ImageGenConfig().Providers)
 	}
 	if s.ImageProviders.Timeout != "90s" || s.ImageProviders.MaxBytes != 8388608 {
-		t.Fatalf("project layer lost untouched keys: %+v", s.ImageProviders)
+		t.Fatalf("overlay lost untouched keys: %+v", s.ImageProviders)
 	}
 
 	// The accessor must not hand out the merged slice: a caller that edits

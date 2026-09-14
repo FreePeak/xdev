@@ -143,3 +143,43 @@ After wiring any of the above, confirm:
    not actually confining writes.
 4. `ls <dataDir>/sessions` shows the session after exit, proving the data
    volume is writable and mounted where xdev expects it.
+
+## 7. What no sandbox covers: the repository you cloned
+
+A sandbox confines the process. It says nothing about who **configured** the
+process — and two of xdev's configuration files arrive inside the checkout, so
+`git clone` is itself a configuration event. xdev gives the two authorities
+different rights (#114).
+
+This is not something a container substitutes for: a sandbox that hands the
+process your network and your `~/.xdev` mount still has to pick an endpoint, and
+before #114 that decision could come from a file in the repository.
+
+### What a repository may configure
+
+`<cwd>/.xdev/config.yml`, `<cwd>/.xdev/models.yml` and `<cwd>/.xdev/secrets.yml`
+are read like any other layer, then pruned to this set. Anything else they name
+is **ignored and reported on stderr at startup**, with the line pointing at
+`<dataDir>/config.yml` as the file that may set it.
+
+| File | A repository may set | A repository may not set |
+|---|---|---|
+| `.xdev/config.yml` | `theme`, `colorBlindMode`, `statusLine`, `showThinking` (interface); `memoryLimit`, `maxTurns`, `compaction`, `branchSummary`, `experimentalContextManagement`, `models` (caps and context shape); `ask`, `tts` (per-tool knobs naming no binary and no endpoint) | anything carrying authority: `approvalMode`, `toolsApproval`, `bashPatterns`, `bash.interceptor`, `hooks`, `lsp`, `debug`, `computer`, `plugins`, `defaultModel`, `modelRoles`, `modelRolesEffort`, `retry`, `prewalk`, `memory*`, `hindsight`, `webSearch`, `imageProviders`, `browser`, `ttsr`, `advisor*`, `personality`, `autolearn*`, `lessonCap`, and the provider enable/disable lists |
+| `.xdev/models.yml` | per-provider `api`, `discovery`, `toolsFormat`; per-model `id`, `name`, `reasoning`, `vision`, `contextWindow`, `maxTokens` — what exists and how to speak it | `baseUrl`, `apiKey`, `apiKeys`, `authHeader`, `auth`, `headers`, `oauth`, `project`, `location`, `deployment`, `apiVersion`, top-level `defaultModel`, the per-model `baseUrl`/`apiKey`/`headers` overrides. `${VAR}` expansion does **not** run on this file, so a repository cannot read your environment into a request |
+| `.xdev/secrets.yml` | new entries to redact in this project | replace an entry the profile already defines — redaction matches on the value, so a clone that shadows `GITHUB_TOKEN` with a dummy would unmask a secret it never had |
+
+The lists are allowlists, in code, in one file: `internal/config/reposafe.go`. A
+key added to the schema is repository-unreachable until someone puts it there
+deliberately; the alternative (a denylist) hands every future key to clones by
+default. And on a provider named by both files, the **profile's entry wins
+outright** — the project layer is applied first precisely so it cannot be the
+last word.
+
+### What a repository still reaches without a decision
+
+`.xdev/hooks/` is loaded and executed per event with no trust decision yet —
+the known remaining hole, tracked as #241 with the proposed `xdev trust` gate.
+Until that lands, the containment answer for an unfamiliar checkout is the rest
+of this page: run it in a container (§1–§3) or a host sandbox (§4–§5).
+Repository `.xdev/commands`, `.xdev/agents` and `.xdev/skills` are read the way
+`AGENTS.md` is: their text enters the model context, which is #81's territory.

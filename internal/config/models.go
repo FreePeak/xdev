@@ -11,8 +11,6 @@ import (
 	"slices"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/FreePeak/xdev/internal/ai"
 )
 
@@ -134,6 +132,10 @@ func CredentialKey(pc *ProviderConfig, model string, i int) string {
 type Config struct {
 	Providers    map[string]*ProviderConfig `yaml:"providers"`
 	DefaultModel string                     `yaml:"defaultModel,omitempty"` // "provider/model"
+	// ignoredProject names what a repository's .xdev/models.yml tried to set
+	// that the repo-trust boundary refused (#114). Not part of the schema: it
+	// never decodes and never marshals, only the startup notice reads it.
+	ignoredProject []string
 }
 
 // RegisterProvider installs one provider block for the life of this process.
@@ -205,49 +207,79 @@ func Resolve(s string) string {
 
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// LoadModels parses one models.yml file with ${VAR} expansion applied to
-// string values (baseUrl, apiKey, header values).
+// LoadModels parses one models.yml (the trusted shape: every key honored)
+// with ${VAR} references expanded against the process environment.
 func LoadModels(path string) (*Config, error) {
+	cfg, _, err := loadModelsFile(path, true)
+	return cfg, err
+}
+
+// loadModelsFile parses one layer. An untrusted layer (a repository's
+// .xdev/models.yml, #114) is pruned to the repo-safe subset, and ${VAR}
+// expansion is skipped for it: interpolating the environment through a file
+// that arrived with a clone is a read of the user's secrets.
+func loadModelsFile(path string, trusted bool) (*Config, []string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var cfg Config
-	dec := yaml.NewDecoder(strings.NewReader(expandEnvYAML(string(raw))))
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	var ignored []string
+	if trusted {
+		err = parseYAMLLayer([]byte(expandEnvYAML(string(raw))), &cfg)
+	} else {
+		ignored, err = pruneTo(raw, &cfg, pruneProjectModels)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]*ProviderConfig{}
 	}
-	return &cfg, nil
+	return &cfg, ignored, nil
 }
 
-// LoadModelsLayered loads global then project models.yml, later wins.
-// Missing files are skipped silently.
+// LoadModelsLayered loads the profile models.yml plus the repository's, with
+// the repository's held to the subset a stranger may choose (#114): model
+// metadata and the transport dialect, never an endpoint, a credential or the
+// default model. On a provider both name, the profile wins outright — a
+// clone that ships .xdev/models.yml must not be able to move the user's
+// traffic anywhere. Missing files are skipped silently.
 func LoadModelsLayered() (*Config, error) {
 	cfg := &Config{Providers: map[string]*ProviderConfig{}}
-	paths := []string{
-		filepath.Join(DataDir(), "models.yml"),
-		".xdev/models.yml",
-	}
-	for _, p := range paths {
-		c, err := LoadModels(p)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
+	// Project first, profile second, so the profile's entry is the last word.
+	proj, ignored, err := loadModelsFile(projectModelsName, false)
+	if err != nil {
+		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		for k, v := range c.Providers {
+	} else {
+		for k, v := range proj.Providers {
 			cfg.Providers[k] = v
 		}
-		if c.DefaultModel != "" {
-			cfg.DefaultModel = c.DefaultModel
-		}
 	}
+	global, _, err := loadModelsFile(filepath.Join(DataDir(), "models.yml"), true)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		for k, v := range global.Providers {
+			cfg.Providers[k] = v
+		}
+		cfg.DefaultModel = global.DefaultModel
+	}
+	cfg.ignoredProject = ignored
 	return cfg, nil
+}
+
+// IgnoredProjectKeys returns what the repository's models.yml named that the
+// repo-trust boundary refused (#114); see Settings.IgnoredProjectKeys.
+func (c *Config) IgnoredProjectKeys() []string {
+	if c == nil {
+		return nil
+	}
+	return c.ignoredProject
 }
 
 // ParseModelRef splits "provider/model" into its two halves.

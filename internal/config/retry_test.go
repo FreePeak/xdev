@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,14 +92,16 @@ func TestSettingsRetryValidation(t *testing.T) {
 	}
 }
 
-// TestSettingsRetryLayerMerge: chain tables deep-merge per key, so a project
-// layer can add one chain without restating the global table.
+// TestSettingsRetryLayerMerge: chain tables deep-merge per key, so a later
+// layer can add one chain without restating the global table. A fallback
+// chain names where a failed request goes next, so the layer is a file the
+// user chose — a clone may not steer traffic (#114).
 func TestSettingsRetryLayerMerge(t *testing.T) {
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	cwd := t.TempDir()
 	writeFile(t, GlobalSettingsPath(), "retry:\n  fallbackChains:\n    smol: [\"other/dev\"]\n")
-	writeFile(t, cwd+"/.xdev/config.yml", "retry:\n  fallbackChains:\n    slow: [\"third/big\"]\n")
-	s, err := LoadSettings(cwd, nil)
+	extra := writeFile(t, filepath.Join(t.TempDir(), "chains.yml"), "retry:\n  fallbackChains:\n    slow: [\"third/big\"]\n")
+	s, err := LoadSettings(cwd, []string{extra})
 	if err != nil {
 		t.Fatal(err)
 	}

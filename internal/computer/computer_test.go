@@ -262,17 +262,20 @@ func TestSettingsGate(t *testing.T) {
 		t.Fatalf("default settings enabled desktop control: %+v", got)
 	}
 
-	on := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(on, ".xdev"), 0o755); err != nil {
-		t.Fatal(err)
+	// A clone may not turn desktop control on: `computer` is profile-owned
+	// (#114), so the layer carrying the opt-in here is a file the user named.
+	load := func(t *testing.T, body string) (*config.Settings, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "overlay.yml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return config.LoadSettings(t.TempDir(), []string{path})
 	}
-	body := "computer:\n  enabled: true\n  timeout: 5\n"
-	if err := os.WriteFile(filepath.Join(on, ".xdev", "config.yml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err = config.LoadSettings(on, nil)
+
+	cfg, err = load(t, "computer:\n  enabled: true\n  timeout: 5\n")
 	if err != nil {
-		t.Fatalf("LoadSettings(project): %v", err)
+		t.Fatalf("LoadSettings(overlay): %v", err)
 	}
 	got := FromSettings(cfg)
 	if !got.Enabled {
@@ -285,14 +288,7 @@ func TestSettingsGate(t *testing.T) {
 		t.Fatalf("tool timeout = %v, want 5s", tl.timeout())
 	}
 
-	bad := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(bad, ".xdev"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bad, ".xdev", "config.yml"), []byte("computer:\n  timeout: -1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := config.LoadSettings(bad, nil); err == nil {
+	if _, err := load(t, "computer:\n  timeout: -1\n"); err == nil {
 		t.Fatal("a negative computer.timeout must be reported")
 	}
 }

@@ -18,7 +18,7 @@ func TestStatusLineAndColorBlindSettings(t *testing.T) {
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := readSettingsFile(path)
+	s, _, err := readSettingsFile(path, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestStatusLineAndColorBlindSettings(t *testing.T) {
 	if err := os.WriteFile(scalar, []byte("statusLine:\n  segments: model,tokens\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s2, err := readSettingsFile(scalar)
+	s2, _, err := readSettingsFile(scalar, true)
 	if err != nil {
 		t.Fatalf("scalar segments must decode: %v", err)
 	}
