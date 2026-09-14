@@ -28,8 +28,8 @@ on:
 permissions:
   contents: read
 
-# Serialize bumps: two merges landing together must not race to create
-# the same next tag (the loser's git push would fail on an existing tag).
+# Serialize releases: two merges landing together must not race to publish
+# the same next tag (the loser's `gh release create` would fail on it).
 concurrency:
   group: release-bump
   cancel-in-progress: false
