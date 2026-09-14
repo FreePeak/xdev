@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,8 +66,9 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 
 // TestHUDConfiguredSegments: settings statusLine.segments picks which
 // segments render, in order, from the statusLine* theme tokens. The row is
-// wide enough for the hints plus every segment (a narrow row drops leading
-// segments so the keyboard hints stay readable).
+// wide enough for the path plus every segment; a narrow row drops segments by
+// keep-rank so the clock and the decode rate stay readable (see
+// TestStatusRowShowsPathAndMetrics).
 func TestHUDConfiguredSegments(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	app.AddUsage(50000, 50000)
@@ -216,24 +218,34 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 	}
 }
 
-// TestStatusRowKeepsRateAndTimeInNarrowRow pins the small-terminal
-// contract: the decode rate (⚡ t/s) and the total session clock share the
-// bottom row all the way down to a 40-column window, with the token counter
-// and then the hotkeys giving way to them. The hotkeys are the live KeyMap's
-// compact chords (⏎ / ^J / ⎋ / ^C), never the long "Ctrl+C:quit" labels that
-// used to eat the row.
-func TestStatusRowKeepsRateAndTimeInNarrowRow(t *testing.T) {
-	// seededStatusRow draws a HUD with a 2h05m clock and a measured 42.5 t/s.
+// TestStatusRowShowsPathAndMetrics pins the bottom row's contract: the
+// working directory on the left, the session clock and the decode rate
+// right-aligned, and no keyboard chords anywhere (they live in /hotkeys and
+// the welcome menu now). The metrics own the width: the path tail-truncates
+// and the optional segments drop before the clock or the rate is touched.
+func TestStatusRowShowsPathAndMetrics(t *testing.T) {
+	const deep = "/Volumes/work/example/freepeak/checkout/xdev-feature"
+
+	// seededStatusRow draws the row for a deep path with a 2h05m clock and a
+	// measured 42.5 t/s.
 	seededStatusRow := func(t *testing.T, w int) string {
 		t.Helper()
 		app, scr := drawnApp(t, w, 4)
 		app.AddUsage(50000, 50000)
 		app.SetSessionStart(time.Now().Add(-2*time.Hour - 5*time.Minute))
+		app.SetLocation(deep)
 		app.mu.Lock()
 		app.st.Rate = 42.5
 		app.mu.Unlock()
 		app.draw()
 		return lastRow(screenText(scr))
+	}
+
+	wide := seededStatusRow(t, 160)
+	for _, want := range []string{deep, "2h05m", "↑50k │ ↓50k", "42.5 t/s"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide row missing %q: %q", want, wide)
+		}
 	}
 
 	narrow := seededStatusRow(t, 60)
@@ -243,35 +255,30 @@ func TestStatusRowKeepsRateAndTimeInNarrowRow(t *testing.T) {
 	if strings.Contains(narrow, "↑50k") {
 		t.Fatalf("the token counter must drop before the metrics do: %q", narrow)
 	}
-	if !strings.Contains(narrow, "⏎ send") || !strings.Contains(narrow, "^J newline") {
-		t.Fatalf("hotkeys must render as live keymap chords: %q", narrow)
+	// A path too long for the row keeps the components that identify the
+	// project and marks the cut, instead of clipping at the screen edge.
+	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
+		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
 	}
-	if strings.Contains(narrow, "^C quit") {
-		t.Fatalf("the hints must yield their right end to the metrics: %q", narrow)
+	for _, gone := range []string{"send", "newline", "cancel", "quit", "⏎", "^J"} {
+		if strings.Contains(narrow, gone) {
+			t.Fatalf("keyboard chords no longer belong on the row: %q", narrow)
+		}
 	}
 
-	// The row at 40 columns keeps the two metrics plus the one hotkey that
-	// still fits — the contract is that they never displace each other.
 	tiny := seededStatusRow(t, 40)
 	if !strings.Contains(tiny, "2h05m") || !strings.Contains(tiny, "42.5 t/s") {
 		t.Fatalf("40-column row lost the metrics: %q", tiny)
 	}
-
-	wide := seededStatusRow(t, 100)
-	for _, want := range []string{"⏎ send", "^J newline", "⎋ cancel", "^C quit", "2h05m", "↑50k │ ↓50k", "42.5 t/s"} {
-		if !strings.Contains(wide, want) {
-			t.Fatalf("wide row missing %q: %q", want, wide)
-		}
+	if !strings.Contains(tiny, "…/xdev-feature") {
+		t.Fatalf("40-column row must shorten the path, not the metrics: %q", tiny)
 	}
 
-	// The advertised chord is the live KeyMap's, not a hard-coded string:
-	// a remap moves the glyph in the bar.
-	app, scr := drawnApp(t, 100, 4)
-	app.keyMap.clearAction("quit")
-	app.keyMap.bindings["C-q"] = "quit"
-	app.draw()
-	if row := lastRow(screenText(scr)); !strings.Contains(row, "^Q quit") {
-		t.Fatalf("remapped chord not advertised: %q", row)
+	// The home directory abbreviates rather than eating the row.
+	if home, err := os.UserHomeDir(); err == nil {
+		if got := pathDisplay(home+"/work/proj", 40); got != "~/work/proj" {
+			t.Fatalf("home must abbreviate, got %q", got)
+		}
 	}
 }
 
