@@ -46,8 +46,10 @@ func lastRow(text string) string {
 }
 
 // TestHUDDefaultKeepsTokenCounter pins the shipped layout: with no
-// statusLine.segments the HUD renders the session clock and the token
-// counters, right aligned, and nothing else.
+// statusLine.segments the HUD renders the session clock, the token counters
+// and the context total, right aligned, and nothing else. The context segment
+// rides on the model window, so the case that shows no ctx is the one where
+// the window is still unknown.
 func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
 	app.AddUsage(1200, 340)
@@ -60,8 +62,58 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	if !strings.Contains(text, "0s") {
 		t.Fatalf("session clock missing from the default layout:\n%s", text)
 	}
-	if strings.Contains(text, "ctx ") || strings.Contains(text, "$0.") {
+	if strings.Contains(text, "ctx ") {
+		t.Fatalf("the context segment must hide without a known window:\n%s", text)
+	}
+	if strings.Contains(text, "$0.") {
 		t.Fatalf("unconfigured segments must not render:\n%s", text)
+	}
+
+	// The window is the only thing that was missing: with it known, the
+	// default row shows the session's context against it — no settings,
+	// no statusLine.segments.
+	app.SetContextWindow(200000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 1.5k/200k") {
+		t.Fatalf("default layout missing the context total: %q", row)
+	}
+}
+
+// TestHUDContextTracksTheSession pins the number's meaning across the
+// transcript resets that end or move a session: /new, /resume and tree
+// navigation empty the live context (so it must not keep showing the old
+// session's), and a replayed transcript measures its rebuilt history back in
+// with the agent's own context count.
+func TestHUDContextTracksTheSession(t *testing.T) {
+	app, scr := drawnApp(t, 100, 24)
+	app.AddUsage(50000, 50000)
+	app.SetContextWindow(200000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 100k/200k") {
+		t.Fatalf("context total missing after a turn: %q", row)
+	}
+
+	// A reset transcript occupies nothing: the segment hides rather than
+	// keep claiming the previous session's 100k.
+	app.Reset()
+	app.draw()
+	if row := lastRow(screenText(scr)); strings.Contains(row, "ctx ") {
+		t.Fatalf("context total must not survive a session reset: %q", row)
+	}
+
+	// Resume rebuilds the history without sending a request; the replay
+	// measurement brings the number back (and a replayed 40k never overrides
+	// a live 60k that already answered).
+	app.SetContextReplay(40000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 40k/200k") {
+		t.Fatalf("replayed history must report its context: %q", row)
+	}
+	app.AddUsage(30000, 30000)
+	app.SetContextReplay(40000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 60k/200k") {
+		t.Fatalf("a replay must not stale a live measurement: %q", row)
 	}
 }
 
