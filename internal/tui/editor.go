@@ -6,9 +6,10 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// Editor is the prompt input: one logical line (soft multi-line via
-// Alt+Enter), history recall with Up/Down when the buffer has no embedded
-// newline.
+// Editor is the prompt input: soft multi-line (Ctrl+J / Alt+Enter).
+// Up/Down walk the composer's visual rows (App routes through moveLine);
+// at the buffer edge they recall history — and never clobber a draft that
+// holds a hard newline.
 type Editor struct {
 	buf     []rune
 	cur     int
@@ -18,6 +19,12 @@ type Editor struct {
 	// Down past the newest entry returns to it instead of dropping it —
 	// the readline/zsh behavior that lets an Up recall be undone.
 	draft []rune
+	// wantCol is the sticky desired column for repeated Up/Down (vim/omp
+	// #dt/#He): a clamped row-to-row move keeps the column the pointer
+	// asked for so alternating arrows don't drift left. 0 = unset (column 0
+	// never needs stickiness, so the zero value is correct); any horizontal
+	// key through HandleKey clears it.
+	wantCol int
 }
 
 // Text returns the current input.
@@ -53,6 +60,9 @@ func (e *Editor) finishSend() {
 // non-empty prompt; the editor has already archived and reset itself, so
 // callers that need the sent text must capture Text() before calling.
 func (e *Editor) HandleKey(ev *tcell.EventKey) (send bool) {
+	if ev.Key() != tcell.KeyUp && ev.Key() != tcell.KeyDown {
+		e.wantCol = 0 // horizontal motion and edits end the vertical-walk memory
+	}
 	switch ev.Key() {
 	case tcell.KeyRune:
 		switch {
@@ -159,6 +169,7 @@ func (e *Editor) recall(dir int) {
 		e.draft = nil
 	}
 	e.cur = len(e.buf)
+	e.wantCol = 0 // the buffer swapped: the walk memory resets too
 }
 
 // HasHistory reports whether anything can be recalled (the app keeps
@@ -171,3 +182,98 @@ func (e *Editor) HasHistory() bool { return len(e.history) > 0 }
 func (e *Editor) HistoryPrev() { e.recall(-1) }
 
 func (e *Editor) HistoryNext() { e.recall(1) }
+
+// Visual-row geometry shared with the composer painter
+// (App.composerInputLines): what the arrows walk is exactly what is drawn.
+
+// rowSpan is one visual row: the rune offsets [start,end), newline excluded.
+type rowSpan struct{ start, end int }
+
+// wrapRows partitions buf into the composer's visual rows: '\n' is a hard
+// break, and a row breaks before a rune that would overflow wrap cells.
+// Always returns at least one row.
+func wrapRows(buf []rune, wrap int) []rowSpan {
+	if wrap < 4 {
+		wrap = 4
+	}
+	var rows []rowSpan
+	start, col := 0, 0
+	for i, r := range buf {
+		if r == '\n' {
+			rows = append(rows, rowSpan{start, i})
+			start, col = i+1, 0
+			continue
+		}
+		rw := width(string(r))
+		if col+rw > wrap {
+			rows = append(rows, rowSpan{start, i})
+			start, col = i, 0
+		}
+		col += rw
+	}
+	return append(rows, rowSpan{start, len(buf)})
+}
+
+// cursorCell maps a rune offset to (row, cell column) within rows.
+func cursorCell(buf []rune, rows []rowSpan, cur int) (int, int) {
+	r := len(rows) - 1
+	for i, rs := range rows {
+		if rs.start <= cur {
+			r = i
+		}
+	}
+	rs := rows[r]
+	col := 0
+	for _, ch := range buf[rs.start:min(cur, rs.end)] {
+		col += width(string(ch))
+	}
+	return r, col
+}
+
+// offsetFor is the rune offset where the cursor sits at cell column col,
+// clamped to the row's end when the row is shorter.
+func offsetFor(buf []rune, rs rowSpan, col int) int {
+	w := 0
+	for i := rs.start; i < rs.end; i++ {
+		rw := width(string(buf[i]))
+		if w+rw > col {
+			return i
+		}
+		w += rw
+	}
+	return rs.end
+}
+
+// moveLine walks the cursor one visual row in direction dir across a box
+// wrap cells wide, preserving the cell column as far as the target row
+// allows. It reports false when no such row exists — the cursor is already
+// on the first/last row, and the caller keeps the history-recall contract.
+func (e *Editor) moveLine(dir, wrap int) bool {
+	rows := wrapRows(e.buf, wrap)
+	r, c := cursorCell(e.buf, rows, e.cur)
+	if e.wantCol > 0 {
+		c = e.wantCol
+	}
+	tr := r + dir
+	if tr < 0 || tr >= len(rows) {
+		return false
+	}
+	e.cur = offsetFor(e.buf, rows[tr], c)
+	// Stay sticky while either edge of this step is shorter than the
+	// desired column, so the walk can return to the column it asked for.
+	if rowWidth(e.buf, rows[r]) < c || rowWidth(e.buf, rows[tr]) < c {
+		e.wantCol = c
+	} else {
+		e.wantCol = 0
+	}
+	return true
+}
+
+// rowWidth is the display width of one visual row.
+func rowWidth(buf []rune, rs rowSpan) int {
+	w := 0
+	for _, ch := range buf[rs.start:rs.end] {
+		w += width(string(ch))
+	}
+	return w
+}

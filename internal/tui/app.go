@@ -1631,6 +1631,23 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 	}
 
+	// Multi-row drafts: Up/Down walk the composer's visual rows first, the
+	// same order omp's editor uses (cursorUp/cursorDown move a row; history
+	// is only reached at the buffer edge). moveLine reports false when the
+	// cursor is already on the first/last row — or the draft fits one row —
+	// and HandleKey below keeps the history-recall contract there.
+	switch key.Key() {
+	case tcell.KeyUp, tcell.KeyDown:
+		dir := 1
+		if key.Key() == tcell.KeyUp {
+			dir = -1
+		}
+		if a.ed.moveLine(dir, a.composerAvail()) {
+			a.poke()
+			return
+		}
+	}
+
 	// Editor keys. Text is captured BEFORE HandleKey — the editor archives
 	// and resets itself when it reports send.
 	text := strings.TrimSpace(a.ed.Text())
@@ -2393,47 +2410,29 @@ func clip(s string, maxCells int) string {
 	return b.String() + "…"
 }
 
-// composerInputLines returns the wrapped input rows for the editor text
-// plus the column of the cursor within that wrapped grid. An embedded
-// newline is a hard row break (Ctrl+J / Alt+Enter), and a long line wraps
-// at the available width so the box grows instead of truncating.
-func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
-	text := a.ed.Text()
-	cur := a.ed.cur
-	avail := a.width - 7 // inner width: border+pad+prefix+right pad+border
+// composerAvail is the editor's text width in cells inside the prompt box
+// (border+pad+prefix+right pad+border).
+func (a *App) composerAvail() int {
+	avail := a.width - 7
 	if avail < 4 {
 		avail = 4
 	}
-	// Convert the rune-cursor into (row, col) while wrapping.
-	row, col := 0, 0
-	flush := func(line string) {
-		lines = append(lines, line)
-		row++
-		col = 0
+	return avail
+}
+
+// composerInputLines returns the wrapped input rows for the editor text
+// plus the column of the cursor within that wrapped grid. An embedded
+// newline is a hard row break (Ctrl+J / Alt+Enter), and a long line wraps
+// at the available width so the box grows instead of truncating. The same
+// wrapRows geometry backs the Up/Down cursor walk in Editor.moveLine:
+// arrows traverse exactly what is painted.
+func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
+	rows := wrapRows(a.ed.buf, a.composerAvail())
+	for _, rs := range rows {
+		lines = append(lines, string(a.ed.buf[rs.start:rs.end]))
 	}
-	line := strings.Builder{}
-	for i, r := range []rune(text) {
-		if i == cur {
-			curRow, curCol = row, col
-		}
-		switch {
-		case r == '\n':
-			flush(line.String())
-			line.Reset()
-		default:
-			if col+width(string(r)) > avail {
-				flush(line.String())
-				line.Reset()
-			}
-			line.WriteRune(r)
-			col += width(string(r))
-		}
-	}
-	if cur >= len([]rune(text)) {
-		curRow, curCol = row, col
-	}
-	flush(line.String())
-	return lines, curRow, curCol
+	curRow, curCol = cursorCell(a.ed.buf, rows, a.ed.cur)
+	return
 }
 
 // composerRows is the total height of the prompt box (top border, wrapped

@@ -80,3 +80,59 @@ func TestViewportShrinksWithComposer(t *testing.T) {
 		t.Fatalf("viewport delta = %d, want 2 (two extra input rows)", one-three)
 	}
 }
+
+// The reported bug: with a multi-line draft, Up/Down did nothing — recall()
+// refuses newline-bearing buffers and there was no line-motion path. Now the
+// arrows walk the painted rows; at the top/bottom row they stay put and the
+// draft is never clobbered by history.
+func TestArrowsWalkHardNewlineRows(t *testing.T) {
+	app, _ := newTestApp(t, 90, 30)
+	setDraft(&app.ed, "first line\nsecond line", 22) // cursor after "second line"
+	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	_, row, col := app.composerInputLines()
+	if row != 0 || col != 10 {
+		t.Fatalf("Up from row 1 col 11 = (%d,%d), want (0,10) (clamped to row 0 length)", row, col)
+	}
+	// At the first row Up must not recall: the draft holds newlines.
+	app.ed.PushHistory("older prompt")
+	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	if app.ed.Text() != "first line\nsecond line" {
+		t.Fatalf("Up at top row clobbered the multi-line draft: %q", app.ed.Text())
+	}
+	// Down walks back and stops at the last row for the same reason.
+	app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	_, row, col = app.composerInputLines()
+	if row != 1 || col != 11 {
+		t.Fatalf("Down = (%d,%d), want (1,11)", row, col)
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	if app.ed.Text() != "first line\nsecond line" || app.ed.cur != 22 {
+		t.Fatalf("Down at bottom row moved the buffer: %q cur=%d", app.ed.Text(), app.ed.cur)
+	}
+}
+
+// A long single line that WRAPS is multi-row too: the arrows walk the
+// visual rows, preserving the cell column, and history recall returns only
+// at the first/last row — never mid-paragraph.
+func TestArrowsWalkWrappedRowsAndRecallAtEdge(t *testing.T) {
+	app, _ := newTestApp(t, 40, 24) // avail = 33 → 100 x's cover 4 rows (33/33/33/1)
+	long := strings.Repeat("x", 100)
+	setDraft(&app.ed, long, 100)
+	app.ed.PushHistory("older prompt")
+	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	_, row, col := app.composerInputLines()
+	if row != 2 || col != 1 {
+		t.Fatalf("Up on wrapped row 3 = (%d,%d), want (2,1)", row, col)
+	}
+	// Two more rows to the top (3→2 already moved); the edge is the 4th Up.
+	for range 2 {
+		app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	}
+	if app.ed.Text() != long {
+		t.Fatalf("recall fired before the edge: %q", app.ed.Text())
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	if app.ed.Text() != "older prompt" {
+		t.Fatalf("Up at first wrapped row should recall history, got %q", app.ed.Text())
+	}
+}
