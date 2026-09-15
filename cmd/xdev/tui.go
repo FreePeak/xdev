@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/FreePeak/xdev/internal/memory"
@@ -231,6 +232,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Wheel events drive the in-app transcript scroll, not the host
 	// terminal's own scrollback (#17 follow-up, user-reported 2026-09-10).
 	scr.EnableMouse()
+	// Bracketed paste: without it a multi-line paste arrives as keys with CR
+	// between the lines, and CR is Enter — one message per line (paste.go).
+	// A terminal that ignores the mode keeps the old behaviour; nothing hangs.
+	scr.EnablePaste()
 	defer scr.Fini()
 	defer setCursorReset()
 
@@ -1394,158 +1399,190 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 	app.SetCommandDir(cwd)
 
-	app.SetHandlers(
-		func(text string) {
-			// Joined as a guest: the host owns the turn, so send the
-			// prompt over the room instead of starting one here.
-			if tui.Collab != nil && tui.Collab.Forward != nil && tui.Collab.Forward(text) {
-				return
+	// runTurn owns one submit: persist the user message, then drive the agent.
+	// imgs is the pasted images riding with it (nil for a plain prompt). It
+	// reports whether the turn was taken, so a draft carrying attachments can go
+	// back to the composer instead of being sent without them — see
+	// tui.App.SetImageSend.
+	runTurn := func(text string, imgs []tui.PasteImage) bool {
+		// Joined as a guest: the host owns the turn, so the prompt goes over
+		// the room instead of starting one here. The room carries text only,
+		// so a draft with attachments is neither forwarded nor run: returning
+		// false hands it back to the composer, where the notice says why.
+		// Sending the text alone would let the host answer a screenshot nobody
+		// delivered.
+		if tui.Collab != nil && tui.Collab.Forward != nil {
+			if imgs != nil {
+				return false
 			}
-			if !running.CompareAndSwap(false, true) {
-				app.AddSystemBlock("a turn is already running — Esc cancels it")
-				return
+			if tui.Collab.Forward(text) {
+				return true
 			}
-			// Name the session after its first prompt: /resume and the
-			// breadcrumb read the title slot, and "print <timestamp>" hides
-			// everything about the conversation. Called before the first
-			// assistant message materializes the file, so the title lands in
-			// the slot without needing a rewrite pass; later prompts keep
-			// the first one's title (omp's first-prompt cascade).
-			if store.Path() == "" {
-				if t := titleFromPrompt(text); t != "" {
-					store.SetTitle(t)
-				}
+		}
+		if !running.CompareAndSwap(false, true) {
+			app.AddSystemBlock("a turn is already running — Esc cancels it")
+			return false
+		}
+		// Name the session after its first prompt: /resume and the
+		// breadcrumb read the title slot, and "print <timestamp>" hides
+		// everything about the conversation. Called before the first
+		// assistant message materializes the file, so the title lands in
+		// the slot without needing a rewrite pass; later prompts keep
+		// the first one's title (omp's first-prompt cascade).
+		if store.Path() == "" {
+			if t := titleFromPrompt(text); t != "" {
+				store.SetTitle(t)
 			}
-			sessMu.Lock()
-			msg := ai.Message{
-				Role:        ai.RoleUser,
-				Content:     []ai.Block{ai.TextBlock{Text: text}},
-				Attribution: "user",
-				UserTS:      time.Now().UnixMilli(),
+		}
+		sessMu.Lock()
+		msg := ai.Message{
+			Role:        ai.RoleUser,
+			Attribution: "user",
+			UserTS:      time.Now().UnixMilli(),
+		}
+		sessMu.Unlock()
+		// A pasted image is a block, not a word in the text: the chip the
+		// composer showed has already been stripped (tui.App.expandPastes),
+		// and what is left of the draft goes out beside the payloads in the
+		// order they sit in the prompt.
+		if text != "" {
+			msg.Content = append(msg.Content, ai.TextBlock{Text: text})
+		}
+		for _, im := range imgs {
+			msg.Content = append(msg.Content, ai.ImageBlock{Source: ai.ImageSource{
+				Type:      "base64",
+				MediaType: im.MediaType,
+				Data:      base64.StdEncoding.EncodeToString(im.Data),
+			}})
+		}
+		if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
+			logx.Errorf("persist user message: %v", err)
+		}
+		// #86: the memory turn boundary. print mode counted turns for the
+		// remote backend; the TUI — where sessions are actually long —
+		// never fed it, so retainEveryNTurns could not fire and queued
+		// retains sat until exit.
+		noteMemoryTurn(sessionMemory, []ai.Message{msg})
+		// #89: the friction detector had no TUI feed at all, so decision
+		// files only ever accumulated in print runs.
+		observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
+		ctx, cancel := context.WithCancel(baseCtx)
+		turn.set(cancel)
+		go func() {
+			// LIFO: clear runs FIRST so this turn can never nil a slot
+			// that a newer turn already claimed (running=false admits the
+			// next submit before cancel() unwinds).
+			defer cancel()
+			defer running.Store(false)
+			defer turn.clear()
+			app.SetRunning(true)
+			feedAdvisor := func() {}
+			modelMu.Lock()
+			lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
+			modelMu.Unlock()
+			ag := &agent.Agent{
+				Provider: lp,
+				Tools:    toolsForTurn(),
+				// feedAdvisor is assigned after the agent exists, so go
+				// through an indirection: a direct field copy would
+				// capture the nil func at literal time.
+				Hooks:      memoryTurnHooks(&tuiHooks{ts: ts, feed: func() { feedAdvisor() }}, lastSettings()),
+				TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
+				MaxTokens:  opts.MaxTokens,
+				MaxTurns:   opts.MaxTurns,
+				Model:      lm,
+				Store:      store,
+				Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
+				Failovers:  failoverChain(cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm),
+				Thinking:   effortBudget(le),
+				// Intercept set below from exts (only when non-nil).
+				Policy:  agentPolicy(),
+				Handoff: handoffSettings(),
 			}
-			sessMu.Unlock()
-			if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
-				logx.Errorf("persist user message: %v", err)
+			// Shared per-mode seams: catalog bridge + secrets redactor
+			// (#79/#80). The TUI is the daily driver; an unredacted tool
+			// result here is the case that mattered.
+			if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true); st != nil {
+				// The TUI has a console: a silent provider swap or a
+				// cooldown revert is otherwise invisible to the user.
+				st.Notify = func(msg string) { app.AddSystemBlock("· " + msg) }
 			}
-			// #86: the memory turn boundary. print mode counted turns for the
-			// remote backend; the TUI — where sessions are actually long —
-			// never fed it, so retainEveryNTurns could not fire and queued
-			// retains sat until exit.
-			noteMemoryTurn(sessionMemory, []ai.Message{msg})
-			// #89: the friction detector had no TUI feed at all, so decision
-			// files only ever accumulated in print runs.
-			observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
-			ctx, cancel := context.WithCancel(baseCtx)
-			turn.set(cancel)
-			go func() {
-				// LIFO: clear runs FIRST so this turn can never nil a slot
-				// that a newer turn already claimed (running=false admits the
-				// next submit before cancel() unwinds).
-				defer cancel()
-				defer running.Store(false)
-				defer turn.clear()
-				app.SetRunning(true)
-				feedAdvisor := func() {}
-				modelMu.Lock()
-				lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
-				modelMu.Unlock()
-				ag := &agent.Agent{
-					Provider: lp,
-					Tools:    toolsForTurn(),
-					// feedAdvisor is assigned after the agent exists, so go
-					// through an indirection: a direct field copy would
-					// capture the nil func at literal time.
-					Hooks:      memoryTurnHooks(&tuiHooks{ts: ts, feed: func() { feedAdvisor() }}, lastSettings()),
-					TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
-					MaxTokens:  opts.MaxTokens,
-					MaxTurns:   opts.MaxTurns,
-					Model:      lm,
-					Store:      store,
-					Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
-					Failovers:  failoverChain(cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm),
-					Thinking:   effortBudget(le),
-					// Intercept set below from exts (only when non-nil).
-					Policy:  agentPolicy(),
-					Handoff: handoffSettings(),
-				}
-				// Shared per-mode seams: catalog bridge + secrets redactor
-				// (#79/#80). The TUI is the daily driver; an unredacted tool
-				// result here is the case that mattered.
-				if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true); st != nil {
-					// The TUI has a console: a silent provider swap or a
-					// cooldown revert is otherwise invisible to the user.
-					st.Notify = func(msg string) { app.AddSystemBlock("· " + msg) }
-				}
-				// The HUD context segment measures against this window.
-				app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
-				prewalkMu.Lock()
-				pwOn, pwT := prewalkOn, *prewalkTarget
-				prewalkMu.Unlock()
-				if pwOn {
-					ag.Prewalk = &agent.Prewalk{Target: pwT}
-				} else if t := resolvePrewalk(opts, cfg, lastSettings()); t != nil {
-					ag.Prewalk = &agent.Prewalk{Target: *t}
-				}
-				ag.PlanMode = planMode
-				// feedAdvisor hands the reviewer a fresh snapshot after each
-				// assistant message; it never blocks the primary turn.
-				if adv != nil {
-					adv.Primary = ag
-					feedAdvisor = func() {
-						if !advisorOn.Load() {
-							return
-						}
-						sessMu.Lock()
-						snap := rebuildHistory()
-						sessMu.Unlock()
-						go adv.Feed(baseCtx, append([]ai.Message(nil), snap...))
+			// The HUD context segment measures against this window.
+			app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
+			prewalkMu.Lock()
+			pwOn, pwT := prewalkOn, *prewalkTarget
+			prewalkMu.Unlock()
+			if pwOn {
+				ag.Prewalk = &agent.Prewalk{Target: pwT}
+			} else if t := resolvePrewalk(opts, cfg, lastSettings()); t != nil {
+				ag.Prewalk = &agent.Prewalk{Target: *t}
+			}
+			ag.PlanMode = planMode
+			// feedAdvisor hands the reviewer a fresh snapshot after each
+			// assistant message; it never blocks the primary turn.
+			if adv != nil {
+				adv.Primary = ag
+				feedAdvisor = func() {
+					if !advisorOn.Load() {
+						return
 					}
+					sessMu.Lock()
+					snap := rebuildHistory()
+					sessMu.Unlock()
+					go adv.Feed(baseCtx, append([]ai.Message(nil), snap...))
 				}
-				// Extension actions steer the live run: this agent is the
-				// target until the next submit replaces it.
-				// Hook bus per submit: --hook specs, settings `hooks`, discovered
-				// files. Extensions compose into the same fail-closed chain.
-				hookBus := buildHookBus(cwd, opts, app.AddSystemBlock)
+			}
+			// Extension actions steer the live run: this agent is the
+			// target until the next submit replaces it.
+			// Hook bus per submit: --hook specs, settings `hooks`, discovered
+			// files. Extensions compose into the same fail-closed chain.
+			hookBus := buildHookBus(cwd, opts, app.AddSystemBlock)
+			agentMu.Lock()
+			curAgent = ag
+			if c := agent.NewChain(hookBus, exts); c != nil {
+				ag.Intercept = c
+			}
+			ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
+			agentMu.Unlock()
+			defer func() {
 				agentMu.Lock()
-				curAgent = ag
-				if c := agent.NewChain(hookBus, exts); c != nil {
-					ag.Intercept = c
-				}
-				ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
+				curAgent = nil
 				agentMu.Unlock()
-				defer func() {
-					agentMu.Lock()
-					curAgent = nil
-					agentMu.Unlock()
-				}()
-				sessMu.Lock()
-				hist := rebuildHistory() // store mirror is authoritative
-				sessMu.Unlock()
-				sys := buildSys()
-				if vibeActive() {
-					sys = vibeSys() // director prompt for the restricted toolset
-				}
-				finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
-				app.EndAssistant()
-				app.FinishRun()
-				// Ai-title cascade (#107): the TUI sessions are the ones the
-				// picker lists, and they are the ones stuck with "tui
-				// <timestamp>". Async on purpose: the user's next keystroke
-				// must not wait on a title request.
-				lastTurnFailed.Store(err != nil)
-				if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
-					go generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
-						append(append([]ai.Message(nil), hist...), *finalMsg))
-				}
-				if err != nil {
-					if ctx.Err() != nil {
-						app.AddSystemBlock("· turn canceled")
-					} else {
-						app.AddSystemBlock("error: " + err.Error())
-					}
-				}
 			}()
-		},
+			sessMu.Lock()
+			hist := rebuildHistory() // store mirror is authoritative
+			sessMu.Unlock()
+			sys := buildSys()
+			if vibeActive() {
+				sys = vibeSys() // director prompt for the restricted toolset
+			}
+			finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
+			app.EndAssistant()
+			app.FinishRun()
+			// Ai-title cascade (#107): the TUI sessions are the ones the
+			// picker lists, and they are the ones stuck with "tui
+			// <timestamp>". Async on purpose: the user's next keystroke
+			// must not wait on a title request.
+			lastTurnFailed.Store(err != nil)
+			if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
+				go generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
+					append(append([]ai.Message(nil), hist...), *finalMsg))
+			}
+			if err != nil {
+				if ctx.Err() != nil {
+					app.AddSystemBlock("· turn canceled")
+				} else {
+					app.AddSystemBlock("error: " + err.Error())
+				}
+			}
+		}()
+		return true
+	}
+	// The composer holds the two send paths apart: a plain prompt cannot ask
+	// for images it has none of, and a draft that has them must not be
+	// silently demoted to text.
+	app.SetHandlers(
+		func(text string) { runTurn(text, nil) },
 		// Esc / Ctrl+C aborts the live turn only; see liveTurn. This handler
 		// used to call baseCancel(), which bricked every future turn after
 		// the first cancel while the TUI still looked alive.
@@ -1553,6 +1590,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 		func() { app.Quit() },
 	)
+	app.SetImageSend(func(text string, imgs []tui.PasteImage) bool { return runTurn(text, imgs) })
+	// Vision is the live model's property, not the launch model's: /model
+	// mid-session changes whether an attachment can be read at all.
+	app.SetVision(func() bool {
+		modelMu.Lock()
+		defer modelMu.Unlock()
+		return modelVision(cfg, live.provName, live.model)
+	})
 
 	app.Run() // blocks until Quit
 	// #92: the session is ending (quit, or the terminal closing): tell the
@@ -1699,6 +1744,13 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			}
 		}
 	case ai.EventError:
+		// A transient blip is being retried by the recovery ladder: the
+		// wire error would flash once per attempt, so it collapses to a
+		// notice. Hard errors still print verbatim — the turn ends on them.
+		if ai.Classify(ev.Err) == ai.ClassTransient {
+			h.ts.app.AddSystemBlock("· stream error — retrying")
+			break
+		}
 		h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error())
 	}
 }

@@ -121,8 +121,15 @@ type App struct {
 	sessionBranch     func(args string) error // /branch to an entry id
 	resumeList        func(cwd string) error  // /resume session listing
 	onSend            func(text string)
-	onCancel          func()
-	onQuit            func()
+	// onSendImages is the multimodal send: the draft with every attached
+	// image's chip stripped, plus the payloads in prompt order. It returns
+	// true when it took the turn. False (or nil) means the attachments cannot
+	// go out — and then the draft must come back to the composer rather than
+	// being sent as text: a chip reaching the model as the word "[Image …]"
+	// is a user believing a screenshot was read that no pixel of was sent.
+	onSendImages func(text string, imgs []PasteImage) bool
+	onCancel     func()
+	onQuit       func()
 
 	keyq   chan tcell.Event
 	dirty  chan struct{}
@@ -166,6 +173,18 @@ type App struct {
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
+	// Pasted images (paste.go): the payloads the chips in the composer name,
+	// the bracketed-paste window, and the clipboard reader. All three are
+	// UI-thread-owned exactly like the editor beside them — no lock covers
+	// them, and nothing off the UI loop may touch them.
+	images    pendingImages
+	paste     pasteState
+	clipImage func() ([]byte, string, error)
+	// vision reports whether the live model takes image input (cmd wires it
+	// from models.yml `vision:` for the model in use). nil is unknown, which
+	// pastes anyway: a model that cannot read the attachment answers with
+	// text, and a wrong "no" would block the feature on a field nobody filled.
+	vision func() bool
 }
 
 type blockKey struct {
@@ -221,10 +240,21 @@ func (a *App) SetStatusModel(m string) {
 	a.poke()
 }
 
-// SetHandlers wires the send/cancel/quit callbacks.
+// SetHandlers wires the send/cancel/quit callbacks. A text-only caller uses
+// this; a mode that can carry image attachments adds SetImageSend.
 func (a *App) SetHandlers(onSend func(text string), onCancel, onQuit func()) {
 	a.onSend, a.onCancel, a.onQuit = onSend, onCancel, onQuit
 }
+
+// SetImageSend wires the multimodal send path (see App.onSendImages).
+func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
+	a.onSendImages = fn
+}
+
+// SetVision wires "can the live model take an image?", which cmd answers from
+// models.yml `vision:` for the model in use — so a /model switch changes the
+// answer. Unwired (tests, modes with no model) is unknown, which pastes.
+func (a *App) SetVision(fn func() bool) { a.vision = fn }
 
 // Invalidate clears the render cache (resize, theme change).
 func (a *App) Invalidate() {
@@ -1301,6 +1331,12 @@ func (a *App) Run() {
 			a.draw()
 		case <-tick.C:
 			ticks++
+			// A paste window whose end marker never arrived must still close,
+			// or the keys held inside it would never reach the user again
+			// (paste.go). Before the lock and outside it: the paste state and
+			// the editor are UI-thread-owned, and the flush may read the file
+			// a pasted path named.
+			stuck := a.flushStuckPaste()
 			a.mu.Lock()
 			running := a.st.Running
 			if running {
@@ -1333,7 +1369,7 @@ func (a *App) Run() {
 			}
 			clock := a.hudHasClock()
 			a.mu.Unlock()
-			if running || animate {
+			if running || animate || stuck {
 				a.draw()
 			} else if clock && ticks%30 == 0 {
 				// The session clock must keep counting while the UI is
@@ -1344,8 +1380,22 @@ func (a *App) Run() {
 	}
 }
 
-// handleKey applies one key event (editor, scrolling, control keys).
+// handleKey applies one key event (editor, scrolling, control keys) or one
+// paste event.
 func (a *App) handleKey(ev tcell.Event) {
+	// Bracketed paste before the EventKey cast: the markers are their own
+	// event type, and the keys between them are payload, not commands — a
+	// pasted CR must not read as Enter. A window can also close by handing
+	// back its text WITH the event still to be handled (a control key ended
+	// it), so both halves are acted on: the draft lands in the composer and
+	// Ctrl-C / Esc still do what they were pressed for.
+	consumed, payload := a.paste.feedPaste(ev)
+	if payload != "" {
+		a.handlePaste(payload)
+	}
+	if consumed {
+		return // the UI loop repaints after handleKey
+	}
 	key, ok := ev.(*tcell.EventKey)
 	if !ok {
 		if r, ok := ev.(*tcell.EventResize); ok {
@@ -1551,6 +1601,12 @@ func (a *App) handleKey(ev tcell.Event) {
 		// transcript must not claim to have expanded something.
 		a.ToggleToolExpand()
 		return
+	case "paste-image":
+		// omp's app.clipboard.pasteImage: the one paste no terminal can hand
+		// us, because a bitmap never reaches an app through a keystroke. The
+		// read shells out, like the text copy on this path already does.
+		a.pasteClipboard()
+		return
 	}
 
 	// Slash dropdown navigation: while the menu is open the arrows move the
@@ -1648,25 +1704,77 @@ func (a *App) handleKey(ev tcell.Event) {
 
 	// Editor keys. Text is captured BEFORE HandleKey — the editor archives
 	// and resets itself when it reports send.
-	text := strings.TrimSpace(a.ed.Text())
+	draft := strings.TrimSpace(a.ed.Text())
+	// Which images ride with this message is read from the same snapshot, for
+	// the same reason: sending resets the buffer, and the buffer is what says
+	// which payloads are live (paste.go).
+	imgs := a.ImagesFor(draft)
 	send := a.ed.HandleKey(key)
+	// A chip the key removed retires its payload: nothing may be sent that the
+	// composer no longer shows.
+	a.dropStalePastes()
 	a.syncSlashMenu()
 	if send {
 		// slash command routing (issue #11): a command is consumed by the
-		// router — no user block, no agent run.
-		if dispatch(a, text) {
+		// router — no user block, no agent run. A command sees the draft as
+		// typed, chips included: its argument is not a place to lose a name.
+		if dispatch(a, draft) {
 			a.smenu = nil // editor reset — the dropdown is moot
 			a.poke()
 			return
 		}
+		// The wire text drops an attached image's chip, because the image part
+		// is its rendering. The transcript row keeps the draft, so the screen
+		// shows what was composed.
+		text := draft
+		if len(imgs) > 0 {
+			text = a.expandPastes(draft)
+		}
 		a.mu.Lock()
-		a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: text})
+		a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: draft})
 		a.sm.Bottom()
 		a.mu.Unlock()
+		if len(imgs) > 0 {
+			// Attachments make this the multimodal path's alone. A declined
+			// or unwired send returns the draft to the composer: the text-only
+			// handler cannot carry the bytes, and sending the chip as a word
+			// would let a model answer a picture it never received.
+			if a.onSendImages != nil && a.onSendImages(text, imgs) {
+				a.poke()
+				return
+			}
+			a.returnDraft(draft, imgs)
+			return
+		}
 		if a.onSend != nil {
 			a.onSend(text)
 		}
 	}
+	a.poke()
+}
+
+// returnDraft puts a draft that could not be sent back in the composer and
+// says why on the divider. It exists because an attached image has no text
+// fallback: the alternative is a cleared box, a lost screenshot, and a user who
+// does not know either happened. The chips and the payloads go back together,
+// so one Enter retries.
+func (a *App) returnDraft(draft string, imgs []PasteImage) {
+	if a.ed.Text() == "" {
+		a.ed.InsertText(draft) // the send path has only just emptied it
+	}
+	a.images.keep(imgs)
+	a.images.drop(a.ed.Text())
+	a.mu.Lock()
+	running := a.st.Running
+	a.mu.Unlock()
+	why := "this mode cannot send images"
+	switch {
+	case a.onSendImages != nil && running:
+		why = "a turn is already running — Esc cancels it, then send again"
+	case a.onSendImages != nil:
+		why = "the send declined the attachment (a guest room forwards text only)"
+	}
+	a.setNotice(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
 	a.poke()
 }
 
@@ -2413,10 +2521,10 @@ func clip(s string, maxCells int) string {
 	return b.String() + "…"
 }
 
-// composerAvail is the editor's text width in cells inside the prompt box
-// (border+pad+prefix+right pad+border).
+// composerAvail is the editor's text width in cells: the borderless prompt
+// spends two on the gutter (❯ + one pad) and one on the divider's right cap.
 func (a *App) composerAvail() int {
-	avail := a.width - 7
+	avail := a.width - 4
 	if avail < 4 {
 		avail = 4
 	}
@@ -2438,23 +2546,36 @@ func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
 	return
 }
 
-// composerRows is the total height of the prompt box (top border, wrapped
-// input rows, bottom divider).
+// composerRows is the total height of the prompt: the wrapped input rows plus
+// the bottom info divider. There is no top border — the composer is borderless.
 func (a *App) composerRows() int {
 	lines, _, _ := a.composerInputLines()
-	return len(lines) + 2
+	return len(lines) + 1
 }
 
-// drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
-// editor text, blinking block cursor; the model + running spinner ride the
-// info divider, tinted with the statusLine tokens.
+// drawComposer renders the borderless prompt (omp's composer shapes, lifted
+// from the reference implementation's defaults): no frame — the input rows are
+// a filled surface carrying the user's own background band colour, so the
+// draft reads as the same thing a sent message reads as. The only rule left is
+// the info divider under the text, which carries the model, the spinner, the
+// viewport hint and the copy notice.
 func (a *App) drawComposer(yTop int) {
 	w := a.width
 	if w < 6 || yTop < 1 {
 		return
 	}
-	box := a.th.Box()
+	box, ms := a.th.Box(), a.mdStyle()
 	bs := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	// The prompt's surface: the user-message band, exactly what a sent message
+	// paints with. A theme that leaves it to the terminal default stays
+	// transparent instead of painting black.
+	surfSt := bs
+	bodySt := ms.body
+	if surf, ok := a.th.Slot(theme.BgHighlight); ok {
+		surfSt = surfSt.Background(a.cellColor(surf))
+		bodySt = bodySt.Background(a.cellColor(surf))
+	}
+	promptStyle := surfSt.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	// The divider is the status line: a theme that sets statusLineBg fills
 	// the row ("" = terminal default = transparent, today's look).
 	infoBg, hasInfoBg := a.th.Slot(theme.StatusLineBg)
@@ -2462,40 +2583,27 @@ func (a *App) drawComposer(yTop int) {
 	if hasInfoBg {
 		divSt = divSt.Background(a.cellColor(infoBg))
 	}
-	ms := a.mdStyle()
 
-	// Top border: ╭────╮ (1-cell inset on each side, like grok's box).
-	drawText(a.scr, 1, yTop-1, box.TopLeft, bs)
-	for x := 2; x < w-2; x++ {
-		a.scr.SetContent(x, yTop-1, boxRune(box.Horizontal), nil, bs)
-	}
-	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
-
-	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
+	// Input rows: ❯ on the gutter, continuation rows aligned under the text.
+	// The whole row is painted, so a shorter draft leaves no stale cells.
 	lines, curRow, curCol := a.composerInputLines()
-	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
-	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
 		y := yTop + i
-		a.scr.SetContent(1, y, vert, nil, bs)
-		a.scr.SetContent(w-2, y, vert, nil, bs)
+		for x := 0; x < w; x++ {
+			a.scr.SetContent(x, y, ' ', nil, surfSt)
+		}
+		gutter := "  " // continuation rows align under the text
 		if i == 0 {
-			drawText(a.scr, 3, y, "❯ ", promptStyle)
-		} else {
-			drawText(a.scr, 3, y, "  ", promptStyle)
+			gutter = "❯ "
 		}
-		drawText(a.scr, 5, y, ln, ms.body)
-	}
-	// Blank the space between the last text row and the right border so a
-	// short line cannot leave stale cells from a previous longer draft.
-	for i, ln := range lines {
-		x := 5 + width(ln)
-		for ; x < w-2; x++ {
-			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
-		}
+		drawText(a.scr, 0, y, gutter, promptStyle)
+		drawText(a.scr, 2, y, ln, bodySt)
 	}
 
-	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
+	// Info divider: a rule under the prompt, model · spinner on the left,
+	// the viewport hint on the right. It used to be the box's bottom border;
+	// the box is gone, the row stays because it is the only chrome the
+	// statusLine tokens, the spinner and the copy notice have.
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
@@ -2506,33 +2614,32 @@ func (a *App) drawComposer(yTop int) {
 		a.st.spinnerIdx = a.st.spinnerIdx % len(frames)
 		info += " · " + frames[a.st.spinnerIdx]
 	}
-	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
-	for x := 2; x < w-2; x++ {
-		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
+	rule := boxRune(box.Horizontal)
+	for x := 0; x < w; x++ {
+		a.scr.SetContent(x, yBottom, rule, nil, divSt)
 	}
 	if info != " " {
 		infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
 		if hasInfoBg {
 			infoSt = infoSt.Background(a.cellColor(infoBg))
 		}
-		drawText(a.scr, 2, yBottom, info, infoSt)
+		drawText(a.scr, 1, yBottom, info, infoSt)
 	}
-	// The viewport hint (▲n▼n) rides this divider's right end. It used to be
+	// The viewport hint (▲n▼n) rides the divider's right end. It used to be
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
-	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name. A fresh copy
-	// confirmation outranks it — that message is the only proof the mouse
-	// gesture did anything, since the app holds the mouse and the terminal
-	// stays quiet.
+	// takes the pixels instead; when it is too narrow for both, the hint is
+	// dropped rather than eating the model name. A fresh copy confirmation
+	// outranks it — that message is the only proof the mouse gesture did
+	// anything, since the app holds the mouse and the terminal stays quiet.
 	hint := a.copyHint()
 	if hint == "" {
 		hint = a.scrollHint
 	}
 	if hint != "" {
-		hx := w - 3 - width(hint)
-		if hx > 2+width(info) {
+		hx := w - 2 - width(hint)
+		if hx > 1+width(info) {
 			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			if hasInfoBg {
 				hintSt = hintSt.Background(a.cellColor(infoBg))
@@ -2540,11 +2647,9 @@ func (a *App) drawComposer(yTop int) {
 			drawText(a.scr, hx, yBottom, hint, hintSt)
 		}
 	}
-	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
 	// Cursor: blinking block at the editor position inside the wrapped grid.
-	cx := 5 + curCol
-	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
+	a.scr.ShowCursor(min(2+curCol, w-2), yTop+curRow)
 }
 
 // drawStatusRow renders the bottom row: the working directory on the left,

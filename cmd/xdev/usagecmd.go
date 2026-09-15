@@ -433,6 +433,13 @@ func usageObservedText(b *strings.Builder, o usageObserved) {
 	fmt.Fprintf(b, "  %-12s total %s (in %s · out %s · cache read %s · cache write %s)\n", "tokens",
 		stats.HumanTokens(t.TotalTokens), stats.HumanTokens(t.Input), stats.HumanTokens(t.Output),
 		stats.HumanTokens(t.CacheRead), stats.HumanTokens(t.CacheWrite))
+	// The cache-hit ratio is the one number that says whether breakpoints are
+	// working: input is what the provider charged full price for, so a run of
+	// 0% means the prefix never got read back.
+	if prompt := t.Input + t.CacheRead + t.CacheWrite; prompt > 0 {
+		fmt.Fprintf(b, "  %-12s %.1f%% of %s prompt tokens\n", "cache hit",
+			100*float64(t.CacheRead)/float64(prompt), stats.HumanTokens(prompt))
+	}
 	fmt.Fprintf(b, "  %-12s %s\n", "cost", stats.HumanMoney(t.CostUSD))
 	if t.PricedTurns < t.Turns {
 		fmt.Fprintf(b, "  %-12s %d of %d turns carried no provider price (counted as 0)\n", "",

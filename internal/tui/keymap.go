@@ -43,6 +43,7 @@ var BuiltinActions = []string{
 	"model-select",   // Alt+M: the /model roles+models selector (omp app.model.select)
 	"app.agents.hub", // Alt+A: the agent-hub roster (omp app.agents.hub)
 	"model-cycle",    // Ctrl+P: cycle the active model through --models patterns
+	"paste-image",    // Ctrl+V: attach the clipboard image (omp app.clipboard.pasteImage)
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
 
@@ -96,6 +97,11 @@ func DefaultKeyMap() *KeyMap {
 			// when no agent is running.
 			"A-a": "app.agents.hub",
 			"C-r": "history-prev",
+			// omp's app.clipboard.pasteImage. This is NOT the ordinary paste —
+			// the terminal owns that and bracketed paste delivers it (see
+			// paste.go). The chord reaches only for the clipboard's bitmap,
+			// which no terminal forwards to an app.
+			"C-v": "paste-image",
 			"A-t": "app.session.tree",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
