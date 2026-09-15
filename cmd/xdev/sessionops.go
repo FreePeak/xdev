@@ -75,6 +75,40 @@ func readBreadcrumb() string {
 	return strings.TrimSpace(string(b))
 }
 
+// resumeHint is the line the TUI prints as it exits: the one command that
+// reopens the session just used. It asks resolveResumeID the same question the
+// pasted line will ask it — does `--resume <id>` land on THIS file, from this
+// directory? — so a store with nothing to resume (--no-session, a chat that got
+// no assistant reply, the file /drop deleted, a --continue'd session owned by
+// another directory) prints nothing instead of a command that errors.
+func resumeHint(store *session.Store, cwd string) string {
+	if store == nil {
+		return ""
+	}
+	path, err := resolveResumeID(cwd, store.ID())
+	if err != nil || path != store.Path() {
+		return ""
+	}
+	return resumeCommand(store.ID())
+}
+
+// resumeCommand spells the hint with the name xdev was invoked as, so a shell
+// that installs the binary under another name (an `alias omp=xdev`, a renamed
+// copy) prints a line that pastes back.
+func resumeCommand(id string) string {
+	return resumeProg(os.Args[0]) + " --resume " + id
+}
+
+// resumeProg is the command name for a resume line: argv0's basename without
+// the Windows suffix, falling back to "xdev" when argv0 says nothing usable.
+func resumeProg(argv0 string) string {
+	prog := strings.TrimSuffix(filepath.Base(argv0), ".exe")
+	if prog == "" || prog == "." || prog == ".." || prog == string(filepath.Separator) {
+		return "xdev"
+	}
+	return prog
+}
+
 // resolveResumeID finds a session by case-insensitive id prefix (mtime
 // desc, omp parity). "" query returns the most recent in cwd.
 func resolveResumeID(cwd, query string) (string, error) {

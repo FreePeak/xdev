@@ -486,3 +486,56 @@ func TestShareLiveServesOneSnapshot(t *testing.T) {
 		t.Fatalf("shared snapshot lost the transcript:\n%.200s", plain)
 	}
 }
+
+// TestResumeHint: the TUI's exit line is printed only when the session it
+// names is reachable by `--resume <id>` from this directory, and never for a
+// store with nothing on disk.
+func TestResumeHint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := "/tmp/hint-test"
+	id := "CCCC3333-0000-0000-0000-000000000000"
+	path := writePickerSession(t, cwd, id, "hinted", "hello")
+	st, err := session.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if got, want := resumeHint(st, cwd), resumeCommand(id); got != want {
+		t.Fatalf("hint = %q, want %q", got, want)
+	}
+	// Another directory: --resume <id> would error there, so no line.
+	if got := resumeHint(st, "/tmp/hint-elsewhere"); got != "" {
+		t.Fatalf("hint for another cwd = %q, want empty", got)
+	}
+	// /drop took the file with it.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := resumeHint(st, cwd); got != "" {
+		t.Fatalf("hint after the file vanished = %q, want empty", got)
+	}
+	// A store that never materialized: the fresh session /new or /drop left,
+	// or a chat that got no assistant reply.
+	if got := resumeHint(session.OpenMem(cwd, "memory-only"), cwd); got != "" {
+		t.Fatalf("hint for a memory-only store = %q, want empty", got)
+	}
+}
+
+// TestResumeProgSpellsTheInvokedName: the hint must paste back into the shell
+// the user typed it from, whatever the binary was named.
+func TestResumeProgSpellsTheInvokedName(t *testing.T) {
+	for _, c := range []struct{ argv0, want string }{
+		{"/home/u/.local/bin/omp", "omp"},
+		{"./xdev", "xdev"},
+		{"/tmp/build/xdev.exe", "xdev"},
+		{"", "xdev"},
+		{".", "xdev"},
+		{"..", "xdev"},
+		{string(filepath.Separator), "xdev"},
+	} {
+		if got := resumeProg(c.argv0); got != c.want {
+			t.Errorf("resumeProg(%q) = %q, want %q", c.argv0, got, c.want)
+		}
+	}
+}

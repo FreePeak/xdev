@@ -194,6 +194,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// previous one (the /new, /drop defect).
 	saveBreadcrumb(breadcrumbPath(store))
 	wireTaskParent(reg, store)
+	// The resume line on the way out. Registered BEFORE the defers that flush
+	// and close the store and release the screen, so LIFO order prints it last
+	// of the three: tcell has left the alt screen (anything written before Fini
+	// is wiped) and the session file is closed. It reads `store` at exit, so
+	// /new, /fork and /resume change what the line names.
+	defer func() {
+		if hint := resumeHint(store, cwd); hint != "" {
+			fmt.Println(hint)
+		}
+	}()
 	defer func() {
 		modelMu.Lock()
 		lm := live.provName + "/" + live.model

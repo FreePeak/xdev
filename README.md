@@ -148,7 +148,10 @@ drags a scrolled viewport (the `▲ n ▼ n` indicator shows hidden rows):
 | `/quit`, `/q` | quit |
 
 Lifecycle commands refuse while a turn is running (Esc cancels first, Ctrl+C
-quits). `xdev -h` lists the launch flags; the flags an omp user expects
+quits). Quitting prints the one command that reopens the session just used —
+`xdev --resume <uuid>` (spelled with whatever name the binary was invoked as),
+and nothing when the session never reached disk (`--no-session`, a chat with no
+reply). `xdev -h` lists the launch flags; the flags an omp user expects
 (`-p/-c/-r/-e`, `--approval-mode`, `--smol/--slow/--plan-model`, `--models`,
 `--provider`, `--add-dir`, `--allow-home`, `--yolo`, `--no-prewalk`,
 `--plugin-dir`) are accepted with the same meanings, and
