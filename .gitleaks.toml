@@ -1,0 +1,23 @@
+# gitleaks config for the gitleaks step in .github/workflows/ci.yml.
+#
+# useDefault keeps gitleaks' shipped rules on: without this line a config file
+# REPLACES the default ruleset, and an allowlist-only file like this one would
+# silently turn the gate into a no-op.
+[extend]
+useDefault = true
+
+# The paths below exist to CARRY fake credentials: each is a fixture a test
+# asserts is redacted, refused, or never echoed (a redaction test cannot exist
+# without a key-shaped string in it), and docs/research/fx-internals.md quotes
+# another tool's environment-variable NAMES with no values. Allowlisted by path,
+# not by fingerprint, so edits and history rewrites cannot un-ignore them; the
+# cost is that a real key committed into one of these four files is caught by
+# review, not by this gate.
+[allowlist]
+description = "test fixtures and research notes that quote credential shapes on purpose"
+paths = [
+  '''internal/config/secrets_test\.go''',
+  '''internal/config/credentials_test\.go''',
+  '''internal/oauth/oauth_test\.go''',
+  '''docs/research/fx-internals\.md''',
+]
