@@ -112,7 +112,7 @@ ol.root li, ul.notes li { margin: 6px 0; }
 <div class="cards">
   <div class="card"><div class="k">Edit-task wall (pinned model, 6 rounds)</div><div class="v">54.0 s vs 63.9 s</div><div class="s">median, omp vs xdev — the gap is 2 extra xdev turns, at parity per turn</div></div>
   <div class="card"><div class="k">Process fixed cost</div><div class="v">0.04 s vs 4.06 s</div><div class="s">xdev boots ~100× faster than omp (Go vs Bun runtime)</div></div>
-  <div class="card"><div class="k">Grammar-error round-trips</div><div class="v">12 vs 0</div><div class="s">fresh unpatched xdev runs vs all omp runs; patched xdev: 0/3</div></div>
+  <div class="card"><div class="k">Edit rejections (unpatched xdev vs omp)</div><div class="v">14 vs 2</div><div class="s">11 xdev runs vs 14 omp runs, same model — and <strong>0</strong> in 3 patched xdev runs</div></div>
 </div>
 
 <h2 id="tldr">1 · Headline comparison</h2>
@@ -161,24 +161,53 @@ ol.root li, ul.notes li { margin: 6px 0; }
     <tr><td>round 4</td><td>1</td><td>6</td><td>55.2 s</td></tr>
     <tr><td>round 5</td><td>1</td><td>8</td><td>50.7 s</td></tr>
     <tr><td>round 6</td><td class="pos">0</td><td class="pos">5</td><td class="pos">45.4 s</td></tr>
-    <tr><td>all 12 omp runs (both windows + combo)</td><td class="pos">0</td><td>4–6</td><td>—</td></tr>
+    <tr><td>all 14 omp runs (both windows + combo)</td><td>2 <span class="small">(both in one run; zero fabricated tags)</span></td><td>4–6</td><td>—</td></tr>
   </tbody>
 </table></div>
+
+<h3 id="evidence">4a · Evidence — every observed rejection</h3>
+<p class="small">Cost = completion of the rejected call → completion of the next assistant message (the full error round-trip: result return + request build + queue + prefill + retry decode), from session JSONL timestamps. Classes are the exact bytes sent.</p>
+<div class="wrap"><table>
+  <thead><tr><th scope="col">run</th><th scope="col">what the model sent</th><th scope="col">class</th><th scope="col">round-trip cost</th></tr></thead>
+  <tbody>
+    <tr><td>evening r1</td><td><code>[invoice.js#1]</code></td><td>fabricated tag → ENOENT</td><td>17.2 s</td></tr>
+    <tr><td>evening r2</td><td><code>[invoice.js#t1]</code> + <code>PUT 23:=24:</code></td><td>tag + colon spelling</td><td>5.9 s</td></tr>
+    <tr><td>evening r2</td><td><code>[invoice.js#t2]</code> + <code>PUT 26:=33:</code></td><td>tag + colon spelling</td><td>10.7 s</td></tr>
+    <tr><td>evening r2</td><td><code>[invoice.js#t3]</code></td><td>fabricated tag → ENOENT</td><td>12.2 s</td></tr>
+    <tr><td>evening r3</td><td><code>PUT 6:=6:</code> <code>15:=15:</code> <code>17:=17:</code> <code>18:=19:</code></td><td>colon ×4, one call</td><td>5.9 s</td></tr>
+    <tr><td>evening r3</td><td><code>PUT 15:=24:</code></td><td>colon spelling</td><td>7.4 s</td></tr>
+    <tr><td>evening r4</td><td><code>[indigo]</code></td><td>path hallucination (model drift)</td><td>4.2 s</td></tr>
+    <tr><td>evening r5</td><td><code>PUT 15:=24:</code></td><td>colon spelling</td><td>5.8 s</td></tr>
+    <tr><td>combo r2</td><td><code>[invoice.js#x1]</code> + <code>PUT 15:=16:</code></td><td>tag + colon spelling</td><td>9.4 s</td></tr>
+    <tr><td>combo r2</td><td><code>PUT 22:=23:</code></td><td>colon spelling</td><td>7.4 s</td></tr>
+    <tr><td>morning r1</td><td><code>PUT 15:=24:</code></td><td>colon spelling</td><td>4.4 s</td></tr>
+    <tr><td>morning r2</td><td><code>[invoice.js#1]</code> + <code>PUT 5:=7:</code> + <code>PUT 14:=24:</code></td><td>tag + colon spelling</td><td>27.6 s †</td></tr>
+    <tr><td>morning r2</td><td><code>[invoice.js#1]</code></td><td>fabricated tag → ENOENT</td><td>3.2 s</td></tr>
+    <tr><td>morning r3</td><td><code>[invoice.js#1]</code></td><td>fabricated tag → ENOENT</td><td>10.6 s</td></tr>
+  </tbody>
+</table></div>
+<p class="small">† that round-trip contains an upstream stall (see §2 tail-risk row). Total across the 14 rejected calls: ≈ 132 s of wasted provider time in 11 runs. The stderr bubble tally is 12 error results in the 8 fresh runs (one call carried two defects; two further combo rejections were stale-tag refusals).</p>
+<p>One verbatim exchange (evening r2, session JSONL, UTC):</p>
+<pre><code>ASSISTANT 15:05:28.085  edit {"input":"[invoice.js#t1]\nPUT 6:…\nREM 15\nPUT 15.=16:…PUT 23:=24:…"}
+  TOOLERR 15:05:28.086  "edit: line 9: \"PUT 23:=24:\" names a range this grammar cannot
+                         express (want e.g. \"PUT 3.=5:\" or \"CUT 5\")"
+  RETRY   15:05:33.938  read {"path":"invoice.js"}   ← a whole extra turn re-reading first</code></pre>
+<p><strong>Controls.</strong> omp runs the same model with the same class of parser (it rejects the colon spelling too — observed exactly 2× in 14 runs, message <code>payload line has no preceding hunk header</code>) but prints the <code>[path#TAG]</code> header on every read, so the fabricated-tag class never appears there: 0/14. The rejection-rate difference (9 colon-containing rejections in 6 of 11 xdev runs vs 2 in 14 omp runs) is consistent with prompt-density: omp’s edit contract repeats the canonical spelling many times, xdev’s one-liner lets training-time spellings resurface [INFERENCE]. In the patched arm the model <em>still wrote</em> <code>PUT 4:=7</code> and <code>PUT 11:=24</code> (evening patched r3) — and both calls applied with zero round-trips: the fix absorbs the spelling instead of teaching it the hard way.</p>
 
 <h2 id="roots">5 · Root causes (traced to source)</h2>
 <ol class="root">
   <li>
     <h3>Hashline rejects the colon range spelling</h3>
-    <p>The model’s RL-trained muscle memory writes <code>PUT 15:=24:</code>. xdev’s op regex admits only <code>[.=]{1,2}</code> between line numbers:</p>
+    <p>The model’s RL-trained muscle memory writes <code>PUT 15:=24:</code> (observed on both harnesses). xdev’s op regex admits only <code>[.=]{1,2}</code> between line numbers — and on xdev’s surface the spelling appeared in 9 of 14 rejected calls across 6 of 11 runs, vs 2 rejections in 14 omp runs:</p>
     <pre><code>hashlinePutRe = regexp.MustCompile(`^PUT\s+([&lt;&gt;])?\s*(\d*)\s*(?:[.=]{1,2}\s*(\d*))?…`)</code></pre>
-    <p>Every occurrence costs one full provider turn to retry. Observed error text (5× across 5 of 6 evening rounds):</p>
+    <p>Every rejection costs one full provider turn to retry (§4a lists all 14). Observed error text:</p>
     <pre><code>edit: edit: line 4: "PUT 15:=24:" names a range this grammar cannot express (want e.g. "PUT 3.=5:" or "CUT 5")</code></pre>
   </li>
   <li>
     <h3><code>read</code> prints no snapshot header — so the model fabricates one</h3>
     <p>The <code>edit</code> contract tells the model to quote “the header a read or a previous edit printed (never invent it)” — but xdev’s <code>read</code> renders bare numbered lines with no <code>[path#TAG]</code> header, while omp’s does. With no real tag to quote, the model invents <code>[invoice.js#1]</code>:</p>
     <pre><code>edit: cannot read invoice.js#1: open /tmp/bench2/runs/…/invoice.js#1: no such file or directory</code></pre>
-    <p>An ENOENT on a path that looks like a tag teaches the model nothing; it re-reads and retries. Seen in the morning window and twice in the evening (<code>#1</code>, <code>#t3</code>).</p>
+    <p>An ENOENT on a path that looks like a tag teaches the model nothing; it re-reads and retries. Fabricated tags appeared in 8 of the 14 rejected calls, in both windows (<code>#1</code>, <code>#t1</code>–<code>#t3</code>, <code>#x1</code>) — and 0 times across all 14 omp runs, because omp’s read prints a real header to quote.</p>
   </li>
   <li>
     <h3>The fabricated tag silently becomes a filesystem path</h3>
@@ -192,10 +221,10 @@ if len(t) &lt; 4 || len(t) &gt; 64 { return p, "" }   // "#1" → path, not tag<
   </li>
 </ol>
 
-<h2 id="patch">6 · Measured fix (unit-proven, live-corroborated)</h2>
+<h2 id="patch">6 · Measured fix (unit-proven, live-corroborated — landed)</h2>
 <p>Three minimal diffs, built in a private worktree at HEAD <code>fe9ebdf</code>, kept out of the shared working tree: (1) normalize <code>N[:=]M</code> → <code>N.=M</code> before op matching; (2) <code>read</code> emits <code>[path#tag]</code> with the recorded freshness hash (notebooks unchanged), descriptions aligned and trimmed to the 400-char prompt-budget cap; (3) a non-hex <code>#suffix</code> whose bare name exists is refused as an <strong>unknown snapshot tag</strong>, not opened as a path. Regression tests pin the read→edit tag round-trip and the colon spelling; <code>go test ./internal/tool ./internal/agent ./internal/tui ./internal/session</code> green, <code>gofmt -l</code> clean.</p>
 <p>Live effect: <strong>0 grammar-error round-trips in 3/3 patched runs</strong> (5/6 unpatched had at least one). The patched wall median is meaningless this late in the provider storm (one run ate a 121.7 s upstream stall; another had a 14-turn wander with zero tool errors); the clean patched round ran 37.1 s / 6 turns against a 32.5 s / 4-turn omp control in the same window. The durable claim is the one the correlation table makes: removing the error round-trips removes the systematic 1–3 turns per run, and turn parity is where the wall-time gap lives.</p>
-<p class="small">Patch file: <code>/tmp/bench2/xdev-tool-grammar-fix.patch</code> (314 lines) · worktree: <code>/tmp/bench2/xtree</code> · not landed in the repo pending an explicit decision.</p>
+<p class="small">Landed as <code>cb8a175</code> (PR #286, branch <code>fix/tool-grammar-turn-tax</code>, feeding #284) the evening this report was written — the repo now normalizes the colon spelling, prints the read header, and refuses fabricated tags with a grammar-teaching error. Prototype artifacts: <code>/tmp/bench2/xdev-tool-grammar-fix.patch</code> (314 lines) · worktree <code>/tmp/bench2/xtree</code>.</p>
 
 <h2 id="where-xdev-wins">7 · What xdev already proves</h2>
 <ul class="notes">
