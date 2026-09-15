@@ -139,7 +139,7 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 						Type: "function",
 						Function: openaiWireFunction{
 							Name:      t.Name,
-							Arguments: emptyJSONObjectArgs(string(t.Arguments)),
+							Arguments: string(parseToolArgs(APIOpenAICompletions, t.ID, string(t.Arguments))),
 						},
 					})
 				}
@@ -266,15 +266,7 @@ func (p *OpenAICompletionsProvider) stream(ctx context.Context, r io.Reader, mod
 		closeText()
 		for _, idx := range order {
 			st := toolCalls[idx]
-			var args json.RawMessage
-			if st.args.Len() > 0 {
-				if err := json.Unmarshal([]byte(st.args.String()), &args); err != nil {
-					fail(Errorf(fmt.Errorf("openai-completions: tool call %s arguments: %w", st.id, err)))
-					return
-				}
-			} else {
-				args = json.RawMessage("{}")
-			}
+			args := parseToolArgs(APIOpenAICompletions, st.id, st.args.String())
 			emit(Event{
 				Type:        EventToolcallEnd,
 				ToolCallID:  st.id,

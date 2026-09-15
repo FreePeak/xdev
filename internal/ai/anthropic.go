@@ -177,14 +177,11 @@ func (p *AnthropicProvider) buildRequest(req StreamRequest) ([]byte, error) {
 						content = append(content, anthropicWireBlock{Type: "thinking", Thinking: t.Thinking})
 					}
 				case ToolCallBlock:
-					input := json.RawMessage(t.Arguments)
-					if len(input) == 0 {
-						input = json.RawMessage("{}")
-					}
-					var probe any
-					if err := json.Unmarshal(input, &probe); err != nil {
-						return nil, fmt.Errorf("anthropic-messages: tool call %s arguments: %w", t.ID, err)
-					}
+					// The same rule as on the stream side: a stored call whose
+					// arguments are not strict JSON (an imported session, a log
+					// from before the fix) is replayed as {}, never as a request
+					// that dies in the encoder and takes every tool with it.
+					input := parseToolArgs(APIAnthropicMessages, t.ID, string(t.Arguments))
 					content = append(content, anthropicWireBlock{Type: "tool_use", ID: t.ID, Name: t.Name, Input: input})
 				}
 			}
@@ -452,15 +449,7 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 				case "thinking":
 					msg.Content = append(msg.Content, ThinkingBlock{Thinking: st.text.String(), ThinkingSignature: st.sig})
 				case "tool_use":
-					var args json.RawMessage
-					if st.args.Len() > 0 {
-						if err := json.Unmarshal([]byte(st.args.String()), &args); err != nil {
-							fail(Errorf(fmt.Errorf("anthropic-messages: tool call %s arguments: %w", st.id, err)))
-							return
-						}
-					} else {
-						args = json.RawMessage("{}")
-					}
+					args := parseToolArgs(APIAnthropicMessages, st.id, st.args.String())
 					msg.Content = append(msg.Content, ToolCallBlock{
 						ID:          st.id,
 						Name:        st.name,

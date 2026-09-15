@@ -260,12 +260,25 @@ func (m *Message) Text() string {
 }
 
 // ToolCalls returns all toolCall blocks.
+//
+// It is also the one guard every reader of a stored call passes through (the
+// native wire encoders, the in-band dialects, ACP, tool execution): arguments
+// that are not valid JSON — an imported or pre-fix log, a hand-edited file, a
+// dialect decoder that could not parse its body — are presented as {} so a
+// request is never poisoned and a tool never runs on arguments nobody wrote.
+// The model's bytes survive in PartialArgs, which callers still fall back to.
+// An empty blob is left alone: it means the arguments are only in PartialArgs.
 func (m *Message) ToolCalls() []ToolCallBlock {
 	var out []ToolCallBlock
 	for _, b := range m.Content {
-		if t, ok := b.(ToolCallBlock); ok {
-			out = append(out, t)
+		t, ok := b.(ToolCallBlock)
+		if !ok {
+			continue
 		}
+		if len(t.Arguments) > 0 && !json.Valid(t.Arguments) {
+			t.Arguments = parseToolArgs(m.API, t.ID, string(t.Arguments))
+		}
+		out = append(out, t)
 	}
 	return out
 }

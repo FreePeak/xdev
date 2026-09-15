@@ -204,7 +204,7 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 						Type:      "function_call",
 						CallID:    t.ID,
 						Name:      t.Name,
-						Arguments: emptyJSONObjectArgs(string(t.Arguments)),
+						Arguments: string(parseToolArgs(p.API(), t.ID, string(t.Arguments))),
 					})
 				}
 			}
@@ -322,17 +322,10 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 			emit(Event{Type: EventThinkingEnd})
 		}
 	}
-	finishToolCalls := func() error {
+	finishToolCalls := func() {
 		for _, idx := range order {
 			st := toolCalls[idx]
-			var args json.RawMessage
-			if st.args.Len() > 0 {
-				if err := json.Unmarshal([]byte(st.args.String()), &args); err != nil {
-					return fmt.Errorf("openai-responses: tool call %s arguments: %w", st.id, err)
-				}
-			} else {
-				args = json.RawMessage("{}")
-			}
+			args := parseToolArgs(p.API(), st.id, st.args.String())
 			emit(Event{
 				Type:        EventToolcallEnd,
 				ToolCallID:  st.id,
@@ -347,16 +340,13 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 				StreamIndex: st.index,
 			})
 		}
-		return nil
 	}
+
 	finish := func(reason StopReason) {
 		if usage == nil {
 			usage = &Usage{}
 		}
-		if err := finishToolCalls(); err != nil {
-			fail(Errorf(err))
-			return
-		}
+		finishToolCalls()
 		msg.Provider, msg.API, msg.Model = p.name, p.API(), model
 		msg.ResponseID, msg.StopReason, msg.Usage = response, reason, usage
 		msg.DurationMS, msg.TTFTMS = time.Since(start).Milliseconds(), ttft

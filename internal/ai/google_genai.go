@@ -180,11 +180,12 @@ func (p *GoogleGenAIProvider) buildRequest(req StreamRequest) ([]byte, error) {
 						parts = append(parts, googlePart{Text: blk.Thinking, Thought: true})
 					}
 				case ToolCallBlock:
+					// Same guard as the other three encoders: an unparseable stored
+					// blob becomes {} rather than an encoder error that would take the
+					// whole request (and every tool in it) down with it.
 					args := map[string]any{}
-					if len(blk.Arguments) > 0 {
-						if err := json.Unmarshal(blk.Arguments, &args); err != nil {
-							return nil, fmt.Errorf("google-generative-ai: tool %s arguments: %w", blk.Name, err)
-						}
+					if obj, aerr := decodeArgsObject(parseToolArgs(p.API(), blk.ID, string(blk.Arguments))); aerr == nil {
+						args = obj
 					}
 					parts = append(parts, googlePart{
 						ThoughtSig:   blk.Signature,

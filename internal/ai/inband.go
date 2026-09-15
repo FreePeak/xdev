@@ -3,6 +3,8 @@ package ai
 import (
 	"context"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/logx"
 )
 
 // In-band tool calling for text-dialect models (M14 #62).
@@ -187,12 +189,14 @@ func (p *InBandProvider) decodeStream(in <-chan Event, out chan<- Event) {
 			}
 			text.WriteString(ev.Delta)
 		case EventTextEnd:
-			inText = false
 			calls, residual, err := DecodeToolCalls(p.format, text.String())
 			if err != nil {
-				out <- Errorf(err)
-				Drain(in)
-				return
+				// A malformed dialect body is not a stream error: keep the model's
+				// text visible (no calls), which is what decodeContent already does
+				// for the terminal message. The turn ends on its own terms and the
+				// model sees its own output instead of the run dying.
+				logx.Errorf("%s: in-band tool call decode: %v", p.format, err)
+				residual = text.String()
 			}
 			emitText(residual)
 			emitCalls(calls)
