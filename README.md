@@ -128,6 +128,7 @@ remap in JSON with live reload). What matters for daily work:
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Ctrl+O` | expand the newest tool result |
 | `Ctrl+C` | quit (`Esc` cancels the running turn first) |
+| `F5` | retry the current session (re-runs the last turn; no new prompt) |
 
 Every chord is remappable in `~/.xdev/agent/keybindings.yml`; `/hotkeys` shows
 the live map.

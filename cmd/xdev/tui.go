@@ -1409,73 +1409,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 	app.SetCommandDir(cwd)
 
-	// runTurn owns one submit: persist the user message, then drive the agent.
-	// imgs is the pasted images riding with it (nil for a plain prompt). It
-	// reports whether the turn was taken, so a draft carrying attachments can go
-	// back to the composer instead of being sent without them — see
-	// tui.App.SetImageSend.
-	runTurn := func(text string, imgs []tui.PasteImage) bool {
-		// Joined as a guest: the host owns the turn, so the prompt goes over
-		// the room instead of starting one here. The room carries text only,
-		// so a draft with attachments is neither forwarded nor run: returning
-		// false hands it back to the composer, where the notice says why.
-		// Sending the text alone would let the host answer a screenshot nobody
-		// delivered.
-		if tui.Collab != nil && tui.Collab.Forward != nil {
-			if imgs != nil {
-				return false
-			}
-			if tui.Collab.Forward(text) {
-				return true
-			}
-		}
-		if !running.CompareAndSwap(false, true) {
-			app.AddSystemBlock("a turn is already running — Esc cancels it")
-			return false
-		}
-		// Name the session after its first prompt: /resume and the
-		// breadcrumb read the title slot, and "print <timestamp>" hides
-		// everything about the conversation. Called before the first
-		// assistant message materializes the file, so the title lands in
-		// the slot without needing a rewrite pass; later prompts keep
-		// the first one's title (omp's first-prompt cascade).
-		if store.Path() == "" {
-			if t := titleFromPrompt(text); t != "" {
-				store.SetTitle(t)
-			}
-		}
-		sessMu.Lock()
-		msg := ai.Message{
-			Role:        ai.RoleUser,
-			Attribution: "user",
-			UserTS:      time.Now().UnixMilli(),
-		}
-		sessMu.Unlock()
-		// A pasted image is a block, not a word in the text: the chip the
-		// composer showed has already been stripped (tui.App.expandPastes),
-		// and what is left of the draft goes out beside the payloads in the
-		// order they sit in the prompt.
-		if text != "" {
-			msg.Content = append(msg.Content, ai.TextBlock{Text: text})
-		}
-		for _, im := range imgs {
-			msg.Content = append(msg.Content, ai.ImageBlock{Source: ai.ImageSource{
-				Type:      "base64",
-				MediaType: im.MediaType,
-				Data:      base64.StdEncoding.EncodeToString(im.Data),
-			}})
-		}
-		if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
-			logx.Errorf("persist user message: %v", err)
-		}
-		// #86: the memory turn boundary. print mode counted turns for the
-		// remote backend; the TUI — where sessions are actually long —
-		// never fed it, so retainEveryNTurns could not fire and queued
-		// retains sat until exit.
-		noteMemoryTurn(sessionMemory, []ai.Message{msg})
-		// #89: the friction detector had no TUI feed at all, so decision
-		// files only ever accumulated in print runs.
-		observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
+	// startTurn launches one agent run against the CURRENT store and returns
+	// immediately; the caller owns the `running` claim (CompareAndSwap) and any
+	// entry it committed first. runTurn calls it after persisting the user
+	// prompt; the F5 retry calls it directly to resume a session whose stream
+	// dropped mid-turn — the same history drives another turn, no new prompt.
+	startTurn := func() {
 		ctx, cancel := context.WithCancel(baseCtx)
 		turn.set(cancel)
 		go func() {
@@ -1586,6 +1525,76 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				}
 			}
 		}()
+	}
+
+	// runTurn owns one submit: persist the user message, then drive the agent.
+	// imgs is the pasted images riding with it (nil for a plain prompt). It
+	// reports whether the turn was taken, so a draft carrying attachments can go
+	// back to the composer instead of being sent without them — see
+	// tui.App.SetImageSend.
+	runTurn := func(text string, imgs []tui.PasteImage) bool {
+		// Joined as a guest: the host owns the turn, so the prompt goes over
+		// the room instead of starting one here. The room carries text only,
+		// so a draft with attachments is neither forwarded nor run: returning
+		// false hands it back to the composer, where the notice says why.
+		// Sending the text alone would let the host answer a screenshot nobody
+		// delivered.
+		if tui.Collab != nil && tui.Collab.Forward != nil {
+			if imgs != nil {
+				return false
+			}
+			if tui.Collab.Forward(text) {
+				return true
+			}
+		}
+		if !running.CompareAndSwap(false, true) {
+			app.AddSystemBlock("a turn is already running — Esc cancels it")
+			return false
+		}
+		// Name the session after its first prompt: /resume and the
+		// breadcrumb read the title slot, and "print <timestamp>" hides
+		// everything about the conversation. Called before the first
+		// assistant message materializes the file, so the title lands in
+		// the slot without needing a rewrite pass; later prompts keep
+		// the first one's title (omp's first-prompt cascade).
+		if store.Path() == "" {
+			if t := titleFromPrompt(text); t != "" {
+				store.SetTitle(t)
+			}
+		}
+		sessMu.Lock()
+		msg := ai.Message{
+			Role:        ai.RoleUser,
+			Attribution: "user",
+			UserTS:      time.Now().UnixMilli(),
+		}
+		sessMu.Unlock()
+		// A pasted image is a block, not a word in the text: the chip the
+		// composer showed has already been stripped (tui.App.expandPastes),
+		// and what is left of the draft goes out beside the payloads in the
+		// order they sit in the prompt.
+		if text != "" {
+			msg.Content = append(msg.Content, ai.TextBlock{Text: text})
+		}
+		for _, im := range imgs {
+			msg.Content = append(msg.Content, ai.ImageBlock{Source: ai.ImageSource{
+				Type:      "base64",
+				MediaType: im.MediaType,
+				Data:      base64.StdEncoding.EncodeToString(im.Data),
+			}})
+		}
+		if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
+			logx.Errorf("persist user message: %v", err)
+		}
+		// #86: the memory turn boundary. print mode counted turns for the
+		// remote backend; the TUI — where sessions are actually long —
+		// never fed it, so retainEveryNTurns could not fire and queued
+		// retains sat until exit.
+		noteMemoryTurn(sessionMemory, []ai.Message{msg})
+		// #89: the friction detector had no TUI feed at all, so decision
+		// files only ever accumulated in print runs.
+		observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
+		startTurn()
 		return true
 	}
 	// The composer holds the two send paths apart: a plain prompt cannot ask
@@ -1601,6 +1610,26 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		func() { app.Quit() },
 	)
 	app.SetImageSend(func(text string, imgs []tui.PasteImage) bool { return runTurn(text, imgs) })
+	// F5 retry: re-run the agent over the CURRENT store with no new prompt —
+	// the recovery for a turn a dropped stream cut short. The turn claim is
+	// taken exactly as runTurn takes it, so an in-flight run is refused rather
+	// than stolen; the empty store is refused too (nothing to resume yet).
+	app.SetRetry(func() {
+		if tui.Collab != nil && tui.Collab.Forward != nil {
+			app.AddSystemBlock("joined as a guest — the host runs the turn")
+			return
+		}
+		if !running.CompareAndSwap(false, true) {
+			app.AddSystemBlock("a turn is already running — Esc cancels it")
+			return
+		}
+		if len(store.Entries()) == 0 {
+			running.Store(false)
+			app.AddSystemBlock("nothing to retry yet — send a prompt first")
+			return
+		}
+		startTurn()
+	})
 	// Vision is the live model's property, not the launch model's: /model
 	// mid-session changes whether an attachment can be read at all.
 	app.SetVision(func() bool {

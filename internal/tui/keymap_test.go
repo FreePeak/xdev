@@ -52,7 +52,8 @@ func TestChordOf(t *testing.T) {
 		{"Shift+Up", tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModShift), "S-Up"},
 		{"Alt+Backspace", tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModAlt), "A-Backspace"},
 		{"plain rune", tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone), "a"},
-		{"unknown", tcell.NewEventKey(tcell.KeyF1, 0, tcell.ModNone), ""},
+		{"F5", tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone), "F5"},
+		{"unknown", tcell.NewEventKey(tcell.KeyInsert, 0, tcell.ModNone), ""},
 	}
 	for _, tc := range tests {
 		if got := chordOf(tc.ev); got != tc.want {
@@ -78,6 +79,18 @@ func TestResolveMenuNavigation(t *testing.T) {
 		if got := m.Resolve(tc.ev); got != tc.want {
 			t.Errorf("test %d: Resolve = %q, want %q", i, got, tc.want)
 		}
+	}
+}
+
+// F5 must resolve to the retry action through the real chord path, not just
+// sit in the bindings table: this is the "the /hotkeys table runs" contract.
+func TestRetryChordResolves(t *testing.T) {
+	m := DefaultKeyMap()
+	if got := m.Chord("retry"); got != "F5" {
+		t.Fatalf("retry chord = %q, want F5", got)
+	}
+	if got := m.Resolve(tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone)); got != "retry" {
+		t.Fatalf("F5 Resolve = %q, want retry", got)
 	}
 }
 
