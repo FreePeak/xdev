@@ -310,30 +310,29 @@ func TestBoxStyleFromTheme(t *testing.T) {
 	}
 }
 
-// TestComposerIsBorderlessAndFilled pins the composer's shape (omp parity):
-// the prompt rows carry the user-message background across the full width,
-// and no box frame is painted around them — the divider's rule is the only
-// composer chrome left.
-func TestComposerIsBorderlessAndFilled(t *testing.T) {
+// TestComposerIsBoxed pins the composer's border box (grok's full TUI —
+// PromptStyle::default carries show_borders: true, chrome_pad_left: 2,
+// chrome_pad_right: 1): ╭─╮ on top, │ on both sides of every draft row,
+// ╰─ model ─╯ underneath. d589778 copied minimal mode's borderless fill band
+// into the interactive TUI, where a text field without an outline reads as a
+// dropped frame.
+func TestComposerIsBoxed(t *testing.T) {
 	app, scr := drawnApp(t, 60, 14)
 	setDraft(&app.ed, "hello there", 11)
 	app.draw()
+	if got := app.composerRows(); got != 3 { // one draft row + two borders
+		t.Fatalf("one-row composer = %d rows, want 3", got)
+	}
 
-	prim, w, _ := scr.GetContents()
-	y := app.height - 1 - app.composerRows() // the prompt's first input row
-	band, _ := app.th.Slot(theme.BgHighlight)
-	for x := 0; x < w; x++ {
-		_, bg, _ := prim[y*w+x].Style.Decompose()
-		if bg != app.cellColor(band) {
-			t.Fatalf("prompt row cell %d bg = %s, want the user band %v", x, bg, band)
-		}
-	}
 	text := screenText(scr)
-	if strings.Contains(text, "╭") || strings.Contains(text, "│") {
-		t.Fatalf("the prompt still paints a frame:\n%s", text)
+	if !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
+		t.Fatalf("composer lost its box:\n%s", text)
 	}
-	if !strings.Contains(text, "❯ hello there") {
-		t.Fatalf("prompt gutter/text misplaced:\n%s", text)
+	if !strings.Contains(text, "│ ❯ hello there") {
+		t.Fatalf("draft row is not framed by side borders:\n%s", text)
+	}
+	if !strings.Contains(text, "╰ test/free") {
+		t.Fatalf("model name left the bottom border:\n%s", text)
 	}
 }
 

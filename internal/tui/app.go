@@ -2248,8 +2248,8 @@ func (a *App) draw() {
 		return
 	}
 
-	// Grok layout: top bar, scrollback, blank row, composer (borderless,
-	// grows with the draft's wrapped line count), status row at the bottom.
+	// Grok layout: top bar, scrollback, blank row, composer box (grows
+	// with the draft's wrapped line count), status row at the bottom.
 	// The top bar is chrome: the transcript viewport starts below it.
 	top := a.transcriptTop()
 	cRows := a.composerRows()
@@ -2620,10 +2620,10 @@ func clip(s string, maxCells int) string {
 	return b.String() + "…"
 }
 
-// composerAvail is the editor's text width in cells: the borderless prompt
-// spends two on the gutter (❯ + one pad) and one on the divider's right cap.
+// composerAvail is the editor's text width in cells inside the prompt box
+// (border+pad+prefix+right pad+border).
 func (a *App) composerAvail() int {
-	avail := a.width - 4
+	avail := a.width - 7
 	if avail < 4 {
 		avail = 4
 	}
@@ -2645,36 +2645,23 @@ func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
 	return
 }
 
-// composerRows is the total height of the prompt: the wrapped input rows plus
-// the bottom info divider. There is no top border — the composer is borderless.
+// composerRows is the total height of the prompt box (top border, wrapped
+// input rows, bottom divider).
 func (a *App) composerRows() int {
 	lines, _, _ := a.composerInputLines()
-	return len(lines) + 1
+	return len(lines) + 2
 }
 
-// drawComposer renders the borderless prompt (omp's composer shapes, lifted
-// from the reference implementation's defaults): no frame — the input rows are
-// a filled surface carrying the user's own background band colour, so the
-// draft reads as the same thing a sent message reads as. The only rule left is
-// the info divider under the text, which carries the model, the spinner, the
-// viewport hint and the copy notice.
+// drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
+// editor text, blinking block cursor; the model + running spinner ride the
+// info divider, tinted with the statusLine tokens.
 func (a *App) drawComposer(yTop int) {
 	w := a.width
 	if w < 6 || yTop < 1 {
 		return
 	}
-	box, ms := a.th.Box(), a.mdStyle()
+	box := a.th.Box()
 	bs := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
-	// The prompt's surface: the user-message band, exactly what a sent message
-	// paints with. A theme that leaves it to the terminal default stays
-	// transparent instead of painting black.
-	surfSt := bs
-	bodySt := ms.body
-	if surf, ok := a.th.Slot(theme.BgHighlight); ok {
-		surfSt = surfSt.Background(a.cellColor(surf))
-		bodySt = bodySt.Background(a.cellColor(surf))
-	}
-	promptStyle := surfSt.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	// The divider is the status line: a theme that sets statusLineBg fills
 	// the row ("" = terminal default = transparent, today's look).
 	infoBg, hasInfoBg := a.th.Slot(theme.StatusLineBg)
@@ -2682,27 +2669,40 @@ func (a *App) drawComposer(yTop int) {
 	if hasInfoBg {
 		divSt = divSt.Background(a.cellColor(infoBg))
 	}
+	ms := a.mdStyle()
 
-	// Input rows: ❯ on the gutter, continuation rows aligned under the text.
-	// The whole row is painted, so a shorter draft leaves no stale cells.
+	// Top border: ╭────╮ (1-cell inset on each side, like grok's box).
+	drawText(a.scr, 1, yTop-1, box.TopLeft, bs)
+	for x := 2; x < w-2; x++ {
+		a.scr.SetContent(x, yTop-1, boxRune(box.Horizontal), nil, bs)
+	}
+	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
+
+	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
 	lines, curRow, curCol := a.composerInputLines()
+	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
+	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
 		y := yTop + i
-		for x := 0; x < w; x++ {
-			a.scr.SetContent(x, y, ' ', nil, surfSt)
-		}
-		gutter := "  " // continuation rows align under the text
+		a.scr.SetContent(1, y, vert, nil, bs)
+		a.scr.SetContent(w-2, y, vert, nil, bs)
 		if i == 0 {
-			gutter = "❯ "
+			drawText(a.scr, 3, y, "❯ ", promptStyle)
+		} else {
+			drawText(a.scr, 3, y, "  ", promptStyle)
 		}
-		drawText(a.scr, 0, y, gutter, promptStyle)
-		drawText(a.scr, 2, y, ln, bodySt)
+		drawText(a.scr, 5, y, ln, ms.body)
+	}
+	// Blank the space between the last text row and the right border so a
+	// short line cannot leave stale cells from a previous longer draft.
+	for i, ln := range lines {
+		x := 5 + width(ln)
+		for ; x < w-2; x++ {
+			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
+		}
 	}
 
-	// Info divider: a rule under the prompt, model · spinner on the left,
-	// the viewport hint on the right. It used to be the box's bottom border;
-	// the box is gone, the row stays because it is the only chrome the
-	// statusLine tokens, the spinner and the copy notice have.
+	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
@@ -2713,32 +2713,33 @@ func (a *App) drawComposer(yTop int) {
 		a.st.spinnerIdx = a.st.spinnerIdx % len(frames)
 		info += " · " + frames[a.st.spinnerIdx]
 	}
-	rule := boxRune(box.Horizontal)
-	for x := 0; x < w; x++ {
-		a.scr.SetContent(x, yBottom, rule, nil, divSt)
+	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
+	for x := 2; x < w-2; x++ {
+		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
 	if info != " " {
 		infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
 		if hasInfoBg {
 			infoSt = infoSt.Background(a.cellColor(infoBg))
 		}
-		drawText(a.scr, 1, yBottom, info, infoSt)
+		drawText(a.scr, 2, yBottom, info, infoSt)
 	}
-	// The viewport hint (▲n▼n) rides the divider's right end. It used to be
+	// The viewport hint (▲n▼n) rides this divider's right end. It used to be
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
-	// takes the pixels instead; when it is too narrow for both, the hint is
-	// dropped rather than eating the model name. A fresh copy confirmation
-	// outranks it — that message is the only proof the mouse gesture did
-	// anything, since the app holds the mouse and the terminal stays quiet.
+	// takes the pixels instead; when the divider is too narrow for both, the
+	// hint is dropped rather than eating the model name. A fresh copy
+	// confirmation outranks it — that message is the only proof the mouse
+	// gesture did anything, since the app holds the mouse and the terminal
+	// stays quiet.
 	hint := a.copyHint()
 	if hint == "" {
 		hint = a.scrollHint
 	}
 	if hint != "" {
-		hx := w - 2 - width(hint)
-		if hx > 1+width(info) {
+		hx := w - 3 - width(hint)
+		if hx > 2+width(info) {
 			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			if hasInfoBg {
 				hintSt = hintSt.Background(a.cellColor(infoBg))
@@ -2746,9 +2747,11 @@ func (a *App) drawComposer(yTop int) {
 			drawText(a.scr, hx, yBottom, hint, hintSt)
 		}
 	}
+	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
 	// Cursor: blinking block at the editor position inside the wrapped grid.
-	a.scr.ShowCursor(min(2+curCol, w-2), yTop+curRow)
+	cx := 5 + curCol
+	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
 }
 
 // drawStatusRow renders the bottom row: the working directory on the left,
