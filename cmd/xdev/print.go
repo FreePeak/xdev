@@ -510,6 +510,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	wireTaskParent(reg, store)
+	// #272: in print mode stderr is the user's surface (stdout is the model's
+	// and a script parses it), so only what needs saying goes there.
+	if notice, warnings, count := taskAgentsAtStartup(cwd); count == 0 || len(warnings) > 0 {
+		fmt.Fprintln(os.Stderr, "xdev: "+notice)
+	}
 
 	// --- agent ---
 	// M12 #44: mnemopi counts turns; every retainEveryNTurns turns this
@@ -1728,16 +1733,28 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 			eval.NewTool(cwd),
 		},
 		// M11 #12: named task agents discovered from markdown files
-		// (.xdev/agents/, ~/.xdev/agent/agents/). The task tool resolves
-		// the "agent" argument against these; a named agent runs with its
-		// own system prompt, tools, and model.
-		Agents: func() []agent.AgentDefinition {
-			defs, warnings := agent.DiscoverAgents(cwd)
-			for _, w := range warnings {
-				fmt.Fprintln(os.Stderr, "warning: "+w)
+		// (.xdev/agents/, ~/.xdev/agent/agents/, plugin roots) over the
+		// bundled defaults. The task tool resolves the "agent" argument
+		// against these per spawn, so a file written mid-session is usable
+		// without a restart (#272); a pinned Agents set would have frozen
+		// the startup snapshot.
+		AgentRoots: cwd,
+		// Frontmatter model: "@role" expands through modelRoles. Children
+		// share this provider — a role that lands on another one needs its
+		// own client, which is what childModel refuses too — so it reports
+		// as unresolvable rather than sending "@role" to the wire (#272).
+		ExpandModel: func(ref string) (string, bool) {
+			return roleModelOnProvider(settings, ref, provName)
+		},
+		// Frontmatter thinkingLevel: an effort name becomes the child's
+		// reasoning budget (#272: parsed, then dropped on the floor).
+		ExpandEffort: func(level string) *ai.ThinkingBudget {
+			tokens, ok := config.EffortBudget(strings.TrimSpace(level))
+			if !ok {
+				return nil
 			}
-			return defs
-		}(),
+			return &ai.ThinkingBudget{Tokens: tokens}
+		},
 	})
 	reg.Register(&agent.HubTool{Hub: hub})
 	// M11 #42: cross-session mailbox — persisted agent-to-agent channel,
@@ -2060,6 +2077,55 @@ func applyPolicy(ag *agent.Agent, settings *config.Settings) {
 		return
 	}
 	ag.Policy = autoApprovePolicy(pol)
+}
+
+// roleModelOnProvider expands one "@role" (or a literal provider/model, with
+// or without an ":effort" suffix) to a model id usable on the named provider.
+// ok=false means "keep the parent's model": the role does not resolve, or it
+// names another provider, which a child sharing this provider cannot call.
+func roleModelOnProvider(settings *config.Settings, ref, provName string) (string, bool) {
+	if settings == nil {
+		return "", false
+	}
+	rr, err := config.ResolveModelRef(settings, strings.TrimSpace(ref))
+	if err != nil {
+		logx.Debugf("task agent model %q: %v", ref, err)
+		return "", false
+	}
+	p, m, err := config.ParseModelRef(rr.Ref)
+	if err != nil || p != provName || m == "" {
+		return "", false
+	}
+	return m, true
+}
+
+// taskAgentsAtStartup resolves the task-agent surface once, at startup, and
+// reports it (#272): the caller shows the notice where its mode has a console
+// the user reads (the TUI's alt screen swallows stderr, which is why an empty
+// or half-broken agent set looked identical to a working one), and routes the
+// warnings however that mode reports problems. The count is stated even when
+// all is well, because "0 loaded" was indistinguishable from "never ran".
+func taskAgentsAtStartup(cwd string) (notice string, warnings []string, count int) {
+	defs, warnings := agent.DiscoverAgents(cwd)
+	count = len(defs)
+	names := make([]string, 0, count)
+	for _, d := range defs {
+		names = append(names, d.Name)
+	}
+	logx.Debugf("task: %d agents from %s", count, strings.Join(agent.AgentDiscoveryRoots(cwd), ", "))
+	var b strings.Builder
+	fmt.Fprintf(&b, "· task agents: %d", count)
+	if count > 0 {
+		fmt.Fprintf(&b, " — %s", strings.Join(names, ", "))
+	} else {
+		// The stock binary cannot reach this (it ships definitions), so an
+		// empty set means the roots were cleared or discovery broke.
+		b.WriteString(" — none: `agent` is unavailable; a definition is a `.xdev/agents/<name>.md` file")
+	}
+	for _, w := range warnings {
+		b.WriteString("\n· task agent warning: " + w)
+	}
+	return b.String(), warnings, count
 }
 
 // childModel resolves the @task role for subagents (M9: roles resolve

@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -284,5 +287,132 @@ func TestTaskToolSinglePromptErrorNamesBatch(t *testing.T) {
 	res, _ := taskTool(&fakeProvider{}).Execute(context.Background(), json.RawMessage(`{}`))
 	if !res.IsError || !strings.Contains(res.Text, "tasks[]") {
 		t.Fatalf("error must name both shapes: %+v", res)
+	}
+}
+
+// --- #272: the frontmatter a definition declares must reach the child ----
+
+func effortResolver(level string) *ai.ThinkingBudget {
+	tokens, ok := config.EffortBudget(level)
+	if !ok {
+		return nil
+	}
+	return &ai.ThinkingBudget{Tokens: tokens}
+}
+
+func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: yieldEvents(`{"result":"ok"}`)},
+	}}
+	tt := &TaskTool{
+		Provider: p, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}},
+		Agents: []AgentDefinition{{
+			Name: "thinker", Description: "d",
+			Model: "@slow", ThinkingLevel: "high",
+		}},
+		ExpandModel:  func(ref string) (string, bool) { return "resolved-model", ref == "@slow" },
+		ExpandEffort: effortResolver,
+	}
+	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"thinker"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("spawn failed: %q", res.Text)
+	}
+	if len(p.gotReqs) != 1 {
+		t.Fatalf("child requests = %d", len(p.gotReqs))
+	}
+	req := p.gotReqs[0]
+	if req.Model != "resolved-model" {
+		t.Fatalf("frontmatter model not expanded on the child request: %q", req.Model)
+	}
+	if req.Thinking == nil || req.Thinking.Tokens != config.EffortTokens["high"] {
+		t.Fatalf("thinkingLevel not applied: %+v", req.Thinking)
+	}
+	if strings.Contains(res.Text, "warnings:") {
+		t.Fatalf("clean definition must warn about nothing: %q", res.Text)
+	}
+}
+
+// An unresolvable role never reaches the wire (the raw "@role" 404s one turn
+// later); the parent's model is kept and the parent is told.
+func TestTaskToolUnresolvableModelKeepsParentAndSaysSo(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	tt := &TaskTool{
+		Provider: p, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}},
+		Agents:      []AgentDefinition{{Name: "a", Description: "d", Model: "@nosuch"}},
+		ExpandModel: func(string) (string, bool) { return "", false },
+	}
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"a"}`))
+	if p.gotReqs[0].Model != "parent-model" {
+		t.Fatalf("model = %q", p.gotReqs[0].Model)
+	}
+	if !strings.Contains(res.Text, "@nosuch") {
+		t.Fatalf("handoff must report the unexpanded role: %q", res.Text)
+	}
+}
+
+// A `tools:` name the child cannot have (typo, or a tool with no child
+// version) used to narrow the child silently — the file looked accepted.
+func TestTaskToolReportsDroppedTools(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	tt := &TaskTool{
+		Provider: p, Model: "m", ChildTools: []tool.Tool{echoTool{}},
+		Agents: []AgentDefinition{{Name: "a", Description: "d", Tools: stringList{"echo", "web_search"}}},
+	}
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"a"}`))
+	if !strings.Contains(res.Text, "web_search") {
+		t.Fatalf("dropped tool must be named to the parent: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "warnings:") {
+		t.Fatalf("notes need a heading: %q", res.Text)
+	}
+}
+
+// The advertised list is what makes a legal name guessable at all: before
+// #272 nothing named the definitions anywhere the model could read.
+func TestTaskToolDescriptionAdvertisesAgents(t *testing.T) {
+	tt := &TaskTool{Agents: []AgentDefinition{{Name: "scout", Description: "read-only recon"}}}
+	if d := tt.Description(); !strings.Contains(d, "scout") || !strings.Contains(d, "read-only recon") {
+		t.Fatalf("description omits the agent list: %q", d)
+	}
+	// No named agents = no vestigial heading.
+	if d := (&TaskTool{}).Description(); strings.Contains(d, "named agent types") {
+		t.Fatalf("empty set must advertise nothing: %q", d)
+	}
+}
+
+// Newly written files are spawnable without a restart: the frozen
+// startup snapshot was half of the "available: none" report.
+func TestTaskToolResolvesAgentsPerSpawn(t *testing.T) {
+	dir := t.TempDir()
+	p := &fakeProvider{calls: []fakeScript{
+		{events: yieldEvents(`{"result":"ok"}`)},
+		{events: yieldEvents(`{"result":"ok"}`)},
+	}}
+	tt := &TaskTool{Provider: p, Model: "m", AgentRoots: dir, ChildTools: []tool.Tool{echoTool{}}}
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"fresh"}`))
+	// The bundled names are available; the authored one is not yet.
+	if !res.IsError || !strings.Contains(res.Text, "unknown agent") {
+		t.Fatalf("unwritten agent must fail: %q", res.Text)
+	}
+	if strings.Contains(res.Text, "available: none") {
+		t.Fatalf("a stock install must never report an empty set: %q", res.Text)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".xdev", "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".xdev", "agents", "fresh.md"),
+		[]byte("---\nname: fresh\ndescription: newly written\n---\ngo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, _ = tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"fresh"}`))
+	if res.IsError {
+		t.Fatalf("newly written agent needs a restart: %q", res.Text)
+	}
+	// And the model-facing listing picked it up too.
+	if !strings.Contains(tt.Description(), "newly written") {
+		t.Fatalf("description cached past the file change")
 	}
 }

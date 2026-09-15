@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -19,6 +21,19 @@ func writeAgentFile(t *testing.T, dir, name, body string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// fileDefs drops the bundled defaults so a test can assert on what the
+// temp cwd contributed: since #272 a stock discovery is never empty, and
+// every "exactly one agent" assertion would otherwise read the bundled set.
+func fileDefs(defs []AgentDefinition) []AgentDefinition {
+	var out []AgentDefinition
+	for _, d := range defs {
+		if !strings.HasPrefix(d.path, "bundled/") {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func TestDiscoverAgentsParsesFrontmatter(t *testing.T) {
@@ -35,10 +50,11 @@ You are a read-only scout. Do not edit files.`)
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %v", warnings)
 	}
-	if len(defs) != 1 {
-		t.Fatalf("defs = %d", len(defs))
+	file := fileDefs(defs)
+	if len(file) != 1 {
+		t.Fatalf("defs = %d", len(file))
 	}
-	d := defs[0]
+	d := file[0]
 	if d.Name != "scout" || d.Description != "read-only research agent" {
 		t.Fatalf("frontmatter not parsed: %+v", d)
 	}
@@ -64,8 +80,13 @@ func TestDiscoverAgentsFileWithoutNameDerivesName(t *testing.T) {
 	dir := t.TempDir()
 	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "reviewer.md", "---\ndescription: code reviewer\n---\nReview this code.")
 	defs, _ := DiscoverAgents(dir)
-	if len(defs) != 1 || defs[0].Name != "reviewer" {
-		t.Fatalf("name should derive from filename: %+v", defs)
+	file := fileDefs(defs)
+	if len(file) != 1 || file[0].Name != "reviewer" {
+		t.Fatalf("name should derive from filename: %+v", file)
+	}
+	// The bundled set still ships alongside: a project file never removes it.
+	if len(defs) <= len(file) {
+		t.Fatalf("bundled defaults missing from discovery: %+v", defs)
 	}
 }
 
@@ -74,8 +95,8 @@ func TestDiscoverAgentsBadFileSkippedWithWarning(t *testing.T) {
 	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "good.md", "---\nname: good\ndescription: works\n---\nbody")
 	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "bad.md", "---\nname: bad\n---\nno description")
 	defs, warnings := DiscoverAgents(dir)
-	if len(defs) != 1 || defs[0].Name != "good" {
-		t.Fatalf("good agent lost: %+v", defs)
+	if file := fileDefs(defs); len(file) != 1 || file[0].Name != "good" {
+		t.Fatalf("good agent lost: %+v", file)
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "bad") {
 		t.Fatalf("bad file warning missing: %v", warnings)
@@ -101,8 +122,8 @@ func TestDiscoverAgentsFirstWinsAcrossRoots(t *testing.T) {
 	writeAgentFile(t, userRoot, "dup.md", "---\nname: dup\ndescription: user version\n---\nu")
 
 	defs, _ := DiscoverAgents(proj)
-	if len(defs) != 1 || defs[0].Description != "project version" {
-		t.Fatalf("project root should win: %+v", defs)
+	if file := fileDefs(defs); len(file) != 1 || file[0].Description != "project version" {
+		t.Fatalf("project root should win: %+v", file)
 	}
 }
 
@@ -135,10 +156,11 @@ func TestSpawnPolicyYAMLList(t *testing.T) {
 	dir := t.TempDir()
 	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "spawner.md", "---\nname: spawner\ndescription: x\nspawns:\n  - scout\n  - reviewer\n---\nbody")
 	defs, _ := DiscoverAgents(dir)
-	if len(defs) != 1 {
-		t.Fatalf("defs = %v", defs)
+	file := fileDefs(defs)
+	if len(file) != 1 {
+		t.Fatalf("defs = %v", file)
 	}
-	pol := defs[0].ResolveSpawnPolicy()
+	pol := file[0].ResolveSpawnPolicy()
 	if pol.AllowAll || len(pol.Allow) != 2 {
 		t.Fatalf("YAML list spawns: %+v", pol)
 	}
@@ -341,5 +363,112 @@ func TestNamedAgentBelowCapGetsChildTaskTool(t *testing.T) {
 	// ("recursion-proven"), not calls[2] ("worker-done").
 	if !strings.Contains(res.Text, "worker-done") {
 		t.Fatalf("child did not run a task tool (worker yield script not consumed): %q", res.Text)
+	}
+}
+
+// --- #272: the bundled set is the floor of discovery -------------------
+
+// TestBundledAgentsDiscoverOnAStockCheckout is the issue's headline: a fresh
+// install with no agent files must not answer `available: none`.
+func TestBundledAgentsDiscoverOnAStockCheckout(t *testing.T) {
+	defs, warnings := DiscoverAgents(t.TempDir())
+	if len(warnings) != 0 {
+		t.Fatalf("bundled definitions must parse clean: %v", warnings)
+	}
+	have := map[string]AgentDefinition{}
+	for _, d := range defs {
+		have[d.Name] = d
+	}
+	for _, name := range []string{"scout", "reviewer", "security-reviewer", "sonic", "task"} {
+		d, ok := have[name]
+		if !ok {
+			t.Fatalf("stock discovery lost bundled %q: %v", name, agentNames(defs))
+		}
+		if d.Description == "" || d.SystemPrompt == "" {
+			t.Fatalf("bundled %q is a stub: %+v", name, d)
+		}
+	}
+}
+
+// A bundled definition is usable, not decorative: the frontmatter it declares
+// must be the shape the task tool consumes.
+func TestBundledAgentsDeclareConsumableFrontmatter(t *testing.T) {
+	defs, _ := discoverBundledAgents()
+	for _, d := range defs {
+		if d.Model != "" && !strings.Contains(d.Model, "/") {
+			if !strings.HasPrefix(d.Model, "@") {
+				t.Errorf("%s: model %q is neither @role nor provider/model", d.Name, d.Model)
+			}
+		}
+		if d.ThinkingLevel != "" && !slices.Contains(config.EffortLevels, d.ThinkingLevel) {
+			t.Errorf("%s: thinkingLevel %q not an effort level", d.Name, d.ThinkingLevel)
+		}
+		if len(d.Unsupported) > 0 {
+			t.Errorf("%s: unsupported keys %v", d.Name, d.Unsupported)
+		}
+		if !slices.Contains(d.Tools, "yield") {
+			t.Errorf("%s: yield missing from tools %v", d.Name, d.Tools)
+		}
+	}
+}
+
+func TestBundledAgentsAreOverriddenByName(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "scout.md", "---\nname: scout\ndescription: mine\n---\nmine")
+	defs, _ := DiscoverAgents(dir)
+	scout, ok := FindAgent(defs, "scout")
+	if !ok {
+		t.Fatal("scout vanished")
+	}
+	if scout.Description != "mine" || !strings.HasPrefix(scout.path, dir) {
+		t.Fatalf("project file must beat the bundled def: %+v", scout)
+	}
+	// Its siblings stay: overriding one name never removes the set.
+	if _, ok := FindAgent(defs, "reviewer"); !ok {
+		t.Fatal("reviewer lost when scout was overridden")
+	}
+}
+
+// A stale key must be named, not swallowed: `output:` advertised a config
+// surface that did nothing.
+func TestDiscoverAgentsReportsUnsupportedKeys(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "stale.md", "---\nname: stale\ndescription: x\noutput: json\nreadSummarize: true\n---\nbody")
+	defs, warnings := DiscoverAgents(dir)
+	if len(warnings) != 2 {
+		t.Fatalf("one warning per stale key: %v", warnings)
+	}
+	if !strings.Contains(warnings[0]+warnings[1], "output") || !strings.Contains(warnings[0]+warnings[1], "readSummarize") {
+		t.Fatalf("warnings must name the keys: %v", warnings)
+	}
+	// The agent still loads: a stale key never costs the definition.
+	if _, ok := FindAgent(fileDefs(defs), "stale"); !ok {
+		t.Fatal("stale key dropped the agent")
+	}
+}
+
+// The documented form `model: @role` is a reserved YAML indicator; discovery
+// promised it, so it must parse.
+func TestDiscoverAgentsBareRoleModelParses(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "roled.md", "---\nname: roled\ndescription: x\nmodel: @smol\n---\nbody")
+	defs, warnings := DiscoverAgents(dir)
+	if len(warnings) != 0 {
+		t.Fatalf("bare @role must not be a syntax error: %v", warnings)
+	}
+	d, _ := FindAgent(fileDefs(defs), "roled")
+	if d.Model != "@smol" {
+		t.Fatalf("model = %q", d.Model)
+	}
+}
+
+// A stale key next to `model: @smol` must still be reported: the alias is
+// quoted before parsing, and the key scan has to read the same text.
+func TestDiscoverAgentsReportsStaleKeyAlongsideRoleModel(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "mix.md", "---\nname: mix\ndescription: x\nmodel: @smol\noutput: json\n---\nbody")
+	_, warnings := DiscoverAgents(dir)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "output") {
+		t.Fatalf("stale key beside @role: %v", warnings)
 	}
 }
