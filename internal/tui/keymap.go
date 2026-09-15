@@ -44,6 +44,8 @@ var BuiltinActions = []string{
 	"app.agents.hub", // Alt+A: the agent-hub roster (omp app.agents.hub)
 	"model-cycle",    // Ctrl+P: cycle the active model through --models patterns
 	"paste-image",    // Ctrl+V: attach the clipboard image (omp app.clipboard.pasteImage)
+	"retry",          // F5: re-run the current session's last turn (omp's retry)
+
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
 
@@ -103,6 +105,11 @@ func DefaultKeyMap() *KeyMap {
 			// which no terminal forwards to an app.
 			"C-v": "paste-image",
 			"A-t": "app.session.tree",
+			// F5: retry the current session — re-run the agent over the store
+			// as it stands, so a turn a dropped stream cut short keeps going
+			// without a new prompt. omp binds retry to Alt+R; function keys are
+			// first-class chords here, so keybindings.yml can move it freely.
+			"F5": "retry",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
@@ -300,6 +307,12 @@ func keyName(ev *tcell.EventKey) string {
 	// can just say "C-q".
 	if k := ev.Key(); k >= tcell.KeyCtrlA && k <= tcell.KeyCtrlZ {
 		return string(rune('a' + int(k-tcell.KeyCtrlA)))
+	}
+	// Function keys arrive as KeyF1..KeyF12 (not KeyRune); name them so a
+	// default chord or a keybindings.yml entry can bind F1–F12. They reach
+	// every terminal we target, unlike the Shift-Enter alias.
+	if k := ev.Key(); k >= tcell.KeyF1 && k <= tcell.KeyF12 {
+		return fmt.Sprintf("F%d", int(k-tcell.KeyF1)+1)
 	}
 	switch ev.Key() {
 	case tcell.KeyEnter:

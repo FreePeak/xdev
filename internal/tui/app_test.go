@@ -118,6 +118,39 @@ func TestAppSendFlow(t *testing.T) {
 	}
 }
 
+// The F5 chord drives the wired retry op on the UI thread; an unwired build
+// says so instead of swallowing the key.
+func TestAppRetryChord(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	retries := 0
+	app.SetRetry(func() { retries++ })
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone))
+
+	if retries != 1 {
+		t.Fatalf("F5 fired retry %d times, want 1", retries)
+	}
+	app.mu.Lock()
+	blocks := len(app.blocks)
+	app.mu.Unlock()
+	if blocks != 0 {
+		t.Fatalf("retry appended %d transcript blocks, want 0 (it re-runs, not resends)", blocks)
+	}
+
+	// Unwired: the chord is a visible notice, never a silent no-op.
+	app2, _ := newTestApp(t, 80, 24)
+	app2.SetHandlers(func(string) {}, func() {}, func() {})
+	app2.handleKey(tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone))
+	app2.mu.Lock()
+	n := len(app2.blocks)
+	notices := n == 1 && app2.blocks[0].Kind == KindSystem
+	app2.mu.Unlock()
+	if !notices {
+		t.Fatalf("unwired F5 must add one system notice, blocks=%d", n)
+	}
+}
+
 func TestStreamingBlocksAndTools(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	app.BeginAssistant()
