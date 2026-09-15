@@ -45,16 +45,34 @@ type AskRequest struct {
 	Recommended []string    `json:"recommended,omitempty"` // labels used when nobody answers
 }
 
-// AskResponse carries the chosen labels (one unless Multi).
+// AskResponse carries the chosen labels (one unless Multi). Note is prose the
+// human typed instead of picking — or AskChatNote, the card's escape hatch
+// meaning "let me answer in the next turn" — and a response with neither labels
+// nor note is "no answer".
 type AskResponse struct {
 	Labels []string `json:"selected"`
+	Note   string   `json:"note,omitempty"`
 }
+
+// AskChatNote is the TUI card's escape hatch arriving as a note rather than an
+// option: the human declined the options and will speak in chat, so the model
+// must end its turn instead of picking for itself.
+const AskChatNote = "Chat about this"
 
 // AskSink answers a question. Sinks should respect ctx cancellation (Esc
 // aborts the turn); returning an error or zero labels means "no answer",
 // and the tool then falls through to the headless guidance text.
 type AskSink interface {
 	Ask(ctx context.Context, req AskRequest) (AskResponse, error)
+}
+
+// AskBatchSink is the optional seam a host implements when it can ask several
+// questions as ONE interruption (the TUI's tabbed card). A sink that only
+// implements AskSink is still correct — the tool then asks in sequence — but a
+// batch costs one wait instead of one per question, which is the whole point of
+// asking them together.
+type AskBatchSink interface {
+	AskBatch(ctx context.Context, reqs []AskRequest) ([]AskResponse, error)
 }
 
 // AskTool asks the model's question through the configured sink.
@@ -73,7 +91,7 @@ func NewAskTool(timeout time.Duration) *AskTool { return &AskTool{Timeout: timeo
 func (t *AskTool) Name() string { return AskToolName }
 
 func (t *AskTool) Description() string {
-	return "ask the user a clarifying question with labelled options; unattended runs use the recommended option after a timeout"
+	return "ask the user a clarifying question with labelled options; unattended runs use the recommended option after a timeout. Several questions in one call are ONE interruption (a tabbed card), not a card each — ask them together"
 }
 
 func (t *AskTool) Parameters() json.RawMessage {
@@ -151,29 +169,49 @@ func (t *AskTool) Execute(ctx context.Context, args json.RawMessage) (Result, er
 	if len(items) == 0 {
 		items = []askQuestion{a.askQuestion}
 	}
-	// One sink for the whole call: the headless wait and the TUI card are the
-	// same machinery per question.
-	sink := t.Sink
-	if sink == nil {
-		sink = headlessAskSink{timeout: t.timeout()}
-	}
-	type answered struct {
-		ID       string   `json:"id,omitempty"`
-		Selected []string `json:"selected"`
-	}
-	results := make([]answered, 0, len(items))
+	// Validate the whole call before interrupting anyone: a bad question must
+	// not cost the human an answer to a good one.
+	reqs := make([]AskRequest, 0, len(items))
 	for i, q := range items {
 		req, fail := normalizeAsk(q, i)
 		if fail != nil {
 			return *fail, nil
 		}
-		resp, err := sink.Ask(ctx, req)
-		if ctx.Err() != nil {
-			return Result{IsError: true, Text: "ask: canceled: " + ctx.Err().Error()}, nil
+		reqs = append(reqs, req)
+	}
+	// One sink for the whole call, and one interruption when the sink can take
+	// a batch: the wait behind a question is the expensive part, not the card.
+	sink := t.Sink
+	if sink == nil {
+		sink = headlessAskSink{timeout: t.timeout()}
+	}
+	resps, err := askAll(ctx, sink, reqs)
+	if ctx.Err() != nil {
+		return Result{IsError: true, Text: "ask: canceled: " + ctx.Err().Error()}, nil
+	}
+	type answered struct {
+		ID       string   `json:"id,omitempty"`
+		Selected []string `json:"selected,omitempty"`
+		Note     string   `json:"note,omitempty"`
+	}
+	guidance := fmt.Sprintf("no answer within %s — proceed with your best judgment and state the assumption", t.timeout().Round(time.Second))
+	if err != nil || len(resps) != len(reqs) {
+		// A sink that broke the one-answer-per-question contract gets reported
+		// as no answer at all rather than half an answer mapped to the wrong id.
+		return Result{Text: guidance}, nil
+	}
+	results := make([]answered, 0, len(reqs))
+	answeredAny := false // did at least one question get an answer?
+	for i, req := range reqs {
+		resp := resps[i]
+		note := strings.TrimSpace(resp.Note)
+		if len(resp.Labels) == 0 && note == "" {
+			// This one went unanswered (its recommendation, if any, already
+			// arrived through the sink); the others keep their real answers.
+			results = append(results, answered{ID: req.ID, Note: guidance})
+			continue
 		}
-		if err != nil || len(resp.Labels) == 0 {
-			return Result{Text: fmt.Sprintf("no answer within %s — proceed with your best judgment and state the assumption", t.timeout().Round(time.Second))}, nil
-		}
+		answeredAny = true
 		legal := map[string]bool{}
 		for _, o := range req.Options {
 			legal[o.Label] = true
@@ -186,15 +224,65 @@ func (t *AskTool) Execute(ctx context.Context, args json.RawMessage) (Result, er
 		if !req.Multi && len(resp.Labels) > 1 {
 			return Result{IsError: true, Text: fmt.Sprintf("ask: got %d answers for a single-select question", len(resp.Labels))}, nil
 		}
-		results = append(results, answered{ID: req.ID, Selected: resp.Labels})
+		results = append(results, answered{ID: req.ID, Selected: resp.Labels, Note: note})
+	}
+	// Nothing answered at all: the flat guidance text is the whole result, as
+	// it has always been for a single question.
+	if !answeredAny {
+		return Result{Text: guidance}, nil
 	}
 	// A single question keeps the flat result shape it always had; a batch
 	// answers per id.
-	out, _ := json.Marshal(map[string]any{"selected": results[0].Selected})
+	single := map[string]any{}
+	if len(results[0].Selected) > 0 {
+		single["selected"] = results[0].Selected
+	}
+	if results[0].Note != "" {
+		single["note"] = results[0].Note // typed answer; AskChatNote = "they'll say it in chat"
+	}
+	out, _ := json.Marshal(single)
 	if len(results) > 1 {
 		out, _ = json.Marshal(map[string]any{"answers": results})
 	}
-	return Result{Text: string(out), Details: map[string]any{"questions": len(results)}}, nil
+	text := string(out)
+	for _, r := range results {
+		if r.Note == AskChatNote {
+			// The escape hatch only works if the model stops talking, so say so
+			// in the result it reads instead of trusting the card's UI hint.
+			text += "\nthe human will answer in chat: end this turn now and wait for their next message"
+			break
+		}
+	}
+	return Result{Text: text, Details: map[string]any{"questions": len(results)}}, nil
+}
+
+// askAll puts one or several questions to the sink, in as few interruptions as
+// the sink's shape allows: a batch sink gets the whole list, otherwise each
+// question goes through Ask in turn.
+func askAll(ctx context.Context, sink AskSink, reqs []AskRequest) ([]AskResponse, error) {
+	if len(reqs) == 1 {
+		resp, err := sink.Ask(ctx, reqs[0])
+		return []AskResponse{resp}, err
+	}
+	if batch, ok := sink.(AskBatchSink); ok {
+		resps, err := batch.AskBatch(ctx, reqs)
+		if err == nil && len(resps) != len(reqs) {
+			err = fmt.Errorf("ask: batch sink answered %d of %d questions", len(resps), len(reqs))
+		}
+		return resps, err
+	}
+	out := make([]AskResponse, 0, len(reqs))
+	for _, req := range reqs {
+		resp, err := sink.Ask(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resp)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return out, nil
 }
 
 // normalizeAsk validates one question and resolves its recommendation, which
@@ -327,4 +415,25 @@ func (s headlessAskSink) Ask(ctx context.Context, req AskRequest) (AskResponse, 
 	case <-timer.C:
 	}
 	return AskResponse{Labels: append([]string(nil), req.Recommended...)}, nil
+}
+
+// AskBatch waits ONCE for the whole batch: nobody is answering any of these
+// questions, so N sequential waits would only make a one-shot run slower.
+func (s headlessAskSink) AskBatch(ctx context.Context, reqs []AskRequest) ([]AskResponse, error) {
+	t := s.timeout
+	if t <= 0 {
+		t = DefaultAskTimeout
+	}
+	timer := time.NewTimer(t)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+	}
+	out := make([]AskResponse, 0, len(reqs))
+	for _, req := range reqs {
+		out = append(out, AskResponse{Labels: append([]string(nil), req.Recommended...)})
+	}
+	return out, nil
 }

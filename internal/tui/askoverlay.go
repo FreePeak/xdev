@@ -1035,12 +1035,13 @@ func (a *App) askFooter(st *askState, rows []askRow) string {
 	if st.reqs[st.q].Multi {
 		parts[0] = "↑/↓ move · Space toggle"
 	}
-	parts = append(parts, "1-9 quick pick")
-	parts = append(parts, "z type an answer", "x chat instead")
+	// The batch hint leads because it is the one a human cannot guess: two
+	// questions are on the card and nothing else says how to reach the next.
+	// Quick pick reads off the row numbers, so it is last of the optional set.
 	if len(st.reqs) > 1 {
 		parts = append(parts, "Tab/←→ questions")
 	}
-	parts = append(parts, "Esc skip")
+	parts = append(parts, "1-9 quick pick", "z type an answer", "x chat instead", "Esc skip")
 	return strings.Join(parts, " · ")
 }
 
