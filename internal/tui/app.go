@@ -29,12 +29,13 @@ type Status struct {
 	// All three feed the optional HUD segments (statusLine.segments).
 	Cost      float64
 	CtxWindow int64
-	// CtxUsed is the LIVE context occupancy: input+output of the most recent
-	// completed request (the provider's own count, so it covers the system
-	// prompt, the whole visible history and the tool schemas). The HUD's
-	// context segment reads this against CtxWindow — deliberately NOT the
-	// cumulative TokensIn/TokensOut, which count every turn the session ever
-	// sent and so run far past the window.
+	// CtxUsed is the LIVE context occupancy: the token count of the most recent
+	// completed request — every input token, cached or fresh, plus the output
+	// (the provider's own total, so it covers the system prompt, the whole
+	// visible history and the tool schemas). The HUD's context segment reads
+	// this against CtxWindow — deliberately NOT the cumulative
+	// TokensIn/TokensOut, which count every turn the session ever sent and so
+	// run far past the window.
 	CtxUsed int64
 	Rate    float64
 	// Start anchors the HUD time segment: the moment the current session's
@@ -566,12 +567,20 @@ func (a *App) ToggleToolExpand() bool {
 // usable window — nothing streamed, or a sub-100ms burst — keeps the previous
 // rate rather than inventing one.
 // It also refreshes CtxUsed, the live occupancy behind the HUD's context
-// segment.
-func (a *App) AddUsage(in, out int64) {
+// segment, with total: the provider's token count for this request, cached
+// input included. ctx is what sits in the window, not only what the window had
+// to re-read — a prompt-cache hit still occupies those tokens, and an
+// input+output sum reads 90 % low on a cached conversation (the same total
+// agent.ContextTokens and compaction trigger on). total <= 0 (a provider that
+// reports none) falls back to in+out.
+func (a *App) AddUsage(in, out, total int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
-	a.st.CtxUsed = in + out
+	if total <= 0 {
+		total = in + out // a provider that reports no total gets the floor
+	}
+	a.st.CtxUsed = total
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
 		a.st.Rate = float64(out) / window.Seconds()
 	}
@@ -2931,11 +2940,11 @@ var statusSegments = map[string]bool{
 // clock reads leftmost so the rate's own " │ " stays the row's right edge).
 // The context segment is the number: what this session's context costs against
 // the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
-// request's provider-reported input+output, which already covers the system
-// prompt, the visible history and the tool schemas. It hides while either half
-// is unknown (an undiscovered window, or a session that has not answered yet),
-// so a fresh run keeps a clean row. The model keeps its composer divider slot,
-// which is chrome rather than a segment.
+// request's provider-reported total, cached input included, which covers the
+// system prompt, the visible history and the tool schemas. It hides while
+// either half is unknown (an undiscovered window, or a session that has not
+// answered yet), so a fresh run keeps a clean row. The model keeps its
+// composer divider slot, which is chrome rather than a segment.
 var defaultStatusSegments = []string{"time", "tokens", "context", "rate"}
 
 // hudHasClock reports whether the effective HUD layout renders the time
