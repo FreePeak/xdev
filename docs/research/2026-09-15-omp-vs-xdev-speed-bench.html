@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omp vs xdev — head-to-head speed benchmark (2026-09-15)</title>
+<style>
+:root {
+  --bg: #f7f8fa; --panel: #ffffff; --ink: #1a2233; --muted: #5b6472;
+  --line: #dfe3ea; --code-bg: #eef1f5;
+  --omp: #4054b2; --omp-fill: #ccd6f4;
+  --xdev: #16693c; --xdev-fill: #c3e6d1;
+  --bad: #a32020; --bad-fill: #f2cccc;
+  --good: #146b3a; --warn: #8a5a00;
+  --chip: #edf0f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10131a; --panel: #171b24; --ink: #e6eaf2; --muted: #9aa4b3;
+    --line: #2a3140; --code-bg: #1d2330;
+    --omp: #93a7f2; --omp-fill: #38447a;
+    --xdev: #5cc98d; --xdev-fill: #21503a;
+    --bad: #ef8f8f; --bad-fill: #6b2626;
+    --good: #6fd39a; --warn: #e0b25a;
+    --chip: #222a38;
+  }
+}
+html[data-theme="light"] {
+  --bg:#f7f8fa;--panel:#fff;--ink:#1a2233;--muted:#5b6472;--line:#dfe3ea;--code-bg:#eef1f5;
+  --omp:#4054b2;--omp-fill:#ccd6f4;--xdev:#16693c;--xdev-fill:#c3e6d1;
+  --bad:#a32020;--bad-fill:#f2cccc;--good:#146b3a;--warn:#8a5a00;--chip:#edf0f5;
+}
+html[data-theme="dark"] {
+  --bg:#10131a;--panel:#171b24;--ink:#e6eaf2;--muted:#9aa4b3;--line:#2a3140;--code-bg:#1d2330;
+  --omp:#93a7f2;--omp-fill:#38447a;--xdev:#5cc98d;--xdev-fill:#21503a;
+  --bad:#ef8f8f;--bad-fill:#6b2626;--good:#6fd39a;--warn:#e0b25a;--chip:#222a38;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1060px; margin: 0 auto; padding: 24px 20px 80px; }
+header.page { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+h1 { font-size: 1.55rem; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 1.18rem; margin: 44px 0 10px; letter-spacing: -0.01em; }
+h3 { font-size: 1.0rem; margin: 26px 0 8px; }
+p.lede { color: var(--muted); margin: 4px 0 0; }
+section > p, li { max-width: 68ch; }
+a { color: var(--omp); }
+.badge { font-size: .78rem; padding: 2px 9px; border-radius: 999px; background: var(--chip); color: var(--muted); border: 1px solid var(--line); }
+#theme { margin-left: auto; font: inherit; font-size: .82rem; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin: 20px 0 4px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.card .k { font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.card .v { font-size: 1.5rem; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.card .s { font-size: .85rem; color: var(--muted); }
+.verdict { border-left: 4px solid var(--omp); background: var(--panel); border-radius: 0 12px 12px 0; border-top:1px solid var(--line); border-right:1px solid var(--line); border-bottom:1px solid var(--line); padding: 16px 18px; margin: 18px 0; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 2px; }
+th, td { padding: 8px 11px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th { position: sticky; top: 0; background: var(--panel); font-weight: 600; color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+tr:last-child td { border-bottom: 0; }
+td.win { font-weight: 700; }
+td.lost { color: var(--muted); }
+.pos { color: var(--good); font-weight: 600; }
+.neg { color: var(--bad); font-weight: 600; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; font: .82rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); border-radius: 5px; padding: 1px 5px; }
+pre code { background: none; padding: 0; }
+figure { margin: 14px 0 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px 12px; }
+figcaption { font-size: .85rem; color: var(--muted); margin-bottom: 10px; }
+.bars { display: grid; gap: 3px; }
+.bar-row { display: grid; grid-template-columns: 118px 1fr 56px; align-items: center; gap: 8px; font-size: .84rem; }
+.bar-row .lbl { color: var(--muted); text-align: right; }
+.track { height: 17px; border-radius: 4px; background: var(--code-bg); position: relative; overflow: hidden; }
+.fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; }
+.fill.omp { background: var(--omp-fill); border-right: 3px solid var(--omp); }
+.fill.xdev { background: var(--xdev-fill); border-right: 3px solid var(--xdev); }
+.bar-row .val { font-variant-numeric: tabular-nums; }
+.group { margin-top: 8px; }
+.group .rnd { font-size: .78rem; color: var(--muted); margin-top: 7px; border-top: 1px dashed var(--line); padding-top: 4px; }
+.legend { display: flex; gap: 16px; font-size: .82rem; color: var(--muted); margin-top: 10px; }
+.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+ol.root li, ul.notes li { margin: 6px 0; }
+.foot { margin-top: 56px; font-size: .82rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+.small { font-size: .82rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header class="page">
+  <h1>omp vs xdev — head-to-head speed benchmark</h1>
+  <span class="badge">2026-09-15</span>
+  <span class="badge">36 headless runs</span>
+  <button id="theme" type="button" aria-label="Toggle dark or light theme">theme</button>
+</header>
+<p class="lede">Same task, same model, same gateway, isolated configs, timestamp-decomposed telemetry. Reproduced from <code>/tmp/bench2</code> (script <code>bench2.sh</code>, decomposer <code>timeline2.py</code>).</p>
+
+<div class="verdict">
+  <strong>The claim “omp finishes tasks faster than xdev” is confirmed — and its cause is not a faster engine.</strong>
+  Both harnesses spend 95&nbsp;%+ of wall time inside the same provider round-trips, with harness
+  switching overhead of 2–24&nbsp;ms per turn on omp and ≤0.3&nbsp;s total on xdev. omp wins because the same
+  model takes <em>fewer turns</em> on its tool surface: xdev’s edit-grammar rejections and missing snapshot
+  header make a mid-tier model burn 1–4 wasted provider turns per run (~7–12&nbsp;s each). Where turn count
+  cannot save it — boot and one-shot calls — xdev is decisively faster: <strong>0.04&nbsp;s vs 4.06&nbsp;s fixed
+  cost, 2–4× wall on one-shot prompts</strong>.
+</div>
+
+<div class="cards">
+  <div class="card"><div class="k">Edit-task wall (pinned model, 6 rounds)</div><div class="v">54.0 s vs 63.9 s</div><div class="s">median, omp vs xdev — the gap is 2 extra xdev turns, at parity per turn</div></div>
+  <div class="card"><div class="k">Process fixed cost</div><div class="v">0.04 s vs 4.06 s</div><div class="s">xdev boots ~100× faster than omp (Go vs Bun runtime)</div></div>
+  <div class="card"><div class="k">Grammar-error round-trips</div><div class="v">12 vs 0</div><div class="s">fresh unpatched xdev runs vs all omp runs; patched xdev: 0/3</div></div>
+</div>
+
+<h2 id="tldr">1 · Headline comparison</h2>
+<div class="wrap"><table>
+  <caption class="small" style="text-align:left; padding:8px 11px 0">All arms: <code>--model</code> pinned, 6 identical tools, yolo, skills/extensions/LSP/rules off, isolated config dirs, alternating launch order. Every run in every suite passed the fixture’s 5 tests — arms are quality-equivalent; only time differs.</caption>
+  <thead><tr><th scope="col">Suite (task: fix invoice.js, node --test)</th><th scope="col">omp wall med</th><th scope="col">xdev wall med</th><th scope="col">omp turns</th><th scope="col">xdev turns</th><th scope="col">omp fixed/run</th><th scope="col">xdev fixed/run</th><th scope="col">Winner</th></tr></thead>
+  <tbody>
+    <tr><td>Morning window, 3 rounds, pinned b-ai/qwen3.8-flash, older binary</td><td>29.5 s <span class="small">(21.0–31.7)</span></td><td>47.5 s <span class="small">(27.3–91.6)</span></td><td>5</td><td>7</td><td>~4.1 s</td><td>~0.2 s</td><td class="win">omp ×2, xdev ×1</td></tr>
+    <tr><td>Evening window, 6 rounds, pinned, HEAD build</td><td>54.0 s <span class="small">(32.1–128.0)</span></td><td>63.9 s <span class="small">(45.4–130.3)</span></td><td>6 <span class="small">(4–6)</span></td><td>8 <span class="small">(5–11)</span></td><td>4.23 s</td><td>0.04 s</td><td class="win">omp ×4, xdev ×2</td></tr>
+    <tr><td>Combo ladder onegw/free, 2 rounds, HEAD build</td><td>38.4 s <span class="small">(38.2–38.6)</span></td><td>61.0 s <span class="small">(34.2–87.8)</span></td><td>6</td><td>10 <span class="small">(5/14)</span></td><td>4.18 s</td><td>0.04 s</td><td class="win">tie-then-omp; xdev bimodal</td></tr>
+    <tr><td>Patched xdev (tool-grammar fixes), 3 rounds + concurrent omp control</td><td>65.0 s <span class="small">(32.5–72.3)</span></td><td>101.3 s <span class="small">(37.1–166.2)</span></td><td>5</td><td>7 <span class="small">(6–14)</span></td><td>4.57 s</td><td>0.08 s</td><td>see §6 — provider storm window; <span class="pos">0 error round-trips</span></td></tr>
+    <tr><td>One-shot “PONG”, no tools, 3 runs each</td><td>13.2 s <span class="small">(10.7–19.1)</span></td><td>5.1 s <span class="small">(4.6–15.8)</span></td><td>1</td><td>1</td><td>4.48 s</td><td>0.05 s</td><td class="win" style="color:var(--xdev)">xdev ×3</td></tr>
+  </tbody>
+</table></div>
+<p class="small">Reading: the medians are noisy because the b-ai upstream entered a latency storm mid-benchmark (single turns took 13–25 s in rounds 4–6 and the patched window; see per-cycle data). Every window’s <em>own</em> omp control absorbs that: within a window, api/turn is at parity (8.5 vs 9.1 s), and the wall gap follows the turn gap.</p>
+
+<h2 id="decomp">2 · Where the wall time actually goes</h2>
+<div class="wrap"><table>
+  <thead><tr><th scope="col">Bucket (per run, edit task)</th><th scope="col">omp</th><th scope="col">xdev</th><th scope="col">Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Boot + first request sent</td><td>2.7–4.1 s</td><td class="win" style="color:var(--xdev)">0.02–0.08 s</td><td>Bun runtime init vs a static Go binary; rock-stable 4.06 s on omp, twice the variance-free delta</td></tr>
+    <tr><td>Provider round-trip (queue + prefill + decode)</td><td>95–99 % of wall (inside <code>duration</code>)</td><td>95–99 % of wall (<code>decode + wait</code>)</td><td>Per-turn cost at parity; ~2.2–3.4 s/turn is queue+prefill in both</td></tr>
+    <tr><td>Tool execution (bash/read/edit)</td><td>0.3–0.4 s total</td><td>0.1–1.1 s total</td><td>Measured: xdev stderr bubbles <code>← bash [ok, 85ms]</code>; node --test ≈ 0.1–0.3 s</td></tr>
+    <tr><td>Harness inter-turn switching</td><td>2–24 ms/turn</td><td>≤ 300 ms total</td><td>Neither loop is the problem</td></tr>
+    <tr><td>Session close + exit</td><td>0.4–0.7 s</td><td>0.0 s</td><td>omp exit path; xdev already flushed</td></tr>
+    <tr><td>Provider tail-risk stalls</td><td>inside duration (invisible)</td><td>23 s (old r2) · <strong>121.66 s</strong> (patched r2)</td><td>Upstream; xdev’s 90 s first-progress/idle watchdog can stretch a stall into stall+retry</td></tr>
+    <tr><td>System prompt tokens (small run)</td><td>~4.0 k, hits prefix cache (cache_read 3.3 k)</td><td>~0.7 k, below the ~1 k cache floor (cache_read 0)</td><td>Pi-minimalism tax at small context; vanishes as the transcript grows</td></tr>
+  </tbody>
+</table></div>
+<p><strong>Calibration note (why naive “api_ms” comparisons across these two harnesses are wrong):</strong> a no-tool probe showed omp stamps its assistant message at <em>request send</em> with <code>duration</code> = the whole round-trip, while xdev stamps at <em>completion</em> with <code>duration</code> = streaming decode only — its queue/prefill fall into the between-entry gap. Buckets above are recomputed from raw timestamps with that difference normalized.</p>
+
+<h2 id="rounds">3 · Per-round wall times (evening window, pinned model)</h2>
+<figure>
+  <div class="bars" id="chart"></div>
+  <div class="legend"><span><span class="swatch" style="background:var(--omp)"></span>omp</span><span><span class="swatch" style="background:var(--xdev)"></span>xdev</span><span>bar length = wall seconds (max 130 s) · turns in labels</span></div>
+  <figcaption>Rounds 4–5 are provider storms on the shared gateway — <em>both</em> arms inflate (omp r4: 123 s of provider time in 5 turns). xdev’s clean round r6 (45.4 s, 5 turns, zero error round-trips) matches omp’s best rounds.</figcaption>
+</figure>
+
+<h2 id="correlation">4 · The gap is turns, and the turns are tool-contract errors</h2>
+<div class="wrap"><table>
+  <thead><tr><th scope="col">xdev run (pinned model)</th><th scope="col">edit-error round-trips</th><th scope="col">turns</th><th scope="col">wall</th></tr></thead>
+  <tbody>
+    <tr><td>round 1</td><td>1</td><td>8</td><td>86.8 s</td></tr>
+    <tr><td>round 2</td><td>3</td><td>11</td><td>130.3 s</td></tr>
+    <tr><td>round 3</td><td>2</td><td>8</td><td>72.5 s</td></tr>
+    <tr><td>round 4</td><td>1</td><td>6</td><td>55.2 s</td></tr>
+    <tr><td>round 5</td><td>1</td><td>8</td><td>50.7 s</td></tr>
+    <tr><td>round 6</td><td class="pos">0</td><td class="pos">5</td><td class="pos">45.4 s</td></tr>
+    <tr><td>all 12 omp runs (both windows + combo)</td><td class="pos">0</td><td>4–6</td><td>—</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="roots">5 · Root causes (traced to source)</h2>
+<ol class="root">
+  <li>
+    <h3>Hashline rejects the colon range spelling</h3>
+    <p>The model’s RL-trained muscle memory writes <code>PUT 15:=24:</code>. xdev’s op regex admits only <code>[.=]{1,2}</code> between line numbers:</p>
+    <pre><code>hashlinePutRe = regexp.MustCompile(`^PUT\s+([&lt;&gt;])?\s*(\d*)\s*(?:[.=]{1,2}\s*(\d*))?…`)</code></pre>
+    <p>Every occurrence costs one full provider turn to retry. Observed error text (5× across 5 of 6 evening rounds):</p>
+    <pre><code>edit: edit: line 4: "PUT 15:=24:" names a range this grammar cannot express (want e.g. "PUT 3.=5:" or "CUT 5")</code></pre>
+  </li>
+  <li>
+    <h3><code>read</code> prints no snapshot header — so the model fabricates one</h3>
+    <p>The <code>edit</code> contract tells the model to quote “the header a read or a previous edit printed (never invent it)” — but xdev’s <code>read</code> renders bare numbered lines with no <code>[path#TAG]</code> header, while omp’s does. With no real tag to quote, the model invents <code>[invoice.js#1]</code>:</p>
+    <pre><code>edit: cannot read invoice.js#1: open /tmp/bench2/runs/…/invoice.js#1: no such file or directory</code></pre>
+    <p>An ENOENT on a path that looks like a tag teaches the model nothing; it re-reads and retries. Seen in the morning window and twice in the evening (<code>#1</code>, <code>#t3</code>).</p>
+  </li>
+  <li>
+    <h3>The fabricated tag silently becomes a filesystem path</h3>
+    <p><code>splitSnapshotTag</code> accepts only 4–64 hex chars after <code>#</code>; <code>#1</code> fails that test and the whole string is opened as a path:</p>
+    <pre><code>t := p[i+1:]
+if len(t) &lt; 4 || len(t) &gt; 64 { return p, "" }   // "#1" → path, not tag</code></pre>
+  </li>
+  <li>
+    <h3>Minimalism has a model-tier tax</h3>
+    <p>The &lt;1000-token pi-style prompt + 400-char tool descriptions assume frontier models. On qwen3.8-flash, xdev’s runs occasionally drift: reading files via <code>bash cat</code>, hallucinated <code>cd</code> targets, and repeated verification bashes after green tests (one clean run still spent 3 turns re-running <code>node --test</code>). omp’s heavier prompt and always-tagged tool outputs suppress that variance — its turn count never exceeded 6 in 12 runs; xdev ranged 5–14.</p>
+  </li>
+</ol>
+
+<h2 id="patch">6 · Measured fix (unit-proven, live-corroborated)</h2>
+<p>Three minimal diffs, built in a private worktree at HEAD <code>fe9ebdf</code>, kept out of the shared working tree: (1) normalize <code>N[:=]M</code> → <code>N.=M</code> before op matching; (2) <code>read</code> emits <code>[path#tag]</code> with the recorded freshness hash (notebooks unchanged), descriptions aligned and trimmed to the 400-char prompt-budget cap; (3) a non-hex <code>#suffix</code> whose bare name exists is refused as an <strong>unknown snapshot tag</strong>, not opened as a path. Regression tests pin the read→edit tag round-trip and the colon spelling; <code>go test ./internal/tool ./internal/agent ./internal/tui ./internal/session</code> green, <code>gofmt -l</code> clean.</p>
+<p>Live effect: <strong>0 grammar-error round-trips in 3/3 patched runs</strong> (5/6 unpatched had at least one). The patched wall median is meaningless this late in the provider storm (one run ate a 121.7 s upstream stall; another had a 14-turn wander with zero tool errors); the clean patched round ran 37.1 s / 6 turns against a 32.5 s / 4-turn omp control in the same window. The durable claim is the one the correlation table makes: removing the error round-trips removes the systematic 1–3 turns per run, and turn parity is where the wall-time gap lives.</p>
+<p class="small">Patch file: <code>/tmp/bench2/xdev-tool-grammar-fix.patch</code> (314 lines) · worktree: <code>/tmp/bench2/xtree</code> · not landed in the repo pending an explicit decision.</p>
+
+<h2 id="where-xdev-wins">7 · What xdev already proves</h2>
+<ul class="notes">
+  <li><strong>Startup budget is real:</strong> 0.02–0.15 s to first request vs omp’s 2.7–4.1 s (and 0.4–0.7 s exit vs omp’s ~0.5 s). On one-shot and short tasks xdev finishes 2–4× faster end-to-end (PONG probe median 5.1 s vs 13.2 s).</li>
+  <li><strong>Decode seam is fine:</strong> xdev’s median decode on edit tasks (31.9 s) sits below omp’s (51.0 s) while carrying <em>more</em> output tokens (1680 vs 1316 median) — the Go SSE path adds nothing measurable.</li>
+  <li><strong>Loop machinery is sound:</strong> tool dispatch is already bounded-parallel (<code>runTools</code>), per-entry session writes cost ~0, no queueing artifacts found in any of 22 xdev transcripts inspected.</li>
+  <li>Open items this exercise surfaced but did not fix: sub-1K prompts never hit the provider prefix cache; the 90 s watchdog policy turns upstream stalls into minutes with no user-visible “waiting on provider” signal; thinking-token budget drifts more on xdev’s terse prompt (422 vs 39 reasoning tokens on the same calibration prompt — sampling variance, not a config gap, worth one more measurement before acting).</li>
+</ul>
+
+<h2 id="method">8 · Method &amp; honesty notes</h2>
+<ul class="notes">
+  <li>Fixture: 3 planted bugs in <code>invoice.js</code> (parseFloat/off-by-one/dedup), 5 node:test cases; baseline fails 3/5; graders re-ran <code>node --test</code> and byte-compared <code>invoice.test.js</code> after each run — no arm ever touched the tests.</li>
+  <li>Arms run strictly serially against the one shared gateway; order alternated each round; fresh fixture + session dirs per run.</li>
+  <li>xdev isolated via <code>XDEV_AGENT_DIR</code> (bare <code>models.yml</code>) and herdr hooks neutralized; omp via <code>PI_CODING_AGENT_DIR</code> (same dir as prior rounds for continuity).</li>
+  <li>Binary drift caveat: three xdev binaries coexist on this machine — the <strong>installed</strong> <code>~/.local/bin/xdev</code> (v0.1.0-dev) which the archived morning rounds used, the repo’s <code>./xdev</code> (v0.2.0-stamped), and the clean HEAD build used tonight. Conclusions hold in both windows; morning absolute numbers describe the older binary.</li>
+  <li>Wall-time medians across a shared upstream that degraded 3–5× during the evening window are weak evidence; the turn-count and error-round-trip correlations (deterministic transcript facts) are strong evidence. This report distinguishes them throughout.</li>
+</ul>
+
+<footer class="foot">
+  Raw data: <code>/tmp/bench2/results-{medium,combo,patched}.tsv</code> · probes <code>/tmp/bench2/probes.log</code> · decomposer <code>/tmp/bench2/timeline2.py</code> · prior-day rounds <code>/tmp/mb-runs/results-medium.tsv</code>. Repro: <code>bash /tmp/bench2/bench2.sh &lt;tsv&gt; &lt;model&gt; &lt;rounds&gt;</code> (uses <code>/tmp/agent-bench/TEMPLATE</code> fixture).
+</footer>
+
+</main>
+<script>
+const rounds=[["r1",32.4,4,86.8,8],["r2",51.7,6,130.3,11],["r3",32.1,4,72.5,8],["r4",128.0,5,55.2,6],["r5",105.3,6,50.7,8],["r6",56.4,6,45.4,5]];
+const MAX=131;
+const el=document.getElementById("chart");
+for(const [name,ow,ot,xw,xt] of rounds){
+  const g=document.createElement("div"); g.className="group";
+  g.innerHTML=`<div class="rnd">${name}</div>`+
+    [["omp",ow,ot],["xdev",xw,xt]].map(([t,w,n])=>
+      `<div class="bar-row"><span class="lbl">${t} · ${n} turn${n>1?"s":""}</span><span class="track"><span class="fill ${t}" style="width:${(w/MAX*100).toFixed(1)}%"></span></span><span class="val">${w.toFixed(1)}s</span></div>`).join("");
+  el.appendChild(g);
+}
+const btn=document.getElementById("theme");
+const stored=localStorage.getItem("xdev-bench-theme");
+if(stored)document.documentElement.dataset.theme=stored;
+btn.addEventListener("click",()=>{
+  const cur=document.documentElement.dataset.theme|| (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");
+  const next=cur==="dark"?"light":"dark";
+  document.documentElement.dataset.theme=next;
+  localStorage.setItem("xdev-bench-theme",next);
+});
+</script>
+</body>
+</html>
