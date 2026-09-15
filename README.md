@@ -6,7 +6,24 @@
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/platforms-linux%20%C2%B7%20macos%20%C2%B7%20windows-blue" alt="linux, macos, windows"></a>
 </p>
 
+<p align="center">
+  <img src="assets/screenshots/welcome.png" alt="The xdev terminal UI: the block-art wordmark over the session menu, composer and status line" width="880">
+</p>
+
 **xdev** is a lightweight coding-agent harness in Go: the session/chat core of [pi](https://github.com/earendil-works/pi) and Oh My Pi (omp) — provider streaming, the agent loop, JSONL session persistence, tool execution, and a terminal UI — rebuilt as a **single static, CGO-free binary** (~22 MB dev / ~29 MB installed with the SQLite-backed mnemopi memory backend linked in; a build without it is smaller) with a **hard <100 MB RSS budget**, roughly 3–8× lighter than a JS-runtime harness. It ports the proven pi/omp data model (append-only JSONL session tree, unified stream contract, context reconstruction, compaction, output sinks) while replacing the expensive parts: no JS runtime, no in-process plugin VM, no unbounded queues.
+
+## Install (Linux / macOS)
+
+One command — fetches the newest release for your platform, verifies its
+SHA-256, and installs to `~/.local/bin`. Re-running it auto-updates the
+installed binary to the newest release.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh
+```
+
+Variables for power users (same names as `xdev update`):
+`XDEV_UPDATE_REPO`, `XDEV_UPDATE_API`, `XDEV_INSTALL_DIR`.
 
 ## Philosophy
 
@@ -72,19 +89,6 @@ through an interactive prompt that silently truncates at 128 bytes — enough fo
 an API key, not for a JWT. A `keychain:` reference that cannot be satisfied is an
 error naming the reference; xdev will not quietly use a different credential.
 `XDEV_DISABLE_KEYCHAIN=1` turns the lookup off. [Why, with measurements](docs/decisions/keychain-credential-source.md).
-
-## Install (Linux / macOS)
-
-One command — fetches the newest release for your platform, verifies its
-SHA-256, and installs to `~/.local/bin`. Re-running it auto-updates the
-installed binary to the newest release.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh
-```
-
-Variables for power users (same names as `xdev update`):
-`XDEV_UPDATE_REPO`, `XDEV_UPDATE_API`, `XDEV_INSTALL_DIR`.
 
 ## Onboarding, updates, benchmarks
 
