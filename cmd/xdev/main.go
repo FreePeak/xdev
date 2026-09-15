@@ -202,6 +202,7 @@ func main() {
 	fs.StringVar(&slowModelFlag, "slow", "", "role override: model for the @slow / @plan role")
 	fs.StringVar(&planModelFlag, "plan-model", "", "role override: model for the @plan role (omp spells this --plan <model>)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
+	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
 	providerFlag := fs.String("provider", "", "force the provider when the model ref does not name one")
 	addDirs := repeatable{}
 	fs.Var(&addDirs, "add-dir", "extra workspace root beyond the launch cwd: joins context-file discovery and is named in the prompt (repeatable)")
@@ -349,6 +350,13 @@ func main() {
 		settings.Prewalk.Enabled = false
 	} else if launch.Prewalk {
 		settings.Prewalk.Enabled = true
+	}
+	// -retry-forever is the one-run form of retry.infinite. It rides the
+	// layered settings rather than a launchFlags field: every mode reads
+	// this object through lastSettings(), so one write covers TUI, print,
+	// RPC and ACP.
+	if *retryForever {
+		settings.Retry.Infinite = true
 	}
 	// --models patterns enable Ctrl+P cycling; the catalog print stays on
 	// the `models` subcommand (omp keeps the same split).

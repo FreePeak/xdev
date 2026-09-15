@@ -61,6 +61,13 @@ type RetrySettings struct {
 	// FallbackCooldown is a Go duration ("5m") bounding how long a
 	// fallback stays active before the primary is restored.
 	FallbackCooldown string `yaml:"fallbackCooldown"`
+	// Infinite is "always retry": once the whole fallback chain has
+	// drained, the recovery ladder keeps re-running it instead of
+	// surfacing the error, so an outage (a gateway that answers
+	// `connection refused`) is survived however long it lasts. Off by
+	// default: a hard failure misclassified as transient would then
+	// spin forever. -retry-forever forces it on for one run.
+	Infinite bool `yaml:"infinite"`
 }
 
 // RetryConfig returns the retry group (nil-safe: a missing layer means the
@@ -153,6 +160,11 @@ func (s *Settings) mergeRetry(layer *Settings) error {
 			return fmt.Errorf("retry.fallbackCooldown %q: %w", layer.Retry.FallbackCooldown, err)
 		}
 		s.Retry.FallbackCooldown = layer.Retry.FallbackCooldown
+	}
+	// One-way like prewalk.enabled: a later layer turns "always retry" on,
+	// never off — the shipped default stays the bounded ladder.
+	if layer.Retry.Infinite {
+		s.Retry.Infinite = true
 	}
 	return validateRetryChains(s.Retry.FallbackChains)
 }

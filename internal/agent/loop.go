@@ -540,10 +540,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	// (revert to the primary), and the usage-reserve policy is checked
 	// before a turn is spent on a near-quota target.
 	a.fallbackPreTurn()
-	policy := a.Retry
-	if policy.MaxRetries == 0 && policy.BaseDelay == 0 {
-		policy = DefaultRetryPolicy()
-	}
+	policy := a.Retry.withDefaults()
 	attempt, continued, compacted := 0, false, false
 	escalation := 0
 	interrupted := 0
@@ -602,16 +599,26 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					attempt = 0
 					continue
 				}
-				// Chain drained too. "Always retry" survives an outage
-				// that outlasts one pass through the chain by re-running
-				// the ladder on the current target — bounded rounds, so
-				// a hard failure misclassified as transient still ends
-				// the turn (see maxEscalationRounds in retry.go).
-				if escalation < maxEscalationRounds {
+				// Chain drained too: re-run the ladder on the current
+				// target. Rounds are bounded so a hard failure
+				// misclassified as transient still ends the turn (see
+				// maxEscalationRounds); retry.infinite lifts the bound and
+				// announces each round on the event stream, so an outage
+				// of any length reads as waiting rather than hanging.
+				if escalation < maxEscalationRounds || policy.Infinite {
 					escalation++
 					attempt = 0
-					logx.Errorf("recovery: all targets drained, escalation round %d/%d after backoff", escalation, maxEscalationRounds)
-					if serr := sleepBackoff(ctx, policy.delay(policy.MaxRetries+1)); serr != nil {
+					d := policy.delay(policy.MaxRetries + 1)
+					logx.Errorf("recovery: all targets drained, escalation round %d after backoff", escalation)
+					if policy.Infinite {
+						a.noticeAllTargetsDown(escalation, d, err)
+						// Re-enter the pre-turn pass so an expired fallback
+						// cooldown restores the primary mid-outage: the wait
+						// re-walks the chain from the target the user chose,
+						// not from wherever the last failover landed.
+						a.fallbackPreTurn()
+					}
+					if serr := sleepBackoff(ctx, d); serr != nil {
 						return nil, history, serr
 					}
 					continue
@@ -662,6 +669,16 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		}
 		logx.Debugf("retry %d/%d after: %v", attempt, policy.MaxRetries, err)
 	}
+}
+
+// noticeAllTargetsDown raises one unbounded-wait round on the event stream
+// (retry.infinite only). Nil-safe: modes that never install hooks stay quiet
+// and keep their logx line.
+func (a *Agent) noticeAllTargetsDown(round int, d time.Duration, last error) {
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&AllTargetsDownError{Round: round, Delay: d, LastErr: last}))
 }
 
 // recoverOverflow forces a compaction (ignoring the threshold — the
