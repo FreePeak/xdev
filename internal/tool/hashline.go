@@ -42,6 +42,13 @@ var (
 	hashlineCutRe = regexp.MustCompile(`^(CUT|REM)\s+([<>])?\s*(\d+)\s*(?:[.=]{1,2}\s*(\d+))?\s*(?:@\S+)?\s*:?\s*$`)
 	// hashlineMvRe matches "MV dest" or "MV src dest".
 	hashlineMvRe = regexp.MustCompile(`^MV\s+(\S.*?)\s*$`)
+	// hashlineColonRe catches the colon range spellings models carry over
+	// from other hashline dialects — "PUT 15:=24:" (live bench trace,
+	// 2026-09-15: one wasted edit round per run) and "PUT 15:24" — and is
+	// normalized to the canonical "15.=24" below before matching. It only
+	// fires when digits stand after the colon, so "PUT 3:" keeps its
+	// single-line meaning and "PUT 3: +row" keeps its inline body.
+	hashlineColonRe = regexp.MustCompile(`^(PUT\s+(?:[<>]\s*)?\d+)\s*:(=?)\s*(\d+)`)
 )
 
 // looksLikeHashline reports whether s reads as patch text rather than some
@@ -131,6 +138,7 @@ func parseHashline(text, defaultPath string) (hashlineSection, error) {
 // parseHashlineOp parses one op line at input line lineNo and, for a PUT,
 // consumes the body rows under it. n is the index of the next unconsumed line.
 func parseHashlineOp(raw string, next int, lines []string, lineNo int) (editOp, int, error) {
+	raw = hashlineColonRe.ReplaceAllString(raw, "$1.=$3")
 	if m := hashlinePutRe.FindStringSubmatch(raw); m != nil {
 		op := editOp{Op: "PUT"}
 		switch m[1] {
