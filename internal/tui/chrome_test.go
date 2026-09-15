@@ -10,6 +10,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/FreePeak/xdev/internal/theme"
+	"github.com/FreePeak/xdev/internal/tool"
 )
 
 // screenText flattens a simulation screen into rows of text.
@@ -387,6 +388,104 @@ func askOptions() AskRequest {
 			{Label: "postgres"},
 			{Label: "mysql"},
 		},
+	}
+}
+
+// askBatchResultOf drives one tabbed card of several questions to completion.
+func askBatchResultOf(t *testing.T, app *App, reqs []AskRequest, timeout time.Duration, keys ...any) ([]AskAnswer, bool) {
+	t.Helper()
+	done := make(chan struct {
+		ans []AskAnswer
+		ok  bool
+	}, 1)
+	go func() {
+		ans, ok := app.AskCardBatch(context.Background(), reqs, timeout)
+		done <- struct {
+			ans []AskAnswer
+			ok  bool
+		}{ans, ok}
+	}()
+	waitAsk(t, app, true)
+	for _, k := range keys {
+		switch v := k.(type) {
+		case tcell.Key:
+			pressKey(app, v)
+		case rune:
+			pressRune(app, v)
+		}
+	}
+	select {
+	case got := <-done:
+		return got.ans, got.ok
+	case <-time.After(3 * time.Second):
+		t.Fatal("ask card did not resolve")
+		return nil, false
+	}
+}
+
+// TestAskCardBatchOneInterruption: two questions answer in ONE card — Enter on
+// the first steps to the next, and the last answer submits both.
+func TestAskCardBatchOneInterruption(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	q1, q2 := askOptions(), askOptions()
+	q1.ID, q2.ID = "backend", "cache"
+	q2.Question = "Turn the cache on?"
+	q2.Options = []AskOption{{Label: "yes"}, {Label: "no"}}
+	// '1' takes sqlite and steps to the cache question, '2' takes "no" and
+	// lands on the review, Enter submits both.
+	answers, ok := askBatchResultOf(t, app, []AskRequest{q1, q2}, 5*time.Second, '1', '2', tcell.KeyEnter)
+	if !ok || len(answers) != 2 {
+		t.Fatalf("batch answers = %+v ok=%v", answers, ok)
+	}
+	if answers[0].Labels[0] != "sqlite" || answers[1].Labels[0] != "no" {
+		t.Fatalf("answers out of order or wrong: %+v", answers)
+	}
+	if app.AskPending() {
+		t.Fatal("card must close after the last answer")
+	}
+}
+
+// TestAskCardChatEscape: the escape hatch closes the card with the note set and
+// NO labels — a host must not read it as a chosen option, nor as a skip.
+func TestAskCardChatEscape(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	ans, ok := askResultOf(t, app, askOptions(), 5*time.Second, 'x')
+	if !ok {
+		t.Fatal("the chat escape is an answer, not a skip")
+	}
+	if len(ans.Labels) != 0 || ans.Note != AskChatLabel {
+		t.Fatalf("escape answer = %+v", ans)
+	}
+}
+
+// TestAskCardTypedAnswer: typing at the card writes the free-text row, and
+// Enter answers with prose instead of an option.
+func TestAskCardTypedAnswer(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	done := make(chan AskAnswer, 1)
+	go func() {
+		ans, _ := app.AskCard(context.Background(), askOptions(), 5*time.Second)
+		done <- ans
+	}()
+	waitAsk(t, app, true)
+	typeRunes(app, "postgres")
+	pressKey(app, tcell.KeyEnter)
+	select {
+	case ans := <-done:
+		if len(ans.Labels) != 0 || ans.Note != "postgres" {
+			t.Fatalf("typed answer = %+v", ans)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("typed answer did not resolve the card")
+	}
+}
+
+// TestAskChatLabelMatchesTheTool: the card and the tool name the escape hatch
+// in different packages, and the value has to be the same string on both sides
+// or a chat answer arrives as an unknown label.
+func TestAskChatLabelMatchesTheTool(t *testing.T) {
+	if AskChatLabel != tool.AskChatNote {
+		t.Fatalf("tui.AskChatLabel = %q, tool.AskChatNote = %q", AskChatLabel, tool.AskChatNote)
 	}
 }
 
