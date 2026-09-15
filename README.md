@@ -1,80 +1,194 @@
-<p align="center"> <img src="assets/brand/xdev-logo.png" alt="xdev" width="560"> </p>
 <p align="center">
-  <a href="https://github.com/FreePeak/xdev/releases"><img src="https://img.shields.io/github/v/release/FreePeak/xdev?include_prereleases&label=release" alt="release"></a>
+  <img src="assets/brand/xdev-logo.png" alt="xdev" width="520">
+</p>
+
+<p align="center">
+  A lightweight coding agent in Go: one static, CGO-free binary that reads your repo, edits it, runs it, and remembers the session.
+</p>
+
+<p align="center">
+  <a href="https://github.com/FreePeak/xdev/releases/latest"><img src="https://img.shields.io/github/v/release/FreePeak/xdev?label=release&color=blue" alt="latest release"></a>
+  <img src="https://img.shields.io/badge/platform-linux%20%C2%B7%20macos%20%C2%B7%20windows-blue" alt="linux, macOS, windows">
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="license: Apache-2.0"></a>
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-00ADD8" alt="Go 1.25"></a>
-  <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/platforms-linux%20%C2%B7%20macos%20%C2%B7%20windows-blue" alt="linux, macos, windows"></a>
+  <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/welcome.png" alt="The xdev terminal UI: the block-art wordmark over the session menu, composer and status line" width="880">
+  <img src="assets/screenshots/welcome.png" alt="The xdev terminal UI: the block-art wordmark over the session menu, composer and status line" width="860">
 </p>
 
-**xdev** is a lightweight coding-agent harness in Go: the session/chat core of [pi](https://github.com/earendil-works/pi) and Oh My Pi (omp) — provider streaming, the agent loop, JSONL session persistence, tool execution, and a terminal UI — rebuilt as a **single static, CGO-free binary** (~22 MB dev / ~29 MB installed with the SQLite-backed mnemopi memory backend linked in; a build without it is smaller) with a **hard <100 MB RSS budget**, roughly 3–8× lighter than a JS-runtime harness. It ports the proven pi/omp data model (append-only JSONL session tree, unified stream contract, context reconstruction, compaction, output sinks) while replacing the expensive parts: no JS runtime, no in-process plugin VM, no unbounded queues.
+## What it is
 
-## Install (Linux / macOS)
+`xdev` is a terminal coding agent and a harness you can embed. It carries the
+session/chat core of [pi](https://github.com/earendil-works/pi) and Oh My Pi
+(omp) — provider streaming, the agent loop, JSONL session persistence, tool
+execution, a terminal UI — rebuilt in Go with two disciplines the JS versions
+gave up:
 
-One command — fetches the newest release for your platform, verifies its
-SHA-256, and installs to `~/.local/bin`. Re-running it auto-updates the
-installed binary to the newest release.
+- **One binary, ~20–22 MB per platform.** No JS runtime, no in-process plugin
+  VM, no install-time toolchain. `CGO_ENABLED=0` cross-builds for linux, macOS
+  and windows, each on amd64 and arm64.
+- **A hard <100 MB RSS budget.** `debug.SetMemoryLimit` is the backstop
+  (`XDEV_MEMLIMIT` overrides it) and every queue, buffer, cache, session window
+  and output sink is bounded, so a runaway turn degrades into "compact now"
+  instead of an OOM kill.
+
+Sessions are append-only JSONL trees with a mutable leaf pointer. Nothing is
+rewritten: branching moves a pointer, context is reconstructed by walking parent
+links, and the file stays inspectable with ordinary tools — `jq`, `grep`, git.
+The format is omp-compatible (`xdev -from-claude` / `-from-codex` import a
+transcript from another harness and continue it).
+
+## Install
+
+**Linux / macOS** — one command. It resolves the newest release for your
+platform, verifies its SHA-256 against the release manifest, and installs to
+`~/.local/bin`. Re-running it is how you upgrade.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh
 ```
 
-Variables for power users (same names as `xdev update`):
-`XDEV_UPDATE_REPO`, `XDEV_UPDATE_API`, `XDEV_INSTALL_DIR`.
+**Windows** — download `xdev_windows_amd64.exe` (or `_arm64`) from
+[the latest release](https://github.com/FreePeak/xdev/releases/latest) and put it
+on your `PATH`.
 
-## Philosophy
-
-- **Minimal system prompt.** Under 1,000 tokens including tool descriptions; frontier models are RL-trained to understand coding agents, and 10,000 tokens of instructions are dead weight. Project context comes from the standard `AGENTS.md` hierarchy (global + project), and the full prompt is user-replaceable.
-- **Exactly four core tools:** `read`, `write`, `edit`, `bash`. These four are all you need for an effective coding agent — prompt plus tools fits under 1,000 tokens.
-- **YOLO by default.** No permission theater. The read-data + execute-code + network trifecta cannot be contained by prompting or pattern rules; containment belongs to external sandboxing (containers, micro-VMs), not the agent. The harness documents sandbox patterns instead of building security theater.
-- **Sessions are append-only JSONL trees with a mutable leaf pointer.** Nothing is ever mutated or deleted — branching moves a pointer, context is reconstructed by walking parent links, and the format is inspectable and post-processable with ordinary tools.
-- **Bounded everything.** Queues, buffers, session windows, and output sinks are all bounded; backpressure is a feature, not a bug. A runaway turn degrades into "compact now" instead of an OOM kill.
-- **Full-parity ambition.** Everything omp does daily — model roles, slash/custom commands, AGENTS.md hierarchy, subagents + hub, advisor watchdog, prewalk, memory, skills, themes/color — rebuilt with the same bounded-memory discipline.
-
-## Status
-
-**M5 through M15 landed (2026-09-12).** `xdev tui` is daily-drivable (streaming markdown-aware output, tool-call blocks, dimmed thinking, 66-token themes with box/spinner/HUD controls, session picker + tree selector, ask overlay) and the conversation survives turns, resumptions, forks, imports and compactions. The harness now carries the full parity surface: model roles + four wire transports + OAuth login, settings layering with `xdev config`, an approval policy with `bash.patterns`/compound handling and a fail-closed interceptor hook, a compaction method ladder (`threshold`/`overflow`/`promotion`/`snapcompact`/`shake`/`soft`/`handoff`) with `/handoff`, retry fallback chains with credential rotation, TTSR stream rules, goal mode, plan mode with `ask` + `xd://` devices, subagents with the hub roster (park/revive, process supervision), a cross-session mailbox, hooks, advisor/watchdog, prewalk, memory (local two-phase pipeline, mnemopi, Hindsight, sharpshooter), skills (`/skill:`, managed skills, `learn`), rules/rulebooks, context notes, and the extended tool set (eval kernel, web_search, github, lsp, checkpoint/rewind, browser, marketplace, deferred catalog, secrets redaction, MCP extensions, security_scan, computer, DAP, tts, generate_image). v2 modes are in: vibe, collab (`xdev join`), ACP, `/export`+`/share`, profiles/XDG, and the distribution surface (`update`/`setup`/`bench`). Verified on the integration branch: `go build ./...`, `go vet ./...`, gofmt clean, six-target CGO-free cross-builds, and the full `go test -count=1 ./...` suite green.
-
-- [docs/PRD.md](docs/PRD.md) — product requirements and scope.
-- [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md) — the full architecture research and rebuild blueprint this project is based on.
-
-## Quickstart (print mode)
+**From source** (needs Go 1.25+):
 
 ```bash
-go build -o xdev ./cmd/xdev
-
-# ~/.xdev/agent/models.yml — OpenAI-compatible gateway (env-expanded):
-# providers:
-#   onegw:
-#     baseUrl: http://127.0.0.1:8080/v1
-#     apiKey: ${ONEGW_KEY}         # macOS alternative: keychain:dev.xdev.credential.onegw
-#     api: openai-completions
-#     models: [{ id: free, name: Free, contextWindow: 1000000 }]
-# defaultModel: onegw/free
-
-xdev "create a hello.py that prints hello world, then run it"
-xdev -continue "now add tests"   # resume the latest session in this cwd
-xdev -resume 01a0 "pick up where we left off"   # resume by session-id prefix
-xdev -model onegw/dev "..."      # explicit provider/model
-xdev tui                        # interactive mode (Grok-CLI look)
-xdev tui -theme grokday         # light variant (default: auto)
-# hard RSS backstop defaults to 100MB; set XDEV_MEMLIMIT to override
+git clone https://github.com/FreePeak/xdev && cd xdev
+CGO_ENABLED=0 go build -o xdev ./cmd/xdev
 ```
 
-### Where secrets live
+Installer knobs — the same names `xdev update` reads: `XDEV_UPDATE_REPO`,
+`XDEV_UPDATE_API`, `XDEV_INSTALL_DIR`.
 
-`~/.xdev/agent/credentials.json` (what `/login` stores) is written `0600` and
-**re-verified on every read** — mode `0600` and `nlink == 1`, because a
-write-time chmod says nothing about the file now. A file that fails either check
-is refused with the repair named, never silently trusted. The data directory is
-tightened to `0700` when a credential is saved.
+## First run
 
-To keep a long-lived token off disk entirely on macOS, store it in the Keychain
-yourself (Keychain Access, `1password --read`, `op read`, or your own `security
-add-generic-password -w` call) and point a provider at it:
+```bash
+xdev setup      # creates ~/.xdev/agent/, writes a starter config.yml, prints next steps
+xdev            # the TUI
+```
+
+xdev speaks eight wire formats through `~/.xdev/agent/models.yml` —
+`anthropic-messages`, `openai-completions`, `openai-responses`,
+`azure-openai-responses`, `openai-codex-responses`, `google-generative-ai`,
+`google-vertex`, `gemini-cli` — so any OpenAI-compatible gateway works. Point a
+provider at it:
+
+```yaml
+# ~/.xdev/agent/models.yml
+providers:
+  onegw:
+    baseUrl: http://127.0.0.1:8080/v1
+    apiKey: ${ONEGW_KEY}              # or keychain:dev.xdev.credential.onegw
+    api: openai-completions
+    models: [{ id: free, name: Free, contextWindow: 1000000 }]
+defaultModel: onegw/free
+```
+
+Claude Pro/Max and Codex subscriptions work through the browser OAuth flow:
+
+```bash
+xdev login claude     # or: xdev login codex
+```
+
+## Use it
+
+```bash
+xdev                                            # the TUI (a bare call on a TTY)
+xdev "add pagination to /users, then run the tests"
+xdev -continue "now cover the empty page"       # latest session in this cwd
+xdev -resume 01a0 "pick up where we left off"   # by session-id prefix
+xdev -model onegw/dev "…"                       # explicit provider/model
+xdev < prompt.txt                               # headless: the prompt on stdin
+xdev rpc                                        # JSONL-over-stdio, for embedders
+xdev acp                                        # ACP server on stdio, for editors
+```
+
+`xdev --help` lists every launch flag. The flags an omp user expects
+(`-p/-c/-r/-e`, `--approval-mode`, `--smol/--slow/--plan-model`, `--models`,
+`--provider`, `--add-dir`, `--no-prewalk`, `--plugin-dir`) are accepted with the
+same meanings; [docs/parity-delta.md](docs/parity-delta.md) records every
+deliberate difference.
+
+## Terminal UI
+
+The look is Grok CLI's (GrokNight/GrokDay, and 66 named theme tokens you can
+remap in JSON with live reload). What matters for daily work:
+
+| Keys | Action |
+|---|---|
+| `PgUp` / `PgDn`, `Ctrl+B` / `Ctrl+F` | page through the transcript |
+| `Home` / `End` | jump to the top / back to live |
+| `Shift+↑` / `Shift+↓` | line up / down |
+| `↑` / `↓` | walk the composer's visual rows, then recall prompt history |
+| `Ctrl+R` | previous prompt |
+| `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
+| `Ctrl+O` | expand the newest tool result |
+| `Ctrl+C` | quit (`Esc` cancels the running turn first) |
+
+Every chord is remappable in `~/.xdev/agent/keybindings.yml`; `/hotkeys` shows
+the live map.
+
+Scrolling never fights the stream: a scrolled viewport stays put while output
+arrives, and `▲ n ▼ n` shows how much is hidden. Mouse selection covers the
+whole screen and survives a scroll.
+
+**Slash commands** dispatch at input-submit and never reach the model:
+
+| Command | Action |
+|---|---|
+| `/new` `/fresh` `/clear` `/drop` | start over, rotate provider state, reset context in place, delete the session file |
+| `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
+| `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
+| `/model [@role\|ref]` `/theme <name>` `/settings` `/hotkeys` | model, theme and display control |
+| `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
+| `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
+| `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |
+
+Lifecycle commands refuse while a turn is running. **Custom commands** are
+markdown files: drop one in `.xdev/commands/` (project) or
+`~/.xdev/agent/commands/` (user; project wins), optionally with `name:` and
+`description:` frontmatter, and the body is a prompt template with quote-aware
+`$1..$n`, `$@`, `$@[start:length]` and `$ARGUMENTS` expansion. An unknown
+`/foo` falls through to the model as ordinary text.
+
+## Tools
+
+Four tools are the core — `read`, `write`, `edit`, `bash` — and they are what
+the system-prompt budget is spent on. The rest of the surface is registered but
+progressively disclosed: the model sees a one-line index and pulls a schema with
+`tool_search` → `tool_describe` → `tool_call`, so the long tail costs almost
+nothing per turn.
+
+The rest of the surface: `grep`/`glob` (the host's `rg` is used when present),
+`eval` (a persistent Python kernel; a `.ipynb` reads and edits as cell blocks),
+`ast_grep`/`ast_edit`, `lsp`, `debug` (DAP over stdio: dlv, debugpy, lldb-dap),
+`browser` (CDP attach to a Chrome you started — it never launches one),
+`web_search`, `github`, `security_scan`, `computer`, `tts`, `generate_image`,
+`checkpoint` / `rewind`, `todo`, `ask`, `task` + `hub` + `send_message` /
+`inbox` for subagents and cross-session mail, and the memory and skill tools.
+MCP servers and subprocess extensions register into that same registry, so they
+ride the same approval policy, hooks and output sinks as the built-ins.
+
+## Configuration & credentials
+
+Everything lives under `~/.xdev/agent/` — `config.yml`, `models.yml`,
+`credentials.json`, `sessions/`, `agents/`, `commands/`, `themes/` — layered
+schema defaults → user file → `<project>/.xdev/config.yml` → `-config` overlays,
+and readable with `xdev config list|get|path`. Only the user layer is editable
+through `xdev config set`; project files stay hand-written, because a repository
+that can set your settings is how leaks start.
+
+`credentials.json` is written `0600` and **re-verified on every read** — mode
+`0600` and `nlink == 1`, because a write-time chmod says nothing about the file
+now. A file that fails either check is refused with the repair named, never
+silently trusted.
+
+To keep a long-lived token off disk on macOS, store it in the Keychain yourself
+and point a provider at it:
 
 ```yaml
 providers:
@@ -83,153 +197,123 @@ providers:
     api: openai-completions
 ```
 
-xdev **reads** such an item and never writes one: `/usr/bin/security` accepts a
+xdev **reads** such an item and never writes one — `/usr/bin/security` accepts a
 secret either as an argument (visible in `ps` to every user on the machine) or
-through an interactive prompt that silently truncates at 128 bytes — enough for
-an API key, not for a JWT. A `keychain:` reference that cannot be satisfied is an
-error naming the reference; xdev will not quietly use a different credential.
-`XDEV_DISABLE_KEYCHAIN=1` turns the lookup off. [Why, with measurements](docs/decisions/keychain-credential-source.md).
+through a prompt that silently truncates at 128 bytes. An unsatisfiable
+`keychain:` reference is an error naming the reference; xdev will not quietly
+use a different credential. `XDEV_DISABLE_KEYCHAIN=1` turns the lookup off.
+[Rationale with measurements](docs/decisions/keychain-credential-source.md).
 
-## Onboarding, updates, benchmarks
+A repository is not a configuration authority: its hooks run only once you trust
+the workspace (`xdev trust`). [SECURITY.md](SECURITY.md) is the reporting
+policy; the [2026-09-15 audit](docs/SECURITY-AUDIT-2026-09-15.md) is public.
+
+## Updating, checking, measuring
 
 ```bash
-xdev setup                           # data dir + starter config.yml + next steps
-xdev update --check                  # is a newer release published for the channel?
+xdev update --check                  # is a newer release published for this channel?
 xdev update                          # verify SHA256SUMS, then replace this binary
 xdev update --channel canary         # pre-release tags (v0.2.0-canary.1)
-xdev bench --turns 5 --model @smol   # TTFT + decode p50/p95 for the configured provider
+xdev bench --turns 5 --model @smol   # TTFT + decode p50/p95 through your provider
+xdev stats --serve                   # usage dashboard over the local session store
+xdev usage                           # which accounts are configured + what you spent locally
 ```
 
-`xdev update` resolves the channel's newest release from GitHub releases
+`xdev update` resolves the channel's newest release from GitHub
 (`XDEV_UPDATE_REPO`, default `FreePeak/xdev`; `XDEV_UPDATE_API` for a mirror),
-refuses a release that carries no `SHA256SUMS` entry, refuses when the running
-binary is not writable (printing the exact `chmod u+w <path>` hint), and
-installs by writing a temp file next to the target and renaming — an
-interrupted update never leaves a half-written binary. `--check` only reports.
+refuses a release with no `SHA256SUMS` entry, refuses when the running binary is
+not writable — printing the exact `chmod u+w <path>` — and installs by writing a
+temp file next to the target and renaming, so an interrupted update never leaves
+a half-written binary. `--check` only reports.
 
-`xdev setup` is the non-interactive onboarding pass: it creates
-`~/.xdev/agent/` (plus `sessions/`, `agents/`, `commands/`, `themes/`), writes
-a starter `config.yml` only when none exists, then prints the `models.yml`
-template and which optional external tools (git, rg, fd, ast-grep, gh,
-python3) it found. Re-running it never overwrites an existing file.
+Release binaries are Developer ID-signed and notarized in CI when the `APPLE_*`
+secrets are configured, and ship ad-hoc signed when they are not: a release
+never fails for want of credentials. See
+[`.github/workflows/release.yml`](.github/workflows/release.yml) (job
+`macos-sign`) for the five secret names.
 
-Release binaries are Developer ID-signed and notarized in CI when the
-`APPLE_*` repository secrets are configured, and ship ad-hoc signed when they
-are absent — a release never fails for want of credentials. See
-`.github/workflows/release.yml` (job `macos-sign`) for the five secret names
-and how to produce them.
+## Design principles
 
-## Interactive mode
+1. **A minimal prompt.** The budget is under 1,000 tokens including tool
+   descriptions. Frontier models are RL-trained to act as coding agents; 10,000
+   tokens of instructions are dead weight. Project context arrives through the
+   standard `AGENTS.md` hierarchy (global → project, imports included), and the
+   whole prompt is user-replaceable.
+2. **Four core tools.** `read`, `write`, `edit`, `bash` are the job. Everything
+   else has to earn its place in the request.
+3. **YOLO by default — no permission theater.** Read-data + execute-code +
+   network cannot be contained by prompting or pattern rules. Containment
+   belongs to external sandboxing; the harness documents those patterns
+   ([container & sandbox reference](docs/reference/container-and-sandbox.md))
+   rather than performing security.
+4. **Bounded everything.** Backpressure is a feature. Nothing grows silently
+   with its input.
+5. **Append-only state.** Sessions, transcripts and checkpoints are trees you
+   can read; a fork is a pointer, not a copy.
+6. **Shell out over import.** `git`, `rg`, `fd`, `ast-grep`, `gh`, `python3`
+   and `/usr/bin/security` stay external — optional, probed at setup, never
+   required. Six direct Go dependencies in `go.mod`; the binary stays CGO-free.
 
-`xdev tui` is the Grok-CLI-styled interactive mode (GrokNight/GrokDay themes).
+## Repository layout
 
-**Scrollback** — the transcript is fully scrollable; streaming output never
-drags a scrolled viewport (the `▲ n ▼ n` indicator shows hidden rows):
+One binary (`cmd/xdev`), one internal package per concern: `ai` (the wire
+adapters + the shared SSE/partial-JSON reader), `agent` (the loop, compaction
+ladder, subagents, plan/goal modes, prompt assembly), `session` (the JSONL tree
+store), `tool` (the registry, approvals, output sinks), `tui` (the frame-plan
+renderer over tcell), `config` (layering + the credential chain), and `dist`
+(`setup`/`update`/`bench`). The rest are the seams: `rpc`, `acp`, `protocol`,
+`ext`, `mcpclient`, `memory`, `skills`, `rules`, `hooks`, `theme`, `stats`.
 
-| Keys | Action |
+## Documentation
+
+| Read | What it answers |
 |---|---|
-| PgUp / PgDn | half-page up / down |
-| Ctrl+B / Ctrl+F | half-page up / down (emacs-style) |
-| ↑ / ↓ | recall the previous / next prompt (once history exists) |
-| Shift+↑ / Shift+↓ | line up / down |
-| Home / End | jump to top / back to live |
+| [docs/PRD.md](docs/PRD.md) | scope, architecture, milestones, status — the source of truth |
+| [docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md](docs/research/2026-09-09-omp-pi-architecture-go-rebuild.md) | the architecture research and rebuild blueprint |
+| [docs/reference/session-format.md](docs/reference/session-format.md) | the JSONL tree on disk |
+| [docs/reference/extension-protocol.md](docs/reference/extension-protocol.md) | the subprocess extension handshake |
+| [docs/reference/container-and-sandbox.md](docs/reference/container-and-sandbox.md) | running it contained |
+| [docs/parity/cli.md](docs/parity/cli.md) · [docs/parity/tools.md](docs/parity/tools.md) | measured parity against the omp baseline |
+| [docs/decisions/](docs/decisions/) | the recorded trade-offs, with evidence |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | the checks a PR must pass, and what will not be accepted |
 
-**Slash commands** — dispatched at input-submit, never sent to the model:
+## Status
 
-| Command | Action |
-|---|---|
-| `/new` | fresh session file + cleared transcript |
-| `/clear` | reset context in place (durable `reset_boundary`; history kept on disk) |
-| `/drop` | delete the session file and start fresh |
-| `/rename <title>` | title this session (a manual title beats the generated one) |
-| `/resume [id]`, `/fork`, `/branch`, `/tree` | session picker, fork, and the tree navigator |
-| `/model [@role\|ref]` | switch the active model or assign a role (Alt+M opens the selector) |
-| `/goal [view\|create <objective>\|resume <objective>\|evidence <note>\|complete [notes]\|drop]` | drive the session objective and its token budget; bare `/goal` (or `check`/`status`/`get`) shows it. Creating one starts its first turn, and an active goal keeps working until it is completed, dropped, out of budget, or the turn ends (Esc) |
-| `/plan`, `/vibe`, `/prewalk`, `/advisor`, `/handoff` | run-mode controls |
-| `/memory`, `/skill:<name>`, `/settings`, `/theme`, `/hotkeys`, `/hub` (Alt+A), `/stats`, `/export`, `/share`, `/collab` | knowledge, chrome and sharing |
-| `/help` | list every command |
-| `/quit`, `/q` | quit |
+Milestones M0–M15 are landed (2026-09-09 → 2026-09-12): the provider layer and
+its eight transports, the session core, the agent loop and four tools, the TUI,
+compaction and failover, RPC + subagents + MCP, the memory-hardening audit
+(fuzzers, six-platform cross-builds), model roles and auth, session UX, the
+agent system (task agents, hub, hooks, advisor, prewalk, plan mode), memory and
+skills, the extended tool set, and the v2 modes (vibe, collab, ACP, profiles,
+`/export` + `/share`, goal mode). The distribution surface — the installer,
+`xdev update` and the release pipeline — closed on 2026-09-14. 553 Go files,
+274 of them tests, ~159k lines.
 
-Lifecycle commands refuse while a turn is running (Esc cancels first, Ctrl+C
-quits). Quitting prints the one command that reopens the session just used —
-`xdev --resume <uuid>` (spelled with whatever name the binary was invoked as),
-and nothing when the session never reached disk (`--no-session`, a chat with no
-reply). `xdev -h` lists the launch flags; the flags an omp user expects
-(`-p/-c/-r/-e`, `--approval-mode`, `--smol/--slow/--plan-model`, `--models`,
-`--provider`, `--add-dir`, `--allow-home`, `--yolo`, `--no-prewalk`,
-`--plugin-dir`) are accepted with the same meanings, and
-`docs/parity-delta.md` records every deliberate difference from the baseline.
+What ships is [the release list](https://github.com/FreePeak/xdev/releases).
+What is left is tracked in GitHub issues — this repo has no `TODO.md`, and the
+[PRD](docs/PRD.md) milestone table is the status summary.
 
-**Custom markdown commands** — drop `*.md` files into `<cwd>/.xdev/commands/`
-(project) or `~/.xdev/agent/commands/` (user; project wins on name
-collisions). Optional frontmatter sets `name:`/`description:`; the body is a
-prompt template with quote-aware argument expansion: `$1..$n`, `$@`,
-`$@[start]`, `$@[start:length]`, `$ARGUMENTS`. Unknown `/foo` input falls
-through to the model as ordinary text.
+## Contributing
 
-**Turn budget** — `-max-turns N` caps one run (default 200). At the cap the
-agent wraps up gracefully with a status report instead of dying with an
-error; say "continue" to resume.
-
-## Planned module layout
-
-```text
-xdev/
-  cmd/xdev/            # CLI entry: tui | print | rpc modes
-  internal/ai/         # provider adapters (anthropic, openai-completions, openai-responses, google)
-    internal/ai/sse/   #   shared SSE frame reader, unified AssistantEvent, partial-JSON w/ 256B throttle
-  internal/agent/      # agent loop: steering channels, tool scheduling, cancellation layers
-  internal/session/    # JSONL tree store, entries, buildContext, compaction, blob store, listing
-  internal/tool/       # read/write/edit/bash + registry, approvals, OutputSink, env hardening
-  internal/tui/        # frame-plan renderer over tcell
-  internal/ext/        # subprocess extension protocol (JSONL capability handshake)
-  internal/mcp/        # MCP client via official Go SDK
-  internal/store/      # pure-Go SQLite: history FTS, stats; blob store in stdlib
-  internal/protocol/   # RPC v1/v2 wire types (compatible with omp's where possible)
-```
-
-Module path: `github.com/FreePeak/xdev`. Agent data lives under `~/.xdev/agent/`, with a session format compatible with omp's.
-
-## Memory budget
-
-Hard target: worst case **<100 MB RSS** (~30–70 MB estimated in normal use).
-
-| Component | Budget | Technique |
-|---|---|---|
-| Go runtime + binary + idle GC heap | 8–15 MB | `GOGC` tuning, `debug.SetMemoryLimit` as hard backstop |
-| Provider HTTP/2 connections + TLS | 3–8 MB | Shared `http.Client`, connection reuse, streaming bodies |
-| Session entries in memory (windowed) | 10–30 MB | Materialize only the post-boundary tail; older entries stay on disk |
-| In-flight assistant stream state | 1–3 MB | Only the current message materialized |
-| Tool output sinks | <1 MB | Fixed head+tail windows, artifact spill |
-| TUI frame buffers | 2–6 MB | Viewport-only frames; terminal owns scrollback |
-| JSON decode buffers | 2–5 MB | `json.Decoder` per JSONL line; never unmarshal whole files |
-| MCP child servers | 0 (agent RSS) | Child processes; agent holds pipes + tool descriptors only |
-| **Total worst case** | **~30–70 MB (est.)** | Enforced via memory limit + bounded structures |
-
-## Roadmap
-
-| Milestone | Scope | Exit criterion |
-|---|---|---|
-| M0 | Skeleton + config + logger + memory-limit backstop | binary boots <15 MB RSS |
-| M1 | Provider layer: 2 adapters (Anthropic + OpenAI Responses), SSE, watchdogs, unified events | streamed chat in `print` mode |
-| M2 | Session core: JSONL tree store, buildContext, blob store, listing | resumes an omp-generated session file; context equivalent |
-| M3 | Agent loop + 4 tools + OutputSink + env hardening + approvals | real coding tasks end-to-end |
-| M4 | TUI: frame-plan renderer, editor, history retirement, resize | daily-drivable interactive mode |
-| M5 | Compaction (threshold + overflow + promotion), retry/failover | 200k-token sessions survive |
-| M6 | RPC mode (wire-compatible-ish) + subagents + MCP client | embedders can drive it |
-| M7 | Ext subprocess protocol + FS-scan cache + AST shell-out | parity with omp daily workflow |
-| M8 | Memory hardening audit, fuzzing, cross-platform builds, packaging | <100 MB RSS verified under worst-case transcript |
-| M9 | Model roles + provider/auth layer: roles (`@smol`/`:effort`), models.yml, credential chain, 4 wire transports, Claude/Codex OAuth, config layering + `xdev config` | role aliases resolve across sessions; OAuth login works; config precedence tests pass |
-| M10 | Session UX: slash commands, lifecycle (`/new` `/fork` `--continue`), AGENTS.md hierarchy + imports, system-prompt files, keybindings | continue/resume/fork workflow works; custom markdown commands expand; AGENTS.md reaches context |
-| M11 | Agent system: task agents, hub messaging/processes, hooks, advisor watchdog, prewalk, plan mode | parent spawns scoped subagent steered back via hub; advisor steers; prewalk switches model after first edit |
-| M12 | Knowledge & chrome: memory backend + `/memory`, skills (`skill://`), theme engine, TUI chrome (status line, overlays) | memory summary injects at start; `/skill:` expands; theme live-reloads with all 66 tokens enforced |
-| M13 | Extended tools: eval kernel, notebook, web_search, github, ast-grep, browser, checkpoint/rewind, secrets redaction, LSP, MCP extensions | eval cell persists state; web_search/github/ast-grep answer real queries |
-| M14 | v2 modes & polish: vibe mode, E2E-encrypted collab, multi-provider discovery, profiles, `/export` `/share`, goal mode | vibe session completes delegated multi-worker task; collab guest mirrors host |
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Issues are the task list; every
+PR says what changed and why. There is deliberately no CI gate on a pull
+request — you run the checks yourself before merging: `gofmt -l .`,
+`go vet ./...`, `go test -count=1 ./...`, `go test -race -count=1 ./...`, and
+the six-platform `CGO_ENABLED=0` cross matrix. Agent-authored PRs are welcome
+and hold to the same bar: the human who submits owns every line.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE). Security reporting: [SECURITY.md](SECURITY.md).
+Apache-2.0 — see [LICENSE](LICENSE). Code of conduct:
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Security reporting:
+[SECURITY.md](SECURITY.md).
 
-## Name
+<details>
+<summary>The name</summary>
 
-The repo and product name is **xdev**. The underlying research document explored the working codename **adze** (a small, sharp woodworking adze: light, precise, fast — it cuts exactly what you point it at); that proposal is superseded by the repository name.
+The repository and product name is **xdev**. The research document that
+preceded it explored the working codename **adze** — a small, sharp woodworking
+adze: light, precise, fast, cutting exactly what you point it at. That proposal
+is superseded by the repository name.
+
+</details>
