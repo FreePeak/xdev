@@ -558,9 +558,10 @@ func TestAskCardTimeoutNotices(t *testing.T) {
 // TestTopBarCarriesBranchAndLastPrompt pins the persistent header: once a
 // transcript is on screen, row 0 keeps the git branch AND the newest user
 // prompt collapsed to one line — so the request being answered stays visible
-// even while its transcript band scrolls away. Neither the directory path nor
-// the model name is on the bar (the status row and the composer's info divider
-// carry them; both removals were user-requested).
+// even while its transcript band scrolls away. With a single prompt the bar
+// names it once, not twice. Neither the directory path nor the model name is
+// on the bar (the status row and the composer's info divider carry them; both
+// removals were user-requested).
 func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	dir := t.TempDir()
@@ -579,6 +580,9 @@ func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 			t.Fatalf("top bar %q missing %q", bar, want)
 		}
 	}
+	if got := strings.Count(bar, "fix the tool"); got != 1 {
+		t.Fatalf("one prompt must not be painted twice on %q", bar)
+	}
 	if dirName := dir[strings.LastIndex(dir, "/")+1:]; strings.Contains(bar, dirName) {
 		t.Fatalf("top bar still carries the directory path: %q", bar)
 	}
@@ -593,5 +597,54 @@ func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 	// still names the last prompt.
 	if !strings.Contains(rows[1], "line") {
 		t.Fatalf("first transcript row lost to the top bar: %q", rows[1])
+	}
+}
+
+// TestTopBarCarriesFirstAndLastPrompt: the header names the session's opening
+// request as well as the newest one, so a long chat still says what it is about
+// after the first exchange has scrolled out of the viewport. The first entry is
+// clipped and the newest keeps the wider share — the request being answered is
+// the one the bar must not truncate away — and the bar ends in air instead of
+// painting off the right edge.
+func TestTopBarCarriesFirstAndLastPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.mu.Lock()
+	app.branch = "feat/topbar"
+	app.mu.Unlock()
+	app.AddUserBlock("port the top bar to carry the first prompt of the session too please")
+	app.AddAssistantBlock("done — three files touched")
+	app.AddUserBlock("and clip them to the width")
+	app.AddSystemBlock(strings.Repeat("line\n", 60))
+	app.draw()
+
+	bar := strings.TrimRight(strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0], " ")
+	// The opening prompt keeps the front of its collapsed line and pays for it
+	// with an ellipsis; the newest prompt is what the bar refuses to cut.
+	if !strings.Contains(bar, "· port the top bar to carry the first prompt of the ") {
+		t.Fatalf("first prompt missing or misclipped from top bar %q", bar)
+	}
+	if !strings.HasSuffix(bar, "… · and clip them to the width") {
+		t.Fatalf("newest prompt clipped or misplaced on top bar %q", bar)
+	}
+	if len([]rune(bar)) > 99 {
+		t.Fatalf("top bar spills past the right edge (%d cells): %q", len([]rune(bar)), bar)
+	}
+}
+
+// TestTopBarNarrowKeepsNewestPrompt: on a bar too small for both, the newest
+// prompt — the request on screen — is the one that survives.
+func TestTopBarNarrowKeepsNewestPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 44, 24)
+	app.AddUserBlock(strings.Repeat("first ", 20))
+	app.AddUserBlock("second")
+	app.AddSystemBlock(strings.Repeat("line\n", 20))
+	app.draw()
+
+	bar := strings.TrimRight(strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0], " ")
+	if !strings.Contains(bar, "· second") {
+		t.Fatalf("narrow bar must keep the newest prompt: %q", bar)
+	}
+	if len([]rune(bar)) > 43 {
+		t.Fatalf("narrow bar spills past the right edge (%d cells): %q", len([]rune(bar)), bar)
 	}
 }
