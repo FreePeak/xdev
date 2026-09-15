@@ -634,28 +634,33 @@ func main() {
 			}
 		}
 		prompt := strings.Join(args, " ")
-		if prompt == "" && !*continueLast && *resumePrefix == "" && *forkID == "" && *fromClaude == "" && *fromCodex == "" {
-			if stdinIsTerminal() {
-				// Bare interactive invocation: open the TUI.
-				code, err := runTUI(printOptions{
-					Model:        *model,
-					ContinueLast: *continueLast,
-					ResumePrefix: *resumePrefix,
-					FromClaude:   *fromClaude,
-					FromCodex:    *fromCodex,
-					ForkID:       *forkID,
-					SystemPrompt: *systemPrompt,
-					AppendSystem: *appendSystemPrompt,
-					Personality:  *personality,
-					MaxTokens:    *maxTokens,
-				}, *themeName)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "xdev:", err)
-					os.Exit(2)
-				}
-				os.Exit(code)
+		// A terminal with no prompt is an interactive request: open the TUI,
+		// which honors --resume/--continue/--fork/--from-* itself. Guarding this
+		// on "no session flags" instead sent `xdev --resume <id>` into print mode
+		// with an empty prompt, which streams an UNPROMPTED agent turn into the
+		// very session it was asked to reopen. The exit hint prints that bare
+		// form, so this is the path every user hits first.
+		if prompt == "" && !*printModeFlag && stdinIsTerminal() {
+			code, err := runTUI(printOptions{
+				Model:        *model,
+				ContinueLast: *continueLast,
+				ResumePrefix: *resumePrefix,
+				FromClaude:   *fromClaude,
+				FromCodex:    *fromCodex,
+				ForkID:       *forkID,
+				SystemPrompt: *systemPrompt,
+				AppendSystem: *appendSystemPrompt,
+				Personality:  *personality,
+				MaxTokens:    *maxTokens,
+			}, *themeName)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "xdev:", err)
+				os.Exit(2)
 			}
-			// Pipe usage: read the prompt from stdin.
+			os.Exit(code)
+		}
+		if prompt == "" && !*continueLast && *resumePrefix == "" && *forkID == "" && *fromClaude == "" && *fromCodex == "" {
+			// Headless with no session flag: read the prompt from stdin.
 			buf := make([]byte, 0, 4096)
 			tmp := make([]byte, 4096)
 			for {
