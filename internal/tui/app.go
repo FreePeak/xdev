@@ -2285,7 +2285,21 @@ func stThinkingHdr(a *App, running bool) tcell.Style {
 
 // --- drawing ---
 
+// draw paints the state into the screen buffer (paint, under a.mu) and then
+// flushes to the tty WITHOUT the lock. The flush is a synchronous write a
+// suspended terminal or full tty buffer can block for minutes — measured
+// 12m9s (#283 RCA §1: held across it, that freeze starved every provider
+// delta waiting on a.mu and let the stream watchdog kill a healthy stream).
+// With Show outside the lock, a frozen tty costs display freshness only;
+// the agent goroutine is never blocked by it.
 func (a *App) draw() {
+	a.paint()
+	a.scr.Show()
+}
+
+// paint renders the current state into the screen buffer. a.mu guards the
+// state reads; it must NEVER be held across the Show() flush (see draw).
+func (a *App) paint() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := a.scr
@@ -2310,7 +2324,6 @@ func (a *App) draw() {
 		a.drawAskCard(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
-		s.Show()
 		return
 	}
 
@@ -2440,7 +2453,6 @@ func (a *App) draw() {
 	a.drawAskCard(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
-	s.Show()
 }
 
 // drawSlashDropdown renders the "/" autocomplete popup above the composer

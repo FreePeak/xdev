@@ -268,6 +268,10 @@ func (p *GoogleGenAIProvider) streamAt(ctx context.Context, req StreamRequest, u
 	if err != nil {
 		return nil, err
 	}
+	// Fetch-origin timing: ttft/duration must include connect +
+	// gateway queue + prefill — the wait the user feels (#283; see the
+	// full comment in anthropic.go).
+	start := time.Now()
 	sctx, cancel := context.WithCancel(ctx)
 	resp, err := wirePost(sctx, p.httpClient, url, headers, body, p.API())
 	if err != nil {
@@ -275,7 +279,6 @@ func (p *GoogleGenAIProvider) streamAt(ctx context.Context, req StreamRequest, u
 		return nil, err
 	}
 	ch := make(chan Event, 64)
-	start := time.Now()
 	go func() {
 		defer resp.Body.Close()
 		defer cancel()

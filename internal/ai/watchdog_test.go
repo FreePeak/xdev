@@ -117,3 +117,52 @@ func TestWatchdogForwardsTerminalEventDespiteStreamTeardown(t *testing.T) {
 		t.Fatalf("terminal event dropped: %+v", got)
 	}
 }
+
+func TestWatchdogBackPressureDoesNotAbort(t *testing.T) {
+	// #283 RCA §1: a frozen UI stopped the consumer, the relay jammed, the
+	// idle window expired on UNDELIVERED source events, and the stale
+	// expiry (Go's select may hand it back before the receive branch once
+	// delivery resumes) aborted a stream that was healthy at the socket —
+	// each episode costing a backoff, a retry and one injected fake-user
+	// continuation turn. Delivery starvation must never become a verdict.
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := make(chan Event, 64) // same capacity as the relay's own buffer
+	out := withWatchdog(context.Background(), cancel, src, 20*time.Millisecond, 60*time.Millisecond)
+
+	const n = 300 // > src cap + out cap: delivery cannot keep up without a reader
+	go func() {
+		for i := range n {
+			src <- Event{Type: EventTextDelta, Delta: fmt.Sprint(i)}
+		}
+		close(src)
+	}()
+
+	// Three jam rounds: fill the buffers, let the idle window expire well
+	// past, then release exactly one event. Pre-fix, every release is a
+	// coin flip between the receive branch and the stale expiry.
+	got := 0
+	for range 3 {
+		time.Sleep(200 * time.Millisecond)
+		select {
+		case ev := <-out:
+			if ev.Type == EventError {
+				t.Fatalf("back-pressure stall aborted a live stream: %v", ev.Err)
+			}
+			got++
+		default:
+			t.Fatal("relay delivered nothing after the stall")
+		}
+	}
+
+	// Drain: every event must arrive and no error event may appear.
+	for ev := range out {
+		if ev.Type == EventError {
+			t.Fatalf("relay emitted %v on a completed stream", ev.Err)
+		}
+		got++
+	}
+	if got != n {
+		t.Fatalf("delivered %d of %d events", got, n)
+	}
+}

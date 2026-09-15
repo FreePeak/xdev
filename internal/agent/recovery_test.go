@@ -469,3 +469,50 @@ func TestEscalationRoundsAreBounded(t *testing.T) {
 		t.Fatalf("stream calls = %d, want %d (bounded escalation)", len(p.gotReqs), want)
 	}
 }
+
+// TestContinuationInjectionAttributedAndHooked pins #283: the injected
+// cut-off recovery turn must carry the harness attribution (never
+// masquerade as user input in the store or in stats) and must fire
+// OnContinuation so the live transcript can render it as a harness event.
+func TestContinuationInjectionAttributedAndHooked(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("partial "),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall"}),
+		}},
+		{events: []ai.Event{textEvent("continued"), doneEvent("continued")}},
+	}}
+	var injected []string
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	st := session.OpenMem("test", "t")
+	hooks := TurnHooksFunc{
+		OnMessageEndF:    func(m *ai.Message) { _ = st.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = st.Append(&session.MessageEntry{Message: *m}) },
+		OnContinuationF:  func(text string) { injected = append(injected, text) },
+	}
+	a := &Agent{Provider: p, Tools: reg, Hooks: hooks, Store: st}
+	a.Retry = fastRetry()
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("retain-and-continue must recover: %v", err)
+	}
+	if len(injected) != 1 || injected[0] != ContinuationPrompt {
+		t.Fatalf("OnContinuation fired %v", injected)
+	}
+	var found bool
+	for _, e := range st.Entries() {
+		me, ok := e.(*session.MessageEntry)
+		if !ok {
+			continue
+		}
+		if me.Message.Text() == ContinuationPrompt {
+			found = true
+			if me.Message.Attribution != ContinuationAttribution {
+				t.Fatalf("persisted continuation attribution = %q, want %q", me.Message.Attribution, ContinuationAttribution)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("continuation turn was not persisted at all")
+	}
+}

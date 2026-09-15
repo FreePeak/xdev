@@ -286,6 +286,11 @@ func (p *AnthropicProvider) headers() map[string]string {
 
 // Stream implements Provider.
 func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {
+	// start is the fetch origin: connect + gateway queue + prefill belong
+	// to the user's wait, so recorded ttft/duration match what is felt
+	// (#283: stamping it after the headers made xdev's own metrics show
+	// 7.3 s steps while users waited 17 s).
+	start := time.Now()
 	sctx, cancel := context.WithCancel(ctx)
 	body, err := p.buildRequest(req)
 	if err != nil {
@@ -315,7 +320,6 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 		return nil, err
 	}
 	ch := make(chan Event, 64)
-	start := time.Now()
 	go func() {
 		defer resp.Body.Close()
 		defer cancel()

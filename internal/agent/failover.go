@@ -20,6 +20,12 @@ type FailoverTarget struct {
 // whose partial output was retained (omp turn-recovery continuation).
 const ContinuationPrompt = "your previous message was cut off by a provider error — continue exactly where it stopped"
 
+// ContinuationAttribution tags the injected user turn that follows a
+// retained partial: harness text the user never typed. The transcript
+// renders it as a harness event and the stats keep it out of the user
+// turn count (#283: 27 such turns were masquerading as user input).
+const ContinuationAttribution = "provider-continuation"
+
 // currentWindow returns the active target's context window (the promotion
 // ladder compares against it).
 func (a *Agent) currentWindow() int {
