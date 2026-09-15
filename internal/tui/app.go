@@ -553,6 +553,23 @@ func (a *App) AddCost(usd float64) {
 	a.mu.Unlock()
 }
 
+// SetContextReplay measures a replayed transcript for the HUD's context
+// segment. A resumed, switched-to or rewound session rebuilds its history
+// without sending a request, so AddUsage has not run and the live number is
+// still zero. Callers pass the agent's own context measure (agent.ContextTokens
+// of the rebuilt messages) — the same number compaction triggers on, so HUD and
+// loop can never disagree. It only ever raises the number: a request that just
+// answered knows better than a replay of what led to it. n <= 0 (an empty
+// history) leaves the segment hidden rather than claiming zero.
+func (a *App) SetContextReplay(n int64) {
+	a.mu.Lock()
+	if n > a.st.CtxUsed {
+		a.st.CtxUsed = n
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
 // SetContextWindow records the model's context window for the HUD context
 // segment (0 = unknown: the segment hides).
 func (a *App) SetContextWindow(tokens int64) {
@@ -873,13 +890,17 @@ func (a *App) ResumeSession(query string) error {
 	return nil
 }
 
-// Reset clears the transcript (used by /clear): all blocks gone, viewport
-// back to follow. Streaming state is untouched — callers must not be
-// running a turn when they call this.
+// Reset clears the transcript (used by /clear, /new, /drop, /resume and tree
+// navigation): all blocks gone, viewport back to follow, and the context
+// segment's number goes with them — an emptied transcript occupies nothing, so
+// leaving the previous session's measurement on the row would lie. A replayed
+// session measures the history back in with SetContextReplay. Streaming state is
+// untouched — callers must not be running a turn when they call this.
 func (a *App) Reset() {
 	a.mu.Lock()
 	a.blocks = nil
 	a.sm = newScrollModel()
+	a.st.CtxUsed = 0
 	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
@@ -2841,10 +2862,16 @@ var statusSegments = map[string]bool{
 }
 
 // defaultStatusSegments is the shipped layout: the session clock, the token
-// counters and the decode speed, right-aligned (the clock reads leftmost so
-// the rate's own " │ " stays the row's right edge). The model keeps its
-// composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"time", "tokens", "rate"}
+// counters, the live context total and the decode speed, right-aligned (the
+// clock reads leftmost so the rate's own " │ " stays the row's right edge).
+// The context segment is the number: what this session's context costs against
+// the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
+// request's provider-reported input+output, which already covers the system
+// prompt, the visible history and the tool schemas. It hides while either half
+// is unknown (an undiscovered window, or a session that has not answered yet),
+// so a fresh run keeps a clean row. The model keeps its composer divider slot,
+// which is chrome rather than a segment.
+var defaultStatusSegments = []string{"time", "tokens", "context", "rate"}
 
 // hudHasClock reports whether the effective HUD layout renders the time
 // segment (caller holds a.mu). When it does, the UI loop repaints at 1 Hz

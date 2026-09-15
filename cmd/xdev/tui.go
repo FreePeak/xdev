@@ -290,6 +290,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if len(store.Entries()) > 0 {
 		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
+			app.SetContextReplay(agent.ContextTokens(res.Messages))
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -446,6 +447,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		saveBreadcrumb(breadcrumbPath(ns))
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
+			app.SetContextReplay(agent.ContextTokens(res.Messages))
 		}
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
@@ -539,6 +541,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		app.Reset()
 		replayTranscript(app, res.Messages)
+		app.SetContextReplay(agent.ContextTokens(res.Messages))
 	}
 	// navigateTree is the port of omp's session.navigateTree (the tree
 	// selector's Enter / Shift+Enter / Alt+S): the leaf lands on the
