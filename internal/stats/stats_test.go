@@ -361,3 +361,38 @@ func TestHumanTokens(t *testing.T) {
 		}
 	}
 }
+
+// TestScanCountsInjectedTurnsSeparately pins #283: harness-written user
+// messages (provider continuations, goal nudges) must not inflate the
+// user-message count.
+func TestScanCountsInjectedTurnsSeparately(t *testing.T) {
+	dataDir := t.TempDir()
+	ts := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	mk := func(id, attr string) session.Entry {
+		return &session.MessageEntry{
+			Env: session.Envelope{ID: id, Timestamp: ts},
+			Message: ai.Message{
+				Role:        ai.RoleUser,
+				Attribution: attr,
+				Content:     []ai.Block{ai.TextBlock{Text: "t-" + id}},
+			},
+		}
+	}
+	entries := []session.Entry{
+		mk("u1", ""),                      // legacy / omp files: user
+		mk("u2", "user"),                  // typed input: user
+		mk("u3", "provider-continuation"), // #283 injected: harness
+		mk("u4", "goal-continuation"),     // goal nudge: harness
+	}
+	writeSessionFile(t, dataDir, "-tmp-fixture", "sess-inj", "/tmp/fixture", "auto", ts, entries)
+	rep, err := Scan(Options{DataDir: dataDir, NoRollup: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Totals.UserMessages != 2 {
+		t.Fatalf("userMessages = %d, want 2", rep.Totals.UserMessages)
+	}
+	if rep.Totals.InjectedTurns != 2 {
+		t.Fatalf("injectedTurns = %d, want 2", rep.Totals.InjectedTurns)
+	}
+}

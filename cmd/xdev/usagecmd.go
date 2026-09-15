@@ -430,6 +430,7 @@ func usageObservedText(b *strings.Builder, o usageObserved) {
 		fmt.Fprintf(b, "  %-12s %s (as passed to --since)\n", "window", o.Since)
 	}
 	fmt.Fprintf(b, "  %-12s %d (%d priced)\n", "turns", t.Turns, t.PricedTurns)
+	fmt.Fprintf(b, "  %-12s %d (harness-injected, not user input)\n", "injected", t.InjectedTurns)
 	fmt.Fprintf(b, "  %-12s total %s (in %s · out %s · cache read %s · cache write %s)\n", "tokens",
 		stats.HumanTokens(t.TotalTokens), stats.HumanTokens(t.Input), stats.HumanTokens(t.Output),
 		stats.HumanTokens(t.CacheRead), stats.HumanTokens(t.CacheWrite))

@@ -1862,6 +1862,13 @@ func (h *tuiHooks) OnToolResultMessage(msg *ai.Message) {
 }
 
 func (h *tuiHooks) OnTurnEnd(reason ai.StopReason, err error) {}
+
+// OnContinuation surfaces the injected cut-off recovery turn live: a
+// harness event, not a fake user prompt (#283).
+func (h *tuiHooks) OnContinuation(text string) {
+	h.ts.app.AddSystemBlock("· provider cut off mid-message — partial retained, continuation injected")
+}
+
 func (h *tuiHooks) OnCompaction(tokensBefore int64) {
 	h.ts.app.AddSystemBlock(fmt.Sprintf("· context compacted (~%d tokens)", tokensBefore))
 }
@@ -1896,7 +1903,14 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 		case ai.RoleUser:
 			// Goal-continuation prompts are harness text the user never
 			// typed: replaying them as ❯ blocks would invent turns that
-			// never happened.
+			// never happened. A provider cut-off recovery is the same
+			// kind of harness turn, but it is worth seeing — it marks
+			// the episode where the stream died — so it replays as a
+			// system event instead of a user prompt (#283).
+			if m.Attribution == agent.ContinuationAttribution {
+				app.AddSystemBlock("· recovered provider cut-off — continuation injected")
+				continue
+			}
 			if m.Attribution == agent.GoalContinuationAttribution {
 				continue
 			}

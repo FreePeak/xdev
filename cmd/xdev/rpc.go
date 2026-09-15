@@ -335,3 +335,7 @@ func (h *rpcHandler) OnToolResultMessage(m *ai.Message) {
 func (h *rpcHandler) OnCompaction(before int64) {}
 
 func (h *rpcHandler) OnTurnEnd(s ai.StopReason, err error) {}
+
+// OnContinuation: same — the injected turn persists as an attributed
+// message entry, so readers of the store can still count it (#283).
+func (h *rpcHandler) OnContinuation(text string) {}

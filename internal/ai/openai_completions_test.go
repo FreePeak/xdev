@@ -3,10 +3,12 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // completionsFrames is a happy-path stream: text then a tool call, usage on
@@ -209,5 +211,49 @@ func TestOpenAICompletionsHTTPError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "bad key") {
 		t.Fatalf("error = %v, want status + snippet", err)
+	}
+}
+
+// TestOpenAICompletionsTTFTIncludesGatewayQueue pins the #283 metric fix:
+// the clock starts at fetch, so the queue + prefill wait before response
+// headers is inside the recorded ttft. If start were stamped after the
+// headers, this number would sit near zero while users wait seconds —
+// the blind spot that hid the UI-stall episode (RCA §3).
+func TestOpenAICompletionsTTFTIncludesGatewayQueue(t *testing.T) {
+	const hold = 300 * time.Millisecond
+	frames := [][2]string{
+		{"", `{"id":"q","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`},
+		{"", `{"id":"q","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`},
+		{"", `{"id":"q","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1}}`},
+		{"", `[DONE]`},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(hold) // gateway queue + prefill before headers
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		for _, f := range frames {
+			fmt.Fprintf(w, "data: %s\n\n", f[1])
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+	p := NewOpenAICompletionsProvider("router", srv.URL, "sk-test", nil, nil)
+	ch, err := p.Stream(context.Background(), StreamRequest{
+		Model:    "free",
+		Messages: []Message{{Role: RoleUser, Content: []Block{TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	evs := collectEvents(t, ch)
+	done := evs[len(evs)-1]
+	if done.Message == nil {
+		t.Fatalf("no message on done: %+v", done)
+	}
+	if done.Message.TTFTMS < hold.Milliseconds() {
+		t.Fatalf("ttft %dms omits the %dms queue — start stamped after headers again", done.Message.TTFTMS, hold.Milliseconds())
+	}
+	if done.Message.DurationMS < done.Message.TTFTMS {
+		t.Fatalf("duration %dms < ttft %dms", done.Message.DurationMS, done.Message.TTFTMS)
 	}
 }

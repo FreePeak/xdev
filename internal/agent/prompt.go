@@ -25,6 +25,7 @@ Rules:
 - Prefer minimal, surgical edits; keep the codebase boring and consistent with its conventions.
 - Verify changes: run the relevant build/test command before claiming success.
 - Never invent file contents; read before editing. Never leave placeholders or stubs.
+- Inspect files with the structured tools (read, grep), not bash cat/sed/pipes: they page exactly what you asked for into context; raw shell output dumps whole files in.
 - If blocked by missing information you cannot obtain with tools, say so plainly.`
 
 // SubagentSystemPromptBase is the child's system prompt: same working
