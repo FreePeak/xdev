@@ -104,57 +104,49 @@ func TestCapabilityFromEnv(t *testing.T) {
 	}
 }
 
-// The built-in palettes must actually carry the diff slots: Theme.Get falls
-// back through text_primary to a fixed gray, so an unpopulated palette would
-// render every diff row the same colour as prose and no test of the renderer
-// could tell the difference.
-func TestBuiltinThemesPopulateDiffSlots(t *testing.T) {
+// The built-in palettes leave the diff slots to the terminal: the TUI cannot
+// learn the emulator's palette, so a fixed green/red it picks for itself is
+// free to land on the user's — Slot must say "no colour here" for exactly the
+// three slots the diff renderer reads, and nothing else.
+func TestBuiltinThemesLeaveDiffToTerminal(t *testing.T) {
 	for _, name := range []string{"groknight", "grokday"} {
 		th := Builtins()[name]
 		for _, slot := range []string{ToolDiffAdded, ToolDiffRemoved, ToolDiffContext} {
-			c, ok := th.Slot(slot)
-			if !ok {
-				t.Errorf("%s: %s unset", name, slot)
-				continue
+			if c, ok := th.Slot(slot); ok {
+				t.Errorf("%s: %s pins %+v, want the terminal's own ink", name, slot, c)
 			}
-			// Added and removed must not be the same colour, and neither may
-			// collapse onto the context gray.
-			if slot == ToolDiffAdded {
-				if r, _ := th.Slot(ToolDiffRemoved); c == r {
-					t.Errorf("%s: added == removed", name)
-				}
+			// The slots still carry the palette's green/red as color-blind
+			// mode's source pair — Get answers, Slot abstains.
+			if th.Get(slot) == (Color{}) {
+				t.Errorf("%s: %s has no palette color for the color-blind remap", name, slot)
 			}
-			if slot != ToolDiffContext {
-				if ctx, _ := th.Slot(ToolDiffContext); c == ctx {
-					t.Errorf("%s: %s equals the context color", name, slot)
-				}
-			}
+		}
+		if _, ok := th.Slot(AccentError); !ok {
+			t.Errorf("%s: only the diff slots may be terminal-default", name)
 		}
 	}
 }
 
-// Color-blind mode remaps the diff inks along with the status accents — it can
-// only do that once the palettes define the slots (the remap skips absent ones).
+// Color-blind mode exists because the diff's whole meaning rides on a
+// red/green pair some readers cannot separate, so it must override the
+// built-ins' terminal-default mark, not skip over it.
 func TestColorBlindRemapsDiffSlots(t *testing.T) {
 	for _, name := range []string{"groknight", "grokday"} {
 		base := Builtins()[name]
 		cb := ApplyColorBlindMode(base)
-		add, _ := base.Slot(ToolDiffAdded)
-		rem, _ := base.Slot(ToolDiffRemoved)
-		cbAdd, _ := cb.Slot(ToolDiffAdded)
+		cbAdd, ok := cb.Slot(ToolDiffAdded)
 		cbRem, _ := cb.Slot(ToolDiffRemoved)
-		if cbAdd == add || cbRem == rem {
-			t.Errorf("%s: colorblind left the diff inks unchanged", name)
+		if !ok {
+			t.Fatalf("%s: colorblind must pin the added ink, not leave it to the terminal", name)
 		}
 		if cbAdd == cbRem {
 			t.Errorf("%s: colorblind collapsed added and removed to one color", name)
 		}
-		ctx, _ := cb.Slot(ToolDiffContext)
-		if ctx == cbAdd || ctx == cbRem {
-			t.Errorf("%s: colorblind diff context collides with an ink", name)
+		if cbAdd != cb.Get(AccentSuccess) || cbRem != cb.Get(AccentError) {
+			t.Errorf("%s: diff inks must join the success/error pair: %+v vs %+v", name, []Color{cbAdd, cbRem}, []Color{cb.Get(AccentSuccess), cb.Get(AccentError)})
 		}
-		if add == rem {
-			t.Fatalf("%s: base palette has no added/removed distinction to test", name)
+		if base.TerminalDefault(ToolDiffAdded) != true {
+			t.Errorf("%s: the mode must remap a copy, not the shared built-in", name)
 		}
 	}
 }
