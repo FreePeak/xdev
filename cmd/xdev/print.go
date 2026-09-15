@@ -2374,6 +2374,13 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 	case ai.EventToolcallStart:
 		fmt.Fprintf(os.Stderr, "\n⟨%s⟩\n", ev.ToolName)
 	case ai.EventError:
+		// The recovery ladder retries transient wire errors; printing the
+		// full message once per attempt is noise (and alarming). Hard
+		// errors still print verbatim — the turn ends on them.
+		if ai.Classify(ev.Err) == ai.ClassTransient {
+			fmt.Fprintln(os.Stderr, "\n[stream error: retrying]")
+			break
+		}
 		fmt.Fprintf(os.Stderr, "\n[stream error: %v]\n", ev.Err)
 	}
 }

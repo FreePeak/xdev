@@ -535,6 +535,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		policy = DefaultRetryPolicy()
 	}
 	attempt, continued, compacted := 0, false, false
+	escalation := 0
 	interrupted := 0
 	for {
 		msg, err := a.oneTurn(ctx, system, history)
@@ -584,11 +585,24 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, err
 			}
 			if attempt >= policy.MaxRetries {
-				// Ladder drained: fail over to the next model-host;
-				// without one the error surfaces.
+				// Ladder drained: fail over to the next model-host.
 				if nxt := a.nextFailoverTarget(); nxt > 0 {
 					a.switchTarget(nxt, "recovery")
 					attempt = 0
+					continue
+				}
+				// Chain drained too. "Always retry" survives an outage
+				// that outlasts one pass through the chain by re-running
+				// the ladder on the current target — bounded rounds, so
+				// a hard failure misclassified as transient still ends
+				// the turn (see maxEscalationRounds in retry.go).
+				if escalation < maxEscalationRounds {
+					escalation++
+					attempt = 0
+					logx.Errorf("recovery: all targets drained, escalation round %d/%d after backoff", escalation, maxEscalationRounds)
+					if serr := sleepBackoff(ctx, policy.delay(policy.MaxRetries+1)); serr != nil {
+						return nil, history, serr
+					}
 					continue
 				}
 				return nil, history, err

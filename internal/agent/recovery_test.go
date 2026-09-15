@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -373,21 +374,98 @@ func TestFailoverAfterRetryLadderDrains(t *testing.T) {
 }
 
 func TestFailoverChainExhaustedSurfaces(t *testing.T) {
-	// Every target drains its ladder: the last error surfaces.
-	primary := &fakeProvider{calls: []fakeScript{
-		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
-		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
-	}}
-	backup := &fakeProvider{calls: []fakeScript{
-		{err: &ai.HTTPError{API: "b", Status: 500, Body: "boom"}},
-		{err: &ai.HTTPError{API: "b", Status: 500, Body: "boom"}},
-	}}
+	// Every target drains its ladder. The primary gets exactly one ladder
+	// (the chain never bounces back mid-turn); the last target then runs
+	// the bounded escalation rounds before the error surfaces.
+	boom := func(api string) fakeScript {
+		return fakeScript{err: &ai.HTTPError{API: api, Status: 500, Body: "boom"}}
+	}
+	primary := &fakeProvider{calls: []fakeScript{boom("a"), boom("a")}}
+	backupCalls := 2 * (maxEscalationRounds + 1) // one ladder per round (MaxRetries 1)
+	var backupScripts []fakeScript
+	for i := 0; i < backupCalls; i++ {
+		backupScripts = append(backupScripts, boom("b"))
+	}
+	backup := &fakeProvider{calls: backupScripts}
 	a, s := ladderAgent(t, primary, backup)
 	_, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
 	if err == nil {
 		t.Fatal("expected error after the chain exhausted")
 	}
-	if len(primary.gotReqs) != 2 || len(backup.gotReqs) != 2 {
-		t.Fatalf("calls primary=%d backup=%d, want 2/2", len(primary.gotReqs), len(backup.gotReqs))
+	if len(primary.gotReqs) != 2 {
+		t.Fatalf("primary calls = %d, want 2 (one ladder, then fail over)", len(primary.gotReqs))
+	}
+	if len(backup.gotReqs) != backupCalls {
+		t.Fatalf("backup calls = %d, want %d (bounded escalation rounds)", len(backup.gotReqs), backupCalls)
+	}
+}
+
+// TestStreamEndedWithoutFinishReasonRetriesAndResumes is the end-to-end pin
+// for the session-killing bug: the adapters' "clean EOF, no terminal event"
+// error — the exact string openai_completions.go emits — must classify as
+// transient so the ladder retries and the run resumes instead of ending.
+func TestStreamEndedWithoutFinishReasonRetriesAndResumes(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{err: errors.New("openai-completions: stream ended without finish_reason")},
+		{events: []ai.Event{ai.Event{Type: ai.EventStart}, textEvent("recovered"), doneEvent("recovered")}},
+	}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("a stream-ended error must not end the session: %v", err)
+	}
+	if final.Text() != "recovered" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream calls = %d, want 2 (retry + success)", len(p.gotReqs))
+	}
+}
+
+func oneShotRetry() RetryPolicy {
+	return RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+}
+
+func TestEscalationRoundsRecoverAfterChainDrains(t *testing.T) {
+	// No failover chain: the ladder drains, and the FIRST escalation round
+	// must be allowed to succeed — an outage slightly longer than the
+	// ladder no longer ends the session.
+	p := &fakeProvider{calls: []fakeScript{
+		{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}},
+		{err: errors.New("openai-completions: stream ended without finish_reason")},
+		{events: []ai.Event{textEvent("ok after round 1"), doneEvent("ok after round 1")}},
+	}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = oneShotRetry()
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("escalation round 1 must get a chance: %v", err)
+	}
+	if final.Text() != "ok after round 1" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(p.gotReqs) != 3 {
+		t.Fatalf("stream calls = %d, want 3 (ladder 2 + round 1)", len(p.gotReqs))
+	}
+}
+
+func TestEscalationRoundsAreBounded(t *testing.T) {
+	// A hard failure the classifier believes is transient must still end:
+	// (MaxRetries+1) calls per round × (1 + maxEscalationRounds) rounds.
+	var calls []fakeScript
+	want := (oneShotRetry().MaxRetries + 1) * (maxEscalationRounds + 1)
+	for i := 0; i < want; i++ {
+		calls = append(calls, fakeScript{err: &ai.HTTPError{API: "a", Status: 500, Body: "boom"}})
+	}
+	p := &fakeProvider{calls: calls}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = oneShotRetry()
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("an always-failing provider must eventually surface")
+	}
+	if len(p.gotReqs) != want {
+		t.Fatalf("stream calls = %d, want %d (bounded escalation)", len(p.gotReqs), want)
 	}
 }

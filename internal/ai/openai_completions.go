@@ -56,10 +56,26 @@ type openaiWireToolCall struct {
 }
 
 type openaiWireMessage struct {
-	Role       string               `json:"role"`
-	Content    *string              `json:"content"`
+	Role string `json:"role"`
+	// Content is a string for every text-only message and a []part array for
+	// one carrying images — the two shapes the endpoint accepts. any is not
+	// sloppiness here: the array form is a different JSON type, so no single
+	// Go type can name both.
+	Content    any                  `json:"content"`
 	ToolCalls  []openaiWireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string               `json:"tool_call_id,omitempty"`
+}
+
+// openaiWirePart is one element of a multimodal content array. Only image_url
+// uses the nested shape; text parts leave URL nil, which omits the object.
+type openaiWirePart struct {
+	Type     string              `json:"type"`
+	Text     string              `json:"text,omitempty"`
+	ImageURL *openaiWireImageURL `json:"image_url,omitempty"`
+}
+
+type openaiWireImageURL struct {
+	URL string `json:"url"`
 }
 
 type openaiWireTool struct {
@@ -84,10 +100,44 @@ type openaiWireRequest struct {
 	StreamOptions   *openaiWireStreamOptions `json:"stream_options,omitempty"`
 	Tools           []openaiWireTool         `json:"tools,omitempty"`
 	ReasoningEffort string                   `json:"reasoning_effort,omitempty"`
+	// PromptCacheKey is this wire's cache-affinity field: a stable value routes
+	// a session's turns to one cached prefix. It rides only on a first-party
+	// endpoint (see promptCacheKey).
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
-// strPtr returns a pointer to s (nil only when we mean JSON null).
-func strPtr(s string) *string { return &s }
+// userContent maps a user message onto this wire: a plain string when it is
+// text, the part array when it carries images. An image is sent as a data URL,
+// which is the only form the chat endpoint accepts inline.
+func userContent(m Message) any {
+	imgs := 0
+	for _, b := range m.Content {
+		if _, ok := b.(ImageBlock); ok {
+			imgs++
+		}
+	}
+	if imgs == 0 {
+		return m.Text()
+	}
+	parts := []openaiWirePart{}
+	if t := m.Text(); t != "" {
+		parts = append(parts, openaiWirePart{Type: "text", Text: t})
+	}
+	for _, b := range m.Content {
+		ib, ok := b.(ImageBlock)
+		if !ok {
+			continue
+		}
+		if s := ib.Source; s.Type == "base64" {
+			parts = append(parts, openaiWirePart{Type: "image_url", ImageURL: &openaiWireImageURL{
+				URL: "data:" + s.MediaType + ";base64," + s.Data,
+			}})
+		} else {
+			parts = append(parts, openaiWirePart{Type: "image_url", ImageURL: &openaiWireImageURL{URL: s.Data}})
+		}
+	}
+	return parts
+}
 
 // buildRequest maps the unified conversation onto the chat/completions shape.
 // Content is a plain string on this wire; thinking blocks are dropped (the
@@ -106,8 +156,11 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 		Stream:        true,
 		StreamOptions: &openaiWireStreamOptions{IncludeUsage: true},
 	}
+	if k := promptCacheKey(p.baseURL, req.Cache.Key); k != "" {
+		wr.PromptCacheKey = k
+	}
 	if req.System != "" {
-		wr.Messages = append(wr.Messages, openaiWireMessage{Role: "system", Content: strPtr(req.System)})
+		wr.Messages = append(wr.Messages, openaiWireMessage{Role: "system", Content: req.System})
 	}
 	if req.Thinking != nil {
 		wr.ReasoningEffort = reasoningEffort(req.Thinking.Tokens)
@@ -125,7 +178,7 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 	for _, m := range req.Messages {
 		switch m.Role {
 		case RoleUser:
-			wr.Messages = append(wr.Messages, openaiWireMessage{Role: "user", Content: strPtr(m.Text())})
+			wr.Messages = append(wr.Messages, openaiWireMessage{Role: "user", Content: userContent(m)})
 		case RoleAssistant:
 			var toolCalls []openaiWireToolCall
 			var text strings.Builder
@@ -146,13 +199,13 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 			}
 			wm := openaiWireMessage{Role: "assistant", Content: nil, ToolCalls: toolCalls}
 			if toolCalls == nil {
-				wm.Content = strPtr(text.String())
+				wm.Content = text.String()
 			}
 			wr.Messages = append(wr.Messages, wm)
 		case RoleToolResult:
 			wr.Messages = append(wr.Messages, openaiWireMessage{
 				Role:       "tool",
-				Content:    strPtr(m.Text()),
+				Content:    m.Text(),
 				ToolCallID: m.ToolCallID,
 			})
 		}

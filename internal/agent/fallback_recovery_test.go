@@ -132,7 +132,16 @@ func TestUsageLimitRotatesCredentialAcrossKeys(t *testing.T) {
 // instead of looping.
 func TestUsageLimitStepsChainWhenPoolExhausted(t *testing.T) {
 	first := &fakeProvider{calls: []fakeScript{{err: usageLimitErr()}}}
-	second := &fakeProvider{calls: []fakeScript{{err: usageLimitErr()}, {err: usageLimitErr()}, {err: usageLimitErr()}, {err: usageLimitErr()}}}
+	// The last target also runs the bounded escalation rounds (loop.go):
+	// (1+MaxRetries) calls per round × (1+maxEscalationRounds) rounds.
+	second := &fakeProvider{calls: func() []fakeScript {
+		n := (fastRetry().MaxRetries + 1) * (maxEscalationRounds + 1)
+		scripts := make([]fakeScript, n)
+		for i := range scripts {
+			scripts[i] = fakeScript{err: usageLimitErr()}
+		}
+		return scripts
+	}()}
 	a := newFallbackAgent(named("onegw", first), "free", []FailoverTarget{
 		{Provider: named("other", second), Model: "dev", ContextWindow: 64000},
 	})
@@ -148,8 +157,8 @@ func TestUsageLimitStepsChainWhenPoolExhausted(t *testing.T) {
 	if a.curTarget != 1 {
 		t.Fatalf("curTarget = %d, want 1", a.curTarget)
 	}
-	if second.i != 4 {
-		t.Fatalf("fallback stream calls = %d, want 4 (1 + the drained retry ladder; no infinite loop)", second.i)
+	if want := (fastRetry().MaxRetries + 1) * (maxEscalationRounds + 1); second.i != want {
+		t.Fatalf("fallback stream calls = %d, want %d (drained ladder + bounded escalation rounds; no infinite loop)", second.i, want)
 	}
 }
 

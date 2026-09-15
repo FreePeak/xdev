@@ -37,6 +37,20 @@ func TestClassify(t *testing.T) {
 		{"context deadline", errors.New("a: Post http://x: context deadline exceeded"), ClassTransient},
 		{"stream stall", errors.New("stream stall detected after 30s"), ClassTransient},
 		{"premature close", errors.New("stream closed before a terminal response event"), ClassTransient},
+		// The adapters' own missing-terminal-event strings. These are the
+		// exact messages emitted by openai_completions.go,
+		// openai_responses.go, anthropic.go and the compaction/handoff
+		// side requests; classified anything else they would fall out of
+		// the retry ladder and end the session (the "stream ended without
+		// finish_reason kills the run" bug).
+		{"openai-completions ended", errors.New("agent: stream: openai-completions: stream ended without finish_reason"), ClassTransient},
+		{"openai-responses ended", errors.New("agent: stream: openai-responses: stream ended without response.completed"), ClassTransient},
+		{"anthropic ended", errors.New("agent: stream: anthropic-messages: stream ended without message_stop"), ClassTransient},
+		{"compaction ended", errors.New("compaction: stream ended without done"), ClassTransient},
+		{"handoff ended", errors.New("handoff: stream ended without done"), ClassTransient},
+		// Not a stream-ended failure: must stay unmatched so the ladder
+		// cannot be widened into retrying arbitrary text.
+		{"ended without (nonsense)", errors.New("the meeting ended without finish_reason being decided"), ClassUnknown},
 		{"wrapped url error", &url.Error{Op: "Post", URL: "http://x", Err: errors.New("no such host")}, ClassTransient},
 		{"generic message", errors.New("weird internal thing"), ClassUnknown},
 	}

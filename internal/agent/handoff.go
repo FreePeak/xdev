@@ -265,6 +265,9 @@ func (a *Agent) handoffDoc(ctx context.Context, system string, msgs []ai.Message
 	req := a.liveRequest(a.liveSystem(system), withTrailing, nil)
 	req.Model = model
 	req.MaxTokens = MaxSummaryTokens
+	// A summarize call is served and dropped: its markers stop at the last
+	// completed tool round so the prefix it writes is one the main chain reads.
+	req.Cache.SideRequest = true
 
 	policy := a.Retry
 	if policy.MaxRetries == 0 && policy.BaseDelay == 0 {
@@ -397,6 +400,7 @@ func (a *Agent) liveRequest(system string, history []ai.Message, tools []ai.Tool
 		MaxTokens: a.MaxTokens,
 		Model:     a.Model,
 		Thinking:  a.Thinking,
+		Cache:     a.cacheOpts(),
 	}
 	if a.Redactor != nil {
 		// Redact a copy: the store keeps the raw values, only the
@@ -416,4 +420,18 @@ func (pm *PlanMode) Reset() {
 	}
 	pm.Active = false
 	pm.Pending = ""
+}
+
+// cacheOpts is the prompt-cache identity of this session's requests: the stable
+// session id, which is what both cache vocabularies key on — Anthropic's
+// markers ride the request body, OpenAI's prompt_cache_key routes affinity — and
+// is shared by the main chain and its side requests on purpose so a side request
+// reads the prefix the main turn wrote (omp forwards promptCacheKey ??
+// sessionId). Empty when no store is bound: a provider then sends exactly the
+// request shape it sent before caching existed.
+func (a *Agent) cacheOpts() ai.CacheOpts {
+	if a.Store == nil {
+		return ai.CacheOpts{}
+	}
+	return ai.CacheOpts{Key: a.Store.ID()}
 }

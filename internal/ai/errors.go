@@ -65,8 +65,13 @@ var contextOverflowRe = []*regexp.Regexp{
 var (
 	streamStallRe      = regexp.MustCompile(`(?i)stream stall`)
 	http2StreamResetRe = regexp.MustCompile(`(?i)(nghttp2|http2).*(internal_error|refused_stream)|stream error received`)
-	prematureCloseRe   = regexp.MustCompile(`(?i)stream closed before a (finish_reason|terminal response event)|(unexpected|premature) EOF|body closed before`)
-	connectionResetRe  = regexp.MustCompile(`(?i)(connection reset|connection refused|broken pipe|no such host|i/o timeout|context deadline exceeded|tls: handshake failure)`)
+	// prematureCloseRe also matches the adapters' own "clean EOF but no
+	// terminal event" failures — the strings they actually emit
+	// (openai-completions .../finish_reason, openai-responses .../
+	// response.completed, anthropic-messages .../message_stop, and the
+	// compaction/handoff side requests .../done).
+	prematureCloseRe  = regexp.MustCompile(`(?i)stream closed before a (finish_reason|terminal response event)|(unexpected|premature) EOF|body closed before|stream ended without (finish_reason|response\.completed|message_stop|done)`)
+	connectionResetRe = regexp.MustCompile(`(?i)(connection reset|connection refused|broken pipe|no such host|i/o timeout|context deadline exceeded|tls: handshake failure)`)
 )
 
 // Classify maps an error to its recovery class. Wire HTTPError instances

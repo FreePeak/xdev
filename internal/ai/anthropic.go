@@ -66,6 +66,8 @@ type anthropicWireBlock struct {
 	ToolUseID string              `json:"tool_use_id,omitempty"`
 	Content   []anthropicWireText `json:"content,omitempty"`
 	IsError   bool                `json:"is_error,omitempty"`
+	// CacheControl ends a cached span here; nil leaves the block unmarked.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicWireMessage struct {
@@ -77,6 +79,11 @@ type anthropicWireTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	// CacheControl rides the LAST definition only. The tool array is the head of
+	// the cached prefix on this wire (tools, then system, then messages), so one
+	// marker writes every tool — and it survives a system-prompt change, which a
+	// per-turn reminder is free to make.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicWireThinking struct {
@@ -85,13 +92,16 @@ type anthropicWireThinking struct {
 }
 
 type anthropicWireRequest struct {
-	Model     string                 `json:"model"`
-	MaxTokens int                    `json:"max_tokens"`
-	System    string                 `json:"system,omitempty"`
-	Messages  []anthropicWireMessage `json:"messages"`
-	Stream    bool                   `json:"stream"`
-	Tools     []anthropicWireTool    `json:"tools,omitempty"`
-	Thinking  *anthropicWireThinking `json:"thinking,omitempty"`
+	Model     string `json:"model"`
+	MaxTokens int    `json:"max_tokens"`
+	// System is a plain string, or — when the request is cacheable — an array of
+	// text blocks, which is the only shape that can carry a marker. any is not
+	// sloppiness: the endpoint accepts two different JSON types here.
+	System   any                    `json:"system,omitempty"`
+	Messages []anthropicWireMessage `json:"messages"`
+	Stream   bool                   `json:"stream"`
+	Tools    []anthropicWireTool    `json:"tools,omitempty"`
+	Thinking *anthropicWireThinking `json:"thinking,omitempty"`
 	// Metadata carries the stable installation identity the OAuth account is
 	// keyed by (omp sends {device_id, session_id, account_uuid}); it rides the
 	// documented `metadata.user_id` string field. #102: install-id minted a
@@ -124,6 +134,19 @@ func (p *AnthropicProvider) buildRequest(req StreamRequest) ([]byte, error) {
 		System:    req.System,
 		Stream:    true,
 	}
+	// Prompt caching (#133). This wire caches a prefix in order — tools, then
+	// system, then messages — so one marker per tier is what makes the write
+	// worth reading back: a marker on the LAST tool writes the whole schema
+	// even when a per-turn reminder changes the prompt after it, and a marker
+	// at the end of the system array writes tools+system together. Only a
+	// cacheable request changes shape: the system prompt has to ride as blocks
+	// to hold a marker, so everything else keeps the plain string it always
+	// sent. The remaining budget (Anthropic allows four) rolls over the
+	// conversation tail below.
+	cache := req.Cache.cacheWanted()
+	if cache && req.System != "" {
+		wr.System = []anthropicWireBlock{{Type: "text", Text: req.System}}
+	}
 	if uid := installIdentity(); uid != "" {
 		wr.Metadata = &anthropicWireMetadata{UserID: uid}
 	}
@@ -140,6 +163,9 @@ func (p *AnthropicProvider) buildRequest(req StreamRequest) ([]byte, error) {
 			Description: t.Description,
 			InputSchema: t.Parameters,
 		})
+	}
+	if cache && len(wr.Tools) > 0 {
+		wr.Tools[len(wr.Tools)-1].CacheControl = cacheMarker()
 	}
 
 	var msgs []anthropicWireMessage
@@ -204,8 +230,45 @@ func (p *AnthropicProvider) buildRequest(req StreamRequest) ([]byte, error) {
 		}
 	}
 	flush()
+	if cache {
+		// Spend the budget bottom-up: the tail markers are the ones that make a
+		// long run cheap, so the tiers above them only take what they need.
+		used := 0
+		if blocks, ok := wr.System.([]anthropicWireBlock); ok && len(blocks) > 0 {
+			blocks[len(blocks)-1].CacheControl = cacheMarker()
+			used++
+		}
+		if len(wr.Tools) > 0 {
+			used++
+		}
+		tail := msgs
+		if req.Cache.SideRequest {
+			// A side request is served and dropped: marking its newest message
+			// would write an entry nothing later reads. Stop at the last
+			// completed tool round, whose prefix the next main turn does read.
+			if n := lastToolResultMessage(msgs); n >= 0 {
+				tail = msgs[:n+1]
+			} else {
+				tail = nil
+			}
+		}
+		applyAnthropicBreakpoints(tail, cacheMaxBreakpoints-used)
+	}
 	wr.Messages = msgs
 	return json.Marshal(wr)
+}
+
+// lastToolResultMessage is the index of the newest tool-result turn, or -1 when
+// the conversation has none: the point a side request may still cache.
+func lastToolResultMessage(msgs []anthropicWireMessage) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		for _, b := range msgs[i].Content {
+			if b.Type == "tool_result" {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 func (p *AnthropicProvider) headers() map[string]string {
@@ -223,16 +286,30 @@ func (p *AnthropicProvider) headers() map[string]string {
 
 // Stream implements Provider.
 func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {
+	sctx, cancel := context.WithCancel(ctx)
 	body, err := p.buildRequest(req)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	model := req.Model
 	if model == "" {
 		model = p.model
 	}
-	sctx, cancel := context.WithCancel(ctx)
 	resp, err := wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
+	if err != nil && req.Cache.cacheWanted() && cacheRejected(err) {
+		// The endpoint does not understand markers — a gateway, an older proxy.
+		// Rebuild without them and retry once on the same context: one lost turn
+		// is a bad trade for a cache that never fills, and the latch keeps every
+		// later turn of this process from paying for the mistake again.
+		disableCacheMarkers("endpoint rejected cache_control")
+		req.Cache = CacheOpts{}
+		if body, err = p.buildRequest(req); err != nil {
+			cancel()
+			return nil, err
+		}
+		resp, err = wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
+	}
 	if err != nil {
 		cancel() // no goroutine will own it on this path
 		return nil, err
