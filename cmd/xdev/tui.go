@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/FreePeak/xdev/internal/memory"
 	"os"
@@ -1783,6 +1784,13 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			}
 		}
 	case ai.EventError:
+		// An unbounded-wait round (retry.infinite) says "still waiting"
+		// once per round — show it, not the blip notice.
+		var down *agent.AllTargetsDownError
+		if errors.As(ev.Err, &down) {
+			h.ts.app.AddSystemBlock(ev.Err.Error())
+			break
+		}
 		// A transient blip is being retried by the recovery ladder: the
 		// wire error would flash once per attempt, so it collapses to a
 		// notice. Hard errors still print verbatim — the turn ends on them.
