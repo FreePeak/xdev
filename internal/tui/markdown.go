@@ -63,7 +63,7 @@ func (a *App) mdStyle() mdStyle {
 // renderMarkdown converts markdown source to visual lines of styled runs,
 // following the grok markdown renderer: fences/backticks/URLs hidden,
 // bullets → •, blockquote > → │, hr → ───, headings colored+bold,
-// fenced code lines carry the code-bg band.
+// fenced code lines carry the code-bg band, GFM pipe tables → sharp grid.
 func (a *App) renderMarkdown(src string, w int) []line {
 	src = strings.TrimRight(src, "\n")
 	if src == "" {
@@ -73,8 +73,10 @@ func (a *App) renderMarkdown(src string, w int) []line {
 
 	inCode := false
 	quoteDepth := 0
+	srcLines := strings.Split(src, "\n")
 	var out []line
-	for _, raw := range strings.Split(src, "\n") {
+	for i := 0; i < len(srcLines); i++ {
+		raw := srcLines[i]
 		trimmed := strings.TrimSpace(raw)
 
 		// Fenced code blocks: hide the fence, band every content line.
@@ -133,6 +135,17 @@ func (a *App) renderMarkdown(src string, w int) []line {
 			ln.runs = appendRuns(ln.runs, a.inlineRuns(rest, ms), w)
 			out = append(out, ln)
 			continue
+		}
+
+		// GFM table: a pipe row followed by a |---|---| delimiter opens a
+		// grid; the block swallows every following pipe row. Too-narrow
+		// grids fall back to the raw lines (omp does the same).
+		if strings.Contains(trimmed, "|") {
+			if tbl, n := a.tableAt(srcLines, i, w, ms); n > 0 {
+				out = append(out, tbl...)
+				i += n - 1
+				continue
+			}
 		}
 
 		// Plain body line.
@@ -352,4 +365,298 @@ func wrapLine(ln line, w int) []line {
 		out = append(out, line{runs: cur, bg: ln.bg})
 	}
 	return out
+}
+
+// --- GFM tables (omp semantics) ---
+//
+// A table renders as a full sharp-cornered grid with one rule between every
+// pair of rows: top border, bold header, separators, bottom border. Column
+// widths come from omp's fitter: a column wants its widest cell, the
+// wrappable minimum is the longest word capped at 30, and the 3-per-column
+// border overhead is subtracted from the terminal width first. Alignment
+// colons are accepted and ignored (everything renders flush-left).
+
+// tableFrame is the grid's border glyph set. Tables always draw sharp,
+// whatever the chrome box style is; the ascii preset degenerates every
+// junction to +.
+type tableFrame struct {
+	topLeft, teeDown, topRight     string
+	teeLeft, cross, teeRight       string
+	bottomLeft, teeUp, bottomRight string
+	horizontal, vertical           string
+}
+
+func (a *App) tableFrame() tableFrame {
+	b := a.th.BoxSharp()
+	f := tableFrame{
+		topLeft: b.TopLeft, teeDown: "┬", topRight: b.TopRight,
+		teeLeft: "├", cross: "┼", teeRight: "┤",
+		bottomLeft: b.BottomLeft, teeUp: "┴", bottomRight: b.BottomRight,
+		horizontal: b.Horizontal, vertical: b.Vertical,
+	}
+	if f.horizontal == "-" {
+		f.teeDown, f.teeUp, f.teeLeft, f.teeRight, f.cross = "+", "+", "+", "+", "+"
+	}
+	return f
+}
+
+// rule builds one border row (top / separator / bottom) over columns of the
+// given content widths.
+func (f tableFrame) rule(left, junction, right string, m []int) string {
+	s := left + f.horizontal
+	for i, cw := range m {
+		if i > 0 {
+			s += f.horizontal + junction + f.horizontal
+		}
+		s += strings.Repeat(f.horizontal, cw)
+	}
+	return s + f.horizontal + right
+}
+
+// tableRow splits one pipe-table line into cells. ok=false when the line
+// carries no unescaped pipe (so it cannot belong to a table); `\|` is a
+// literal pipe and the optional outer pipes are dropped.
+func tableRow(s string) (cells []string, ok bool) {
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s) && s[i+1] == '|':
+			cur.WriteByte('|')
+			i++
+		case s[i] == '|':
+			ok = true
+			cells = append(cells, strings.TrimSpace(cur.String()))
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+	cells = append(cells, strings.TrimSpace(cur.String()))
+	if len(cells) > 1 && cells[0] == "" {
+		cells = cells[1:]
+	}
+	if len(cells) > 1 && cells[len(cells)-1] == "" {
+		cells = cells[:len(cells)-1]
+	}
+	return cells, ok
+}
+
+// isTableDelim reports whether s is the | --- | :-- | ---: | delimiter row of
+// an n-column table.
+func isTableDelim(s string, n int) bool {
+	cells, pipe := tableRow(s)
+	if !pipe || len(cells) != n {
+		return false
+	}
+	for _, c := range cells {
+		c = strings.Trim(c, ":")
+		if c == "" || strings.Trim(c, "-") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func runsWidth(runs []cell) int {
+	n := 0
+	for _, r := range runs {
+		n += width(r.text)
+	}
+	return n
+}
+
+func runsString(runs []cell) string {
+	var b strings.Builder
+	for _, r := range runs {
+		b.WriteString(r.text)
+	}
+	return b.String()
+}
+
+// runsLongestWord measures the widest unbreakable stretch of a rendered cell
+// (the floor for its column width).
+func runsLongestWord(runs []cell) int {
+	best := 0
+	for _, wd := range strings.Fields(runsString(runs)) {
+		if cw := width(wd); cw > best {
+			best = cw
+		}
+	}
+	return best
+}
+
+// tableAt renders the GFM table opening at lines[i]: header, delimiter, and
+// the run of following pipe rows. It returns the grid lines and the number of
+// source lines consumed; n=0 means the block is not a table or cannot fit w,
+// and the caller must render the raw lines instead.
+func (a *App) tableAt(lines []string, i, w int, ms mdStyle) (out []line, n int) {
+	head, pipe := tableRow(strings.TrimSpace(lines[i]))
+	r := len(head)
+	if !pipe || r == 0 || i+1 >= len(lines) || !isTableDelim(strings.TrimSpace(lines[i+1]), r) {
+		return nil, 0
+	}
+	over := 3*r + 1
+	if w-over < r {
+		return nil, 0 // too narrow for even a 1-cell grid: keep the raw text
+	}
+
+	grid := make([][]string, 0, 8)
+	grid = append(grid, head)
+	j := i + 2
+	for ; j < len(lines); j++ {
+		row, ok := tableRow(strings.TrimSpace(lines[j]))
+		if !ok {
+			break
+		}
+		for len(row) < r {
+			row = append(row, "")
+		}
+		grid = append(grid, row[:r])
+	}
+
+	// Style every cell (inline markdown included); the header row is bold.
+	runs := make([][][]cell, len(grid))
+	u := make([]int, r) // widest rendered cell per column
+	p := make([]int, r) // longest word per column, capped at 30, floored at 1
+	const maxPref = 30
+	for gi, row := range grid {
+		runs[gi] = make([][]cell, r)
+		for c, text := range row {
+			cr := a.inlineRuns(text, ms)
+			if gi == 0 {
+				for k := range cr {
+					cr[k].style = cr[k].style.Bold(true)
+				}
+			}
+			runs[gi][c] = cr
+			if wd := runsWidth(cr); wd > u[c] {
+				u[c] = wd
+			}
+		}
+	}
+	for c := range r {
+		lw := 1
+		for gi := range runs {
+			if wd := runsLongestWord(runs[gi][c]); wd > lw {
+				lw = wd
+			}
+		}
+		p[c] = min(max(lw, 1), maxPref)
+	}
+
+	// Fit the columns into w-over cells. c starts at the preferred widths and
+	// shrinks proportionally when even those overflow; m is the final width.
+	c := p
+	sumC := 0
+	for _, v := range c {
+		sumC += v
+	}
+	if avail := w - over; sumC > avail {
+		extra := avail - r
+		sumQ := 0
+		for _, v := range c {
+			sumQ += max(0, v-1)
+		}
+		c = make([]int, r)
+		used := 0
+		for col, v := range p {
+			q := 0
+			if extra > 0 && sumQ > 0 {
+				q = max(0, v-1) * extra / sumQ
+			}
+			c[col] = 1 + q
+			used += q
+		}
+		// Hand out the rounding remainder one cell per column (omp).
+		rem := extra - used
+		for col := range c {
+			if rem <= 0 {
+				break
+			}
+			c[col]++
+			rem--
+		}
+		sumC = r + extra
+	}
+	m := make([]int, r)
+	sumU := 0
+	for _, v := range u {
+		sumU += v
+	}
+	if sumU+over <= w {
+		for col := range m {
+			m[col] = max(u[col], c[col])
+		}
+	} else {
+		avail := w - over
+		excess := 0
+		for col := range c {
+			excess += max(0, u[col]-c[col])
+		}
+		spare := avail - sumC
+		used := 0
+		for col := range m {
+			f := 0
+			if excess > 0 && spare > 0 {
+				f = max(0, u[col]-c[col]) * spare / excess
+			}
+			m[col] = c[col] + f
+			used += f
+		}
+		for left := avail - sumC - used; left > 0; {
+			moved := false
+			for col := range m {
+				if left == 0 {
+					break
+				}
+				if m[col] < u[col] {
+					m[col]++
+					left--
+					moved = true
+				}
+			}
+			if !moved {
+				break
+			}
+		}
+	}
+
+	f := a.tableFrame()
+	out = append(out, textline(f.rule(f.topLeft, f.teeDown, f.topRight, m), ms.muted))
+	sep := func() { out = append(out, textline(f.rule(f.teeLeft, f.cross, f.teeRight, m), ms.muted)) }
+	for gi := range runs {
+		if gi > 0 {
+			sep()
+		}
+		cellLines := make([][]line, r)
+		k := 1
+		for col := range m {
+			cl := wrapLine(line{runs: runs[gi][col]}, m[col])
+			cellLines[col] = cl
+			if len(cl) > k {
+				k = len(cl)
+			}
+		}
+		for v := range k {
+			ln := line{}
+			ln.runs = append(ln.runs, cell{text: f.vertical + " ", style: ms.muted})
+			for col := range m {
+				var rc []cell
+				if v < len(cellLines[col]) {
+					rc = cellLines[col][v].runs
+				}
+				ln.runs = append(ln.runs, rc...)
+				if pad := m[col] - runsWidth(rc); pad > 0 {
+					ln.runs = append(ln.runs, cell{text: strings.Repeat(" ", pad)})
+				}
+				if col < r-1 {
+					ln.runs = append(ln.runs, cell{text: " " + f.vertical + " ", style: ms.muted})
+				}
+			}
+			ln.runs = append(ln.runs, cell{text: " " + f.vertical, style: ms.muted})
+			out = append(out, ln)
+		}
+	}
+	out = append(out, textline(f.rule(f.bottomLeft, f.teeUp, f.bottomRight, m), ms.muted))
+	return out, j - i
 }
