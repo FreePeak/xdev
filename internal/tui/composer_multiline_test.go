@@ -36,8 +36,8 @@ func TestCtrlJInsertsNewlineAndComposerRendersRows(t *testing.T) {
 	if curRow != 1 || curCol != len("second line") {
 		t.Fatalf("cursor = (%d,%d)", curRow, curCol)
 	}
-	if app.composerRows() != 3 { // 2 input rows + the info divider (no top border)
-		t.Fatalf("composerRows = %d, want 3", app.composerRows())
+	if app.composerRows() != 4 { // 2 input rows + top border + divider
+		t.Fatalf("composerRows = %d, want 4", app.composerRows())
 	}
 }
 
@@ -115,17 +115,19 @@ func TestArrowsWalkHardNewlineRows(t *testing.T) {
 // visual rows, preserving the cell column, and history recall returns only
 // at the first/last row — never mid-paragraph.
 func TestArrowsWalkWrappedRowsAndRecallAtEdge(t *testing.T) {
-	app, _ := newTestApp(t, 40, 24) // avail = 36 → 100 x's cover 3 rows (36/36/28)
+	app, _ := newTestApp(t, 40, 24) // avail = 33 → 100 x's cover 4 rows (33/33/33/1)
 	long := strings.Repeat("x", 100)
 	setDraft(&app.ed, long, 100)
 	app.ed.PushHistory("older prompt")
 	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
 	_, row, col := app.composerInputLines()
-	if row != 1 || col != 28 {
-		t.Fatalf("Up from the last wrapped row = (%d,%d), want (1,28)", row, col)
+	if row != 2 || col != 1 {
+		t.Fatalf("Up on wrapped row 3 = (%d,%d), want (2,1)", row, col)
 	}
-	// One more row to the top; the edge is the next Up.
-	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	// Two more rows to the top (3→2 already moved); the edge is the 4th Up.
+	for range 2 {
+		app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	}
 	if app.ed.Text() != long {
 		t.Fatalf("recall fired before the edge: %q", app.ed.Text())
 	}
