@@ -146,6 +146,11 @@ func estimateTokens(msgs []ai.Message) int64 {
 	return chars / charsPerToken
 }
 
+// ContextTokens is contextTokens for callers outside the agent loop: the
+// TUI measures a replayed transcript (resume, switch, branch) with it, so the
+// HUD's context segment and the compaction trigger can never disagree.
+func ContextTokens(msgs []ai.Message) int64 { return contextTokens(msgs) }
+
 // contextTokens is the honest trigger input: provider-reported usage when
 // the last assistant message carries it (it counts the full request),
 // else the estimate floor (omp compactionContextTokens).
