@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -39,16 +42,26 @@ type TaskTool struct {
 	Policy   tool.ApprovalPolicy
 	Approve  ApprovalFunc
 	Thinking *ai.ThinkingBudget
-	// Agents are the discovered task-agent definitions (M11 #12). The
-	// task tool looks up the named agent and uses its system prompt and
-	// tool restrictions. nil = no named agents (default shape only).
+	// Agents is an explicit definition set: the host normally leaves it nil
+	// and uses AgentRoots below, so tests and in-process callers can pin the
+	// set a spawn resolves against.
 	Agents []AgentDefinition
+	// AgentRoots is the cwd task agents are discovered from (M11 #12). When
+	// set, the definitions are resolved PER SPAWN (TaskTool.discoverAgents),
+	// so a newly written .xdev/agents/foo.md is spawnable without a restart
+	// (#272). Both empty = no named agents: the default child shape still
+	// works and every `agent` argument fails as unknown.
+	AgentRoots string
 	// ExpandModel resolves an agent's frontmatter model — "@role" aliases
 	// per discovery's documented contract — to a bare model id usable with
 	// this tool's Provider. ok=false keeps the parent's model. Wired from
 	// cmd where the settings live; nil disables expansion (a literal
 	// frontmatter model never needs it).
 	ExpandModel func(ref string) (model string, ok bool)
+	// ExpandEffort resolves an agent's frontmatter thinkingLevel to a
+	// reasoning budget for the child (config.EffortBudget in production).
+	// nil keeps the parent's Thinking.
+	ExpandEffort func(level string) *ai.ThinkingBudget
 	// Depth counts how deep in the spawn chain we are. 0 = top-level
 	// agent. omp: task.maxRecursionDepth=2; a child at the cap loses the
 	// task tool (structurally guaranteed since ChildTools excludes it).
@@ -60,6 +73,12 @@ type TaskTool struct {
 	// Hub enables background task dispatch (hub tool, research §2). nil
 	// makes background:true fall back to a synchronous spawn.
 	Hub *Hub
+	// mu guards the per-spawn discovery cache below (Description() is
+	// rendered on every model request, and batch spawns run concurrently).
+	mu       sync.Mutex
+	cache    []AgentDefinition
+	cachedAt string
+
 	// ChildAdvisor (M11 #39, settings taskAgentAdvisor) builds the reviewer
 	// attached to every spawned child; nil keeps children unadvised. The
 	// host wires it (cmd/xdev/print.go): "on" resolves the advisor role's
@@ -74,16 +93,94 @@ const TaskToolName = "task"
 func (t *TaskTool) Name() string { return TaskToolName }
 
 func (t *TaskTool) Description() string {
-	return "spawn a subagent for one focused job (search, batch edits, a self-contained question); " +
+	desc := "spawn a subagent for one focused job (search, batch edits, a self-contained question); " +
 		"it runs with a restricted tool set in its own session and returns only its final result — " +
 		"its transcript never enters this conversation"
+	if agents := t.advertiseAgents(); agents != "" {
+		// #272: while nothing named the legal values, guessing an agent was
+		// the expected outcome — so the whole feature read as broken.
+		desc += "\n\nnamed agent types (agent field; omit for the default shape):\n" + agents
+	}
+	return desc
+}
+
+// advertiseAgents lists the spawnable definitions for the model, one line
+// each. It rides the same cache as resolution, so a per-request call never
+// re-scans the roots.
+func (t *TaskTool) advertiseAgents() string {
+	var b strings.Builder
+	for _, d := range t.discoverAgents() {
+		b.WriteString("- " + d.Name + ": " + oneLine(d.Description) + "\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// oneLine flattens a definition's description for a listing.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return s
+}
+
+// discoverAgents resolves the definitions this spawn can name. A pinned
+// Agents set wins (tests, in-process callers); otherwise the roots are
+// re-read, so a file written mid-session is immediately spawnable — the
+// frozen-at-startup snapshot was half of #272's invisibility. The result is
+// cached against the file mtimes of the roots, because Description() is
+// rendered on every model request and a plain re-scan would be a stat storm
+// (same mtime discipline as config.Settings.Mtime).
+func (t *TaskTool) discoverAgents() []AgentDefinition {
+	if t.Agents != nil || t.AgentRoots == "" {
+		return t.Agents
+	}
+	fingerprint := agentsFingerprint(t.AgentRoots)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cachedAt == fingerprint && t.cache != nil {
+		return t.cache
+	}
+	defs, warnings := DiscoverAgents(t.AgentRoots)
+	for _, w := range warnings {
+		logx.Warnf("task agent: %s", w)
+	}
+	t.cache, t.cachedAt = defs, fingerprint
+	return defs
+}
+
+// agentsFingerprint summarizes the state of every discovery root, bundled
+// definitions included (they never change within a process, so they need no
+// stat). A changed file — added, removed, or edited — changes the string.
+func agentsFingerprint(cwd string) string {
+	var b strings.Builder
+	for _, root := range AgentDiscoveryRoots(cwd) {
+		if root == AgentRootBundled {
+			continue // embedded: cannot change inside a running process
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(&b, "%s/%d/%d;", root, info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	return b.String()
 }
 
 func (t *TaskTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "agent": {"type": "string", "description": "named agent type to dispatch (from discovered definitions; omit for the default shape)"},
+    "agent": {"type": "string", "description": "named agent type to dispatch; the available definitions and their descriptions are listed at the end of this tool description (omit for the default shape)"},
     "prompt": {"type": "string", "description": "the task, self-contained: state the goal, the files/paths involved, and the expected result"},
     "name": {"type": "string", "description": "short label for the child session (optional)"},
     "schema": {"type": "object", "description": "JSON Schema the result must satisfy (optional)"},
@@ -233,11 +330,15 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		return tool.Result{Text: "task: recursion depth limit reached (cannot spawn deeper)", IsError: true}, nil
 	}
 
+	// Resolved per spawn so a mid-session .xdev/agents addition is usable
+	// without a restart (#272).
+	defs := t.discoverAgents()
+
 	// Back-compat for model habits: `name` doubles as the agent type when
 	// it matches a discovered definition and `agent` was left empty.
 	agentArg := a.Agent
 	if agentArg == "" {
-		if _, ok := FindAgent(t.Agents, a.Name); ok {
+		if _, ok := FindAgent(defs, a.Name); ok {
 			agentArg = a.Name
 		}
 	}
@@ -246,15 +347,21 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 	agentSystem := t.System
 	agentTools := t.ChildTools
 	agentModel := t.Model
+	agentThinking := t.Thinking
+	// What the definition asked for that this binary cannot do, rendered
+	// into the handoff so BOTH readers see it: the model (whose spawn ran
+	// with a narrower child than it authored) and, in the TUI, the user
+	// (#272: every one of these was silent).
+	var agentNotes []string
 	if agentArg != "" {
-		def, ok := FindAgent(t.Agents, agentArg)
+		def, ok := FindAgent(defs, agentArg)
 		if !ok {
-			return tool.Result{Text: fmt.Sprintf("task: unknown agent %q (available: %s)", agentArg, agentNames(t.Agents)), IsError: true}, nil
+			return tool.Result{Text: fmt.Sprintf("task: unknown agent %q (available: %s)", agentArg, agentNames(defs)), IsError: true}, nil
 		}
 		// Spawn policy: can this parent agent spawn the requested child?
 		// A restrictive parent (None or a non-matching allowlist) denies.
 		if t.AgentName != "" {
-			if parent, ok := FindAgent(t.Agents, t.AgentName); ok {
+			if parent, ok := FindAgent(defs, t.AgentName); ok {
 				pol := parent.ResolveSpawnPolicy()
 				blocked := pol.None ||
 					(!pol.AllowAll && len(pol.Allow) > 0 && !slices.Contains(pol.Allow, agentArg))
@@ -268,18 +375,52 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		}
 		if len(def.Tools) > 0 {
 			agentTools = resolveAgentTools(def.Tools, t.ChildTools, t.Depth, maxDepth)
-		}
-		if def.Model != "" {
-			if strings.HasPrefix(def.Model, "@") && t.ExpandModel != nil {
-				// The alias resolves per modelRoles; an unresolvable one
-				// keeps the parent model (discovery promises expansion,
-				// not a hard failure on a typo).
-				if m, ok := t.ExpandModel(def.Model); ok {
-					agentModel = m
-				}
-			} else {
-				agentModel = def.Model
+			if missing := missingAgentTools(def.Tools, agentTools, t.Depth, maxDepth); len(missing) > 0 {
+				// A tool the parent does not carry is not the same as a typo,
+				// and both silently narrowed the child (#272): report them.
+				note := fmt.Sprintf("agent %q: tool(s) not available to children, dropped: %s", def.Name, strings.Join(missing, ", "))
+				logx.Warnf("%s", note)
+				agentNotes = append(agentNotes, note)
 			}
+		}
+		for _, key := range def.Unsupported {
+			note := fmt.Sprintf("agent %q: unsupported frontmatter key %q (ignored)", def.Name, key)
+			logx.Warnf("%s", note)
+			agentNotes = append(agentNotes, note)
+		}
+		if def.ThinkingLevel != "" {
+			// An effort the resolver does not know keeps the parent's budget;
+			// the field was parsed and dropped before #272.
+			if t.ExpandEffort == nil {
+				agentNotes = append(agentNotes, fmt.Sprintf("agent %q: thinkingLevel %q ignored (host supplies no effort resolver)", def.Name, def.ThinkingLevel))
+			} else if b := t.ExpandEffort(def.ThinkingLevel); b != nil {
+				agentThinking = b
+			} else {
+				note := fmt.Sprintf("agent %q: unsupported thinkingLevel %q (want %s) — parent effort kept",
+					def.Name, def.ThinkingLevel, strings.Join(config.EffortLevels, "|"))
+				logx.Warnf("%s", note)
+				agentNotes = append(agentNotes, note)
+			}
+		}
+		if def.Model != "" && strings.HasPrefix(def.Model, "@") {
+			// A role alias resolves through modelRoles; an unresolvable one
+			// keeps the parent model (discovery promises expansion, not a
+			// hard failure on a typo) — but says so. Forwarding the raw
+			// "@role" to the wire 404s one turn later (#272), so it never
+			// becomes the child's model.
+			resolved, resolves := "", t.ExpandModel != nil
+			if resolves {
+				resolved, resolves = t.ExpandModel(def.Model)
+			}
+			if resolves {
+				agentModel = resolved
+			} else {
+				note := fmt.Sprintf("agent %q: model %q did not resolve — parent model kept", def.Name, def.Model)
+				logx.Warnf("%s", note)
+				agentNotes = append(agentNotes, note)
+			}
+		} else if def.Model != "" {
+			agentModel = def.Model
 		}
 		// Recursive spawn (omp task.maxRecursionDepth semantics): a child
 		// below the cap gets its own task tool so it can dispatch further
@@ -299,14 +440,22 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				ParentSessionID: t.ParentSessionID,
 				Policy:          t.Policy,
 				Approve:         t.Approve,
-				Thinking:        t.Thinking,
-				Agents:          t.Agents,
-				Depth:           t.Depth + 1,
-				AgentName:       agentArg,
-				Hub:             t.Hub,
-				ChildAdvisor:    t.ChildAdvisor,
+				Thinking:        agentThinking,
+				// Inherit the resolution SOURCE, not a snapshot: a parent
+				// that discovers keeps discovering, a pinned set stays pinned.
+				Agents:       t.Agents,
+				AgentRoots:   t.AgentRoots,
+				ExpandModel:  t.ExpandModel,
+				ExpandEffort: t.ExpandEffort,
+				Depth:        t.Depth + 1,
+				AgentName:    agentArg,
+				Hub:          t.Hub,
+				ChildAdvisor: t.ChildAdvisor,
 			})
 		}
+		// The granted set, once, for --verbose: which tools the child of a
+		// named agent actually holds is otherwise invisible to the author.
+		logx.Debugf("task: agent %q granted %s", def.Name, strings.Join(toolNames(agentTools), ", "))
 	}
 
 	mt := a.MaxTurns
@@ -321,7 +470,7 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		ParentSessionID: t.ParentSessionID,
 		Policy:          t.Policy,
 		Approve:         t.Approve,
-		Thinking:        t.Thinking,
+		Thinking:        agentThinking,
 	}
 
 	// task.agentAdvisor (M11 #39): give the child its own reviewer, wired
@@ -338,7 +487,7 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 			return tool.Result{Text: "task: " + err.Error(), IsError: true}, nil
 		}
 		return tool.Result{
-			Text:    "started background job " + id + " (hub wait/jobs/send/cancel to drive it)",
+			Text:    "started background job " + id + " (hub wait/jobs/send/cancel to drive it)" + renderAgentNotes(agentNotes),
 			Details: map[string]string{"job": id},
 		}, nil
 	}
@@ -347,10 +496,26 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		return tool.Result{Text: "task: " + err.Error(), IsError: true}, nil
 	}
 	return tool.Result{
-		Text:    renderSubagentResult(res),
+		Text:    renderSubagentResult(res) + renderAgentNotes(agentNotes),
 		Details: res,
 		IsError: res.Status == "failed" || res.Status == "schema-mismatch",
 	}, nil
+}
+
+// renderAgentNotes appends what the definition asked for that could not be
+// honoured. The child ran narrower than the parent intended, so the
+// assumption has to be in the handoff the parent reads, not only in a log
+// file nobody opens (#272).
+func renderAgentNotes(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nwarnings:\n")
+	for _, n := range notes {
+		b.WriteString("- " + n + "\n")
+	}
+	return b.String()
 }
 
 // agentNames lists available agent names for error messages.
@@ -367,8 +532,10 @@ func agentNames(defs []AgentDefinition) string {
 
 // resolveAgentTools builds the child's tool set from the agent's declared
 // tool names. At the depth cap, the task tool is removed (recursive spawn
-// blocked structurally). Unknown tool names are skipped (forward-compat:
-// the agent may name tools this binary does not have).
+// blocked structurally). Names the parent does not carry are skipped
+// (forward-compat: the agent may name tools this binary does not have) and
+// reported by missingAgentTools, so a typo no longer reads as a config that
+// took effect (#272).
 func resolveAgentTools(declared stringList, parentTools []tool.Tool, depth, maxDepth int) []tool.Tool {
 	// We cannot rebuild the full registry here; we filter parent tools by
 	// name. yield is added by SpawnChild.
@@ -380,6 +547,38 @@ func resolveAgentTools(declared stringList, parentTools []tool.Tool, depth, maxD
 	for _, t := range parentTools {
 		if allowed[t.Name()] {
 			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// toolNames lists a tool set by name for a log line.
+func toolNames(tools []tool.Tool) []string {
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, t.Name())
+	}
+	slices.Sort(out)
+	return out
+}
+
+// missingAgentTools lists declared tool names the child did not get: either
+// the parent never carried them (a typo, or a tool this binary has no child
+// version of) — in both cases the child is narrower than the author meant.
+func missingAgentTools(declared stringList, granted []tool.Tool, depth, maxDepth int) []string {
+	have := map[string]bool{"yield": true}
+	for _, t := range granted {
+		have[t.Name()] = true
+	}
+	// A declared `task` is granted structurally by the recursive spawn above,
+	// and only below the depth cap.
+	if depth+1 < maxDepth {
+		have[TaskToolName] = true
+	}
+	var out []string
+	for _, name := range declared {
+		if !have[name] {
+			out = append(out, name)
 		}
 	}
 	return out
