@@ -1778,7 +1778,10 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	case ai.EventDone:
 		h.ts.app.EndAssistant()
 		if ev.Usage != nil {
-			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output)
+			// The HUD's ctx number is the whole request — cached input included
+			// (Claude Code's used_tokens), which is Usage.TotalTokens, not the
+			// uncached Input+Output the ↑/↓ counters accumulate.
+			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output, ev.Usage.TotalTokens)
 			if ev.Usage.Cost != nil {
 				h.ts.app.AddCost(ev.Usage.Cost.Total)
 			}
