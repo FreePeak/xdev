@@ -2287,23 +2287,39 @@ func (a *App) draw() {
 	selRows := make([]selRow, 0, end-start)
 	for row, r := range a.viewRows(int32(start), int32(end)) {
 		y := row + top
-		if r.ln.bg != 0 {
-			// Band row (user prompt / code fence): fill the full width so
-			// the band reads as one continuous row (grok semantic band).
-			for bx := 0; bx < bandLim; bx++ {
+		// A banded row (user prompt / code fence) carries one background
+		// that the fill, the rail, the runs and the timestamp must all
+		// share: tcell's zero background is ColorDefault, so a style that
+		// omits it resets the cell under the glyphs to the terminal's own
+		// colour instead of the band.
+		banded := r.ln.bg != 0
+		if banded {
+			// Fill the full width so the band reads as one continuous row
+			// (grok semantic band).
+			for bx := range bandLim {
 				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
 			}
 		}
 		x := 3 // rail(1) + pad(2); user bands start their runs at x=0
-		if r.ln.bg != 0 && len(r.ln.runs) > 0 && r.ln.runs[0].text == "❯ " {
+		if banded && len(r.ln.runs) > 0 && r.ln.runs[0].text == "❯ " {
 			x = 0
 		}
 		if r.rail != "" {
-			drawText(s, 0, y, r.rail, r.railS)
+			railS := r.railS
+			if banded {
+				railS = railS.Background(r.ln.bg)
+			}
+			drawText(s, 0, y, r.rail, railS)
 		}
 		startX, content := x, strings.Builder{}
 		for _, run := range r.ln.runs {
-			drawText(s, x, y, run.text, run.style)
+			st := run.style
+			if banded {
+				// Runs carry the band too, or the row fill survives only
+				// in the gaps between the glyphs.
+				st = st.Background(r.ln.bg)
+			}
+			drawText(s, x, y, run.text, st)
 			content.WriteString(run.text)
 			x += width(run.text)
 		}
@@ -2313,7 +2329,7 @@ func (a *App) draw() {
 		// Right-aligned dim timestamp (grok draws these on first rows).
 		if r.ts != "" {
 			tsSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-			if r.ln.bg != 0 {
+			if banded {
 				tsSt = tsSt.Background(r.ln.bg)
 			}
 			drawText(s, w-width(r.ts)-2, y, r.ts, tsSt)

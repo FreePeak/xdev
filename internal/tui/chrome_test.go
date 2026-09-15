@@ -337,6 +337,44 @@ func TestComposerIsBorderlessAndFilled(t *testing.T) {
 	}
 }
 
+// TestUserBandPaintsUnderGlyphs pins the sent-message band as one surface:
+// every cell of a banded transcript row that carries the prompt's own runes
+// shows the band background, not the terminal default. A run painted with a
+// foreground-only style resets its cells (tcell's zero background is
+// ColorDefault), so the row fill survives only in the gaps and the user
+// input reads as black behind the glyphs inside the band.
+func TestUserBandPaintsUnderGlyphs(t *testing.T) {
+	app, scr := drawnApp(t, 80, 20)
+	app.AddUserBlock("hello band")
+	app.draw()
+
+	band, ok := app.th.Slot(theme.BgHighlight)
+	if !ok {
+		t.Fatal("built-in theme must carry a user band")
+	}
+	want := app.cellColor(band)
+	prim, w, _ := scr.GetContents()
+	x0, y0 := -1, -1
+	for i := range prim {
+		// The top bar also leads with ❯ at (0,0); the band row is a
+		// transcript row, so below the bar and flush left.
+		if i%w == 0 && i >= w && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
+			x0, y0 = i%w, i/w
+			break
+		}
+	}
+	if x0 < 0 {
+		t.Fatal("no user band row painted")
+	}
+	// Cells of "❯ hello band": gutter, space, and the ten prompt runes.
+	for x := range 12 {
+		_, bg, _ := prim[y0*w+x].Style.Decompose()
+		if bg != want {
+			t.Fatalf("band row cell %d (rune %q) bg = %s, want the band %v under the glyphs", x, string(prim[y0*w+x].Runes), bg, band)
+		}
+	}
+}
+
 // askResultOf drives one card to completion and returns its answer.
 func askResultOf(t *testing.T, app *App, req AskRequest, timeout time.Duration, keys ...any) (AskAnswer, bool) {
 	t.Helper()
