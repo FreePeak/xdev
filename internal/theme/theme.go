@@ -268,11 +268,12 @@ func groknightSlots() map[string]Color {
 		StatusLineOutput:    Hex("#6c6c6c"),
 		StatusLineCost:      Hex("#6c6c6c"),
 		StatusLineSubagents: Hex("#bb9af7"),
-		// Diff rows. grok-build has no diff tokens of its own; these reuse
-		// the palette's success/error inks (the same Tokyo Night green/red
-		// the status line paints a clean/dirty tree in) and the comment gray
-		// for unchanged rows, so a change reads as the theme already says
-		// "added", "removed", "background".
+		// Diff rows. These keep the palette's own green/red — the pair the
+		// status line paints a clean/dirty tree in — but the TUI does not
+		// paint a change with them: Builtins marks the three slots terminal-
+		// default, because a colour xdev picks for itself is free to land on
+		// the user's red or green. They stay as color-blind mode's source
+		// pair, and a custom theme may still pin them.
 		ToolDiffAdded:   Hex("#9ece6a"),
 		ToolDiffRemoved: Hex("#f7768e"),
 		ToolDiffContext: Hex("#6c6c6c"),
@@ -328,12 +329,22 @@ func grokdaySlots() map[string]Color {
 	}
 }
 
-// Builtins returns the launch themes.
+// Builtins returns the launch themes. The diff slots are marked terminal-
+// default (the state a theme file reaches by spelling a color ""): the TUI
+// reads that as "paint the change in the terminal's own palette", which is
+// the only palette xdev can be sure matches the screen it is drawn on. The
+// slots keep their palette values above so color-blind mode — which exists
+// precisely because those two inks are unreadable to some readers — has a
+// pair to remap and a difference to name.
 func Builtins() map[string]*Theme {
 	return map[string]*Theme{
-		"groknight": {Name: "groknight", Dark: true, Slots: groknightSlots()},
-		"grokday":   {Name: "grokday", Dark: false, Slots: grokdaySlots()},
+		"groknight": {Name: "groknight", Dark: true, Slots: groknightSlots(), Defaults: diffToTerminal()},
+		"grokday":   {Name: "grokday", Dark: false, Slots: grokdaySlots(), Defaults: diffToTerminal()},
 	}
+}
+
+func diffToTerminal() map[string]bool {
+	return map[string]bool{ToolDiffAdded: true, ToolDiffRemoved: true, ToolDiffContext: true}
 }
 
 // Load resolves the theme by name ("groknight"|"grokday"; "" → auto). Auto
