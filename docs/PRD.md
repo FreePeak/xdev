@@ -620,6 +620,8 @@ Net: CC's §5.1 verdict still holds — xdev's pi/omp-shaped minimalism survives
 
 ---
 
+*Last updated: 2026-09-15 (user-requested "Move the ci pipeline generate sem ver + create github release to origin release"): the semver bump + GitHub Release pipeline (release.yml) no longer triggers on push to `main` — `main` is the gate only. The release train is now the `release` branch on origin (created from main's tip): pushing there auto-bumps the patch version, builds the six-platform binaries, signs, and publishes the release. Tag pushes (manual minor/major) and workflow_dispatch are unchanged.
+
 *Last updated: 2026-09-15 (user-requested "remove the dir path at top bar"): the top bar's location is the git branch alone (`❯ main`); the working directory lives only on the status row's left. `cwdLabel`/`cwdShort` retired with it — a branchless welcome bar paints just the model. `TestTopBarCarriesBranchAndLastPrompt` asserts the temp-dir name never reaches row 0.
 
 *Last updated: 2026-09-15 (user-reported "The box tool call output in xdev not having the style format like omp"): the tool-result frame now sanitizes output before measuring it — `sanitizeOutput` expands tabs to omp's 3-cell stop and drops ANSI/C0/C1 sequences (omp parity: `we()` + the control-char strip in its tui utils, read from the binary's embedded source) — because `runewidth` counts a tab as 0 cells while the terminal paints it as an advance to the next 8-column stop: every `│` of a tab-indented result landed on its own column. `TestToolResultBoxAlignsTabbedOutput` pins one shared right edge.

@@ -10,14 +10,16 @@ name: release
 # workflow, which is why the release is not a reaction to a tag push
 # but is run directly by this file.
 #
+# Release model: `main` is the gate; the `release` branch (cut from main's
+# tip on origin) is the release train — pushing to it cuts the next version.
+#
 # Triggers:
-#   push to main          auto-bump the patch version, build, publish
+#   push to release       auto-bump the patch version, build, publish
 #   push: tags: ["v*"]    tag already chosen (manual minor/major release)
-#   workflow_dispatch     optional "version" input, else like main
-
+#   workflow_dispatch     optional "version" input, else like a release push
 on:
   push:
-    branches: [main]
+    branches: [release]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
