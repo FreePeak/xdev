@@ -4,8 +4,9 @@ go 1.25.14
 
 require (
 	github.com/gdamore/tcell/v2 v2.13.10
-	github.com/mattn/go-runewidth v0.0.29
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/mattn/go-runewidth v0.0.30
+	github.com/modelcontextprotocol/go-sdk v1.8.0
+	golang.org/x/term v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.58.0
 )
@@ -27,7 +28,6 @@ require (
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	modernc.org/libc v1.75.6 // indirect
