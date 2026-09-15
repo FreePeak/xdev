@@ -74,6 +74,9 @@ type askState struct {
 type askResult struct {
 	labels []string
 	ok     bool
+	// notice is set by the draw path when the card had no room to paint:
+	// AskCard puts it in the transcript, then takes the skip.
+	notice string
 }
 
 // minAskCardWidth is the narrowest screen the card renders on; below it the
@@ -93,7 +96,7 @@ func (a *App) AskCard(ctx context.Context, req AskRequest, timeout time.Duration
 		// No room for the card: say the question in the transcript and take
 		// the skip path, so the tool's headless policy answers instead of
 		// the question vanishing.
-		a.AddSystemBlock(askNotice(req))
+		a.AddSystemBlock(askNotice(req, "window too narrow for the option card — using the recommended path"))
 		return AskAnswer{}, false
 	}
 	st := &askState{req: req, ch: make(chan askResult, 1)}
@@ -123,8 +126,16 @@ func (a *App) AskCard(ctx context.Context, req AskRequest, timeout time.Duration
 	}
 	select {
 	case res := <-st.ch:
+		if res.notice != "" {
+			// The draw path closed an unpaintable card; keep its record.
+			a.AddSystemBlock(res.notice)
+			return AskAnswer{}, false
+		}
 		return AskAnswer{Labels: res.labels}, res.ok
 	case <-deadline:
+		// The wait the headless policy would have run is already spent, so
+		// record the question and let the caller answer from the card alone.
+		a.AddSystemBlock(askNotice(req, fmt.Sprintf("no answer within %s — using the recommended path", timeout)))
 		return AskAnswer{}, false
 	case <-ctx.Done():
 		return AskAnswer{}, false
@@ -264,6 +275,23 @@ func (a *App) resolveAsk(confirm bool) {
 	a.poke()
 }
 
+// dropAskLocked closes the card from the draw path when it cannot paint — the
+// 5b999f0 invariant (a modal that cannot paint must close) restated for ask:
+// owning the keyboard while painting nothing looked like a dead UI. Callers
+// hold a.mu, so AddSystemBlock/resolveAsk would re-lock and deadlock the UI
+// thread; the parked AskCard is woken through its buffered channel instead and
+// leaves the question in the transcript itself.
+func (a *App) dropAskLocked(st *askState) {
+	if a.ask != st {
+		return
+	}
+	a.ask = nil
+	select {
+	case st.ch <- askResult{notice: askNotice(st.req, "no room above the composer for the option card — using the recommended path")}:
+	default:
+	}
+}
+
 // drawAskCard renders the blocking question above the composer. Callers hold
 // a.mu (draw does), so this must not re-lock.
 func (a *App) drawAskCard(yComposerTop int) {
@@ -273,6 +301,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 	}
 	w, s := a.width, a.scr
 	if w < minAskCardWidth {
+		a.dropAskLocked(st)
 		return
 	}
 	box := a.th.Box()
@@ -325,6 +354,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 	// top border row (like the other cards), never its input rows.
 	y := yComposerTop - len(rows) - len(question) - 3
 	if y < 1 {
+		a.dropAskLocked(st)
 		return
 	}
 	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
@@ -390,9 +420,9 @@ func wrapAsk(text string, cells int) []string {
 	return append(out, line)
 }
 
-// askNotice renders a question as a transcript block: the fallback when no
-// card fits on screen.
-func askNotice(req AskRequest) string {
+// askNotice renders a question as a transcript block: the record kept when
+// the card did not get an answer (no room, or nobody answered in time).
+func askNotice(req AskRequest, why string) string {
 	var b strings.Builder
 	b.WriteString("ask: " + req.Question)
 	for _, o := range req.Options {
@@ -401,7 +431,10 @@ func askNotice(req AskRequest) string {
 			b.WriteString(": " + o.Description)
 		}
 	}
-	b.WriteString("\n  (window too narrow for the option card — using the recommended path)")
+	if len(req.Recommended) > 0 {
+		b.WriteString("\n  recommended: " + strings.Join(req.Recommended, ", "))
+	}
+	b.WriteString("\n  (" + why + ")")
 	return b.String()
 }
 
