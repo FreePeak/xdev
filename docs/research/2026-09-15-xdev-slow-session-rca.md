@@ -1,5 +1,7 @@
 # Why xdev sessions feel slower than omp — root-cause analysis (2026-09-15)
 
+**Tracked as [#284](https://github.com/FreePeak/xdev/issues/284).**
+
 **User-reported symptom:** in this repo, xdev sessions *take more turns* and *run longer* than omp
 sessions doing the same work. This doc finds the root causes by measuring both tools' real session
 JSONL stores (166 xdev + 52 omp files, all on the same onegw `free`/`fast` lanes, same usage/ttft/
