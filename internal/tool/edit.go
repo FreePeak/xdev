@@ -246,6 +246,7 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	// model typed (which never carries one) would land as a bare LF and leave
 	// a CRLF file silently mixed — the defect the live fixture showed.
 	crlf := dominantCRLF(lines)
+	before := append([]string(nil), lines...)
 	linesBefore := len(lines)
 
 	// Freshness guard + arg repair: compare the file against what read/
@@ -397,17 +398,37 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if finalPath != resolved {
 		t.reg.forgetSnapshot(resolved)
 	}
-
+	details := map[string]any{
+		"resolvedPath": finalPath,
+		"opsApplied":   len(a.Ops),
+		"linesBefore":  linesBefore,
+		"linesAfter":   len(lines),
+		"diffSummary":  summary,
+	}
+	// The renderer gets the actual change, not just the op tally: the text
+	// above stays what the model was shown, while the frame paints these
+	// rows in the theme's diff colours. An MV still diffs as a content
+	// change under the path the model named — the move is in the text.
+	if diff, ok := UnifiedDiff(outDisplay, stripCR(before), stripCR(lines)); ok {
+		details["unifiedDiff"] = diff
+	}
 	return Result{
-		Text: text,
-		Details: map[string]any{
-			"resolvedPath": finalPath,
-			"opsApplied":   len(a.Ops),
-			"linesBefore":  linesBefore,
-			"linesAfter":   len(lines),
-			"diffSummary":  summary,
-		},
+		Text:    text,
+		Details: details,
 	}, nil
+}
+
+// stripCR drops the carriage returns ReadLines kept, so a CRLF file's diff
+// shows what changed rather than every line differing by one invisible byte.
+func stripCR(lines []string) []string {
+	if !strings.Contains(strings.Join(lines, ""), "\r") {
+		return lines
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = strings.TrimSuffix(l, "\r")
+	}
+	return out
 }
 
 // editOpSummary renders one applied op's change for the result metadata. The

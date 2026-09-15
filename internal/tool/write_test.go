@@ -94,3 +94,52 @@ func TestWriteRefusesDirectoryTarget(t *testing.T) {
 		t.Fatalf("text = %q, isError = %v", res.Text, res.IsError)
 	}
 }
+
+// A write's Details carry the change: every line added for a new file, the
+// real before/after for an overwrite. Text keeps the one-line summary the
+// model and the session log read.
+func TestWriteAttachesUnifiedDiff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+
+	res, err := NewWriteTool().Execute(t.Context(), fsToolArgs(t, map[string]any{"path": path, "content": "one\ntwo\n"}))
+	if err != nil || res.IsError {
+		t.Fatalf("create failed: %v %v", err, res)
+	}
+	d := res.Details.(map[string]any)
+	diff, _ := d["unifiedDiff"].(string)
+	if !strings.Contains(diff, "--- /dev/null") || !strings.Contains(diff, "+one") || !strings.Contains(diff, "+two") {
+		t.Errorf("created file diff wrong:\n%q", diff)
+	}
+	if minus, _ := tallyRows(diff); minus != 0 {
+		t.Errorf("created file diff shows %d removals:\n%q", minus, diff)
+	}
+	if res.Text != "Wrote "+path+" (8 bytes, 2 lines)" {
+		t.Errorf("Text = %q", res.Text)
+	}
+
+	res, err = NewWriteTool().Execute(t.Context(), fsToolArgs(t, map[string]any{"path": path, "content": "one\nTWO\n"}))
+	if err != nil || res.IsError {
+		t.Fatalf("overwrite failed: %v %v", err, res)
+	}
+	diff = res.Details.(map[string]any)["unifiedDiff"].(string)
+	if !strings.Contains(diff, "-two") || !strings.Contains(diff, "+TWO") {
+		t.Errorf("overwrite diff wrong:\n%q", diff)
+	}
+}
+
+// Rewriting identical content is not a change: no diff, so no painted one.
+func TestWriteIdenticalContentHasNoDiff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewWriteTool().Execute(t.Context(), fsToolArgs(t, map[string]any{"path": path, "content": "same\n"}))
+	if err != nil || res.IsError {
+		t.Fatalf("write failed: %v %v", err, res)
+	}
+	if d := res.Details.(map[string]any); d["unifiedDiff"] != nil {
+		t.Errorf("unchanged write produced a diff: %v", d["unifiedDiff"])
+	}
+}

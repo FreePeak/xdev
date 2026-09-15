@@ -1789,8 +1789,9 @@ func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
 	h.ts.app.AddToolBlock(call.Name, string(call.Arguments))
 }
 
-// OnToolEnd passes the outcome facts the status footer shows — exit code and
-// dropped output — flattened from the tool's own structured details.
+// OnToolEnd passes the outcome facts the status footer shows — exit code,
+// dropped output, and the change the tool made to a file — flattened from the
+// tool's own structured details.
 func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Duration) {
 	out := tool.OutcomeOf(res.Details)
 	h.ts.app.FinishTool(call.Name, res.IsError, res.Text, tui.ToolOutcome{
@@ -1798,6 +1799,7 @@ func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Du
 		Exit:      out.Exit,
 		HasExit:   out.HasExit,
 		Truncated: out.Truncated,
+		Diff:      out.Diff,
 	})
 }
 

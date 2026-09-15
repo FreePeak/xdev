@@ -268,6 +268,14 @@ func groknightSlots() map[string]Color {
 		StatusLineOutput:    Hex("#6c6c6c"),
 		StatusLineCost:      Hex("#6c6c6c"),
 		StatusLineSubagents: Hex("#bb9af7"),
+		// Diff rows. grok-build has no diff tokens of its own; these reuse
+		// the palette's success/error inks (the same Tokyo Night green/red
+		// the status line paints a clean/dirty tree in) and the comment gray
+		// for unchanged rows, so a change reads as the theme already says
+		// "added", "removed", "background".
+		ToolDiffAdded:   Hex("#9ece6a"),
+		ToolDiffRemoved: Hex("#f7768e"),
+		ToolDiffContext: Hex("#6c6c6c"),
 	}
 }
 
@@ -313,6 +321,10 @@ func grokdaySlots() map[string]Color {
 		StatusLineOutput:    Hex("#767676"),
 		StatusLineCost:      Hex("#767676"),
 		StatusLineSubagents: Hex("#7D4BC6"),
+		// Diff rows: the day palette's own green/red and comment gray.
+		ToolDiffAdded:   Hex("#378E23"),
+		ToolDiffRemoved: Hex("#cd3048"),
+		ToolDiffContext: Hex("#767676"),
 	}
 }
 

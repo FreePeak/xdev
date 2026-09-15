@@ -447,3 +447,139 @@ func TestHumanTokens(t *testing.T) {
 		}
 	}
 }
+
+// A tool result that changed a file paints its diff: the rows carry the
+// theme's diff inks, the changed token inside a -/+ pair sits on its own band,
+// and the plain model preview is not also painted as prose. Text stays what
+// the model saw.
+func TestToolBoxPaintsDiff(t *testing.T) {
+	app := idxApp(100, 40)
+	w := app.contentWidth()
+	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
+	app.AddToolBlock("edit", `{"path":"f.go"}`)
+	app.FinishTool("edit", false, "[f.go#abc]\n1:a\n2:b := 2\n3:c", ToolOutcome{Dur: "12ms", Diff: diff})
+	idx := len(app.blocks) - 1
+	lines := app.blockLines(idx, app.blocks[idx], w)
+	joined := joinedLines(lines)
+	for _, want := range []string{"+b := 2", "-b := 1", "@@ -1,3 +1,3 @@"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("diff row %q missing from the render:\n%s", want, joined)
+		}
+	}
+	// The box paints the change, not the same change twice.
+	if strings.Contains(joined, "2:b := 2") {
+		t.Errorf("model preview painted alongside the diff:\n%s", joined)
+	}
+	// A file change keeps its header line so the box still names what it did.
+	if !strings.Contains(joined, "[f.go#abc]") {
+		t.Errorf("result header dropped:\n%s", joined)
+	}
+	// Every row lands its right border on the same column.
+	frame := width(runsText(lines[0].runs))
+	for _, ln := range lines {
+		if width(runsText(ln.runs)) != frame {
+			t.Fatalf("row %q is %d cells, frame is %d", runsText(ln.runs), width(runsText(ln.runs)), frame)
+		}
+	}
+
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
+	rem, _ := app.th.Slot(theme.ToolDiffRemoved)
+	ctx, _ := app.th.Slot(theme.ToolDiffContext)
+	rowRuns := func(prefix string) []cell {
+		for _, ln := range lines {
+			if txt := runsText(ln.runs); strings.Contains(txt, prefix) {
+				return ln.runs[1:] // skip the left border cell
+			}
+		}
+		t.Fatalf("no row containing %q in\n%s", prefix, joined)
+		return nil
+	}
+	inkOf := func(runs []cell) tcell.Color {
+		fg, _, _ := runs[0].style.Decompose()
+		return fg
+	}
+	// cellRow pads short rows with an unstyled run, so the content ink is the
+	// first run's foreground and the context row must differ from both inks.
+	if got := inkOf(rowRuns("+b := 2")); got != app.cellColor(add) {
+		t.Errorf("added row ink = %v, want %v", got, app.cellColor(add))
+	}
+	if got := inkOf(rowRuns("-b := 1")); got != app.cellColor(rem) {
+		t.Errorf("removed row ink = %v, want %v", got, app.cellColor(rem))
+	}
+	got := inkOf(rowRuns(" c "))
+	wantCtx := app.cellColor(ctx)
+	if got == app.cellColor(add) || got == app.cellColor(rem) {
+		t.Errorf("context row ink = %v, painted as a change (want %v)", got, wantCtx)
+	}
+
+	// Word band: the added row splits into runs, and the changed token is the
+	// one whose background is tinted rather than the terminal default.
+	runs := rowRuns("+b := 2")
+	var banded []string
+	for _, r := range runs {
+		if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
+			banded = append(banded, r.text)
+		}
+	}
+	if len(banded) == 0 {
+		t.Fatalf("added row carries no word band: %#v", runs)
+	}
+	if !strings.Contains(strings.Join(banded, ""), "2") {
+		t.Errorf("word band = %q, want it to cover the changed token", strings.Join(banded, ""))
+	}
+	for _, r := range runs {
+		if _, bg, _ := r.style.Decompose(); bg == tcell.ColorDefault {
+			continue
+		}
+		if strings.Contains(r.text, "b :=") {
+			t.Errorf("word band swallowed unchanged text: %q", r.text)
+		}
+	}
+}
+
+// A bash result that merely prints a list is not re-painted as a diff; one
+// that prints a real `git diff` is.
+func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
+	if DiffLooksUnified("- item one\n- item two\n") {
+		t.Error("a bullet list read as a diff")
+	}
+	if DiffLooksUnified("1 file changed, 2 insertions(+)\n") {
+		t.Error("a diffstat read as a diff")
+	}
+	git := "diff --git a/f.go b/f.go\nindex 111..222 100644\n--- a/f.go\n+++ b/f.go\n@@ -1 +1 @@\n-old\n+new\n"
+	if !DiffLooksUnified(git) {
+		t.Error("a real git diff was not detected")
+	}
+
+	app := idxApp(100, 40)
+	w := app.contentWidth()
+	app.AddToolBlock("bash", `{"command":"git diff"}`)
+	app.FinishTool("bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
+	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], w)
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
+	var painted bool
+	for _, ln := range lines {
+		txt := runsText(ln.runs)
+		if strings.Contains(txt, "+new") {
+			fg, _, _ := ln.runs[1].style.Decompose()
+			painted = fg == app.cellColor(add)
+		}
+	}
+	if !painted {
+		t.Errorf("bash git diff not painted with the diff ink:\n%s", joinedLines(lines))
+	}
+
+	// The same tool's ordinary output keeps the plain body colour.
+	app2 := idxApp(100, 40)
+	app2.AddToolBlock("bash", `{"command":"ls"}`)
+	app2.FinishTool("bash", false, "- item one\n- item two\n", ToolOutcome{Dur: "1ms"})
+	ln2 := app2.blockLines(len(app2.blocks)-1, app2.blocks[len(app2.blocks)-1], app2.contentWidth())
+	for _, ln := range ln2 {
+		if txt := runsText(ln.runs); strings.Contains(txt, "item one") {
+			fg, _, _ := ln.runs[1].style.Decompose()
+			if fg == app2.cellColor(add) {
+				t.Errorf("plain bash output painted as a diff addition:\n%s", joinedLines(ln2))
+			}
+		}
+	}
+}

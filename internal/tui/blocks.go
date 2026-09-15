@@ -34,6 +34,12 @@ type Block struct {
 	HasExit  bool   // tool result blocks: Exit is a real exit status
 	// Truncated marks a result whose tool dropped output the model never saw.
 	Truncated bool
+	// Diff carries the unified diff of the file change a tool made, when
+	// there was one to take. Text stays the model-visible output; the diff
+	// exists so the result box can paint added/removed rows instead of a
+	// wall of one colour. (edit/write attach it; a `git diff` captured in
+	// bash output is painted by detection, not through this field.)
+	Diff string
 	// Expanded is a result box's Ctrl+O state: render every row.
 	Expanded bool
 	stream   bool      // assistant still receiving deltas (dim cursor at tail)

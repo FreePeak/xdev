@@ -198,6 +198,7 @@ type blockKey struct {
 	expanded bool // result box: the Ctrl+O state changed the row set
 	age      int64
 	trim     int8 // bounded middle trim: this block's render-window tier
+	dlen     int  // result box: a diff changes the row set without touching Text
 }
 
 // New creates the App over an initialized screen.
@@ -450,6 +451,7 @@ type ToolOutcome struct {
 	Exit      int    // process exit code; read only when HasExit
 	HasExit   bool
 	Truncated bool
+	Diff      string // unified diff of the file change, when the tool made one
 }
 
 // AddToolBlock appends one tool-call row in the running state, carrying the
@@ -497,7 +499,7 @@ func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome
 	a.blocks = append(a.blocks, &Block{
 		Kind: KindToolDone, ToolName: name, Text: text,
 		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
-		Truncated: out.Truncated,
+		Truncated: out.Truncated, Diff: out.Diff,
 	})
 	a.mu.Unlock()
 	a.poke()
@@ -2069,37 +2071,86 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 		}}
 	}
 
+	// cellRow frames an already-wrapped styled row: the same border and
+	// padding cell row paints, but the padding keeps each run's own style so
+	// a coloured row's cells land on the same column as a plain one. Runs
+	// past the interior budget are cut here rather than allowed to push the
+	// right border out of alignment.
+	cellRow := func(ln line) line {
+		framed := line{runs: []cell{{text: box.Vertical + " ", style: border}}}
+		col := 0
+		for _, r := range ln.runs {
+			if col >= inner {
+				break
+			}
+			if col+width(r.text) > inner {
+				r.text = truncateCells(r.text, inner-col, "")
+			}
+			framed.runs = append(framed.runs, r)
+			col += width(r.text)
+		}
+		if col < inner {
+			framed.runs = append(framed.runs, cell{text: strings.Repeat(" ", inner-col)})
+		}
+		framed.runs = append(framed.runs, cell{text: " " + box.Vertical, style: border})
+		return framed
+	}
+
+	// The render window: Ctrl+O drops it and prints everything the tool kept
+	// (bounded by the tool's own sink cap, not by this renderer).
+	headRows, tailRows := toolWindow(a.trimTier(i))
+
+	// A file change paints its diff: the coloured rows replace the plain
+	// preview the model was shown (same change, plus the context around it),
+	// and the tool's own first line survives above them as the header, so the
+	// box still names what it did. Bash gets the same treatment only when its
+	// output actually reads as a unified diff — painting a list whose rows
+	// happen to start with "-" as a change would be a lie, which is why the
+	// structured path (b.Diff, written by a tool that made the change) needs
+	// no such test.
+	body := sanitizeOutput(strings.TrimRight(b.Text, "\n"))
+	diff, header := b.Diff, ""
+	switch {
+	case diff == "" && b.ToolName == "bash" && DiffLooksUnified(body):
+		diff, body = body, ""
+	case diff != "":
+		header, body = splitDiffHeader(body)
+	}
+
+	var rows []line
+	if diff != "" {
+		rows = a.diffCells(sanitizeOutput(diff), inner)
+	} else {
+		for _, wl := range wrap(body, inner) {
+			rows = append(rows, textline(wl, bodySt))
+		}
+	}
+
 	var out []line
 	out = append(out, top)
-
-	// Body: the tool output as the model saw it (the tool layer bounds it:
-	// bash 16KB head+tail per stream, 8MB combined kill cap). Collapsed, the
-	// render window keeps the resident line cache bounded (PRD row budget);
-	// Ctrl+O drops the window and prints everything the tool kept, which is
-	// bounded by that sink cap rather than by this renderer.
-	body := sanitizeOutput(strings.TrimRight(b.Text, "\n"))
+	if header != "" {
+		out = append(out, row(header, bodySt))
+	}
 	switch {
-	case body == "" && !b.Err:
+	case len(rows) == 0 && !b.Err:
 		out = append(out, row("(no output)", mutedSt))
-	case body != "":
+	case len(rows) == 0:
+		// An error result with nothing to say: the frame and footer carry it.
+	case b.Expanded || len(rows) <= headRows+tailRows+1:
 		// Aged results collapse to a head+tail window: the middle of the
 		// output is trimmed before anything else in the transcript is.
-		headRows, tailRows := toolWindow(a.trimTier(i))
-		rows := wrap(body, inner)
-		if b.Expanded || len(rows) <= headRows+tailRows+1 {
-			for _, wl := range rows {
-				out = append(out, row(wl, bodySt))
-			}
-		} else {
-			for _, wl := range rows[:headRows] {
-				out = append(out, row(wl, bodySt))
-			}
-			// The notice sits at the hole it describes, between the head and
-			// the tail — omp prints its hidden-line count the same way.
-			out = append(out, row(fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-headRows-tailRows), dimSt))
-			for _, wl := range rows[len(rows)-tailRows:] {
-				out = append(out, row(wl, bodySt))
-			}
+		for _, ln := range rows {
+			out = append(out, cellRow(ln))
+		}
+	default:
+		for _, ln := range rows[:headRows] {
+			out = append(out, cellRow(ln))
+		}
+		// The notice sits at the hole it describes, between the head and
+		// the tail — omp prints its hidden-line count the same way.
+		out = append(out, row(fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-headRows-tailRows), dimSt))
+		for _, ln := range rows[len(rows)-tailRows:] {
+			out = append(out, cellRow(ln))
 		}
 	}
 
@@ -2126,6 +2177,35 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 
 	out = append(out, textline(box.BottomLeft+strings.Repeat(box.Horizontal, max(1, w-2))+box.BottomRight, border))
 	return out
+}
+
+// splitDiffHeader keeps the part of a tool's output that the diff cannot say:
+// its leading one-line reports (the moved notice, the [path#TAG] snapshot, the
+// write summary). It stops where the render window starts — the "N:text" rows
+// a file preview is made of — because those restate the change the coloured
+// rows now carry. body returns the dropped remainder.
+func splitDiffHeader(body string) (header, rest string) {
+	if body == "" {
+		return "", ""
+	}
+	var keep []string
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		if isWindowRow(ln) {
+			return strings.Join(keep, "\n"), strings.Join(lines[i:], "\n")
+		}
+		keep = append(keep, ln)
+	}
+	return strings.Join(keep, "\n"), ""
+}
+
+// isWindowRow reports a render-window row: a 1-based line number and a colon.
+func isWindowRow(s string) bool {
+	i := 0
+	for i < len(s) && '0' <= s[i] && s[i] <= '9' {
+		i++
+	}
+	return i > 0 && i < len(s) && s[i] == ':'
 }
 
 // stThinkingHdr styles the thinking header: muted bold, per grok thinking.rs.
