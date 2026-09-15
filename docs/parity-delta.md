@@ -45,6 +45,7 @@ drift) plus the authoritative `cli-reference.md`. Method: mechanical surface dif
 | `--provider <name>` | **added** | forces the provider when the model ref names none; unknown provider fails fast |
 | `--no-prewalk` | **added** | beats `--prewalk` and `settings.Prewalk.Enabled` |
 | `--prewalk-into` + `prewalk.enabled`/`prewalk.into` | **added** | flag → `prewalk.into` → `@smol`; the flag default is now "" so the setting is reachable |
+| `-retry-forever` + `retry.infinite` | **added** | the flag writes the setting for one run; `wireAgentMode` copies it into every mode, so once the whole fallback chain drains the ladder keeps re-running it — announcing each round — instead of ending the turn |
 | `-e`, `--extension <path>` | **added** | explicit extension directory load; a non-directory (omp's single-file shape) fails **loudly** on stderr |
 | `--plugin-dir <dir>` | **added** | extra plugin roots via `marketplace.SetExtraRoots` (commands/skills/agents/hooks inherit) |
 | `--add-dir <dir>` | **added** | workspace roots: file-scan roots (`fscache`), context-file discovery (AGENTS.md per root), and named in the prompt |

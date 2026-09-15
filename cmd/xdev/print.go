@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -251,6 +252,9 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	if settings != nil {
 		ag.Compaction.IdleAfter = settings.CompactionIdleAfter()
 		ag.Compaction.Async = settings.CompactionAsyncOn()
+		// retry.infinite rides here: every build site (print/tui/rpc/acp)
+		// goes through this function, and none of them set ag.Retry at all.
+		ag.Retry.Infinite = settings.RetryConfig().Infinite
 	}
 	// #86: a compaction summary must carry the memories the remote backend
 	// recalled, or they are lost for the rest of the session.
@@ -2440,6 +2444,15 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 	case ai.EventToolcallStart:
 		fmt.Fprintf(os.Stderr, "\n⟨%s⟩\n", ev.ToolName)
 	case ai.EventError:
+		// The rounds of an unbounded wait (retry.infinite) are the one
+		// transient worth printing verbatim: once per round, not once per
+		// attempt, and it is the message that says "still waiting" rather
+		// than "hung".
+		var down *agent.AllTargetsDownError
+		if errors.As(ev.Err, &down) {
+			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
+			break
+		}
 		// The recovery ladder retries transient wire errors; printing the
 		// full message once per attempt is noise (and alarming). Hard
 		// errors still print verbatim — the turn ends on them.
