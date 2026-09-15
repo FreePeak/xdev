@@ -138,6 +138,20 @@ func (e *Editor) insert(r rune) {
 	e.cur++
 }
 
+// InsertText puts a whole string at the cursor as one edit. Paste must not
+// replay the buffer through HandleKey rune by rune: a pasted CR is Enter, and
+// Enter sends, so one multi-line paste would submit one message per line.
+// Nothing in here can send, whatever the text contains.
+func (e *Editor) InsertText(s string) {
+	if s == "" {
+		return
+	}
+	ins := []rune(s)
+	e.buf = append(e.buf[:e.cur], append(ins, e.buf[e.cur:]...)...)
+	e.cur += len(ins)
+	e.wantCol = 0
+}
+
 // recall moves through history; only when the buffer holds no newline
 // (multi-line drafts are not clobbered by history navigation). An in-progress
 // draft never blocks recall — the baseline (omp/Claude Code) recalls on Up

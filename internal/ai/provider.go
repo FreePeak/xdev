@@ -20,6 +20,33 @@ type StreamRequest struct {
 	MaxTokens int
 	// Thinking requests reasoning when non-nil (reasoning-capable models).
 	Thinking *ThinkingBudget
+	// Cache opts this request into prompt caching. Zero value = no caching:
+	// a provider behaves exactly as it did before the field existed.
+	Cache CacheOpts
+}
+
+// CacheOpts carries the prompt-cache identity of one request. Providers with no
+// cache-control vocabulary on the wire (Bedrock, gRPC, local servers) ignore all
+// of it, so callers never have to care which adapter they hit.
+type CacheOpts struct {
+	// Key routes cache affinity for providers with a request-level key field —
+	// OpenAI's `prompt_cache_key`. It is the stable session id, NOT the
+	// per-request id: a side request that shares the main chain's prefix
+	// should read from the same entry (omp pi-ai forwards
+	// promptCacheKey ?? sessionId). Empty = send no key.
+	Key string
+	// SideRequest marks a request that is NOT the main chain — a compaction or
+	// handoff summarize call, a one-shot CLI ask. Its markers stop at the last
+	// completed tool round instead of the newest message, so a throwaway
+	// request never writes a cache entry nothing later reads.
+	SideRequest bool
+}
+
+// cacheWanted reports whether one request opts into cache markers: a caller
+// that set no identity is asking for the pre-cache request shape, byte for
+// byte. Providers with no marker vocabulary ignore the field entirely.
+func (c CacheOpts) cacheWanted() bool {
+	return c.Key != "" && cacheEnabled()
 }
 
 // Provider streams one assistant turn onto a channel of unified events.

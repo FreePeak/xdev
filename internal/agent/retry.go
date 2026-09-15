@@ -14,6 +14,14 @@ type RetryPolicy struct {
 	MaxDelay   time.Duration // backoff cap
 }
 
+// maxEscalationRounds bounds what "always retry" means once the whole
+// failover chain has drained (loop.go's M5 ladder): the turn re-runs the
+// retry ladder on the current target this many extra times, each behind a
+// full-cap backoff, then the error surfaces. An outage that outlasts one
+// pass through the chain is survived; a hard failure misclassified as
+// transient still terminates.
+const maxEscalationRounds = 2
+
 // DefaultRetryPolicy is the omp-shaped default ladder.
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{MaxRetries: 4, BaseDelay: 500 * time.Millisecond, MaxDelay: 8 * time.Second}

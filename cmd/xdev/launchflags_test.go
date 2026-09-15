@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -613,5 +614,22 @@ func TestStartupIsInteractive(t *testing.T) {
 		if got := startupIsInteractive(c.prompt, c.forcePrint, c.tty); got != c.wantTUI {
 			t.Errorf("%s: startupIsInteractive = %v, want %v", c.name, got, c.wantTUI)
 		}
+	}
+}
+
+// The stream-error display follows the recovery ladder's mind: a transient
+// wire error is being retried, so it collapses to a notice instead of
+// flashing the raw provider text once per attempt; a hard error still shows.
+func TestTransientStreamErrorDisplaysAsRetryNotice(t *testing.T) {
+	transient := ai.Event{Type: ai.EventError, Err: errors.New("openai-completions: stream ended without finish_reason")}
+	hard := ai.Event{Type: ai.EventError, Err: errors.New("agent: stream: HTTP 400 invalid_request: bad stuff")}
+
+	out := captureStderr(t, func() { (&printHooks{}).OnEvent(transient) })
+	if !strings.Contains(out, "retrying") || strings.Contains(out, "finish_reason") {
+		t.Fatalf("transient stream error display = %q, want a retry notice without the raw wire text", out)
+	}
+	out = captureStderr(t, func() { (&printHooks{}).OnEvent(hard) })
+	if !strings.Contains(out, "bad stuff") {
+		t.Fatalf("hard stream error display = %q, want the raw error", out)
 	}
 }

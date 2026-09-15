@@ -224,7 +224,7 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 // the welcome menu now). The metrics own the width: the path tail-truncates
 // and the optional segments drop before the clock or the rate is touched.
 func TestStatusRowShowsPathAndMetrics(t *testing.T) {
-	const deep = "/Volumes/work/example/freepeak/checkout/xdev-feature"
+	const deep = "/Volumes/work/harvey/freepeak/checkout/xdev-feature"
 
 	// seededStatusRow draws the row for a deep path with a 2h05m clock and a
 	// measured 42.5 t/s.
@@ -282,27 +282,57 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	}
 }
 
-// TestBoxStyleFromTheme: boxRound keeps today's glyphs, boxSharp swaps the
-// outline, and the ascii preset degenerates it.
+// TestBoxStyleFromTheme: with the composer frame gone, theme.Box shows
+// through the tool-result box — round keeps today's glyphs, boxSharp swaps
+// the outline, and the ascii preset degenerates it to +-| (BRO-614).
 func TestBoxStyleFromTheme(t *testing.T) {
 	app, scr := drawnApp(t, 60, 20)
+	app.AddToolBlock("bash", `{"command":"echo hi"}`)
+	app.FinishTool("bash", false, "done", ToolOutcome{Dur: "1ms"})
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "╰ test/free") {
-		t.Fatalf("default round composer missing:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
+		t.Fatalf("default round tool box missing:\n%s", text)
 	}
 
 	sharp := &theme.Theme{Name: "sharp", Dark: true, Slots: map[string]theme.Color{}, Symbols: theme.Symbols{Box: "sharp"}}
 	app.SetTheme(sharp)
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "┌") || strings.Contains(text, "╭") {
-		t.Fatalf("sharp composer missing:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "┌") || !strings.Contains(text, "└") || strings.Contains(text, "╭") {
+		t.Fatalf("sharp tool box missing:\n%s", text)
 	}
 
 	ascii := &theme.Theme{Name: "ascii", Dark: true, Slots: map[string]theme.Color{}, Symbols: theme.Symbols{Preset: "ascii"}}
 	app.SetTheme(ascii)
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "+-") || strings.Contains(text, "╭") {
-		t.Fatalf("ascii composer missing:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "+") || !strings.Contains(text, "|") || strings.Contains(text, "╭") || strings.Contains(text, "┌") {
+		t.Fatalf("ascii tool box missing:\n%s", text)
+	}
+}
+
+// TestComposerIsBorderlessAndFilled pins the composer's shape (omp parity):
+// the prompt rows carry the user-message background across the full width,
+// and no box frame is painted around them — the divider's rule is the only
+// composer chrome left.
+func TestComposerIsBorderlessAndFilled(t *testing.T) {
+	app, scr := drawnApp(t, 60, 14)
+	setDraft(&app.ed, "hello there", 11)
+	app.draw()
+
+	prim, w, _ := scr.GetContents()
+	y := app.height - 1 - app.composerRows() // the prompt's first input row
+	band, _ := app.th.Slot(theme.BgHighlight)
+	for x := 0; x < w; x++ {
+		_, bg, _ := prim[y*w+x].Style.Decompose()
+		if bg != app.cellColor(band) {
+			t.Fatalf("prompt row cell %d bg = %s, want the user band %v", x, bg, band)
+		}
+	}
+	text := screenText(scr)
+	if strings.Contains(text, "╭") || strings.Contains(text, "│") {
+		t.Fatalf("the prompt still paints a frame:\n%s", text)
+	}
+	if !strings.Contains(text, "❯ hello there") {
+		t.Fatalf("prompt gutter/text misplaced:\n%s", text)
 	}
 }
 

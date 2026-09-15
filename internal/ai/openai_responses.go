@@ -78,8 +78,13 @@ func (p *OpenAIResponsesProvider) API() string {
 // Wire shapes for the request body.
 
 type openaiRespContent struct {
-	Type string `json:"type"` // input_text | output_text
+	Type string `json:"type"` // input_text | output_text | input_image
+	// Text is emitted always on this wire (no omitempty): the assistant
+	// round-trip test reads it even when empty, and the endpoint accepts "".
 	Text string `json:"text"`
+	// ImageURL is a data URL, and here — unlike chat/completions — the
+	// Responses API wants it as a bare string, not an object.
+	ImageURL string `json:"image_url,omitempty"`
 }
 
 type openaiRespItem struct {
@@ -117,7 +122,10 @@ type openaiRespRequest struct {
 	Instructions string           `json:"instructions,omitempty"`
 	Tools        []openaiRespTool `json:"tools,omitempty"`
 	Store        *bool            `json:"store,omitempty"`
-	Reasoning    *struct {
+	// PromptCacheKey is the Responses wire's cache-affinity field, sent only to
+	// a first-party endpoint (see promptCacheKey).
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
+	Reasoning      *struct {
 		Effort string `json:"effort"`
 	} `json:"reasoning,omitempty"`
 }
@@ -137,6 +145,9 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 		Instructions: req.System,
 	}
 
+	if k := promptCacheKey(p.baseURL, req.Cache.Key); k != "" {
+		wr.PromptCacheKey = k
+	}
 	if p.behavior.attachInstallID {
 		wr.User = InstallID() // "" when unset: the field is omitted
 	}
@@ -170,8 +181,13 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 		case RoleUser:
 			var content []openaiRespContent
 			for _, b := range m.Content {
-				if t, ok := b.(TextBlock); ok {
+				switch t := b.(type) {
+				case TextBlock:
 					content = append(content, openaiRespContent{Type: "input_text", Text: t.Text})
+				case ImageBlock:
+					if u, ok := imageURL(t.Source); ok {
+						content = append(content, openaiRespContent{Type: "input_image", ImageURL: u})
+					}
 				}
 			}
 			if len(content) > 0 {
@@ -505,4 +521,18 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 			return
 		}
 	}
+}
+
+// imageURL renders an image source as the data URL the Responses API wants in
+// an input_image part — a bare string here, unlike chat/completions, which
+// nests it in an object (userContent). False on an empty source: a part with no
+// URL is a request the endpoint rejects, so the block is dropped instead.
+func imageURL(s ImageSource) (string, bool) {
+	if s.Data == "" {
+		return "", false
+	}
+	if s.Type == "base64" {
+		return "data:" + s.MediaType + ";base64," + s.Data, true
+	}
+	return s.Data, true
 }

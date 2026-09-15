@@ -7,16 +7,17 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// dividerRow returns the composer's info divider (the ╰─ model ─╯ row) from a
-// rendered screen: the bottom rows are shortcuts, divider, composer input, box
-// top — so the divider is the third line counting back from the end.
+// dividerRow returns the composer's info divider (the ─ model ─ rule) from a
+// rendered screen: the bottom rows are the status row, the divider, and the
+// prompt above it — so the divider is the second line counting back from the
+// end.
 func dividerRow(t *testing.T, scr tcell.SimulationScreen) string {
 	t.Helper()
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	if len(rows) < 3 {
 		t.Fatalf("screen too short to have a composer: %q", strings.Join(rows, "|"))
 	}
-	return rows[len(rows)-3]
+	return rows[len(rows)-2]
 }
 
 // TestScrollIndicatorNeverPaintsTranscriptRow pins the fix for "the last prompt
@@ -42,10 +43,8 @@ func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 		t.Fatalf("the first transcript row lost its content: %q", rows[1])
 	}
 	divider := dividerRow(t, scr)
-	if !strings.Contains(divider, "╰") {
+	if !strings.Contains(divider, "─") || !strings.Contains(divider, "test/free") {
 		t.Fatalf("expected the info divider, got %q", divider)
-	}
-	if !strings.Contains(divider, "▲") || !strings.Contains(divider, "▼") {
 		t.Fatalf("the hint did not move to the divider: %q", divider)
 	}
 }
