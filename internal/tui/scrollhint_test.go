@@ -7,17 +7,24 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// dividerRow returns the composer's info divider (the ─ model ─ rule) from a
+// dividerRow returns the composer's info divider (the ╰─ model ─╯ row) from a
 // rendered screen: the bottom rows are the status row, the divider, and the
 // prompt above it — so the divider is the second line counting back from the
-// end.
+// end of what was actually drawn; TrimRight drops blank rows, so instead of a
+// fixed index the divider is the last row that opens a box corner.
 func dividerRow(t *testing.T, scr tcell.SimulationScreen) string {
 	t.Helper()
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	if len(rows) < 3 {
 		t.Fatalf("screen too short to have a composer: %q", strings.Join(rows, "|"))
 	}
-	return rows[len(rows)-2]
+	for i := len(rows) - 1; i >= 0; i-- {
+		if strings.Contains(rows[i], "╰") {
+			return rows[i]
+		}
+	}
+	t.Fatalf("no composer divider on screen: %q", strings.Join(rows, "|"))
+	return ""
 }
 
 // TestScrollIndicatorNeverPaintsTranscriptRow pins the fix for "the last prompt
@@ -43,8 +50,10 @@ func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 		t.Fatalf("the first transcript row lost its content: %q", rows[1])
 	}
 	divider := dividerRow(t, scr)
-	if !strings.Contains(divider, "─") || !strings.Contains(divider, "test/free") {
+	if !strings.Contains(divider, "╰") {
 		t.Fatalf("expected the info divider, got %q", divider)
+	}
+	if !strings.Contains(divider, "▲") || !strings.Contains(divider, "▼") {
 		t.Fatalf("the hint did not move to the divider: %q", divider)
 	}
 }
