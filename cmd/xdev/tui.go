@@ -2327,19 +2327,88 @@ func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskRes
 	if s.ops == nil || s.ops.Show == nil {
 		return s.fallback.Ask(ctx, req)
 	}
-	ans, ok := s.ops.Show(ctx, tui.AskRequest{
-		Question: req.Question, Options: askCardOptions(req.Options),
-		Multi: req.Multi, Recommended: req.Recommended,
-	}, 0)
-	if ok && len(ans.Labels) > 0 {
-		return tool.AskResponse{Labels: ans.Labels}, nil
-	}
+	ans, ok := s.ops.Show(ctx, askCardRequest(req), 0)
 	if err := ctx.Err(); err != nil {
 		return tool.AskResponse{}, err
 	}
+	// The card has been shown, so this call has already spent its one wait:
+	// whatever it says is the answer, including "nothing" (which the tool
+	// turns into its best-judgment text). Falling to the fallback here would
+	// wait ask.timeout a second time for a human who already declined.
+	resp, _ := askCardAnswer(req, ans, ok)
+	return resp, nil
+}
+
+// AskBatch answers a batch as one tabbed card, so several questions cost the
+// human one interruption and one wait instead of N of each. The tool only
+// routes here when its sink implements the seam (tool.AskBatchSink).
+func (s *askCardSink) AskBatch(ctx context.Context, reqs []tool.AskRequest) ([]tool.AskResponse, error) {
+	if len(reqs) == 1 {
+		one, err := s.Ask(ctx, reqs[0])
+		return []tool.AskResponse{one}, err
+	}
+	if s.ops == nil || s.ops.ShowBatch == nil {
+		// No batch card: one Ask per question keeps the old behavior correct,
+		// at the cost of one interruption each.
+		out := make([]tool.AskResponse, 0, len(reqs))
+		for _, req := range reqs {
+			resp, err := s.Ask(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resp)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+		return out, nil
+	}
+	cardReqs := make([]tui.AskRequest, 0, len(reqs))
+	for _, req := range reqs {
+		cardReqs = append(cardReqs, askCardRequest(req))
+	}
+	answers, ok := s.ops.ShowBatch(ctx, cardReqs, 0)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(answers) != len(reqs) {
+		ok = false // a half answer is no answer: fall back wholesale
+	}
+	out := make([]tool.AskResponse, len(reqs))
+	for i, req := range reqs {
+		var ans tui.AskAnswer
+		if ok {
+			ans = answers[i]
+		}
+		out[i], _ = askCardAnswer(req, ans, ok) // one wait, same rule as Ask
+	}
+	return out, nil
+}
+
+// askCardRequest converts one tool question to the overlay's shape.
+func askCardRequest(req tool.AskRequest) tui.AskRequest {
+	return tui.AskRequest{
+		Question: req.Question, Options: askCardOptions(req.Options),
+		Multi: req.Multi, ID: req.ID, Recommended: req.Recommended,
+	}
+}
+
+// askCardAnswer is one card answer's verdict. answered=false means the question
+// is unanswered even after the card (skipped or timed out with no recommended
+// option), which the tool reports as its best-judgment text. Picking the chat
+// escape hatch IS an answer — it carries no labels on purpose — so it must not
+// be mistaken for a skip.
+func askCardAnswer(req tool.AskRequest, ans tui.AskAnswer, ok bool) (tool.AskResponse, bool) {
+	note := strings.TrimSpace(ans.Note)
+	if ok && (len(ans.Labels) > 0 || note != "") {
+		return tool.AskResponse{Labels: ans.Labels, Note: note}, true
+	}
 	// Skip or timeout, after the card's own wait: the tool's policy is the
 	// recommended option(s), so take them instead of waiting a second time.
-	return tool.AskResponse{Labels: append([]string(nil), req.Recommended...)}, nil
+	if len(req.Recommended) > 0 {
+		return tool.AskResponse{Labels: append([]string(nil), req.Recommended...)}, true
+	}
+	return tool.AskResponse{}, false
 }
 
 // askCardOptions converts the tool's option list to the overlay's shape.
