@@ -234,6 +234,10 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, req StreamReques
 	if model == "" {
 		model = p.model
 	}
+	// Fetch-origin timing: ttft/duration must include connect +
+	// gateway queue + prefill — the wait the user feels (#283; see the
+	// full comment in anthropic.go).
+	start := time.Now()
 	sctx, cancel := context.WithCancel(ctx)
 	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/chat/completions", p.headers(), body, APIOpenAICompletions)
 	if err != nil {
@@ -241,7 +245,6 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, req StreamReques
 		return nil, err
 	}
 	ch := make(chan Event, 64)
-	start := time.Now()
 	go func() {
 		defer resp.Body.Close()
 		defer cancel()

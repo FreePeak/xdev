@@ -26,6 +26,7 @@ type TurnHooks interface {
 	OnMessageEnd(msg *ai.Message) // assistant message (persists here)
 	OnToolResultMessage(msg *ai.Message)
 	OnCompaction(tokensBefore int64) // history compacted
+	OnContinuation(text string)      // provider cut-off: a continuation turn was injected
 	OnTurnEnd(reason ai.StopReason, err error)
 }
 
@@ -38,6 +39,7 @@ type TurnHooksFunc struct {
 	OnMessageEndF    func(*ai.Message)
 	OnToolResultMsgF func(*ai.Message)
 	OnCompactionF    func(tokensBefore int64)
+	OnContinuationF  func(text string)
 	OnTurnEndF       func(ai.StopReason, error)
 }
 
@@ -74,6 +76,11 @@ func (h TurnHooksFunc) OnToolResultMessage(m *ai.Message) {
 func (h TurnHooksFunc) OnCompaction(before int64) {
 	if h.OnCompactionF != nil {
 		h.OnCompactionF(before)
+	}
+}
+func (h TurnHooksFunc) OnContinuation(text string) {
+	if h.OnContinuationF != nil {
+		h.OnContinuationF(text)
 	}
 }
 func (h TurnHooksFunc) OnTurnEnd(s ai.StopReason, err error) {
@@ -182,6 +189,9 @@ type Agent struct {
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
+	// Offload is the artifact-offload seam for oversized tool results
+	// (#283 RCA §4, backend owned by #115); nil keeps results verbatim.
+	Offload ArtifactOffloader
 	// Intercept routes tool calls/results through the extension bus
 	// (nil disables interception).
 	Intercept Interceptor
@@ -573,10 +583,11 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				if !continued && errors.As(err, &te) && te.partial != nil {
 					history = append(history, *te.partial)
 					a.persist(*te.partial)
-					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}}
+					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}, Attribution: ContinuationAttribution}
 					history = append(history, cont)
 					a.persist(cont)
 					continued = true
+					a.Hooks.OnContinuation(ContinuationPrompt)
 					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
 						return nil, history, serr
 					}
@@ -1114,6 +1125,15 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		// it, like omp, because the reminder is the thing the model must not
 		// miss in a long output (T3 #40 had it appended and buried).
 		res.Text = rem + "\n\n" + strings.TrimLeft(res.Text, "\n")
+	}
+	if a.Offload != nil && !res.IsError && len(res.Text) > OffloadThresholdBytes {
+		if stub, ok, oerr := a.Offload.Offload(call.Name, call.ID, res.Text); oerr != nil {
+			// A failed spill must be a named error, never a silent
+			// marker claiming bytes that were not written (#115).
+			logx.Errorf("artifact offload: %v", oerr)
+		} else if ok {
+			res.Text = stub
+		}
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
 	return toolResultMsg(call, res)

@@ -34,6 +34,17 @@ var ErrWatchdogAborted = errors.New("stream watchdog: no progress")
 // body read), emits one error{ErrWatchdogAborted}, and keeps draining the
 // source until close so its goroutine exits.
 //
+// Liveness is judged from the SOURCE side, never from delivery: an expiry
+// with undelivered events buffered in ch means the stream produced faster
+// than the consumer drained, which is back-pressure, not a dead socket.
+// #283 RCA §1 measured this exact kill: a frozen UI stalled the agent
+// goroutine that pumps ch's consumer, the relay's event-forwarding stopped
+// refreshing the window (and Go's select can even hand back a stale expiry
+// once delivery resumes), and a stream healthy at the socket was aborted —
+// each episode costing the retry ladder plus one injected fake-user
+// continuation turn. A slow consumer may delay the verdict; it can never
+// cause one.
+//
 // The relay NEVER ends early: the Provider contract promises exactly one
 // terminal done/error event then close, and consumers (agent loop, print,
 // TUI) read to close — so a caller-cancel that raced the source teardown
@@ -69,8 +80,21 @@ func withWatchdog(_ context.Context, cancel context.CancelFunc, ch <-chan Event,
 					// closed, so stop waiting. The relay's lifetime must
 					// never outlive the stream by more than one grace
 					// window, or every aborted stream leaks a goroutine
-					// (caught by the CI leak test on Linux).
+					// (caught by the CI leak test on Linux). This check
+					// precedes the back-pressure re-arm below: a source
+					// that keeps queueing events after cancel must not
+					// hold the relay open forever.
 					return
+				}
+				if len(ch) > 0 {
+					// Source-side progress is outstanding: the relay was
+					// blocked delivering into a stalled consumer, so this
+					// expiry measures delivery starvation, not socket
+					// silence. Re-arm and keep delivering (#283: a stale
+					// expiry beating the receive branch is how a frozen
+					// UI killed healthy streams).
+					timer.Reset(idle)
+					continue
 				}
 				aborted = true
 				cancel()

@@ -21,7 +21,9 @@ type rollupEntry struct {
 	C    counters `json:"c"`
 }
 
-const rollupVersion = 1
+// rollupVersion 2: counters gained `injected` (#283); v1 caches would
+// under-report it as 0, so the whole cache is invalidated once.
+const rollupVersion = 2
 
 // rollupPath is <dataDir>/stats/rollup.json.
 func rollupPath(dataDir string) string {

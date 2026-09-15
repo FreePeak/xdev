@@ -223,6 +223,7 @@ var fragmentTemplate = template.Must(template.New("frag").Funcs(tmplFuncs).Parse
 <tr><td>subagent sessions</td><td>{{.Totals.Subagents}}</td></tr>
 <tr><td>turns</td><td>{{.Totals.Turns}}</td></tr>
 <tr><td>user messages</td><td>{{.Totals.UserMessages}}</td></tr>
+<tr><td>injected turns</td><td>{{.Totals.InjectedTurns}} (harness, not user input)</td></tr>
 <tr><td>tool calls</td><td>{{.Totals.ToolCalls}} ({{.Totals.ToolErrors}} errors)</td></tr>
 <tr><td>tokens in / out</td><td>{{tok .Totals.Input}} / {{tok .Totals.Output}}</td></tr>
 <tr><td>cache read / write</td><td>{{tok .Totals.CacheRead}} / {{tok .Totals.CacheWrite}}</td></tr>

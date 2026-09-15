@@ -2497,6 +2497,12 @@ func (h *printHooks) OnCompaction(tokensBefore int64) {
 	fmt.Fprintf(os.Stderr, "\n[context compacted at ~%d tokens]\n", tokensBefore)
 }
 
+// OnContinuation surfaces the injected cut-off recovery turn on stderr,
+// in the same voice as the compaction notice (#283).
+func (h *printHooks) OnContinuation(text string) {
+	fmt.Fprintf(os.Stderr, "\n[provider cut off mid-message — partial retained, continuation injected]\n")
+}
+
 // OnGoalUpdated implements agent.GoalHook: goal transitions surface on stderr
 // in print mode.
 func (h *printHooks) OnGoalUpdated(g agent.Goal) {

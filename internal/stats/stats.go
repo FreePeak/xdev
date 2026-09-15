@@ -60,9 +60,14 @@ type Totals struct {
 	Sessions     int `json:"sessions"`
 	Subagents    int `json:"subagentSessions"`
 	UserMessages int `json:"userMessages"`
-	Turns        int `json:"turns"`
-	ToolCalls    int `json:"toolCalls"`
-	ToolErrors   int `json:"toolErrors"`
+	// InjectedTurns counts harness-written user messages — provider
+	// cut-off continuations, goal nudges — which are not user input
+	// (#283: they inflated the felt turn count while hiding where the
+	// turns actually came from).
+	InjectedTurns int `json:"injectedTurns"`
+	Turns         int `json:"turns"`
+	ToolCalls     int `json:"toolCalls"`
+	ToolErrors    int `json:"toolErrors"`
 
 	Input       int64 `json:"input"`
 	Output      int64 `json:"output"`
@@ -229,6 +234,7 @@ func (r *Report) fold(m session.SessionMeta, c counters) {
 		t.Subagents++
 	}
 	t.UserMessages += c.UserMessages
+	t.InjectedTurns += c.Injected
 	t.Turns += c.Turns
 	t.ToolCalls += c.ToolCalls
 	t.ToolErrors += c.ToolErrors
@@ -385,12 +391,13 @@ type wireEntry struct {
 }
 
 type wireMessage struct {
-	Role     string      `json:"role"`
-	Model    string      `json:"model"`
-	IsError  bool        `json:"isError"`
-	ToolName string      `json:"toolName"`
-	Usage    *ai.Usage   `json:"usage"`
-	Content  []wireBlock `json:"content"`
+	Role        string      `json:"role"`
+	Attribution string      `json:"attribution,omitempty"`
+	Model       string      `json:"model"`
+	IsError     bool        `json:"isError"`
+	ToolName    string      `json:"toolName"`
+	Usage       *ai.Usage   `json:"usage"`
+	Content     []wireBlock `json:"content"`
 }
 
 type wireBlock struct {
@@ -402,6 +409,7 @@ type wireBlock struct {
 // session file, small enough to cache thousands of.
 type counters struct {
 	UserMessages int     `json:"userMessages,omitempty"`
+	Injected     int     `json:"injected,omitempty"`
 	Turns        int     `json:"turns,omitempty"`
 	ToolCalls    int     `json:"toolCalls,omitempty"`
 	ToolErrors   int     `json:"toolErrors,omitempty"`
@@ -474,7 +482,14 @@ func (c *counters) addEntry(e *wireEntry) {
 	m := e.Message
 	switch m.Role {
 	case "user":
-		c.UserMessages++
+		// Typed input carries no attribution or the verbatim "user";
+		// anything else ("provider-continuation", "goal-continuation",
+		// …) is harness text the user never wrote (#283).
+		if m.Attribution == "" || m.Attribution == "user" {
+			c.UserMessages++
+		} else {
+			c.Injected++
+		}
 	case "assistant":
 		c.Turns++
 		name := m.Model
