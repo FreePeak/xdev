@@ -143,18 +143,58 @@ func TestAppEscClosesDropdown(t *testing.T) {
 	}
 }
 
-// TestWelcomeMenuItems covers the menu contract.
+// TestWelcomeMenuItems covers the menu contract: four rows, every hint a
+// control that exists.
 func TestWelcomeMenuItems(t *testing.T) {
-	items := welcomeMenuItems(false)
-	if len(items) != 3 {
-		t.Fatalf("fresh session menu = %d rows, want 3", len(items))
+	items := welcomeMenuItems()
+	if len(items) != 4 {
+		t.Fatalf("menu = %d rows, want 4", len(items))
 	}
-	if items[0].Key != "/new" {
-		t.Fatalf("first action = %q, want /new", items[0].Key)
+	for _, it := range items {
+		if it.Label == "" || it.Key == "" {
+			t.Fatalf("menu row %v has no label or no key", it)
+		}
+		if it.Key == "ctrl+r" {
+			t.Fatalf("menu advertises %q, which no keymap binds", it.Key)
+		}
 	}
-	items = welcomeMenuItems(true)
-	if len(items) != 4 || items[0].Key != "ctrl+r" {
-		t.Fatalf("with history, first row must be Resume (ctrl+r)")
+	if items[0].Key != "/resume" {
+		t.Fatalf("first action = %q, want /resume", items[0].Key)
+	}
+}
+
+// TestWelcomeStartupNotice pins the #272 surface: the startup report is a
+// LINE OF THE WELCOME SCREEN. As a transcript block it ended that screen, so
+// the first thing a fresh xdev showed was an agent count instead of its logo
+// and menu. With a transcript already on screen there is no welcome to hang
+// it on, so the same call falls back to the scrollback.
+func TestWelcomeStartupNotice(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	app.SetStartupNotice("· task agents: 5 — reviewer, scout, task")
+	app.draw()
+	if !gridContains(scr, "New session") {
+		t.Fatal("a startup notice must not evict the welcome screen")
+	}
+	if !gridContains(scr, "task agents: 5") {
+		t.Fatal("startup notice missing from the welcome screen")
+	}
+	app.mu.Lock()
+	blocks := len(app.blocks)
+	app.mu.Unlock()
+	if blocks != 0 {
+		t.Fatalf("notice went into the transcript (%d blocks); it must stay chrome", blocks)
+	}
+
+	// With a transcript the welcome is gone, and the notice must still be
+	// readable — as a block.
+	app2, _ := newTestApp(t, 100, 30)
+	app2.AddSystemBlock("hello")
+	app2.SetStartupNotice("· task agents: 0 — none")
+	app2.mu.Lock()
+	n, last := len(app2.blocks), app2.blocks[len(app2.blocks)-1].Text
+	app2.mu.Unlock()
+	if n != 2 || last != "· task agents: 0 — none" {
+		t.Fatalf("with a transcript the notice must be a block; got %d blocks, last=%q", n, last)
 	}
 }
 
