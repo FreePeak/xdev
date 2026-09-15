@@ -361,7 +361,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// warnings used to go — so an empty or half-broken agent set looked
 	// exactly like a working one. Say what loaded, before the first turn.
 	if notice, _, _ := taskAgentsAtStartup(cwd); notice != "" {
-		app.AddSystemBlock(notice)
+		app.SetStartupNotice(notice)
 	}
 
 	// -handoff: document the resumed session before the first turn.

@@ -148,6 +148,12 @@ type App struct {
 	life       lifeGrid
 	lifeTick   int
 	sheenPhase int // welcome logo sheen sweep position (columns)
+	// startupNotice is a line of the welcome screen's own chrome — what
+	// loaded, what broke (#272). It is deliberately NOT a transcript block:
+	// any block ends the welcome screen, so the report used to replace the
+	// start screen. grok keeps the same split — startup warnings and the tip
+	// row are slots of the welcome layout, never scrollback content.
+	startupNotice string
 	// Mouse text selection: drag anywhere, release copies to the clipboard.
 	// selDown is the held button (a drag in flight); selShown keeps the
 	// highlight up after the release until the next click, like a terminal's
@@ -331,6 +337,26 @@ func (a *App) AddSystemBlock(text string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{Kind: KindSystem, Text: text})
 	a.mu.Unlock()
+	a.poke()
+}
+
+// SetStartupNotice reports a startup fact (#272: what loaded, what broke)
+// where the user will actually read it. With an empty transcript it becomes
+// a line of the welcome screen — a transcript block would end that screen,
+// which is how "· task agents: 5" came to replace the start screen outright.
+// Once a transcript exists (a resumed session) there is no welcome to hang it
+// on, so it goes to the scrollback instead. Either way it is one line the user
+// sees before the first turn, and never both.
+func (a *App) SetStartupNotice(text string) {
+	a.mu.Lock()
+	empty := len(a.blocks) == 0
+	if empty {
+		a.startupNotice = text
+	}
+	a.mu.Unlock()
+	if !empty {
+		a.AddSystemBlock(text)
+	}
 	a.poke()
 }
 
@@ -2718,6 +2744,14 @@ func (a *App) drawComposer(yTop int) {
 	// short line cannot leave stale cells from a previous longer draft.
 	for i, ln := range lines {
 		x := 5 + width(ln)
+		if x == 5 && a.ed.Text() == "" {
+			// grok's "Type a message…": an empty prompt is not a blank void.
+			// Drawn here, after the text row, because the fill below would
+			// otherwise blank it back to spaces.
+			ph := "Type a message…"
+			drawText(a.scr, 5, yTop+i, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+			x += width(ph)
+		}
 		for ; x < w-2; x++ {
 			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
 		}
