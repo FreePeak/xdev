@@ -17,19 +17,17 @@ type welcomeMenu struct {
 	Key   string
 }
 
-// welcomeMenuItems returns the start-screen actions for the current
-// session state.
-func welcomeMenuItems(hasHistory bool) []welcomeMenu {
-	items := []welcomeMenu{}
-	if hasHistory {
-		items = append(items, welcomeMenu{Label: "Resume session", Key: "ctrl+r"})
+// welcomeMenuItems returns the start-screen actions. Every row names a
+// control that actually exists: the hint column is what to type (or the chord
+// that is really bound), like grok's menu — a row advertising an unbound
+// chord is a lie the user discovers at the keyboard.
+func welcomeMenuItems() []welcomeMenu {
+	return []welcomeMenu{
+		{Label: "Resume session", Key: "/resume"},
+		{Label: "New session", Key: "/new"},
+		{Label: "Clear context", Key: "/clear"},
+		{Label: "Quit", Key: "ctrl+c"},
 	}
-	items = append(items,
-		welcomeMenu{Label: "New session", Key: "/new"},
-		welcomeMenu{Label: "Clear context", Key: "/clear"},
-		welcomeMenu{Label: "Quit", Key: "ctrl+c"},
-	)
-	return items
 }
 
 // xdevLogo is the one welcome logo: "XDEV" in the FIGlet font
@@ -400,10 +398,13 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	// + status row occupy the bottom 4 rows).
 	contentTop, contentH := 2, h-8
 	logo := logoArt(w, contentH)
-	menu := welcomeMenuItems(len(a.blocks) > 0)
+	menu := welcomeMenuItems()
 	total := len(logo) + len(menu)
 	if len(logo) > 0 {
 		total += 2 // binary tagline + gap below the logo
+	}
+	if a.startupNotice != "" {
+		total++ // grok's error/tip slot: a row of its own under the menu
 	}
 	y := contentTop + max(0, (contentH-total)/2)
 
@@ -457,27 +458,61 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	}
 	y++ // gap between logo and menu
 
+	// Clear the band behind the menu + notice block (one column of margin,
+	// the same treatment the logo gets): the Life grid paints '▓' anywhere in
+	// its band, and a cell surviving between the key and the edge read as
+	// garbage in a row that is otherwise aligned chrome.
+	noticeRows := len(strings.Split(a.startupNotice, "\n"))
+	if a.startupNotice == "" {
+		noticeRows = 0
+	}
 	// Menu: label left, hotkey right-aligned in a centered column
 	// (grok menu.rs). On a narrow window the column doesn't fit —
-	// fall back to label + key inline.
-	colW := 28
+	// fall back to label + key inline. The column is as wide as the mark it
+	// sits under, like grok's render_menu (logo_visual_width().max(30)): a
+	// fixed 28 left the menu floating off the logo's own edges.
+	colW := max(28, logoW)
 	for _, m := range menu {
 		if cw := width(m.Label) + width(m.Key) + 4; cw > colW {
 			colW = cw
 		}
 	}
-	if w < colW+4 {
+	if w >= colW+4 {
+		x0 := max(2, (w-colW)/2)
+		for yy := y; yy < min(h, y+len(menu)+noticeRows); yy++ {
+			for xx := max(0, x0-1); xx < min(w, x0+colW+1); xx++ {
+				s.SetContent(xx, yy, ' ', nil, st(whiteC, false))
+			}
+		}
+		for _, m := range menu {
+			drawText(s, x0, y, m.Label, st(a.th.Get(theme.TextPrimary), true))
+			drawText(s, x0+colW-width(m.Key), y, m.Key, st(a.th.Get(theme.Gray), false))
+			y++
+		}
+	} else {
 		for _, m := range menu {
 			drawText(s, 2, y, m.Label, st(a.th.Get(theme.TextPrimary), true))
 			drawText(s, 2+width(m.Label)+2, y, m.Key, st(a.th.Get(theme.Gray), false))
 			y++
 		}
-		return
 	}
-	x0 := max(2, (w-colW)/2)
-	for _, m := range menu {
-		drawText(s, x0, y, m.Label, st(a.th.Get(theme.TextPrimary), true))
-		drawText(s, x0+colW-width(m.Key), y, m.Key, st(a.th.Get(theme.Gray), false))
+	a.drawStartupNotice(s, w, y, st(grayC, false))
+}
+
+// drawStartupNotice paints the startup report (see App.SetStartupNotice) on
+// its own rows below the menu — grok's error/tip slot — centred, clipped to
+// the screen and truncated to width so a long agent list can never spill past
+// the edge. Dim: it is a fact about the build, not a turn of the conversation.
+func (a *App) drawStartupNotice(s tcell.Screen, w, y int, dim tcell.Style) {
+	for _, ln := range strings.Split(a.startupNotice, "\n") {
+		if y >= a.height {
+			return
+		}
+		if w <= 4 { // too narrow to centre anything in
+			return
+		}
+		txt := truncateCells(ln, w-4, "…")
+		drawText(s, max(2, (w-width(txt))/2), y, txt, dim)
 		y++
 	}
 }
