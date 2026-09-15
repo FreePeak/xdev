@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
 	"testing"
 	"time"
@@ -493,5 +495,107 @@ func TestTreeSelectorNoDataNoOpen(t *testing.T) {
 	}
 	if app.TreeSelectorOpen() {
 		t.Fatal("/tree with no data must not open the selector")
+	}
+}
+
+// A long-running session is a linear parent chain: every user turn, assistant
+// turn, tool call and tool result is one entry deeper, so real transcripts
+// reach depths in the hundreds. Two cells per level put ~1.4k cells of gutter
+// before the row's own text: the content started past the panel edge and past
+// the screen width, and the overflow wrecked the rows below it (probe: a long
+// drawText at y keeps painting onto y+1). The newest rows — the ones the
+// navigator exists to reach — showed blank gutter instead of their entry. The
+// gutter is a hint (the branch structure lives in parentId), so it is capped
+// and the content stays.
+func TestTreeRowIndentIsCapped(t *testing.T) {
+	sum := strings.Repeat("x", 60) // the real summaries are clipped this long
+	deep := treeRowText(TreeEntry{ID: "aaaaaaaaaaaa", Type: "message", Depth: 722, Summary: sum}, "")
+	if !strings.HasPrefix(deep, strings.Repeat("  ", treeIndentCap)) {
+		t.Fatalf("capped row lost its gutter: %q", deep)
+	}
+	// The selector's interior is min(width-4, 120) cells; anything past the
+	// panel edge is cut off and past the screen width is dropped entirely.
+	if width(deep) >= 120 {
+		t.Fatalf("deep row is %d cells, too wide for the panel: %q", width(deep), deep)
+	}
+	// A shallow row is untouched — the cap is a ceiling, not a rewrite.
+	// depth(2 levels) + the selection mark's two cells, then the content.
+	if got := treeRowText(TreeEntry{ID: "bbbbbbbb", Type: "message", Depth: 2}, ""); got != "      bbbbbbbb message " {
+		t.Fatalf("shallow row = %q, want two levels of indent plus the mark", got)
+	}
+}
+
+// OpenTreeSelector focuses the newest row. The old default was row 0 — the
+// oldest entry — which only worked while the snapshot flagged the leaf: after
+// /branch or Shift+Enter the leaf is a custom/branch_summary marker the
+// default filter hides, and with no flag to find the selection stayed parked
+// at the start of history. A long session then opened showing its first rows.
+func TestTreeSelectorOpensOnTheNewestRow(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.SetTreeData(func() []TreeEntry {
+		return []TreeEntry{
+			{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "first prompt", Depth: 0},
+			{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "answer", Depth: 1},
+			// The leaf: a branch marker, invisible to the default filter.
+			{ID: "33333333cccc", Type: "custom", Summary: "(branch)", Depth: 2, Active: true},
+		}
+	})
+	app.OpenTreeSelector()
+	app.mu.Lock()
+	sel := app.tpick.sel
+	app.mu.Unlock()
+	if sel != 1 {
+		t.Fatalf("selection = %d, want the newest VISIBLE row (1: the leaf is filtered out)", sel)
+	}
+
+	// Same when nothing is flagged at all (a snapshot built without the leaf).
+	app.SetTreeData(func() []TreeEntry {
+		return []TreeEntry{
+			{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "first prompt"},
+			{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "answer"},
+		}
+	})
+	app.OpenTreeSelector()
+	app.mu.Lock()
+	sel = app.tpick.sel
+	app.mu.Unlock()
+	if sel != 1 {
+		t.Fatalf("unflagged selection = %d, want the last row", sel)
+	}
+}
+
+// The row window is sized to the room above the composer, and the selection
+// is kept inside it. maxRows = height/2 with no room term made a panel taller
+// than the space left above a tall composer bail out in draw() — the modal the
+// user had just opened closed itself, and the newest rows were never paintable.
+func TestTreeSelectorPaintsNewestRowsUnderATallComposer(t *testing.T) {
+	var entries []TreeEntry
+	for i := range 40 {
+		entries = append(entries, TreeEntry{
+			ID: fmt.Sprintf("%08dzzzz", i), Type: "message", Role: "user",
+			Summary: fmt.Sprintf("prompt %d", i),
+		})
+	}
+	entries[len(entries)-1].Active = true
+	app, scr := newTestApp(t, 100, 20)
+	app.SetTreeData(func() []TreeEntry { return entries })
+	app.OpenTreeSelector()
+	// A multi-line draft eats the screen the panel used to demand: eight
+	// hard-newline rows put composerRows at 10 of the 20.
+	for _, para := range []string{"one", "two", "three", "four", "five", "six", "seven", "eight"} {
+		app.ed.HandleKey(tcell.NewEventKey(tcell.KeyCtrlJ, 0, tcell.ModNone))
+		for _, r := range para {
+			app.ed.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		}
+	}
+	app.draw()
+	app.mu.Lock()
+	open := app.tpick != nil
+	app.mu.Unlock()
+	if !open {
+		t.Fatalf("selector closed itself instead of drawing a shorter window:\n%s", screenRows(scr))
+	}
+	if !gridContains(scr, "prompt 39") {
+		t.Fatalf("the focused newest row is not on screen:\n%s", screenRows(scr))
 	}
 }
