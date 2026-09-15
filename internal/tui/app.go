@@ -1416,8 +1416,11 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Unlock()
 			// A modal owns the mouse first: omp's lists move the selection on
 			// the wheel and choose the row under a click, so nothing underneath
-			// them should scroll or start a text selection.
-			if a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) {
+			// them should scroll or start a text selection. The ask card
+			// outranks the rest — while it is up it takes the wheel and the
+			// click, or the human scrolls the transcript underneath a question
+			// they were trying to answer.
+			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) {
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
@@ -2165,9 +2168,9 @@ func (a *App) draw() {
 		return
 	}
 
-	// Grok layout: top bar, scrollback, blank row, composer box (grows with
-	// the draft's wrapped line count), status row at the bottom. The top bar
-	// is chrome: the transcript viewport starts below it.
+	// Grok layout: top bar, scrollback, blank row, composer (borderless,
+	// grows with the draft's wrapped line count), status row at the bottom.
+	// The top bar is chrome: the transcript viewport starts below it.
 	top := a.transcriptTop()
 	cRows := a.composerRows()
 	vp := h - cRows - 2 - top
@@ -2264,8 +2267,8 @@ func (a *App) draw() {
 	} else {
 		a.scrollHint = ""
 	}
-	// The composer's first input row sits below the transcript; the box
-	// occupies composerRows() rows above the status line.
+	// The composer's first input row sits below the transcript; it occupies
+	// composerRows() rows above the status line.
 	composerTop := h - 1 - cRows
 	a.drawSessionPicker(composerTop)
 	a.drawHubRoster(composerTop)
