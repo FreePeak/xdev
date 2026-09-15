@@ -291,6 +291,33 @@ func TestToolResultRendersBox(t *testing.T) {
 	}
 }
 
+// TestToolResultBoxAlignsTabbedOutput pins the omp sanitize-before-frame
+// step: a tab is zero cells to runewidth but paints as an advance to the
+// next 8-column stop, so an unsanitized tab drags its row's right border
+// off the shared edge. Every framed row must still land on one column.
+func TestToolResultBoxAlignsTabbedOutput(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	out := "\tmsg := ai.Message{\n\t\tRole: ai.RoleUser,\n\t}\r\n\x1b[31mred\x1b[0m"
+	app.FinishTool("bash", false, out, ToolOutcome{Dur: "5ms"})
+	app.mu.Lock()
+	i := len(app.blocks) - 1
+	lines := app.blockLines(i, app.blocks[i], 80)
+	app.mu.Unlock()
+
+	for n, ln := range lines {
+		if w := width(lineText(ln)); w != 80 {
+			t.Fatalf("row %d width = %d, want 80 (%q)", n, w, lineText(ln))
+		}
+	}
+	body := lineText(lines[1]) + lineText(lines[2]) + lineText(lines[3])
+	if !strings.Contains(body, "   msg := ai.Message{") || !strings.Contains(body, "      Role: ai.RoleUser,") {
+		t.Fatalf("tab indentation lost, not expanded to the 3-cell stop:\n%s", body)
+	}
+	if strings.ContainsAny(body, "\x1b[") {
+		t.Fatalf("raw escape bytes reached the frame: %q", body)
+	}
+}
+
 // TestToolResultExitCodeSitsInTheFooter pins omp's division of labour: the
 // frame under its own call row repeats no name, the body keeps the output
 // without the marker the footer now reports, and the exit code appears exactly

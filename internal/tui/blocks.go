@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 
@@ -50,6 +51,42 @@ func truncateCells(s string, maxW int, ell string) string {
 		return s
 	}
 	return runewidth.Truncate(s, maxW, ell)
+}
+
+// ansiSeq matches CSI (colour/cursor) and simple ESC-prefixed sequences;
+// dropping only the ESC byte would leave the printable "[31m" as garbage.
+var ansiSeq = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z_]")
+
+// sanitizeOutput makes tool output safe to frame, the way omp's we() +
+// control-char strip do before any width math: tabs expand to fixed cells
+// (omp's tab stop is 3 spaces) and C0/C1 control characters are dropped —
+// raw ANSI escape sequences first, so no printable "[31m" litter survives.
+// zero cells, so an unsanitized tab measures 0 but paints as an advance to
+// the next 8-column stop: every right border in the box lands elsewhere.
+// Newlines are the one control rune kept; carriage returns collapse with it.
+func sanitizeOutput(s string) string {
+	if strings.IndexByte(s, 0x1b) >= 0 {
+		s = ansiSeq.ReplaceAllString(s, "")
+	}
+	if !strings.ContainsFunc(s, func(r rune) bool { return r == '\t' || r == '\r' || r < 0x20 || (r >= 0x7f && r <= 0x9f) }) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/8)
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteString("   ")
+		case r == '\n':
+			b.WriteRune('\n')
+		case r == '\r':
+			// CRLF: the \n carries the break.
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // fitWidth returns s padded (or truncated) to exactly n display cells, so a

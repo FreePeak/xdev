@@ -248,6 +248,66 @@ func gitBranch(cwd string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// transcriptTop is the screen row the transcript viewport paints into: the
+// persistent top bar owns row 0 whenever a transcript is on screen. The
+// selection geometry (anchoring, auto-scroll, row capture) shifts by it.
+func (a *App) transcriptTop() int {
+	if len(a.blocks) == 0 {
+		return 0
+	}
+	return 1
+}
+
+// lastPrompt returns the newest user prompt collapsed to one line — the top
+// bar's "where was I" anchor once the prompt itself scrolls away. Tabs and
+// control bytes are sanitized so the width math matches what is painted.
+// Caller holds a.mu.
+func (a *App) lastPrompt() string {
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindUser {
+			continue
+		}
+		s, _, _ := strings.Cut(sanitizeOutput(b.Text), "\n")
+		return strings.Join(strings.Fields(s), " ")
+	}
+	return ""
+}
+
+// drawTopBar paints row 0 (grok top_bar.rs): the location ("cwd:branch")
+// left, the model name right; with a transcript it also carries the last
+// user prompt after the location, so the request the screen is answering
+// never scrolls out of sight. Narrow windows shed the model first, then
+// clip the prompt. Caller holds a.mu.
+func (a *App) drawTopBar(s tcell.Screen, w int, withPrompt bool) {
+	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	promptSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+	left := "❯ " + a.cwdLabel
+	if a.branch != "" {
+		left += ":" + a.branch
+	}
+	drawText(s, 1, 0, left, dim)
+	x := 1 + width(left)
+	prompt := ""
+	if withPrompt {
+		prompt = a.lastPrompt()
+	}
+	right := a.st.Model
+	if 1+width(left)+2+width(right) > w-2 {
+		right = ""
+	}
+	if prompt != "" {
+		if room := w - 2 - width(right) - x - 4; room > 1 {
+			if width(prompt) > room {
+				prompt = truncateCells(prompt, room, "…")
+			}
+			drawText(s, x, 0, " · ", dim)
+			drawText(s, x+3, 0, prompt, promptSt)
+		}
+	}
+	drawText(s, w-width(right)-2, 0, right, dim)
+}
+
 // drawWelcome renders the start screen (grok welcome/mod.rs anatomy):
 // top bar (cwd:branch left, model right), vertically centered logo +
 // menu; the composer and status rows are drawn by the caller.
@@ -260,18 +320,7 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		return st
 	}
 
-	// Top bar: cwd:branch left, model right (grok top_bar.rs). On a
-	// narrow window the two would collide — drop the model name.
-	left := "❯ " + a.cwdLabel
-	if a.branch != "" {
-		left += ":" + a.branch
-	}
-	drawText(s, 1, 0, left, st(a.th.Get(theme.GrayDim), false))
-	right := a.st.Model
-	if 1+width(left)+2+width(right) > w-2 {
-		right = ""
-	}
-	drawText(s, w-len(right)-2, 0, right, st(a.th.Get(theme.GrayDim), false))
+	a.drawTopBar(s, w, false)
 
 	// Monochrome like grok's welcome: white text, gray grue.
 	whiteC, grayC, dimC := a.th.Get(theme.TextPrimary), a.th.Get(theme.Gray), a.th.Get(theme.GrayDim)

@@ -161,8 +161,9 @@ func (a *App) selViewport() (top, vp int) {
 func (a *App) selCornerAt(x, y int) selCorner {
 	c := selCorner{x: x, y: a.clampScreen(y), doc: -1}
 	top, vp := a.selViewport()
-	if vp > 0 && (a.selDocMode || y < vp) {
-		c.doc = top + min(max(y, 0), vp-1)
+	hdr := a.transcriptTop()
+	if vp > 0 && (a.selDocMode || (y >= hdr && y < hdr+vp)) {
+		c.doc = top + min(max(y-hdr, 0), vp-1)
 	}
 	return c
 }
@@ -178,10 +179,11 @@ func (a *App) selAutoScroll(y int) {
 		return
 	}
 	total := a.totalLinesLocked()
+	hdr := a.transcriptTop()
 	switch {
-	case y <= 0:
+	case y <= hdr:
 		a.sm.ScrollUp(1, total, vp)
-	case y >= vp-1:
+	case y >= hdr+vp-1:
 		a.sm.ScrollDown(1, total, vp)
 	}
 }
@@ -256,13 +258,14 @@ func (a *App) selSpan() []selSpanRow {
 // selDocRow resolves one document row: its text from the live capture while it is
 // on screen, from the gesture's cache once it has scrolled away.
 func (a *App) selDocRow(d, top int, b selBounds) selSpanRow {
+	vy := d - top
+	y := vy + a.transcriptTop()
 	sr, have := selRow{}, false
-	if y := d - top; y >= 0 && y < len(a.selRows) {
-		sr, have = a.selRows[y], true
+	if vy >= 0 && vy < len(a.selRows) {
+		sr, have = a.selRows[vy], true
 	} else if c, cached := a.selCache[d]; cached {
 		sr, have = c, true
 	}
-	y := d - top
 	if !have {
 		// Past the end of the rendered transcript: an empty line is the honest
 		// answer. On screen but unrecorded (blank padding) reads from the grid.
@@ -349,13 +352,14 @@ func (a *App) selectionText() string {
 
 // selRowAt returns the selectable content of screen row y. Rows the transcript
 // painter recorded come from that capture, which leaves out the accent rail and
-// its padding so a copied line is the text and not the decoration. Every other
-// row — welcome screen, composer, status row, an open overlay, or blank space
-// under a short transcript — is read back from the painted grid, trimmed of the
-// trailing cells that only exist to fill the width.
+// its padding so a copied line is the text and not the decoration; the capture
+// is viewport-relative, so the top bar's row is subtracted. Every other row —
+// the top bar itself, welcome, composer, status row, an open overlay, or blank
+// space under a short transcript — is read back from the painted grid, trimmed
+// of the trailing cells that only exist to fill the width.
 func (a *App) selRowAt(y int) selRow {
-	if y >= 0 && y < len(a.selRows) {
-		return a.selRows[y]
+	if vy := y - a.transcriptTop(); vy >= 0 && vy < len(a.selRows) {
+		return a.selRows[vy]
 	}
 	var sb strings.Builder
 	for x := 0; x < a.width; {

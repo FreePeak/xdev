@@ -501,3 +501,32 @@ func TestAskCardNarrowWindowNotice(t *testing.T) {
 		t.Fatalf("question must surface as a notice: %+v", app.blocks)
 	}
 }
+
+// TestTopBarCarriesFolderBranchAndLastPrompt pins the persistent header: once
+// a transcript is on screen, row 0 keeps the location (folder:branch) AND the
+// newest user prompt collapsed to one line — so the request being answered
+// stays visible even while its transcript band scrolls away.
+func TestTopBarCarriesFolderBranchAndLastPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.SetLocation(t.TempDir())
+	app.mu.Lock()
+	app.branch = "fix/boxes"
+	app.mu.Unlock()
+	app.AddUserBlock("fix the   tool\noutput box please")
+	app.AddSystemBlock(strings.Repeat("line\n", 60)) // guarantees hidden rows
+	app.draw()
+
+	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
+	bar := rows[0]
+	for _, want := range []string{"fix/boxes", "· fix the tool"} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("top bar %q missing %q", bar, want)
+		}
+	}
+	// The transcript starts below the bar: the bar is chrome, content rows
+	// belong to the scrollback — and at the tail of a 60-row block the bar
+	// still names the last prompt.
+	if !strings.Contains(rows[1], "line") {
+		t.Fatalf("first transcript row lost to the top bar: %q", rows[1])
+	}
+}

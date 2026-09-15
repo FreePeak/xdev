@@ -24,7 +24,7 @@ func dividerRow(t *testing.T, scr tcell.SimulationScreen) string {
 // scrolling transcript, so the top row showed the hint glued onto whatever
 // content reached it — a long thinking line, or the last prompt — and ate the
 // right-aligned timestamp there too. The hint belongs on the composer's
-// divider (chrome); row 0 belongs to the content.
+// divider (chrome); content gets content rows — never a chrome row.
 func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddSystemBlock(strings.Repeat("line\n", 40)) // guarantees rows hidden above
@@ -34,11 +34,12 @@ func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("nothing drawn")
 	}
+	// Row 0 is the top bar's; the first transcript row sits below it.
 	if strings.Contains(rows[0], "▲") || strings.Contains(rows[0], "▼") {
-		t.Fatalf("scroll hint overwrote the first transcript row: %q", rows[0])
+		t.Fatalf("scroll hint overwrote the top bar: %q", rows[0])
 	}
-	if !strings.Contains(rows[0], "line") {
-		t.Fatalf("the first row lost its content: %q", rows[0])
+	if !strings.Contains(rows[1], "line") {
+		t.Fatalf("the first transcript row lost its content: %q", rows[1])
 	}
 	divider := dividerRow(t, scr)
 	if !strings.Contains(divider, "╰") {

@@ -1748,8 +1748,9 @@ func (a *App) totalLinesLocked() int {
 }
 
 func (a *App) viewportLinesLocked() int {
-	// scrollback + blank + composer (grows with the draft) + status row.
-	return a.height - a.composerRows() - 2
+	// top bar (transcript only) + scrollback + blank + composer (grows with
+	// the draft) + status row.
+	return a.height - a.composerRows() - 2 - a.transcriptTop()
 }
 
 // contentWidth is the scrollback text width (rail + padding removed).
@@ -1967,7 +1968,7 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	// render window keeps the resident line cache bounded (PRD row budget);
 	// Ctrl+O drops the window and prints everything the tool kept, which is
 	// bounded by that sink cap rather than by this renderer.
-	body := strings.TrimRight(b.Text, "\n")
+	body := sanitizeOutput(strings.TrimRight(b.Text, "\n"))
 	switch {
 	case body == "" && !b.Err:
 		out = append(out, row("(no output)", mutedSt))
@@ -2058,13 +2059,16 @@ func (a *App) draw() {
 		return
 	}
 
-	// Grok layout: scrollback, blank row, composer box (grows with the
-	// draft's wrapped line count), status row at the bottom.
+	// Grok layout: top bar, scrollback, blank row, composer box (grows with
+	// the draft's wrapped line count), status row at the bottom. The top bar
+	// is chrome: the transcript viewport starts below it.
+	top := a.transcriptTop()
 	cRows := a.composerRows()
-	vp := h - cRows - 2
+	vp := h - cRows - 2 - top
 	if vp < 1 {
 		vp = 1
 	}
+	a.drawTopBar(s, w, true)
 	contentW := a.contentWidth()
 
 	// The row index is this frame's plan: sync() re-renders only the blocks
@@ -2092,7 +2096,8 @@ func (a *App) draw() {
 		bandLim = w - 1
 	}
 	selRows := make([]selRow, 0, end-start)
-	for y, r := range a.viewRows(int32(start), int32(end)) {
+	for row, r := range a.viewRows(int32(start), int32(end)) {
+		y := row + top
 		if r.ln.bg != 0 {
 			// Band row (user prompt / code fence): fill the full width so
 			// the band reads as one continuous row (grok semantic band).
@@ -2135,7 +2140,7 @@ func (a *App) draw() {
 			if y >= sbStart && y < sbEnd {
 				ch, st = "█", thumbSt
 			}
-			drawText(s, w-1, y, ch, st)
+			drawText(s, w-1, y+top, ch, st)
 		}
 	}
 	a.selRows, a.selTop = selRows, start

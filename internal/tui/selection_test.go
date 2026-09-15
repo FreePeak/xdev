@@ -50,12 +50,14 @@ func drag(app *App, x0, y0, x1, y1 int) {
 	app.handleMouse(tcell.NewEventMouse(x1, y1, tcell.ButtonNone, tcell.ModNone))
 }
 
-// contentRow returns the transcript row that rendered text sits on.
+// contentRow returns the SCREEN row that rendered transcript text sits on:
+// the capture is viewport-relative, and the top bar owns whatever rows sit
+// above the transcript.
 func contentRow(t *testing.T, app *App, text string) int {
 	t.Helper()
 	for i, sr := range app.selRows {
 		if sr.text == text {
-			return i
+			return i + app.transcriptTop()
 		}
 	}
 	t.Fatalf("row %q not captured in selRows (%v)", text, app.selRows)
@@ -90,7 +92,7 @@ func TestSelectionSpansRows(t *testing.T) {
 	app.draw()
 
 	y0 := contentRow(t, app, "alpha")
-	if app.selRows[y0+1].text != "bravo" {
+	if app.selRowAt(y0+1).text != "bravo" {
 		t.Fatalf("expected alpha/bravo on consecutive rows, got %v", app.selRows)
 	}
 	app.mu.Lock()
@@ -318,10 +320,13 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	}
 	app.mu.Unlock()
 
-	// Press on the top row, then pull the pointer down past the last transcript
-	// row: each event scrolls one row, exactly like a terminal's edge drag.
+	// Press on the top transcript row (below the top bar — a press on the
+	// bar is a chrome gesture), then pull the pointer down past the last
+	// transcript row: each event scrolls one row, exactly like a terminal's
+	// edge drag.
+	hdr := app.transcriptTop()
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(3, 0, tcell.Button1, tcell.ModNone))
+	app.handleMouse(tcell.NewEventMouse(3, hdr, tcell.Button1, tcell.ModNone))
 	app.mu.Unlock()
 	app.draw()
 
@@ -330,12 +335,12 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	const scrolls, far = 5, 3 + len("L000") - 1
 	for range scrolls {
 		app.mu.Lock()
-		app.handleMouse(tcell.NewEventMouse(far, vp-1, tcell.Button1, tcell.ModNone))
+		app.handleMouse(tcell.NewEventMouse(far, hdr+vp-1, tcell.Button1, tcell.ModNone))
 		app.mu.Unlock()
 		app.draw() // the UI loop draws after every event; the cache fills here
 	}
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(far, vp-1, tcell.ButtonNone, tcell.ModNone))
+	app.handleMouse(tcell.NewEventMouse(far, hdr+vp-1, tcell.ButtonNone, tcell.ModNone))
 	app.mu.Unlock()
 
 	got := strings.Split(string(scr.GetClipboardData()), "\n")
