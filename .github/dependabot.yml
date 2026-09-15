@@ -1,7 +1,7 @@
 # Dependabot: keep the module graph and the CI actions current.
 # Both ecosystems here are cheap to review and expensive to let rot: a stale
 # setup-go/actions pair silently breaks the release pipeline, and a stale
-# dependency is what govulncheck in ci.yml exists to catch.
+# dependency is what `govulncheck ./...` exists to catch.
 version: 2
 updates:
   - package-ecosystem: gomod

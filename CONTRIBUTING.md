@@ -30,7 +30,7 @@ before writing code that changes it.
 
 ```bash
 git clone https://github.com/FreePeak/xdev && cd xdev
-CGO_ENABLED=0 go build -o ./xdev ./cmd/xdev      # the gate builds exactly this way
+CGO_ENABLED=0 go build -o ./xdev ./cmd/xdev      # build exactly this way, CGO-free
 ./xdev --help
 ```
 
@@ -38,7 +38,7 @@ Configuration and data live in `~/.xdev/agent/` (`config.yml`, `models.yml`,
 `sessions/`). Provider credentials and model choices are per-machine and
 per-owner; nothing under `~/.xdev/` belongs in a commit.
 
-## Running what CI runs
+## Pre-merge checks (run all of these yourself)
 
 ```bash
 gofmt -l .                        # must print nothing
@@ -60,8 +60,8 @@ Platform-specific syscalls need a **build tag** (or a `_windows.go` stub), not a
 runtime `GOOS` check — a runtime guard cannot stop
 `syscall.SysProcAttr{Setpgid: true}` from failing the Windows compile, and the
 first version of that bug shipped green because the gate only built Linux.
-`govulncheck ./...` also runs in CI: a hit in a dependency is a reason to bump,
-not to add an ignore.
+`govulncheck ./...` is a reason to bump a dependency, never to add an ignore.
+
 
 End-to-end against a configured provider:
 
