@@ -599,8 +599,8 @@ func TestNotebookInvalidJSONStaysText(t *testing.T) {
 		if strings.Contains(res.Text, "cell:") {
 			t.Fatalf("%s rendered as a notebook: %s", name, res.Text)
 		}
-		if res.Text != "1:"+content {
-			t.Fatalf("%s text = %q", name, res.Text)
+		if got := stripReadHeader(t, res.Text); got != "1:"+content {
+			t.Fatalf("%s text = %q", name, got)
 		}
 	}
 

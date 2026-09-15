@@ -161,6 +161,45 @@ func TestEditHashlineAnchoredOnPreviousResult(t *testing.T) {
 	}
 }
 
+// TestEditHashlineReadTagRoundTrip is the live bench trace fix (2026-09-15,
+// medium runs): the model writes the colon range spelling "PUT 15:=24:" from
+// muscle memory, and — because read printed no snapshot header — quoted a
+// fabricated "[f#1]" that opened as an ENOENT. Both are fixed: the colon
+// spelling normalizes, and the header read actually prints round-trips
+// through edit untouched.
+func TestEditHashlineReadTagRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := editFile(t, dir, "f.txt", "a\nb\nc\nd\ne\n")
+	reg := freshnessRegistry(t)
+	read := toolFrom(t, reg, "read")
+	et := toolFrom(t, reg, "edit")
+	res := runTool(t, read, map[string]any{"path": path})
+	header := strings.SplitN(res.Text, "\n", 2)[0]
+	if !strings.HasPrefix(header, "["+path+"#") {
+		t.Fatalf("read header = %q", header)
+	}
+	mustEditText(t, et, map[string]any{"input": header + "\nPUT 2:=3:\n+x\n"})
+	if data, _ := os.ReadFile(path); string(data) != "a\nx\nd\ne\n" {
+		t.Fatalf("file = %q", data)
+	}
+}
+
+// TestEditHashlineShortFabricatedTag: "[f.txt#1]" is a tag attempt, not a
+// path — the bare file exists, so the refusal must teach the grammar instead
+// of answering ENOENT on "f.txt#1".
+func TestEditHashlineShortFabricatedTag(t *testing.T) {
+	dir := t.TempDir()
+	path := editFile(t, dir, "f.txt", "a\nb\n")
+	et := NewEditTool()
+	res := hashlineEdit(t, et, map[string]any{"input": "[" + path + "#1]\nPUT 1.=1:\n+z\n"})
+	if !res.IsError {
+		t.Fatalf("fabricated tag must be refused: %s", res.Text)
+	}
+	if strings.Contains(res.Text, "no such file") {
+		t.Fatalf("must refuse as a tag, not a path: %s", res.Text)
+	}
+}
+
 // TestEditHashlineRejectionsTeachTheGrammar checks that a malformed patch is
 // answered with the shape that works, at the line that broke — the class of
 // failure the JSON-ops dialect produced was an unmarshal trace no model could
