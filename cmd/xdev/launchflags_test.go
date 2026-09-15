@@ -589,3 +589,29 @@ func TestWithMaxTimeAppliesDeadline(t *testing.T) {
 		t.Fatal("deadline never fired")
 	}
 }
+
+// The routing rule of main's print branch, as a table. startupIsInteractive
+// decides whether an empty prompt opens the TUI, and the bug it pins was the
+// hint's own form: `xdev --resume <id>` on a tty was NOT interactive (the old
+// guard also required no session flags), fell into print mode with an empty
+// prompt, and appended an unrequested agent turn to the resumed session.
+func TestStartupIsInteractive(t *testing.T) {
+	cases := []struct {
+		name                     string
+		prompt                   string
+		forcePrint, tty, wantTUI bool
+	}{
+		{"bare xdev on a terminal", "", false, true, true},
+		{"xdev --resume <id> on a terminal", "", false, true, true},
+		{"xdev --continue on a terminal", "", false, true, true},
+		{"xdev --fork <id> on a terminal", "", false, true, true},
+		{"prompt on a terminal stays print mode", "hi", false, true, false},
+		{"-p with resume stays headless", "", true, true, false},
+		{"empty prompt on a pipe is not a TUI", "", false, false, false},
+	}
+	for _, c := range cases {
+		if got := startupIsInteractive(c.prompt, c.forcePrint, c.tty); got != c.wantTUI {
+			t.Errorf("%s: startupIsInteractive = %v, want %v", c.name, got, c.wantTUI)
+		}
+	}
+}

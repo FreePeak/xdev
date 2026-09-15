@@ -634,13 +634,7 @@ func main() {
 			}
 		}
 		prompt := strings.Join(args, " ")
-		// A terminal with no prompt is an interactive request: open the TUI,
-		// which honors --resume/--continue/--fork/--from-* itself. Guarding this
-		// on "no session flags" instead sent `xdev --resume <id>` into print mode
-		// with an empty prompt, which streams an UNPROMPTED agent turn into the
-		// very session it was asked to reopen. The exit hint prints that bare
-		// form, so this is the path every user hits first.
-		if prompt == "" && !*printModeFlag && stdinIsTerminal() {
+		if startupIsInteractive(prompt, *printModeFlag, stdinIsTerminal()) {
 			code, err := runTUI(printOptions{
 				Model:        *model,
 				ContinueLast: *continueLast,
@@ -721,4 +715,15 @@ func main() {
 // stdin/usage path instead of trying to open a TUI on it.
 func stdinIsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// startupIsInteractive is the routing decision of main: with no prompt, a
+// terminal asks for the TUI - with or without a session flag. The old rule
+// required "no session flags" as well, so the very form the TUI-exit hint
+// prints (`xdev --resume <id>`) fell into print mode with an empty prompt:
+// it looked like a hang, and on a short prefix it appended an UNPROMPTED
+// agent turn to the session being resumed. Keep it a pure function so the
+// table below covers the rule; main passes stdinIsTerminal().
+func startupIsInteractive(prompt string, forcePrint, tty bool) bool {
+	return prompt == "" && !forcePrint && tty
 }
