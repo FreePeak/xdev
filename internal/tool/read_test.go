@@ -22,7 +22,8 @@ func TestReadWholeFile(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Text)
 	}
-	if want := "1:alpha\n2:beta\n3:gamma"; res.Text != want {
+	header := "[" + path + "#" + hashTag(linesHash([]string{"alpha", "beta", "gamma"})) + "]"
+	if want := header + "\n1:alpha\n2:beta\n3:gamma"; res.Text != want {
 		t.Fatalf("text = %q, want %q", res.Text, want)
 	}
 	d := res.Details.(map[string]any)
@@ -45,8 +46,8 @@ func TestReadWindowFooter(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "1:L1\n2:L2\n3:L3\n4:L4\n[Showing lines 1-4 of 10. Use offset=5 to continue]"
-	if res.Text != want {
-		t.Fatalf("text = %q, want %q", res.Text, want)
+	if got := stripReadHeader(t, res.Text); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
 	}
 	d := res.Details.(map[string]any)
 	if d["truncated"] != true || d["lineCount"] != 4 || d["totalLines"] != 10 {
@@ -69,8 +70,8 @@ func TestReadOffsetWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "8:L8\n9:L9\n10:L10"
-	if res.Text != want {
-		t.Fatalf("text = %q, want %q", res.Text, want)
+	if got := stripReadHeader(t, res.Text); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
 	}
 	// Offset window cut mid-file: footer shows the next real line.
 	res, err = NewReadTool().Execute(t.Context(), fsToolArgs(t, map[string]any{"path": path, "offset": 3, "limit": 2}))
@@ -78,8 +79,8 @@ func TestReadOffsetWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	want = "3:L3\n4:L4\n[Showing lines 3-4 of 10. Use offset=5 to continue]"
-	if res.Text != want {
-		t.Fatalf("text = %q, want %q", res.Text, want)
+	if got := stripReadHeader(t, res.Text); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
 	}
 }
 
@@ -99,7 +100,7 @@ func TestReadDefaultLimit(t *testing.T) {
 	if !strings.HasSuffix(res.Text, "[Showing lines 1-2000 of 2001. Use offset=2001 to continue]") {
 		t.Fatalf("missing default-limit footer: %q", res.Text[len(res.Text)-80:])
 	}
-	if first := strings.SplitN(res.Text, "\n", 2)[0]; first != "1:line 1" {
+	if first := strings.SplitN(stripReadHeader(t, res.Text), "\n", 2)[0]; first != "1:line 1" {
 		t.Fatalf("first line = %q", first)
 	}
 }
@@ -115,7 +116,7 @@ func TestReadLongLineTruncated(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "1:" + strings.Repeat("x", 2000) + "…\n2:short"
-	if res.Text != want {
+	if got := stripReadHeader(t, res.Text); got != want {
 		t.Fatalf("text mismatch (len %d)", len(res.Text))
 	}
 	// Raw bytes on disk are untouched.
@@ -288,9 +289,21 @@ func TestReadFooterContinuationIsActionable(t *testing.T) {
 	if cont.IsError {
 		t.Fatalf("obeying the footer errored: %q", cont.Text)
 	}
-	if first := strings.SplitN(cont.Text, "\n", 2)[0]; first != m[3]+":L"+m[3] {
+	if first := strings.SplitN(stripReadHeader(t, cont.Text), "\n", 2)[0]; first != m[3]+":L"+m[3] {
 		t.Fatalf("footer pointed at line %s, continuation returned %q", m[3], first)
 	}
+}
+
+// stripReadHeader removes the leading "[path#TAG]" snapshot header a text
+// read prints. Window-content tests pin the body; the header shape itself is
+// pinned by TestReadWholeFile and the freshness round-trip tests.
+func stripReadHeader(t *testing.T, text string) string {
+	t.Helper()
+	i := strings.Index(text, "\n")
+	if i < 0 || !strings.HasPrefix(text, "[") || !strings.HasPrefix(text[i-1:], "]\n") {
+		t.Fatalf("read output missing [path#tag] header: %q", text[:min(60, len(text))])
+	}
+	return text[i+1:]
 }
 
 func mustAtoi(t *testing.T, s string) int {

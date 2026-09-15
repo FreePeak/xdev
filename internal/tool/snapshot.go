@@ -149,21 +149,34 @@ func (s *fileSnapshot) window(start, end int) ([]string, bool) {
 // splitSnapshotTag strips an optional "#TAG" snapshot anchor from a path
 // argument ("f.go#A1B2" — the header form tool results render), returning
 // the bare path and the tag ("" when absent or not a plausible hex tag).
+// A suffix that is not plausible hex is still taken as a tag when the joined
+// name cannot exist but the bare name can — "[f.go#1]" is a model quoting a
+// tag it never saw, and checkFreshness's "unknown tag" refusal teaches the
+// grammar where an ENOENT on "f.go#1" teaches nothing.
 func splitSnapshotTag(p string) (path, tag string) {
 	i := strings.LastIndex(p, "#")
 	if i <= 0 {
 		return p, ""
 	}
 	t := p[i+1:]
-	if len(t) < 4 || len(t) > 64 {
-		return p, ""
-	}
-	for _, c := range t {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
-			return p, ""
+	if len(t) >= 4 && len(t) <= 64 {
+		hex := true
+		for _, c := range t {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				hex = false
+				break
+			}
+		}
+		if hex {
+			return p[:i], strings.ToLower(t)
 		}
 	}
-	return p[:i], strings.ToLower(t)
+	if _, err := os.Stat(p); err != nil {
+		if _, err2 := os.Stat(p[:i]); err2 == nil {
+			return p[:i], strings.ToLower(t)
+		}
+	}
+	return p, ""
 }
 
 // RenderWindow renders lines as 1-based "N:content" rows in a

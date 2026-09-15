@@ -55,7 +55,7 @@ func (t *ReadTool) Name() string { return "read" }
 
 // Description implements Tool.
 func (t *ReadTool) Description() string {
-	return "Read a file. Returns line-numbered lines (N:content); use offset (1-based line) and limit to window large files. Directories return an entry listing — open files directly instead. Binary and image files are detected and reported, not dumped. .ipynb notebooks render as editable \"# %% [code|markdown|raw] cell:N\" blocks (outputs summarized; run cells with the eval tool)."
+	return "Read a file. Returns [path#tag] header + numbered lines (N:content); quote the header in a later edit. offset/limit window large files. Directories return an entry listing — open files directly instead. Binary/image files are detected and reported, not dumped. .ipynb renders as editable \"# %% [code|markdown|raw] cell:N\" blocks (outputs summarized; run cells with the eval tool)."
 }
 
 // Parameters implements Tool.
@@ -190,7 +190,7 @@ func (t *ReadTool) readNotebookWindow(resolved string, doc *notebookDoc, offset,
 		}}
 	}
 	details := map[string]any{"resolvedPath": resolved, "notebook": true, "cells": len(doc.cells)}
-	return t.windowLines(resolved, doc.renderLines(), offset, limit, details)
+	return t.windowLines(resolved, doc.renderLines(), offset, limit, details, "")
 }
 
 // readHead returns up to n leading bytes plus the full file size.
@@ -219,14 +219,17 @@ func (t *ReadTool) readTextWindow(display, resolved string, offset, limit int) (
 	if err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
 	}
-	return t.windowLines(resolved, lines, offset, limit, map[string]any{"resolvedPath": resolved}), nil
+	return t.windowLines(resolved, lines, offset, limit, map[string]any{"resolvedPath": resolved}, display), nil
 }
 
-// windowLines renders lines as the offset/limit window with real 1-based line
-// numbers and the omp continuation footer, recording the freshness snapshot
-// (content hash + the rendered window's exact text) for later edits.
-// Notebooks pass their virtual text; plain files pass the file's own lines.
-func (t *ReadTool) windowLines(resolved string, lines []string, offset, limit int, details map[string]any) Result {
+// windowLines renders lines as the offset/limit window with the [path#TAG]
+// snapshot header (when display is set), real 1-based line numbers, and the
+// omp continuation footer, recording the freshness snapshot (content hash +
+// the rendered window's exact text) for later edits. The header tag is what
+// checkFreshness accepts, closing the loop the edit tool's contract assumes:
+// "quote the tag from the header read or the last edit printed". Notebooks
+// pass display "" — their raw-JSON freshness is negotiated separately.
+func (t *ReadTool) windowLines(resolved string, lines []string, offset, limit int, details map[string]any, display string) Result {
 	total := len(lines)
 	details["lineCount"] = 0
 	details["totalLines"] = total
@@ -250,6 +253,10 @@ func (t *ReadTool) windowLines(resolved string, lines []string, offset, limit in
 	// (The freshness snapshot itself is recorded on the success path below.)
 
 	var b strings.Builder
+	fullHash := linesHash(lines)
+	if display != "" {
+		fmt.Fprintf(&b, "[%s#%s]\n", display, hashTag(fullHash))
+	}
 	for i, line := range lines[start-1 : end] {
 		if i > 0 {
 			b.WriteByte('\n')
@@ -267,7 +274,7 @@ func (t *ReadTool) windowLines(resolved string, lines []string, offset, limit in
 	for i := start; i <= end; i++ {
 		window[i] = lines[i-1]
 	}
-	t.reg.recordSnapshot(resolved, linesHash(lines), window)
+	t.reg.recordSnapshot(resolved, fullHash, window)
 	details["lineCount"] = end - start + 1
 	details["truncated"] = truncated
 	return Result{Text: b.String(), Details: details}
