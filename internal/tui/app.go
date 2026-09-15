@@ -130,6 +130,10 @@ type App struct {
 	onSendImages func(text string, imgs []PasteImage) bool
 	onCancel     func()
 	onQuit       func()
+	// onRetry re-runs the current session's last turn with no new prompt (the
+	// F5 recovery for a stream a dropped connection cut short). Wired by cmd;
+	// nil degrades the chord to a notice.
+	onRetry func()
 
 	keyq   chan tcell.Event
 	dirty  chan struct{}
@@ -262,6 +266,9 @@ func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 // models.yml `vision:` for the model in use — so a /model switch changes the
 // answer. Unwired (tests, modes with no model) is unknown, which pastes.
 func (a *App) SetVision(fn func() bool) { a.vision = fn }
+
+// SetRetry wires the F5 retry path (see App.onRetry).
+func (a *App) SetRetry(fn func()) { a.onRetry = fn }
 
 // Invalidate clears the render cache (resize, theme change).
 func (a *App) Invalidate() {
@@ -1658,6 +1665,18 @@ func (a *App) handleKey(ev tcell.Event) {
 		// us, because a bitmap never reaches an app through a keystroke. The
 		// read shells out, like the text copy on this path already does.
 		a.pasteClipboard()
+		return
+	case "retry":
+		// F5: re-run the current session's last turn. The host owns the
+		// running / nothing-to-retry guards (it holds the turn and the
+		// store); the chord is a bare notice only when the mode never wired
+		// a retry at all.
+		if a.onRetry != nil {
+			a.onRetry()
+			a.poke()
+			return
+		}
+		a.AddSystemBlock("retry is not wired in this build")
 		return
 	}
 
