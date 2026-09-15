@@ -356,6 +356,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
+	// #272: the alt screen swallows stderr, which is where discovery
+	// warnings used to go — so an empty or half-broken agent set looked
+	// exactly like a working one. Say what loaded, before the first turn.
+	if notice, _, _ := taskAgentsAtStartup(cwd); notice != "" {
+		app.AddSystemBlock(notice)
+	}
+
 	// -handoff: document the resumed session before the first turn.
 	if handoffMode && len(store.Entries()) > 0 {
 		if doc, err := runHandoff(""); err != nil {

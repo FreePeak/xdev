@@ -150,3 +150,31 @@ func TestEffortReachesTheBudget(t *testing.T) {
 		t.Fatal("no/unknown effort must mean no thinking requested")
 	}
 }
+
+// #272: frontmatter `model: @role` must expand through modelRoles. Before
+// the wiring landed, ExpandModel had no assignment outside internal/agent, so
+// every bundled "@smol"/"@slow" was parsed and dropped.
+func TestRoleModelOnProvider(t *testing.T) {
+	s := &config.Settings{ModelRoles: map[string]string{
+		"smol": "onegw/dev",
+		"slow": "other-p/big",
+	}}
+	if got, ok := roleModelOnProvider(s, "@smol", "onegw"); !ok || got != "dev" {
+		t.Fatalf("@smol on onegw = %q,%v want dev,true", got, ok)
+	}
+	// A role on another provider is not usable by a child that shares this
+	// provider's client — same refusal childModel makes.
+	if _, ok := roleModelOnProvider(s, "@slow", "onegw"); ok {
+		t.Fatal("cross-provider role must not expand")
+	}
+	if _, ok := roleModelOnProvider(s, "@nosuch", "onegw"); ok {
+		t.Fatal("unknown role must not expand")
+	}
+	if _, ok := roleModelOnProvider(nil, "@smol", "onegw"); ok {
+		t.Fatal("no settings, no expansion")
+	}
+	// A literal provider/model is a valid frontmatter model too.
+	if got, ok := roleModelOnProvider(s, "onegw/free", "onegw"); !ok || got != "free" {
+		t.Fatalf("literal = %q,%v want free,true", got, ok)
+	}
+}
