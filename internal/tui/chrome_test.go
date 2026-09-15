@@ -505,8 +505,9 @@ func TestAskCardNarrowWindowNotice(t *testing.T) {
 // TestTopBarCarriesBranchAndLastPrompt pins the persistent header: once a
 // transcript is on screen, row 0 keeps the git branch AND the newest user
 // prompt collapsed to one line — so the request being answered stays visible
-// even while its transcript band scrolls away. The directory path is NOT on
-// the bar (the status row carries it; user-requested removal).
+// even while its transcript band scrolls away. Neither the directory path nor
+// the model name is on the bar (the status row and the composer's info divider
+// carry them; both removals were user-requested).
 func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	dir := t.TempDir()
@@ -527,6 +528,12 @@ func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 	}
 	if dirName := dir[strings.LastIndex(dir, "/")+1:]; strings.Contains(bar, dirName) {
 		t.Fatalf("top bar still carries the directory path: %q", bar)
+	}
+	app.mu.Lock()
+	model := app.st.Model
+	app.mu.Unlock()
+	if model == "" || strings.Contains(bar, model) {
+		t.Fatalf("top bar %q must not carry the model name %q", bar, model)
 	}
 	// The transcript starts below the bar: the bar is chrome, content rows
 	// belong to the scrollback — and at the tail of a 60-row block the bar

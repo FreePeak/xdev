@@ -265,11 +265,11 @@ func (a *App) lastPrompt() string {
 	return ""
 }
 
-// drawTopBar paints row 0 (grok top_bar.rs): the git branch left, the model
-// name right; with a transcript it also carries the last user prompt, so the
-// request the screen is answering never scrolls out of sight. The working
-// directory is NOT shown here (the status row carries it). Narrow windows
-// shed the model first, then clip the prompt. Caller holds a.mu.
+// drawTopBar paints row 0 (grok top_bar.rs): the git branch left; with a
+// transcript it also carries the last user prompt, so the request the screen is
+// answering never scrolls out of sight. Neither the working directory nor the
+// model name is shown here — the status row and the composer's info divider
+// carry them, and the prompt gets the freed width. Caller holds a.mu.
 func (a *App) drawTopBar(s tcell.Screen, w int, withPrompt bool) {
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	promptSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
@@ -286,16 +286,12 @@ func (a *App) drawTopBar(s tcell.Screen, w int, withPrompt bool) {
 	if withPrompt {
 		prompt = a.lastPrompt()
 	}
-	right := a.st.Model
-	if 1+width(left)+2+width(right) > w-2 {
-		right = ""
-	}
 	if prompt != "" {
 		sep := " · "
 		if left == "" {
 			sep = "❯ "
 		}
-		if room := w - 2 - width(right) - x - width(sep) - 1; room > 1 {
+		if room := w - 2 - x - width(sep) - 1; room > 1 {
 			if width(prompt) > room {
 				prompt = truncateCells(prompt, room, "…")
 			}
@@ -303,12 +299,11 @@ func (a *App) drawTopBar(s tcell.Screen, w int, withPrompt bool) {
 			drawText(s, x+width(sep), 0, prompt, promptSt)
 		}
 	}
-	drawText(s, w-width(right)-2, 0, right, dim)
 }
 
 // drawWelcome renders the start screen (grok welcome/mod.rs anatomy):
-// top bar (git branch left, model right), vertically centered logo +
-// menu; the composer and status rows are drawn by the caller.
+// top bar (git branch left), vertically centered logo + menu; the composer
+// and status rows are drawn by the caller.
 func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	st := func(c theme.Color, bold bool) tcell.Style {
 		st := tcell.StyleDefault.Foreground(a.cellColor(c))
