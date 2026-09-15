@@ -1,6 +1,5 @@
 <p align="center"> <img src="assets/brand/xdev-logo.png" alt="xdev" width="560"> </p>
 <p align="center">
-  <a href="https://github.com/FreePeak/xdev/actions/workflows/ci.yml"><img src="https://github.com/FreePeak/xdev/actions/workflows/ci.yml/badge.svg" alt="CI gate"></a>
   <a href="https://github.com/FreePeak/xdev/releases"><img src="https://img.shields.io/github/v/release/FreePeak/xdev?include_prereleases&label=release" alt="release"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="license: Apache-2.0"></a>
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-00ADD8" alt="Go 1.25"></a>
@@ -113,8 +112,8 @@ python3) it found. Re-running it never overwrites an existing file.
 Release binaries are Developer ID-signed and notarized in CI when the
 `APPLE_*` repository secrets are configured, and ship ad-hoc signed when they
 are absent — a release never fails for want of credentials. See
-`.github/workflows/ci.yml` (job `macos-sign`) for the five secret names and how
-to produce them.
+`.github/workflows/release.yml` (job `macos-sign`) for the five secret names
+and how to produce them.
 
 ## Interactive mode
 
