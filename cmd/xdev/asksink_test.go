@@ -50,23 +50,43 @@ func TestAskCardSinkPrefersTheCard(t *testing.T) {
 	}
 }
 
-// Skip (or a narrow terminal, which the overlay reports as not-ok) falls back
-// to the timeout→recommended policy instead of losing the question.
-func TestAskCardSinkFallsBackOnSkip(t *testing.T) {
+// A skip (or a terminal that cannot fit the card) must still answer from the
+// recommendation, and it must answer NOW: the card already waited out
+// ask.timeout, so falling through to the headless sink would wait it a second
+// time and then report "no answer within" a wait nobody saw. A fallback that
+// blocks forever proves the sink never reaches it.
+func TestAskCardSinkSkipDoesNotWaitAgain(t *testing.T) {
 	ops := &recordingOps{ok: false}
-	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: staticSink{labels: []string{"recommended-label"}}}
-	got, err := sink.Ask(context.Background(), tool.AskRequest{
-		Question: "Q", Options: []tool.AskOption{{Label: "recommended-label"}},
-	})
-	if err != nil {
-		t.Fatal(err)
+	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: blockingSink{}}
+	done := make(chan tool.AskResponse, 1)
+	go func() {
+		got, err := sink.Ask(context.Background(), tool.AskRequest{
+			Question: "Q", Options: []tool.AskOption{{Label: "recommended-label"}},
+			Recommended: []string{"recommended-label"},
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		done <- got
+	}()
+	select {
+	case got := <-done:
+		if len(got.Labels) != 1 || got.Labels[0] != "recommended-label" {
+			t.Fatalf("recommended path did not answer: %+v", got.Labels)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a skipped card must not wait the headless timeout a second time")
 	}
 	if ops.calls != 1 {
 		t.Fatalf("card consulted %d times", ops.calls)
 	}
-	if len(got.Labels) != 1 || got.Labels[0] != "recommended-label" {
-		t.Fatalf("fallback did not answer: %+v", got.Labels)
-	}
+}
+
+// blockingSink answers never — it stands for the headless timeout wait.
+type blockingSink struct{}
+
+func (blockingSink) Ask(context.Context, tool.AskRequest) (tool.AskResponse, error) {
+	select {}
 }
 
 // An unwired card (no ops) keeps the headless path — the tool must never hang

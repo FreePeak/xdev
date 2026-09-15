@@ -2251,45 +2251,34 @@ func hubCostLabel(r agent.RosterEntry) string {
 }
 
 // askCardSink is the ask tool's TUI answer path (#36 → #106): the interactive
-// option card answers when the user picks one; the headless timeout→recommended
-// policy is the fallback when the card is skipped, times out, or the terminal
-// is too narrow for it. The overlay existed (internal/tui/askoverlay.go) with
-// zero callers — NewAskOps was never wired — so every ask timed out.
+// option card answers when the user picks one. When nobody picks, the card has
+// already waited out ask.timeout and put the question in the transcript, so
+// the sink answers with the recommended labels itself — falling through to the
+// headless sink here would wait ask.timeout a second time and then report
+// "no answer within" a wait the user never saw. The headless sink stays the
+// fallback only when no card can be shown at all.
 type askCardSink struct {
 	ops      *tui.AskOps
 	fallback tool.AskSink
 }
 
 func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskResponse, error) {
-	if s.ops != nil && s.ops.Show != nil {
-		ans, ok := s.ops.Show(ctx, tui.AskRequest{
-			Question: req.Question, Options: askCardOptions(req.Options),
-			Multi: req.Multi, Recommended: req.Recommended,
-		}, 0)
-		if ok && len(ans.Labels) > 0 {
-			return tool.AskResponse{Labels: ans.Labels}, nil
-		}
-		// Skip/timeout: fall through to the transcript notice + headless
-		// policy below, exactly the pre-overlay behavior.
+	if s.ops == nil || s.ops.Show == nil {
+		return s.fallback.Ask(ctx, req)
 	}
-	var b strings.Builder
-	b.WriteString("ask: " + req.Question)
-	for _, o := range req.Options {
-		b.WriteString("\n  - " + o.Label)
-		if o.Description != "" {
-			b.WriteString(": " + o.Description)
-		}
+	ans, ok := s.ops.Show(ctx, tui.AskRequest{
+		Question: req.Question, Options: askCardOptions(req.Options),
+		Multi: req.Multi, Recommended: req.Recommended,
+	}, 0)
+	if ok && len(ans.Labels) > 0 {
+		return tool.AskResponse{Labels: ans.Labels}, nil
 	}
-	if req.Multi {
-		b.WriteString("\n  (multi-select)")
+	if err := ctx.Err(); err != nil {
+		return tool.AskResponse{}, err
 	}
-	if len(req.Recommended) > 0 {
-		b.WriteString("\n  recommended: " + strings.Join(req.Recommended, ", "))
-	}
-	if s.ops != nil {
-		s.ops = nil // unreachable with the wired Show; kept for safety
-	}
-	return s.fallback.Ask(ctx, req)
+	// Skip or timeout, after the card's own wait: the tool's policy is the
+	// recommended option(s), so take them instead of waiting a second time.
+	return tool.AskResponse{Labels: append([]string(nil), req.Recommended...)}, nil
 }
 
 // askCardOptions converts the tool's option list to the overlay's shape.
