@@ -89,6 +89,14 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 	if st, err := os.Stat(resolved); err == nil {
 		priorBytes = st.Size()
 	}
+	// The prior content is read only so the change can be diffed. A file that
+	// exists but cannot be read (permissions, a device) leaves priorKnown
+	// false: an unknown baseline is not an empty one, and painting every new
+	// line as an addition would be a lie.
+	prior, priorKnown := []string(nil), false
+	if raw, rerr := os.ReadFile(resolved); rerr == nil {
+		prior, priorKnown = stripCR(SplitLines(raw)), true
+	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
 		return Result{IsError: true, Text: fmt.Sprintf("write: %v", err)}, nil
 	}
@@ -113,6 +121,14 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 	if priorBytes >= 0 {
 		// MVP has no read-before-write gate; surface what was replaced.
 		details["priorBytes"] = priorBytes
+	}
+	// A created file diffs as every line added; an overwrite diffs the real
+	// change. The diff goes to the renderer: Text stays what the model and
+	// the session log carry.
+	if priorBytes < 0 || priorKnown {
+		if diff, ok := UnifiedDiff(a.Path, prior, stripCR(wlines)); ok {
+			details["unifiedDiff"] = diff
+		}
 	}
 	return Result{
 		Text:    fmt.Sprintf("Wrote %s (%d bytes, %d lines)", a.Path, len(data), writeContentLines(a.Content)),

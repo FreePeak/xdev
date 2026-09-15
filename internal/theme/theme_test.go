@@ -103,3 +103,58 @@ func TestCapabilityFromEnv(t *testing.T) {
 		t.Fatal("TERM set must be 256 tier")
 	}
 }
+
+// The built-in palettes must actually carry the diff slots: Theme.Get falls
+// back through text_primary to a fixed gray, so an unpopulated palette would
+// render every diff row the same colour as prose and no test of the renderer
+// could tell the difference.
+func TestBuiltinThemesPopulateDiffSlots(t *testing.T) {
+	for _, name := range []string{"groknight", "grokday"} {
+		th := Builtins()[name]
+		for _, slot := range []string{ToolDiffAdded, ToolDiffRemoved, ToolDiffContext} {
+			c, ok := th.Slot(slot)
+			if !ok {
+				t.Errorf("%s: %s unset", name, slot)
+				continue
+			}
+			// Added and removed must not be the same colour, and neither may
+			// collapse onto the context gray.
+			if slot == ToolDiffAdded {
+				if r, _ := th.Slot(ToolDiffRemoved); c == r {
+					t.Errorf("%s: added == removed", name)
+				}
+			}
+			if slot != ToolDiffContext {
+				if ctx, _ := th.Slot(ToolDiffContext); c == ctx {
+					t.Errorf("%s: %s equals the context color", name, slot)
+				}
+			}
+		}
+	}
+}
+
+// Color-blind mode remaps the diff inks along with the status accents — it can
+// only do that once the palettes define the slots (the remap skips absent ones).
+func TestColorBlindRemapsDiffSlots(t *testing.T) {
+	for _, name := range []string{"groknight", "grokday"} {
+		base := Builtins()[name]
+		cb := ApplyColorBlindMode(base)
+		add, _ := base.Slot(ToolDiffAdded)
+		rem, _ := base.Slot(ToolDiffRemoved)
+		cbAdd, _ := cb.Slot(ToolDiffAdded)
+		cbRem, _ := cb.Slot(ToolDiffRemoved)
+		if cbAdd == add || cbRem == rem {
+			t.Errorf("%s: colorblind left the diff inks unchanged", name)
+		}
+		if cbAdd == cbRem {
+			t.Errorf("%s: colorblind collapsed added and removed to one color", name)
+		}
+		ctx, _ := cb.Slot(ToolDiffContext)
+		if ctx == cbAdd || ctx == cbRem {
+			t.Errorf("%s: colorblind diff context collides with an ink", name)
+		}
+		if add == rem {
+			t.Fatalf("%s: base palette has no added/removed distinction to test", name)
+		}
+	}
+}
