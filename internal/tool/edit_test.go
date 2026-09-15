@@ -474,3 +474,58 @@ func TestHashlineMoveRenamesTheFile(t *testing.T) {
 // opWordRe finds the op words a Description() can be naming (ops are spelled
 // in caps; prose that is not an op must not be).
 var opWordRe = regexp.MustCompile(`[A-Z]{2,}`)
+
+// The renderer gets the change itself, not just the op tally: Details carries
+// a unified diff of the file's before/after state while Text keeps the exact
+// shape the model and the session log depend on.
+func TestEditAttachesUnifiedDiff(t *testing.T) {
+	path := editFile(t, t.TempDir(), "f.txt", "a\nb\nc\nd\ne\n")
+	res, err := NewEditTool().Execute(t.Context(), fsToolArgs(t, map[string]any{
+		"path": path,
+		"ops": []map[string]any{{
+			"op":    "PUT",
+			"range": map[string]any{"start": 2, "end": 3},
+			"lines": []string{"+x1"},
+		}},
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("edit failed: %v %s", err, res.Text)
+	}
+	d := res.Details.(map[string]any)
+	diff, _ := d["unifiedDiff"].(string)
+	// The header names the path as the call gave it (an absolute one here), so
+	// only its prefix is asserted; the rows are the change itself.
+	if !strings.HasPrefix(diff, "--- ") || !strings.Contains(diff, "\n+++ ") {
+		t.Errorf("no file header in unifiedDiff:\n%s", diff)
+	}
+	for _, want := range []string{"-b", "-c", "+x1", "\n a\n", "\n d\n"} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("unifiedDiff missing %q:\n%s", want, diff)
+		}
+	}
+	// Text is the model-visible snapshot: the tag line plus the render window,
+	// with no diff appended.
+	if !strings.HasPrefix(res.Text, "[") || !strings.Contains(res.Text, "#") || strings.Contains(res.Text, "@@") {
+		t.Errorf("Text changed shape: %q", res.Text)
+	}
+}
+
+// An edit whose ops net out to no content change (write the same lines back)
+// attaches no diff: the box would paint an empty change as a change.
+func TestEditNoDiffWhenContentUnchanged(t *testing.T) {
+	path := editFile(t, t.TempDir(), "f.txt", "a\nb\n")
+	res, err := NewEditTool().Execute(t.Context(), fsToolArgs(t, map[string]any{
+		"path": path,
+		"ops": []map[string]any{{
+			"op":    "PUT",
+			"range": map[string]any{"start": 1, "end": 2},
+			"lines": []string{"+a", "+b"},
+		}},
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("edit failed: %v %s", err, res.Text)
+	}
+	if d := res.Details.(map[string]any); d["unifiedDiff"] != nil {
+		t.Errorf("unchanged content produced a diff: %v", d["unifiedDiff"])
+	}
+}

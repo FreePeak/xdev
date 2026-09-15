@@ -2,9 +2,9 @@ package tool
 
 // Outcome is the renderer-facing slice of a tool result's structured Details.
 // The TUI must not type-switch over another package's payloads, so the tools
-// name the two facts a status frame can show — how the process ended, and
-// whether the output window dropped anything — and everything else stays
-// invisible to the chrome.
+// name the facts a status frame can show — how the process ended, whether the
+// output window dropped anything, and what changed on disk — and everything
+// else stays invisible to the chrome.
 type Outcome struct {
 	// Exit is the process exit code; meaningful only when HasExit is set.
 	Exit int
@@ -16,11 +16,15 @@ type Outcome struct {
 	// Truncated marks output the tool's sink window dropped: the model saw
 	// less than the command produced, and the user should know it.
 	Truncated bool
+	// Diff is the unified diff of the file change the tool made, when it made
+	// one. The result's Text stays what the model was shown; this exists so
+	// the frame can say what moved on disk in the theme's diff colours.
+	Diff string
 }
 
-// OutcomeOf flattens one Result.Details. Tools that record neither fact
-// (read, grep, every MCP tool) yield the zero Outcome, which renders as no
-// status footer rather than a footer of guesses.
+// OutcomeOf flattens one Result.Details. Tools that record none of these
+// facts (read, grep, every MCP tool) yield the zero Outcome, which renders as
+// no status footer rather than a footer of guesses.
 func OutcomeOf(details any) Outcome {
 	switch d := details.(type) {
 	case nil:
@@ -41,6 +45,9 @@ func OutcomeOf(details any) Outcome {
 		}
 		if cut, ok := d["truncated"].(bool); ok {
 			o.Truncated = cut
+		}
+		if diff, ok := d["unifiedDiff"].(string); ok {
+			o.Diff = diff
 		}
 		return o
 	}

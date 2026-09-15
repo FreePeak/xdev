@@ -143,6 +143,7 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 		idx: i, kind: b.Kind, width: w, tlen: len(b.Text),
 		tool: b.ToolName, status: b.Status, stream: b.stream,
 		expanded: b.Expanded, age: age, trim: a.trimTier(i),
+		dlen: len(b.Diff),
 	}
 }
 
