@@ -2,9 +2,17 @@ package tui
 
 // Diff colouring for tool results. A file change's unified diff reaches the
 // renderer as plain text (Block.Diff) and is painted here: added/removed/
-// context rows take the theme's diff slots, and the changed words inside a
-// replaced pair are lifted above their row so a one-token edit reads as that
-// token rather than as two whole lines of noise.
+// context rows take an ink, and the changed words inside a replaced pair are
+// bolded so a one-token edit reads as that token rather than as two whole
+// lines of noise.
+//
+// The ink defaults to the terminal's own ANSI palette and no row ever paints
+// a background: xdev cannot learn the emulator's colours, so a fixed RGB it
+// chooses is free to land on the user's red or green — and a band tinted from
+// such an ink buries that ink under itself, which is how red came to sit on
+// red. A theme may still name tool_diff_* explicitly (a custom palette, or
+// color-blind mode), and that override is honoured; what no theme may do is
+// make a row's background someone else's foreground.
 //
 // The pass is stateless per row on purpose: the model-visible text may be
 // head/tail trimmed, a diff split across a hidden middle has no partner to
@@ -12,7 +20,7 @@ package tui
 // none. The one exception is the adjacent -/+ pair, which is the diff a user
 // actually reads — so pairing runs over the rows being rendered, never where
 // the diff was attached, and a trim that separates the pair just loses the
-// band instead of painting a lie.
+// emphasis instead of painting a lie.
 
 import (
 	"strings"
@@ -224,59 +232,77 @@ func changedRuns(text string, ranges [][2]int, keep []bool) []diffSeg {
 	return out
 }
 
-// diffStyle is the row palette for the live theme.
+// diffStyle is one diff's row palette: five foregrounds, no backgrounds.
 type diffStyle struct {
 	ctx, hunk, file, added, removed tcell.Style
-	bandAdd, bandRem                tcell.Style
 }
 
+// diffInk is what a row falls back to when the theme leaves its slot to the
+// terminal: two of the terminal's own sixteen system colours for the change,
+// plus attributes for everything that is not a claim about the change.
+//
+// The fallback is the default because xdev cannot learn the emulator's
+// palette: a fixed RGB it picks itself is free to land on the user's red or
+// green, and a band tinted from such an ink then buries that ink under itself —
+// which is how red came to sit on red. The system colours are the one palette a
+// terminal is guaranteed to have tuned to its own scheme, which is what
+// `git diff` paints (31m/32m) and what a user who cannot tell the two apart has
+// already reached, in the emulator's own settings. Attributes — bold, dim,
+// italic — claim no colour at all and clash with nothing.
+var diffInk = diffStyle{
+	ctx:     tcell.StyleDefault.Dim(true), // unchanged: the terminal's own text
+	hunk:    tcell.StyleDefault.Italic(true),
+	file:    tcell.StyleDefault.Bold(true),
+	added:   tcell.StyleDefault.Foreground(tcell.ColorGreen),  // SGR 32, as `git diff`
+	removed: tcell.StyleDefault.Foreground(tcell.ColorMaroon), // SGR 31
+}
+
+// diffStyle reads the palette off the theme: a theme that names a diff ink
+// (a custom palette, or color-blind mode) is honoured, and one that leaves a
+// slot to the terminal keeps the terminal's own answer. Only the three
+// statement-bearing rows are colourable; the hunk header and the file pair are
+// chrome, so the theme's grays tint them and nothing paints a background.
 func (a *App) diffStyle() diffStyle {
-	ink := func(slot string) tcell.Color { return a.cellColor(a.th.Get(slot)) }
-	ds := diffStyle{
-		ctx:     tcell.StyleDefault.Foreground(ink(theme.ToolDiffContext)),
-		hunk:    tcell.StyleDefault.Foreground(ink(theme.Gray)).Italic(true),
-		file:    tcell.StyleDefault.Foreground(ink(theme.TextSecondary)).Bold(true),
-		added:   tcell.StyleDefault.Foreground(ink(theme.ToolDiffAdded)),
-		removed: tcell.StyleDefault.Foreground(ink(theme.ToolDiffRemoved)),
+	ds := diffInk
+	ink := func(slot string, base tcell.Style) tcell.Style {
+		if c, ok := a.th.Slot(slot); ok {
+			return base.Foreground(a.cellColor(c))
+		}
+		return base
 	}
-	// The band tints the row's background a shade off its ink. The box behind
-	// it is the terminal default, so the mix moves toward the theme's text
-	// colour — darker on a dark terminal, lighter on a light one, and visible
-	// either way, which mixing toward black or white would not be.
-	ds.bandAdd = ds.added.Background(a.bandInk(ds.added))
-	ds.bandRem = ds.removed.Background(a.bandInk(ds.removed))
+	ds.added = ink(theme.ToolDiffAdded, ds.added)
+	ds.removed = ink(theme.ToolDiffRemoved, ds.removed)
+	ds.ctx = ink(theme.ToolDiffContext, ds.ctx)
+	if c, ok := a.th.Slot(theme.Gray); ok {
+		ds.hunk = ds.hunk.Foreground(a.cellColor(c))
+	}
+	if c, ok := a.th.Slot(theme.TextSecondary); ok {
+		ds.file = ds.file.Foreground(a.cellColor(c))
+	}
 	return ds
 }
 
-// bandInk mixes a diff ink 40% toward the theme's text colour.
-func (a *App) bandInk(st tcell.Style) tcell.Color {
-	fg, _, _ := st.Decompose()
-	tx, _, _ := tcell.Style{}.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))).Decompose()
-	r, g, b := fg.RGB()
-	tr, tg, tb := tx.RGB()
-	mix := func(c, toward int32) int32 { return c + (toward-c)*40/100 }
-	return tcell.NewRGBColor(mix(r, tr), mix(g, tg), mix(b, tb))
-}
-
 // row renders one diff row: the whole row in its kind's colour, with the
-// changed runs lifted onto their band. The +/- marker keeps the row colour —
-// it says what the row is, not that it changed — so the band offsets, which
-// wordPair counted from the content, shift right by it here.
+// changed runs bolded. The +/- marker keeps the row colour — it says what the
+// row is, not that it changed — so the offsets, which wordPair counted from
+// the content, shift right by it here.
 func (ds diffStyle) row(r diffRow) line {
-	base, band := ds.ctx, ds.ctx
+	base := ds.ctx
 	switch r.kind {
 	case diffHunk:
 		return textline(r.text, ds.hunk)
 	case diffFile:
 		return textline(r.text, ds.file)
 	case diffAdded:
-		base, band = ds.added, ds.bandAdd
+		base = ds.added
 	case diffRemoved:
-		base, band = ds.removed, ds.bandRem
+		base = ds.removed
 	}
 	if len(r.segs) == 0 {
 		return textline(r.text, base)
 	}
+	// The changed word is lifted with bold, not a background: the emphasis
+	// has to survive a palette the renderer cannot see.
 	ln := line{runs: []cell{{text: r.text[:1], style: base}}}
 	off := 1
 	for _, sg := range r.segs {
@@ -284,7 +310,7 @@ func (ds diffStyle) row(r diffRow) line {
 		if o > off {
 			ln.runs = append(ln.runs, cell{text: r.text[off:o], style: base})
 		}
-		ln.runs = append(ln.runs, cell{text: r.text[o:c], style: band})
+		ln.runs = append(ln.runs, cell{text: r.text[o:c], style: base.Bold(true)})
 		off = c
 	}
 	if off < len(r.text) {

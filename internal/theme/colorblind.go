@@ -32,15 +32,26 @@ func ApplyColorBlindMode(t *Theme) *Theme {
 	for k, v := range t.Slots {
 		slots[k] = v
 	}
-	for _, slot := range []string{Error, AccentError, ToolDiffRemoved, StatusLineGitDirty, StatusLineDirty} {
-		if _, ok := slots[slot]; ok {
-			slots[slot] = errC
+	// A remap is an explicit colour, and "leave it to the terminal" is the one
+	// state that hides an explicit colour — so the two cannot both stand. The
+	// launch themes mark their diff slots terminal-default (the renderer then
+	// paints the change in the terminal's own palette); the mode exists
+	// precisely because red and green are the pair this reader cannot
+	// separate, so that mark has to give way here.
+	defaults := make(map[string]bool, len(t.Defaults))
+	for k, v := range t.Defaults {
+		defaults[k] = v
+	}
+	remap := func(c Color, in ...string) {
+		for _, slot := range in {
+			if _, ok := slots[slot]; !ok {
+				continue // a slot this theme never carried stays unfilled
+			}
+			slots[slot] = c
+			delete(defaults, slot)
 		}
 	}
-	for _, slot := range []string{Success, AccentSuccess, ToolDiffAdded, StatusLineGitClean, StatusLineStaged} {
-		if _, ok := slots[slot]; ok {
-			slots[slot] = okC
-		}
-	}
-	return &Theme{Name: t.Name, Dark: t.Dark, Slots: slots, Defaults: t.Defaults, Symbols: t.Symbols}
+	remap(errC, Error, AccentError, ToolDiffRemoved, StatusLineGitDirty, StatusLineDirty)
+	remap(okC, Success, AccentSuccess, ToolDiffAdded, StatusLineGitClean, StatusLineStaged)
+	return &Theme{Name: t.Name, Dark: t.Dark, Slots: slots, Defaults: defaults, Symbols: t.Symbols}
 }
