@@ -502,6 +502,59 @@ func TestAskCardNarrowWindowNotice(t *testing.T) {
 	}
 }
 
+// TestAskCardNoRoomClosesTheCard pins the 5b999f0 invariant for ask: a card
+// that cannot paint must close on the next frame instead of parking a modal
+// that owns the keyboard while drawing nothing — the "invisible lock" that
+// read as a dead TUI. The question survives as a transcript notice.
+func TestAskCardNoRoomClosesTheCard(t *testing.T) {
+	// Roomy width, but one row short: the card needs 7 rows above the
+	// composer (border + question + 3 options + footer + border).
+	app, _ := drawnApp(t, 100, 11)
+	req := askOptions()
+	done := make(chan AskAnswer, 1)
+	go func() {
+		// A long timeout: only the draw path may end the wait.
+		ans, _ := app.AskCard(context.Background(), req, time.Minute)
+		done <- ans
+	}()
+	waitAsk(t, app, true)
+
+	app.mu.Lock()
+	yTop := app.height - 1 - app.composerRows()
+	app.mu.Unlock()
+	app.drawAskCard(yTop) // what draw() does each frame, sans the full paint
+
+	waitAsk(t, app, false)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an unpaintable card must release its caller")
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if len(app.blocks) < 2 || !strings.Contains(app.blocks[len(app.blocks)-1].Text, "storage backend") {
+		t.Fatalf("question must surface as a notice: %+v", app.blocks)
+	}
+}
+
+// TestAskCardTimeoutNotices: when nobody answers, the card closes and the
+// transcript records the question with the reason — the wait the caller spent
+// is never invisible.
+func TestAskCardTimeoutNotices(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	before := len(app.Blocks())
+	if _, ok := app.AskCard(context.Background(), askOptions(), 20*time.Millisecond); ok {
+		t.Fatal("a timeout is a skip")
+	}
+	if app.AskPending() {
+		t.Fatal("the card must close on timeout")
+	}
+	blocks := app.Blocks()
+	if len(blocks) != before+1 || !strings.Contains(blocks[len(blocks)-1].Text, "no answer within") {
+		t.Fatalf("timeout must leave a notice: %+v", blocks)
+	}
+}
+
 // TestTopBarCarriesBranchAndLastPrompt pins the persistent header: once a
 // transcript is on screen, row 0 keeps the git branch AND the newest user
 // prompt collapsed to one line — so the request being answered stays visible
