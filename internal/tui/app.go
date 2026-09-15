@@ -111,8 +111,7 @@ type App struct {
 	treeLabels        map[string]string // id→label snapshot, refreshed on open
 	settingsOps       *SettingsOps      // /settings, wired by cmd (nil → notices)
 	cwd               string            // working directory (the status row's left side)
-	cwdLabel          string            // welcome top bar (last two path components)
-	branch            string            // git branch for the welcome top bar ("" when none)
+	branch            string            // git branch for the top bar ("" when none)
 	commandDir        string            // markdown command discovery root
 	pathRoot          string            // @-completion root (empty disables the menu)
 	pathScan          func() []string   // shared FS-scan cache-backed file source
@@ -205,11 +204,10 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 }
 
 // SetLocation wires the working directory: the status row's left side, and
-// the welcome top-bar location (cwd + git branch).
+// the top bar's git branch.
 func (a *App) SetLocation(cwd string) {
 	a.mu.Lock()
 	a.cwd = cwd
-	a.cwdLabel = cwdShort(cwd)
 	a.branch = gitBranch(cwd)
 	a.mu.Unlock()
 }

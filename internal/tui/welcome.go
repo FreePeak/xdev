@@ -230,15 +230,6 @@ func lifeArea(w, h int) (gw, top, bot int, ok bool) {
 	return w - 20, 3, h - 8, w >= 48 && h >= 18
 }
 
-// cwdShort renders the top-bar location: last two path components.
-func cwdShort(cwd string) string {
-	parts := strings.Split(strings.TrimRight(cwd, "/"), "/")
-	if len(parts) > 2 {
-		return strings.Join(parts[len(parts)-2:], "/")
-	}
-	return cwd
-}
-
 // gitBranch returns the current git branch name, "" when not a repo.
 func gitBranch(cwd string) string {
 	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output()
@@ -274,20 +265,23 @@ func (a *App) lastPrompt() string {
 	return ""
 }
 
-// drawTopBar paints row 0 (grok top_bar.rs): the location ("cwd:branch")
-// left, the model name right; with a transcript it also carries the last
-// user prompt after the location, so the request the screen is answering
-// never scrolls out of sight. Narrow windows shed the model first, then
-// clip the prompt. Caller holds a.mu.
+// drawTopBar paints row 0 (grok top_bar.rs): the git branch left, the model
+// name right; with a transcript it also carries the last user prompt, so the
+// request the screen is answering never scrolls out of sight. The working
+// directory is NOT shown here (the status row carries it). Narrow windows
+// shed the model first, then clip the prompt. Caller holds a.mu.
 func (a *App) drawTopBar(s tcell.Screen, w int, withPrompt bool) {
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	promptSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-	left := "❯ " + a.cwdLabel
+	left := ""
 	if a.branch != "" {
-		left += ":" + a.branch
+		left = "❯ " + a.branch
 	}
-	drawText(s, 1, 0, left, dim)
-	x := 1 + width(left)
+	x := 1
+	if left != "" {
+		drawText(s, x, 0, left, dim)
+		x += width(left)
+	}
 	prompt := ""
 	if withPrompt {
 		prompt = a.lastPrompt()
@@ -297,19 +291,23 @@ func (a *App) drawTopBar(s tcell.Screen, w int, withPrompt bool) {
 		right = ""
 	}
 	if prompt != "" {
-		if room := w - 2 - width(right) - x - 4; room > 1 {
+		sep := " · "
+		if left == "" {
+			sep = "❯ "
+		}
+		if room := w - 2 - width(right) - x - width(sep) - 1; room > 1 {
 			if width(prompt) > room {
 				prompt = truncateCells(prompt, room, "…")
 			}
-			drawText(s, x, 0, " · ", dim)
-			drawText(s, x+3, 0, prompt, promptSt)
+			drawText(s, x, 0, sep, dim)
+			drawText(s, x+width(sep), 0, prompt, promptSt)
 		}
 	}
 	drawText(s, w-width(right)-2, 0, right, dim)
 }
 
 // drawWelcome renders the start screen (grok welcome/mod.rs anatomy):
-// top bar (cwd:branch left, model right), vertically centered logo +
+// top bar (git branch left, model right), vertically centered logo +
 // menu; the composer and status rows are drawn by the caller.
 func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	st := func(c theme.Color, bold bool) tcell.Style {
