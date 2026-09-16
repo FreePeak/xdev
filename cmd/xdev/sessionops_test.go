@@ -555,3 +555,54 @@ func TestResumeProgSpellsTheInvokedName(t *testing.T) {
 		}
 	}
 }
+
+// TestResumePickerItemsCarryStatus: the rows /resume draws close on the session
+// lifecycle badge, read from each file's tail (#107).
+func TestResumePickerItemsCarryStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := config.DataDir()
+	cwd := "/tmp/status-picker"
+	now := time.Now()
+	for i, tail := range []string{"done", "interrupted"} {
+		id := "STATUS" + string(rune('A'+i)) + "-0000-0000-0000-000000000000"
+		p := session.SessionFilePath(dir, cwd, now.Add(time.Duration(-i)*time.Minute), id)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		b.Write(session.MarshalTitleSlot("sess "+tail, session.TitleSourceAuto, now))
+		b.Write(session.MarshalHeader(session.SessionHeader{
+			Version: 3, ID: id, Timestamp: now, CWD: cwd, Title: "sess " + tail, TitleSource: session.TitleSourceAuto,
+		}))
+		b.WriteString("\n")
+		role := ai.RoleAssistant
+		msg := ai.Message{Role: role, Content: []ai.Block{ai.TextBlock{Text: "answer"}}}
+		if tail == "done" {
+			msg.StopReason = ai.StopReasonStop
+		} else {
+			// An aborted turn persists the prompt and nothing past it.
+			msg = ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "unfinished"}}}
+		}
+		line, err := session.MarshalEntry(&session.MessageEntry{Message: msg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(line)
+		b.WriteString("\n")
+		if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items := resumePickerItems(cwd)
+	if len(items) != 2 {
+		t.Fatalf("rows = %d, want 2", len(items))
+	}
+	byID := map[string]string{}
+	for _, it := range items {
+		byID[it.ID[:7]] = it.Status
+	}
+	if byID["STATUSA"] != "done" || byID["STATUSB"] != "interrupted" {
+		t.Fatalf("row statuses = %v, want STATUSA done, STATUSB interrupted", byID)
+	}
+}

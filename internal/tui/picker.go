@@ -330,6 +330,10 @@ type SessionPickerItem struct {
 	Size   string // e.g. "128 KB"
 	Pinned bool   // session-pins.json sidecar, managed by cmd
 	InCwd  bool   // session's folder == the launcher's cwd
+	// Status is the lifecycle badge, read from the session's tail by cmd
+	// (#107): "done" when the last turn finished, "interrupted" otherwise.
+	// Empty hides it (a caller that did not classify).
+	Status string
 }
 
 type sessionPicker struct {
@@ -667,13 +671,18 @@ func (a *App) pickerTogglePin() {
 	a.pickerRefresh() // rebuild from canonical src: pins float, order stays stable
 }
 
-// sessionPickerRowText renders one row: id — title — mtime — size.
+// sessionPickerRowText renders one row: id — title — mtime — size — status.
+// The badge closes the row so a killed session is legible before Enter.
 func sessionPickerRowText(it SessionPickerItem) string {
 	title := it.Title
 	if title == "" {
 		title = "(untitled)"
 	}
-	return fmt.Sprintf("%s  %s  %s  %s", it.ID, title, it.Mtime, it.Size)
+	row := fmt.Sprintf("%s  %s  %s  %s", it.ID, title, it.Mtime, it.Size)
+	if it.Status != "" {
+		row += "  " + it.Status
+	}
+	return row
 }
 
 // drawSessionPicker renders the selector above the composer (same chrome
