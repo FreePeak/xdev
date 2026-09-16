@@ -362,7 +362,7 @@ func TestListRendersTheEnforcedSurface(t *testing.T) {
 			want: []string{
 				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
 				"showThinking true", "advisor false", "memory off",
-				"config " + path,
+				"sidebarMode auto", "config " + path,
 			},
 		},
 		{
