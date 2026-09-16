@@ -218,6 +218,8 @@ policy; the [2026-09-15 audit](docs/SECURITY-AUDIT-2026-09-15.md) is public.
 xdev update --check                  # is a newer release published for this channel?
 xdev update                          # verify SHA256SUMS, then replace this binary
 xdev update --channel canary         # pre-release tags (v0.2.0-canary.1)
+xdev update job install              # a twice-daily release check (launchd / systemd)
+xdev update job status               # what it last found, and whether it is installed
 xdev bench --turns 5 --model @smol   # TTFT + decode p50/p95 through your provider
 xdev stats --serve                   # usage dashboard over the local session store
 xdev usage                           # which accounts are configured + what you spent locally
@@ -229,6 +231,17 @@ refuses a release with no `SHA256SUMS` entry, refuses when the running binary is
 not writable — printing the exact `chmod u+w <path>` — and installs by writing a
 temp file next to the target and renaming, so an interrupted update never leaves
 a half-written binary. `--check` only reports.
+
+Keeping up to date is opt-in and costs nothing to notice: `xdev update job
+install` registers `com.freepeak.xdev.update-check` (launchd) or a `--user`
+systemd timer running `xdev update --check` at 09:00 and 21:00. Each run leaves
+one record in the data dir, and the next launch reads it — so a newer release
+surfaces as a line on the welcome screen and on `xdev -p`'s stderr, never as a
+network call in the way of your prompt. It never installs anything; `xdev
+update` stays the act that does. With no job registered, the first
+terminal-attached launch of a 12-hour window runs the check detached instead,
+and `XDEV_UPDATE_CHECK=0` declines even that. `xdev update job remove`
+unregisters it.
 
 Release binaries are Developer ID-signed and notarized in CI when the `APPLE_*`
 secrets are configured, and ship ad-hoc signed when they are not: a release

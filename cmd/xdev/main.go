@@ -127,6 +127,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev install <name>          alias of "plugin install"
   xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
   xdev update [--channel C]    check for and install updates (stable | canary)
+  xdev update job <verb>       the twice-daily release check: install | remove | status
   xdev setup                   onboarding: data dir, starter config, next steps
   xdev bench [--turns N]       TTFT + decode p50/p95 through the provider seam
   xdev completions <shell>     bash | zsh | fish completion script

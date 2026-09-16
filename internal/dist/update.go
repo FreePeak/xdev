@@ -16,21 +16,34 @@ import (
 // binary (which, under `go test`, is the test binary).
 var updateTarget = func() (string, error) { return ResolveTarget("") }
 
-// updateMain implements `xdev update [--channel stable|canary] [--check]`:
-// resolve the channel's newest release, compare it with the running
-// version, and install the platform asset after verifying its SHA-256
-// entry. Nothing is installed when the release carries no manifest.
+// updateMain implements `xdev update [--channel stable|canary] [--check]
+// [--timeout D]` and the `job` subcommand: resolve the channel's newest
+// release, compare it with the running version, and install the platform asset
+// after verifying its SHA-256 entry. Nothing is installed when the release
+// carries no manifest.
+//
+// A --check run also records its answer for the next session start (check.go);
+// a bare `xdev update` installs and records nothing, because an install is not
+// a check. The record is what the `job` verb's schedule feeds.
 func updateMain(args []string, version string, out, errw io.Writer) int {
+	if len(args) > 0 && args[0] == "job" {
+		// `xdev update job …` owns the twice-a-day schedule; see job.go.
+		return jobMain(args[1:], version, out, errw)
+	}
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(errw)
 	channel := fs.String("channel", channelEnv(), "release channel: stable | canary")
 	check := fs.Bool("check", false, "report whether a newer release exists without installing it")
+	timeout := fs.Duration("timeout", 10*time.Minute, "bound this run (the scheduled check passes a shorter one)")
 	fs.Usage = func() {
-		fmt.Fprint(errw, `usage: xdev update [--channel stable|canary] [--check]
+		fmt.Fprint(errw, `usage: xdev update [--channel stable|canary] [--check] [--timeout D]
+       xdev update job <install|remove|status>
 
 Resolves the newest release for the channel from GitHub releases, compares
 it with the running version, verifies the platform asset against the
-release's SHA256SUMS, and atomically replaces this binary.
+release's SHA256SUMS, and atomically replaces this binary. --check records
+its answer under the state dir, so the next session start can report it
+without touching the network; the job verb schedules that check twice a day.
 
   XDEV_CHANNEL   default channel (stable)
   XDEV_UPDATE_REPO  owner/repo to update from (default FreePeak/xdev)
@@ -60,7 +73,7 @@ Flags:
 	}
 	c := &Client{Repo: envOr("XDEV_UPDATE_REPO", DefaultReleaseRepo), APIBase: os.Getenv("XDEV_UPDATE_API"), Token: githubToken()}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	rel, err := c.Latest(ctx, ch)
@@ -71,17 +84,29 @@ Flags:
 		c.Token = ""
 		rel, err = c.Latest(ctx, ch)
 	}
+	record := *check
 	if err != nil {
+		if record {
+			recordCheck(ch, "", version, err)
+		}
 		fmt.Fprintln(errw, "xdev:", err)
 		return 1
 	}
 	if rel == nil {
 		fmt.Fprintf(out, "no published release for channel %s in %s yet — nothing to do\n", ch, c.repo())
+		if record {
+			recordCheck(ch, "", version, nil)
+		}
 		return 0
 	}
 	latest := strings.TrimSpace(rel.Tag)
 	assetName := PlatformAssetName()
 	fmt.Fprintf(out, "latest %s release: %s\n", ch, latest)
+	if record {
+		// Before the up-to-date branch returns: a record saying "checked,
+		// nothing newer" is exactly as useful as one naming a release.
+		recordCheck(ch, latest, version, nil)
+	}
 
 	if cmp := Compare(version, latest); cmp >= 0 {
 		fmt.Fprintf(out, "xdev %s is up to date (channel %s, latest %s)\n", displayVersion(version), ch, latest)
@@ -117,6 +142,19 @@ Flags:
 	fmt.Fprintf(out, "installed %s (%s)\n", target, latest)
 	verifyInstalled(ctx, target, out, errw)
 	return 0
+}
+
+// recordCheck writes the background-check record for a --check run. A failed
+// check is still a check: CheckedAt is set so the throttle covers it too, or a
+// host with no route to GitHub would re-try on every single launch.
+func recordCheck(channel, latest, version string, checkErr error) {
+	rec := CheckRecord{CheckedAt: time.Now(), Channel: channel, Version: latest, Running: version}
+	if checkErr != nil {
+		rec.Error = checkErr.Error()
+	}
+	// A check that cannot record its own result is not news the caller must
+	// act on: the printed report already said what happened.
+	_ = WriteCheck(rec)
 }
 
 // verifyInstalled runs the freshly installed binary's `version` command:

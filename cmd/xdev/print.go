@@ -21,6 +21,7 @@ import (
 	"github.com/FreePeak/xdev/internal/computer"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dap"
+	"github.com/FreePeak/xdev/internal/dist"
 	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/ext"
 	hookbus "github.com/FreePeak/xdev/internal/hooks"
@@ -519,6 +520,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if notice, warnings, count := taskAgentsAtStartup(cwd); count == 0 || len(warnings) > 0 {
 		fmt.Fprintln(os.Stderr, "xdev: "+notice)
 	}
+	// A newer release goes to stderr too, and only there: stdout is the
+	// model's answer and a script parses it, so the notice must not join it.
+	// The check itself runs in the background for the same reason the record
+	// exists — it costs this run nothing and pays the next one.
+	if n := dist.Notice(version); n != "" {
+		fmt.Fprintln(os.Stderr, n)
+	}
+	go dist.MaybeCheck(version)
 
 	// --- agent ---
 	// M12 #44: mnemopi counts turns; every retainEveryNTurns turns this
