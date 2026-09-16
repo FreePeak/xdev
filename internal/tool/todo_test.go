@@ -468,3 +468,55 @@ func TestTodoOpenForReminderExcludesBlockedAndFinished(t *testing.T) {
 		t.Fatalf("Snapshot leaked live state: %v", got)
 	}
 }
+
+// View is the dock's task source (#291 §1): the same states the model sees, with
+// the counts in the heading so the section reads in one line. "" when there is
+// nothing to show — an empty section is a lie by omission, an absent one is not.
+func TestTodoViewHeadingsAndEmptiness(t *testing.T) {
+	tt := testTodoTool()
+	if got := tt.View(); got != "" {
+		t.Fatalf("empty list must render nothing, got %q", got)
+	}
+	if res := todoExec(t, tt, map[string]any{"op": "init", "items": []string{"wire the dock", "write tests"}}); res.IsError {
+		t.Fatal(res.Text)
+	}
+	head, rest, found := strings.Cut(tt.View(), "\n")
+	if !found {
+		t.Fatalf("view must have a heading and rows:\n%s", tt.View())
+	}
+	if head != "TASKS · 0/2 done" {
+		t.Fatalf("heading = %q", head)
+	}
+	// init auto-promotes the earliest pending task, and the view carries the
+	// model's own markers so the two renderings cannot disagree about a state.
+	if !strings.Contains(rest, "[/] wire the dock") || !strings.Contains(rest, "[ ] write tests") {
+		t.Fatalf("rows missing:\n%s", rest)
+	}
+	// A phase name only appears when there is more than one to tell apart.
+	if strings.Contains(rest, "Tasks") {
+		t.Fatalf("a flat list must not name its one phase:\n%s", rest)
+	}
+	if res := todoExec(t, tt, map[string]any{"op": "done", "task": "wire the dock"}); res.IsError {
+		t.Fatal(res.Text)
+	}
+	if head, _, _ := strings.Cut(tt.View(), "\n"); head != "TASKS · 1/2 done" {
+		t.Fatalf("heading after a done: %q", head)
+	}
+	if res := todoExec(t, tt, map[string]any{"op": "block", "task": "write tests", "reason": "waiting on review"}); res.IsError {
+		t.Fatal(res.Text)
+	}
+	out := tt.View()
+	if !strings.Contains(out, "1 blocked") || !strings.Contains(out, "(blocked: waiting on review)") {
+		t.Fatalf("a blocker must be visible:\n%s", out)
+	}
+	if res := todoExec(t, tt, map[string]any{"op": "init", "list": []map[string]any{
+		{"phase": "Foundation", "items": []string{"a"}},
+		{"phase": "Polish", "items": []string{"b"}},
+	}}); res.IsError {
+		t.Fatal(res.Text)
+	}
+	out = tt.View()
+	if !strings.Contains(out, "Foundation") || !strings.Contains(out, "Polish") {
+		t.Fatalf("a phased list must name its phases:\n%s", out)
+	}
+}

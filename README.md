@@ -145,6 +145,7 @@ remap in JSON with live reload). What matters for daily work:
 | `↑` / `↓` | walk the composer's visual rows, then recall prompt history |
 | `Ctrl+R` | previous prompt |
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
+| `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
 | `Ctrl+O` | expand the newest tool result |
 | `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
 | `Ctrl+C` | quit (`Esc` cancels the running turn first) |
@@ -159,6 +160,16 @@ bottom edge and it keeps scrolling while you select, and the right-edge
 scrollbar drags like any other. Shift+drag hands the gesture back to the
 terminal's native selection.
 
+The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
+transcript: the pending plan, the task list, the files this session changed, the
+running subagents and the session footer — the working set, kept beside the
+stream instead of scrolling behind it. It auto-closes below 120 columns, never
+takes focus from a picker or a question card, and rebuilds only on events (plan
+published, tool finished, agent settled), never per frame. A pending plan is
+resolved where plans have always been resolved — `/plan off` approves, any
+typed prompt is revision feedback — and `/plan show` reprints the document in
+the transcript.
+
 **Slash commands** dispatch at input-submit and never reach the model:
 
 | Command | Action |
@@ -166,7 +177,7 @@ terminal's native selection.
 | `/new` `/fresh` `/clear` `/drop` | start over, rotate provider state, reset context in place, delete the session file |
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
-| `/model [@role\|ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control |
+| `/model [@role\|ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
 | `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |

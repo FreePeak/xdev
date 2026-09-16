@@ -84,7 +84,7 @@ func TestHandoffSideRequestMirrorsLiveTurn(t *testing.T) {
 	live := &docProvider{doc: "live answer"}
 	side := &docProvider{doc: "## Goal\nship it"}
 
-	pm := &PlanMode{Active: true, Note: "plan note"}
+	pm := &PlanMode{active: true, note: "plan note"}
 	ag := &Agent{
 		Provider: live, Tools: tool.NewRegistry(), Model: "big-model", Store: store,
 		Compaction: CompactionConfig{ContextWindow: 200_000},
@@ -306,7 +306,7 @@ func TestHandoffResetsBranchState(t *testing.T) {
 	if _, err := todoTool.Execute(context.Background(), []byte(`{"op":"init","list":[{"phase":"P","items":["a","b"]}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	pm := &PlanMode{Active: true, Pending: "the old plan"}
+	pm := &PlanMode{active: true, pending: "the old plan"}
 	var resetKept []ai.Message
 	ag := &Agent{
 		Provider: side, Tools: reg, Model: "big", Store: store,
@@ -319,8 +319,8 @@ func TestHandoffResetsBranchState(t *testing.T) {
 	if _, err := ag.HandoffDoc(context.Background(), "sys", ""); err != nil {
 		t.Fatal(err)
 	}
-	if pm.Active || pm.Pending != "" {
-		t.Fatalf("plan mode survived the handoff: active=%v pending=%q", pm.Active, pm.Pending)
+	if pm.active || pm.pending != "" {
+		t.Fatalf("plan mode survived the handoff: active=%v pending=%q", pm.active, pm.pending)
 	}
 	for _, p := range todoTool.Snapshot() {
 		if len(p.Tasks) != 0 {
@@ -355,7 +355,7 @@ func TestHandoffMethodOrderSelectsRung(t *testing.T) {
 
 	store := seedHandoffStore(t)
 	side := &docProvider{doc: "RUNG DOC"}
-	pm := &PlanMode{Active: true}
+	pm := &PlanMode{active: true}
 	ag := &Agent{
 		Provider: side, Tools: tool.NewRegistry(), Model: "big", Store: store,
 		Compaction: CompactionConfig{ContextWindow: 100, ReserveTokens: 1, KeepRecentTokens: 10, Methods: []string{MethodHandoff}},
@@ -382,7 +382,7 @@ func TestHandoffMethodOrderSelectsRung(t *testing.T) {
 	}
 	// A run in flight keeps its plan-mode sub-state: lifting the read-only
 	// policy mid-run would contradict the reminder the run still carries.
-	if !pm.Active {
+	if !pm.active {
 		t.Fatal("the automatic rung reset plan mode mid-run")
 	}
 	// The rebuilt context is under the threshold, so the rung is one-shot.

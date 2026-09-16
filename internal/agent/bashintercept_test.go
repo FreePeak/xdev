@@ -158,7 +158,7 @@ func TestAgentBashInterceptorCannotBypassPlanMode(t *testing.T) {
 		{events: toolCallEvents("bash", `{"command":"rm -rf /tmp/x"}`)},
 		{events: []ai.Event{{Type: ai.EventStart}, textEvent("ok"), doneEvent("ok")}},
 	}, pol, nil)
-	a.PlanMode = &PlanMode{Active: true}
+	a.PlanMode = &PlanMode{active: true}
 	hist := []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}}
 	if _, err := a.Run(context.Background(), "sys", hist); err != nil {
 		t.Fatal(err)
