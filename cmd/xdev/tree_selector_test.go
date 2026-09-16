@@ -120,6 +120,39 @@ func TestTreeEntriesSnapshot(t *testing.T) {
 	}
 }
 
+// TestTreeEntriesLabelEveryRow is the regression for the blank tree rows. A
+// real agent run is mostly tool-call-only assistant turns and tool results, and
+// those carry no text block at all (45% of a 714-message session), so a summary
+// built on Message.Text() alone left nearly half the selector's rows empty: an
+// id over a blank line, which is what reads as "the last of my history shows
+// nothing". Every row has to say something.
+func TestTreeEntriesLabelEveryRow(t *testing.T) {
+	st := session.OpenMem("/tmp/tree-rows", "t")
+	for _, m := range []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "run the tests"}}},
+		{Role: ai.RoleAssistant, Content: []ai.Block{ai.ToolCallBlock{
+			ID: "c1", Name: "bash", Arguments: []byte(`{"command":"go test ./..."}`),
+		}}},
+		{Role: ai.RoleToolResult, ToolName: "bash"}, // a result with no output text
+		{Role: ai.RoleAssistant, Content: []ai.Block{ai.ThinkingBlock{Thinking: "checking"}}},
+		{Role: ai.RoleAssistant, StopReason: ai.StopReasonAborted}, // turn that produced nothing
+	} {
+		if err := st.Append(&session.MessageEntry{Message: m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := treeEntries(st)
+	if len(rows) != 5 {
+		t.Fatalf("rows = %d, want 5", len(rows))
+	}
+	want := []string{"run the tests", "bash · go test ./...", "↩ bash", "… checking", "(aborted)"}
+	for i, r := range rows {
+		if r.Summary != want[i] {
+			t.Errorf("row %d (%s): summary = %q, want %q", i, r.Role, r.Summary, want[i])
+		}
+	}
+}
+
 // TestSessionLabelSidecarRoundTrip pins label persistence: set, overwrite,
 // and clear on the dataDir sidecar JSON.
 func TestSessionLabelSidecarRoundTrip(t *testing.T) {
