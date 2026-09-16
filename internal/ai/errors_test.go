@@ -2,8 +2,12 @@ package ai
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/FreePeak/xdev/internal/ai/sse"
 )
 
 func TestHTTPErrorFormat(t *testing.T) {
@@ -48,6 +52,12 @@ func TestClassify(t *testing.T) {
 		{"anthropic ended", errors.New("agent: stream: anthropic-messages: stream ended without message_stop"), ClassTransient},
 		{"compaction ended", errors.New("compaction: stream ended without done"), ClassTransient},
 		{"handoff ended", errors.New("handoff: stream ended without done"), ClassTransient},
+		// A body the adapters could not decode. The mangle usually comes
+		// from a proxy between us and the provider; classed anything
+		// else, one bad frame ended the session instead of being retried.
+		{"malformed frame", malformedStream("anthropic-messages", "decode event", errors.New("invalid character 'o'")), ClassTransient},
+		{"malformed frame wrapped by the agent", fmt.Errorf("agent: stream: %w", malformedStream("openai-completions", "decode chunk", errors.New("unexpected end of JSON input"))), ClassTransient},
+		{"oversized SSE line", fmt.Errorf("anthropic-messages: read stream: %w", fmt.Errorf("%w: line exceeds %d bytes", sse.ErrMalformed, sse.MaxLineBytes)), ClassTransient},
 		// Not a stream-ended failure: must stay unmatched so the ladder
 		// cannot be widened into retrying arbitrary text.
 		{"ended without (nonsense)", errors.New("the meeting ended without finish_reason being decided"), ClassUnknown},
@@ -72,5 +82,18 @@ func TestRetriable(t *testing.T) {
 	}
 	if Retriable(&HTTPError{API: "a", Status: 400, Body: "maximum context length exceeded"}) {
 		t.Fatal("overflow must not be retried by the retry ladder")
+	}
+}
+
+// TestMalformedStreamKeepsTheAdapterMessage pins the log/UI contract: the
+// sentinel is a classification hook, not a replacement for the detail the
+// adapters have always reported (api, stage, and the JSON error itself).
+func TestMalformedStreamKeepsTheAdapterMessage(t *testing.T) {
+	err := malformedStream("openai-completions", "decode chunk", errors.New("invalid character 'o'"))
+	got := err.Error()
+	for _, want := range []string{"openai-completions", "decode chunk", "invalid character 'o'"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("message %q must keep %q", got, want)
+		}
 	}
 }
