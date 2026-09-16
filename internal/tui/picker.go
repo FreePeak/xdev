@@ -439,7 +439,8 @@ func scopeSessionPickerItems(items []SessionPickerItem, allProj bool) []SessionP
 }
 
 // tokenFilterItems keeps rows where EVERY whitespace-separated token
-// appears (case-insensitive) in the id or the title.
+// appears (case-insensitive) in the id, the title, or the lifecycle
+// status — "interrupted" has to be a real filter, not just a badge (#107).
 func tokenFilterItems(items []SessionPickerItem, query string) []SessionPickerItem {
 	tokens := strings.Fields(strings.ToLower(query))
 	if len(tokens) == 0 {
@@ -447,7 +448,7 @@ func tokenFilterItems(items []SessionPickerItem, query string) []SessionPickerIt
 	}
 	out := make([]SessionPickerItem, 0, len(items))
 	for _, it := range items {
-		hay := strings.ToLower(it.ID + " " + it.Title)
+		hay := strings.ToLower(it.ID + " " + it.Title + " " + it.Status)
 		ok := true
 		for _, t := range tokens {
 			if !strings.Contains(hay, t) {
