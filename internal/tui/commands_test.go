@@ -489,6 +489,13 @@ func (f *fakeAPI) Theme(args string) error {
 	return nil
 }
 
+func (f *fakeAPI) Connect(args string) error {
+	if f.fail == "connect" {
+		return fmt.Errorf("boom")
+	}
+	return nil
+}
+
 func (f *fakeAPI) Memory(args string) error {
 	if f.fail == "memory" {
 		return fmt.Errorf("boom")
@@ -750,5 +757,50 @@ func TestBuiltinCommandsAreUnique(t *testing.T) {
 	dup := append(builtinCommands(), Command{Name: "hub", Description: "shadow"})
 	if problems := commandRegistryProblems(dup); len(problems) == 0 {
 		t.Fatal("a duplicated /hub must be reported")
+	}
+}
+
+// "/connect" opens the catalog as a picker; "/connect <name>" writes that row
+// and answers with the model the session can switch to. Both are the point of
+// the command, so both are checked through the seams cmd wires.
+func TestConnectCommandPickerAndDirect(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	var connected []string
+	app.SetConnectOps(&ConnectOps{
+		Items: func() []PickerItem {
+			return []PickerItem{
+				{Label: "deepseek", Value: "deepseek", Section: "credential in hand"},
+				{Label: "zai", Value: "zai", Section: "catalog"},
+			}
+		},
+		Connect:    func(name string) error { connected = append(connected, name); return nil },
+		DefaultRef: func(name string) string { return name + "/model-1" },
+	})
+	if err := app.Connect(""); err != nil {
+		t.Fatalf("/connect: %v", err)
+	}
+	if !app.PickerOpen() {
+		t.Fatal("/connect did not open the picker")
+	}
+	if !dispatch(app, "/connect deepseek") {
+		t.Fatal("/connect deepseek was not consumed")
+	}
+	if len(connected) != 1 || connected[0] != "deepseek" {
+		t.Fatalf("connected = %v", connected)
+	}
+	app.mu.Lock()
+	block := app.blocks[len(app.blocks)-1].Text
+	app.mu.Unlock()
+	if !strings.Contains(block, "/model deepseek/model-1") {
+		t.Fatalf("connect block = %q, want the switch hint", block)
+	}
+}
+
+// An unwired catalog says so instead of silently doing nothing (the same rule
+// every other ops-backed command follows).
+func TestConnectCommandUnwired(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	if err := app.Connect(""); err == nil {
+		t.Fatal("/connect with no catalog wired must error")
 	}
 }

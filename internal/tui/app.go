@@ -97,6 +97,7 @@ type App struct {
 	advisorOps        *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
 	memoryOps         *MemoryOps                             // /memory, wired by cmd (nil → notices)
 	themeOps          *ThemeOps                              // /theme, wired by cmd (nil → notices)
+	connectOps        *ConnectOps                            // /connect, wired by cmd (nil → notices)
 	prewalkOps        *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
 	goalOps           *GoalOps                               // /goal, wired by cmd (nil → notices)
 	vibeOps           *VibeOps                               // /vibe, wired by cmd (nil → notices)
@@ -807,6 +808,9 @@ func (a *App) Goal(args string) error {
 	a.AddSystemBlock(block)
 	return nil
 }
+
+// SetConnectOps wires the /connect command (the catalog lives in cmd/config).
+func (a *App) SetConnectOps(ops *ConnectOps) { a.connectOps = ops }
 
 // SetThemeOps wires the /theme command (theme resolution lives in cmd).
 func (a *App) SetThemeOps(ops *ThemeOps) { a.themeOps = ops }

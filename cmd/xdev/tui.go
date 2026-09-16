@@ -1279,6 +1279,36 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return nil
 		},
 	})
+	// --- /connect: the provider catalog. The listing and the write live in
+	// internal/config; what is wired here is TUI state — the picker rows, and
+	// folding a newly connected provider into the running config so /model can
+	// reach it without a restart.
+	app.SetConnectOps(&tui.ConnectOps{
+		Items: connectPickerItems(cfg),
+		Connect: func(name string) error {
+			if _, err := config.Connect(name, ""); err != nil {
+				return err
+			}
+			// Fold the new provider into the running config so /model lists it
+			// without a restart, key by key rather than by replacing the struct
+			// (the non-yaml fields — the repo-trust notices — stay as they
+			// were). ponytail: this mutates shared config from the key thread,
+			// the way /theme already mutates lastSettings(); the upgrade path
+			// is one mutex on Config with every read site behind it, not a
+			// lock bolted onto this one writer.
+			if fresh, err := config2Load(); err == nil {
+				for k, v := range fresh.Providers {
+					cfg.Providers[k] = v
+				}
+				if fresh.DefaultModel != "" {
+					cfg.DefaultModel = fresh.DefaultModel
+				}
+			}
+			return nil
+		},
+		DefaultRef: config.ConnectDefaultRef,
+	})
+
 	// --- collab (M14 #59): E2E-encrypted live session sharing -----------
 	// Hosting serves this session over an in-process WebSocket relay
 	// (internal/collab): guests receive the sealed transcript and, with a
