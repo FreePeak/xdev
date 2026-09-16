@@ -122,6 +122,11 @@ const DefaultMaxTurns = 200
 // its turn cap: the model gets one wrap-up turn instead of a hard error.
 const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the user can say \"continue\""
 
+// TurnBudgetAttribution tags that wrap-up prompt as harness text: the user
+// never typed it, so the transcript must not invent a ❯ block for it and
+// stats must not count it as typed input (#283).
+const TurnBudgetAttribution = "turn-budget"
+
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
 
@@ -473,7 +478,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// The prompt is persisted so a store rebuild keeps it, and tool calls in
 	// the wrap-up reply are NOT executed (session/context neutralizes the
 	// dangling calls on rebuild — the budget is spent by design).
-	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}}
+	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
 	history = append(history, wrap)
 	a.persist(wrap)
 	msg, _, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)

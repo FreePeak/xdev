@@ -2068,6 +2068,13 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			if m.Attribution == agent.GoalContinuationAttribution {
 				continue
 			}
+			// The turn-budget wrap-up is harness text too, but it explains
+			// why the transcript stops mid-task — so it replays as the
+			// system event that ends the episode, not as a ❯ block.
+			if m.Attribution == agent.TurnBudgetAttribution {
+				app.AddSystemBlock("· turn budget reached — the run wrapped up here; say \"continue\" to keep going")
+				continue
+			}
 			if txt := m.Text(); txt != "" {
 				app.AddUserBlock(txt)
 			}
@@ -2386,10 +2393,19 @@ func humanSize(n int64) string {
 // what returns to the composer — omp's session.navigateTree target rule: a
 // user message rewinds to its PARENT ("" for the very first message: a
 // fresh root) and its prompt comes back as the draft to edit and resend;
-// every other entry becomes the leaf itself with no draft.
+// every other entry becomes the leaf itself with no draft. A user row the
+// harness wrote (goal continuation, provider cut-off, turn-budget wrap-up)
+// still rewinds, but offers no draft: the user never typed that text.
 func treeRewindTarget(e session.Entry) (target, draft string) {
 	env := e.Envelope()
 	if msg, ok := e.(*session.MessageEntry); ok && msg.Message.Role == ai.RoleUser {
+		// Harness turns — goal continuation, provider cut-off, the turn-budget
+		// wrap-up — are messages the user never typed. The row still rewinds
+		// to the parent, but its text must not come back as a draft to resend
+		// (the same rule the stats counter and the replay use, #283).
+		if a := msg.Message.Attribution; a != "" && a != "user" {
+			return env.ParentID, ""
+		}
 		return env.ParentID, msg.Message.Text()
 	}
 	return env.ID, ""
