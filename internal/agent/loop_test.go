@@ -191,6 +191,12 @@ func TestRunWrapsUpAtTurnLimit(t *testing.T) {
 	if last.Role != ai.RoleUser || last.Text() != TurnBudgetPrompt {
 		t.Fatalf("wrap-up prompt missing from last request: %+v", last)
 	}
+	// Tagged as harness text: the transcript and the stats counter both
+	// branch on the attribution, so an untagged wrap-up would replay as a ❯
+	// block and count as something the user typed (#283).
+	if last.Attribution != TurnBudgetAttribution {
+		t.Fatalf("wrap-up attribution = %q, want %q", last.Attribution, TurnBudgetAttribution)
+	}
 	if len(*ends) != 4 {
 		t.Fatalf("message_end hooks = %d, want 4", len(*ends))
 	}

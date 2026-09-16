@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
@@ -84,6 +85,18 @@ func TestTreeRewindTarget(t *testing.T) {
 	}
 	if target, draft := treeRewindTarget(assistant); target != "bbbbbbbb" || draft != "" {
 		t.Fatalf("assistant row: target=%q draft=%q, want itself, no draft", target, draft)
+	}
+
+	// A user row the harness wrote (provider cut-off, turn-budget wrap-up, goal
+	// continuation) rewinds the same way but offers no draft: resending text
+	// the user never typed would put it in the composer as their own words.
+	harness := &session.MessageEntry{Message: ai.Message{
+		Role: ai.RoleUser, Attribution: agent.TurnBudgetAttribution,
+		Content: []ai.Block{ai.TextBlock{Text: agent.TurnBudgetPrompt}},
+	}}
+	harness.Env = session.Envelope{ID: "cccccccc", ParentID: "bbbbbbbb", Type: session.TypeMessage}
+	if target, draft := treeRewindTarget(harness); target != "bbbbbbbb" || draft != "" {
+		t.Fatalf("harness row: target=%q draft=%q, want the parent rewind and no draft", target, draft)
 	}
 }
 

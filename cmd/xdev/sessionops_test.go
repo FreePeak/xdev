@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
@@ -144,6 +145,33 @@ func TestReplayTranscriptIncludesThinking(t *testing.T) {
 	}
 	if blocks[1].Text != "answer" {
 		t.Fatalf("assistant text = %q", blocks[1].Text)
+	}
+}
+
+// TestReplayTranscriptTurnBudgetNotice: the turn-budget wrap-up prompt is
+// harness text (#283 lineage). Replaying it as a ❯ block would invent a user
+// turn that never happened; it must surface as the system event that ends the
+// episode instead.
+func TestReplayTranscriptTurnBudgetNotice(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(80, 24)
+	app := tui.New(scr, theme.Load("groknight"), "test/free", "sess")
+
+	replayTranscript(app, []ai.Message{{
+		Role:        ai.RoleUser,
+		Content:     []ai.Block{ai.TextBlock{Text: agent.TurnBudgetPrompt}},
+		Attribution: agent.TurnBudgetAttribution,
+	}})
+	blocks := app.Blocks()
+	if len(blocks) != 1 || blocks[0].Kind != tui.KindSystem {
+		t.Fatalf("wrap-up replayed as %v, want one system block", blocks)
+	}
+	if strings.Contains(blocks[0].Text, agent.TurnBudgetPrompt) {
+		t.Fatalf("the raw harness prompt leaked into the transcript: %q", blocks[0].Text)
 	}
 }
 
