@@ -14,21 +14,44 @@ import (
 )
 
 // semver is a tolerant semver-ish version: an optional "v" prefix, zero
-// filled missing components, ignored build metadata ("+meta"), and a
-// pre-release suffix that sorts below its own release.
+// filled missing components, ignored build metadata ("+meta"), a pre-release
+// suffix that sorts below its own release, and a `git describe` suffix that
+// says nothing about precedence at all (see parseSemver).
 type semver struct {
 	core []int
 	pre  []string
 }
 
 // parseSemver parses "1.2.3", "v1.2", "1.2.3-rc.2", "0.1.0-dev".
+//
+// A `git describe` tail — "-2-gf419040", the commit count past the tag and
+// its shortened SHA — is dropped rather than read as a pre-release. That
+// suffix says a build is *ahead* of v0.4.0, but semver precedence ranks any
+// hyphenated form *below* the plain tag — so both of this package's readers
+// agree on the wrong answer: `xdev update --check` says "update available:
+// v0.4.0-2-gf419040 → v0.4.0", and plain `xdev update` acts on it, replacing
+// a newer binary with the release that predates it. The shape is matched
+// strictly — digits, then "-g" plus seven or more hex characters — so a real
+// pre-release like "0.1.0-dev" or "0.2.0-canary.1" keeps semver's rule.
+//
+// Order of trimming follows git's own layout,
+// <tag>-<n>-g<sha>[-dirty][+meta], so each suffix has exactly one home:
+// "-dirty" first (it is optional and sits after the SHA), then build
+// metadata, then the describe tail, then the pre-release.
 func parseSemver(v string) (semver, error) {
 	s := strings.TrimSpace(v)
 	if s != "" && (s[0] == 'v' || s[0] == 'V') {
 		s = s[1:]
 	}
+	// git's own order, so each suffix has exactly one home: build metadata
+	// last of all, then the describe tail, then the real pre-release. The
+	// tail is optional ("-dirty" from --dirty), so trim it before matching.
+	s = strings.TrimSuffix(s, "-dirty")
 	if i := strings.IndexByte(s, '+'); i >= 0 {
-		s = s[:i] // build metadata does not participate in precedence
+		s = s[:i]
+	}
+	if i := describeSuffix(s); i >= 0 {
+		s = s[:i] // ahead of the tag it describes, not a pre-release of it
 	}
 	core, pre := s, ""
 	if i := strings.IndexByte(s, '-'); i >= 0 {
@@ -49,6 +72,42 @@ func parseSemver(v string) (semver, error) {
 		sv.pre = strings.Split(pre, ".")
 	}
 	return sv, nil
+}
+
+// describeSuffix returns the index of a `git describe` suffix ("-2-gf419040")
+// in s, or -1 when s carries no such suffix. The shape is strict on purpose:
+// digits, then "-g" plus at least seven hex characters. That leaves real
+// pre-releases ("0.2.0-canary.1", "0.1.0-dev") to the semver rule.
+func describeSuffix(s string) int {
+	i := strings.LastIndexByte(s, '-')
+	if i < 0 || !strings.HasPrefix(s[i+1:], "g") {
+		return -1
+	}
+	rest := s[:i]
+	j := strings.LastIndexByte(rest, '-')
+	if j < 0 {
+		return -1
+	}
+	num := rest[j+1:]
+	if num == "" {
+		return -1
+	}
+	for _, r := range num {
+		if r < '0' || r > '9' {
+			return -1
+		}
+	}
+	const minHex = 7 // a shortened SHA-1 is 7+ chars; "g1" is not a describe tail
+	hash := s[i+2:]
+	if len(hash) < minHex {
+		return -1
+	}
+	for _, r := range hash {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return -1
+		}
+	}
+	return j
 }
 
 // Valid reports whether v parses as a version (used to warn about a build
