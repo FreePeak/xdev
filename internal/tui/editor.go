@@ -197,8 +197,23 @@ func (e *Editor) HistoryPrev() { e.recall(-1) }
 
 func (e *Editor) HistoryNext() { e.recall(1) }
 
-// Visual-row geometry shared with the composer painter
-// (App.composerInputLines): what the arrows walk is exactly what is drawn.
+// Visual-row geometry shared with the composer painter (App.composerView):
+// what the arrows walk is exactly what is painted — a window of it, when the
+// draft outgrows the room the screen can give the box.
+
+// rowWindow picks the budget rows an n-row draft lets the box paint: the span
+// holding the cursor row, taken so the cursor sits on the painted edge where
+// it can. A draft that fits is painted whole: lo=0, hi=n.
+func rowWindow(n, cur, budget int) (lo, hi int) {
+	if budget < 1 {
+		budget = 1
+	}
+	if n <= budget {
+		return 0, n
+	}
+	lo = min(max(cur-budget+1, 0), n-budget)
+	return lo, lo + budget
+}
 
 // rowSpan is one visual row: the rune offsets [start,end), newline excluded.
 type rowSpan struct{ start, end int }

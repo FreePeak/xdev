@@ -2762,25 +2762,49 @@ func (a *App) composerAvail() int {
 	return avail
 }
 
-// composerInputLines returns the wrapped input rows for the editor text
-// plus the column of the cursor within that wrapped grid. An embedded
-// newline is a hard row break (Ctrl+J / Alt+Enter), and a long line wraps
-// at the available width so the box grows instead of truncating. The same
-// wrapRows geometry backs the Up/Down cursor walk in Editor.moveLine:
-// arrows traverse exactly what is painted.
-func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
+// composerBudget is the most input rows the box may paint: the screen minus
+// everything else it shares the terminal with (top bar, one transcript row,
+// the box's own borders, the status row) — draw()'s viewport arithmetic
+// solved for the composer. Without a ceiling the box grew past the screen:
+// its top edge climbed above row 0, drawComposer bailed on yTop < 1, and a
+// large paste showed NOTHING while the full draft sat in the buffer — the
+// "composer is empty but Enter sends it all" bug.
+func (a *App) composerBudget() int {
+	n := a.height - 5 - a.transcriptTop()
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// composerView returns the input rows the box paints plus the cursor's cell
+// within them and the draft rows hidden above/below the window. An embedded
+// newline is a hard row break (Ctrl+J / Alt+Enter), a long line wraps at the
+// available width so the box grows instead of truncating, and past the
+// budget it pages to the cursor (rowWindow) instead of leaving the screen.
+// The same wrapRows geometry backs the Up/Down walk in Editor.moveLine:
+// arrows traverse exactly what is painted, and walking off the painted edge
+// scrolls the window with the cursor.
+func (a *App) composerView() (lines []string, curRow, curCol, above, below int) {
 	rows := wrapRows(a.ed.buf, a.composerAvail())
-	for _, rs := range rows {
+	full, col := cursorCell(a.ed.buf, rows, a.ed.cur)
+	lo, hi := rowWindow(len(rows), full, a.composerBudget())
+	for _, rs := range rows[lo:hi] {
 		lines = append(lines, string(a.ed.buf[rs.start:rs.end]))
 	}
-	curRow, curCol = cursorCell(a.ed.buf, rows, a.ed.cur)
+	return lines, full - lo, col, lo, len(rows) - hi
+}
+
+// composerInputLines is the painted window without the scroll counts.
+func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
+	lines, curRow, curCol, _, _ = a.composerView()
 	return
 }
 
-// composerRows is the total height of the prompt box (top border, wrapped
+// composerRows is the total height of the prompt box (top border, painted
 // input rows, bottom divider).
 func (a *App) composerRows() int {
-	lines, _, _ := a.composerInputLines()
+	lines, _, _, _, _ := a.composerView()
 	return len(lines) + 2
 }
 
@@ -2811,14 +2835,16 @@ func (a *App) drawComposer(yTop int) {
 	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
 	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
-	lines, curRow, curCol := a.composerInputLines()
+	// above/below count the draft rows the window hides, and decide both
+	// where the ❯ prefix belongs and what the divider's hint says.
+	lines, curRow, curCol, above, below := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
 		y := yTop + i
 		a.scr.SetContent(1, y, vert, nil, bs)
 		a.scr.SetContent(w-2, y, vert, nil, bs)
-		if i == 0 {
+		if i == 0 && above == 0 {
 			drawText(a.scr, 3, y, "❯ ", promptStyle)
 		} else {
 			drawText(a.scr, 3, y, "  ", promptStyle)
@@ -2864,16 +2890,21 @@ func (a *App) drawComposer(yTop int) {
 		}
 		drawText(a.scr, 2, yBottom, info, infoSt)
 	}
-	// The viewport hint (▲n▼n) rides this divider's right end. It used to be
+	// The viewport hint rides this divider's right end. It used to be
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
 	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name. A fresh copy
-	// confirmation outranks it — that message is the only proof the mouse
+	// hint is dropped rather than eating the model name. Three hints want the
+	// slot, in this order: a fresh copy confirmation (the only proof the mouse
 	// gesture did anything, since the app holds the mouse and the terminal
-	// stays quiet.
+	// stays quiet), then the draft's own hidden rows — text the user is
+	// composing right now beats scrollback they already read — then the
+	// transcript's ▲n▼n.
 	hint := a.copyHint()
+	if hint == "" {
+		hint = draftHint(above, below)
+	}
 	if hint == "" {
 		hint = a.scrollHint
 	}
@@ -2889,9 +2920,22 @@ func (a *App) drawComposer(yTop int) {
 	}
 	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
-	// Cursor: blinking block at the editor position inside the wrapped grid.
+	// Cursor: blinking block at the editor position inside the painted window.
 	cx := 5 + curCol
 	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
+}
+
+// draftHint names the composer rows the window hides, if any.
+func draftHint(above, below int) string {
+	switch {
+	case above > 0 && below > 0:
+		return fmt.Sprintf("draft ▲%d ▼%d", above, below)
+	case above > 0:
+		return fmt.Sprintf("draft ▲%d", above)
+	case below > 0:
+		return fmt.Sprintf("draft ▼%d", below)
+	}
+	return ""
 }
 
 // drawStatusRow renders the bottom row: the working directory on the left,
