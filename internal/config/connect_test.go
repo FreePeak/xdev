@@ -11,23 +11,36 @@ import (
 )
 
 // connectSandbox isolates every file connect.go writes — models.yml and, for
-// the --key path, credentials.json — behind a temp directory.
+// the --key path, credentials.json — behind a temp directory, and fails the test
+// that forgets it. t.Setenv("XDEV_AGENT_DIR", …) is the strongest knob profile.go
+// has: it collapses all three roots into one directory and skips the XDG record
+// and the legacy default. (Isolating HOME instead is not enough on a developer
+// machine that ran `xdev config init-xdg`: the XDG record lives under ~/.xdev,
+// which a redirected HOME still resolves through installDir's own XDEV_AGENT_DIR
+// fallthrough — a test that passed while writing to the real config.)
 func connectSandbox(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDEV_AGENT_DIR", dir)
-	t.Setenv("HOME", dir)
+	t.Setenv("HOME", dir) // belt: anything resolving home the slow way lands here too
 	t.Setenv("DEEPSEEK_API_KEY", "")
 	return dir
 }
 
-// connectTestFile stages and returns the sandbox's models.yml.
+// connectTestFile stages and returns the sandbox's models.yml. It insists on a
+// sandbox rather than trusting each caller to remember one: the first version of
+// this helper wrote to DataDir() unconditionally, and two tests that did not
+// isolate destroyed the developer's own provider config.
 func connectTestFile(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(DataDir(), "models.yml")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
+	dir := os.Getenv("XDEV_AGENT_DIR")
+	if dir == "" {
+		t.Fatal("connect test without connectSandbox: refusing to write a real data dir")
 	}
+	if DataDir() != dir {
+		t.Fatalf("DataDir() = %s, sandbox is %s: the isolation knob is not the one connect uses", DataDir(), dir)
+	}
+	path := filepath.Join(dir, "models.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -291,5 +304,22 @@ defaultModel: a/old
 	}
 	if cfg.DefaultModel != "b/m" {
 		t.Errorf("defaultModel = %q", cfg.DefaultModel)
+	}
+}
+
+// The write keeps the bytes it replaces: an atomic rename is still an
+// overwrite, and models.yml carries comments nothing can regenerate.
+func TestUpsertKeepsPreviousBytes(t *testing.T) {
+	connectSandbox(t)
+	path := connectTestFile(t, "# hand-written\nproviders: {}\n")
+	if _, err := Connect("deepseek", ""); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("no backup of the replaced file: %v", err)
+	}
+	if !strings.Contains(string(old), "# hand-written") {
+		t.Errorf("backup = %q", old)
 	}
 }

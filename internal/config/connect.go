@@ -285,6 +285,16 @@ func writeModelsYAML(path string, body *yaml.Node) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	// Keep the bytes being replaced. models.yml is hand-written user data with
+	// comments no tool can reproduce, and an atomic rename is still an
+	// overwrite: one bad writer should not be able to erase it. A test that
+	// reached this path once did exactly that, and the .bak is why the next one
+	// is an inconvenience instead of a loss.
+	if old, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(old)) > 0 {
+		if err := os.WriteFile(path+".bak", old, 0o600); err != nil {
+			return err
+		}
+	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
