@@ -8,21 +8,20 @@ import (
 	"github.com/FreePeak/xdev/internal/theme"
 )
 
-// Session tree selector (M10 #27, omp /tree parity): /tree, double-Escape
-// on an empty editor, and the app.session.tree keybinding open an
-// interactive entry navigator above the composer instead of a text dump.
+// Session tree selector (M10 #27, omp /tree parity): /tree, the Esc ladder on
+// an empty composer, and the app.session.tree keybinding open an interactive
+// entry navigator above the composer instead of a text dump.
 // The data (one row per entry) lives in cmd via SetTreeData; the TUI owns
 // selection, filters, search, labels and rendering only.
 
 // TreeEntry is one row of the tree selector, precomputed by cmd from the
-// session store: depth and the active-leaf flag are graph properties the
-// TUI should not re-derive from envelopes.
+// session store: the active-leaf flag is a graph property the TUI should not
+// re-derive from envelopes.
 type TreeEntry struct {
 	ID      string // full entry id (what NavigateTree and the store expect)
 	Type    string // wire type: message, compaction, model_change, custom, ...
 	Role    string // message role (user/assistant/toolResult); "" otherwise
 	Summary string // one-line preview
-	Depth   int    // indentation level
 	Active  bool   // current leaf (rendered with the → bullet)
 }
 
@@ -233,11 +232,8 @@ func (a *App) treeSelect(e TreeEntry, summarize bool) {
 	}
 	a.AddSystemBlock("Navigated to selected point")
 	if draft != "" && strings.TrimSpace(a.ed.Text()) == "" {
-		a.ed.Reset()
-		for _, r := range draft {
-			a.ed.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
-		}
-		a.ed.HandleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone))
+		a.escDraft, a.escUsed = nil, false // the composer now holds a DIFFERENT prompt;
+		a.ed.SetBuffer(draft)              // its undo is another rewind, not the old Esc
 	}
 	a.poke()
 }
@@ -391,30 +387,65 @@ func (a *App) applyLabel(t *treeSelector) error {
 	return a.treeLabelSave(e.ID, label)
 }
 
-// treeIndentCap bounds the row gutter. Depth is the parent-chain length, and
-// a long-running session is a linear chain — every user turn, tool call,
-// result and assistant turn adds a level — so real transcripts reach the
-// hundreds (a 724-entry session ends at depth 722). Two cells per level put
-// ~1.4k cells before the row's own text: the content started beyond the
-// panel edge and beyond the screen width, so the newest rows — the ones the
-// navigator exists to reach — painted as a wall of blank gutter and the
-// active line was never legible. The branch structure lives in parentId; the
-// gutter is a hint, so it stops at this many levels and the row keeps its
-// content.
-const treeIndentCap = 10
-
-// treeRowText renders one selector row: indentation, active-branch bullet
-// (→, like store.Tree), [label], short id, type, summary.
+// treeRowText renders one row's content: the role tag, [label], the short id,
+// then the summary. The cursor and leaf bullets are the caller's.
+//
+// The depth gutter is gone. Depth was the parent-chain length, and a long run
+// is one linear chain — every user turn, tool call, result and reply adds a
+// level, so real transcripts reach the hundreds (a 724-entry session ends at
+// depth 722). Two cells per level put ~1.4k cells before a row's own text, so
+// the newest rows — the ones the navigator exists to reach — painted as a wall
+// of blank gutter. Branch structure lives in parentId; what a row has to answer
+// is "who said this, and what", which the tag column now does in eight cells.
 func treeRowText(e TreeEntry, label string) string {
-	mark := "  "
-	if e.Active {
-		mark = "→ "
-	}
 	lab := ""
 	if label != "" {
 		lab = "[" + label + "] "
 	}
-	return strings.Repeat("  ", min(e.Depth, treeIndentCap)) + mark + lab + e.ID[:min(8, len(e.ID))] + " " + e.Type + " " + e.Summary
+	id := e.ID[:min(8, len(e.ID))]
+	if e.Summary == "" {
+		return treeRoleTag(e) + lab + id
+	}
+	return treeRoleTag(e) + lab + id + " " + e.Summary
+}
+
+// treeRoleTag names the row's author in a fixed-width column. The user/agent
+// split is what the panel is read for, and colour alone cannot carry it: it
+// disappears in a monochrome terminal and in a screenshot. Bookkeeping rows
+// name their type instead — the same answer to "who speaks here".
+func treeRoleTag(e TreeEntry) string {
+	switch {
+	case e.Type == "message" && e.Role == "user":
+		return "user    "
+	case e.Role == "assistant":
+		return "agent   "
+	case e.Role == "toolResult":
+		return "tool    "
+	case e.Type == "model_change":
+		return "model   "
+	case e.Type == "compaction":
+		return "compact "
+	case e.Type == "branch_summary":
+		return "branch  "
+	case e.Type == "custom":
+		return "custom  "
+	}
+	return "system  "
+}
+
+// treeRoleSlot is the colour a row's tag is painted with: the same slot the
+// transcript gives that kind of block, so the panel and the scrollback agree
+// on who is who.
+func treeRoleSlot(e TreeEntry) string {
+	switch {
+	case e.Type == "message" && e.Role == "user":
+		return theme.AccentUser
+	case e.Role == "assistant":
+		return theme.AccentAssistant
+	case e.Role == "toolResult":
+		return theme.AccentTool
+	}
+	return theme.Gray
 }
 
 // drawTreeEmpty renders the selector's panel with no rows: the same chrome as
@@ -523,11 +554,23 @@ func (a *App) drawTreeSelector(yComposerTop int) {
 		for x := 2; x < w-2; x++ {
 			s.SetContent(x, y, ' ', nil, st)
 		}
-		mark := "  "
+		e := t.entries[idx]
+		tag := treeRoleTag(e)
+		body := treeRowText(e, a.treeLabels[e.ID])
+		mark, leaf := "  ", "  "
 		if i == selRow {
 			mark = "❯ "
 		}
-		drawText(s, 2, y, mark+treeRowText(t.entries[idx], a.treeLabels[t.entries[idx].ID]),
+		if e.Active {
+			leaf = "→ " // where the next message would continue (like store.Tree)
+		}
+		// Fixed columns: cursor, leaf bullet, then the eight-cell tag — so ids
+		// and summaries line up whether or not a row has a label. Only the tag
+		// is coloured; tinting the whole row per author turns the panel into a
+		// rainbow and the summary harder to read.
+		drawText(s, 2, y, mark+leaf, st.Foreground(a.cellColor(a.th.Get(theme.Gray))))
+		drawText(s, 6, y, tag, st.Foreground(a.cellColor(a.th.Get(treeRoleSlot(e)))))
+		drawText(s, 6+width(tag), y, body[len(tag):],
 			st.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
 		y++
 	}

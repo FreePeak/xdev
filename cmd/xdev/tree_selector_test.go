@@ -88,7 +88,9 @@ func TestTreeRewindTarget(t *testing.T) {
 }
 
 // TestTreeEntriesSnapshot pins the selector row data built from the store:
-// depth from the parent chain, active = current leaf, role/summary filled.
+// file order, active = current leaf, role/summary filled. No depth — rows are
+// flush left and tagged with their author, so the snapshot stopped computing
+// an indentation level.
 func TestTreeEntriesSnapshot(t *testing.T) {
 	st := session.OpenMem("/tmp/tree-selector", "t")
 	if err := st.Append(&session.MessageEntry{Message: ai.Message{
@@ -105,9 +107,6 @@ func TestTreeEntriesSnapshot(t *testing.T) {
 	rows := treeEntries(st)
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
-	}
-	if rows[0].Depth != 0 || rows[1].Depth != 1 {
-		t.Fatalf("depths = %d,%d; want 0,1", rows[0].Depth, rows[1].Depth)
 	}
 	if rows[0].Role != "user" || rows[1].Role != "assistant" {
 		t.Fatalf("roles = %q,%q", rows[0].Role, rows[1].Role)

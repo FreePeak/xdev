@@ -2296,25 +2296,17 @@ func treeRewindTarget(e session.Entry) (target, draft string) {
 	return env.ID, ""
 }
 
-// treeEntries snapshots the session entry graph as tree-selector rows:
-// file order, depth from the parent chain, active = current leaf.
-// ponytail: depth walks parents per entry (O(n·depth)); session files are
-// small — memoize if trees ever grow.
+// treeEntries snapshots the session entry graph as tree-selector rows: file
+// order, active = current leaf. No depth — the selector paints rows flush left
+// and tags each with its author, so the parent walk that used to compute an
+// indentation level (O(n·depth) per snapshot) is gone with the gutter.
 func treeEntries(store *session.Store) []tui.TreeEntry {
 	entries := store.Entries()
 	leaf := store.LeafID()
-	parent := make(map[string]string, len(entries))
-	for _, e := range entries {
-		env := e.Envelope()
-		parent[env.ID] = env.ParentID
-	}
 	out := make([]tui.TreeEntry, 0, len(entries))
 	for _, e := range entries {
 		env := e.Envelope()
 		te := tui.TreeEntry{ID: env.ID, Type: env.Type, Active: env.ID == leaf}
-		for p := parent[env.ID]; p != "" && te.Depth < len(parent); p = parent[p] {
-			te.Depth++
-		}
 		switch t := e.(type) {
 		case *session.MessageEntry:
 			te.Role = string(t.Message.Role)
