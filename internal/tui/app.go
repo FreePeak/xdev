@@ -125,14 +125,15 @@ type App struct {
 	treeData          func() []TreeEntry                     // entry snapshot, wired by cmd
 	treeLabelLoad     func() map[string]string
 	treeLabelSave     func(id, label string) error
-	treeLabels        map[string]string // id→label snapshot, refreshed on open
-	settingsOps       *SettingsOps      // /settings, wired by cmd (nil → notices)
-	cwd               string            // working directory (the status row's left side)
-	branch            string            // git branch for the top bar ("" when none)
-	commandDir        string            // markdown command discovery root
-	pathRoot          string            // @-completion root (empty disables the menu)
-	pathScan          func() []string   // shared FS-scan cache-backed file source
-	extCommands       map[string]string // "/server:cmd" -> description
+	treeLabels        map[string]string        // id→label snapshot, refreshed on open
+	settingsOps       *SettingsOps             // /settings, wired by cmd (nil → notices)
+	cwd               string                   // working directory (the status row's left side)
+	branch            string                   // git branch for the top bar ("" when none)
+	commandDir        string                   // markdown command discovery root
+	pathRoot          string                   // @-completion root (empty disables the menu)
+	pathList          func(string) []PathEntry // one directory's entries (the fast path)
+	pathScan          func() []string          // shared FS-scan cache-backed whole-repo source
+	extCommands       map[string]string        // "/server:cmd" -> description
 	extRun            ExtensionCommand
 	renderers         map[string]RenderSpec   // tool name -> declarative render spec
 	sessionBranch     func(args string) error // /branch to an entry id
@@ -1749,8 +1750,13 @@ func (a *App) handleKey(ev tcell.Event) {
 				text := sel.Name
 				next := ""
 				if sel.kind == kindPath {
-					// Replace only the @token: the user's sentence stays.
-					text = a.smenu.pathPrefix + "@" + sel.Name + " "
+					// Replace only the @token: the user's sentence stays. A
+					// directory keeps its slash and reopens the menu inside it;
+					// anything else ends the mention with a space.
+					text = pathMention(a.smenu.pathPrefix, a.smenu.pathDir, sel.Name)
+					if !strings.HasSuffix(text, "/") {
+						text += " "
+					}
 					next = text
 				} else {
 					next = strings.TrimPrefix(sel.Name, "/")
@@ -2073,7 +2079,7 @@ func (a *App) syncSlashMenu() {
 		a.smenu.open(text[1:], a.commandDir, a.extCommands)
 		return
 	}
-	if a.pathScan != nil {
+	if a.pathList != nil {
 		if prefix, query, ok := pathToken(text); ok {
 			if a.smenu == nil {
 				a.smenu = newSlashMenu()
