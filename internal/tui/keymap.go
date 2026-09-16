@@ -37,7 +37,7 @@ var BuiltinActions = []string{
 	"menu-prev", "menu-next", "menu-accept",
 	"history-prev", "history-next",
 	"redraw",
-	"expand", // Ctrl+O: reveal the newest tool result in full (omp's ctrl+o)
+	"expand", // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
 	"clear-input",
 	"app.session.tree",
 	"model-select",   // Alt+M: the /model roles+models selector (omp app.model.select)
@@ -89,9 +89,10 @@ func DefaultKeyMap() *KeyMap {
 			"S-Down": "scroll-down",
 			// TUI extras
 			"C-l": "redraw",
-			// omp's ctrl+o: expand the newest tool result. The tree selector
-			// owns the same chord while it is open (filter cycle); that branch
-			// is taken before this action is ever resolved.
+			// omp's ctrl+o: expand the newest boxed block (a result or a
+			// reasoning box). The tree selector owns the same chord while it
+			// is open (filter cycle); that branch is taken before this action
+			// is ever resolved.
 			"C-o": "expand",
 			// Model selector. omp parity chord (app.model.select); Alt+M
 			// is deliverable in every terminal we target.

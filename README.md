@@ -146,7 +146,7 @@ remap in JSON with live reload). What matters for daily work:
 | `Ctrl+R` | previous prompt |
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
-| `Ctrl+O` | expand the newest tool result |
+| `Ctrl+O` | expand the newest tool result or thinking box |
 | `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
 | `Ctrl+C` | quit (`Esc` cancels the running turn first) |
 
@@ -159,6 +159,12 @@ whole screen and survives a scroll — hold the drag at the transcript's top or
 bottom edge and it keeps scrolling while you select, and the right-edge
 scrollbar drags like any other. Shift+drag hands the gesture back to the
 terminal's native selection.
+
+Thinking renders like a tool result: a rounded box whose top border carries the
+state (`⠹ Thinking…` while it streams, `Thought for Xs` when it settles) and
+whose body is a fixed 12-row window. The wheel over the box scrolls its own
+window, so long reasoning stays readable without pushing the transcript under
+the pointer; `Ctrl+O` expands it to every row.
 
 The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
 transcript: the pending plan, the task list, the files this session changed, the
