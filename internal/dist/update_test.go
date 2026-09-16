@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeRepo is a GitHub releases API stand-in: /releases/latest, /releases
@@ -205,6 +206,7 @@ func TestUpdateUpToDateSkipsDownload(t *testing.T) {
 }
 
 func TestUpdateCheckReportsWithoutInstalling(t *testing.T) {
+	checkDir(t) // --check records; keep the run out of the real state dir
 	bin := fakeBinary()
 	f := &fakeRepo{tag: "v9.9.9", binary: bin, sumsBody: sha256Hex(bin) + "  " + PlatformAssetName() + "\n"}
 	f.start(t)
@@ -285,6 +287,7 @@ func TestUpdateRefusesReleaseWithoutPlatformAsset(t *testing.T) {
 }
 
 func TestUpdateCanaryPicksPrereleaseAndStableSkipsIt(t *testing.T) {
+	checkDir(t) // likewise: the canary --check run must not reach ~/.xdev
 	bin := fakeBinary()
 	f := &fakeRepo{tag: "v2.0.0-canary.1", prerelease: true, binary: bin, sumsBody: sha256Hex(bin) + "  " + PlatformAssetName() + "\n"}
 	f.start(t)
@@ -398,5 +401,117 @@ func assertNoTempLeftovers(t *testing.T, target string) {
 		if strings.HasPrefix(e.Name(), ".xdev-update-") {
 			t.Errorf("staged temp file left behind: %s", e.Name())
 		}
+	}
+}
+
+// TestCheckWritesTheRecord pins the contract between the two halves of the
+// twice-a-day check: `--check` leaves its answer in the record file that a
+// session start reads, and a plain `xdev update` (which installs) does not
+// claim to have checked anything.
+func TestCheckWritesTheRecord(t *testing.T) {
+	bin := fakeBinary()
+	f := &fakeRepo{tag: "v9.9.9", binary: bin, sumsBody: sha256Hex(bin) + "  " + PlatformAssetName() + "\n"}
+	f.start(t)
+	checkDir(t)
+	withTarget(t, []byte("old binary"))
+
+	code, _, errw := runUpdate(t, []string{"--check"}, "v1.0.0")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, errw)
+	}
+	rec := ReadCheck()
+	if rec.CheckedAt.IsZero() {
+		t.Fatal("--check wrote no record")
+	}
+	if rec.Version != "v9.9.9" || rec.Channel != ChannelStable || rec.Running != "v1.0.0" {
+		t.Errorf("record = %+v", rec)
+	}
+	if f.assetHits.Load() != 0 {
+		t.Errorf("--check downloaded %d assets", f.assetHits.Load())
+	}
+	// The next session start's notice is now derivable from the record alone —
+	// no network — and it says the thing that is true.
+	if got := Notice("v1.0.0"); !strings.Contains(got, "v9.9.9 is available") {
+		t.Errorf("Notice = %q", got)
+	}
+	if got := Notice("v9.9.9"); got != "" {
+		t.Errorf("notice survives installing the release it named: %q", got)
+	}
+}
+
+func TestUpToDateCheckRecordsNothingNewer(t *testing.T) {
+	f := &fakeRepo{tag: "v1.0.0", binary: fakeBinary(), sumsBody: ""}
+	f.start(t)
+	checkDir(t)
+	withTarget(t, []byte("old binary"))
+
+	code, out, errw := runUpdate(t, []string{"--check"}, "v1.0.0")
+	if code != 0 {
+		t.Fatalf("exit = %d, stdout = %s, stderr = %s", code, out, errw)
+	}
+	if got := ReadCheck(); got.Version != "v1.0.0" || got.CheckedAt.IsZero() {
+		t.Errorf("an up-to-date check wrote %+v; the throttle needs CheckedAt", got)
+	}
+	if n := Notice("v1.0.0"); n != "" {
+		t.Errorf("up to date produced a notice: %q", n)
+	}
+}
+
+func TestCheckFailureRecordsTheAttempt(t *testing.T) {
+	t.Setenv("XDEV_UPDATE_API", "http://127.0.0.1:1/") // nothing listening
+	t.Setenv("XDEV_UPDATE_REPO", "FreePeak/xdev")
+	checkDir(t)
+	withTarget(t, []byte("old binary"))
+
+	code, _, errw := runUpdate(t, []string{"--check"}, "v1.0.0")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr %s)", code, errw)
+	}
+	rec := ReadCheck()
+	if rec.CheckedAt.IsZero() {
+		t.Fatal("a failed check wrote no record: the next launch would retry immediately")
+	}
+	if rec.Error == "" {
+		t.Errorf("failed check recorded no reason: %+v", rec)
+	}
+	if rec.Version != "" {
+		t.Errorf("a failed check recorded a version it never resolved: %+v", rec)
+	}
+}
+
+func TestInstallDoesNotWriteTheRecord(t *testing.T) {
+	bin := fakeBinary()
+	f := &fakeRepo{tag: "v9.9.9", binary: bin, sumsBody: sha256Hex(bin) + "  " + PlatformAssetName() + "\n"}
+	f.start(t)
+	checkDir(t)
+	withTarget(t, []byte("old binary"))
+
+	code, _, errw := runUpdate(t, nil, "v1.0.0")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, errw)
+	}
+	if rec := ReadCheck(); !rec.CheckedAt.IsZero() {
+		t.Errorf("an install wrote a check record: %+v", rec)
+	}
+}
+
+func TestUpdateTimeoutBoundsTheRun(t *testing.T) {
+	f := &fakeRepo{tag: "v9.9.9", binary: fakeBinary(), sumsBody: "x"}
+	f.start(t)
+	checkDir(t)
+	withTarget(t, []byte("old binary"))
+	start := time.Now()
+	// An already-expired deadline must fail fast rather than hang for the
+	// 10-minute default the interactive path uses. 0 is deterministic where a
+	// 1ms budget would race a loopback server and sometimes win.
+	code, _, errw := runUpdate(t, []string{"--check", "--timeout", "0"}, "v1.0.0")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr %s)", code, errw)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("--timeout 0 took %v", elapsed)
+	}
+	if !strings.Contains(errw, "context deadline exceeded") && !strings.Contains(errw, "timeout") {
+		t.Errorf("stderr does not name the timeout:\n%s", errw)
 	}
 }
