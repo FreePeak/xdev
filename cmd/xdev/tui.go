@@ -315,6 +315,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
+			app.SetWork(workOf(res.Messages))
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -450,7 +451,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.store = ns
 		wireTaskParent(reg, ns) // children must link to the ACTIVE session
 		app.Reset()
-		app.SetSessionStart(sessionStart(ns))
+		// A new session has never worked: Reset already banked 0 for the HUD.
 		saveBreadcrumb(breadcrumbPath(ns))
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
@@ -482,11 +483,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			vibeScope.Restore(workers, on)
 		}
 		app.Reset()
-		app.SetSessionStart(sessionStart(ns))
 		saveBreadcrumb(breadcrumbPath(ns))
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
+			app.SetWork(workOf(res.Messages))
 		}
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
@@ -581,6 +582,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.Reset()
 		replayTranscript(app, res.Messages)
 		app.SetContextReplay(agent.ContextTokens(res.Messages))
+		app.SetWork(workOf(res.Messages))
 	}
 	// navigateTree is the port of omp's session.navigateTree (the tree
 	// selector's Enter / Shift+Enter / Alt+S): the leaf lands on the
@@ -1896,22 +1898,20 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	}
 }
 
-// sessionStart anchors the HUD time segment for a store being adopted
-// mid-run: the span already on disk (header → newest entry) carries over,
-// so the segment shows total session time across resumes. A fresh or
-// empty store starts the clock now.
-func sessionStart(st *session.Store) time.Time {
-	now := time.Now()
-	first := st.StartedAt()
-	es := st.Entries()
-	if first.IsZero() || len(es) == 0 {
-		return now
+// workOf is the work a rebuilt history already banked: the provider-request
+// spans the assistant messages carry. A resumed, forked or rewound session
+// starts with that number on the HUD's time segment instead of zero, so the
+// active-work total survives restarts — and a tree navigation shows only the
+// path that is on screen. Messages written before durations were recorded, or
+// imported without one, simply add nothing.
+func workOf(msgs []ai.Message) time.Duration {
+	var work time.Duration
+	for _, m := range msgs {
+		if m.Role == ai.RoleAssistant && m.DurationMS > 0 {
+			work += time.Duration(m.DurationMS) * time.Millisecond
+		}
 	}
-	span := es[len(es)-1].Envelope().Timestamp.Sub(first)
-	if span <= 0 {
-		return now
-	}
-	return now.Add(-span)
+	return work
 }
 
 // shortSessionID renders the first 8 chars of a session id (matches the TUI

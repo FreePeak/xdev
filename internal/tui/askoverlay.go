@@ -241,6 +241,7 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		close(a.ask.ch)
 	}
 	a.ask = st
+	a.askPause() // the wait for an answer is not work the session did
 	a.mu.Unlock()
 	a.poke()
 	defer func() {
@@ -248,6 +249,7 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		if a.ask == st {
 			a.ask = nil
 		}
+		a.askResume()
 		a.mu.Unlock()
 		a.poke()
 	}()

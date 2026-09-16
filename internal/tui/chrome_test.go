@@ -46,10 +46,10 @@ func lastRow(text string) string {
 }
 
 // TestHUDDefaultKeepsTokenCounter pins the shipped layout: with no
-// statusLine.segments the HUD renders the session clock, the token counters
-// and the context total, right aligned, and nothing else. The context segment
-// rides on the model window, so the case that shows no ctx is the one where
-// the window is still unknown.
+// statusLine.segments the HUD renders the active-work timer, the token
+// counters and the context total, right aligned, and nothing else. The context
+// segment rides on the model window, so the case that shows no ctx is the one
+// where the window is still unknown.
 func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
 	app.AddUsage(1200, 340, 1540)
@@ -60,7 +60,7 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 		t.Fatalf("token counter missing:\n%s", text)
 	}
 	if !strings.Contains(text, "0s") {
-		t.Fatalf("session clock missing from the default layout:\n%s", text)
+		t.Fatalf("the work timer must read 0s on a session that never ran:\n%s", text)
 	}
 	if strings.Contains(text, "ctx ") {
 		t.Fatalf("the context segment must hide without a known window:\n%s", text)
@@ -208,36 +208,83 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	}
 }
 
-// TestHUDTimeSegment counts total session time: the segment renders the
-// elapsed clock, re-bases on SetSessionStart, and hides when unanchored.
+// TestHUDTimeSegment counts WORK time only: the segment renders the banked
+// active spans plus the live span of a run in flight, re-bases on SetWork (the
+// work a replayed history carried), and freezes — it does not tick — while the
+// agent is idle or parked on a question card.
 func TestHUDTimeSegment(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	app.SetStatusSegments([]string{"time", "tokens"})
 	app.AddUsage(1200, 340, 1540)
 
-	// Fresh app: the clock anchors at New (process start), so the first
-	// draw shows a live (sub-minute) session time, not an empty cell.
+	// Fresh app, nothing has run: the honest reading is 0s, not a clock
+	// inherited from process start. "0s" is a reading, so it renders.
 	app.draw()
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "s │ ↑") {
-		t.Fatalf("session clock missing from the row: %q", row)
+	if !strings.Contains(row, "0s │ ↑1.2k │ ↓340") {
+		t.Fatalf("zero work must render beside the tokens: %q", row)
 	}
 
-	// A re-based clock (session swap) shows the carried-over span.
-	app.SetSessionStart(time.Now().Add(-2*time.Hour - 5*time.Minute))
+	// A re-based total (resume/fork replay) shows the carried-over work.
+	app.SetWork(2*time.Hour + 5*time.Minute)
 	app.draw()
 	row = lastRow(screenText(scr))
 	if !strings.Contains(row, "2h05m") {
-		t.Fatalf("re-based session clock missing: %q", row)
+		t.Fatalf("carried work missing from the row: %q", row)
 	}
 
-	// An unanchored clock hides instead of drawing an empty cell; the
-	// segments that do have data keep rendering.
-	app.SetSessionStart(time.Time{})
+	// Idle, the number does not move: a second draw reads the same.
 	app.draw()
-	row = lastRow(screenText(scr))
-	if strings.Contains(row, " │ ↑") || !strings.Contains(row, "↑1.2k │ ↓340") {
-		t.Fatalf("unanchored clock must hide, tokens must survive: %q", row)
+	if r2 := lastRow(screenText(scr)); r2 != row {
+		t.Fatalf("idle HUD time must not tick: %q then %q", row, r2)
+	}
+
+	// A live run counts: an open span adds to the banked total.
+	app.SetRunning(true)
+	app.mu.Lock()
+	app.st.runStart = time.Now().Add(-90 * time.Second)
+	app.mu.Unlock()
+	app.draw()
+	if row = lastRow(screenText(scr)); !strings.Contains(row, "2h06m") {
+		t.Fatalf("open run span must add to the total: %q", row)
+	}
+
+	// Ending the run folds the span in and stops the count.
+	app.SetRunning(false)
+	app.draw()
+	frozen := lastRow(screenText(scr))
+	if !strings.Contains(frozen, "2h06m") {
+		t.Fatalf("the finished span must be banked, not lost: %q", frozen)
+	}
+	app.draw()
+	if r2 := lastRow(screenText(scr)); r2 != frozen {
+		t.Fatalf("a finished run must not keep counting: %q then %q", frozen, r2)
+	}
+}
+
+// TestHUDTimeFreezesOnAskCard: a question card waiting for the human is not
+// work the session did. The number stops mid-run while the card is up, and
+// starts again the moment it is answered.
+func TestHUDTimeFreezesOnAskCard(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	app.SetRunning(true)
+
+	app.mu.Lock()
+	before := app.activeWork()
+	app.mu.Unlock()
+	_, _ = askResultOf(t, app, AskRequest{Question: "which?", Options: []AskOption{{Label: "a"}}}, 5*time.Second, tcell.KeyEnter)
+
+	app.mu.Lock()
+	after := app.activeWork()
+	askWaits := app.st.askWaits
+	app.mu.Unlock()
+	if askWaits != 0 {
+		t.Fatalf("the card left a wait claimed: %d", askWaits)
+	}
+	// The answer is instantaneous, so the run only accrued the few ms the
+	// card spent opening; a wall-clock wait would add whole seconds.
+	if after-before > 500*time.Millisecond {
+		t.Fatalf("the clock ran while the card waited: %v → %v", before, after)
 	}
 }
 
@@ -296,20 +343,20 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 }
 
 // TestStatusRowShowsPathAndMetrics pins the bottom row's contract: the
-// working directory on the left, the session clock and the decode rate
+// working directory on the left, the active-work timer and the decode rate
 // right-aligned, and no keyboard chords anywhere (they live in /hotkeys and
 // the welcome menu now). The metrics own the width: the path tail-truncates
-// and the optional segments drop before the clock or the rate is touched.
+// and the optional segments drop before the timer or the rate is touched.
 func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	const deep = "/Volumes/work/harvey/freepeak/checkout/xdev-feature"
 
-	// seededStatusRow draws the row for a deep path with a 2h05m clock and a
-	// measured 42.5 t/s.
+	// seededStatusRow draws the row for a deep path with 2h05m of banked work
+	// and a measured 42.5 t/s.
 	seededStatusRow := func(t *testing.T, w int) string {
 		t.Helper()
 		app, scr := drawnApp(t, w, 4)
 		app.AddUsage(50000, 50000, 100000)
-		app.SetSessionStart(time.Now().Add(-2*time.Hour - 5*time.Minute))
+		app.SetWork(2*time.Hour + 5*time.Minute)
 		app.SetLocation(deep)
 		app.mu.Lock()
 		app.st.Rate = 42.5

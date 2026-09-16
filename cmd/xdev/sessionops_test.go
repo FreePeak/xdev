@@ -178,6 +178,22 @@ func writePickerSession(t *testing.T, cwd, id, title, prompt string) string {
 	return path
 }
 
+// TestWorkOfSumsAssistantSpans: the HUD's re-based total is the provider
+// request time the replayed path carries — assistant spans only, missing
+// timings add nothing (an old or imported message must not invent seconds).
+func TestWorkOfSumsAssistantSpans(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser},
+		{Role: ai.RoleAssistant, DurationMS: 4000},
+		{Role: ai.RoleToolResult, DurationMS: 9000},
+		{Role: ai.RoleAssistant, DurationMS: 2500},
+		{Role: ai.RoleAssistant}, // pre-timing history: contributes 0
+	}
+	if got := workOf(msgs); got != 6500*time.Millisecond {
+		t.Fatalf("workOf = %v, want 6.5s", got)
+	}
+}
+
 // TestSessionPinsRoundTrip: toggle persists to session-pins.json, toggle
 // back clears it.
 func TestSessionPinsRoundTrip(t *testing.T) {
