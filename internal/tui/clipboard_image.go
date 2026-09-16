@@ -54,24 +54,53 @@ func clipboardImage() ([]byte, string, error) {
 	return data, mime, nil
 }
 
-// darwinClipboardImage writes the pasteboard's PNG flavour to a temp file and
-// reads it back.
+// darwinClipboardScript writes the pasteboard's PNG flavour to a temp file and
+// hands back its path.
 //
 // «class PNGf» is what screenshot.app puts on the pasteboard, and the file route
 // is what works: `the clipboard as PNG` instead exports a Finder icon
 // representation for a copied FILE — a picture of an icon, never what the user
-// meant to attach. osascript errors when the clipboard holds text, which is the
-// ordinary case, so the error path is the common one and stays quiet.
-func darwinClipboardImage() ([]byte, error) {
-	const script = `set f to (POSIX path of (path to temporary folder)) & "xdev-clipboard.png"
+// meant to attach. A clipboard holding no image at all (text is the ordinary
+// case) errors instead, and osascript also answers «class PNGf» for a JPEG or
+// TIFF-only pasteboard by converting, so the error path stays the rare one.
+//
+// The exact spelling of two phrases is load-bearing, each pinned by the error
+// osascript gives when it is wrong — both were wrong once, and both failures
+// surfaced as the same "no image on the clipboard":
+//
+//   - `path to temporary items folder`, not `path to temporary folder`: the
+//     latter is a syntax error (-2741) on current macOS, so the script never
+//     even compiled.
+//   - `open for access (POSIX file f)`, not `open for access file f`: the bare
+//     form coerces the POSIX *string* and fails -61 (not open with write
+//     permission) at the first write.
+//
+// TestDarwinClipboardScriptCompiles catches the first without a clipboard;
+// TestDarwinClipboardScriptWritesImage exercises the four file verbs for real.
+const darwinClipboardScript = `set f to (POSIX path of (path to temporary items folder)) & "xdev-clipboard.png"
 set d to (the clipboard as «class PNGf»)
-set fh to open for access file f with write permission
+set fh to open for access (POSIX file f) with write permission
 set eof of fh to 0
 write d to fh
 close access fh
 return f`
-	out, err := exec.Command("osascript", "-e", script).Output()
+
+// darwinClipboardImage runs the script and reads back what it wrote.
+func darwinClipboardImage() ([]byte, error) {
+	cmd := exec.Command("osascript", "-e", darwinClipboardScript)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
+		// The script cannot write the file when the pasteboard holds no image,
+		// which is the case almost every time this chord is pressed — so that
+		// failure is expected, not a bug, and keeps its plain wording. Anything
+		// else (a dialect change in a future macOS) is a real defect and must
+		// not hide behind the same reassuring sentence.
+		if !isNoImageStderr(stderr.String()) {
+			return nil, fmt.Errorf("read clipboard image: %w: %s",
+				err, strings.TrimSpace(stderr.String()))
+		}
 		return nil, fmt.Errorf("%s", noImage)
 	}
 	path := strings.TrimSpace(string(out))
@@ -84,6 +113,33 @@ return f`
 		return nil, fmt.Errorf("read clipboard image: %w", err)
 	}
 	return data, nil
+}
+
+// isNoImageStderr reports whether osascript failed because the clipboard holds
+// no image rather than because the script is broken. A script error must never
+// take this path: it is the one failure the user cannot tell from an empty
+// clipboard, which is exactly how two dead versions of this script shipped.
+//
+// The codes, measured by running the script against each clipboard in turn:
+//
+//   - -1700 "Can't make some data into the expected type" for every clipboard
+//     that simply has no image: plain text, an empty pasteboard, a Finder copy
+//     of a file (an alias), RTF.
+//   - -25133, the pasteboard family's "flavour declared, no data behind it",
+//     for a pasteboard that advertises an image type lazily and never fills it
+//     — rarer, same meaning, same quiet handling; -25130 is its sibling.
+//
+// Anything else is surfaced as itself, in osascript's own words.
+func isNoImageStderr(s string) bool {
+	if strings.Contains(s, "syntax error") || strings.Contains(s, "compilation error") {
+		return false
+	}
+	for _, code := range []string{"-1700", "-25130", "-25133"} {
+		if strings.Contains(s, code) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsClipboardImage exports the clipboard bitmap through WinForms, which
