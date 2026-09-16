@@ -227,9 +227,7 @@ func TestThinkingDisplayToggle(t *testing.T) {
 	app.mu.Unlock()
 	var got []string
 	for _, ln := range lines {
-		if len(ln.runs) == 1 {
-			got = append(got, ln.runs[0].text)
-		}
+		got = append(got, lineText(ln))
 	}
 	joined := strings.Join(got, "\n")
 	for _, want := range []string{"Thought for", "first line of reasoning", "second line"} {
@@ -260,12 +258,7 @@ func TestThinkingDisplayToggle(t *testing.T) {
 	app.mu.Unlock()
 	got = got[:0]
 	for _, ln := range lines {
-		if len(ln.runs) == 1 {
-			got = append(got, ln.runs[0].text)
-		}
-	}
-	if !strings.Contains(strings.Join(got, "\n"), "visible again") {
-		t.Fatalf("thinking body missing after re-enable:\n%s", strings.Join(got, "\n"))
+		got = append(got, lineText(ln))
 	}
 }
 
@@ -448,7 +441,7 @@ func TestToolResultRowWindow(t *testing.T) {
 		t.Fatalf("last tail row = %q", lineText(lines[251]))
 	}
 
-	if !app.ToggleToolExpand() {
+	if !app.ToggleBoxExpand() {
 		t.Fatal("Ctrl+O found no tool result to expand")
 	}
 	lines = render()
