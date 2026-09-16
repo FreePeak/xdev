@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/FreePeak/xdev/internal/memory"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -497,12 +498,40 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
 	// /clear resets in place (durable reset_boundary, history kept on
-	// disk), /drop deletes the file and starts fresh. All refuse while a
-	// @-file completion runs through the SAME shared FS-scan cache
-	// grep/glob use, so the menu costs one walk per TTL, not per keystroke.
-	app.SetPathCompletion(cwd, func() []string {
+	// disk), /drop deletes the file and starts fresh.
+	//
+	// @-file completion (M7 #8, PRD §IV.6) is wired in two halves. listDir
+	// answers a keystroke with ONE readdir of the directory the typed token
+	// names, which is what makes hidden and gitignored paths affordable to
+	// offer: walking the repo to filter them out was the whole cost, and there
+	// is no walk here. A bare `@` names no directory, so the second half falls
+	// back to the whole-repo scan through the SAME shared FS-scan cache
+	// grep/glob use (one walk per TTL, never one per keystroke); the explicit
+	// options are also what stop a cached hidden-file lookup from handing this
+	// menu a listing that is missing exactly the files it exists to offer.
+	listDir := func(dir string) []tui.PathEntry {
+		full := filepath.Join(cwd, filepath.FromSlash(dir))
+		ents, err := os.ReadDir(full)
+		if err != nil {
+			return nil // an unreadable or absent directory offers nothing
+		}
+		out := make([]tui.PathEntry, 0, len(ents))
+		for _, e := range ents {
+			isDir := e.IsDir()
+			// A symlink to a directory must complete AS one, or the menu offers
+			// a file that walking into cannot open.
+			if e.Type()&fs.ModeSymlink != 0 {
+				if info, serr := os.Stat(filepath.Join(full, e.Name())); serr == nil {
+					isDir = info.IsDir()
+				}
+			}
+			out = append(out, tui.PathEntry{Name: e.Name(), IsDir: isDir})
+		}
+		return out // os.ReadDir sorts lexically, which the menu shows as-is
+	}
+	app.SetPathCompletion(cwd, listDir, func() []string {
 		entries, _, _ := tool.SharedFSCache().Scan(fscache.Options{
-			Roots: workspaceDirs(cwd), RespectGitignore: true,
+			Roots: workspaceDirs(cwd), IncludeHidden: true, MaxEntries: 200,
 		})
 		out := make([]string, 0, len(entries))
 		for _, e := range entries {

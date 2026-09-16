@@ -242,6 +242,12 @@ func walkRoot(root string, opts Options, patterns []string, out *[]Entry, total 
 		}
 		if path != root {
 			name := d.Name()
+			// VCS metadata is never a file anyone means to read, grep or
+			// mention — and .git holds the bulk of an object store. Pruned
+			// before the hidden check so IncludeHidden does not reopen it.
+			if d.IsDir() && (name == ".git" || name == ".hg" || name == ".svn") {
+				return fs.SkipDir
+			}
 			if !opts.IncludeHidden && strings.HasPrefix(name, ".") {
 				if d.IsDir() {
 					return fs.SkipDir
