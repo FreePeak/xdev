@@ -94,6 +94,25 @@ Claude Pro/Max and Codex subscriptions work through the browser OAuth flow:
 xdev login claude     # or: xdev login codex
 ```
 
+Two hundred more hosts — the subscription and gateway providers opencode and omp
+list — connect with one command instead of a hand-written block:
+
+```bash
+xdev connect                  # the providers a credential is ready to use
+xdev connect --list           # the whole catalog (~200 hosts), with its state
+xdev connect deepseek         # write that provider into models.yml
+xdev connect openrouter --key sk-or-...   # ...and store the key (0600)
+```
+
+`/connect` in the TUI opens the same catalog as a picker. Each connected row
+keeps its credential as a `${VAR}` reference in models.yml — the variable the
+host documents — so the config file stays safe to paste into an issue; a key
+passed with `--key` goes to `credentials.json` instead. Every connected
+provider turns on model discovery, so hosts publish their own newest ids
+without a config edit. The catalog is a generated snapshot of
+[models.dev](https://models.dev) (`scripts/gen_connect.go`), and the same
+command refreshes nothing at runtime — it answers offline.
+
 ## Use it
 
 ```bash
@@ -128,15 +147,18 @@ remap in JSON with live reload). What matters for daily work:
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
 | `Ctrl+O` | expand the newest tool result |
+| `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
 | `Ctrl+C` | quit (`Esc` cancels the running turn first) |
-| `F5` | retry the current session (re-runs the last turn; no new prompt) |
 
 Every chord is remappable in `~/.xdev/agent/keybindings.yml`; `/hotkeys` shows
 the live map.
 
 Scrolling never fights the stream: a scrolled viewport stays put while output
 arrives, and `▲ n ▼ n` shows how much is hidden. Mouse selection covers the
-whole screen and survives a scroll.
+whole screen and survives a scroll — hold the drag at the transcript's top or
+bottom edge and it keeps scrolling while you select, and the right-edge
+scrollbar drags like any other. Shift+drag hands the gesture back to the
+terminal's native selection.
 
 The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
 transcript: the pending plan, the task list, the files this session changed, the
@@ -155,7 +177,7 @@ the transcript.
 | `/new` `/fresh` `/clear` `/drop` | start over, rotate provider state, reset context in place, delete the session file |
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
-| `/model [@role\|ref]` `/theme <name>` `/settings` `/hotkeys` | model, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/model [@role\|ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
 | `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |
@@ -226,6 +248,8 @@ policy; the [2026-09-15 audit](docs/SECURITY-AUDIT-2026-09-15.md) is public.
 xdev update --check                  # is a newer release published for this channel?
 xdev update                          # verify SHA256SUMS, then replace this binary
 xdev update --channel canary         # pre-release tags (v0.2.0-canary.1)
+xdev update job install              # a twice-daily release check (launchd / systemd)
+xdev update job status               # what it last found, and whether it is installed
 xdev bench --turns 5 --model @smol   # TTFT + decode p50/p95 through your provider
 xdev stats --serve                   # usage dashboard over the local session store
 xdev usage                           # which accounts are configured + what you spent locally
@@ -237,6 +261,17 @@ refuses a release with no `SHA256SUMS` entry, refuses when the running binary is
 not writable — printing the exact `chmod u+w <path>` — and installs by writing a
 temp file next to the target and renaming, so an interrupted update never leaves
 a half-written binary. `--check` only reports.
+
+Keeping up to date is opt-in and costs nothing to notice: `xdev update job
+install` registers `com.freepeak.xdev.update-check` (launchd) or a `--user`
+systemd timer running `xdev update --check` at 09:00 and 21:00. Each run leaves
+one record in the data dir, and the next launch reads it — so a newer release
+surfaces as a line on the welcome screen and on `xdev -p`'s stderr, never as a
+network call in the way of your prompt. It never installs anything; `xdev
+update` stays the act that does. With no job registered, the first
+terminal-attached launch of a 12-hour window runs the check detached instead,
+and `XDEV_UPDATE_CHECK=0` declines even that. `xdev update job remove`
+unregisters it.
 
 Release binaries are Developer ID-signed and notarized in CI when the `APPLE_*`
 secrets are configured, and ship ad-hoc signed when they are not: a release

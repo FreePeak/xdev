@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/FreePeak/xdev/internal/memory"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/dist"
 	"github.com/FreePeak/xdev/internal/fscache"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
@@ -382,9 +384,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// #272: the alt screen swallows stderr, which is where discovery
 	// warnings used to go — so an empty or half-broken agent set looked
 	// exactly like a working one. Say what loaded, before the first turn.
-	if notice, _, _ := taskAgentsAtStartup(cwd); notice != "" {
+	notice, _, _ := taskAgentsAtStartup(cwd)
+	if n := dist.Notice(version); n != "" {
+		// A newer release is reported where the user reads, not on stderr
+		// under the alt screen: the welcome screen's notice slot, on its
+		// own line. The agents line keeps that slot when it is the only
+		// one; the update line joins it rather than replacing it, because
+		// both are startup facts.
+		notice = strings.TrimSuffix(notice, "\n") + "\n" + n
+	}
+	if notice != "" {
 		app.SetStartupNotice(notice)
 	}
+
+	// Check for a newer release in the background, at most twice a day. The
+	// record the previous run wrote is what this session just read, so the
+	// check pays for the next launch, not this one; dist.MaybeCheck is a
+	// no-op while a scheduled job owns the checking.
+	go dist.MaybeCheck(version)
 
 	// -handoff: document the resumed session before the first turn.
 	if handoffMode && len(store.Entries()) > 0 {
@@ -1312,6 +1329,36 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return nil
 		},
 	})
+	// --- /connect: the provider catalog. The listing and the write live in
+	// internal/config; what is wired here is TUI state — the picker rows, and
+	// folding a newly connected provider into the running config so /model can
+	// reach it without a restart.
+	app.SetConnectOps(&tui.ConnectOps{
+		Items: connectPickerItems(cfg),
+		Connect: func(name string) error {
+			if _, err := config.Connect(name, ""); err != nil {
+				return err
+			}
+			// Fold the new provider into the running config so /model lists it
+			// without a restart, key by key rather than by replacing the struct
+			// (the non-yaml fields — the repo-trust notices — stay as they
+			// were). ponytail: this mutates shared config from the key thread,
+			// the way /theme already mutates lastSettings(); the upgrade path
+			// is one mutex on Config with every read site behind it, not a
+			// lock bolted onto this one writer.
+			if fresh, err := config2Load(); err == nil {
+				for k, v := range fresh.Providers {
+					cfg.Providers[k] = v
+				}
+				if fresh.DefaultModel != "" {
+					cfg.DefaultModel = fresh.DefaultModel
+				}
+			}
+			return nil
+		},
+		DefaultRef: config.ConnectDefaultRef,
+	})
+
 	// --- collab (M14 #59): E2E-encrypted live session sharing -----------
 	// Hosting serves this session over an in-process WebSocket relay
 	// (internal/collab): guests receive the sealed transcript and, with a
@@ -1827,12 +1874,22 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	case ai.EventDone:
 		h.ts.app.EndAssistant()
 		if ev.Usage != nil {
-			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output)
+			// The HUD's ctx number is the whole request — cached input included
+			// (Claude Code's used_tokens), which is Usage.TotalTokens, not the
+			// uncached Input+Output the ↑/↓ counters accumulate.
+			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output, ev.Usage.TotalTokens)
 			if ev.Usage.Cost != nil {
 				h.ts.app.AddCost(ev.Usage.Cost.Total)
 			}
 		}
 	case ai.EventError:
+		// An unbounded-wait round (retry.infinite) says "still waiting"
+		// once per round — show it, not the blip notice.
+		var down *agent.AllTargetsDownError
+		if errors.As(ev.Err, &down) {
+			h.ts.app.AddSystemBlock(ev.Err.Error())
+			break
+		}
 		// A transient blip is being retried by the recovery ladder: the
 		// wire error would flash once per attempt, so it collapses to a
 		// notice. Hard errors still print verbatim — the turn ends on them.
@@ -2296,29 +2353,25 @@ func treeRewindTarget(e session.Entry) (target, draft string) {
 	return env.ID, ""
 }
 
-// treeEntries snapshots the session entry graph as tree-selector rows:
-// file order, depth from the parent chain, active = current leaf.
-// ponytail: depth walks parents per entry (O(n·depth)); session files are
-// small — memoize if trees ever grow.
+// treeEntries snapshots the session entry graph as tree-selector rows: file
+// order, active = current leaf. No depth — the selector paints rows flush left
+// and tags each with its author, so the parent walk that used to compute an
+// indentation level (O(n·depth) per snapshot) is gone with the gutter.
 func treeEntries(store *session.Store) []tui.TreeEntry {
 	entries := store.Entries()
 	leaf := store.LeafID()
-	parent := make(map[string]string, len(entries))
-	for _, e := range entries {
-		env := e.Envelope()
-		parent[env.ID] = env.ParentID
-	}
 	out := make([]tui.TreeEntry, 0, len(entries))
 	for _, e := range entries {
 		env := e.Envelope()
 		te := tui.TreeEntry{ID: env.ID, Type: env.Type, Active: env.ID == leaf}
-		for p := parent[env.ID]; p != "" && te.Depth < len(parent); p = parent[p] {
-			te.Depth++
-		}
 		switch t := e.(type) {
 		case *session.MessageEntry:
 			te.Role = string(t.Message.Role)
-			te.Summary = clipSummary(t.Message.Text(), 60)
+			// MessageLabel, not Text(): most rows of a real session are
+			// tool-call-only assistant turns, which carry no text block at all,
+			// so Text() returned "" and the panel painted those ids over blank
+			// lines — the "empty lines" at the end of the history.
+			te.Summary = clipSummary(ai.MessageLabel(&t.Message), 60)
 		case *session.CompactionEntry:
 			te.Summary = "(compaction)"
 		case *session.BranchSummaryEntry:

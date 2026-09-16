@@ -30,11 +30,30 @@ type Editor struct {
 // Text returns the current input.
 func (e *Editor) Text() string { return string(e.buf) }
 
-// Reset clears the buffer and history browsing position.
+// Clear takes the draft out of the composer and returns a copy of it. Reset
+// reuses the buffer's array, so a caller that wants the text back must not
+// keep a slice of the live buffer (same discipline as recall's draft stash).
+func (e *Editor) Clear() []rune {
+	old := append([]rune(nil), e.buf...)
+	e.Reset()
+	return old
+}
+
+// Reset clears the buffer and history browsing position. It takes the cleared
+// text with it — callers that want it back must copy it out first.
 func (e *Editor) Reset() {
 	e.buf = e.buf[:0]
 	e.cur = 0
 	e.histIdx = len(e.history)
+}
+
+// SetBuffer replaces the draft with text and parks the caret at its end — how
+// a rewound prompt or an Esc-restored one comes back for editing.
+func (e *Editor) SetBuffer(text string) {
+	e.Reset()
+	e.wantCol = 0 // same contract as typing through HandleKey
+	e.buf = append(e.buf, []rune(text)...)
+	e.cur = len(e.buf)
 }
 
 // PushHistory records a sent prompt (dedup of immediate repeat).
@@ -197,8 +216,23 @@ func (e *Editor) HistoryPrev() { e.recall(-1) }
 
 func (e *Editor) HistoryNext() { e.recall(1) }
 
-// Visual-row geometry shared with the composer painter
-// (App.composerInputLines): what the arrows walk is exactly what is drawn.
+// Visual-row geometry shared with the composer painter (App.composerView):
+// what the arrows walk is exactly what is painted — a window of it, when the
+// draft outgrows the room the screen can give the box.
+
+// rowWindow picks the budget rows an n-row draft lets the box paint: the span
+// holding the cursor row, taken so the cursor sits on the painted edge where
+// it can. A draft that fits is painted whole: lo=0, hi=n.
+func rowWindow(n, cur, budget int) (lo, hi int) {
+	if budget < 1 {
+		budget = 1
+	}
+	if n <= budget {
+		return 0, n
+	}
+	lo = min(max(cur-budget+1, 0), n-budget)
+	return lo, lo + budget
+}
 
 // rowSpan is one visual row: the rune offsets [start,end), newline excluded.
 type rowSpan struct{ start, end int }

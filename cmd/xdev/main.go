@@ -62,6 +62,7 @@ var subcommands = map[string]bool{
 	"models": true, "search": true, "commit": true, "compress": true,
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
 	"usage": true, "ps": true, "token": true, "completions": true,
+	"connect":  true,
 	"worktree": true, "wt": true,
 	// Repository hook trust (#241): the review and the decision.
 	"trust": true, "distrust": true,
@@ -108,6 +109,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
   xdev trust|distrust      review and allow (or withhold) a repository's hooks (--list)
   xdev models [query]          resolved model catalog (--refresh re-discovers)
+  xdev connect [provider]      connect a catalog provider (--list shows them)
   xdev login | logout          Claude Pro/Max and Codex OAuth (PKCE browser flow)
   xdev lsp-config [list|validate]  language servers, resolved binaries
   xdev memory <sub>            show | stats | lessons | add | edit | export | import | scratchpad | clear
@@ -127,6 +129,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev install <name>          alias of "plugin install"
   xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
   xdev update [--channel C]    check for and install updates (stable | canary)
+  xdev update job <verb>       the twice-daily release check: install | remove | status
   xdev setup                   onboarding: data dir, starter config, next steps
   xdev bench [--turns N]       TTFT + decode p50/p95 through the provider seam
   xdev completions <shell>     bash | zsh | fish completion script
@@ -202,6 +205,7 @@ func main() {
 	fs.StringVar(&slowModelFlag, "slow", "", "role override: model for the @slow / @plan role")
 	fs.StringVar(&planModelFlag, "plan-model", "", "role override: model for the @plan role (omp spells this --plan <model>)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
+	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
 	providerFlag := fs.String("provider", "", "force the provider when the model ref does not name one")
 	addDirs := repeatable{}
 	fs.Var(&addDirs, "add-dir", "extra workspace root beyond the launch cwd: joins context-file discovery and is named in the prompt (repeatable)")
@@ -349,6 +353,13 @@ func main() {
 		settings.Prewalk.Enabled = false
 	} else if launch.Prewalk {
 		settings.Prewalk.Enabled = true
+	}
+	// -retry-forever is the one-run form of retry.infinite. It rides the
+	// layered settings rather than a launchFlags field: every mode reads
+	// this object through lastSettings(), so one write covers TUI, print,
+	// RPC and ACP.
+	if *retryForever {
+		settings.Retry.Infinite = true
 	}
 	// --models patterns enable Ctrl+P cycling; the catalog print stays on
 	// the `models` subcommand (omp keeps the same split).
@@ -573,6 +584,9 @@ func main() {
 	// each prints its own usage and exits on its own.
 	if mode == "models" {
 		os.Exit(runModels(args))
+	}
+	if mode == "connect" {
+		os.Exit(runConnect(args))
 	}
 	if mode == "search" {
 		os.Exit(runSearch(args))

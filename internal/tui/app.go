@@ -29,12 +29,13 @@ type Status struct {
 	// All three feed the optional HUD segments (statusLine.segments).
 	Cost      float64
 	CtxWindow int64
-	// CtxUsed is the LIVE context occupancy: input+output of the most recent
-	// completed request (the provider's own count, so it covers the system
-	// prompt, the whole visible history and the tool schemas). The HUD's
-	// context segment reads this against CtxWindow — deliberately NOT the
-	// cumulative TokensIn/TokensOut, which count every turn the session ever
-	// sent and so run far past the window.
+	// CtxUsed is the LIVE context occupancy: the token count of the most recent
+	// completed request — every input token, cached or fresh, plus the output
+	// (the provider's own total, so it covers the system prompt, the whole
+	// visible history and the tool schemas). The HUD's context segment reads
+	// this against CtxWindow — deliberately NOT the cumulative
+	// TokensIn/TokensOut, which count every turn the session ever sent and so
+	// run far past the window.
 	CtxUsed int64
 	Rate    float64
 	// Start anchors the HUD time segment: the moment the current session's
@@ -57,7 +58,15 @@ type App struct {
 	blocks []*Block
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
 	ed     Editor
-	smenu  *slashMenu // "/" autocomplete dropdown (nil = closed)
+	// escDraft is the prompt the last Esc took out of the composer and
+	// escUsed says that exact text has already been given back: the ladder is
+	// clear → restore → clear → open the selector, so repeated Esc always
+	// ends at the tree instead of blinking the same text forever, while an
+	// edit made after a restore still gets its own undo. UI-thread-only like
+	// the editor itself (no lock); the stash is a copy.
+	escDraft []rune
+	escUsed  bool
+	smenu    *slashMenu // "/" autocomplete dropdown (nil = closed)
 	// pickers is the modal-list stack: /model opens a roles+models
 	// selector, and "set role" pushes a second list on top. Esc pops one
 	// level; a selection pops them all. While non-empty the picker owns
@@ -96,6 +105,7 @@ type App struct {
 	advisorOps        *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
 	memoryOps         *MemoryOps                             // /memory, wired by cmd (nil → notices)
 	themeOps          *ThemeOps                              // /theme, wired by cmd (nil → notices)
+	connectOps        *ConnectOps                            // /connect, wired by cmd (nil → notices)
 	prewalkOps        *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
 	goalOps           *GoalOps                               // /goal, wired by cmd (nil → notices)
 	vibeOps           *VibeOps                               // /vibe, wired by cmd (nil → notices)
@@ -176,6 +186,29 @@ type App struct {
 	selEnd     selCorner
 	selRows    []selRow
 	selCache   map[int]selRow
+	// Held-drag edge auto-scroll (selection.go): selEdge is the direction a drag
+	// parked on the transcript's first (-1) or last (+1) row is scrolling,
+	// selEdgeAt when it first arrived there. The UI tick keeps scrolling once
+	// selEdgeDelay has passed — the pointer itself reports nothing while it sits
+	// still, which is the whole problem. selThumbDrag is a drag that took the
+	// scrollbar instead of the text; selGrab is the grip taken on the thumb, so
+	// thumb keeps its grip while it moves: selGrab is how far below the thumb's
+	// top the finger landed, so a thumb grabbed in the middle stays under it.
+	// (UI thread; mu-guarded.)
+	selEdge      int
+	selEdgeAt    time.Time
+	selThumbDrag bool
+	selGrab      int
+	// selBar* is the scrollbar's geometry as the painter last drew it, published
+	// every frame like the picker's hit table: a press is tested against the bar
+	// that is on screen rather than a re-derivation that could disagree with it.
+	// (UI thread; mu-guarded.)
+	selBarOn    bool
+	selBarW     int // the bar's column width (the last screen column, or 0)
+	selBarVP    int // visible transcript rows the bar spans
+	selBarTotal int // transcript rows at paint time
+	selBarThumb int // thumb rows at paint time
+	selBarPos   int // thumb's first track row at paint time
 	// selNotice is the copy confirmation (omp's showStatus for a copy); it
 	// rides the composer divider until selNoticeUntil.
 	selNotice      string
@@ -573,12 +606,20 @@ func (a *App) ToggleToolExpand() bool {
 // usable window — nothing streamed, or a sub-100ms burst — keeps the previous
 // rate rather than inventing one.
 // It also refreshes CtxUsed, the live occupancy behind the HUD's context
-// segment.
-func (a *App) AddUsage(in, out int64) {
+// segment, with total: the provider's token count for this request, cached
+// input included. ctx is what sits in the window, not only what the window had
+// to re-read — a prompt-cache hit still occupies those tokens, and an
+// input+output sum reads 90 % low on a cached conversation (the same total
+// agent.ContextTokens and compaction trigger on). total <= 0 (a provider that
+// reports none) falls back to in+out.
+func (a *App) AddUsage(in, out, total int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
-	a.st.CtxUsed = in + out
+	if total <= 0 {
+		total = in + out // a provider that reports no total gets the floor
+	}
+	a.st.CtxUsed = total
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
 		a.st.Rate = float64(out) / window.Seconds()
 	}
@@ -782,6 +823,9 @@ func (a *App) Goal(args string) error {
 	a.AddSystemBlock(block)
 	return nil
 }
+
+// SetConnectOps wires the /connect command (the catalog lives in cmd/config).
+func (a *App) SetConnectOps(ops *ConnectOps) { a.connectOps = ops }
 
 // SetThemeOps wires the /theme command (theme resolution lives in cmd).
 func (a *App) SetThemeOps(ops *ThemeOps) { a.themeOps = ops }
@@ -1485,6 +1529,12 @@ func (a *App) Run() {
 			if a.selNotice != "" && a.copyHint() == "" {
 				animate = true
 			}
+			// A held drag parked on the transcript's edge is the one mouse
+			// gesture with no events of its own, so the tick is its clock
+			// (selection.go selEdgeTick).
+			if a.selEdgeTick() {
+				animate = true
+			}
 			clock := a.hudHasClock()
 			a.mu.Unlock()
 			if running || animate || stuck {
@@ -1530,7 +1580,12 @@ func (a *App) handleKey(ev tcell.Event) {
 			held := m.Buttons()&tcell.Button1 != 0
 			a.mu.Lock()
 			press := held && !a.mouseBtnDown
-			a.mouseBtnDown = held
+			// A wheel report carries no button bits at all, so reading one as
+			// "the button came up" would make the next motion of a held drag
+			// look like a fresh press and restart the selection under it.
+			if m.Buttons()&(tcell.WheelUp|tcell.WheelDown|tcell.WheelLeft|tcell.WheelRight) == 0 {
+				a.mouseBtnDown = held
+			}
 			a.mu.Unlock()
 			// A modal owns the mouse first: omp's lists move the selection on
 			// the wheel and choose the row under a click, so nothing underneath
@@ -1548,7 +1603,7 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.scroll(3, true)
 			default:
 				a.mu.Lock()
-				a.handleMouse(m)
+				a.handleMouse(m, press)
 				a.mu.Unlock()
 			}
 		}
@@ -1580,17 +1635,40 @@ func (a *App) handleKey(ev tcell.Event) {
 		return
 	}
 
-	// Claude-Code double-Esc rewind: idle with a draft in the composer,
-	// the first Esc clears the draft; the next Esc (empty composer) opens
-	// the tree selector, where a user row is rewind-and-re-prime. An open
-	// slash/@-menu owns Esc first (close the menu), and the selector's own
-	// Esc handling is modal.
+	// Claude-Code double-Esc rewind, with one rung first: idle with a draft,
+	// the first Esc clears it — and keeps it, so the next Esc on the empty
+	// composer gives the prompt back instead of opening the tree selector.
+	// Only with nothing left to undo does Esc open the selector, where a user
+	// row is rewind-and-re-prime. Clearing a draft you cannot get back is not
+	// an undo, it is a delete, and the text was the expensive part.
+	//
+	// An open slash/@-menu owns Esc first (close the menu), and the selector's
+	// own Esc handling is modal. The stash always holds what the LAST Esc
+	// cleared — a newer draft re-stashes on its own clear — and a send retires
+	// it: a prompt resurfacing after the user moved on is worse than one lost.
 	if key.Key() == tcell.KeyEsc && !running && !menuOpen {
 		if strings.TrimSpace(a.ed.Text()) != "" {
-			a.ed.Reset()
+			// The stash still names THIS text and was already handed back
+			// once: that draft spent its undo, so clear it for real. Anything
+			// else — new text, an edit after the hand-back (a whitespace
+			// change counts) — gets its own undo, so Esc stays one gesture:
+			// "undo what the last Esc took".
+			if strings.TrimSpace(string(a.escDraft)) == strings.TrimSpace(a.ed.Text()) && a.escUsed {
+				a.ed.Reset()
+				a.escDraft, a.escUsed = nil, false
+			} else {
+				a.escDraft, a.escUsed = a.ed.Clear(), false
+			}
 			a.poke()
 			return
 		}
+		if len(a.escDraft) > 0 && !a.escUsed {
+			a.ed.SetBuffer(string(a.escDraft))
+			a.escUsed = true
+			a.poke()
+			return
+		}
+		a.escDraft, a.escUsed = nil, false
 		a.OpenTreeSelector()
 		return
 	}
@@ -1854,6 +1932,10 @@ func (a *App) handleKey(ev tcell.Event) {
 	a.dropStalePastes()
 	a.syncSlashMenu()
 	if send {
+		// The prompt is on its way: an Esc-cleared draft from before it is no
+		// longer "the last thing I undid", and resurfacing it after a send
+		// would put two prompts in the composer that were never both there.
+		a.escDraft, a.escUsed = nil, false
 		// slash command routing (issue #11): a command is consumed by the
 		// router — no user block, no agent run. A command sees the draft as
 		// typed, chips included: its argument is not a place to lose a name.
@@ -2379,7 +2461,9 @@ func (a *App) paint() {
 	// (welcome, /clear) must not keep last frame's scroll hint, nor its
 	// selection capture — rows recorded before /clear would copy text that is
 	// no longer on screen.
-	a.scrollHint, a.selRows = "", nil
+	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
+	// draws no bar must not leave last frame's grab live on the last column.
+	a.scrollHint, a.selRows, a.selBarOn = "", nil, false
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -2504,6 +2588,15 @@ func (a *App) paint() {
 			}
 			drawText(s, edge-1, y+top, ch, st)
 		}
+	}
+	// Publish the bar's geometry for the mouse hit-test (selection.go): the
+	// press that grabs the thumb and the drag that moves it act on exactly the
+	// bar painted here — and on no bar at all when the transcript fits, since
+	// sbOk false is what keeps grab off a column that carries content.
+	a.selBarOn, a.selBarVP, a.selBarPos = sbOk, vp, sbStart
+	a.selBarW, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
+	if sbOk {
+		a.selBarW = 1
 	}
 	a.selRows, a.selTop = selRows, start
 	if a.selDown {
@@ -2792,25 +2885,49 @@ func (a *App) composerAvail() int {
 	return avail
 }
 
-// composerInputLines returns the wrapped input rows for the editor text
-// plus the column of the cursor within that wrapped grid. An embedded
-// newline is a hard row break (Ctrl+J / Alt+Enter), and a long line wraps
-// at the available width so the box grows instead of truncating. The same
-// wrapRows geometry backs the Up/Down cursor walk in Editor.moveLine:
-// arrows traverse exactly what is painted.
-func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
+// composerBudget is the most input rows the box may paint: the screen minus
+// everything else it shares the terminal with (top bar, one transcript row,
+// the box's own borders, the status row) — draw()'s viewport arithmetic
+// solved for the composer. Without a ceiling the box grew past the screen:
+// its top edge climbed above row 0, drawComposer bailed on yTop < 1, and a
+// large paste showed NOTHING while the full draft sat in the buffer — the
+// "composer is empty but Enter sends it all" bug.
+func (a *App) composerBudget() int {
+	n := a.height - 5 - a.transcriptTop()
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// composerView returns the input rows the box paints plus the cursor's cell
+// within them and the draft rows hidden above/below the window. An embedded
+// newline is a hard row break (Ctrl+J / Alt+Enter), a long line wraps at the
+// available width so the box grows instead of truncating, and past the
+// budget it pages to the cursor (rowWindow) instead of leaving the screen.
+// The same wrapRows geometry backs the Up/Down walk in Editor.moveLine:
+// arrows traverse exactly what is painted, and walking off the painted edge
+// scrolls the window with the cursor.
+func (a *App) composerView() (lines []string, curRow, curCol, above, below int) {
 	rows := wrapRows(a.ed.buf, a.composerAvail())
-	for _, rs := range rows {
+	full, col := cursorCell(a.ed.buf, rows, a.ed.cur)
+	lo, hi := rowWindow(len(rows), full, a.composerBudget())
+	for _, rs := range rows[lo:hi] {
 		lines = append(lines, string(a.ed.buf[rs.start:rs.end]))
 	}
-	curRow, curCol = cursorCell(a.ed.buf, rows, a.ed.cur)
+	return lines, full - lo, col, lo, len(rows) - hi
+}
+
+// composerInputLines is the painted window without the scroll counts.
+func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
+	lines, curRow, curCol, _, _ = a.composerView()
 	return
 }
 
-// composerRows is the total height of the prompt box (top border, wrapped
+// composerRows is the total height of the prompt box (top border, painted
 // input rows, bottom divider).
 func (a *App) composerRows() int {
-	lines, _, _ := a.composerInputLines()
+	lines, _, _, _, _ := a.composerView()
 	return len(lines) + 2
 }
 
@@ -2841,14 +2958,16 @@ func (a *App) drawComposer(yTop int) {
 	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
 	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
-	lines, curRow, curCol := a.composerInputLines()
+	// above/below count the draft rows the window hides, and decide both
+	// where the ❯ prefix belongs and what the divider's hint says.
+	lines, curRow, curCol, above, below := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
 		y := yTop + i
 		a.scr.SetContent(1, y, vert, nil, bs)
 		a.scr.SetContent(w-2, y, vert, nil, bs)
-		if i == 0 {
+		if i == 0 && above == 0 {
 			drawText(a.scr, 3, y, "❯ ", promptStyle)
 		} else {
 			drawText(a.scr, 3, y, "  ", promptStyle)
@@ -2894,16 +3013,21 @@ func (a *App) drawComposer(yTop int) {
 		}
 		drawText(a.scr, 2, yBottom, info, infoSt)
 	}
-	// The viewport hint (▲n▼n) rides this divider's right end. It used to be
+	// The viewport hint rides this divider's right end. It used to be
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
 	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name. A fresh copy
-	// confirmation outranks it — that message is the only proof the mouse
+	// hint is dropped rather than eating the model name. Three hints want the
+	// slot, in this order: a fresh copy confirmation (the only proof the mouse
 	// gesture did anything, since the app holds the mouse and the terminal
-	// stays quiet.
+	// stays quiet), then the draft's own hidden rows — text the user is
+	// composing right now beats scrollback they already read — then the
+	// transcript's ▲n▼n.
 	hint := a.copyHint()
+	if hint == "" {
+		hint = draftHint(above, below)
+	}
 	if hint == "" {
 		hint = a.scrollHint
 	}
@@ -2919,9 +3043,22 @@ func (a *App) drawComposer(yTop int) {
 	}
 	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
-	// Cursor: blinking block at the editor position inside the wrapped grid.
+	// Cursor: blinking block at the editor position inside the painted window.
 	cx := 5 + curCol
 	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
+}
+
+// draftHint names the composer rows the window hides, if any.
+func draftHint(above, below int) string {
+	switch {
+	case above > 0 && below > 0:
+		return fmt.Sprintf("draft ▲%d ▼%d", above, below)
+	case above > 0:
+		return fmt.Sprintf("draft ▲%d", above)
+	case below > 0:
+		return fmt.Sprintf("draft ▼%d", below)
+	}
+	return ""
 }
 
 // drawStatusRow renders the bottom row: the working directory on the left,
@@ -3015,11 +3152,11 @@ var statusSegments = map[string]bool{
 // clock reads leftmost so the rate's own " │ " stays the row's right edge).
 // The context segment is the number: what this session's context costs against
 // the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
-// request's provider-reported input+output, which already covers the system
-// prompt, the visible history and the tool schemas. It hides while either half
-// is unknown (an undiscovered window, or a session that has not answered yet),
-// so a fresh run keeps a clean row. The model keeps its composer divider slot,
-// which is chrome rather than a segment.
+// request's provider-reported total, cached input included, which covers the
+// system prompt, the visible history and the tool schemas. It hides while
+// either half is unknown (an undiscovered window, or a session that has not
+// answered yet), so a fresh run keeps a clean row. The model keeps its
+// composer divider slot, which is chrome rather than a segment.
 var defaultStatusSegments = []string{"time", "tokens", "context", "rate"}
 
 // hudHasClock reports whether the effective HUD layout renders the time

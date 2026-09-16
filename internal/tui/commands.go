@@ -220,6 +220,17 @@ type ThemeOps struct {
 	Set     func(name string) error
 }
 
+// ConnectOps wires /connect to the provider catalog (the catalog and the
+// writing live in cmd/config). Items lists the rows to offer — Label is the
+// provider name, Detail says what it is and whether a credential is in hand.
+// Connect writes one row into models.yml; DefaultRef names the model a session
+// gets from it ("" = none pinned).
+type ConnectOps struct {
+	Items      func() []PickerItem
+	Connect    func(name string) error
+	DefaultRef func(name string) string
+}
+
 // MemoryOps wires the /memory command (backend lives in cmd). View, Stats and
 // Clear are the backend-agnostic verbs; Diagnose is the remote backend's
 // health dump and Queue/Sync/Enqueue are the queue-backed store's (mnemopi);
@@ -361,6 +372,10 @@ type CommandAPI interface {
 	Memory(args string) error
 	Theme(args string) error
 	Prewalk(args string) error
+	// Connect opens the provider catalog (xdev's own "connect to a
+	// subscription"): with an argument it connects that provider, without one
+	// it shows the picker.
+	Connect(args string) error
 	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
@@ -422,6 +437,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
 		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},
+		{Name: "connect", Description: "connect a provider from the catalog: /connect [name]",
+			Fn: func(app CommandAPI, args string) error { return app.Connect(args) }},
 		{Name: "hub", Description: "agent hub roster: live status, kill/revive, transcripts",
 			Fn: func(app CommandAPI, args string) error { return app.HubRoster() }},
 		{Name: "hotkeys", Description: "show keybinding map",
@@ -811,6 +828,55 @@ func collabCommand(app CommandAPI, args string) error {
 		return err
 	}
 	app.AddSystemBlock(out)
+	return nil
+}
+
+// Connect implements CommandAPI /connect: the provider catalog as a picker,
+// and one row's write into models.yml. With an argument it connects that
+// provider directly — the shape a user reaches for once they know the name.
+func (a *App) Connect(args string) error {
+	if a.connectOps == nil {
+		return fmt.Errorf("provider catalog not wired")
+	}
+	if name := strings.TrimSpace(args); name != "" {
+		return a.connectProvider(name)
+	}
+	if a.connectOps.Items == nil {
+		return fmt.Errorf("provider catalog not wired")
+	}
+	items := a.connectOps.Items()
+	if len(items) == 0 {
+		return fmt.Errorf("provider catalog is empty (this build has no connect catalog)")
+	}
+	a.OpenPicker(PickerOptions{
+		Title: "connect a provider",
+		Views: []PickerView{{Name: "providers", Action: "connect", Items: items}},
+		OnSelect: func(name string) {
+			if err := a.connectProvider(name); err != nil {
+				a.AddSystemBlock("error: " + err.Error())
+			}
+		},
+	})
+	return nil
+}
+
+// connectProvider writes one catalog row and reports the model that is now
+// usable. The picker is already gone by the time a select lands here, so the
+// answer goes to the transcript either way.
+func (a *App) connectProvider(name string) error {
+	if a.connectOps.Connect == nil {
+		return fmt.Errorf("connecting providers is not wired")
+	}
+	if err := a.connectOps.Connect(name); err != nil {
+		return err
+	}
+	msg := "connected " + name
+	if a.connectOps.DefaultRef != nil {
+		if ref := a.connectOps.DefaultRef(name); ref != "" {
+			msg += "\n· this session can switch to it now: /model " + ref
+		}
+	}
+	a.AddSystemBlock(msg)
 	return nil
 }
 

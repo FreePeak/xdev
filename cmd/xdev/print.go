@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/FreePeak/xdev/internal/computer"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dap"
+	"github.com/FreePeak/xdev/internal/dist"
 	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/ext"
 	hookbus "github.com/FreePeak/xdev/internal/hooks"
@@ -251,6 +253,9 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	if settings != nil {
 		ag.Compaction.IdleAfter = settings.CompactionIdleAfter()
 		ag.Compaction.Async = settings.CompactionAsyncOn()
+		// retry.infinite rides here: every build site (print/tui/rpc/acp)
+		// goes through this function, and none of them set ag.Retry at all.
+		ag.Retry.Infinite = settings.RetryConfig().Infinite
 	}
 	// #86: a compaction summary must carry the memories the remote backend
 	// recalled, or they are lost for the rest of the session.
@@ -516,6 +521,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if notice, warnings, count := taskAgentsAtStartup(cwd); count == 0 || len(warnings) > 0 {
 		fmt.Fprintln(os.Stderr, "xdev: "+notice)
 	}
+	// A newer release goes to stderr too, and only there: stdout is the
+	// model's answer and a script parses it, so the notice must not join it.
+	// The check itself runs in the background for the same reason the record
+	// exists — it costs this run nothing and pays the next one.
+	if n := dist.Notice(version); n != "" {
+		fmt.Fprintln(os.Stderr, n)
+	}
+	go dist.MaybeCheck(version)
 
 	// --- agent ---
 	// M12 #44: mnemopi counts turns; every retainEveryNTurns turns this
@@ -2441,6 +2454,15 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 	case ai.EventToolcallStart:
 		fmt.Fprintf(os.Stderr, "\n⟨%s⟩\n", ev.ToolName)
 	case ai.EventError:
+		// The rounds of an unbounded wait (retry.infinite) are the one
+		// transient worth printing verbatim: once per round, not once per
+		// attempt, and it is the message that says "still waiting" rather
+		// than "hung".
+		var down *agent.AllTargetsDownError
+		if errors.As(ev.Err, &down) {
+			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
+			break
+		}
 		// The recovery ladder retries transient wire errors; printing the
 		// full message once per attempt is noise (and alarming). Hard
 		// errors still print verbatim — the turn ends on them.
