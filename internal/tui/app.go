@@ -177,6 +177,29 @@ type App struct {
 	selEnd     selCorner
 	selRows    []selRow
 	selCache   map[int]selRow
+	// Held-drag edge auto-scroll (selection.go): selEdge is the direction a drag
+	// parked on the transcript's first (-1) or last (+1) row is scrolling,
+	// selEdgeAt when it first arrived there. The UI tick keeps scrolling once
+	// selEdgeDelay has passed — the pointer itself reports nothing while it sits
+	// still, which is the whole problem. selThumbDrag is a drag that took the
+	// scrollbar instead of the text; selGrab is the grip taken on the thumb, so
+	// thumb keeps its grip while it moves: selGrab is how far below the thumb's
+	// top the finger landed, so a thumb grabbed in the middle stays under it.
+	// (UI thread; mu-guarded.)
+	selEdge      int
+	selEdgeAt    time.Time
+	selThumbDrag bool
+	selGrab      int
+	// selBar* is the scrollbar's geometry as the painter last drew it, published
+	// every frame like the picker's hit table: a press is tested against the bar
+	// that is on screen rather than a re-derivation that could disagree with it.
+	// (UI thread; mu-guarded.)
+	selBarOn    bool
+	selBarW     int // the bar's column width (the last screen column, or 0)
+	selBarVP    int // visible transcript rows the bar spans
+	selBarTotal int // transcript rows at paint time
+	selBarThumb int // thumb rows at paint time
+	selBarPos   int // thumb's first track row at paint time
 	// selNotice is the copy confirmation (omp's showStatus for a copy); it
 	// rides the composer divider until selNoticeUntil.
 	selNotice      string
@@ -1432,6 +1455,12 @@ func (a *App) Run() {
 			if a.selNotice != "" && a.copyHint() == "" {
 				animate = true
 			}
+			// A held drag parked on the transcript's edge is the one mouse
+			// gesture with no events of its own, so the tick is its clock
+			// (selection.go selEdgeTick).
+			if a.selEdgeTick() {
+				animate = true
+			}
 			clock := a.hudHasClock()
 			a.mu.Unlock()
 			if running || animate || stuck {
@@ -1477,7 +1506,12 @@ func (a *App) handleKey(ev tcell.Event) {
 			held := m.Buttons()&tcell.Button1 != 0
 			a.mu.Lock()
 			press := held && !a.mouseBtnDown
-			a.mouseBtnDown = held
+			// A wheel report carries no button bits at all, so reading one as
+			// "the button came up" would make the next motion of a held drag
+			// look like a fresh press and restart the selection under it.
+			if m.Buttons()&(tcell.WheelUp|tcell.WheelDown|tcell.WheelLeft|tcell.WheelRight) == 0 {
+				a.mouseBtnDown = held
+			}
 			a.mu.Unlock()
 			// A modal owns the mouse first: omp's lists move the selection on
 			// the wheel and choose the row under a click, so nothing underneath
@@ -1495,7 +1529,7 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.scroll(3, true)
 			default:
 				a.mu.Lock()
-				a.handleMouse(m)
+				a.handleMouse(m, press)
 				a.mu.Unlock()
 			}
 		}
@@ -2318,7 +2352,9 @@ func (a *App) paint() {
 	// (welcome, /clear) must not keep last frame's scroll hint, nor its
 	// selection capture — rows recorded before /clear would copy text that is
 	// no longer on screen.
-	a.scrollHint, a.selRows = "", nil
+	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
+	// draws no bar must not leave last frame's grab live on the last column.
+	a.scrollHint, a.selRows, a.selBarOn = "", nil, false
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -2435,6 +2471,15 @@ func (a *App) paint() {
 			}
 			drawText(s, w-1, y+top, ch, st)
 		}
+	}
+	// Publish the bar's geometry for the mouse hit-test (selection.go): the
+	// press that grabs the thumb and the drag that moves it act on exactly the
+	// bar painted here — and on no bar at all when the transcript fits, since
+	// sbOk false is what keeps grab off a column that carries content.
+	a.selBarOn, a.selBarVP, a.selBarPos = sbOk, vp, sbStart
+	a.selBarW, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
+	if sbOk {
+		a.selBarW = 1
 	}
 	a.selRows, a.selTop = selRows, start
 	if a.selDown {
