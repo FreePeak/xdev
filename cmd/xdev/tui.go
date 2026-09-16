@@ -1694,6 +1694,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		func() { app.Quit() },
 	)
 	app.SetImageSend(func(text string, imgs []tui.PasteImage) bool { return runTurn(text, imgs) })
+	// Shell mode (M10 #163): "!<command>" in the composer runs locally and
+	// prints to the transcript. Nothing is sent to the model, so the draft
+	// costs no tokens; the block is display-only — it is not persisted to the
+	// session, so a resume replays the conversation without it.
+	tui.Bang = newBangRunner(app, cwd, baseCtx)
 	// F5 retry: re-run the agent over the CURRENT store with no new prompt —
 	// the recovery for a turn a dropped stream cut short. The turn claim is
 	// taken exactly as runTurn takes it, so an in-flight run is refused rather
@@ -1911,6 +1916,56 @@ func shortSessionID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// bangToolName names the transcript rows shell mode writes. A name of its own
+// is load-bearing: FinishTool pairs a result with the newest still-running
+// block carrying the same name, so a bang run must never match — or close —
+// the box of an agent bash call that is in flight.
+const bangToolName = "!bash"
+
+// newBangRunner builds the executor behind composer shell mode (#163): it
+// runs one command through the bash tool in the session cwd and writes the
+// result as a tool box, with no model call anywhere on the path.
+//
+// Runs are serialized. FinishTool matches by tool name, so two overlapping
+// runs could mark each other's row; the lock also makes a burst of typed
+// commands execute in the order they were sent.
+//
+// ponytail: display-only, i.e. the transcript is the sole sink — the output
+// is not persisted to the session and never enters the model's context, which
+// is exactly what "costs no tokens" means. Upgrading it means appending a
+// session.CustomEntry here and replaying it as a user-role note next turn.
+func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) error {
+	var mu sync.Mutex
+	return func(command string) error {
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			return err
+		}
+		go func() {
+			mu.Lock()
+			defer mu.Unlock()
+			started := time.Now()
+			app.AddToolBlock(bangToolName, string(args))
+			res, execErr := tool.NewBashTool(cwd).Execute(ctx, args)
+			if execErr != nil {
+				// The transcript can only show a Result; a hard error (a bad
+				// cwd, a refused spawn) becomes an error box rather than a
+				// row that stays "running" forever.
+				res = tool.Result{Text: execErr.Error(), IsError: true}
+			}
+			out := tool.OutcomeOf(res.Details)
+			app.FinishTool(bangToolName, res.IsError, res.Text, tui.ToolOutcome{
+				Dur:       time.Since(started).Round(time.Millisecond).String(),
+				Exit:      out.Exit,
+				HasExit:   out.HasExit,
+				Truncated: out.Truncated,
+				Diff:      out.Diff,
+			})
+		}()
+		return nil
+	}
 }
 
 // OnToolStart hands the transcript the call's raw arguments: the renderer

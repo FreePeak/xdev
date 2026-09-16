@@ -118,6 +118,41 @@ func TestAppSendFlow(t *testing.T) {
 	}
 }
 
+// The composer's submit path must route a "!cmd" draft into shell mode: no
+// user block, no send. Asserted through handleKey because the risk lives in
+// the ordering of that path, not in the router alone.
+func TestAppBangShellModeNotSent(t *testing.T) {
+	orig := Bang
+	t.Cleanup(func() { Bang = orig })
+
+	var ran []string
+	Bang = func(cmd string) error { ran = append(ran, cmd); return nil }
+	app, _ := newTestApp(t, 80, 24)
+	var sent []string
+	app.SetHandlers(func(text string) { sent = append(sent, text) }, func() {}, func() {})
+
+	for _, r := range "!echo hi" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+
+	if len(ran) != 1 || ran[0] != "echo hi" {
+		t.Fatalf("ran = %v, want [echo hi]", ran)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("bang draft was sent to the model: %v", sent)
+	}
+	app.mu.Lock()
+	blocks, empty := len(app.blocks), app.ed.Text() == ""
+	app.mu.Unlock()
+	if blocks != 0 {
+		t.Fatalf("bang draft appended %d transcript blocks, want 0 (no user row)", blocks)
+	}
+	if !empty {
+		t.Fatal("bang draft left the composer dirty")
+	}
+}
+
 // The F5 chord drives the wired retry op on the UI thread; an unwired build
 // says so instead of swallowing the key.
 func TestAppRetryChord(t *testing.T) {
