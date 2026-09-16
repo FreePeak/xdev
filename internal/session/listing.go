@@ -24,6 +24,11 @@ type SessionMeta struct {
 	// TitleSource is the title-slot source ("auto"/"manual"/"subagent").
 	// Resume paths skip "subagent" — a child is never a user continuation.
 	TitleSource string
+	// Status is the lifecycle badge derived from the tail of the file
+	// (#107): "done" when the last turn finished, "interrupted" otherwise.
+	// A session the user killed mid-turn must not look like one that
+	// finished.
+	Status SessionStatus
 }
 
 // EncodeCWDBucket maps a canonical cwd path to its session-bucket name:
@@ -52,9 +57,9 @@ func SessionFilePath(dataDir, cwd string, now time.Time, id string) string {
 
 // List walks dataDir/sessions/<bucket>/*.jsonl for ALL buckets, reading only
 // the first 4 KiB of each file (title slot + session header + maybe first
-// entry) plus os.Stat for size/mtime. Results are sorted by ModTime desc.
-// A stat-keyed cache reuses parsed metadata across calls and invalidates on
-// stat change.
+// entry) plus the last 32 KiB for the lifecycle status, and os.Stat for
+// size/mtime. Results are sorted by ModTime desc. A stat-keyed cache reuses
+// parsed metadata across calls and invalidates on stat change.
 func List(dataDir string) ([]SessionMeta, error) {
 	return listWithCache(dataDir, newStatCache())
 }
@@ -155,7 +160,8 @@ func scanPaths(paths []string, cache *statCache) []SessionMeta {
 	return kept
 }
 
-// statPath stats one file and parses its 4 KiB prefix (cache-first).
+// statPath stats one file and parses its 4 KiB prefix plus its status tail
+// (cache-first).
 func statPath(path string, cache *statCache) (SessionMeta, bool) {
 	fi, err := os.Stat(path)
 	if err != nil || fi.IsDir() {
@@ -172,10 +178,23 @@ func statPath(path string, cache *statCache) (SessionMeta, bool) {
 	}
 	prefix := make([]byte, 4096)
 	n, _ := f.Read(prefix)
+	// The terminal entry sits at the END of the file, and the store appends
+	// bookkeeping after it (model_change, session_exit, branch markers), so
+	// the prefix never shows it. One extra bounded read on the descriptor we
+	// already hold — never a whole-file parse.
+	var tail []byte
+	if fi.Size() <= int64(len(prefix)) {
+		tail = prefix[:n] // the prefix already reached EOF
+	} else {
+		buf := make([]byte, statusTailMax)
+		if m, rerr := f.ReadAt(buf, max(0, fi.Size()-int64(len(buf)))); rerr == nil || m > 0 {
+			tail = buf[:m] // the offset may split a line; ClassifyStatus drops the fragment
+		}
+	}
 	f.Close()
 	lines := strings.Split(strings.TrimRight(string(prefix[:n]), "\n"), "\n")
 
-	meta := SessionMeta{Path: path, SizeBytes: fi.Size(), ModTime: fi.ModTime()}
+	meta := SessionMeta{Path: path, SizeBytes: fi.Size(), ModTime: fi.ModTime(), Status: ClassifyStatus(tail)}
 	if len(lines) > 0 {
 		if title, src, ok := ParseTitleSlotSource([]byte(lines[0])); ok {
 			meta.Title = title
