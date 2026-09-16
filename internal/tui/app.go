@@ -58,7 +58,15 @@ type App struct {
 	blocks []*Block
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
 	ed     Editor
-	smenu  *slashMenu // "/" autocomplete dropdown (nil = closed)
+	// escDraft is the prompt the last Esc took out of the composer and
+	// escUsed says that exact text has already been given back: the ladder is
+	// clear → restore → clear → open the selector, so repeated Esc always
+	// ends at the tree instead of blinking the same text forever, while an
+	// edit made after a restore still gets its own undo. UI-thread-only like
+	// the editor itself (no lock); the stash is a copy.
+	escDraft []rune
+	escUsed  bool
+	smenu    *slashMenu // "/" autocomplete dropdown (nil = closed)
 	// pickers is the modal-list stack: /model opens a roles+models
 	// selector, and "set role" pushes a second list on top. Esc pops one
 	// level; a selection pops them all. While non-empty the picker owns
@@ -1565,17 +1573,40 @@ func (a *App) handleKey(ev tcell.Event) {
 		return
 	}
 
-	// Claude-Code double-Esc rewind: idle with a draft in the composer,
-	// the first Esc clears the draft; the next Esc (empty composer) opens
-	// the tree selector, where a user row is rewind-and-re-prime. An open
-	// slash/@-menu owns Esc first (close the menu), and the selector's own
-	// Esc handling is modal.
+	// Claude-Code double-Esc rewind, with one rung first: idle with a draft,
+	// the first Esc clears it — and keeps it, so the next Esc on the empty
+	// composer gives the prompt back instead of opening the tree selector.
+	// Only with nothing left to undo does Esc open the selector, where a user
+	// row is rewind-and-re-prime. Clearing a draft you cannot get back is not
+	// an undo, it is a delete, and the text was the expensive part.
+	//
+	// An open slash/@-menu owns Esc first (close the menu), and the selector's
+	// own Esc handling is modal. The stash always holds what the LAST Esc
+	// cleared — a newer draft re-stashes on its own clear — and a send retires
+	// it: a prompt resurfacing after the user moved on is worse than one lost.
 	if key.Key() == tcell.KeyEsc && !running && !menuOpen {
 		if strings.TrimSpace(a.ed.Text()) != "" {
-			a.ed.Reset()
+			// The stash still names THIS text and was already handed back
+			// once: that draft spent its undo, so clear it for real. Anything
+			// else — new text, an edit after the hand-back (a whitespace
+			// change counts) — gets its own undo, so Esc stays one gesture:
+			// "undo what the last Esc took".
+			if strings.TrimSpace(string(a.escDraft)) == strings.TrimSpace(a.ed.Text()) && a.escUsed {
+				a.ed.Reset()
+				a.escDraft, a.escUsed = nil, false
+			} else {
+				a.escDraft, a.escUsed = a.ed.Clear(), false
+			}
 			a.poke()
 			return
 		}
+		if len(a.escDraft) > 0 && !a.escUsed {
+			a.ed.SetBuffer(string(a.escDraft))
+			a.escUsed = true
+			a.poke()
+			return
+		}
+		a.escDraft, a.escUsed = nil, false
 		a.OpenTreeSelector()
 		return
 	}
@@ -1833,6 +1864,10 @@ func (a *App) handleKey(ev tcell.Event) {
 	a.dropStalePastes()
 	a.syncSlashMenu()
 	if send {
+		// The prompt is on its way: an Esc-cleared draft from before it is no
+		// longer "the last thing I undid", and resurfacing it after a send
+		// would put two prompts in the composer that were never both there.
+		a.escDraft, a.escUsed = nil, false
 		// slash command routing (issue #11): a command is consumed by the
 		// router — no user block, no agent run. A command sees the draft as
 		// typed, chips included: its argument is not a place to lose a name.
