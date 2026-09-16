@@ -1369,11 +1369,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// append observer), so an entry reaches guests within one poll tick;
 	// streaming deltas, ui-request, bus, and agents frames have working
 	// protocol support but no producers wired yet.
-	var (
-		collabMu    sync.Mutex
-		collabHost  *collab.Host
-		collabGuest *collab.Guest
-	)
 	tui.Collab = &tui.CollabOps{
 		Start: func(mode tui.CollabMode) (string, error) {
 			collabMu.Lock()
@@ -1636,7 +1631,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// false hands it back to the composer, where the notice says why.
 		// Sending the text alone would let the host answer a screenshot nobody
 		// delivered.
-		if tui.Collab != nil && tui.Collab.Forward != nil {
+		if collabGuestJoined() {
 			if imgs != nil {
 				return false
 			}
@@ -1712,7 +1707,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// taken exactly as runTurn takes it, so an in-flight run is refused rather
 	// than stolen; the empty store is refused too (nothing to resume yet).
 	app.SetRetry(func() {
-		if tui.Collab != nil && tui.Collab.Forward != nil {
+		if collabGuestJoined() {
 			app.AddSystemBlock("joined as a guest — the host runs the turn")
 			return
 		}
@@ -2627,6 +2622,26 @@ func askCardOptions(in []tool.AskOption) []tui.AskOption {
 		out[i] = tui.AskOption{Label: o.Label, Description: o.Description}
 	}
 	return out
+}
+
+// The collab room state of this process's TUI: the relay the session hosts and
+// the room it joined as a guest. Package-level, like the tui.Collab slot that
+// drives them, because the send paths must ask the ROOM — both used to ask the
+// WIRING (`tui.Collab != nil && tui.Collab.Forward != nil`), and every TUI
+// installs that seam at startup, so the test was always true: F5 answered
+// "joined as a guest — the host runs the turn" in plain local sessions, and a
+// pasted image bounced with "a guest room forwards text only".
+var (
+	collabMu    sync.Mutex
+	collabHost  *collab.Host
+	collabGuest *collab.Guest
+)
+
+// collabGuestJoined reports whether this session is mirroring a room as a guest.
+func collabGuestJoined() bool {
+	collabMu.Lock()
+	defer collabMu.Unlock()
+	return collabGuest != nil
 }
 
 // --- collab helpers (M14 #59) ---

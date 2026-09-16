@@ -3,68 +3,43 @@
     <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="640">
       <stop offset="0" stop-color="#17171b"/><stop offset="1" stop-color="#0b0b0d"/>
     </linearGradient>
-    <linearGradient id="bigmark" gradientUnits="userSpaceOnUse" x1="200" y1="200" x2="1100" y2="420">
+    <linearGradient id="bigmark" gradientUnits="userSpaceOnUse" x1="160" y1="80" x2="1120" y2="420">
       <stop offset="0" stop-color="#bb9af7"/><stop offset="1" stop-color="#7aa2f7"/>
     </linearGradient>
   </defs>
   <rect width="1280" height="640" fill="url(#tile)"/>
-  <rect x="200" y="150" width="160" height="160" rx="34" fill="#101014" stroke="#2a2a31"/>
-  <rect x="239.38" y="180.00" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="245.62" y="180.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="251.88" y="180.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="258.12" y="180.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="292.50" y="180.00" width="3.12" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="180.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="301.88" y="180.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="308.12" y="180.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="314.38" y="180.00" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="251.88" y="192.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="258.12" y="192.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="264.38" y="192.50" width="3.12" height="12.50" fill="url(#bigmark)"/>
-  <rect x="289.38" y="192.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="192.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="301.88" y="192.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="308.12" y="192.50" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="258.12" y="205.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="264.38" y="205.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="286.25" y="205.00" width="3.12" height="12.50" fill="url(#bigmark)"/>
-  <rect x="289.38" y="205.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="205.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="258.12" y="217.50" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="264.38" y="217.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="270.62" y="217.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="276.88" y="223.75" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="283.12" y="217.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="289.38" y="217.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="217.50" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="258.12" y="230.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="264.38" y="230.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="270.62" y="230.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="276.88" y="230.00" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="283.12" y="230.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="289.38" y="230.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="236.25" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="255.00" y="242.50" width="3.12" height="12.50" fill="url(#bigmark)"/>
-  <rect x="258.12" y="242.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="264.38" y="242.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="283.12" y="242.50" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="289.38" y="242.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="242.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="245.62" y="261.25" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="251.88" y="255.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="258.12" y="255.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="295.62" y="255.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="301.88" y="255.00" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="308.12" y="261.25" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <rect x="239.38" y="267.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="245.62" y="267.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="251.88" y="267.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="301.88" y="267.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="308.12" y="267.50" width="6.25" height="12.50" fill="url(#bigmark)"/>
-  <rect x="314.38" y="273.75" width="6.25" height="6.25" fill="url(#bigmark)"/>
-  <text x="404" y="256" font-family="Menlo, monospace" font-size="104" font-weight="bold" letter-spacing="-3" fill="#e6e6e6">xdev</text>
-  <text x="406" y="300" font-family="Menlo, monospace" font-size="25" fill="#9a9aa4">a lightweight coding agent in one static Go binary</text>
-  <rect x="96" y="420" width="1088" height="86" rx="14" fill="#0e0e11" stroke="#26262c"/>
-  <text x="138" y="472" font-family="Menlo, monospace" font-size="19"><tspan fill="#bb9af7">$</tspan><tspan dx="11" fill="#e6e6e6">curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh</tspan></text>
-  <text x="96" y="558" font-family="Menlo, monospace" font-size="22" fill="#9a9aa4">single static CGO-free binary &#183; four core tools &#183; &lt;1,000-token system prompt</text>
+  <rect x="365" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="365" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="390" y="277.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="390" y="327.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="415" y="302.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="440" y="277.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="440" y="327.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="465" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="465" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="515" y="277.50" width="25" height="75" fill="url(#bigmark)"/>
+  <rect x="540" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="540" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="565" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="565" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="590" y="202.50" width="25" height="175" fill="url(#bigmark)"/>
+  <rect x="640" y="277.50" width="25" height="75" fill="url(#bigmark)"/>
+  <rect x="665" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="665" y="302.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="665" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="690" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="690" y="302.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="690" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="715" y="252.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="715" y="302.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="715" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="740" y="277.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="790" y="252.50" width="25" height="50" fill="url(#bigmark)"/>
+  <rect x="815" y="302.50" width="25" height="50" fill="url(#bigmark)"/>
+  <rect x="840" y="352.50" width="25" height="25" fill="url(#bigmark)"/>
+  <rect x="865" y="302.50" width="25" height="50" fill="url(#bigmark)"/>
+  <rect x="890" y="252.50" width="25" height="50" fill="url(#bigmark)"/>
+  <text x="640" y="500" text-anchor="middle" font-family="Menlo, monospace" font-size="25" fill="#9a9aa4">a lightweight coding agent in one static Go binary</text>
+  <rect x="96" y="540" width="1088" height="70" rx="14" fill="#0e0e11" stroke="#26262c"/>
+  <text x="138" y="584" font-family="Menlo, monospace" font-size="19"><tspan fill="#bb9af7">$</tspan><tspan dx="11" fill="#e6e6e6">curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh</tspan></text>
 </svg>
