@@ -38,11 +38,18 @@ type Status struct {
 	// run far past the window.
 	CtxUsed int64
 	Rate    float64
-	// Start anchors the HUD time segment: the moment the current session's
-	// clock began (process start; cmd re-bases it on every session swap so
-	// the segment shows total session time, not process uptime). Zero = the
-	// segment hides.
-	Start      time.Time
+	// Work is the session's accumulated ACTIVE time — the spans the agent spent
+	// thinking, streaming and running tools. The idle gaps between turns are
+	// never counted, and neither is the time a question card sat waiting for
+	// the human, so an idle agent shows a frozen number instead of a wall clock
+	// that keeps running. SetWork re-bases it when a store with history is
+	// adopted (/resume, /fork).
+	Work time.Duration
+	// runStart stamps the work span in flight; zero means none is open.
+	runStart time.Time
+	// askWaits counts the question cards on screen. While it is above zero the
+	// clock stands still: the pause belongs to the human, not to the session.
+	askWaits   int
 	Running    bool
 	spinnerIdx int
 }
@@ -260,7 +267,7 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		keyMap:       km,
 		scr:          scr,
 		th:           th,
-		st:           Status{Model: model, SessionID: sessionID, Start: time.Now()},
+		st:           Status{Model: model, SessionID: sessionID},
 		showThinking: true,
 		width:        w, height: h,
 		keyq:   make(chan tcell.Event, 64),
@@ -404,10 +411,13 @@ func (a *App) SetStartupNotice(text string) {
 	a.poke()
 }
 
-// BeginAssistant starts (or continues into) the streaming assistant block.
+// BeginAssistant starts (or continues into) the streaming assistant block. A
+// stream that arrives with no turn opened (a feed that outlived its cancel)
+// opens its work span here too, so the time segment never loses the seconds
+// the model was actually answering.
 func (a *App) BeginAssistant() {
 	a.mu.Lock()
-	a.st.Running = true
+	a.markRun(true)
 	if n := len(a.blocks); n == 0 || a.blocks[n-1].Kind != KindAssistant || !a.blocks[n-1].stream {
 		a.blocks = append(a.blocks, &Block{Kind: KindAssistant, stream: true, Ts: time.Now()})
 	}
@@ -657,12 +667,13 @@ func (a *App) SetContextWindow(tokens int64) {
 	a.poke()
 }
 
-// SetSessionStart re-anchors the HUD time segment. Wired by cmd on session
-// swaps (/new, /drop, /resume, fork) so the clock follows the session, not
-// the process.
-func (a *App) SetSessionStart(t time.Time) {
+// SetWork re-bases the HUD time segment with the work a session has already
+// banked. Wired by cmd when a store is adopted (/new, /drop, /resume, fork):
+// the turns already on disk were active time even though this process never
+// watched them happen.
+func (a *App) SetWork(d time.Duration) {
 	a.mu.Lock()
-	a.st.Start = t
+	a.st.Work = max(d, 0)
 	a.mu.Unlock()
 	a.poke()
 }
@@ -694,12 +705,13 @@ func (a *App) SetStatusSegments(segs []string) {
 	a.poke()
 }
 
-// SetRunning toggles the spinner state. Starting a run also discards a decode
-// window the last one never closed — an aborted stream would otherwise make
-// the next rate divide new tokens by old elapsed time.
+// SetRunning toggles the spinner state and opens/closes the work span the
+// HUD's time segment measures. Starting a run also discards a decode window
+// the last one never closed — an aborted stream would otherwise make the next
+// rate divide new tokens by old elapsed time.
 func (a *App) SetRunning(r bool) {
 	a.mu.Lock()
-	a.st.Running = r
+	a.markRun(r)
 	if r {
 		a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
 	}
@@ -707,7 +719,64 @@ func (a *App) SetRunning(r bool) {
 	a.poke()
 }
 
-// FinishRun clears running state (after cancel or completion).
+// markRun opens or closes the work span (caller holds a.mu). It is idempotent
+// per state, so every streaming hook may claim the run: time between turns —
+// reading output, deciding the next prompt — is never counted. An open span
+// outlives a question card, whose wait is discounted where the card opens
+// (askPause), so a stream that stops to ask is not ended by the asking.
+func (a *App) markRun(r bool) {
+	if r == a.st.Running {
+		return
+	}
+	a.st.Running = r
+	if r {
+		if a.st.runStart.IsZero() {
+			a.st.runStart = time.Now()
+		}
+		return
+	}
+	if !a.st.runStart.IsZero() {
+		a.st.Work += time.Since(a.st.runStart)
+		a.st.runStart = time.Time{}
+	}
+}
+
+// askPause stops the clock while a question card waits for the human: it banks
+// the span a live run had open — the turn is still in flight, it is the answer
+// that is missing — and closes it, so nothing accrues while somebody reads.
+// askResume reopens it. Caller holds a.mu.
+func (a *App) askPause() {
+	a.st.askWaits++
+	if !a.st.runStart.IsZero() {
+		a.st.Work += time.Since(a.st.runStart)
+		a.st.runStart = time.Time{}
+	}
+}
+
+// askResume ends one card's claim on the clock; the span reopens only when the
+// last waiting card is gone and the run that asked is still in flight.
+// Caller holds a.mu.
+func (a *App) askResume() {
+	if a.st.askWaits > 0 {
+		a.st.askWaits--
+	}
+	if a.st.askWaits == 0 && a.st.Running && a.st.runStart.IsZero() {
+		a.st.runStart = time.Now()
+	}
+}
+
+// activeWork is the time segment's reading: the banked spans plus the live
+// one. Idle, it is a frozen total — the wall clock between turns belongs to
+// the user, not to the session.
+func (a *App) activeWork() time.Duration {
+	live := a.st.Work
+	if !a.st.runStart.IsZero() {
+		live += time.Since(a.st.runStart)
+	}
+	return live
+}
+
+// FinishRun closes the run, folding its span into the active-time total.
 func (a *App) FinishRun() { a.SetRunning(false) }
 
 // Quit terminates the UI loop.
@@ -994,11 +1063,14 @@ func (a *App) ResumeSession(query string) error {
 // Reset clears the transcript (used by /clear, /new, /drop, /resume and tree
 // navigation): all blocks gone, viewport back to follow, and the context
 // segment's number goes with them — an emptied transcript occupies nothing, so
-// leaving the previous session's measurement on the row would lie. A replayed
-// session measures the history back in with SetContextReplay. Streaming state is
+// leaving the previous session's measurement on the row would lie. The time
+// segment follows the same rule: the work on a blanked history is 0 until a
+// replayed session banks its path's spans back in with SetWork. A replay also
+// measures the history back in with SetContextReplay. Streaming state is
 // untouched — callers must not be running a turn when they call this.
 func (a *App) Reset() {
 	a.mu.Lock()
+	a.st.Work = 0
 	a.blocks = nil
 	a.sm = newScrollModel()
 	a.st.CtxUsed = 0
@@ -1458,7 +1530,6 @@ func (a *App) Run() {
 	a.width, a.height = a.scr.Size()
 	tick := time.NewTicker(33 * time.Millisecond) // ~30fps
 	defer tick.Stop()
-	ticks := 0
 	a.beat()
 	a.startStallWatchdog()
 
@@ -1489,7 +1560,6 @@ func (a *App) Run() {
 		case <-a.dirty:
 			a.draw()
 		case <-tick.C:
-			ticks++
 			// A paste window whose end marker never arrived must still close,
 			// or the keys held inside it would never reach the user again
 			// (paste.go). Before the lock and outside it: the paste state and
@@ -1523,13 +1593,11 @@ func (a *App) Run() {
 			if a.selEdgeTick() {
 				animate = true
 			}
-			clock := a.hudHasClock()
 			a.mu.Unlock()
+			// Nothing repaints for the HUD: a running draw keeps the time
+			// segment live, and idle, the number is a frozen total that needs
+			// no tick to stay correct.
 			if running || animate || stuck {
-				a.draw()
-			} else if clock && ticks%30 == 0 {
-				// The session clock must keep counting while the UI is
-				// otherwise idle: repaint once a second (33ms × 30).
 				a.draw()
 			}
 		}
@@ -3056,7 +3124,7 @@ func draftHint(above, below int) string {
 // on a small terminal.
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
-	// The session clock and the decode rate are what the row is for during a
+	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the path is what shrinks.
 	budget := a.width - 2 - hudEssentialWidth(parts) - 1
 	lbl := pathDisplay(a.cwd, budget-2)
@@ -3073,7 +3141,7 @@ func (a *App) drawStatusRow(y int) {
 // fills the row when the theme sets one. The metrics win a narrow row:
 // the path is drawn first against the space the essential segments need,
 // and any segment that still does not fit is dropped by keep-rank (theme
-// and model first, the session clock and the rate last).
+// and model first, the work timer and the rate last).
 func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
 	if len(parts) == 0 {
 		return
@@ -3135,9 +3203,9 @@ var statusSegments = map[string]bool{
 	"time":    true,
 }
 
-// defaultStatusSegments is the shipped layout: the session clock, the token
+// defaultStatusSegments is the shipped layout: the work timer, the token
 // counters, the live context total and the decode speed, right-aligned (the
-// clock reads leftmost so the rate's own " │ " stays the row's right edge).
+// timer reads leftmost so the rate's own " │ " stays the row's right edge).
 // The context segment is the number: what this session's context costs against
 // the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
 // request's provider-reported total, cached input included, which covers the
@@ -3146,22 +3214,6 @@ var statusSegments = map[string]bool{
 // answered yet), so a fresh run keeps a clean row. The model keeps its
 // composer divider slot, which is chrome rather than a segment.
 var defaultStatusSegments = []string{"time", "tokens", "context", "rate"}
-
-// hudHasClock reports whether the effective HUD layout renders the time
-// segment (caller holds a.mu). When it does, the UI loop repaints at 1 Hz
-// even while idle so the clock stays live.
-func (a *App) hudHasClock() bool {
-	segs := a.statusSegs
-	if len(segs) == 0 {
-		segs = defaultStatusSegments
-	}
-	for _, s := range segs {
-		if s == "time" {
-			return true
-		}
-	}
-	return false
-}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -3198,10 +3250,11 @@ func (a *App) hudSegment(name string) (text, token string) {
 		}
 		return fmt.Sprintf("$%.4f", a.st.Cost), theme.StatusLineCost
 	case "time":
-		if a.st.Start.IsZero() {
-			return "", ""
-		}
-		return humanDur(time.Since(a.st.Start)), theme.StatusLineSpend
+		// Total time spent WORKING: the banked spans plus the live one. An idle
+		// agent — and an agent parked on a question card — shows a frozen
+		// number; the wall clock between turns belongs to the user, not to the
+		// session. "0s" is a reading, so the segment never hides.
+		return humanDur(a.activeWork()), theme.StatusLineSpend
 	case "rate":
 		// omp's ⚡ tok/s: the decode speed of the last completed message, or a
 		// live estimate from the deltas arriving right now. Never measured is
@@ -3250,7 +3303,7 @@ func (a *App) hudParts() []hudPart {
 }
 
 // hudEssentialWidth is the space the metrics that must always survive a
-// narrow row take: the session clock and the decode rate, separated by a
+// narrow row take: the work timer and the decode rate, separated by a
 // HUD separator. The rest of the HUD (and the hotkeys) give way to them.
 func hudEssentialWidth(parts []hudPart) int {
 	essential := make([]hudPart, 0, 2)
@@ -3273,7 +3326,7 @@ func hudEssentialWidth(parts []hudPart) int {
 }
 
 // statusKeepRank orders segments by how essential they are when the row
-// runs out of width. The decode rate and the session clock are what the
+// runs out of width. The decode rate and the work timer are what the
 // user reads during a run, so they are dropped last.
 var statusKeepRank = map[string]int{
 	"theme":   0,
