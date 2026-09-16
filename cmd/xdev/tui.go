@@ -2216,11 +2216,12 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 }
 
 // searchPickerItems ranks sessions for the picker query: every
-// whitespace-separated token must match the id or title (the TUI re-checks
-// scope + id/title itself), and sessions whose JSONL body contains the
-// tokens count as prompt matches — matches rank by match count: id/title
-// hits count double, body hits count occurrences. The body scan is capped
-// (64 KiB per file, 50 files) — the picker runs per keystroke.
+// whitespace-separated token must match the id, the title, or the
+// lifecycle status (the TUI re-applies scope itself), and
+// sessions whose JSONL body contains the tokens count as prompt matches —
+// matches rank by match count: id/title/status hits count double, body
+// hits count occurrences. The body scan is capped (64 KiB per file, 50
+// files) — the picker runs per keystroke.
 func searchPickerItems(cwd, query string) []tui.SessionPickerItem {
 	items := resumePickerItems(cwd)
 	tokens := strings.Fields(strings.ToLower(query))
@@ -2233,7 +2234,7 @@ func searchPickerItems(cwd, query string) []tui.SessionPickerItem {
 	}
 	var out []ranked
 	for _, it := range items {
-		hay := strings.ToLower(it.ID + " " + it.Title)
+		hay := strings.ToLower(it.ID + " " + it.Title + " " + it.Status)
 		score, ok := 0, true
 		var body []string // tokens the id/title did not satisfy
 		for _, t := range tokens {
