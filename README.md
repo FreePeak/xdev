@@ -94,6 +94,25 @@ Claude Pro/Max and Codex subscriptions work through the browser OAuth flow:
 xdev login claude     # or: xdev login codex
 ```
 
+Two hundred more hosts — the subscription and gateway providers opencode and omp
+list — connect with one command instead of a hand-written block:
+
+```bash
+xdev connect                  # the providers a credential is ready to use
+xdev connect --list           # the whole catalog (~200 hosts), with its state
+xdev connect deepseek         # write that provider into models.yml
+xdev connect openrouter --key sk-or-...   # ...and store the key (0600)
+```
+
+`/connect` in the TUI opens the same catalog as a picker. Each connected row
+keeps its credential as a `${VAR}` reference in models.yml — the variable the
+host documents — so the config file stays safe to paste into an issue; a key
+passed with `--key` goes to `credentials.json` instead. Every connected
+provider turns on model discovery, so hosts publish their own newest ids
+without a config edit. The catalog is a generated snapshot of
+[models.dev](https://models.dev) (`scripts/gen_connect.go`), and the same
+command refreshes nothing at runtime — it answers offline.
+
 ## Use it
 
 ```bash
@@ -147,7 +166,7 @@ terminal's native selection.
 | `/new` `/fresh` `/clear` `/drop` | start over, rotate provider state, reset context in place, delete the session file |
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
-| `/model [@role\|ref]` `/theme <name>` `/settings` `/hotkeys` | model, theme and display control |
+| `/model [@role\|ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control |
 | `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |
