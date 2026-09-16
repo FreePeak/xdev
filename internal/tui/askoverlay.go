@@ -143,7 +143,6 @@ type askState struct {
 	note   []string   // typed free text per question
 	cur    []int      // cursor row per question
 	q      int        // the question the tab strip is on
-	top    int        // first painted row of the current question
 	msg    string     // one-line feedback, cleared by navigation
 	review bool       // showing the summary screen, not a question
 	dead   bool       // resolved off the caller's hands: stop painting
@@ -333,22 +332,10 @@ func (st *askState) cursor(rows []askRow) int {
 	return clamp(st.cur[st.q], 0, len(rows)-1)
 }
 
-// setCursor parks the cursor on a row and keeps the window around it.
+// setCursor parks the cursor on a row. Which rows are on screen is the
+// painter's call (askRowWindow), so nothing about the window lives here.
 func (st *askState) setCursor(rows []askRow, i int) {
 	st.cur[st.q] = clamp(i, 0, len(rows)-1)
-	st.scroll(rows)
-}
-
-// scroll slides the painted window just enough to hold the cursor.
-func (st *askState) scroll(rows []askRow) {
-	vis := min(len(rows), askMaxVisible)
-	if st.top > st.cur[st.q] {
-		st.top = st.cur[st.q]
-	}
-	if st.top+vis <= st.cur[st.q] {
-		st.top = max(0, st.cur[st.q]-vis+1)
-	}
-	st.top = clamp(st.top, 0, max(0, len(rows)-vis))
 }
 
 func (st *askState) move(rows []askRow, d int) {
@@ -869,21 +856,28 @@ func (a *App) drawAskCard(yComposerTop int) {
 	// Publish the clamp the key path uses too, so a resize cannot leave the
 	// cursor and the highlight on different rows.
 	st.cur[st.q] = st.cursor(rows)
-	st.scroll(rows)
 
-	visible := min(len(rows), askMaxVisible)
+	x0, x1 := 2, w-3 // border columns; content is x0+1..x1-1
+	inner := x1 - x0 - 1
 	qLines := askQuestionLines(st.reqs[st.q].Question, w-8)
 	tabs := 0
 	if len(st.reqs) > 1 {
 		tabs = 1
 	}
-	body := len(qLines) + visible
-	if st.review {
-		body = len(st.reqs) + 1 // the answers, plus the line saying what Enter does
-	}
+	msgRows := 0
 	if st.msg != "" {
-		body++
+		msgRows = 1
 	}
+	// The option rows wrap, so the card's height comes from the lines they take,
+	// not from how many there are: askRowWindow keeps the rows that fit above the
+	// composer, the cursor's own row always among them.
+	painted := []askRowLine(nil)
+	body := len(st.reqs) + 1 // the answers, plus the line saying what Enter does
+	if !st.review {
+		painted = askRowWindow(st, rows, inner, yComposerTop-5-tabs-len(qLines)-msgRows)
+		body = len(qLines) + len(painted)
+	}
+	body += msgRows
 	height := 2 + tabs + body + 1 // borders, tabs, body, footer
 	yTop := yComposerTop - 1 - height
 	// The card may overlap the composer's own top border row (like the other
@@ -900,8 +894,6 @@ func (a *App) drawAskCard(yComposerTop int) {
 		return
 	}
 
-	x0, x1 := 2, w-3 // border columns; content is x0+1..x1-1
-	inner := x1 - x0 - 1
 	box := a.th.Box()
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 	textSt := rowSt.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
@@ -992,20 +984,20 @@ func (a *App) drawAskCard(yComposerTop int) {
 			edge(y)
 			y++
 		}
-		for i := st.top; i < st.top+visible; i++ {
-			style, label := rowSt, askRowText(st, rows[i], i)
+		for _, pl := range painted {
+			style := rowSt
 			switch {
-			case i == st.cur[st.q]:
+			case pl.row == st.cur[st.q]:
 				style = selSt
-			case rows[i].kind != askRowOption && rows[i].label == "":
+			case rows[pl.row].kind != askRowOption && rows[pl.row].label == "":
 				style = dimSt
-			case rows[i].kind == askRowChat:
+			case rows[pl.row].kind == askRowChat:
 				style = dimSt
 			}
 			fill(y)
-			paint(y, x0+1, label, style)
+			paint(y, x0+1, pl.text, style)
 			edge(y)
-			st.hit.addRow(y, i)
+			st.hit.addRow(y, pl.row)
 			y++
 		}
 		if st.msg != "" { // the one thing the human just did wrong, in one line
@@ -1062,10 +1054,13 @@ func askQuestionLines(text string, cells int) []string {
 	return lines
 }
 
-// askRowText renders one row: cursor, box, ordinal, label, description. The
-// ordinal doubles as the quick-pick hint, so the free-text and chat rows get
-// one too.
-func askRowText(st *askState, r askRow, i int) string {
+// askRowLines renders one row as every line it takes: the cursor, the box, the
+// ordinal, then the label — which wraps instead of running under the right
+// border. The description follows on its own indented lines (omp's shape: the
+// reason to pick a row is not a tail to cut off), capped at two with a "…"
+// saying there is more. The ordinal doubles as the quick-pick hint, so the
+// free-text and chat rows get one too.
+func askRowLines(st *askState, r askRow, i, cells int) []string {
 	box, here := "  ", " " // two fixed columns: the cursor never shifts a label
 	if r.kind == askRowOption {
 		box = "☐ "
@@ -1084,14 +1079,67 @@ func askRowText(st *askState, r askRow, i int) string {
 		}
 		label = `"` + label + `" ▍` // the text row reads as a field, cursor included
 	}
-	row := fmt.Sprintf("%s%s%d. %s", here, box, i+1, label)
-	if r.desc != "" {
-		row += " — " + r.desc
-	}
 	if st != nil && hasLabel(st.reqs[st.q].Recommended, r.label) {
-		row += "  (recommended)"
+		label += "  (recommended)"
 	}
-	return row
+	prefix := fmt.Sprintf("%s%s%d. ", here, box, i+1)
+	wrapped := wrap(label, max(1, cells-width(prefix)))
+	lines := make([]string, 0, len(wrapped)+2)
+	lines = append(lines, prefix+wrapped[0])
+	indent := strings.Repeat(" ", width(prefix))
+	for _, line := range wrapped[1:] {
+		lines = append(lines, indent+line)
+	}
+	if r.desc != "" {
+		descW := max(1, cells-6)
+		desc := wrap(r.desc, descW)
+		if len(desc) > 2 {
+			desc = desc[:2]
+			desc[1] = truncateCells(desc[1]+"…", descW, "…")
+		}
+		for _, line := range desc {
+			lines = append(lines, "      "+line)
+		}
+	}
+	return lines
+}
+
+// askRowLine is one painted line of the option list, tagged with the selectable
+// row it belongs to (a wrapped row owns several, so a click and the highlight
+// land on the row, not the line).
+type askRowLine struct {
+	row  int
+	text string
+}
+
+// askRowWindow picks the rows the card paints, as the wrapped lines they cost.
+// The cursor's row always makes it — the highlight and the keys are on it — then
+// the rows below it while the budget lasts, then the rows above it, never more
+// than the quick-pick digits can name. A row carrying a description is three
+// lines, so a row count alone cannot bound the card's height.
+// ponytail: heuristic window; the ceiling is that the card still grows and
+// shrinks with its content, where omp measures one height from the tallest tab
+// and scrolls that — the upgrade path if the card ever wants a stable frame.
+func askRowWindow(st *askState, rows []askRow, cells, budget int) []askRowLine {
+	cur := st.cursor(rows)
+	cost := func(i int) int { return len(askRowLines(st, rows[i], i, cells)) }
+	top, vis, used := cur, 1, cost(cur)
+	for vis < askMaxVisible && top+vis < len(rows) && used+cost(top+vis) <= budget {
+		used += cost(top + vis)
+		vis++
+	}
+	for vis < askMaxVisible && top > 0 && used+cost(top-1) <= budget {
+		used += cost(top - 1)
+		top--
+		vis++
+	}
+	out := make([]askRowLine, 0, used)
+	for i := top; i < top+vis; i++ {
+		for _, line := range askRowLines(st, rows[i], i, cells) {
+			out = append(out, askRowLine{row: i, text: line})
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- mouse hit map
