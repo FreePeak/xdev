@@ -423,6 +423,75 @@ func TestStreamEndedWithoutFinishReasonRetriesAndResumes(t *testing.T) {
 	}
 }
 
+// TestMalformedStreamRetriesAndResumes is that same pin for the other
+// session-killing half: the adapters' wire-decode failure. A gateway that
+// mangles one SSE frame used to end the turn outright, because the decode
+// error classified as unknown; it must reach the ladder and the run must
+// resume. The error is built exactly as the adapter builds it.
+func TestMalformedStreamRetriesAndResumes(t *testing.T) {
+	// The shape the adapter emits (ai.malformedStream), wrapped the way
+	// oneTurn hands its failures up: "agent: stream: <api>: <sentinel>:
+	// <stage>: <json error>".
+	mangled := fmt.Errorf("agent: stream: %w", fmt.Errorf("openai-completions: %w: decode chunk: unexpected end of JSON input", ai.ErrMalformedStream))
+	if ai.Classify(mangled) != ai.ClassTransient {
+		t.Fatalf("the fixture must classify transient, got %v", ai.Classify(mangled))
+	}
+	p := &fakeProvider{calls: []fakeScript{
+		{err: mangled},
+		{events: []ai.Event{ai.Event{Type: ai.EventStart}, textEvent("recovered"), doneEvent("recovered")}},
+	}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("a malformed frame must not end the session: %v", err)
+	}
+	if final.Text() != "recovered" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream calls = %d, want 2 (retry + success)", len(p.gotReqs))
+	}
+}
+
+// TestMalformedStreamAfterContentRetainsAndContinues pins the other half of
+// the mangled-frame contract: when the bad frame lands after visible text,
+// replaying would double-emit it, so the partial is kept and the turn
+// resumes (the ladder's post-content branch), not discarded.
+func TestMalformedStreamAfterContentRetainsAndContinues(t *testing.T) {
+	mangled := fmt.Errorf("agent: stream: %w", fmt.Errorf("anthropic-messages: %w: decode event: invalid character 'o'", ai.ErrMalformedStream))
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("partial "),
+			ai.Errorf(mangled),
+		}},
+		{events: []ai.Event{textEvent("continued"), doneEvent("continued")}},
+	}}
+	a, st, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+	msg, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("a mangled frame after content must not end the session: %v", err)
+	}
+	if msg == nil || !strings.Contains(msg.Text(), "continued") {
+		t.Fatalf("final message must be the continuation: %v", msg)
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream calls = %d, want 2 (initial + one continuation)", len(p.gotReqs))
+	}
+	res, err := session.BuildContext(st.Entries(), st.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, m := range res.Messages {
+		joined += m.Text() + "\n"
+	}
+	if !strings.Contains(joined, "partial ") {
+		t.Fatalf("the partial must survive the resume:\n%s", joined)
+	}
+}
+
 func oneShotRetry() RetryPolicy {
 	return RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
 }
