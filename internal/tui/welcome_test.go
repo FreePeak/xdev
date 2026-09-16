@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -266,119 +267,49 @@ func TestAppWelcomeLogo(t *testing.T) {
 
 	// The art rows are ragged-width, so they must all sit at the same
 	// x on consecutive rows — per-line centering would wobble them
-	// (the bug this test pins). The Life band paints '▓' into the
-	// art's whitespace, so rows are matched with band cells masked
-	// to spaces.
+	// (the bug this test pins).
 	prim, w, _ := scr.GetContents()
 	h := len(prim) / w
 	rowStr := func(y int) string {
 		var b strings.Builder
 		for x := range w {
-			switch r := prim[y*w+x].Runes; {
-			case len(r) == 1 && r[0] == lifeGlyph:
-				b.WriteByte(' ') // backdrop, not art
-			case len(r) > 0:
+			if r := prim[y*w+x].Runes; len(r) > 0 {
 				b.WriteRune(r[0])
-			default:
+			} else {
 				b.WriteByte(' ')
 			}
 		}
 		return b.String()
 	}
 
+	// Anchor on the third art row — the widest one and the only one that
+	// starts with a pixel, so its leftmost screen match is the mark's
+	// true left edge (rows that are mostly leading space would match
+	// anywhere in the blank margin). Then require every art row, the two
+	// d-ascender rows above the anchor included, at that x on its
+	// consecutive screen row — per-line centering would wobble them.
+	anchor, aIdx := xdevLogo[2], 2
 	x0, y0 := -1, -1
-	for i, art := range xdevLogo {
-		want := art // exact row, leading spaces included
-		x, y := -1, -1
-		for yy := range h {
-			if xx := strings.Index(rowStr(yy), want); xx >= 0 {
-				x, y = xx, yy
-				break
-			}
-		}
-		if x < 0 {
-			t.Fatalf("logo row %d (%q) not on screen", i, want)
-		}
-		if i == 0 {
-			x0, y0 = x, y
-			continue
-		}
-		if x != x0 {
-			t.Fatalf("logo row %d origin x=%d, want %d (common left edge)", i, x, x0)
-		}
-		if y != y0+i {
-			t.Fatalf("logo row %d at y=%d, want %d (consecutive)", i, y, y0+i)
+	for yy := range h {
+		if xx := strings.Index(rowStr(yy), anchor); xx >= 0 {
+			x0, y0 = xx, yy-aIdx
+			break
 		}
 	}
-	// The band must be cleared around the art: a '▓' flush against
-	// the '░' shading reads as static, not letterforms.
-	for yy := y0 - 1; yy < y0+len(xdevLogo)+1; yy++ {
-		for xx := x0 - 3; xx < x0+logoWidth()+3; xx++ {
-			if r := prim[yy*w+xx].Runes; len(r) == 1 && r[0] == lifeGlyph {
-				t.Fatalf("life cell inside logo bbox at (%d,%d)", xx, yy)
-			}
+	if x0 < 0 {
+		t.Fatalf("logo row %d (%q) not on screen", aIdx, anchor)
+	}
+	for i, art := range xdevLogo {
+		rr := []rune(rowStr(y0 + i))
+		if x0+utf8.RuneCountInString(art) > len(rr) {
+			t.Fatalf("logo row %d runs off the bottom or right edge (x=%d, y=%d)", i, x0, y0+i)
+		}
+		if got := string(rr[x0 : x0+utf8.RuneCountInString(art)]); got != art {
+			t.Fatalf("logo row %d at (%d,%d) = %q, want %q (common left edge, consecutive rows)", i, x0, y0+i, got, art)
 		}
 	}
 	if !gridContains(scr, "01111000") {
 		t.Fatal("binary tagline missing")
-	}
-}
-
-// TestAppWelcomeLifeBounds pins the inset-band contract: the grid is
-// the declared (narrower) band, live cells never reach the top bar,
-// the composer rows, or the side margins, and the backdrop is still
-// populated after hundreds of generations — die-out (a blank
-// backdrop) is exactly the failure mode Life on a finite torus has
-// without the mutation sprinkle.
-func TestAppWelcomeLifeBounds(t *testing.T) {
-	app, scr := newTestApp(t, 80, 26)
-	app.draw()
-	gw, top, bot, ok := lifeArea(80, 26)
-	if !ok {
-		t.Fatal("life area should fit in an 80x26 terminal")
-	}
-	if gw != 60 || top != 3 || bot != 18 {
-		t.Fatalf("lifeArea(80,26) = (%d,%d,%d), want inset 60x[3,18]", gw, top, bot)
-	}
-	// Step 200 generations — far past any random soup's burn-in.
-	for range 200 {
-		app.stepLife(gw, top, bot)
-	}
-	app.draw()
-	if app.life.w != gw || app.life.h != bot-top+1 {
-		t.Fatalf("life grid = %dx%d, want %dx%d", app.life.w, app.life.h, gw, bot-top+1)
-	}
-	prim, w, _ := scr.GetContents()
-	h := len(prim) / w
-	alive := 0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			c := prim[y*w+x]
-			if len(c.Runes) == 1 && c.Runes[0] == lifeGlyph {
-				alive++
-				if y == 0 || y >= h-4 || x < 10 || x >= 10+gw {
-					t.Fatalf("life cell at (%d,%d), outside band x[10,%d) protected rows", x, y, 10+gw)
-				}
-			}
-		}
-	}
-	if alive == 0 {
-		t.Fatal("backdrop died out: no live cells after 200 generations")
-	}
-}
-
-// TestLifeAreaSkipsSmallTerminals pins the small-window contract: no
-// backdrop on terminals too small to spare the band.
-func TestLifeAreaSkipsSmallTerminals(t *testing.T) {
-	for _, sz := range [][2]int{{80, 24}, {100, 30}, {60, 20}, {48, 18}} {
-		if _, _, _, ok := lifeArea(sz[0], sz[1]); !ok {
-			t.Errorf("lifeArea(%d,%d) = not ok, want band", sz[0], sz[1])
-		}
-	}
-	for _, sz := range [][2]int{{38, 20}, {80, 14}, {30, 30}, {46, 17}} {
-		if _, _, _, ok := lifeArea(sz[0], sz[1]); ok {
-			t.Errorf("lifeArea(%d,%d) = ok, want skipped", sz[0], sz[1])
-		}
 	}
 }
 
@@ -394,37 +325,8 @@ func TestWelcomeMenuNarrow(t *testing.T) {
 	}
 }
 
-// TestLifeGridToroidalWrap pins the wrap rule: a glider leaving one edge
-// re-enters the opposite edge without index panics.
-func TestLifeGridToroidalWrap(t *testing.T) {
-	g := newLifeGrid(4, 4)
-	// Vertical blinker column at x=0.
-	for y := range 4 {
-		g.c[y][0] = true
-	}
-	g.step()
-	// Under B3/S23 a full wrapped column cycles; the grid must stay 4x4.
-	if g.w != 4 || g.h != 4 {
-		t.Fatalf("grid resized to %dx%d", g.w, g.h)
-	}
-	// Toroidal at() must not panic at the far edge.
-	g.at(3, 3)
-	g.at(0, 0)
-}
-
-// TestLifeGlyphNarrow pins the backdrop glyph to width 1: a wide glyph
-// (e.g. U+30FB '・') drawn just left of the logo makes tcell drop the
-// logo's SetContent into the wide continuation cell, punching a hole
-// in the art — the flake TestAppWelcomeLogo used to hit with the rain
-// alphabet.
-func TestLifeGlyphNarrow(t *testing.T) {
-	if width(string(lifeGlyph)) != 1 {
-		t.Errorf("life glyph %q (U+%04X) has width %d, want 1", lifeGlyph, lifeGlyph, width(string(lifeGlyph)))
-	}
-}
-
 // TestLogoOneArtAcrossSizes pins the size-consistency fix: every
-// terminal size that fits the artwork gets the identical 8-row logo —
+// terminal size that fits the artwork gets the identical logo —
 // no tier swapping — and sizes that can't fit it get nothing.
 func TestLogoOneArtAcrossSizes(t *testing.T) {
 	fitting := [][2]int{{100, 30}, {80, 24}, {80, 22}, {60, 30}, {120, 50}}
@@ -439,7 +341,9 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 			}
 		}
 	}
-	for _, sz := range [][2]int{{80, 21}, {80, 19}, {30, 30}, {10, 5}} {
+	// Content shorter than 7 art rows + tagline + gap + 4 menu rows,
+	// or narrower than the mark plus margins: no art.
+	for _, sz := range [][2]int{{80, 20}, {80, 19}, {30, 30}, {10, 5}} {
 		if got := logoArt(sz[0], sz[1]-8); got != nil {
 			t.Fatalf("logoArt(%d,%d) = art, want nil (doesn't fit)", sz[0], sz[1])
 		}
@@ -496,5 +400,27 @@ func TestSheenBandGeometry(t *testing.T) {
 	// light identical cells.
 	if sheenInBand(30, 3, 20, lw) != sheenInBand(30+period, 3, 20, lw) {
 		t.Fatal("phase must be periodic with the declared period")
+	}
+}
+
+// TestLogoPixelParity pins the seam between the terminal art and the SVG
+// brand (assets/brand/xdev-logo.svg): both are drawings of one 22x7 pixel
+// grid at 2 cells per pixel, so every stroke must occupy whole pixels — no
+// row may start or end mid-pixel. An odd run here means the art drifted from
+// the grid the brand assets are cut from.
+func TestLogoPixelParity(t *testing.T) {
+	if logoWidth() != 44 {
+		t.Fatalf("logoWidth() = %d, want 44 (22 grid pixels)", logoWidth())
+	}
+	for i, art := range xdevLogo {
+		r := []rune(art)
+		if len(r)%2 != 0 {
+			t.Fatalf("row %d (%q) has %d cells, want a whole number of 2-cell pixels", i, art, len(r))
+		}
+		for c := 0; c+1 < len(r); c += 2 {
+			if (r[c] == '█') != (r[c+1] == '█') {
+				t.Fatalf("row %d col %d: %q/%q split a pixel — strokes must be whole 2-cell runs", i, c, r[c], r[c+1])
+			}
+		}
 	}
 }

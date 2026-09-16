@@ -158,9 +158,6 @@ type App struct {
 	// per-frame cost is the viewport, not the session (see rowindex.go).
 	rowIdx rowIndex
 
-	// Welcome-screen Game of Life backdrop (UI thread; guarded by mu).
-	life       lifeGrid
-	lifeTick   int
 	sheenPhase int // welcome logo sheen sweep position (columns)
 	// startupNotice is a line of the welcome screen's own chrome — what
 	// loaded, what broke (#272). It is deliberately NOT a transcript block:
@@ -1446,21 +1443,12 @@ func (a *App) Run() {
 			// per 33ms tick and redraws with it — a smooth sweep at
 			// ~30fps, the cadence omarchy's own About animation runs
 			// at (25ms frames) — while the welcome is visible (no
-			// blocks, nothing running). The Life backdrop still steps
-			// every 4th tick (~8fps), which is all it needs; both
-			// stop once a block exists, so the only idle cost is the
-			// draw itself.
+			// blocks, nothing running). It stops once a block exists,
+			// so the only idle cost is the draw itself.
 			animate := false
 			if !running && len(a.blocks) == 0 {
-				gw, top, bot, ok := lifeArea(a.width, a.height)
-				if ok {
-					a.lifeTick = (a.lifeTick + 1) % 4
-					a.sheenPhase++
-					animate = true
-					if a.lifeTick == 0 {
-						a.stepLife(gw, top, bot)
-					}
-				}
+				a.sheenPhase++
+				animate = true
 			}
 			// A copy confirmation is timed, and an idle UI does not repaint:
 			// the tick that finds it expired asks for the draw that drops it.
