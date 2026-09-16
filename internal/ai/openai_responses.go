@@ -427,7 +427,7 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 			} `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(frame.Data), &data); err != nil {
-			fail(Errorf(fmt.Errorf("openai-responses: decode event: %w", err)))
+			fail(Errorf(malformedStream("openai-responses", "decode event", err)))
 			return
 		}
 		name := frame.Event

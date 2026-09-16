@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/FreePeak/xdev/internal/ai/sse"
 )
 
 // HTTPError is a typed non-2xx response from a wire adapter. Raised at the
@@ -21,6 +23,16 @@ type HTTPError struct {
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d: %s", e.API, e.Status, e.Body)
 }
+
+// ErrMalformedStream marks a streaming response body the adapter could not
+// decode: an SSE frame whose JSON is not JSON (a proxy or gateway between us
+// and the provider rewriting the stream is the usual cause). It is not a
+// request problem — the same request sent again may well be served intact —
+// so it classifies transient: the M5 ladder (agent.oneTurnWithRecovery)
+// backoff-retries it in place, fails over once the ladder drains, and
+// retains-and-continues when the mangled frame arrived after visible
+// content. A stream that dies on one bad frame is resumed, not surfaced.
+var ErrMalformedStream = errors.New("malformed stream response")
 
 // ErrClass classifies a provider error for the retry/compaction engines
 // (omp pi-ai Flag taxonomy, subset xdev acts on).
@@ -103,6 +115,12 @@ func Classify(err error) ErrClass {
 		// Watchdog expiry cancels the STREAM's context only; the agent's
 		// own ctx is untouched, so the M5 ladder (retry → failover,
 		// retain-and-continue for partials) owns recovery.
+		return ClassTransient
+	case errors.Is(err, ErrMalformedStream), errors.Is(err, sse.ErrMalformed):
+		// A body we could not decode — a frame whose JSON is not JSON, or a
+		// line past the shared reader's 1 MiB cap — is something the
+		// transport delivered damaged, not a request the provider rejected:
+		// retry it (see ErrMalformedStream).
 		return ClassTransient
 	case bodyIndicatesOverflow(msg):
 		return ClassContextOverflow
