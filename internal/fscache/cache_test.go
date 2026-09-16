@@ -10,7 +10,7 @@ import (
 func seed(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, p := range []string{"a.go", "b.go", "sub/c.go", ".hidden.go", "node_modules/dep.js"} {
+	for _, p := range []string{"a.go", "b.go", "sub/c.go", ".hidden.go", "node_modules/dep.js", ".git/config", ".git/objects/ab/cdef"} {
 		full := filepath.Join(dir, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)
@@ -41,6 +41,19 @@ func TestWalkSkipsHiddenAndNodeModules(t *testing.T) {
 	for _, unwanted := range []string{".hidden.go", "node_modules/dep.js", "node_modules"} {
 		if got[unwanted] {
 			t.Fatalf("should be pruned: %q", unwanted)
+		}
+	}
+}
+
+// TestWalkPrunesVCSMetadataEvenWhenHiddenIsIncluded: VCS metadata is not a
+// hidden file a caller opts into — it is machine state, and opening it up
+// would put every object in .git on the completion menu and in grep.
+func TestWalkPrunesVCSMetadataEvenWhenHiddenIsIncluded(t *testing.T) {
+	dir := seed(t)
+	got := names(mustWalk(t, Options{Roots: []string{dir}, IncludeHidden: true}))
+	for _, unwanted := range []string{".git", ".git/config", ".git/objects/ab/cdef"} {
+		if got[unwanted] {
+			t.Fatalf("VCS metadata should be pruned: %q", unwanted)
 		}
 	}
 }

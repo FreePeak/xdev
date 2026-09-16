@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/gdamore/tcell/v2"
 )
 
 func TestPathTokenDetectsMentions(t *testing.T) {
@@ -18,6 +19,11 @@ func TestPathTokenDetectsMentions(t *testing.T) {
 		{"read @a.go then @b", "read @a.go then ", "b", true},
 		{"@done and more", "", "", false}, // token already closed by a space
 		{"no mention here", "", "", false},
+		// Quoted mentions carry a path with spaces (omp's `@"…"` form).
+		{`@"my file.go`, "", "my file.go", true},
+		{`fix @"a b/c`, "fix ", "a b/c", true},
+		{`@"my file.go" and more`, "", "", false}, // the closing quote ended it
+		{"@internal/tu", "", "internal/tu", true},
 	}
 	for _, tc := range tests {
 		prefix, query, ok := pathToken(tc.text)
@@ -28,41 +34,168 @@ func TestPathTokenDetectsMentions(t *testing.T) {
 	}
 }
 
-func appWithFiles(files ...string) *App {
+// TestSplitPathQueryScopesToDirectory pins what the readdir is asked for: the
+// segment before the last slash, with the trailing prefix to match inside it.
+func TestSplitPathQueryScopesToDirectory(t *testing.T) {
+	tests := []struct {
+		in, dir, seg string
+	}{
+		{"cache", "", "cache"},
+		{"internal/tu", "internal", "tu"},
+		{"internal/", "internal", ""},
+		{"a/b/c", "a/b", "c"},
+		{"/internal", "", "internal"},
+		{"/internal/", "internal", ""},
+		{"", "", ""},
+		{"../x", "..", "x"},
+	}
+	for _, tc := range tests {
+		dir, seg := splitPathQuery(tc.in)
+		if dir != tc.dir || seg != tc.seg {
+			t.Errorf("splitPathQuery(%q) = (%q,%q), want (%q,%q)", tc.in, dir, seg, tc.dir, tc.seg)
+		}
+	}
+}
+
+// appWithTree wires a fake directory tree: each key is a directory, each value
+// its raw entries in os.ReadDir's lexical order. No scan is wired unless one is
+// given, so the directory path is what a test exercises by default.
+func appWithTree(tree map[string][]PathEntry, scan ...string) *App {
+	var scanFn func() []string
+	if len(scan) > 0 {
+		files := scan
+		scanFn = func() []string { return files }
+	}
 	a := &App{}
-	a.SetPathCompletion("/proj", func() []string { return files })
+	a.SetPathCompletion("/proj", func(dir string) []PathEntry { return tree[dir] }, scanFn)
 	return a
 }
 
-func TestPathCandidatesRanksBasenameFirst(t *testing.T) {
-	a := appWithFiles("internal/tui/cache.go", "cache.go", "docs/readme.md")
-	got := a.pathCandidates("cache")
-	if len(got) == 0 {
-		t.Fatal("no candidates for a matching query")
+func suggNames(items []suggestion) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.Name)
 	}
-	// The root-level file outranks the deep one (basename bonus).
-	if got[0].Name != "cache.go" {
-		t.Fatalf("first = %q, want cache.go", got[0].Name)
+	return out
+}
+
+// TestPathCandidatesScopeToOneDirectory is the point of the rewrite: a typed
+// token costs ONE readdir of the named directory, and the root dir's entries
+// never leak into a subdirectory's listing.
+func TestPathCandidatesScopeToOneDirectory(t *testing.T) {
+	tree := map[string][]PathEntry{
+		"":         {{Name: "cache.go"}, {Name: "docs", IsDir: true}},
+		"internal": {{Name: "cache.go"}, {Name: "readme.md"}, {Name: "tui", IsDir: true}},
 	}
-	for _, c := range got {
-		if c.kind != kindPath || c.Tag != "path" {
-			t.Fatalf("item not tagged as a path: %+v", c)
+	a := appWithTree(tree)
+	got := suggNames(a.pathCandidates("internal/cac"))
+	if len(got) != 1 || got[0] != "cache.go" {
+		t.Fatalf("internal/cac = %v, want [cache.go]", got)
+	}
+}
+
+// TestPathCandidatesDirsFirstWithSlash pins the omp ordering that makes the
+// menu drillable: directories come first and carry a trailing slash.
+func TestPathCandidatesDirsFirstWithSlash(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"": {{Name: "deep", IsDir: true}, {Name: "dockerfile"}, {Name: "docs", IsDir: true}},
+	})
+	got := suggNames(a.pathCandidates("d"))
+	want := []string{"deep/", "docs/", "dockerfile"}
+	if len(got) != len(want) {
+		t.Fatalf("d = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("d = %v, want %v", got, want)
 		}
-		if strings.Contains(c.Name, "readme") {
-			t.Fatalf("non-matching file offered: %q", c.Name)
+	}
+	for _, it := range a.pathCandidates("d") {
+		if it.kind != kindPath || it.Tag != "path" {
+			t.Fatalf("item not tagged as a path: %+v", it)
 		}
 	}
 }
 
-func TestPathCandidatesEmptyQueryListsNewestFirst(t *testing.T) {
-	a := appWithFiles("a.go", "b.go", "c/d.go")
-	got := a.pathCandidates("")
-	if len(got) != 3 {
-		t.Fatalf("empty query should list everything, got %d", len(got))
+// TestPathCandidatesPrefixOnly: matching is a case-insensitive prefix, not a
+// subsequence — `@ca` must not offer README.md.
+func TestPathCandidatesPrefixOnly(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"": {{Name: "CATALOG.md"}, {Name: "README.md"}, {Name: "cache.go"}},
+	})
+	got := suggNames(a.pathCandidates("ca"))
+	if len(got) != 2 || got[0] != "CATALOG.md" || got[1] != "cache.go" {
+		t.Fatalf("ca = %v, want [CATALOG.md cache.go]", got)
 	}
 }
 
-func TestPathCandidatesDisabledWithoutScanner(t *testing.T) {
+// TestPathCandidatesHidesOnlyVCS: a hidden, gitignored or vendored directory
+// IS offered (that is the ask) — only .git and friends never are.
+func TestPathCandidatesHidesOnlyVCS(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"": {{Name: ".env"}, {Name: ".git", IsDir: true}, {Name: ".gitignore"},
+			{Name: ".hidden", IsDir: true}, {Name: "node_modules", IsDir: true}},
+	})
+	got := suggNames(a.pathCandidates(""))
+	want := []string{".hidden/", "node_modules/", ".env", ".gitignore"}
+	if len(got) != len(want) {
+		t.Fatalf("= %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("= %v, want %v", got, want)
+		}
+	}
+}
+
+// TestPathCandidatesScanKeepsDepsOut: naming node_modules reads it, but the
+// bare-`@` whole-repo list still drops vendored paths — they would bury the
+// project's own files.
+func TestPathCandidatesScanKeepsDepsOut(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{}, "a.go", "node_modules/dep.js",
+		"sub/node_modules/other.js")
+	if got := suggNames(a.pathCandidates("")); len(got) != 1 || got[0] != "a.go" {
+		t.Fatalf("bare @ = %v, want [a.go]", got)
+	}
+}
+
+// TestPathCandidatesTrailingSlashListsDir: accepting a directory adds "/" and
+// reopens the menu inside it, so the next keystroke must list that directory.
+func TestPathCandidatesTrailingSlashListsDir(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"internal": {{Name: "tool", IsDir: true}, {Name: "tui", IsDir: true}},
+	})
+	got := suggNames(a.pathCandidates("internal/"))
+	if len(got) != 2 || got[0] != "tool/" || got[1] != "tui/" {
+		t.Fatalf("internal/ = %v, want [tool/ tui/]", got)
+	}
+}
+
+// TestPathCandidatesBareAtFallsBackToScan: with no directory named, the menu
+// still lists the whole-repo scan, minus VCS metadata — including a file that
+// only lives under .git.
+func TestPathCandidatesBareAtFallsBackToScan(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{}, "a.go", "sub/b.go", ".git/config", "node_modules/dep.js")
+	got := suggNames(a.pathCandidates(""))
+	if len(got) != 2 || got[0] != "a.go" || got[1] != "sub/b.go" {
+		t.Fatalf("bare @ = %v, want [a.go sub/b.go]", got)
+	}
+}
+
+// TestPathCandidatesSlashListsRoot: `@/` names the root explicitly, so it must
+// read that directory — not fall through to the whole-repo scan, which is what
+// splitPathQuery's ("","") for "/" would otherwise trigger.
+func TestPathCandidatesSlashListsRoot(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"": {{Name: "cmd", IsDir: true}, {Name: "main.go"}},
+	}, "scan/only.go")
+	got := suggNames(a.pathCandidates("/"))
+	if len(got) != 2 || got[0] != "cmd/" || got[1] != "main.go" {
+		t.Fatalf("@/ = %v, want [cmd/ main.go]", got)
+	}
+}
+
+func TestPathCandidatesDisabledWithoutSource(t *testing.T) {
 	a := &App{}
 	if got := a.pathCandidates("x"); got != nil {
 		t.Fatalf("completion enabled without a source: %v", got)
@@ -70,12 +203,68 @@ func TestPathCandidatesDisabledWithoutScanner(t *testing.T) {
 }
 
 func TestPathCandidatesCapsPool(t *testing.T) {
-	files := make([]string, 0, 500)
+	var files []PathEntry
 	for range 500 {
-		files = append(files, "deep/path/file.go")
+		files = append(files, PathEntry{Name: "file.go"})
 	}
-	a := appWithFiles(files...)
+	a := appWithTree(map[string][]PathEntry{"": files})
 	if got := len(a.pathCandidates("")); got > maxPathCandidates {
 		t.Fatalf("unbounded candidate list: %d", got)
+	}
+}
+
+// TestPathMentionQuotesSpaces: a completion that inserted a bare path with a
+// space would end the mention there, so the file must be quoted.
+func TestPathMentionQuotesSpaces(t *testing.T) {
+	if got := pathMention("fix ", "docs", "my file.go"); got != `fix @"docs/my file.go"` {
+		t.Fatalf("pathMention = %q", got)
+	}
+	if got := pathMention("", "", "plain.go"); got != "@plain.go" {
+		t.Fatalf("pathMention = %q", got)
+	}
+	// A directory keeps its slash so the menu can reopen inside it — and a
+	// quoted one stays OPEN, or the next keystroke would fall outside the token.
+	if got := pathMention("", "a dir", "my dir/"); got != `@"a dir/my dir/` {
+		t.Fatalf("pathMention = %q", got)
+	}
+	// A plain directory name stays unquoted, with its slash, and stays open.
+	if got := pathMention("", "cmd", "xdev/"); got != "@cmd/xdev/" {
+		t.Fatalf("pathMention = %q", got)
+	}
+}
+
+// TestAppAtCompletionDrivesKeyPath is the end-to-end check through the real
+// key handler: `@` opens the menu, typing a directory prefix narrows it to that
+// directory, Tab on a directory keeps the slash and reopens the menu inside it
+// (so the next keystroke lists the CHILD directory), and Tab on a file closes
+// the mention with a space.
+func TestAppAtCompletionDrivesKeyPath(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.SetPathCompletion("/proj", func(dir string) []PathEntry {
+		return map[string][]PathEntry{
+			"internal": {{Name: "tool", IsDir: true}, {Name: "tui", IsDir: true}},
+		}[dir]
+	}, func() []string { return []string{"main.go"} })
+	// A bare `@` opens the menu on the scan; typing a directory name scopes it.
+	typeRunes(app, "read @internal/")
+	app.mu.Lock()
+	got := suggNames(app.smenu.rows())
+	app.mu.Unlock()
+	if len(got) != 2 || got[0] != "tool/" || got[1] != "tui/" {
+		t.Fatalf("menu after @internal/ = %v, want [tool/ tui/]", got)
+	}
+	// Tab on the first row (tool/) must keep the slash and list tool/, not
+	// finish the mention with a space.
+	app.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
+	if want := "read @internal/tool/"; app.ed.Text() != want {
+		t.Fatalf("after accepting a dir = %q, want %q", app.ed.Text(), want)
+	}
+	// With the child directory now named, the menu is scoped to it: no
+	// entries, so it closes rather than showing the parent's contents again.
+	app.mu.Lock()
+	open := app.smenu != nil && app.smenu.active()
+	app.mu.Unlock()
+	if open {
+		t.Fatal("menu must close when the named directory has no matches")
 	}
 }
