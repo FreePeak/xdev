@@ -341,16 +341,20 @@ claim work from a shared queue, revisit. The current mailbox layout
 
 ## 5. Issues filed by this document
 
-| Action | Issue |
-|---|---|
-| **new** | `[M11] A subagent is not a session: no AGENTS.md, no hooks/redactor/rulebook/vision/failover, and no way to ask for them` (rows 1, 2-part, 14) |
-| **new** | `[M11] Subagent definition parity: 11 frontmatter fields Claude Code applies and xdev silently drops` (row 2) |
-| **new** | `[M11] Background completion is invisible to the parent: hub wait swallows results, nothing injects on settle` (row 4) |
-| **new** | `[M11] Agent addressing: ListAgents has no xdev equivalent, nothing names an agent by default, children are excluded from the mailbox` (rows 5, 8) |
-| **new** | `[M11] A budget-exhausted child reports its wrap-up turn as a finished answer` (row 6) |
-| **new** | `[M9] Derived child permissions + task-side approval relay (M12 blocker)` (row 15) |
-| update | **#191** — correct CC's concurrency/depth defaults and the real env var names |
-| update | **#204** — forked subagent: prompt-cache rationale, steer/close, `/fork` split, fork-inherit policy (CC: a normal subagent inherits the parent session's fork context; a child of a forked subagent starts clean) |
-| update | **#220** — state-carry census: name the two missing dimensions (instruction files, interceptor chain) |
-| update | **#169** — re-scope: it specs caps/UI for a runner that was never built |
-| comment | **#258** — closed but never implemented; superseded by the new runner issue |
+Filed 2026-09-16 from this document, in dependency order:
+
+| Issue | Scope | Rows |
+|---|---|---|
+| **#295** | A subagent is not a session: no `AGENTS.md`, no hooks/redactor/rulebook/vision/failover, and no way to ask for them (includes opening the `ChildTools` pool) | 1, 14 |
+| **#296** | Async completion + agent addressing: completion notification into the parent, names by default, `list_agents`, children may `send_message` — with CC's stale-name and no-approval-by-message guards | 4, 5, 8 |
+| **#297** | Definition parity: the 11 functional frontmatter fields parsed-then-dropped (`maxTurns, permissionMode, hooks, mcpServers, disallowedTools, isolation, omitClaudeMd, memory, skills, background, initialPrompt`) | 2 |
+| **#298** | Derived child permissions + approval relay — `TaskTool.Approve` is nil in every host, so M12's dialog must not land without it (filed as an M12 **prerequisite**) | 15 |
+| **#299** | A budget-exhausted child reports its wrap-up turn as a finished answer; CC marks it partial (2.1.246+) | 6 |
+| **#300** | Workflow runner: `workflowz` promises a runtime that does not exist; plan-file + hub runner, no JS embed | 9 |
+
+Already-filed issues updated by comment the same day: **#191** (correct CC's defaults:
+20 concurrent / depth 3 / real env var names), **#204** (fork: cache-sharing rationale,
+steer/close, `isolation: worktree`), **#220** (state-carry census: name the two missing
+dimensions), **#169** (re-scope: it specs caps/UI for a runner that was never built),
+**#258** (closed unimplemented — superseded by #300).
+
