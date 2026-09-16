@@ -195,6 +195,13 @@ type App struct {
 	// pastes anyway: a model that cannot read the attachment answers with
 	// text, and a wrong "no" would block the feature on a field nobody filled.
 	vision func() bool
+	// dock is the context dock panel (#291 §1): its display policy, its fold
+	// state, its built rows. Nil until a source is wired; every reader of it
+	// tolerates that, because a session with no dock is a normal session.
+	dock *dockState
+	// dockSetMode persists a display policy the human changed with Alt+s
+	// (settings `sidebarMode`); nil = this session cannot persist it.
+	dockSetMode func(mode string)
 }
 
 type blockKey struct {
@@ -864,6 +871,9 @@ func (a *App) PlanMode(args string) error {
 	}
 	arg := strings.TrimSpace(args)
 	cur := a.planOps.Get()
+	if arg == "show" {
+		return a.planShow()
+	}
 	var on bool
 	switch arg {
 	case "":
@@ -873,7 +883,7 @@ func (a *App) PlanMode(args string) error {
 	case "off":
 		on = false
 	default:
-		return fmt.Errorf("plan: use /plan, /plan on, or /plan off")
+		return fmt.Errorf("plan: use /plan, /plan on, /plan off, or /plan show")
 	}
 	if err := a.planOps.Set(on); err != nil {
 		return err
@@ -883,6 +893,23 @@ func (a *App) PlanMode(args string) error {
 	} else {
 		a.AddSystemBlock("plan mode OFF — full toolset restored")
 	}
+	return nil
+}
+
+// planShow is /plan show: the proposed document read as a document, plus the
+// phase list it was written against (#291 §2). The dock is the ambient surface
+// for it; this is the one you can scroll back to, and the one that works in a
+// narrow terminal where the panel has folded away.
+func (a *App) planShow() error {
+	if a.planOps.Show == nil {
+		return fmt.Errorf("plan: show not wired")
+	}
+	text := strings.TrimSpace(a.planOps.Show())
+	if text == "" {
+		a.AddSystemBlock("no pending plan — /plan on, have the model propose one")
+		return nil
+	}
+	a.AddSystemBlock(text)
 	return nil
 }
 
@@ -1294,8 +1321,11 @@ func (a *App) SettingsView(args string) error {
 		a.AddSystemBlock(strings.Join(lines, "\n"))
 		return nil
 	}
+	if fields[0] == "sidebarMode" {
+		return a.setDockModeSetting(fields[1:])
+	}
 	if fields[0] != "showThinking" {
-		return fmt.Errorf("unknown setting %q (want showThinking)", fields[0])
+		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode)", fields[0])
 	}
 	on := !a.Thinking()
 	if len(fields) == 2 {
@@ -1325,6 +1355,38 @@ func (a *App) SettingsView(args string) error {
 		confirm += " (saved to " + a.settingsOps.Path + ")"
 	}
 	a.SetShowThinking(on)
+	a.AddSystemBlock(confirm)
+	return nil
+}
+
+// setDockModeSetting is /settings sidebarMode [auto|show|hide]: the context
+// dock's display policy (#291 §1). The App owns the state, so the flip works
+// with unwired ops; persisting is the config seam's job when it exists.
+func (a *App) setDockModeSetting(fields []string) error {
+	// Bare form asks, it does not write: a report that also persisted would make
+	// the panel's own explanation of itself a side effect.
+	if len(fields) == 0 {
+		a.AddSystemBlock("sidebarMode " + a.DockMode() + " — " + a.DockState())
+		return nil
+	}
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /settings sidebarMode [auto|show|hide]")
+	}
+	want := a.DockMode()
+	switch fields[0] {
+	case DockAuto, DockShow, DockHide:
+		want = fields[0]
+	default:
+		return fmt.Errorf("usage: /settings sidebarMode [auto|show|hide]")
+	}
+	confirm := "sidebarMode " + want
+	if a.settingsOps != nil && a.settingsOps.SetSidebar != nil {
+		if err := a.settingsOps.SetSidebar(want); err != nil {
+			return err
+		}
+		confirm += " (saved to " + a.settingsOps.Path + ")"
+	}
+	a.SetDockMode(want)
 	a.AddSystemBlock(confirm)
 	return nil
 }
@@ -1678,6 +1740,12 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 		a.AddSystemBlock("retry is not wired in this build")
 		return
+	case "dock-cycle", "dock-fold":
+		// The context dock's own two chords (#291 §1), handled here — after
+		// every modal handler — so a card or a picker open on screen keeps
+		// first claim on the key. The panel is chrome, never a modal's input.
+		a.dockKey(action)
+		return
 	}
 
 	// Slash dropdown navigation: while the menu is open the arrows move the
@@ -1930,9 +1998,11 @@ func (a *App) viewportLinesLocked() int {
 	return a.height - a.composerRows() - 2 - a.transcriptTop()
 }
 
-// contentWidth is the scrollback text width (rail + padding removed).
+// contentWidth is the scrollback text width (rail + padding removed), and with
+// the context dock open everything to its right edge: the transcript's lines
+// wrap where the panel begins, so no row is ever cut mid-glyph by the border.
 func (a *App) contentWidth() int {
-	w := a.width - 4 // rail(1) + gap(1) + right pad(2)
+	w := a.rightEdge() - 4 // rail(1) + gap(1) + right pad(2)
 	if w < 10 {
 		w = 10
 	}
@@ -2337,6 +2407,10 @@ func (a *App) paint() {
 		vp = 1
 	}
 	a.drawTopBar(s, w, true)
+	// The panel is built before the transcript's width is computed: with it open
+	// the lines wrap at its left edge, and a frame that painted the transcript
+	// first would have to redo every render cache entry it drew.
+	a.dockBuild()
 	contentW := a.contentWidth()
 
 	// The row index is this frame's plan: sync() re-renders only the blocks
@@ -2359,9 +2433,13 @@ func (a *App) paint() {
 	// track/thumb that gives continuous position feedback. Reserve it so band
 	// rows never render a cell under the bar.
 	sbStart, sbEnd, sbOk := a.sm.Scrollbar(total, vp)
-	bandLim := w
+	// The dock's left edge is the transcript's right edge: band fills, the
+	// scrollbar and the right-aligned timestamps all stop there, or a row that
+	// scrolled under the panel would paint through its border.
+	edge := a.rightEdge()
+	bandLim := edge
 	if sbOk {
-		bandLim = w - 1
+		bandLim = edge - 1
 	}
 	selRows := make([]selRow, 0, end-start)
 	for row, r := range a.viewRows(int32(start), int32(end)) {
@@ -2411,7 +2489,7 @@ func (a *App) paint() {
 			if banded {
 				tsSt = tsSt.Background(r.ln.bg)
 			}
-			drawText(s, w-width(r.ts)-2, y, r.ts, tsSt)
+			drawText(s, edge-width(r.ts)-2, y, r.ts, tsSt)
 		}
 	}
 	// Paint the scrollbar over the reserved column, spanning the visible
@@ -2424,7 +2502,7 @@ func (a *App) paint() {
 			if y >= sbStart && y < sbEnd {
 				ch, st = "█", thumbSt
 			}
-			drawText(s, w-1, y+top, ch, st)
+			drawText(s, edge-1, y+top, ch, st)
 		}
 	}
 	a.selRows, a.selTop = selRows, start
@@ -2445,6 +2523,12 @@ func (a *App) paint() {
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
 	composerTop := h - 1 - cRows
+	// The panel first, so every overlay below paints over it: the dock is chrome
+	// beside the transcript, never a surface a modal has to negotiate with.
+	if a.dockOn() {
+		dtop, dh := a.dockGrid()
+		a.drawDock(s, w-dockCols, dtop, dh)
+	}
 	a.drawSessionPicker(composerTop)
 	a.drawHubRoster(composerTop)
 	a.drawTreeSelector(composerTop)

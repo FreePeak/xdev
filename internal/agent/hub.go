@@ -25,6 +25,8 @@ type Hub struct {
 	jobs  map[string]*hubJob
 	inbox map[string][]InboxMsg // steering traffic per job id (Send audit log)
 	procs *ProcTable            // named long-running child processes (lazy)
+	// notify fires when a job settles; see SetNotify.
+	notify func()
 }
 
 type hubJob struct {
@@ -135,10 +137,8 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 		}
 	}
 	go func() {
-		defer close(job.done)
 		res, err := SpawnChild(cctx, spec)
 		h.mu.Lock()
-		defer h.mu.Unlock()
 		if err != nil {
 			job.Err = err
 			if res == nil {
@@ -148,7 +148,38 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 		if res != nil {
 			job.Result = res
 		}
+		notify := h.notify
+		h.mu.Unlock()
+		// Close the settle edge before anyone is told about it: Roster() reads
+		// `done` to decide whether a row still runs, so a bump that fired first
+		// would repaint the pre-settle state and the dock would show a finished
+		// child as running. The deferred close is gone on purpose — an unrecovered
+		// panic here takes the process down, so there is no waiter left to hang.
+		close(job.done)
+		// A job may settle long after the turn that started it, and nothing else
+		// repaints a roster nobody is looking at.
+		if notify != nil {
+			notify()
+		}
 	}()
+}
+
+// SetNotify registers a callback that fires when a job settles — including a
+// canceled or failed one, since those settle too. It exists for #291's context
+// dock, which must show a live roster without being polled at frame rate.
+//
+// Starting, parking and reviving are deliberately not covered: a job starts
+// inside a tool call, and the host bumps on the tool's end; park and revive are
+// only reachable from the /hub overlay, which repaints itself.
+//
+// Contract, because the hub's lock is the transcript's rival: the callback fires
+// from the job's own goroutine with no lock held, must not call back into the
+// Hub, and must be cheap and non-blocking. A single callback, set once at
+// startup, like the other host seams on this type.
+func (h *Hub) SetNotify(fn func()) {
+	h.mu.Lock()
+	h.notify = fn
+	h.mu.Unlock()
 }
 
 // Status reports one job's state without blocking.

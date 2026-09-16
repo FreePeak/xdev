@@ -99,6 +99,9 @@ type SettingsOps struct {
 	Path        string
 	List        func() []string
 	SetThinking func(on bool) error
+	// SetSidebar persists the context dock's display policy (#291 §1), the
+	// sidebarMode key in the same layer Alt+s writes.
+	SetSidebar func(mode string) error
 }
 
 // PlanOps wires the /plan command to the live plan-mode state (lives in
@@ -107,6 +110,11 @@ type SettingsOps struct {
 type PlanOps struct {
 	Get func() bool
 	Set func(on bool) error
+	// Show renders the pending proposal and the task list it was written
+	// against (/plan show, #291 §2): the "" case is a session with nothing
+	// proposed yet. Approval is NOT here on purpose — /plan off and revision
+	// feedback already resolve a proposal, and a second transition would drift.
+	Show func() string
 }
 
 // PrewalkOps wires the /prewalk command (the live target lives in cmd).
@@ -408,7 +416,7 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
-		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit)",
+		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "goal", Description: "session objective + token budget: /goal view|create <objective>|resume|evidence <note>|complete [notes]|drop",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},

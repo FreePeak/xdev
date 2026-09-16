@@ -38,7 +38,7 @@ const (
 // Everything else the file names is dropped and reported.
 var repoSafeSettingsKeys = []string{
 	// Interface: how the transcript and HUD look.
-	"theme", "colorBlindMode", "statusLine", "showThinking",
+	"theme", "colorBlindMode", "statusLine", "showThinking", "sidebarMode",
 	// Resource caps: how much a session may spend. A repo may lower these,
 	// never widen what it can do.
 	"memoryLimit", "maxTurns", "compaction", "branchSummary",

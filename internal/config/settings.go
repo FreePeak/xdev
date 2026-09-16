@@ -425,6 +425,13 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// SidebarMode is the context dock's display policy (issue #291 §1):
+	// "auto" follows the width rule (open at >=120 columns), "show" pins it
+	// open, "hide" pins it shut. Display only, like ShowThinking, and a plain
+	// string rather than a *string because the zero value ("") means "unset in
+	// this layer" exactly the way the zero-skip merge treats every other
+	// string key — the effective default is "auto" (SidebarModeOn).
+	SidebarMode string `yaml:"sidebarMode"`
 	// Personality selects the prompt-tail preset (M10 #32, omp parity):
 	// default | friendly | pragmatic | none. A PERSONALITY.md override
 	// always beats the preset; "none" omits the block.
@@ -825,6 +832,20 @@ func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
 }
 
+// SidebarModeOn reports the effective context-dock policy: unset follows the
+// width rule ("auto"). Unknown values fall back to "auto" too, so a hand-edited
+// layer cannot leave the TUI guessing; the TUI owns the vocabulary.
+func (s *Settings) SidebarModeOn() string {
+	if s == nil {
+		return "auto"
+	}
+	switch s.SidebarMode {
+	case "show", "hide":
+		return s.SidebarMode
+	}
+	return "auto"
+}
+
 // AllowCompoundCommandsOn reports the effective bash.allowCompoundCommands
 // (nil-safe: the shipped default is off, and a layer that never set it
 // can't turn it on).
@@ -1192,6 +1213,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	if layer.SidebarMode != "" {
+		s.SidebarMode = layer.SidebarMode
 	}
 	if layer.Handoff.SaveToDisk {
 		// Same plain-bool rule as Advisor: only a layer that turns it ON
@@ -1619,6 +1643,7 @@ func List(s *Settings, globalPath string) []string {
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
+		"sidebarMode " + s.SidebarModeOn(),
 		"computer " + fmt.Sprint(s.ComputerOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),

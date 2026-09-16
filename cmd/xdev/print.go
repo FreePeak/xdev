@@ -465,7 +465,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 
 	// --- tools ---
-	planMode := &agent.PlanMode{Active: opts.Plan || opts.PlanYolo}
+	planMode := &agent.PlanMode{}
+	planMode.SetActive(opts.Plan || opts.PlanYolo)
 	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef), planMode)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 
@@ -565,20 +566,20 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// propose auto-accepts (a plan nobody can review must not trap the run
 	// in read-only). --plan-yolo keeps that and hands the run to the
 	// execution model on the first acceptance (#36).
-	planMode.Propose = agent.NewProposeTool(planMode, nil)
+	planMode.SetPropose(agent.NewProposeTool(planMode, nil))
 	if opts.Plan && !opts.PlanYolo {
 		// T3 #27: print runs have no reviewer, and auto-accepting made
 		// `--plan` silently implement the plan — the flag's read-only
 		// promise, voided. A plain headless --plan now ENDS at the
 		// proposal; --plan-yolo keeps the approve-and-build behavior
 		// explicit.
-		planMode.PlanOnly = true
+		planMode.SetPlanOnly(true)
 	}
 	if opts.PlanYolo {
-		planMode.Yolo = true
+		planMode.SetYolo(true)
 		if opts.PlanYoloInto != "" {
 			if t := resolveInto(opts.PlanYoloInto, cfg, settings, "plan-yolo"); t != nil {
-				planMode.OnAccept = func() { ag.SwitchToModel(*t, "plan-yolo") }
+				planMode.SetOnAccept(func() { ag.SwitchToModel(*t, "plan-yolo") })
 			}
 		}
 	}
@@ -659,10 +660,10 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			fmt.Fprintf(os.Stderr, "advisor (%s): %s\n", n.Severity, n.Text)
 		}
 	}
-	if planMode.Proposed() && planMode.Pending != "" {
+	if planMode.Proposed() && planMode.Pending() != "" {
 		// The plan was the run's output: print it (the transcript shows the
 		// propose call, not its argument).
-		fmt.Fprintln(os.Stdout, planMode.Pending)
+		fmt.Fprintln(os.Stdout, planMode.Pending())
 	}
 	// Ai-title cascade (#107): one cheap request over the exchange that just
 	// happened, bounded by its own 12s cap. history[0] is the user turn that

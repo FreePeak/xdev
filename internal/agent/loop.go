@@ -336,8 +336,8 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		a.Intercept.Emit(ctx, "agent_end", payload)
 	}()
 	// Plan mode reminder: teach the read-only shape for this run.
-	if a.PlanMode != nil && a.PlanMode.Active {
-		system += "\n\n" + planModeSystemReminder(a.PlanMode.Note)
+	if a.PlanMode != nil && a.PlanMode.Active() {
+		system += "\n\n" + planModeSystemReminder(a.PlanMode.Note())
 	}
 	// Goal mode (M11 #40): the goal tool owns the session-scoped objective;
 	// bind it (and this run's event hook) so the loop can inject the
@@ -858,8 +858,8 @@ func (a *Agent) toolDefs() []ai.ToolDef {
 	}
 	// Plan mode exposes its exit tool only while the sub-state is live —
 	// normal-mode registries never contain propose.
-	if a.PlanMode != nil && a.PlanMode.Active && a.PlanMode.Propose != nil {
-		if d, ok := a.PlanMode.Propose.(interface {
+	if a.PlanMode != nil && a.PlanMode.Active() && a.PlanMode.Propose() != nil {
+		if d, ok := a.PlanMode.Propose().(interface {
 			Name() string
 			Description() string
 			Parameters() json.RawMessage
@@ -982,8 +982,8 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	a.Hooks.OnToolStart(call)
 	// The plan-mode exit tool lives outside the registry (it is exposed
 	// only while the sub-state is live), so route it before lookup.
-	if a.PlanMode != nil && a.PlanMode.Active && a.PlanMode.Propose != nil && call.Name == ProposeToolName {
-		res, rerr := a.PlanMode.Propose.Execute(ctx, call.Arguments)
+	if a.PlanMode != nil && a.PlanMode.Active() && a.PlanMode.Propose() != nil && call.Name == ProposeToolName {
+		res, rerr := a.PlanMode.Propose().Execute(ctx, call.Arguments)
 		if rerr != nil {
 			res = tool.Result{Text: "propose: " + rerr.Error(), IsError: true}
 		}

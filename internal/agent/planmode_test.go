@@ -20,8 +20,8 @@ func TestPlanModeDeniesMutationEndToEnd(t *testing.T) {
 	}}
 	reg := tool.NewRegistry()
 	reg.Register(tool.NewWriteTool())
-	pm := &PlanMode{Active: true}
-	pm.Propose = &proposeTool{pm: pm}
+	pm := &PlanMode{active: true}
+	pm.propose = &proposeTool{pm: pm}
 	ag := &Agent{Provider: p, Tools: reg, Model: "m", MaxTurns: 5, PlanMode: pm}
 
 	_, err := ag.Run(context.Background(), "sys", []ai.Message{
@@ -49,7 +49,7 @@ func TestPlanModeDeniesMutationEndToEnd(t *testing.T) {
 	// After the accepted propose, plan mode is off and the next turn's
 	// system prompt has no plan-mode reminder; more importantly the
 	// sub-state cleared.
-	if pm.Active {
+	if pm.active {
 		t.Fatal("propose did not clear plan mode")
 	}
 }
@@ -61,9 +61,9 @@ func TestPlanModeReviewerRejectsThenAccepts(t *testing.T) {
 		{events: doneEvents("implementing")},
 	}}
 	reg := tool.NewRegistry()
-	pm := &PlanMode{Active: true}
+	pm := &PlanMode{active: true}
 	calls := 0
-	pm.Propose = &proposeTool{pm: pm, OnPropose: func(_ context.Context, plan string) (bool, string) {
+	pm.propose = &proposeTool{pm: pm, OnPropose: func(_ context.Context, plan string) (bool, string) {
 		calls++
 		if plan == "revised draft" {
 			return true, "approved with note"
@@ -80,7 +80,7 @@ func TestPlanModeReviewerRejectsThenAccepts(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("reviewer saw %d proposals, want 2", calls)
 	}
-	if pm.Active {
+	if pm.active {
 		t.Fatal("accepted proposal must clear plan mode")
 	}
 	// The rejection note reached the model.
@@ -108,7 +108,7 @@ func TestPlanModeReadOnlyToolsPass(t *testing.T) {
 	}}
 	reg := tool.NewRegistry()
 	reg.Register(tool.NewReadTool())
-	pm := &PlanMode{Active: true}
+	pm := &PlanMode{active: true}
 	ag := &Agent{Provider: p, Tools: reg, Model: "m", MaxTurns: 3, PlanMode: pm}
 	_, err := ag.Run(context.Background(), "sys", []ai.Message{
 		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "read the file"}}},
@@ -149,7 +149,8 @@ func TestProposeToolParameters(t *testing.T) {
 func TestToolDefsExposeProposeOnlyWhileActive(t *testing.T) {
 	reg := tool.NewRegistry()
 	reg.Register(tool.NewReadTool())
-	pm := &PlanMode{Active: true, Propose: &proposeTool{pm: &PlanMode{}}}
+	pm := &PlanMode{active: true}
+	pm.propose = &proposeTool{pm: &PlanMode{}}
 	ag := &Agent{Tools: reg, PlanMode: pm}
 	has := func(defs []ai.ToolDef) bool {
 		for _, d := range defs {
@@ -162,8 +163,83 @@ func TestToolDefsExposeProposeOnlyWhileActive(t *testing.T) {
 	if !has(ag.toolDefs()) {
 		t.Fatal("active plan mode must expose propose")
 	}
-	pm.Active = false
+	pm.SetActive(false)
 	if has(ag.toolDefs()) {
 		t.Fatal("normal mode must not expose propose")
+	}
+}
+
+// The dock is only free because it is not polled: it rebuilds when a source says
+// it moved. Publish, accept and reject are the three moves a proposal makes, and
+// each must say so once — a missed one leaves a stale document on screen, an
+// extra one is a repaint at frame rate by the back door.
+func TestPlanModeInvalidateFiresOnEveryTransition(t *testing.T) {
+	var fires int
+	pm := &PlanMode{active: true}
+	pm.SetInvalidate(func() { fires++ })
+	pm.Publish("1. do the thing")
+	if fires != 1 {
+		t.Fatalf("publish: %d fires, want 1", fires)
+	}
+	if got := pm.Pending(); got != "1. do the thing" {
+		t.Fatalf("pending %q", got)
+	}
+	if _, err := pm.Resolve(false, "revise it"); err != nil {
+		t.Fatal(err)
+	}
+	if fires != 2 {
+		t.Fatalf("reject: %d fires, want 2", fires)
+	}
+	if pm.Pending() != "" {
+		t.Fatal("a rejected plan must leave nothing pending")
+	}
+	if !pm.Active() {
+		t.Fatal("rejecting leaves plan mode on")
+	}
+	pm.Publish("v2")
+	pm.SetActive(true)
+	if _, err := pm.Resolve(true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if fires != 4 {
+		t.Fatalf("accept: %d fires, want 4", fires)
+	}
+	if pm.Active() || pm.Pending() != "" {
+		t.Fatal("accept resolves the proposal and leaves plan mode")
+	}
+	// The proposal path bumps too, including the one that holds for review.
+	pm2 := &PlanMode{active: true}
+	hits := 0
+	pm2.SetInvalidate(func() { hits++ })
+	_, _ = NewProposeTool(pm2, func(context.Context, string) (bool, string) {
+		// Mid-call the human can already read the document.
+		if hits == 0 {
+			t.Error("propose must publish before the reviewer answers")
+		}
+		return false, "keep going"
+	}).Execute(context.Background(), json.RawMessage(`{"plan":"1. ship it"}`))
+	if hits != 1 {
+		t.Fatalf("a held proposal fired %d bumps, want 1", hits)
+	}
+}
+
+// The task list rides along with the plan it was written against: one read, the
+// same snapshot the model sees, and no panic when the host has no todo tool.
+func TestPlanModeTodoIsDisplayOnly(t *testing.T) {
+	pm := &PlanMode{}
+	if pm.Todo() != "" {
+		t.Fatal("a mode with no list has nothing to show")
+	}
+	tt := tool.NewTodoTool()
+	if _, err := tt.Execute(context.Background(), json.RawMessage(`{"op":"init","items":["ship it"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	pm.SetTodo(tt)
+	if got := pm.Todo(); !strings.Contains(got, "TASKS · 0/1 done") || !strings.Contains(got, "ship it") {
+		t.Fatalf("todo view %q", got)
+	}
+	var nilPM *PlanMode
+	if nilPM.Todo() != "" {
+		t.Fatal("a nil PlanMode must be unreadable, not fatal")
 	}
 }

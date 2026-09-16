@@ -411,6 +411,67 @@ func (t *TodoTool) Snapshot() []TodoPhase {
 	return clonePhases(t.phases)
 }
 
+// View renders the live list for a host that has a surface for it (#291's
+// context dock): one heading line carrying the counts, then the tasks in list
+// order, with a phase named only when there is more than one. The first line is
+// the heading by the dock's contract; "" means the list is empty, so a session
+// with no tasks shows no section rather than an empty one. It reuses the
+// model's own markers so the two renderings can never disagree about a state.
+func (t *TodoTool) View() string {
+	phases := t.Snapshot()
+	total, done, blocked := 0, 0, 0
+	for i := range phases {
+		for _, it := range phases[i].Tasks {
+			total++
+			switch it.Status {
+			case TodoCompleted, TodoDropped:
+				done++
+			case TodoBlocked:
+				blocked++
+			}
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+	head := fmt.Sprintf("TASKS · %d/%d done", done, total)
+	if blocked > 0 {
+		head += fmt.Sprintf(", %d blocked", blocked)
+	}
+	var b strings.Builder
+	b.WriteString(head)
+	named := len(countedPhases(phases)) > 1
+	for i := range phases {
+		p := &phases[i]
+		if len(p.Tasks) == 0 {
+			continue
+		}
+		if named {
+			fmt.Fprintf(&b, "\n%s", p.Name)
+		}
+		for j := range p.Tasks {
+			it := &p.Tasks[j]
+			fmt.Fprintf(&b, "\n%s %s", todoMarker(it.Status), it.Content)
+			if it.Status == TodoBlocked && it.Blocker != "" {
+				fmt.Fprintf(&b, " (blocked: %s)", it.Blocker)
+			}
+		}
+	}
+	return b.String()
+}
+
+// countedPhases are the phases with at least one task — the ones renderTodoPhases
+// numbers, so a heading's "phase" and the model's agree.
+func countedPhases(phases []TodoPhase) []TodoPhase {
+	out := make([]TodoPhase, 0, len(phases))
+	for _, p := range phases {
+		if len(p.Tasks) > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // OpenForReminder returns the tasks a stop-time reminder should report:
 // pending and in_progress only. Blocked tasks are awaiting external input
 // and finished tasks are done, so neither may nag the user (omp parity).

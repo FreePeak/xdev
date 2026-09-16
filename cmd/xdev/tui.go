@@ -253,6 +253,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
+	// The context dock (#291 §1): the fixed-width column right of the transcript.
+	// Its sources are the state the session already keeps — the proposed plan and
+	// the task list through PlanMode, the hub roster through the same snapshot
+	// /hub reads — and the files it lists are read from the transcript's own diff
+	// blocks inside the panel, so no second change-tracker exists. Alt+s is the
+	// only key it takes, and it persists the display policy the way showThinking
+	// does: the global settings layer, the in-memory copy, and nothing else.
+	app.SetDockMode(lastSettings().SidebarModeOn())
+	app.SetDockModeFunc(func(mode string) {
+		if err := config.Set(config.GlobalSettingsPath(), "sidebarMode", mode); err != nil {
+			logx.Errorf("sidebarMode: %v", err)
+			return
+		}
+		lastSettings().SidebarMode = mode
+	})
 	// /settings lists the resolved config; toggles persist to the global
 	// layer (the same file `xdev config set` edits) and update the
 	// in-memory settings so a later /settings sees them.
@@ -265,6 +280,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			v := on
 			lastSettings().ShowThinking = &v
+			return nil
+		},
+		SetSidebar: func(mode string) error {
+			if err := config.Set(config.GlobalSettingsPath(), "sidebarMode", mode); err != nil {
+				return err
+			}
+			lastSettings().SidebarMode = mode
 			return nil
 		},
 	})
@@ -611,6 +633,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	}
 	if sessionHub != nil {
+		// The dock's roster must move when a child settles after the turn that
+		// started it is long over — the only other thing that would repaint it is
+		// polling the panel at frame rate, which is the exact cost #283/#284 closed.
+		sessionHub.SetNotify(app.DockBump)
 		app.SetHubOps(&tui.HubOps{
 			Roster: func() []tui.HubAgent {
 				rows := sessionHub.Roster()
@@ -639,6 +665,29 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Revive: func(id string) bool { return sessionHub.Revive(id, "") == nil },
 		})
 	}
+	// The dock's sources (#291 §1). Each is one block whose first line is its
+	// heading, and each reads state this session already keeps: the plan and its
+	// task list through PlanMode, the roster through the hub's own snapshot.
+	// Nothing here caches a second copy of anything — a source that is nil is a
+	// section that renders nothing, so a session without a hub loses the Agents
+	// section and keeps the rest.
+	var todoTool *tool.TodoTool
+	if tt, ok := reg.Get("todo"); ok {
+		todoTool, _ = tt.(*tool.TodoTool)
+	}
+	if todoTool != nil { // a typed nil would satisfy the interface and panic on read
+		planMode.SetTodo(todoTool) // the plan view's phase list, same snapshot
+	}
+	ops := tui.DockOps{Plan: planMode.View, Tasks: planMode.Todo}
+	if sessionHub != nil {
+		ops.Agents = func() string { return dockAgentsLabel(sessionHub.Roster()) }
+	}
+	app.SetDockOps(ops)
+	// The proposal moving is the one event the panel must show without waiting to
+	// be asked: a plan published from the agent goroutine repaints, and a
+	// consumed one closes its section. Every other section rides the tool and
+	// message hooks below.
+	planMode.SetInvalidate(app.DockBump)
 	// Vibe mode (M14 #58): the director scope over the session hub and the
 	// task tool's subagent machinery. Workers inherit the task tool's tool
 	// surface and approval posture; the tier selects the bundled agent
@@ -684,7 +733,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				ParentID: func() string { return store.ID() },
 				Conflicts: func() []string {
 					var out []string
-					if planMode.Active {
+					if planMode.Active() {
 						out = append(out, "plan")
 					}
 					if gs := agent.GoalStateOf(reg); gs != nil {
@@ -1017,9 +1066,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// In the TUI, propose HOLDS the decision: the plan shows in the tool
 	// block, the model is told to wait, and the user resolves with /plan
 	// off (approve) or feedback (revise).
-	planMode.Propose = agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
+	planMode.SetPropose(agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
 		return false, "awaiting user review — the user will /plan off to approve or send revision feedback"
-	})
+	}))
 	// ask (#36): surface the question in the transcript. The blocking card
 	// that lets the user pick an option is #46's scope, so this sink is
 	// deliberately one-way — it shows the question and lets the headless
@@ -1114,14 +1163,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 	app.SetPlanOps(&tui.PlanOps{
-		Get: func() bool { return planMode.Active },
+		Show: func() string { return planShowText(planMode) },
+		Get:  func() bool { return planMode.Active() },
 		Set: func(on bool) error {
 			// The director's reduced toolset and read-only planning
 			// contradict each other: one mode at a time.
 			if on && vibeActive() {
 				return fmt.Errorf("vibe mode is active — /vibe off first")
 			}
-			planMode.Active = on
+			planMode.SetActive(on)
 			return nil
 		},
 	})
@@ -1840,6 +1890,10 @@ func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Du
 		Truncated: out.Truncated,
 		Diff:      out.Diff,
 	})
+	// The dock's Files section is read from the transcript's diff blocks, and the
+	// task list from the todo tool's state: both move here, and nowhere else in a
+	// quiet session. One bump per finished call, no per-frame source read.
+	h.ts.app.DockBump()
 }
 
 // OnMessageEnd persists the assistant message (persistence on message_end).
@@ -1853,6 +1907,9 @@ func (h *tuiHooks) OnMessageEnd(msg *ai.Message) {
 	if h.feed != nil {
 		h.feed()
 	}
+	// A message's end is the last word on what it said about the plan, and the
+	// transcript gained a block the panel's height budget has to account for.
+	h.ts.app.DockBump()
 }
 
 func (h *tuiHooks) OnToolResultMessage(msg *ai.Message) {
@@ -2355,6 +2412,59 @@ func hubCostLabel(r agent.RosterEntry) string {
 		return fmt.Sprintf("~%.1fk tok", float64(r.Tokens)/1000)
 	}
 	return "-"
+}
+
+// planShowText is /plan show (#291 §2): the proposed document read as a
+// document, then the task list it was written against. The dock renders the same
+// two reads as its top sections; this is the copy that survives in the
+// transcript and the one that works in a terminal too narrow for the panel.
+// Approval is not here — /plan off and typed feedback already resolve a
+// proposal, and only PlanMode.Resolve gets to do that.
+func planShowText(pm *agent.PlanMode) string {
+	pending, active := pm.View()
+	if pending == "" {
+		if !active {
+			return ""
+		}
+		return "plan mode is on — nothing proposed yet; propose submits the plan for review"
+	}
+	out := "PLAN — proposed, awaiting review\n\n" + strings.TrimRight(pending, "\n")
+	if phases := pm.Todo(); phases != "" {
+		out += "\n\n" + phases // the task list, heading included
+	}
+	return out + "\n\nresolve: /plan off approves · any prompt you type next is revision feedback"
+}
+
+// dockAgentsLabel renders the hub roster as the dock's Agents section: a heading
+// carrying how many are still working, then one row per child with what it is
+// doing. /hub reads the same Roster() snapshot, so the panel and the overlay
+// cannot disagree about a status.
+func dockAgentsLabel(rows []agent.RosterEntry) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	run := 0
+	for _, r := range rows {
+		if r.Status == "running" {
+			run++
+		}
+	}
+	var b strings.Builder
+	if run == 0 {
+		fmt.Fprintf(&b, "AGENTS · %d settled", len(rows))
+	} else {
+		fmt.Fprintf(&b, "AGENTS · %d running / %d", run, len(rows))
+	}
+	for _, r := range rows {
+		// No width work here: the panel clips each row to its interior, and a
+		// byte cut here would split a rune the clip could not recover.
+		name := r.Name
+		if name == "" {
+			name = r.ID
+		}
+		fmt.Fprintf(&b, "\n%s %s · %s", r.Status, name, r.Activity)
+	}
+	return b.String()
 }
 
 // askCardSink is the ask tool's TUI answer path (#36 → #106): the interactive
