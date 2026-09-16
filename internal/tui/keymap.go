@@ -45,6 +45,8 @@ var BuiltinActions = []string{
 	"model-cycle",    // Ctrl+P: cycle the active model through --models patterns
 	"paste-image",    // Ctrl+V: attach the clipboard image (omp app.clipboard.pasteImage)
 	"retry",          // F5: re-run the current session's last turn (omp's retry)
+	"dock-cycle",     // Alt+S: the context dock's display policy (#291 §1)
+	"dock-fold",      // Ctrl+T: walk the dock's section folds
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
@@ -110,6 +112,12 @@ func DefaultKeyMap() *KeyMap {
 			// without a new prompt. omp binds retry to Alt+R; function keys are
 			// first-class chords here, so keybindings.yml can move it freely.
 			"F5": "retry",
+			// The context dock (#291 §1). Ctrl+B is what the issue asked for and
+			// it is taken — scroll-page-up since the pager chords landed — so the
+			// panel rides the Alt+letter class the model and hub selectors already
+			// use, and keybindings.yml can move it like any other action.
+			"A-s": "dock-cycle",
+			"C-t": "dock-fold",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.

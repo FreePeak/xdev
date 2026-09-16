@@ -217,3 +217,38 @@ func TestIgnoredKeyNoticeIsLoudAndActionable(t *testing.T) {
 		}
 	}
 }
+
+// sidebarMode is display policy, so a repository may set it — the same argument
+// showThinking has, and the reason the key is on the repo-safe list. A hand-edited
+// or cloned project layer must be able to say "no dock on this repo" without
+// reaching the human's global config.
+func TestProjectConfigCarriesSidebarMode(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	cwd := t.TempDir()
+	writeFile(t, projectSettingsPath(cwd), "sidebarMode: hide\n")
+
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.SidebarMode != "hide" {
+		t.Fatalf("sidebarMode = %q, want hide", s.SidebarMode)
+	}
+	if got := s.IgnoredProjectKeys(); len(got) != 0 {
+		t.Fatalf("sidebarMode must not be refused, got %v", got)
+	}
+}
+
+// SidebarModeOn is the reader the TUI trusts: unset and unrecognized both mean
+// the width rule, because a surprise column is worse than a missing one.
+func TestSidebarModeNormalizesUnknown(t *testing.T) {
+	var nilS *Settings
+	if got := nilS.SidebarModeOn(); got != "auto" {
+		t.Fatalf("nil settings: %q", got)
+	}
+	for _, tc := range []struct{ in, want string }{{"", "auto"}, {"auto", "auto"}, {"show", "show"}, {"hide", "hide"}, {"YES", "auto"}, {" show ", "auto"}} {
+		if got := (&Settings{SidebarMode: tc.in}).SidebarModeOn(); got != tc.want {
+			t.Fatalf("SidebarMode %q → %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

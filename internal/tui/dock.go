@@ -1,0 +1,700 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"sync/atomic"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
+)
+
+// The context dock (issue #291 §1 + §2): a fixed-width column right of the
+// transcript holding the session's working set — the proposed plan, the task
+// list, the files this session changed, the agents running — so the transcript
+// keeps the reading role and the dock the scanning one. It never edits or moves
+// the model's own output.
+//
+// Three properties are load-bearing:
+//
+//   - It is chrome, not a modal. It takes no exclusive focus and holds no key
+//     another surface needs: a pending decision is answered where it is always
+//     answered — the ask card, which owns its timeout, or the composer, which is
+//     how /plan off and revision feedback already work. So the panel's entire
+//     keyboard is Alt+s and Ctrl+T. Every overlay (picker, ask card, hub roster,
+//     tree) still paints full width over it, because the panel is drawn first.
+//   - It costs nothing per frame. Its sources are closures, and the panel
+//     rebuilds only when a version moved (DockBump), the grid changed, or the
+//     human folded something. #283/#284 closed the stall→stream-kill chain at the
+//     draw path; a second column rebuilt at 30fps would reopen it. A rebuild is
+//     therefore capped: a handful of sources, a row budget, no I/O.
+//   - It decides nothing on its own. What it shows of a plan is the one
+//     PlanMode.View read, and the answer stays the propose tool's own reviewer,
+//     so no second surface can resolve a proposal differently.
+
+// Dock display policy. auto follows the width rule; show/hide are the human
+// overriding it from either end, and the third press returns to auto.
+const (
+	DockAuto = "auto"
+	DockShow = "show"
+	DockHide = "hide"
+)
+
+// dockCols is the panel width INCLUDING both borders — opencode's panel number,
+// which is also the number its own content width subtracts.
+const (
+	dockCols    = 42
+	dockInner   = dockCols - 2 // paintable cells between the borders
+	dockMinCols = 120          // below this, auto mode closes the panel
+	dockMin     = 20           // the transcript's own floor, shared with rightEdge
+	dockListMax = 6            // rows one list shows before "+N more"
+	dockPlanMax = 18           // rows the plan document may take: the section is
+	// the reason the panel exists, so it gets the bigger half of the budget.
+)
+
+// Section ids, in the order the panel paints them: what the session is doing,
+// what it is waiting on, then the artifacts. They double as fold keys.
+const (
+	dockPlanID  = "plan"
+	dockTaskID  = "tasks"
+	dockFileID  = "files"
+	dockAgentID = "agents"
+)
+
+// dockBumpSeq is the version every source stamps. Package-level and atomic
+// because the writers live on the agent goroutine — a plan publishes, a task list
+// mutates — and must invalidate the panel without taking a lock the App may
+// already hold. The App keeps only the last value it folded in.
+var dockBumpSeq atomic.Uint64
+
+// DockOps are the dock's sources that the TUI cannot read for itself: the plan
+// state (agent package) and the task/agent rosters (tool and hub packages). cmd
+// wires them; a nil field is a section that renders nothing rather than an empty
+// section forever. The transcript's own facts — the files this session changed —
+// are read here, not through a seam, because they are already App state.
+//
+// A text source returns "" when it has nothing to show, else one block whose
+// FIRST line is the section heading (count or state included) and whose
+// remaining non-blank lines are its rows. The caller owns what the rows say; the
+// panel owns how wide they are painted, so no source has to know its own width.
+type DockOps struct {
+	// Plan is the proposal view: the pending document ("" when none) and whether
+	// plan mode is on. It is PlanMode.View — one lock read, no second copy of the
+	// agent's state kept here.
+	Plan  func() (pending string, active bool)
+	Tasks func() string
+	// Agents is the hub roster, one row per child, heading included. It is the
+	// same snapshot /hub reads; the panel never holds a roster of its own.
+	Agents func() string
+}
+
+// dockCand is one candidate row of a layout pass, tagged with the section it
+// belongs to (-1 = a separator).
+type dockCand struct {
+	fold int
+	text string
+}
+
+// dockFold is one section as its source described it: rows already fitted to the
+// panel's interior, so the layout math is only ever about rows.
+type dockFold struct {
+	id    string
+	title string
+	rows  []string
+	max   int // the section's own row cap, so the render cannot disagree with it
+}
+
+// dockState is the App's dock side. Everything here is UI-thread-owned except the
+// version counter, so the panel is rebuilt only from paint().
+type dockState struct {
+	ops  DockOps
+	mode string
+
+	// fold is the human's override of the section states: 0 lets each section
+	// decide itself, 1 opens them, 2 shuts them. Three states because Ctrl+T has
+	// to be able to get back out of what it just did.
+	//
+	// ponytail: no per-section fold. The issue asks for collapsible sections and a
+	// cycle covers the case that actually costs a human a read — four lists
+	// competing with the document they are all secondary to. The upgrade path is a
+	// heading click on the row map the picker already keeps.
+	fold int8
+
+	version     uint64 // the last bump folded in
+	lines       []string
+	heads       int // section headings drawn, for the panel's title
+	hidden      int // sections the height budget dropped, reported not lost
+	top         int // the band's first row, where the box starts
+	buildW      int
+	bandH       int // the band the rows were budgeted for
+	buildBlocks int // the transcript's shape when the Files fold was read
+}
+
+// --- display policy ---
+
+// dockMode normalizes a persisted or typed policy; anything unrecognized follows
+// the width rule, so a corrupt settings layer is never a surprise column.
+func dockMode(s string) string {
+	switch strings.TrimSpace(s) {
+	case DockShow, DockHide:
+		return strings.TrimSpace(s)
+	}
+	return DockAuto
+}
+
+// SetDockMode applies the persisted policy at startup. cmd owns the settings read
+// and the write-back; the panel owns only the state.
+func (a *App) SetDockMode(mode string) {
+	a.mu.Lock()
+	a.ensureDock().mode = dockMode(mode)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetDockOps points the dock at its sources and forces the first build.
+func (a *App) SetDockOps(ops DockOps) {
+	a.mu.Lock()
+	d := a.ensureDock()
+	d.ops = ops
+	d.version, d.lines = 0, nil
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetDockModeFunc wires the persistence of a policy the human changed with Alt+s
+// (settings `sidebarMode`). nil = a session that cannot persist it, which is every
+// non-TUI caller and every test.
+func (a *App) SetDockModeFunc(set func(mode string)) {
+	a.dockSetMode = set
+}
+
+func (a *App) ensureDock() *dockState {
+	if a.dock == nil {
+		a.dock = &dockState{mode: DockAuto}
+	}
+	return a.dock
+}
+
+// DockBump is the invalidation a source calls when something it shows moved: a
+// plan published, a task list mutated, a tool result finished, a roster turned
+// over. It takes no lock and carries no payload, so a per-event hook can afford
+// it from any goroutine; the version stamp is what makes the NEXT frame rebuild
+// rather than the next unrelated repaint.
+func (a *App) DockBump() {
+	dockBumpSeq.Add(1)
+	a.poke()
+}
+
+// DockMode returns the current display policy.
+func (a *App) DockMode() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dock.policy()
+}
+
+func (d *dockState) policy() string {
+	if d == nil {
+		return DockAuto
+	}
+	return d.mode
+}
+
+// visible is the human's policy, then the width rule.
+func (d *dockState) visible(avail int) bool {
+	switch d.policy() {
+	case DockShow:
+		return true
+	case DockHide:
+		return false
+	}
+	return avail >= dockMinCols
+}
+
+// DockState is the panel's one-line answer for /settings: it is shown, or it is
+// not, and here is why and what would change it.
+func (a *App) DockState() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.dockOn() {
+		return fmt.Sprintf("shown, %d columns — alt+s hides it", dockCols)
+	}
+	switch a.dock.policy() {
+	case DockHide:
+		return "hidden — alt+s cycles shown, hidden, pinned open"
+	case DockShow:
+		if a.width < dockCols+dockMin {
+			return fmt.Sprintf("pinned open, but %d columns cannot hold the panel and a readable prompt — it needs %d", a.width, dockCols+dockMin)
+		}
+		return "pinned open — waiting for a session with something to track"
+	}
+	if a.width < dockMinCols {
+		return fmt.Sprintf("auto: closed at %d columns (%d needed) — alt+s pins it open", a.width, dockMinCols)
+	}
+	return "auto: open, waiting for a session with something to track"
+}
+
+// dockCycle is Alt+s: shown, shut, pinned open regardless of width, and back to
+// following the width rule — so a human can always get out of whatever they
+// pinned into. The policy it lands on is the one cmd persists.
+func (a *App) dockCycle() {
+	a.mu.Lock()
+	d := a.ensureDock()
+	switch d.mode {
+	case DockShow:
+		d.mode = DockHide
+	case DockHide:
+		d.mode = DockAuto
+	default:
+		d.mode = DockShow
+	}
+	mode := d.mode
+	a.mu.Unlock()
+	if a.dockSetMode != nil {
+		a.dockSetMode(mode)
+	}
+	a.poke()
+}
+
+// --- build ---
+
+// dockBuild recomputes the panel from its sources. Called from paint() — where the
+// lock is held, so a source may read App state — and only when something moved.
+// A plan long enough to fill a terminal is the normal case, so the row budget is
+// the panel's whole height story and what does not fit is counted and reported,
+// never dropped in silence.
+func (a *App) dockBuild() {
+	d := a.ensureDock()
+	if !a.dockOn() {
+		d.lines = nil // closed: no source runs, and the next open frame rebuilds
+		return
+	}
+	top, bandH := a.dockGrid()
+	if bandH <= 0 {
+		d.lines = nil // dockOn refuses this frame; belt, so no build has no band
+		return
+	}
+	d.top = top
+	next := dockBumpSeq.Load()
+	// Three things make a build stale: a source said it moved (version), the
+	// grid changed — width, or the band's height, which the composer's growth
+	// controls — and the transcript changing shape, since the Files section is
+	// read from the blocks. The last one is a length, not a revision: a block
+	// list is append-only and every path that shortens it (Reset, /clear, theme
+	// reload) rebuilds the whole panel anyway.
+	if d.lines != nil && next == d.version && a.width == d.buildW && bandH == d.bandH &&
+		len(a.blocks) == d.buildBlocks {
+		return
+	}
+	d.version, d.buildW, d.bandH, d.buildBlocks = next, a.width, bandH, len(a.blocks)
+	folds := a.collect()
+	// The footer is the session, not the work: id, directory, branch — the facts
+	// the status row carries when it has room and the panel keeps readable even
+	// when the transcript fills the height.
+	if f, ok := a.dockFooter(); ok {
+		folds = append(folds, f)
+	}
+	d.lines, d.heads, d.hidden = d.layout(folds, bandH)
+	if d.lines == nil {
+		d.lines = []string{} // the built-and-empty state, so the next frame skips it
+	}
+}
+
+// collect asks each source for its fold. Plan mode with no proposal out still
+// gets a section: a section nobody can see is one nobody can wait on.
+func (a *App) collect() []dockFold {
+	ops := a.dock.ops
+	var out []dockFold
+	if ops.Plan != nil {
+		pending, act := ops.Plan()
+		if f, ok := dockPlanFold(pending, act); ok {
+			out = append(out, f)
+		}
+	}
+	add := func(id string, fn func() string) {
+		if fn == nil {
+			return
+		}
+		if f, ok := dockFoldOf(id, fn(), dockListMax); ok {
+			out = append(out, f)
+		}
+	}
+	add(dockTaskID, ops.Tasks)
+	if f, ok := a.dockChanges(); ok {
+		out = append(out, f)
+	}
+	add(dockAgentID, ops.Agents)
+	return out
+}
+
+// dockPlanFold is the §2 surface: the proposed document, with the gesture that
+// answers it riding at the top so the human reads the ask before the text.
+func dockPlanFold(pending string, act bool) (dockFold, bool) {
+	switch {
+	case pending != "":
+		body := strings.Split(strings.TrimRight(sanitizeOutput(pending), "\n"), "\n")
+		rows := []string{dockClip("/plan off approves · or just type your feedback")}
+		for _, l := range body {
+			rows = append(rows, dockClip(l))
+		}
+		return dockFold{id: dockPlanID, max: dockPlanMax,
+			title: fmt.Sprintf("PLAN · proposed (%d lines)", len(body)), rows: rows}, true
+	case act:
+		return dockFold{id: dockPlanID, max: dockListMax, title: "PLAN · writing",
+			rows: []string{dockClip("the model is drafting; propose submits it")}}, true
+	}
+	return dockFold{}, false
+}
+
+// dockFoldOf splits a source block into its heading and its rows.
+func dockFoldOf(id, raw string, max int) (dockFold, bool) {
+	raw = strings.TrimRight(sanitizeOutput(raw), "\n")
+	if strings.TrimSpace(raw) == "" {
+		return dockFold{}, false
+	}
+	parts := strings.Split(raw, "\n")
+	f := dockFold{id: id, title: dockClip(strings.TrimSpace(parts[0])), max: max}
+	for _, l := range parts[1:] {
+		if strings.TrimSpace(l) != "" {
+			f.rows = append(f.rows, dockClip(l))
+		}
+	}
+	return f, true
+}
+
+// dockChanges is the session's file list, read from the diffs the transcript
+// already carries: Block.Diff is exactly what `git diff` prints, so one source
+// feeds both surfaces and no second change-tracker is introduced here. Paths keep
+// the order they were first touched in, and a file edited twice shows its last
+// word — a net +5/-2 across two edits is what a human wants to see.
+func (a *App) dockChanges() (dockFold, bool) {
+	type tally struct{ add, del int }
+	var order []string
+	counts := map[string]*tally{}
+	for _, b := range a.blocks {
+		if b.Kind != KindToolDone || b.Diff == "" {
+			continue
+		}
+		path := ""
+		for _, r := range classifyDiff(strings.Split(strings.TrimRight(b.Diff, "\n"), "\n")) {
+			switch r.kind {
+			case diffFile:
+				if p := strings.TrimPrefix(r.text, "+++ b/"); p != r.text && p != "/dev/null" {
+					path = p
+				}
+			case diffAdded, diffRemoved:
+				if path == "" {
+					continue
+				}
+				t := counts[path]
+				if t == nil {
+					order = append(order, path)
+					t = &tally{}
+					counts[path] = t
+				}
+				if r.kind == diffAdded {
+					t.add++
+				} else {
+					t.del++
+				}
+			}
+		}
+	}
+	if len(order) == 0 {
+		return dockFold{}, false
+	}
+	rows := make([]string, 0, len(order))
+	for _, p := range order {
+		t := counts[p]
+		rows = append(rows, dockClip(fmt.Sprintf("%s +%d/-%d", dockBase(p), t.add, t.del)))
+	}
+	head := fmt.Sprintf("FILES · %d", len(order))
+	if len(order) == 1 {
+		head = "FILES · 1"
+	}
+	return dockFold{id: dockFileID, title: dockClip(head), max: dockListMax, rows: rows}, true
+}
+
+// dockBase shortens a path to what fits a 40-column panel: the repo-relative
+// form when the diff carries one, else the basename. A changed file under a deep
+// tree is still identified by its name, and the transcript block has the full
+// path if the human wants it.
+func dockBase(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+// dockFooter is the panel's last section: the session identity the issue's footer
+// asks for, from state the App already holds.
+func (a *App) dockFooter() (dockFold, bool) {
+	f := dockFold{id: "footer", title: dockClip("SESSION · " + shortID(a.st.SessionID)), max: 3}
+	if a.cwd != "" {
+		f.rows = append(f.rows, dockClip(pathDisplay(a.cwd, dockInner)))
+	}
+	if a.branch != "" {
+		f.rows = dockAppend(f.rows, dockClip("on "+a.branch))
+	}
+	if len(f.rows) == 0 {
+		return dockFold{}, false
+	}
+	return f, true
+}
+
+// layout turns folds into painted rows for a band bandH rows tall, honoring the
+// fold state, and reports the headings drawn and the rows that did not fit.
+//
+// The budget is spent top-down, and every row it drops pays for its own
+// announcement: a section that lost rows gets a "+N more" row, and the panel ends
+// with the total. That is why the fit test below walks the prefix length down
+// rather than filling the band and clipping — rows reserved for the report are
+// part of the cost of cutting, and a panel that trimmed its content into its last
+// pixel would have to clip its own footnote, which is the silent loss this
+// function exists to prevent.
+func (d *dockState) layout(folds []dockFold, bandH int) (rows []string, heads, hidden int) {
+	if bandH < 5 {
+		return nil, 0, 0
+	}
+	limit := bandH - 1 // the panel's bottom border row is not ours to paint
+	// What each section would show at this fold state, before the band decides.
+	want := make([]int, len(folds))
+	for i, f := range folds {
+		n := min(len(f.rows), f.max)
+		switch d.fold {
+		case foldShut:
+			if f.id == dockPlanID || f.id == "footer" {
+				break // the ask and the identity are never folded away
+			}
+			n = 0
+		case foldOpen:
+			n = len(f.rows)
+		}
+		want[i] = min(n, len(f.rows))
+	}
+	// The candidate rows in paint order, each tagged with its section so a prefix
+	// of them can be recounted per section. A blank row separates sections.
+	var cands []dockCand
+	headAt := make([]int, len(folds))
+	for i, f := range folds {
+		if i > 0 {
+			cands = append(cands, dockCand{fold: -1})
+		}
+		headAt[i] = len(cands)
+		cands = append(cands, dockCand{i, dockClip(" " + f.title)})
+		for j := 0; j < want[i]; j++ {
+			cands = append(cands, dockCand{i, " " + f.rows[j]})
+		}
+	}
+	for keep := min(len(cands), limit); keep >= 0; keep-- {
+		var headsNow int
+		rows, headsNow, hidden = dockEmit(cands, headAt, folds, keep, limit, d.fold)
+		if rows != nil {
+			return rows, headsNow, hidden
+		}
+	}
+	return nil, 0, 0
+}
+
+// dockEmit paints the first keep candidate rows and reports whether the result
+// still fits limit. The markers a cut requires are appended here, so the fit test
+// cannot lie about its own cost; a nil rows means "this prefix is too generous,
+// try a shorter one".
+func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int, fold int8) (rows []string, heads, hidden int) {
+	// Candidate rows each section kept, counting its heading.
+	kept := make([]int, len(folds))
+	for _, c := range cands[:keep] {
+		if c.fold >= 0 {
+			kept[c.fold]++
+		}
+	}
+	for i, f := range folds {
+		hidden += len(f.rows) - max(kept[i]-1, 0)
+	}
+	out := make([]string, 0, keep+2*len(folds))
+	for i, f := range folds {
+		if headAt[i] >= keep {
+			continue // its heading fell off too: counted, never half-painted
+		}
+		if i > 0 {
+			out = append(out, "")
+		}
+		out = append(out, cands[headAt[i]].text)
+		heads++
+		shown := max(kept[i]-1, 0)
+		for j := 0; j < shown; j++ {
+			out = append(out, cands[headAt[i]+1+j].text)
+		}
+		// A folded section explains itself in the summary, not row by row.
+		if cut := len(f.rows) - shown; cut > 0 && (shown > 0 || fold != foldShut) {
+			out = append(out, dockClip(fmt.Sprintf(" +%d more", cut)))
+		}
+	}
+	if hidden > 0 {
+		note := fmt.Sprintf("%d rows not shown · ctrl+t folds", hidden)
+		if fold == foldShut {
+			note = fmt.Sprintf("%d rows folded away · ctrl+t opens them", hidden)
+		}
+		out = append(out, "", dockClip(note))
+	}
+	if len(out) > limit {
+		return nil, 0, hidden
+	}
+	return out, heads, hidden
+}
+
+// Fold states; the zero value lets each section decide itself.
+const (
+	foldAuto = int8(iota)
+	foldOpen
+	foldShut
+)
+
+func dockGap(i int) int {
+	if i == 0 {
+		return 0
+	}
+	return 1
+}
+
+func dockAppend(rows []string, more ...string) []string { return append(rows, more...) }
+
+// dockClip fits one line to the panel's interior with the package's clip():
+// truncate, never wrap. A list row is a path or a one-line status, and a wrapped
+// path is worse than an ellipsis; the plan document reads head-first, so a cut
+// line scrolls off rather than pushing the rows below it out of the panel.
+func dockClip(s string) string { return clip(strings.TrimRight(s, " "), dockInner) }
+
+// --- geometry ---
+
+// dockOn reports whether the panel paints this frame, and so whether anything
+// else may use its columns. Callers hold a.mu.
+//
+// Three refusals, each one a promise to the human rather than to the panel: the
+// welcome screen owns the right pane until a session exists; a terminal too narrow
+// to leave the prompt its floor keeps its full width even when pinned open; and a
+// terminal too short to hold a box reserves nothing, because columns given up for
+// an empty band are a cost with no product. The band's height is measured from the
+// composer, which wraps at its own full width and never at rightEdge, so this
+// predicate does not run in a circle with the layout it gates.
+func (a *App) dockOn() bool {
+	if len(a.blocks) == 0 {
+		return false
+	}
+	if a.width < dockCols+dockMin || !a.dock.visible(a.width) {
+		return false
+	}
+	_, h := a.dockGrid()
+	return h > 0
+}
+
+// dockReserve is the width every other surface lays out against: zero with the
+// panel closed, the panel's columns with it open.
+func (a *App) dockReserve() int {
+	if !a.dockOn() {
+		return 0
+	}
+	return dockCols
+}
+
+// rightEdge is the last screen column the transcript band may paint in — its
+// fills, its timestamps, its scrollbar, and the width its rows are wrapped at.
+// The composer, the info divider and the status row deliberately keep the full
+// terminal: the panel lives inside the transcript's rows and nothing else, so
+// opening it never squeezes the surface a human types into. A terminal too narrow
+// to give up the columns keeps its full width — the panel loses that argument.
+func (a *App) rightEdge() int {
+	r := a.width - a.dockReserve()
+	if r < 20 {
+		return 20
+	}
+	return r
+}
+
+// dockGrid returns the band the panel paints into: the transcript's rows, so it
+// starts under the top bar and stops above the composer's box.
+func (a *App) dockGrid() (top, h int) {
+	top = a.transcriptTop()
+	h = a.height - 2 - a.composerRows() - top
+	if h < 5 {
+		return top, 0
+	}
+	return top, h
+}
+
+// --- paint ---
+
+// drawDock paints the box, the rows the build made and the band they were
+// budgeted for. Caller holds a.mu and has run dockBuild for this frame.
+func (a *App) drawDock(s tcell.Screen, x, top, h int) {
+	if h <= 0 {
+		return
+	}
+	d := a.dock
+	th := a.th
+	border := tcell.StyleDefault.Foreground(a.cellColor(th.Get(theme.Border)))
+	body := tcell.StyleDefault
+	if bg, ok := th.Slot(theme.BgBase); ok {
+		body = body.Background(a.cellColor(bg))
+	}
+	ink := body.Foreground(a.cellColor(th.Get(theme.TextPrimary)))
+	dim := body.Foreground(a.cellColor(th.Get(theme.GrayDim)))
+	for y := top; y < top+h; y++ {
+		for cx := x; cx < x+dockCols; cx++ {
+			ch, st := ' ', body
+			switch {
+			case cx == x || cx == x+dockCols-1:
+				ch, st = '│', border
+			case y == top || y == top+h-1:
+				ch, st = '─', border
+			}
+			s.SetContent(cx, y, ch, nil, st)
+		}
+	}
+	head := "CONTEXT"
+	switch d.heads {
+	case 0:
+	case 1:
+		head = "CONTEXT · 1 section"
+	default:
+		head = fmt.Sprintf("CONTEXT · %d sections", d.heads)
+	}
+	drawText(s, x+2, top, dockClip(head), dim.Bold(true))
+	for i, l := range d.lines {
+		y := top + 1 + i
+		if y >= top+h-1 {
+			break
+		}
+		drawText(s, x+1, y, l, ink)
+	}
+}
+
+// --- keys ---
+
+// dockKey routes the panel's two chords, called from the keymap's action switch —
+// which runs after every modal handler, so the dock can never take a key from a
+// card or a picker. The panel holds no focus of its own: a fold is a display
+// state, so the transcript still scrolls and the composer still types beside it.
+func (a *App) dockKey(action string) bool {
+	switch action {
+	case "dock-cycle":
+		a.dockCycle()
+	case "dock-fold":
+		a.dockFoldCycle()
+	default:
+		return false
+	}
+	return true
+}
+
+// dockFoldCycle walks the section states: source-decided, all open, all but the
+// pending document shut, and back. The proposal is never folded away — the human
+// is being asked something, and a fold that hides the question has answered it.
+func (a *App) dockFoldCycle() {
+	a.mu.Lock()
+	d := a.ensureDock()
+	d.fold = (d.fold + 1) % 3
+	d.lines = nil // the fold state is what the row budget depends on
+	a.mu.Unlock()
+	a.poke()
+}

@@ -14,7 +14,9 @@ import (
 // read tool serves the pending plan, and the write seam finalizes it
 // (write xd://resolve / xd://reject — omp naming parity, #36).
 func TestXDProposeDevicesInRegistry(t *testing.T) {
-	pm := &agent.PlanMode{Active: true, Pending: "1. patch planmode.go\n2. run the tests"}
+	pm := &agent.PlanMode{}
+	pm.SetActive(true)
+	pm.Publish("1. patch planmode.go\n2. run the tests")
 	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, pm)
 
 	rt, ok := reg.Get("read")
@@ -36,15 +38,16 @@ func TestXDProposeDevicesInRegistry(t *testing.T) {
 	if !strings.Contains(text, "plan approved") {
 		t.Fatalf("resolve text = %q", text)
 	}
-	if pm.Active || pm.Pending != "" {
-		t.Fatalf("resolve left active=%v pending=%q", pm.Active, pm.Pending)
+	if pm.Active() || pm.Pending() != "" {
+		t.Fatalf("resolve left active=%v pending=%q", pm.Active(), pm.Pending())
 	}
 
-	pm.Active, pm.Pending = true, "plan B"
+	pm.SetActive(true)
+	pm.Publish("plan B")
 	if _, handled, err := tool.WriteURI("xd://reject", "revise step 2"); err != nil || !handled {
 		t.Fatalf("write xd://reject: handled=%v err=%v", handled, err)
 	}
-	if !pm.Active {
+	if !pm.Active() {
 		t.Fatal("reject must leave plan mode on so the model revises")
 	}
 }

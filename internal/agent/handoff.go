@@ -382,8 +382,8 @@ func writeHandoffDoc(dir, sessionID, doc string) (string, error) {
 // applies the same two steps to its caller's prompt, so a side request built
 // through liveRequest shares the live prefix byte-for-byte.
 func (a *Agent) liveSystem(system string) string {
-	if a.PlanMode != nil && a.PlanMode.Active {
-		system += "\n\n" + planModeSystemReminder(a.PlanMode.Note)
+	if a.PlanMode != nil && a.PlanMode.Active() {
+		system += "\n\n" + planModeSystemReminder(a.PlanMode.Note())
 	}
 	return a.goalSystem(system)
 }
@@ -409,17 +409,6 @@ func (a *Agent) liveRequest(system string, history []ai.Message, tools []ai.Tool
 		req.Messages = redactMessages(history, a.Redactor)
 	}
 	return req
-}
-
-// Reset leaves plan mode. Declared here (not planmode.go) because the handoff
-// is its consumer: a handed-off context must not keep a pending proposal the
-// document already captured — the host re-enters with /plan.
-func (pm *PlanMode) Reset() {
-	if pm == nil {
-		return
-	}
-	pm.Active = false
-	pm.Pending = ""
 }
 
 // cacheOpts is the prompt-cache identity of this session's requests: the stable
