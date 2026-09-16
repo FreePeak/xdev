@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // screenRows dumps the simulation screen as text for failure messages.
@@ -25,12 +27,12 @@ func screenRows(scr tcell.SimulationScreen) string {
 }
 func treeTestEntries() []TreeEntry {
 	return []TreeEntry{
-		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Depth: 0},
-		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan", Depth: 1},
-		{ID: "33333333cccc", Type: "message", Role: "toolResult", Summary: "bash: ls", Depth: 2},
-		{ID: "44444444dddd", Type: "model_change", Summary: "onegw/free", Depth: 2},
-		{ID: "55555555eeee", Type: "custom", Summary: "(branch)", Depth: 2},
-		{ID: "66666666ffff", Type: "message", Role: "user", Summary: "Try approach A", Depth: 1, Active: true},
+		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task"},
+		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan"},
+		{ID: "33333333cccc", Type: "message", Role: "toolResult", Summary: "bash: ls"},
+		{ID: "44444444dddd", Type: "model_change", Summary: "onegw/free"},
+		{ID: "55555555eeee", Type: "custom", Summary: "(branch)"},
+		{ID: "66666666ffff", Type: "message", Role: "user", Summary: "Try approach A", Active: true},
 	}
 }
 
@@ -70,10 +72,10 @@ func TestTreeSelectorRendersBulletAndLabel(t *testing.T) {
 	app, scr, _ := openTreeTestApp(t, treeTestEntries(), map[string]string{"22222222bbbb": "milestone"})
 	app.draw()
 
-	if !gridContains(scr, "→ 66666666 message Try approach A") {
+	if !gridContains(scr, "→ user    66666666 Try approach A") {
 		t.Fatalf("active leaf row missing from screen:\n%s", screenRows(scr))
 	}
-	if !gridContains(scr, "[milestone] 22222222 message Plan") {
+	if !gridContains(scr, "  agent   [milestone] 22222222 Plan") {
 		t.Fatalf("label row missing from screen:\n%s", screenRows(scr))
 	}
 	if !gridContains(scr, "session tree · filter:default") {
@@ -269,24 +271,98 @@ func TestTreeSelectorEnterSwitchesAndSummarizes(t *testing.T) {
 func TestTreeSelectorDoubleEscape(t *testing.T) {
 	app, _, _ := openTreeTestApp(t, treeTestEntries(), nil)
 	app.CloseTreeSelector()
+	esc := func() {
+		app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	}
 
-	// Claude-Code double-Esc: with a draft the first press only parks the
-	// draft; the next press (empty composer) opens the rewind picker.
+	// The Esc ladder: clear the draft (and keep it) → give it back → clear
+	// again → open the rewind picker. A press never both restores and opens:
+	// the user who fat-fingers Esc wants the prompt back, not a modal over
+	// the top of it.
 	typeRunes(app, "draft")
-	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	esc()
 	if app.TreeSelectorOpen() {
 		t.Fatal("Esc with a non-empty composer must not open the selector")
 	}
 	if app.ed.Text() != "" {
 		t.Fatalf("first Esc must clear the draft, got %q", app.ed.Text())
 	}
-	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
-	if !app.TreeSelectorOpen() {
-		t.Fatal("Esc on an empty composer must open the selector")
-	}
-	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	esc()
 	if app.TreeSelectorOpen() {
-		t.Fatal("second Esc must close the selector")
+		t.Fatal("Esc with an Esc-undoable draft must restore it, not open the selector")
+	}
+	if app.ed.Text() != "draft" {
+		t.Fatalf("second Esc must bring the prompt back, got %q", app.ed.Text())
+	}
+	esc() // the restored draft gets its one undo's worth: cleared again
+	if app.ed.Text() != "" {
+		t.Fatalf("third Esc must clear the restored draft, got %q", app.ed.Text())
+	}
+	esc()
+	if !app.TreeSelectorOpen() {
+		t.Fatal("with nothing left to undo, Esc must open the selector")
+	}
+	esc()
+	if app.TreeSelectorOpen() {
+		t.Fatal("Esc must close the selector")
+	}
+}
+
+// The stash always holds what the LAST Esc cleared, and each draft gets its
+// own one-undo: text typed over a stash replaces it on the next clear (so Esc
+// is "undo my last Esc", never a resurrection of a prompt the user abandoned),
+// and a send retires it — a prompt that surfaces after the user moved on
+// duplicates text nobody typed.
+func TestEscapeDraftStashDiesOnEdit(t *testing.T) {
+	app, _, _ := openTreeTestApp(t, treeTestEntries(), nil)
+	app.CloseTreeSelector()
+	esc := func() {
+		app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	}
+
+	typeRunes(app, "stashed")
+	esc() // clear + stash
+	typeRunes(app, "typed")
+	esc() // the new draft clears AND re-stashes: the stash is the last Esc, not the first
+	if app.ed.Text() != "" {
+		t.Fatalf("Esc over a typed draft must clear it, got %q", app.ed.Text())
+	}
+	esc()
+	if app.ed.Text() != "typed" {
+		t.Fatalf("Esc must restore what the last Esc cleared, got %q", app.ed.Text())
+	}
+	// Editing the handed-back draft buys it a fresh undo: Esc after an edit
+	// must not delete what the user just fixed.
+	typeRunes(app, " v2")
+	esc()
+	if app.ed.Text() != "" {
+		t.Fatalf("Esc must clear the edited draft, got %q", app.ed.Text())
+	}
+	esc()
+	if app.ed.Text() != "typed v2" {
+		t.Fatalf("the edited draft got its own undo, got %q", app.ed.Text())
+	}
+	esc() // the restored draft's single undo is spent: cleared for real
+	esc()
+	if app.ed.Text() != "" {
+		t.Fatalf("a spent undo must not blink the text back, got %q", app.ed.Text())
+	}
+	if !app.TreeSelectorOpen() {
+		t.Fatal("with nothing left to undo, Esc must open the selector")
+	}
+
+	// A send retires the stash too.
+	app.CloseTreeSelector()
+	typeRunes(app, "one")
+	esc() // stash "one"
+	typeRunes(app, "two")
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	esc() // empty + retired: the picker, not "one" resurrected after "two"
+	if app.ed.Text() != "" {
+		t.Fatalf("a sent draft must retire the stash, got %q", app.ed.Text())
+	}
+	if !app.TreeSelectorOpen() {
+		t.Fatal("Esc after a send must open the selector")
 	}
 }
 
@@ -360,8 +436,8 @@ func TestTreeRewindReprimesComposer(t *testing.T) {
 // TestTreeSelectorEnterSwitchesAndSummarizes.)
 func TestTreeSelectorAlreadyAtThisPoint(t *testing.T) {
 	entries := []TreeEntry{
-		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task", Depth: 0},
-		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan", Depth: 1, Active: true},
+		{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "Start task"},
+		{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "Plan", Active: true},
 	}
 	app, _, _ := openTreeTestApp(t, entries, nil)
 	var navs []string
@@ -498,30 +574,49 @@ func TestTreeSelectorNoDataNoOpen(t *testing.T) {
 	}
 }
 
-// A long-running session is a linear parent chain: every user turn, assistant
-// turn, tool call and tool result is one entry deeper, so real transcripts
-// reach depths in the hundreds. Two cells per level put ~1.4k cells of gutter
-// before the row's own text: the content started past the panel edge and past
-// the screen width, and the overflow wrecked the rows below it (probe: a long
-// drawText at y keeps painting onto y+1). The newest rows — the ones the
-// navigator exists to reach — showed blank gutter instead of their entry. The
-// gutter is a hint (the branch structure lives in parentId), so it is capped
-// and the content stays.
-func TestTreeRowIndentIsCapped(t *testing.T) {
-	sum := strings.Repeat("x", 60) // the real summaries are clipped this long
-	deep := treeRowText(TreeEntry{ID: "aaaaaaaaaaaa", Type: "message", Depth: 722, Summary: sum}, "")
-	if !strings.HasPrefix(deep, strings.Repeat("  ", treeIndentCap)) {
-		t.Fatalf("capped row lost its gutter: %q", deep)
+// The row gutter is gone: depth was the parent-chain length and a long run is
+// one linear chain (a 724-entry session ends at depth 722), so two cells per
+// level put ~1.4k cells before a row's own text — the newest rows, the ones the
+// navigator exists to reach, painted as a wall of blank gutter, and the overflow
+// wrecked the row below (probe: a long drawText at y keeps painting onto y+1).
+// In its place: rows start flush left and open with an eight-cell author tag,
+// because "user or agent" is the question the panel is read to answer.
+func TestTreeRowIsFlushLeftWithRoleTag(t *testing.T) {
+	sum := strings.Repeat("x", 60) // real summaries are clipped this long
+	deep := treeRowText(TreeEntry{ID: "aaaaaaaaaaaa", Type: "message", Role: "user", Summary: sum}, "")
+	if !strings.HasPrefix(deep, "user    ") {
+		t.Fatalf("user row = %q, want the role tag first, no gutter", deep)
 	}
-	// The selector's interior is min(width-4, 120) cells; anything past the
-	// panel edge is cut off and past the screen width is dropped entirely.
+	// The selector's interior is min(width-4, 120) cells: anything past the
+	// panel edge is cut off and past the screen width drops onto the next row.
 	if width(deep) >= 120 {
-		t.Fatalf("deep row is %d cells, too wide for the panel: %q", width(deep), deep)
+		t.Fatalf("row is %d cells, too wide for the panel: %q", width(deep), deep)
 	}
-	// A shallow row is untouched — the cap is a ceiling, not a rewrite.
-	// depth(2 levels) + the selection mark's two cells, then the content.
-	if got := treeRowText(TreeEntry{ID: "bbbbbbbb", Type: "message", Depth: 2}, ""); got != "      bbbbbbbb message " {
-		t.Fatalf("shallow row = %q, want two levels of indent plus the mark", got)
+	// Every tag is the same width, so ids and summaries form a column whether
+	// or not a label is present — the point of a fixed tag.
+	for _, e := range []TreeEntry{
+		{ID: "bbbbbbbb", Type: "message", Role: "assistant"},
+		{ID: "cccccccc", Type: "message", Role: "toolResult", Summary: "bash: ls"},
+		{ID: "dddddddd", Type: "model_change", Summary: "onegw/free"},
+		{ID: "eeeeeeee", Type: "custom", Summary: "(branch)"},
+		{ID: "ffffffffff", Type: "compaction", Summary: "(compaction)"},
+		{ID: "11111111", Type: "branch_summary"},
+		{ID: "22222222", Type: "message", Role: "weird"},
+	} {
+		tag := treeRoleTag(e)
+		if width(tag) != 8 {
+			t.Fatalf("tag %q for %+v is %d cells, want 8", tag, e, width(tag))
+		}
+		if got := treeRowText(e, "mile"); !strings.HasPrefix(got, tag+"[mile] ") {
+			t.Fatalf("row = %q, want %q then the label", got, tag)
+		}
+	}
+	// Colour matches the transcript, and the split is legible without it.
+	if slot := treeRoleSlot(TreeEntry{Type: "message", Role: "user"}); slot != theme.AccentUser {
+		t.Fatalf("user slot = %q, want the user accent", slot)
+	}
+	if slot := treeRoleSlot(TreeEntry{Type: "message", Role: "assistant"}); slot != theme.AccentAssistant {
+		t.Fatalf("assistant slot = %q, want the assistant accent", slot)
 	}
 }
 
@@ -534,10 +629,10 @@ func TestTreeSelectorOpensOnTheNewestRow(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.SetTreeData(func() []TreeEntry {
 		return []TreeEntry{
-			{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "first prompt", Depth: 0},
-			{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "answer", Depth: 1},
+			{ID: "11111111aaaa", Type: "message", Role: "user", Summary: "first prompt"},
+			{ID: "22222222bbbb", Type: "message", Role: "assistant", Summary: "answer"},
 			// The leaf: a branch marker, invisible to the default filter.
-			{ID: "33333333cccc", Type: "custom", Summary: "(branch)", Depth: 2, Active: true},
+			{ID: "33333333cccc", Type: "custom", Summary: "(branch)", Active: true},
 		}
 	})
 	app.OpenTreeSelector()
