@@ -544,25 +544,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return deleteSessionByShortID(id, store.Path())
 	})
 	app.SetResumeList(func(cwd string) error {
-		metas, err := session.List(sessionDataDir())
-		if err != nil {
-			return nil
-		}
-		out := make([]tui.ResumeOption, 0, 12)
-		for _, m := range metas {
-			if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
-				continue
-			}
-			out = append(out, tui.ResumeOption{
-				ID:      m.ID,
-				Title:   m.Title,
-				Detail:  humanSize(m.SizeBytes) + " · " + m.ModTime.Format("Jan 02 15:04"),
-				Current: m.ID == store.ID(),
-			})
-			if len(out) >= 12 {
-				break
-			}
-		}
+		// The rows here are the session picker's; the closure used to also
+		// build a []tui.ResumeOption that nothing read, at the price of a
+		// second full session.List on every call.
 		items := resumePickerItems(cwd)
 		if len(items) == 0 {
 			app.AddSystemBlock("no other sessions in this directory")
@@ -943,10 +927,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent || m.ID == store.ID() {
 					continue
 				}
+				// The status closes the detail so the row says what happened to
+				// the session (#107) before the user resumes it.
+				detail := m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04")
+				if m.Status != "" {
+					detail += " · " + string(m.Status)
+				}
 				out = append(out, tui.ResumeOption{
 					ID:     m.ID,
 					Title:  m.Title,
-					Detail: m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04"),
+					Detail: detail,
 				})
 				if len(out) >= 12 {
 					break
@@ -2216,6 +2206,7 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 			Size:   humanSize(m.SizeBytes),
 			Pinned: pins[m.ID[:8]],
 			InCwd:  m.CWD == cwd,
+			Status: string(m.Status),
 		})
 		if len(out) >= 50 {
 			break

@@ -669,3 +669,73 @@ func TestPickerMouseWheelAndClick(t *testing.T) {
 		t.Fatal("the click also started a text selection behind the panel")
 	}
 }
+
+// TestSessionPickerRowCarriesStatus: the lifecycle badge closes the row, so a
+// session the user killed mid-turn is legible before Enter (#107).
+func TestSessionPickerRowCarriesStatus(t *testing.T) {
+	done := sessionPickerRowText(SessionPickerItem{
+		ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", Status: "done",
+	})
+	if !strings.HasSuffix(done, "done") {
+		t.Fatalf("row does not end on the status: %q", done)
+	}
+	cut := sessionPickerRowText(SessionPickerItem{
+		ID: "bbbb2222", Title: "alpha parser notes", Mtime: "Jan 02 15:04", Size: "2 KB", Status: "interrupted",
+	})
+	if !strings.HasSuffix(cut, "interrupted") {
+		t.Fatalf("row does not end on the status: %q", cut)
+	}
+	if !strings.Contains(cut, "interrupted") || strings.Contains(done, "interrupted") {
+		t.Fatalf("statuses bled between rows: %q / %q", done, cut)
+	}
+	// An unclassified row (a caller that never read a tail) stays as it was.
+	plain := sessionPickerRowText(SessionPickerItem{ID: "cccc3333", Title: "t", Mtime: "Jan 02 15:04", Size: "3 KB"})
+	if want := "cccc3333  t  Jan 02 15:04  3 KB"; plain != want {
+		t.Fatalf("unclassified row = %q, want %q", plain, want)
+	}
+}
+
+// TestSessionPickerDrawsStatus: the badge reaches the screen, not just the row
+// builder — the window/clip path must not eat the trailing column.
+func TestSessionPickerDrawsStatus(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	app.OpenSessionPicker([]SessionPickerItem{
+		{ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", InCwd: true, Status: "done"},
+		{ID: "bbbb2222", Title: "alpha notes", Mtime: "Jan 02 15:04", Size: "2 KB", InCwd: true, Status: "interrupted"},
+	})
+	app.draw()
+	if !gridContains(scr, "done") {
+		t.Fatal("done badge not drawn")
+	}
+	if !gridContains(scr, "interrupted") {
+		t.Fatal("interrupted badge not drawn")
+	}
+}
+
+// TestResumeSessionPickerShowsStatus: no-arg /resume opens the generic picker
+// over ResumeOption, so the lifecycle badge has to survive into Detail — the
+// live surface, not just the session picker (#107).
+func TestResumeSessionPickerShowsStatus(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	app.SetSessionOps(&SessionOps{
+		Resume: func(string) error { return nil },
+		Recent: func() []ResumeOption {
+			return []ResumeOption{
+				{ID: "aaaa1111", Title: "finished work", Detail: "aaaa1111 · Jan 02 15:04 · done"},
+				{ID: "bbbb2222", Title: "killed work", Detail: "bbbb2222 · Jan 02 15:04 · interrupted"},
+			}
+		},
+	})
+	if err := app.ResumeSession(""); err != nil {
+		t.Fatal(err)
+	}
+	if !app.PickerOpen() {
+		t.Fatal("/resume with no argument must open the picker")
+	}
+	app.draw()
+	for _, want := range []string{"done", "interrupted"} {
+		if !gridContains(scr, want) {
+			t.Fatalf("status %q not drawn on the resume picker", want)
+		}
+	}
+}
