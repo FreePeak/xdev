@@ -157,7 +157,10 @@ func jobInstall(version string, out, errw io.Writer) int {
 func jobInstalledMessage(exe string, out io.Writer) {
 	fmt.Fprintf(out, "job installed: %s — %s update --check at %02d:00 and %02d:00\n",
 		jobName(), exe, checkHours[0], checkHours[1])
-	fmt.Fprintf(out, "  record: %s\n", CheckPath())
+	// Neither launchd nor a systemd timer starts a job it has just enabled, so
+	// say when the first one happens instead of letting the user guess.
+	fmt.Fprintf(out, "  first run at the next %02d:00 or %02d:00; %s until then\n",
+		checkHours[0], checkHours[1], CheckPath())
 	fmt.Fprintf(out, "  stop it with: xdev update job remove\n")
 }
 
