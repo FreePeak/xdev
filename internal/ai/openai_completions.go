@@ -398,7 +398,7 @@ func (p *OpenAICompletionsProvider) stream(ctx context.Context, r io.Reader, mod
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(frame.Data), &chunk); err != nil {
-			fail(Errorf(fmt.Errorf("openai-completions: decode chunk: %w", err)))
+			fail(Errorf(malformedStream("openai-completions", "decode chunk", err)))
 			return
 		}
 		if response == "" {

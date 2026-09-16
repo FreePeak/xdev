@@ -381,7 +381,7 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 		}
 		var gr googleResponse
 		if err := json.Unmarshal([]byte(data), &gr); err != nil {
-			fail(Event{Type: EventError, Err: fmt.Errorf("%s: bad chunk: %w", p.API(), err)})
+			fail(Event{Type: EventError, Err: malformedStream(p.API(), "bad chunk", err)})
 			return
 		}
 		if gr.Error != nil && gr.Error.Message != "" {

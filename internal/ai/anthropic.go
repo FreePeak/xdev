@@ -451,7 +451,7 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 			return
 		}
 		if err := json.Unmarshal([]byte(frame.Data), &data); err != nil {
-			fail(Errorf(fmt.Errorf("anthropic-messages: decode event: %w", err)))
+			fail(Errorf(malformedStream("anthropic-messages", "decode event", err)))
 			return
 		}
 		switch data.Type {

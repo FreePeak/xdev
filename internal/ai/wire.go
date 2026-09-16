@@ -61,6 +61,14 @@ func wireErrBody(r io.Reader) string {
 	return strings.Join(strings.Fields(string(buf[:n])), " ")
 }
 
+// malformedStream wraps a wire-decode failure in ErrMalformedStream. The
+// rendered text keeps the "<api>: <stage>: <json error>" shape the adapters
+// have always reported, with the sentinel's own text in the middle so a log
+// reader can tell a mangled body from a rejected request.
+func malformedStream(api, stage string, err error) error {
+	return fmt.Errorf("%s: %w: %s: %v", api, ErrMalformedStream, stage, err)
+}
+
 // reasoningEffort maps a thinking budget to the OpenAI reasoning-effort tier.
 func reasoningEffort(tokens int) string {
 	switch {
