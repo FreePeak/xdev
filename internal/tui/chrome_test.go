@@ -700,6 +700,111 @@ func TestAskCardDrawsQuestionAndOptions(t *testing.T) {
 	}
 }
 
+// TestAskCardWrapsLongOptionText: a label or a description longer than the card
+// wraps on screen instead of running under the right border, and the
+// description keeps its own indented lines (omp's shape). The words asserted
+// here sit past the old single-line cut, so this fails if the truncation comes
+// back.
+func TestAskCardWrapsLongOptionText(t *testing.T) {
+	app, scr := drawnApp(t, 100, 30)
+	req := AskRequest{
+		Question: "Which storage backend should the fix target?",
+		Options: []AskOption{
+			{
+				Label: "postgres, the shared instance every integration test in the repo already points at, which nobody on the team currently owns or patches",
+				Description: "a local file with no server to run, nothing to page anyone about, and no connection string " +
+					"to put in the environment or rotate on the schedule the platform team agreed to",
+			},
+			{Label: "mysql"},
+		},
+	}
+	// The recommended option is the OTHER one, so the cursor starts away from the
+	// wrapped row: a click on its continuation line proving the hit map works is
+	// then a real move, not the row the cursor was already on.
+	req.Recommended = []string{"mysql"}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.AskCard(context.Background(), req, 5*time.Second)
+		close(done)
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+	text := screenText(scr)
+	// Both wraps have to be on screen: the tail of the label, and the tail of
+	// the description's second line. The old single-line row cut them off at the
+	// border, so neither could appear.
+	for _, want := range []string{
+		"which nobody on the team currently owns or patches",
+		"rotate on the schedule the platform team agreed to",
+		"1-9 quick pick", // and the footer still fits beside them
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("card missing %q:\n%s", want, text)
+		}
+	}
+	var row, cont, desc1, desc2 string
+	for _, ln := range strings.Split(text, "\n") {
+		switch {
+		case strings.Contains(ln, "postgres, the shared instance"):
+			row = ln
+		case strings.Contains(ln, "which nobody on the team"):
+			cont = ln
+		case strings.Contains(ln, "a local file with no server"):
+			desc1 = ln
+		case strings.Contains(ln, "rotate on the schedule"):
+			desc2 = ln
+		}
+	}
+	if row == "" || cont == "" || desc1 == "" || desc2 == "" {
+		t.Fatalf("row=%q cont=%q desc1=%q desc2=%q\n%s", row, cont, desc1, desc2, text)
+	}
+	// The description is its own block, not a tail on the label's line: every
+	// wrapped line — the label's continuation and the description's lines alike —
+	// starts under the label's first character, which is what makes a wrapped row
+	// read as one option (omp's shape). Column of a byte offset, hence width().
+	at := strings.Index(row, "postgres, the shared instance")
+	if at < 0 {
+		t.Fatalf("row line lost its label: %q", row)
+	}
+	col := width(row[:at])
+	for _, ln := range []string{cont, desc1, desc2} {
+		if ind := width(ln) - width(strings.TrimLeft(ln, " ")); ind != col {
+			t.Fatalf("wrapped line %.40q starts at cell %d, want %d:\n%s", ln, ind, col, text)
+		}
+	}
+	// A click on the description's line selects that row: the wrapped lines are
+	// part of the row, not dead space between two of them.
+	if sel, _ := app.AskSelection(); sel != 1 {
+		t.Fatalf("cursor should start on the recommended row, got %d", sel)
+	}
+	clickAskRow(t, app, text, "rotate on the schedule")
+	if sel, _ := app.AskSelection(); sel != 0 {
+		t.Fatalf("clicking a row's description line must select that row, got %d\n%s", sel, text)
+	}
+	// Enter then answers with that row, proving the click landed on the row the
+	// user aimed at and not on its first line only.
+	pressKey(app, tcell.KeyEnter)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Enter must close the card")
+	}
+}
+
+// clickAskRow presses on the card line containing want, at the column its text
+// starts on (the byte offset a mouse report wants is a cell one).
+func clickAskRow(t *testing.T, app *App, text, want string) {
+	t.Helper()
+	for y, line := range strings.Split(text, "\n") {
+		if at := strings.Index(line, want); at >= 0 {
+			app.handleAskMouse(tcell.NewEventMouse(width(line[:at]), y, tcell.Button1, tcell.ModNone), true)
+			return
+		}
+	}
+	t.Fatalf("no card line contains %q:\n%s", want, text)
+}
+
 // TestAskCardQuickPickAndSkip: digits confirm, Esc skips with no labels, and
 // a timeout resolves as a skip so nothing can hang on an unattended card.
 func TestAskCardQuickPickAndSkip(t *testing.T) {
