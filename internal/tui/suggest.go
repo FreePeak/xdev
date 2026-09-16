@@ -38,16 +38,29 @@ func newSlashMenu() *slashMenu {
 }
 
 // pathPrefix is the composer text before the `@` token, so accepting a path
-// replaces just that token instead of clobbering the sentence.
+// replaces just that token instead of clobbering the sentence. pathDir is the
+// directory the token names: candidates are that directory's own entry names,
+// so accepting one has to splice the directory back on to build a mention that
+// resolves from the completion root.
 type menuState struct {
 	pathPrefix string
+	pathDir    string
 }
 
-// openPaths (re)builds the dropdown from a candidate list for @-completion.
+// openPaths (re)builds the dropdown from an ALREADY RANKED candidate list for
+// @-completion. The list is not re-scored: path candidates come back in the
+// order the menu must show them (directories first, then files — omp's order),
+// and running fuzzyScore over them again would rank a long directory name below
+// a short file name and undo that.
 func (m *slashMenu) openPaths(prefix, query string, items []suggestion) {
 	m.menuState.pathPrefix = prefix
+	m.menuState.pathDir, _ = splitPathQuery(query)
 	m.items = items
-	m.query(query)
+	m.match = m.match[:0]
+	for i := range items {
+		m.match = append(m.match, i)
+	}
+	m.sel = 0
 }
 
 // open (re)builds the item list from built-ins + discovered markdown
