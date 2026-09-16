@@ -62,6 +62,7 @@ var subcommands = map[string]bool{
 	"models": true, "search": true, "commit": true, "compress": true,
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
 	"usage": true, "ps": true, "token": true, "completions": true,
+	"connect":  true,
 	"worktree": true, "wt": true,
 	// Repository hook trust (#241): the review and the decision.
 	"trust": true, "distrust": true,
@@ -108,6 +109,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev config init-xdg [--data D --state D --cache D]  relocate the roots to XDG
   xdev trust|distrust      review and allow (or withhold) a repository's hooks (--list)
   xdev models [query]          resolved model catalog (--refresh re-discovers)
+  xdev connect [provider]      connect a catalog provider (--list shows them)
   xdev login | logout          Claude Pro/Max and Codex OAuth (PKCE browser flow)
   xdev lsp-config [list|validate]  language servers, resolved binaries
   xdev memory <sub>            show | stats | lessons | add | edit | export | import | scratchpad | clear
@@ -582,6 +584,9 @@ func main() {
 	// each prints its own usage and exits on its own.
 	if mode == "models" {
 		os.Exit(runModels(args))
+	}
+	if mode == "connect" {
+		os.Exit(runConnect(args))
 	}
 	if mode == "search" {
 		os.Exit(runSearch(args))
