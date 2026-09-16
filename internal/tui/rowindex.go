@@ -56,11 +56,10 @@ const (
 	toolAgedHead      = 8
 	toolAgedTail      = 8
 
-	thinkRecentBlocks = 2
-	thinkRecentHead   = 100
-	thinkRecentTail   = 40
-	thinkAgedHead     = 6
-	thinkAgedTail     = 0
+	// thinkBoxRows is a reasoning box's fixed body height. Reasoning used to
+	// trim head+tail by tier; a fixed window the wheel scrolls reads the same
+	// at every tier and keeps the transcript layout stable.
+	thinkBoxRows = 12
 )
 
 // blockRend is one block's render: the stamp of the inputs that produced it,
@@ -125,6 +124,26 @@ func (x *rowIndex) total() int32 {
 	return x.start[len(x.start)-1]
 }
 
+// blockAt is the block whose transcript rows contain row r, or -1 when there is
+// no such row. Binary search over the cumulative offsets, the same lookup
+// viewRows does for the viewport. Valid after sync.
+func (x *rowIndex) blockAt(r int32) int {
+	n := len(x.rend)
+	if n == 0 || r < 0 || r >= x.total() {
+		return -1
+	}
+	lo, hi := 0, n-1
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if x.start[mid+1] > r {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo
+}
+
 // --- stamps --------------------------------------------------------------
 
 // renderKey is the stamp of everything a block's render reads. A block whose
@@ -143,7 +162,7 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 		idx: i, kind: b.Kind, width: w, tlen: len(b.Text),
 		tool: b.ToolName, status: b.Status, stream: b.stream,
 		expanded: b.Expanded, age: age, trim: a.trimTier(i),
-		dlen: len(b.Diff),
+		dlen: len(b.Diff), thinkOff: b.ThinkOff,
 	}
 }
 
@@ -165,19 +184,11 @@ func toolWindow(tier int8) (head, tail int) {
 	return toolRecentHead, toolRecentTail
 }
 
-// thinkWindow is a thinking block's collapsed render window for a tier.
-func thinkWindow(tier int8) (head, tail int) {
-	if tier == tierAged {
-		return thinkAgedHead, thinkAgedTail
-	}
-	return thinkRecentHead, thinkRecentTail
-}
-
 // stampTiers walks the transcript backwards and assigns each block its trim
-// tier: the newest toolRecentResults results and thinkRecentBlocks thinking
-// blocks keep their full render window, everything older collapses. Counting
-// from the tail (rather than the head) is what keeps the boundary stable while
-// a turn streams: appending output flips exactly one aged-out block.
+// tier: the newest toolRecentResults results keep their full render window,
+// everything older collapses. Counting from the tail (rather than the head) is
+// what keeps the boundary stable while a turn streams: appending output flips
+// exactly one aged-out block.
 func (a *App) stampTiers() {
 	x := &a.rowIdx
 	n := len(a.blocks)
@@ -186,21 +197,14 @@ func (a *App) stampTiers() {
 	} else {
 		x.tier = x.tier[:n]
 	}
-	results, thinks := 0, 0
+	results := 0
 	for i := n - 1; i >= 0; i-- {
 		x.tier[i] = tierRecent
-		b := a.blocks[i]
-		switch {
-		case b.Kind == KindToolDone && !b.Expanded:
+		if b := a.blocks[i]; b.Kind == KindToolDone && !b.Expanded {
 			if results >= toolRecentResults {
 				x.tier[i] = tierAged
 			}
 			results++
-		case b.Kind == KindThinking:
-			if thinks >= thinkRecentBlocks {
-				x.tier[i] = tierAged
-			}
-			thinks++
 		}
 	}
 }
@@ -269,8 +273,6 @@ func (a *App) rowChrome(b *Block) (rail string, railS tcell.Style, ts string) {
 		return tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(slot)))
 	}
 	switch b.Kind {
-	case KindThinking:
-		rail, railS = "┃", railStyle(theme.AccentThinking)
 	case KindTool:
 		rail, railS = "┃", railStyle(theme.AccentTool)
 	case KindSystem:
@@ -278,9 +280,9 @@ func (a *App) rowChrome(b *Block) (rail string, railS tcell.Style, ts string) {
 	case KindAssistant:
 		rail, railS = "┃", railStyle(theme.AccentAssistant)
 	default:
-		// User rows carry their own ❯ band, and a finished result draws its
-		// own rounded frame — a rail beside either would read as a doubled
-		// line.
+		// User rows carry their own ❯ band, and a finished result or a
+		// reasoning box draws its own rounded frame — a rail beside any of
+		// them would read as a doubled line.
 	}
 	if !b.Ts.IsZero() && (b.Kind == KindUser || b.Kind == KindAssistant) {
 		ts = b.Ts.Format("3:04 PM")
