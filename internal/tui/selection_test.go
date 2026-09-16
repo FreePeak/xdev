@@ -45,9 +45,9 @@ func rowContaining(scr tcell.SimulationScreen, needle string) string {
 // caller holds a.mu; draw() is a separate step because it takes the lock
 // itself.
 func drag(app *App, x0, y0, x1, y1 int) {
-	app.handleMouse(tcell.NewEventMouse(x0, y0, tcell.Button1, tcell.ModNone))
-	app.handleMouse(tcell.NewEventMouse(x1, y1, tcell.Button1, tcell.ModNone))
-	app.handleMouse(tcell.NewEventMouse(x1, y1, tcell.ButtonNone, tcell.ModNone))
+	press(app, x0, y0)
+	dragTo(app, x1, y1)
+	release(app, x1, y1)
 }
 
 // contentRow returns the SCREEN row that rendered transcript text sits on:
@@ -149,7 +149,7 @@ func TestSelectionStaysHighlightedAfterRelease(t *testing.T) {
 	// The next press replaces the selection, and the old cells go back to
 	// normal video: exactly one highlight is ever on screen.
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(40, y, tcell.Button1, tcell.ModNone))
+	press(app, 40, y)
 	app.mu.Unlock()
 	app.draw()
 	if _, _, attr := cellStyle(scr, 5, y).Decompose(); attr&tcell.AttrReverse != 0 {
@@ -242,9 +242,9 @@ func TestShiftedDragIsLeftToTheTerminal(t *testing.T) {
 
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(3, y, tcell.Button1, tcell.ModShift))
-	app.handleMouse(tcell.NewEventMouse(10, y, tcell.Button1, tcell.ModShift))
-	app.handleMouse(tcell.NewEventMouse(10, y, tcell.ButtonNone, tcell.ModShift))
+	app.handleMouse(tcell.NewEventMouse(3, y, tcell.Button1, tcell.ModShift), true)
+	app.handleMouse(tcell.NewEventMouse(10, y, tcell.Button1, tcell.ModShift), false)
+	app.handleMouse(tcell.NewEventMouse(10, y, tcell.ButtonNone, tcell.ModShift), false)
 	shown, down := app.selShown, app.selDown
 	app.mu.Unlock()
 
@@ -267,15 +267,15 @@ func TestShiftCancelsAnInFlightSelection(t *testing.T) {
 
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(3, y, tcell.Button1, tcell.ModNone))
-	app.handleMouse(tcell.NewEventMouse(10, y, tcell.Button1, tcell.ModNone))
+	press(app, 3, y)
+	dragTo(app, 10, y)
 	if !app.selDown {
 		app.mu.Unlock()
 		t.Fatal("plain drag did not start a selection")
 	}
 	// Shift arrives mid-gesture (terminal-native selection takes over).
-	app.handleMouse(tcell.NewEventMouse(10, y, tcell.Button1, tcell.ModShift))
-	app.handleMouse(tcell.NewEventMouse(10, y, tcell.ButtonNone, tcell.ModShift))
+	app.handleMouse(tcell.NewEventMouse(10, y, tcell.Button1, tcell.ModShift), false)
+	app.handleMouse(tcell.NewEventMouse(10, y, tcell.ButtonNone, tcell.ModShift), false)
 	shown, down := app.selShown, app.selDown
 	app.mu.Unlock()
 
@@ -326,7 +326,7 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	// edge drag.
 	hdr := app.transcriptTop()
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(3, hdr, tcell.Button1, tcell.ModNone))
+	press(app, 3, hdr)
 	app.mu.Unlock()
 	app.draw()
 
@@ -335,12 +335,12 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	const scrolls, far = 5, 3 + len("L000") - 1
 	for range scrolls {
 		app.mu.Lock()
-		app.handleMouse(tcell.NewEventMouse(far, hdr+vp-1, tcell.Button1, tcell.ModNone))
+		dragTo(app, far, hdr+vp-1)
 		app.mu.Unlock()
 		app.draw() // the UI loop draws after every event; the cache fills here
 	}
 	app.mu.Lock()
-	app.handleMouse(tcell.NewEventMouse(far, hdr+vp-1, tcell.ButtonNone, tcell.ModNone))
+	release(app, far, hdr+vp-1)
 	app.mu.Unlock()
 
 	got := strings.Split(string(scr.GetClipboardData()), "\n")

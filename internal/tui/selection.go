@@ -22,7 +22,12 @@ import (
 // drag clears it instead of writing an empty string over the clipboard, the copy
 // is confirmed on the composer's info divider, and dragging past the top or
 // bottom row scrolls the transcript so one selection can cover more than a
-// screen.
+// screen. That scroll is time-driven, not event-driven (selEdgeTick): a real
+// pointer parked at the edge sends no further reports, since tcell strips the
+// SGR motion bit, and a scroll that stops when the hand stops is a scroll that
+// stops. The right-edge scrollbar answers the mouse too — a press there drags
+// the thumb instead of selecting, because that column is the viewport control,
+// not text.
 //
 // Selection covers every row the app paints: transcript, welcome, composer,
 // status, overlays. A gesture that starts in the transcript anchors its corners
@@ -62,21 +67,37 @@ type selCorner struct {
 // selGrace is how long the copy confirmation stays on the divider.
 const selGrace = 2 * time.Second
 
+// selEdgeDelay and selEdgeStep shape the held-drag edge auto-scroll: once the
+// pointer has sat on the transcript's first or last row for selEdgeDelay, the
+// viewport moves selEdgeStep rows per UI tick (33ms). A terminal's edge drag
+// scrolls continuously because the pointer keeps reporting motion even when it
+// cannot move further; tcell strips the SGR motion bit, so a parked pointer
+// sends nothing at all and the old one-row-per-event scroll stalled the instant
+// the hand stopped. The delay guards against a fast sweep across an edge row
+// turning a two-row selection into a page turn.
+const (
+	selEdgeDelay = 400 * time.Millisecond
+	selEdgeStep  = 2
+)
+
 // handleMouse routes mouse events for selection. Wheel stays with the scroll
 // model (its caller). The primary button drives the drag lifecycle: press starts
 // it, a drag with the button held extends it (scrolling the transcript at the
-// edges), release on ButtonNone finishes it and copies. Caller: UI thread
+// edges), release on ButtonNone finishes it and copies. `press` is the button's
+// rising edge, computed by the caller: tcell strips the SGR motion bit, so a
+// held drag reports Button1 exactly like a press does, and only the edge can
+// tell a gesture's first event from its continuations. Caller: UI thread
 // (handleKey, mu held). Shift-modified events are declined outright — see the
 // file comment: they belong to the terminal's native selection.
-func (a *App) handleMouse(m *tcell.EventMouse) {
+func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 	if m.Modifiers()&tcell.ModShift != 0 {
 		// Decline the gesture, and drop an in-flight one: a plain drag
 		// that picks up Shift mid-stroke gets no release we can act on
 		// (tcell reports it Shift-modified too), so the highlight would
 		// stay stuck on screen while the terminal makes its own
 		// selection on top of ours.
-		if a.selDown || a.selShown {
-			a.selDown, a.selShown = false, false
+		if a.selDown || a.selShown || a.selThumbDrag {
+			a.selDown, a.selShown, a.selThumbDrag = false, false, false
 			a.selAnchor, a.selEnd = selCorner{}, selCorner{}
 			a.selCache = nil
 			a.poke()
@@ -86,10 +107,30 @@ func (a *App) handleMouse(m *tcell.EventMouse) {
 	x, y := m.Position()
 	btn := m.Buttons()
 	switch {
-	case btn&tcell.Button1 != 0 && !a.selDown: // press
-		// A new press always takes over, held selection or not: the release
-		// of a drag whose terminal never reported the button up (released
-		// outside the window) must not leave the app wedged.
+	case btn&tcell.Button1 != 0 && (press || (!a.selDown && !a.selThumbDrag)): // press
+		// The rising edge names the press, because a held drag reports Button1
+		// like a press does. A report with no gesture in flight counts too: the
+		// release of a drag whose terminal never reported the button up
+		// (released outside the window) must not leave the app wedged, and a
+		// stale edge would swallow the gesture that should recover it.
+		a.selEdgeStop()
+		// A press on the scrollbar grabs the bar, not the text: the drag that
+		// follows moves the viewport, and the gesture owns no selection at all
+		// — the rows the painter recorded belong to the frame the bar was hit
+		// in, which is exactly the frame a thumb drag exists to change. So this
+		// branch never touches selDown: the bar cannot start a copy. It does
+		// drop a highlight still held from an earlier drag, because the bar is
+		// about to slide the rows out from under it.
+		if grip, ok := a.selBarAt(x, y); ok {
+			a.selThumbDrag, a.selShown, a.selDown, a.selCache = true, false, false, nil
+			a.selGrab = max(0, grip) // where in the thumb the finger holds
+			if grip < 0 {
+				a.selThumbTo(y) // a track click jumps the thumb to the finger
+			}
+			a.poke()
+			break
+		}
+		a.selThumbDrag = false
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false // classify this corner by where it landed
@@ -97,13 +138,26 @@ func (a *App) handleMouse(m *tcell.EventMouse) {
 		a.selDocMode = a.selAnchor.doc >= 0
 		a.selEnd = a.selAnchor
 		a.poke()
+	case btn&tcell.Button1 != 0 && a.selThumbDrag: // thumb drag on the scrollbar
+		a.selThumbTo(y)
+		a.poke()
 	case btn&tcell.Button1 != 0 && a.selDown: // drag
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
 		a.poke()
-	case btn&tcell.Button1 == 0 && a.selDown: // release
+	case btn == tcell.ButtonNone && a.selThumbDrag: // thumb released
+		// Dropping the bar leaves the viewport where it was dragged and the
+		// highlight that was already up: the gesture was never a selection.
+		a.selThumbDrag = false
+		a.poke()
+	// A release is "no button at all", not merely "not Button1": the wheel
+	// constants are separate bits (mouse.go), so a horizontal wheel report —
+	// which the caller has no binding for and hands here — would otherwise end a
+	// drag in flight and drop the rows the user had already covered.
+	case btn == tcell.ButtonNone && a.selDown: // release
 		a.selDown = false
+		a.selEdgeStop()
 		if a.selAnchor == a.selEnd {
 			// No motion: a click. Clear the highlight and leave the
 			// clipboard alone, exactly like every terminal does.
@@ -168,24 +222,147 @@ func (a *App) selCornerAt(x, y int) selCorner {
 	return c
 }
 
-// selAutoScroll scrolls the transcript one row when a held drag has reached its
-// top or bottom edge — a terminal's edge auto-scroll, and the only way a
-// selection can cover more than one screen. Dragging below the transcript (into
-// the composer's rows) counts as the bottom edge: the user is still pulling the
-// selection downward, and the rows that matter are the ones coming into view.
+// selAutoScroll extends a held drag by one auto-scroll step when it has reached
+// the transcript's top or bottom edge, then arms the timer that keeps it going:
+// a terminal's edge auto-scroll is the only way a selection can cover more than
+// one screen, and the pointer's own reports cannot drive it on their own (see
+// selEdgeTick).
 func (a *App) selAutoScroll(y int) {
-	_, vp := a.selViewport()
-	if vp <= 0 || !a.selDocMode {
-		return
+	a.selEdgeFrom(y)
+	a.selEdgeScroll(1) // one row per event, as a terminal's edge drag steps
+}
+
+// selEdgeAtY is which way a held selection drag is pushing the viewport: -1 at
+// the transcript's first row, +1 at its last, 0 anywhere else. Below the
+// transcript is +1 too — the user is still pulling the selection downward and
+// the rows arriving are the ones being selected. A gesture that is not anchored
+// to document rows has no viewport of its own to scroll, so it never reports a
+// direction.
+func (a *App) selEdgeAtY(y int) int {
+	if !a.selDocMode {
+		return 0
 	}
-	total := a.totalLinesLocked()
+	_, vp := a.selViewport()
+	if vp <= 0 {
+		return 0
+	}
 	hdr := a.transcriptTop()
 	switch {
 	case y <= hdr:
-		a.sm.ScrollUp(1, total, vp)
+		return -1
 	case y >= hdr+vp-1:
-		a.sm.ScrollDown(1, total, vp)
+		return 1
 	}
+	return 0
+}
+
+// selEdgeScroll moves the viewport n rows in the parked direction. Callers hold
+// a.mu.
+func (a *App) selEdgeScroll(n int) {
+	if a.selEdge == 0 {
+		return
+	}
+	total := a.totalLinesLocked()
+	_, vp := a.selViewport()
+	if vp <= 0 {
+		return
+	}
+	if a.selEdge < 0 {
+		a.sm.ScrollUp(n, total, vp)
+	} else {
+		a.sm.ScrollDown(n, total, vp)
+	}
+}
+
+// selEdgeFrom arms or disarms the timer-driven half of the edge auto-scroll: the
+// pointer parked on an edge row starts the clock, a pointer merely passing
+// through stops it again — which is what keeps a fast sweep across an edge row
+// from turning into a page turn. Callers hold a.mu.
+func (a *App) selEdgeFrom(y int) {
+	d := a.selEdgeAtY(y)
+	if d == 0 {
+		a.selEdgeStop()
+		return
+	}
+	if a.selEdge != d {
+		a.selEdge, a.selEdgeAt = d, time.Now()
+	}
+}
+
+// selEdgeStop disarms the held-drag auto-scroll (release, pointer back inside
+// the transcript). Callers hold a.mu.
+func (a *App) selEdgeStop() {
+	a.selEdge, a.selEdgeAt = 0, time.Time{}
+}
+
+// selEdgeTick drives the held-drag auto-scroll from the UI loop: while the
+// pointer sits on an edge row past the delay, every tick scrolls and extends the
+// selection by the rows that just arrived. Without it the pointer's own reports
+// are the only clock, and a hand that stops moving reports nothing — which is
+// exactly the gesture the feature is for. Callers hold a.mu; it reports whether
+// the tick did any work, so the loop knows to draw.
+func (a *App) selEdgeTick() bool {
+	if !a.selDown || a.selEdge == 0 {
+		return false
+	}
+	if time.Since(a.selEdgeAt) < selEdgeDelay {
+		return false
+	}
+	// ponytail: a release the terminal never reported (button up outside the
+	// window, on an emulator that withholds it) leaves the gesture held, so this
+	// scrolls to the end of the transcript and stops there — bounded, and the
+	// next press takes over. The upgrade path if that ever reads as a runaway is a
+	// per-gesture row cap here, not another timer.
+	before := a.sm.offset
+	a.selEdgeScroll(selEdgeStep)
+	if a.sm.offset == before {
+		return false // the transcript has no more rows that way: no repaint
+	}
+	a.selEnd = a.selCornerAt(a.selEnd.x, a.selEnd.y)
+	return true
+}
+
+// --- scrollbar --------------------------------------------------------------
+
+// selBarAt reports whether a press at (x, y) landed on the transcript's
+// scrollbar, and where inside the thumb the finger landed. The painter publishes
+// the bar's geometry every frame (like the picker's hit table), so the
+// hit-test is against what is on screen rather than a re-derivation that could
+// disagree with it. A press on the track beside the thumb brings the thumb to
+// the finger (grip 0, top under the pointer) instead of ignoring the click —
+// what every modern overlay bar does, and the one gesture that reaches a row
+// further away in a single press. Callers hold a.mu.
+func (a *App) selBarAt(x, y int) (int, bool) {
+	if !a.selBarOn || a.selBarW <= 0 || x != a.width-1 {
+		return 0, false
+	}
+	fy := y - a.transcriptTop() // the bar's own row space: 0 = first track row
+	if fy < 0 || fy >= a.selBarVP {
+		return 0, false
+	}
+	if grip := fy - a.selBarPos; grip >= 0 && grip < a.selBarThumb {
+		return grip, true // grabbed the thumb where it was held
+	}
+	return -1, true // the track: the caller brings the thumb to the finger now
+}
+
+// selThumbTo maps a pointer row on the bar to a viewport offset: the thumb's top
+// sits under the finger minus the grip taken at press, so grabbing the middle of
+// a long thumb and pulling keeps the middle under the pointer. The mapping
+// linearly inverts the painter's placement (scroll.go Scrollbar): row `pos` of
+// the bar's travel is offset maxOff-pos*maxOff/travel.
+func (a *App) selThumbTo(y int) {
+	travel := a.selBarVP - a.selBarThumb
+	if travel <= 0 {
+		return
+	}
+	pos := max(0, min(y-a.transcriptTop()-a.selGrab, travel))
+	maxOff := max(0, a.selBarTotal-a.selBarVP)
+	// Rounded, not truncated: the painter floors pos out of the offset, so a
+	// truncated inverse puts the thumb a row away from the finger after every
+	// move — the drift that makes a bar feel like it is fighting the pointer.
+	a.sm.offset = maxOff - (pos*maxOff+travel/2)/travel
+	a.sm.clamp(a.totalLinesLocked(), a.viewportLinesLocked())
 }
 
 // selCacheRows records the frame's transcript rows under their document numbers

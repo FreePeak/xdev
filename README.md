@@ -135,7 +135,10 @@ the live map.
 
 Scrolling never fights the stream: a scrolled viewport stays put while output
 arrives, and `▲ n ▼ n` shows how much is hidden. Mouse selection covers the
-whole screen and survives a scroll.
+whole screen and survives a scroll — hold the drag at the transcript's top or
+bottom edge and it keeps scrolling while you select, and the right-edge
+scrollbar drags like any other. Shift+drag hands the gesture back to the
+terminal's native selection.
 
 **Slash commands** dispatch at input-submit and never reach the model:
 
