@@ -249,10 +249,11 @@ type blockKey struct {
 	tool     string
 	status   string
 	stream   bool
-	expanded bool // result box: the Ctrl+O state changed the row set
+	expanded bool // box rows: the Ctrl+O state changed the row set
 	age      int64
 	trim     int8 // bounded middle trim: this block's render-window tier
 	dlen     int  // result box: a diff changes the row set without touching Text
+	thinkOff int  // reasoning box: the box's own scroll position
 }
 
 // New creates the App over an initialized screen.
@@ -585,15 +586,16 @@ func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome
 	a.poke()
 }
 
-// ToggleToolExpand flips the Ctrl+O state of the newest tool result, the one
-// the user is looking at on a tail-following transcript. It reports whether
-// there was a result to toggle, so the caller can stay silent instead of
-// claiming to have expanded an empty transcript.
-func (a *App) ToggleToolExpand() bool {
+// ToggleBoxExpand flips the Ctrl+O state of the newest boxed block — a finished
+// tool result or a reasoning box — the one the user is looking at on a
+// tail-following transcript. It reports whether there was a box to toggle, so
+// the caller can stay silent instead of claiming to have expanded an empty
+// transcript.
+func (a *App) ToggleBoxExpand() bool {
 	a.mu.Lock()
 	var found bool
 	for i := len(a.blocks) - 1; i >= 0; i-- {
-		if b := a.blocks[i]; b.Kind == KindToolDone {
+		if b := a.blocks[i]; b.Kind == KindToolDone || b.Kind == KindThinking {
 			b.Expanded = !b.Expanded
 			found = true
 			break
@@ -1654,9 +1656,13 @@ func (a *App) handleKey(ev tcell.Event) {
 			}
 			switch m.Buttons() {
 			case tcell.WheelUp:
-				a.scroll(3, false)
+				if !a.scrollThinkBox(m, false) {
+					a.scroll(3, false)
+				}
 			case tcell.WheelDown:
-				a.scroll(3, true)
+				if !a.scrollThinkBox(m, true) {
+					a.scroll(3, true)
+				}
 			default:
 				a.mu.Lock()
 				a.handleMouse(m, press)
@@ -1854,7 +1860,7 @@ func (a *App) handleKey(ev tcell.Event) {
 	case "expand":
 		// omp's ctrl+o. No result to reveal is silence, not a notice: the
 		// transcript must not claim to have expanded something.
-		a.ToggleToolExpand()
+		a.ToggleBoxExpand()
 		return
 	case "paste-image":
 		// omp's app.clipboard.pasteImage: the one paste no terminal can hand
@@ -2192,43 +2198,14 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		}
 	case KindThinking:
 		// Grok thinking.rs: "Thinking…" (running, with braille spinner) or
-		// "Thought for Xs" (done). Muted bold header; the reasoning body
-		// renders dimmed underneath while showThinking is on (issue #20).
+		// "Thought for Xs" (done), in the same rounded frame a finished tool
+		// result gets. Reasoning is the one block that can outgrow any screen,
+		// so the frame shows a fixed window the wheel scrolls and Ctrl+O drops
+		// (issue #20).
 		if !a.showThinking {
 			break
 		}
-		var hdr string
-		if b.stream {
-			hdr = "⠹ Thinking…"
-		} else if b.thinkDur > 0 {
-			hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
-		} else {
-			hdr = "Thought"
-		}
-		lines = append(lines, textline(hdr, stThinkingHdr(a, b.stream)))
-		body := strings.TrimRight(b.Text, "\n")
-		if body == "" {
-			break
-		}
-		// Bounded middle trim: the newest thinking blocks keep the full render
-		// window (PRD row budget); aged ones collapse to a head slice plus the
-		// elided-row count. The full reasoning always stays in the session JSONL.
-		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-		rows := wrap(body, max(10, w-4))
-		headRows, tailRows := thinkWindow(a.trimTier(i))
-		if len(rows) > headRows+tailRows+1 {
-			for _, wl := range rows[:headRows] {
-				lines = append(lines, textline("  "+wl, bodySt))
-			}
-			lines = append(lines, textline(fmt.Sprintf("  … %d rows elided (full reasoning in the session log) …", len(rows)-headRows-tailRows), stThinkingHdr(a, false)))
-			for _, wl := range rows[len(rows)-tailRows:] {
-				lines = append(lines, textline("  "+wl, bodySt))
-			}
-		} else {
-			for _, wl := range rows {
-				lines = append(lines, textline("  "+wl, bodySt))
-			}
-		}
+		lines = a.thinkBoxLines(b, w)
 	case KindTool:
 		// omp's call row: state bullet, bold tool name, and the naming
 		// argument as a phrase — never the raw JSON the model sent. While the
@@ -2298,6 +2275,140 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 	return lines
 }
 
+// boxTop is an outlined frame's opening row: the left corner, the horizontal
+// rule, and an optional bold label set into it (a tool's name, a reasoning
+// block's state). boxBottom closes the same frame; both are shared by every
+// boxed surface so a second frame cannot drift from the first.
+func boxTop(box theme.BoxChars, st tcell.Style, label string, w int) line {
+	top := line{runs: []cell{{text: box.TopLeft, style: st}}}
+	if label == "" {
+		top.runs = append(top.runs, cell{text: strings.Repeat(box.Horizontal, max(1, w-2)) + box.TopRight, style: st})
+		return top
+	}
+	label = truncateCells(label, max(1, w-6), "…")
+	top.runs = append(top.runs,
+		cell{text: box.Horizontal + " ", style: st},
+		cell{text: label, style: st.Bold(true)},
+		cell{text: " " + strings.Repeat(box.Horizontal, max(1, w-5-width(label))) + box.TopRight, style: st})
+	return top
+}
+
+func boxBottom(box theme.BoxChars, st tcell.Style, w int) line {
+	return textline(box.BottomLeft+strings.Repeat(box.Horizontal, max(1, w-2))+box.BottomRight, st)
+}
+
+// boxRow frames one interior row: side borders, one pad cell each, and the text
+// padded to the interior width so every right border lands on the same column.
+func boxRow(box theme.BoxChars, border, st tcell.Style, s string, inner int) line {
+	return line{runs: []cell{
+		{text: box.Vertical + " ", style: border},
+		{text: fitWidth(s, inner), style: st},
+		{text: " " + box.Vertical, style: border},
+	}}
+}
+
+// thinkRows is a reasoning block's body, wrapped to the frame's interior width.
+// Empty reasoning (a block that has not streamed a delta yet) has no rows: the
+// frame still opens, so the reader sees that reasoning began.
+func (a *App) thinkRows(b *Block, w int) []string {
+	body := strings.TrimRight(b.Text, "\n")
+	if body == "" {
+		return nil
+	}
+	return wrap(sanitizeOutput(body), max(1, w-4))
+}
+
+// thinkMaxOff is the largest offset a reasoning box's window can use: past it
+// the window is already at the oldest thought, so a wheel there has nothing
+// left to scroll. One definition, because the render and the wheel must agree
+// on where the box stops.
+func thinkMaxOff(n int) int { return max(0, n-thinkBoxRows) }
+
+// thinkWindow slices a block's wrapped reasoning to the box's window: `off`
+// rows above the newest thought, at most thinkBoxRows tall. The window is
+// tail-anchored, the same way the transcript counts its own offset, so the
+// newest thought is what a reader following the turn sees. An offset past
+// either end reads as that end, never as an empty frame.
+func thinkWindow(n, off int) (start, end int) {
+	end = n - clamp(off, 0, thinkMaxOff(n))
+	return max(0, end-thinkBoxRows), end
+}
+
+// thinkBoxLines renders one reasoning block in the same rounded frame a result
+// gets: the top border carries the state ("⠹ Thinking…" while it streams,
+// "Thought for Xs" once it settles) and the body shows a fixed window of it —
+// at most thinkBoxRows rows, scrolled by the wheel over the box
+// (Block.ThinkOff) and dropped entirely by Ctrl+O. The full reasoning always
+// stays in the session JSONL, so the window is a view, never the record.
+func (a *App) thinkBoxLines(b *Block, w int) []line {
+	box := a.th.Box()
+	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
+	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	inner := max(1, w-4) // side borders + one pad cell each
+
+	hdr := "Thought"
+	switch {
+	case b.stream:
+		hdr = "⠹ Thinking…"
+	case b.thinkDur > 0:
+		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
+	}
+
+	rows := a.thinkRows(b, w)
+	start, end := 0, len(rows)
+	if !b.Expanded {
+		start, end = thinkWindow(len(rows), b.ThinkOff)
+	}
+	// The hidden-row notice leads the window the way it does in a result box:
+	// following the tail, what is elided is the head. Scrolled up, the count
+	// also covers the rows the wheel has yet to come back to — one notice
+	// beats two at this height.
+	out := []line{boxTop(box, border, hdr, w)}
+	if hidden := len(rows) - (end - start); hidden > 0 {
+		out = append(out, boxRow(box, border, bodySt, fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", hidden), inner))
+	}
+	for _, wl := range rows[start:end] {
+		out = append(out, boxRow(box, border, bodySt, wl, inner))
+	}
+	return append(out, boxBottom(box, border, w))
+}
+
+// scrollThinkBox routes a wheel notch to the reasoning box under the pointer:
+// over the box the notch moves the box's own window (Block.ThinkOff) instead of
+// the transcript, so the wheel reads the reasoning it is pointing at. It reports
+// whether the notch was consumed — at either end of the box's own content the
+// wheel falls through to the transcript, which is the way back out.
+func (a *App) scrollThinkBox(m *tcell.EventMouse, down bool) bool {
+	_, y := m.Position()
+	a.mu.Lock()
+	top, vp := a.selViewport() // syncs the layout this hit-test reads
+	hdr := a.transcriptTop()
+	var b *Block
+	if bi := a.rowIdx.blockAt(int32(top + y - hdr)); vp > 0 && y >= hdr && y < hdr+vp && bi >= 0 {
+		b = a.blocks[bi]
+	}
+	if b == nil || b.Kind != KindThinking {
+		a.mu.Unlock()
+		return false
+	}
+	// ThinkOff counts rows above the newest thought, so the wheel's own sense
+	// inverts here: rolling up walks back through the reasoning, rolling down
+	// returns to the live edge. A notch that cannot move the window is not a
+	// scroll, and reporting it unconsumed hands it back to the transcript.
+	step := -1
+	if !down {
+		step = 1
+	}
+	off := clamp(b.ThinkOff+step, 0, thinkMaxOff(len(a.thinkRows(b, a.contentWidth()))))
+	consumed := off != b.ThinkOff
+	b.ThinkOff = off
+	a.mu.Unlock()
+	if consumed {
+		a.poke()
+	}
+	return consumed
+}
+
 // toolBoxLines renders one finished tool result in omp's frame: a rounded box
 // of output, closed by footer rows that carry the outcome — the wall time and
 // exit code omp prints as `⟦Wall: 0.07s | Exit: 9⟧`, the truncation warning,
@@ -2323,33 +2434,13 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	if b.ToolName != "" && (i == 0 || a.blocks[i-1].Kind != KindTool || a.blocks[i-1].ToolName != b.ToolName) {
 		label = b.ToolName
 	}
-	top := line{runs: []cell{{text: box.TopLeft, style: border}}}
-	switch {
-	case label == "":
-		top.runs = append(top.runs, cell{text: strings.Repeat(box.Horizontal, max(1, w-2)) + box.TopRight, style: border})
-	default:
-		label = truncateCells(label, max(1, w-6), "…")
-		top.runs = append(top.runs,
-			cell{text: box.Horizontal + " ", style: border},
-			cell{text: label, style: border.Bold(true)},
-			cell{text: " " + strings.Repeat(box.Horizontal, max(1, w-5-width(label))) + box.TopRight, style: border})
-	}
+	top := boxTop(box, border, label, w)
 
-	// row wraps one line to the frame, padded so every right border lands on
-	// the same column.
-	row := func(s string, st tcell.Style) line {
-		return line{runs: []cell{
-			{text: box.Vertical + " ", style: border},
-			{text: fitWidth(s, inner), style: st},
-			{text: " " + box.Vertical, style: border},
-		}}
-	}
-
-	// cellRow frames an already-wrapped styled row: the same border and
-	// padding cell row paints, but the padding keeps each run's own style so
-	// a coloured row's cells land on the same column as a plain one. Runs
-	// past the interior budget are cut here rather than allowed to push the
-	// right border out of alignment.
+	// cellRow frames an already-wrapped styled row: boxRow's border and
+	// padding, but the padding keeps each run's own style so a coloured row's
+	// cells land on the same column as a plain one. Runs past the interior
+	// budget are cut here rather than allowed to push the right border out of
+	// alignment.
 	cellRow := func(ln line) line {
 		framed := line{runs: []cell{{text: box.Vertical + " ", style: border}}}
 		col := 0
@@ -2403,11 +2494,11 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	var out []line
 	out = append(out, top)
 	if header != "" {
-		out = append(out, row(header, bodySt))
+		out = append(out, boxRow(box, border, bodySt, header, inner))
 	}
 	switch {
 	case len(rows) == 0 && !b.Err:
-		out = append(out, row("(no output)", mutedSt))
+		out = append(out, boxRow(box, border, mutedSt, "(no output)", inner))
 	case len(rows) == 0:
 		// An error result with nothing to say: the frame and footer carry it.
 	case b.Expanded || len(rows) <= headRows+tailRows+1:
@@ -2422,7 +2513,7 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 		}
 		// The notice sits at the hole it describes, between the head and
 		// the tail — omp prints its hidden-line count the same way.
-		out = append(out, row(fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-headRows-tailRows), dimSt))
+		out = append(out, boxRow(box, border, dimSt, fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", len(rows)-headRows-tailRows), inner))
 		for _, ln := range rows[len(rows)-tailRows:] {
 			out = append(out, cellRow(ln))
 		}
@@ -2446,10 +2537,10 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 		if b.Err {
 			notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
 		}
-		out = append(out, row("⟦"+strings.Join(notes, " | ")+"⟧", notesSt))
+		out = append(out, boxRow(box, border, notesSt, "⟦"+strings.Join(notes, " | ")+"⟧", inner))
 	}
 
-	out = append(out, textline(box.BottomLeft+strings.Repeat(box.Horizontal, max(1, w-2))+box.BottomRight, border))
+	out = append(out, boxBottom(box, border, w))
 	return out
 }
 
@@ -2480,15 +2571,6 @@ func isWindowRow(s string) bool {
 		i++
 	}
 	return i > 0 && i < len(s) && s[i] == ':'
-}
-
-// stThinkingHdr styles the thinking header: muted bold, per grok thinking.rs.
-func stThinkingHdr(a *App, running bool) tcell.Style {
-	fg := a.th.Get(theme.Gray)
-	if running {
-		fg = a.th.Get(theme.AccentThinking)
-	}
-	return tcell.StyleDefault.Foreground(a.cellColor(fg)).Bold(true)
 }
 
 // --- drawing ---

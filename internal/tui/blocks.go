@@ -40,8 +40,11 @@ type Block struct {
 	// wall of one colour. (edit/write attach it; a `git diff` captured in
 	// bash output is painted by detection, not through this field.)
 	Diff string
-	// Expanded is a result box's Ctrl+O state: render every row.
+	// Expanded is a result/reasoning box's Ctrl+O state: render every row.
 	Expanded bool
+	// ThinkOff is a reasoning box's scroll: rows scrolled up from the newest
+	// reasoning (0 = newest), mirroring the transcript's own offset.
+	ThinkOff int
 	stream   bool      // assistant still receiving deltas (dim cursor at tail)
 	Ts       time.Time // block timestamp (user/assistant rows, tool start)
 	thinkDur time.Duration
