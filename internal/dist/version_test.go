@@ -21,6 +21,21 @@ func TestCompare(t *testing.T) {
 		{"1.0.0-rc.1.2", "1.0.0-rc.1", 1}, // more identifiers wins a shared prefix
 		{"0.1.0-dev", "0.1.0", -1},        // a local dev build is behind its release
 		{"0.1.0-dev", "0.2.0", -1},
+		// A `git describe` stamp means "commits ahead of this tag", not a
+		// pre-release of it — semver's own rule reads the hyphenated form as
+		// older, which offered a published release as an "update" to a
+		// binary already built past it.
+		{"v0.4.0-2-gf419040", "v0.4.0", 0},
+		{"v0.4.0-2-gf419040", "v0.3.1", 1},
+		{"v0.3.1-5-gf71e12c", "v0.4.0", -1},
+		{"v0.2.0-canary.1-3-gabcdef1", "v0.2.0-canary.1", 0}, // pre + describe
+		{"v0.2.0-canary.1-3-gabcdef1", "v0.1.9", 1},
+		// describe's optional pieces, in git's own order: <tag>-<n>-g<sha>
+		// [-dirty][+meta]. Each has one home, so none leaks into the core.
+		{"v0.4.0-2-gf419040-dirty", "v0.4.0", 0},
+		{"v0.4.0-2-gf419040+meta", "v0.4.0", 0},
+		{"v0.4.0+meta-2-gf419040", "v0.4.0", 0},
+		{"v0.4.0-dirty", "v0.4.0", 0},
 		{"1.2.3+build.9", "1.2.3", 0}, // build metadata is ignored
 		{"v0.2.0-canary.1", "v0.2.0", -1},
 	}
