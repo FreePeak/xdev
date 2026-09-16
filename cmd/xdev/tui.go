@@ -2272,7 +2272,11 @@ func treeEntries(store *session.Store) []tui.TreeEntry {
 		switch t := e.(type) {
 		case *session.MessageEntry:
 			te.Role = string(t.Message.Role)
-			te.Summary = clipSummary(t.Message.Text(), 60)
+			// MessageLabel, not Text(): most rows of a real session are
+			// tool-call-only assistant turns, which carry no text block at all,
+			// so Text() returned "" and the panel painted those ids over blank
+			// lines — the "empty lines" at the end of the history.
+			te.Summary = clipSummary(ai.MessageLabel(&t.Message), 60)
 		case *session.CompactionEntry:
 			te.Summary = "(compaction)"
 		case *session.BranchSummaryEntry:
