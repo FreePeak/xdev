@@ -606,3 +606,73 @@ func TestResumePickerItemsCarryStatus(t *testing.T) {
 		t.Fatalf("row statuses = %v, want STATUSA done, STATUSB interrupted", byID)
 	}
 }
+
+// writeStatusSession lays down one session whose tail classifies as want
+// ("done" or "interrupted"), so search tests exercise the real classifier
+// instead of hand-set struct fields.
+func writeStatusSession(t *testing.T, cwd, id, title, want string, age time.Duration) {
+	t.Helper()
+	now := time.Now().UTC().Add(-age)
+	p := session.SessionFilePath(config.DataDir(), cwd, now, id)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.Write(session.MarshalTitleSlot(title, session.TitleSourceAuto, now))
+	b.Write(session.MarshalHeader(session.SessionHeader{
+		Version: 3, ID: id, Timestamp: now, CWD: cwd, Title: title, TitleSource: session.TitleSourceAuto,
+	}))
+	b.WriteString("\n")
+	msg := ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop, Content: []ai.Block{ai.TextBlock{Text: "answer"}}}
+	if want == "interrupted" {
+		// An aborted turn persists the prompt and nothing past it.
+		msg = ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "unfinished"}}}
+	}
+	line, err := session.MarshalEntry(&session.MessageEntry{Message: msg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Write(line)
+	b.WriteString("\n")
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSearchPickerItemsMatchesStatus: "interrupted" is a real filter, not
+// just a badge — the picker query narrows on the lifecycle status (#107),
+// and status tokens AND with the prompt-text search the way id tokens do.
+func TestSearchPickerItemsMatchesStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := "/tmp/picker-status"
+	writeStatusSession(t, cwd, "AAAA1111-0000-0000-0000-000000000000", "finished work", "done", time.Minute)
+	writeStatusSession(t, cwd, "BBBB2222-0000-0000-0000-000000000000", "killed work", "interrupted", 2*time.Minute)
+	writeStatusSession(t, cwd, "CCCC3333-0000-0000-0000-000000000000", "killed rerun", "interrupted", 3*time.Minute)
+
+	got := searchPickerItems(cwd, "interrupted")
+	if len(got) != 2 {
+		t.Fatalf("query 'interrupted' matches = %v, want the two interrupted rows", got)
+	}
+	for _, it := range got {
+		if it.Status != "interrupted" {
+			t.Fatalf("row %s matched 'interrupted' but carries %q", it.ID, it.Status)
+		}
+	}
+
+	// A status token mixed with an id token must AND (the badge hit for
+	// CCCC3333 must not survive a BBBB2222 id token).
+	got = searchPickerItems(cwd, "interrupted bbbb")
+	if len(got) != 1 || got[0].ID != "BBBB2222" {
+		t.Fatalf("query 'interrupted bbbb' matches = %v, want only BBBB2222", got)
+	}
+
+	// The status must not shadow the body search it sits beside.
+	got = searchPickerItems(cwd, "interrupted unfinished")
+	if len(got) != 2 {
+		t.Fatalf("status+body query matches = %v, want both interrupted rows (body carries 'unfinished')", got)
+	}
+	got = searchPickerItems(cwd, "done")
+	if len(got) != 1 || got[0].ID != "AAAA1111" {
+		t.Fatalf("query 'done' matches = %v, want only AAAA1111", got)
+	}
+}

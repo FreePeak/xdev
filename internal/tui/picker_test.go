@@ -129,6 +129,54 @@ func TestPickerSearchHookRanksMatches(t *testing.T) {
 	}
 }
 
+// TestPickerStatusIsSearchable: the badge is only useful if the query can
+// find it — typing "interrupted" must narrow the list to interrupted rows,
+// and combining the badge with an id token must AND, not OR (#107).
+func TestPickerStatusIsSearchable(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	items := []SessionPickerItem{
+		{ID: "aaaa1111", Title: "finished work", InCwd: true, Status: "done"},
+		{ID: "bbbb2222", Title: "killed work", InCwd: true, Status: "interrupted"},
+		{ID: "cccc3333", Title: "interrupted rerun", InCwd: true, Status: "interrupted"},
+	}
+	app.OpenSessionPicker(items)
+
+	typeRunes(app, "interrupted")
+	got := pickerRows(t, app)
+	if len(got) != 2 {
+		t.Fatalf("query 'interrupted' rows = %v, want the two interrupted rows", got)
+	}
+	for _, it := range got {
+		if it.Status != "interrupted" {
+			t.Fatalf("row %s matched 'interrupted' but is %q", it.ID, it.Status)
+		}
+	}
+
+	typeRunes(app, " bbbb") // badge AND id must narrow, not union
+	got = pickerRows(t, app)
+	if len(got) != 1 || got[0].ID != "bbbb2222" {
+		t.Fatalf("query 'interrupted bbbb' rows = %v, want only bbbb2222", got)
+	}
+
+	// cmd's search hook is the live path for the picker query, so the badge
+	// has to be matchable through it too (cmd ranks, TUI re-applies scope).
+	app.CloseSessionPicker()
+	app.SetPickerSearch(func(q string) []SessionPickerItem {
+		var out []SessionPickerItem
+		for _, it := range items {
+			if strings.Contains(strings.ToLower(it.ID+" "+it.Title+" "+it.Status), q) {
+				out = append(out, it)
+			}
+		}
+		return out
+	})
+	app.OpenSessionPicker(items)
+	typeRunes(app, "interrupted")
+	if got := pickerRows(t, app); len(got) != 2 {
+		t.Fatalf("hooked query 'interrupted' rows = %v, want the two interrupted rows", got)
+	}
+}
+
 // TestPickerIdleCapAndSearchCap: the idle view keeps the 12-row cap; an
 // active query may grow it (search needs the wider pool).
 func TestPickerIdleCapAndSearchCap(t *testing.T) {
