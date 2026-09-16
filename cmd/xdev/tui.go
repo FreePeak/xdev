@@ -21,6 +21,7 @@ import (
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/dist"
 	"github.com/FreePeak/xdev/internal/fscache"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
@@ -361,9 +362,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// #272: the alt screen swallows stderr, which is where discovery
 	// warnings used to go — so an empty or half-broken agent set looked
 	// exactly like a working one. Say what loaded, before the first turn.
-	if notice, _, _ := taskAgentsAtStartup(cwd); notice != "" {
+	notice, _, _ := taskAgentsAtStartup(cwd)
+	if n := dist.Notice(version); n != "" {
+		// A newer release is reported where the user reads, not on stderr
+		// under the alt screen: the welcome screen's notice slot, on its
+		// own line. The agents line keeps that slot when it is the only
+		// one; the update line joins it rather than replacing it, because
+		// both are startup facts.
+		notice = strings.TrimSuffix(notice, "\n") + "\n" + n
+	}
+	if notice != "" {
 		app.SetStartupNotice(notice)
 	}
+
+	// Check for a newer release in the background, at most twice a day. The
+	// record the previous run wrote is what this session just read, so the
+	// check pays for the next launch, not this one; dist.MaybeCheck is a
+	// no-op while a scheduled job owns the checking.
+	go dist.MaybeCheck(version)
 
 	// -handoff: document the resumed session before the first turn.
 	if handoffMode && len(store.Entries()) > 0 {
