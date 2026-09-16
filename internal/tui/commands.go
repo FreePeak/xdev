@@ -485,6 +485,35 @@ func (a *App) Handoff(args string) error {
 // records into); tests may override it. Nil degrades to a notice.
 var BashJobs = func() string { return tool.SharedBashJobs().Render() }
 
+// Bang runs one composer "! command" draft as a local shell command (PRD
+// M10 #163). It is a package-level slot (like BashJobs) so cmd installs the
+// executor at startup and tests may override it; nil degrades to a notice.
+// The transcript is the only destination — a bang run never reaches the
+// model, which is the whole point of the mode.
+var Bang func(cmd string) error
+
+// bangCommand consumes a draft that opens with '!'. It reports whether the
+// draft belonged to shell mode, in which case the caller must NOT submit it
+// as a prompt: a bare '!' and an unwired seam are notices, not turns.
+func bangCommand(app CommandAPI, input string) bool {
+	trimmed := strings.TrimSpace(input)
+	if !strings.HasPrefix(trimmed, "!") {
+		return false
+	}
+	cmd := strings.TrimSpace(trimmed[1:])
+	switch {
+	case cmd == "":
+		app.AddSystemBlock(`shell mode: nothing to run — type "!<command>"`)
+	case Bang == nil:
+		app.AddSystemBlock("shell mode is not wired in this build")
+	default:
+		if err := Bang(cmd); err != nil {
+			app.AddSystemBlock("error: " + err.Error())
+		}
+	}
+	return true
+}
+
 // ParseCommand reports whether input names a slash command and splits it
 // into the command name (without the leading '/') and the argument text.
 // Whitespace-only input and bare "/" are not commands; leading whitespace is
@@ -538,6 +567,11 @@ func isCommandName(name string) bool {
 // submit it as a prompt. Plain text returns false. Markdown commands expand
 // their template and send through the normal send path.
 func dispatch(app CommandAPI, input string) bool {
+	// Shell mode is checked before the slash table: '!' is not a command
+	// name, and a bang draft must be consumed on its own terms.
+	if bangCommand(app, input) {
+		return true
+	}
 	name, raw, ok := ParseCommand(input)
 	if !ok {
 		return false

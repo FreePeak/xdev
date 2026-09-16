@@ -222,6 +222,89 @@ func TestDispatchPlainText(t *testing.T) {
 	}
 }
 
+// Shell mode ("!cmd"): the draft is consumed by the router, so it never
+// reaches the model. Every arm is pinned — a run, a failure, a bare '!',
+// and an unwired seam — because the failure this mode can cause is silent:
+// a draft that falls through would be sent as a prompt.
+func TestDispatchBangShellMode(t *testing.T) {
+	orig := Bang
+	t.Cleanup(func() { Bang = orig })
+	cases := []struct {
+		name    string
+		bang    func(string) error
+		input   string
+		wantCmd string // "" = the seam must not be called
+		block   string // substring the last block must carry ("" = no block)
+	}{
+		{
+			name:    "run",
+			bang:    func(string) error { return nil },
+			input:   "!ls -la",
+			wantCmd: "ls -la",
+		},
+		{
+			name:    "leading space and trailing newline stripped",
+			bang:    func(string) error { return nil },
+			input:   "  !  echo hi  ",
+			wantCmd: "echo hi",
+		},
+		{
+			name:    "error surfaces as a block",
+			bang:    func(string) error { return errors.New("boom") },
+			input:   "!false",
+			wantCmd: "false",
+			block:   "error: boom",
+		},
+		{
+			name:  "bare bang is a notice",
+			bang:  func(string) error { t.Fatal("bare '!' must not run a command"); return nil },
+			input: "!",
+			block: "nothing to run",
+		},
+		{
+			name:  "whitespace-only is a notice",
+			bang:  func(string) error { t.Fatal("blank '!' must not run a command"); return nil },
+			input: "!   ",
+			block: "nothing to run",
+		},
+		{
+			name:  "unwired seam is a notice",
+			bang:  nil,
+			input: "!ls",
+			block: "not wired",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			Bang = tc.bang
+			var got string
+			f := &fakeAPI{}
+			if tc.bang != nil {
+				Bang = func(cmd string) error { got = cmd; return tc.bang(cmd) }
+			}
+			if !dispatch(f, tc.input) {
+				t.Fatalf("dispatch(%q) fell through; a bang draft must never be sent", tc.input)
+			}
+			if got != tc.wantCmd {
+				t.Errorf("command = %q, want %q", got, tc.wantCmd)
+			}
+			if len(f.sent) != 0 {
+				t.Errorf("bang sent %q to the model; shell mode costs no tokens", f.sent)
+			}
+			last := ""
+			if n := len(f.blocks); n > 0 {
+				last = f.blocks[n-1]
+			}
+			if tc.block == "" && last != "" {
+				t.Errorf("unexpected block %q", last)
+			}
+			if tc.block != "" && !strings.Contains(last, tc.block) {
+				t.Errorf("block = %q, want substring %q", last, tc.block)
+			}
+		})
+	}
+}
+
 // Unknown slash names are NOT consumed: they fall through as literal
 // prompt text (issue #11).
 func TestDispatchUnknownFallsThrough(t *testing.T) {
