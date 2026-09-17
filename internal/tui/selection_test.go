@@ -157,6 +157,54 @@ func TestSelectionStaysHighlightedAfterRelease(t *testing.T) {
 	}
 }
 
+// composerRow is the screen row of the composer's first input row: the surface
+// a user drags over before anything has been sent, and the one the transcript
+// painter never records in selRows.
+func composerRow(app *App) int {
+	return app.height - 1 - app.composerRows()
+}
+
+// TestSelectionHighlightsTheComposer pins the half of the mouse contract the
+// copy path did not cover: a drag over the composer paints its highlight on
+// screen, not just into the clipboard. The composer (and the status row, and
+// the overlays) draw after the transcript, so a highlight painted before them
+// was wiped by the same frame — the user saw the text copy and nothing else.
+func TestSelectionHighlightsTheComposer(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		blocks []string
+	}{
+		{"with a transcript", []string{"hello"}},
+		{"welcome screen", nil}, // no transcript: the composer is the only surface
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, scr := newTestApp(t, 80, 24)
+			for _, b := range tc.blocks {
+				app.AddSystemBlock(b)
+			}
+			app.mu.Lock()
+			app.ed.SetBuffer("welcome text")
+			app.mu.Unlock()
+			app.draw()
+
+			y := composerRow(app)
+			app.mu.Lock()
+			drag(app, 5, y, 16, y)
+			app.mu.Unlock()
+			if got := string(scr.GetClipboardData()); got != "welcome text" {
+				t.Fatalf("clipboard = %q, want %q", got, "welcome text")
+			}
+			app.draw()
+
+			for x := 5; x <= 16; x++ {
+				if _, _, attr := cellStyle(scr, x, y).Decompose(); attr&tcell.AttrReverse == 0 {
+					t.Fatalf("composer cell (%d,%d) is not highlighted after the release", x, y)
+				}
+			}
+		})
+	}
+}
+
 // cellStyle is the drawn style of one cell.
 func cellStyle(scr tcell.SimulationScreen, x, y int) tcell.Style {
 	_, _, st, _ := scr.GetContent(x, y)
