@@ -130,6 +130,13 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
+		// Past the bar: this press is on the transcript, and it aims the wheel.
+		// Pressing a reasoning box focuses it, pressing anywhere else takes the
+		// aim back, so the wheel scrolls the transcript until the human asks for
+		// a box by name. The notch never moves focus (app.go scrollThinkBox),
+		// which is what stops a box from stealing the wheel merely by sliding
+		// under a stationary pointer.
+		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
