@@ -323,9 +323,17 @@ func (c *cappedBuf) Write(p []byte) (int, error) {
 
 var _ io.Writer = (*cappedBuf)(nil)
 
-// ghFailureText explains a gh/git failure, naming the two footguns worth
-// calling out: a stale exported token shadowing `gh auth` (401) and a
-// missing login. The raw stderr is preserved (capped) so nothing is hidden.
+// ghHeadFlagHint is gh's abort for a branch it cannot push for us: with
+// GH_PROMPT_DISABLED=1 its "push the branch?" prompt is impossible, so a
+// pr_create whose checked-out branch has no remote ref at HEAD dies here.
+// prCreate replaces this generic wording with the branch and directory it
+// really ran in (prCreateError), which is the part that makes it fixable.
+const ghHeadFlagHint = "hint: gh will not push the checked-out branch for you (prompts are disabled), so a branch with no remote ref at HEAD aborts here: push it, or pass head with the branch holding the commits (xdev never pushes your working tree)."
+
+// ghFailureText explains a gh/git failure, naming the footguns worth calling
+// out: a stale exported token shadowing `gh auth` (401), a missing login, and
+// the --head abort a branch with no remote ref hits. The raw stderr is
+// preserved (capped) so nothing is hidden.
 func ghFailureText(stderr string, err error) string {
 	msg := capText(strings.TrimSpace(stderr), 4096)
 	if msg == "" {
@@ -340,6 +348,8 @@ func ghFailureText(stderr string, err error) string {
 		hint = "hint: run `gh auth login` (or set GH_TOKEN) first."
 	case strings.Contains(low, "not a git repository"):
 		hint = "hint: run from a GitHub checkout, or pass repo (owner/repo) explicitly."
+	case strings.Contains(low, "--head flag"):
+		hint = ghHeadFlagHint
 	}
 	if hint == "" {
 		return msg
@@ -569,7 +579,7 @@ func (t *GithubTool) prCreate(ctx context.Context, a githubArgs) (Result, error)
 	}
 	out, err := t.gh(ctx, prCreateArgs(a, bodyFile)...)
 	if err != nil {
-		return errResult(err), nil
+		return errResult(t.prCreateError(ctx, out, err)), nil
 	}
 	prURL := firstGithubURL(out)
 	text := "created pull request"
@@ -628,6 +638,25 @@ func prCreateArgs(a githubArgs, bodyFile string) []string {
 		argv = append(argv, "--repo", r)
 	}
 	return argv
+}
+
+// prCreateError explains a failed pr_create: when gh aborted on the
+// unpushed-branch footgun (ghHeadFlagHint) it names the branch and directory
+// gh really ran in — the session cwd is not necessarily the checkout holding
+// the commits, and without both facts the hint cannot be acted on. The argv is
+// untouched (xdev never pushes a working tree); only the diagnosis improves.
+func (t *GithubTool) prCreateError(ctx context.Context, stderr string, err error) error {
+	msg := ghFailureText(stderr, err)
+	if !strings.Contains(msg, ghHeadFlagHint) {
+		return errors.New(msg)
+	}
+	ran := "pr_create ran in " + orDash(t.CWD)
+	if out, gerr := t.git(ctx, t.CWD, "rev-parse", "--abbrev-ref", "HEAD"); gerr == nil {
+		if branch := strings.TrimSpace(out); branch != "" && branch != "HEAD" {
+			ran += " on branch " + strconv.Quote(branch)
+		}
+	}
+	return errors.New(msg + "\n" + ran + ".")
 }
 
 // firstGithubURL extracts the first https://... URL gh printed (pr create
