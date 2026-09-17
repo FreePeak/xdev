@@ -85,6 +85,7 @@ const (
 	ToolSuccessBg   = "tool_success_bg"
 	ToolErrorBg     = "tool_error_bg"
 	StatusLineBg    = "status_line_bg"
+	SidebarBg       = "sidebar_bg"
 
 	// Message / tool text (5).
 	UserMessageText    = "user_message_text"
@@ -231,6 +232,7 @@ func groknightSlots() map[string]Color {
 		BgBase:             Hex("#141414"), // BG_STORM, main canvas
 		BgHighlight:        Hex("#242424"), // BG_HIGHLIGHT (user prompt band)
 		BgTerminal:         Hex("#0a0a0a"), // BG, terminal bg
+		SidebarBg:          Hex("#0e0e0e"), // sidebar, a step darker than the canvas
 		AccentUser:         Hex("#c8c8c8"), // accent_user = FG_DARK (neutral, not colored)
 		AccentAssistant:    Hex("#bb9af7"), // MAGENTA
 		AccentThinking:     Hex("#bb9af7"), // MAGENTA
@@ -287,6 +289,7 @@ func grokdaySlots() map[string]Color {
 		BgBase:             Hex("#eeeeee"),
 		BgHighlight:        Hex("#dedede"),
 		BgTerminal:         Hex("#f5f5f5"),
+		SidebarBg:          Hex("#e2e2e4"), // sidebar, a step darker than the canvas
 		AccentUser:         Hex("#444444"), // FG_DARK
 		AccentAssistant:    Hex("#7D4BC6"), // MAGENTA
 		AccentThinking:     Hex("#7D4BC6"), // MAGENTA

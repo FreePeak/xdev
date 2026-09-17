@@ -689,7 +689,9 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	}
 	d := a.dock
 	bg := tcell.ColorDefault
-	if c, ok := a.th.Slot(theme.BgBase); ok {
+	if c, ok := a.th.Slot(theme.SidebarBg); ok {
+		bg = a.cellColor(c)
+	} else if c, ok := a.th.Slot(theme.BgBase); ok {
 		bg = a.cellColor(c)
 	}
 	body := tcell.StyleDefault.Background(bg)

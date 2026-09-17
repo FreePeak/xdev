@@ -277,6 +277,7 @@ var legacyOrder = []string{
 var extraChains = map[string][]string{
 	BgBase:        {"export.pageBg", SelectedBg},
 	BgTerminal:    {"export.pageBg"},
+	SidebarBg:     {"export.cardBg", BgBase},
 	AccentRunning: {Accent},
 	Gray:          {Muted},
 	GrayBright:    {Gray, Muted},
