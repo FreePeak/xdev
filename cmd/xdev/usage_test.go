@@ -25,6 +25,9 @@ func TestUsageDocumentsEverySubcommand(t *testing.T) {
 // merge artifact reaching users through any string the binary prints.
 // Scans the package's non-test sources for the three conflict markers; if a
 // future merge produces one, this names the file and line.
+// Repo-wide (docs, fixtures, every package) is repohygiene_test.go's job;
+// that one exists because the package-local glob below could not see the
+// conflict marker #311 committed into docs/PRD.md.
 func TestNoMergeMarkersInSource(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil || len(files) == 0 {
