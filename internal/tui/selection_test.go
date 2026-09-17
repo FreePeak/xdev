@@ -402,3 +402,34 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 		}
 	}
 }
+
+// SetNotice is the off-UI-thread door to the same divider slot (a failed MCP
+// server reports from the goroutine that connected it, long after startup). It
+// must render without the caller holding a.mu, and expire on its own like the
+// copy confirmation it shares the row with.
+func TestSetNoticeRidesTheDividerAndExpires(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.AddSystemBlock("hello")
+	app.draw()
+
+	const msg = "mcp: broken unavailable"
+	app.SetNotice(msg, 2*time.Minute)
+	app.draw()
+
+	line := rowContaining(scr, msg)
+	if line == "" {
+		t.Fatal("no row carried the notice")
+	}
+	if !strings.Contains(line, "test/free") {
+		t.Fatalf("notice row = %q, want it on the model's divider", line)
+	}
+
+	// Past its deadline the tick's redraw is what drops it (app.go Run).
+	app.mu.Lock()
+	app.selNoticeUntil = time.Now().Add(-time.Millisecond)
+	app.mu.Unlock()
+	app.draw()
+	if line := rowContaining(scr, msg); line != "" {
+		t.Fatalf("notice row = %q, want the expired notice gone", line)
+	}
+}
