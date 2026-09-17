@@ -260,7 +260,7 @@ func connectReady(opts []config.ConnectOption) []config.ConnectOption {
 func connectFirst(opts []config.ConnectOption, n int) []config.ConnectOption {
 	rank := func(o config.ConnectOption) int {
 		switch o.Name {
-		case "anthropic", "openai", "google", "github-copilot", "opencode", "opencode-go":
+		case "xdev-server", "anthropic", "openai", "google", "github-copilot", "opencode", "opencode-go":
 			return 0
 		default:
 			return 1

@@ -35,9 +35,9 @@ memory: local           # local (MEMORY.md + learned.md under the data dir) | of
 
 # Role aliases: "-model @smol", "@slow", "@task" resolve through this map.
 # modelRoles:
-#   smol: onegw/small
-#   slow: onegw/large
-#   task: onegw/small
+#   smol: xdev-server/qwen3.8-flash
+#   slow: xdev-server/deepseek-v4.1-flash
+#   task: xdev-server/free
 `
 
 // setupModelsTemplate is the models.yml shape printed when no provider file
@@ -46,13 +46,16 @@ memory: local           # local (MEMORY.md + learned.md under the data dir) | of
 const setupModelsTemplate = `# <data-dir>/models.yml — providers and models. ${VAR} is expanded from the
 # environment (and from <data-dir>/.env), so no key has to live in this file.
 providers:
-  onegw:
-    baseUrl: http://127.0.0.1:8080/v1
-    apiKey: ${ONEGW_KEY}
+  xdev-server:
+    baseUrl: ${XDEV_SERVER_URL}/v1
+    apiKey: ${XDEV_SERVER_KEY}
     api: openai-completions          # also: openai-responses | anthropic-messages | google-generative-ai
+    discovery:
+      type: openai-models-list
     models:
-      - { id: free, name: Free, contextWindow: 1000000 }
-defaultModel: onegw/free
+      - { id: free, name: Free, reasoning: true, contextWindow: 200000 }
+      - { id: xdev, name: xdev, reasoning: true, contextWindow: 200000 }
+defaultModel: xdev-server/free
 `
 
 // setupDirs are the data-dir subdirectories users or the product drop files
@@ -153,8 +156,9 @@ func setupMain(args []string, _ string, out, errw io.Writer) int {
 	// 5. Next steps.
 	fmt.Fprintf(out, `
 Next steps
-  1. point models.yml at a provider and export the key it references,
-     e.g. export ONEGW_KEY=...          (or put it in %s)
+  1. export XDEV_SERVER_URL=http://<gateway-host>:8080   the gateway you run
+     export XDEV_SERVER_KEY=...                          and its key
+     (or put both in %s)
   2. xdev "explain this repo"           one-shot run
      xdev tui                           interactive session
   3. xdev config list                   resolved settings and their layer
