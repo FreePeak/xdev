@@ -149,6 +149,48 @@ func TestReplayTranscriptIncludesThinking(t *testing.T) {
 	}
 }
 
+// TestReplayTranscriptRestoresToolResults: the dock's FILES section is read
+// off the finished result blocks, so a resumed session that dropped them on
+// replay showed an empty panel next to a transcript full of edits (#291).
+func TestReplayTranscriptRestoresToolResults(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(80, 24)
+	app := tui.New(scr, theme.Load("groknight"), "test/free", "sess")
+
+	diff := "--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old\n+new\n"
+	replayTranscript(app, []ai.Message{
+		{Role: ai.RoleToolResult, ToolName: "edit", DurationMS: 70,
+			Details: map[string]any{"unifiedDiff": diff, "linesBefore": 1, "linesAfter": 1}},
+		{Role: ai.RoleToolResult, ToolName: "bash", IsError: true,
+			Details: map[string]any{"exitCode": 1, "truncated": true}},
+		// A result the store recorded without a duration must not claim 0s.
+		{Role: ai.RoleToolResult, ToolName: "read"},
+	})
+	blocks := app.Blocks()
+	// One call row plus one result row per tool result, in transcript order.
+	if len(blocks) != 6 {
+		t.Fatalf("replay blocks = %d, want 6", len(blocks))
+	}
+	edit := blocks[1]
+	if edit.Kind != tui.KindToolDone || edit.Diff != diff {
+		t.Fatalf("edit result = %+v, want the uniffed diff on a done block", edit)
+	}
+	if edit.Dur != "70ms" {
+		t.Fatalf("duration = %q, want the recorded 70ms", edit.Dur)
+	}
+	bash := blocks[3]
+	if !bash.Err || !bash.HasExit || bash.Exit != 1 || !bash.Truncated {
+		t.Fatalf("bash result lost its outcome: %+v", bash)
+	}
+	if blocks[0].Kind != tui.KindTool || blocks[2].Kind != tui.KindTool {
+		t.Fatalf("the call rows are missing: %+v", blocks)
+	}
+}
+
 // TestReplayTranscriptTurnBudgetNotice: the turn-budget wrap-up prompt is
 // harness text (#283 lineage). Replaying it as a ❯ block would invent a user
 // turn that never happened; it must surface as the system event that ends the
