@@ -213,6 +213,7 @@ func TestEditHashlineRejectionsTeachTheGrammar(t *testing.T) {
 		{"prose", "please replace the second line", "PUT"},
 		{"dash row", "[f.txt]\nPUT 1.=1:\n-x\n", "\"-\" rows are not how this grammar deletes"},
 		{"bare row", "[f.txt]\nPUT 1.=1:\nno plus sign\n", "body rows start with \"+\""},
+		{"unified diff", "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+x\n", "does not take diffs"},
 		{"two files", "[" + path + "]\nCUT 1\n[other.go]\nCUT 2\n", "one [path] header"},
 		{"no ops", "[" + path + "]\n", "names no ops"},
 		{"no number", "[f.txt]\nPUT =:\n+x\n", "op line"},
@@ -239,6 +240,22 @@ func TestEditHashlineRejectionsTeachTheGrammar(t *testing.T) {
 // TestEditHashlineOutOfRangeNamesTheOp keeps the bounds failure the same
 // actionable shape the structured path has: which op, what range, how long
 // the file is.
+// TestEditErrorsCarryOnePrefix pins that a rejection reads "edit: line N: ..."
+// and never "edit: edit: ...": Execute wraps decodeEditArgs' message, and the
+// grammar already leads its own with the tool name.
+func TestEditErrorsCarryOnePrefix(t *testing.T) {
+	res := hashlineEdit(t, NewEditTool(), map[string]any{"input": "[f.txt]\n@@ -1,3 +1,3 @@\n"})
+	if !res.IsError {
+		t.Fatalf("diff-format patch accepted: %s", res.Text)
+	}
+	if strings.Contains(res.Text, "edit: edit:") {
+		t.Fatalf("doubled prefix: %q", res.Text)
+	}
+	if !strings.HasPrefix(res.Text, "edit: ") {
+		t.Fatalf("no tool prefix: %q", res.Text)
+	}
+}
+
 func TestEditHashlineOutOfRangeNamesTheOp(t *testing.T) {
 	dir := t.TempDir()
 	path := editFile(t, dir, "f.txt", "a\nb\nc\n")
