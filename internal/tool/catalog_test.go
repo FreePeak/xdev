@@ -232,3 +232,39 @@ func TestBridgeToolsExposeTheCatalog(t *testing.T) {
 		t.Fatalf("ran = %v", *ran)
 	}
 }
+
+// An empty name is a malformed bridge call, not a missing tool: a provider
+// that streams a nameless tool call (live, `{"args":{...}}` with no name)
+// reached Catalog.Call and the model was told `unknown tool ""`, then had to
+// guess what it did wrong. The refusal must name the correct call shape.
+func TestCatalogRejectsEmptyNameWithTheCallShape(t *testing.T) {
+	_, cat, ran := catalogFixture(t)
+	ctx := context.Background()
+
+	call := NewToolCallTool(cat)
+	if res, err := call.Execute(ctx, json.RawMessage(`{"args":{"q":"1"}}`)); err != nil || !res.IsError {
+		t.Fatalf("nameless tool_call must refuse: %+v err=%v", res, err)
+	} else {
+		for _, want := range []string{"name is required", `"name":<tool name>`, ToolSearchName} {
+			if !strings.Contains(res.Text, want) {
+				t.Fatalf("nameless tool_call text missing %q: %s", want, res.Text)
+			}
+		}
+		if strings.Contains(res.Text, `unknown tool ""`) {
+			t.Fatalf("a nameless call is not an unknown tool: %s", res.Text)
+		}
+	}
+
+	describe := NewToolDescribeTool(cat)
+	if res, err := describe.Execute(ctx, json.RawMessage(`{}`)); err != nil || !res.IsError || !strings.Contains(res.Text, "name is required") {
+		t.Fatalf("nameless tool_describe must refuse: %+v err=%v", res, err)
+	}
+
+	// The name-miss path is unchanged for a name that is merely wrong.
+	if res, err := call.Execute(ctx, json.RawMessage(`{"name":"zzz"}`)); err != nil || !res.IsError || !strings.Contains(res.Text, `unknown tool "zzz"`) {
+		t.Fatalf("a wrong name must still say unknown tool: %+v err=%v", res, err)
+	}
+	if len(*ran) != 0 {
+		t.Fatalf("no tool may run without a name: %v", *ran)
+	}
+}
