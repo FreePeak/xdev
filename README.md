@@ -181,14 +181,16 @@ key). `/thinking low` pins one rung for the rest of the session and writes it to
 the global layer.
 
 The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
-transcript: the pending plan, the task list, the files this session changed, the
-running subagents and the session footer — the working set, kept beside the
-stream instead of scrolling behind it. It auto-closes below 120 columns, never
-takes focus from a picker or a question card, and rebuilds only on events (plan
-published, tool finished, agent settled), never per frame. A pending plan is
-resolved where plans have always been resolved — `/plan off` approves, any
-typed prompt is revision feedback — and `/plan show` reprints the document in
-the transcript.
+transcript, opencode's sidebar shape: no box, just a surface of its own carrying
+the session's title in the top slot, then the pending plan, the task list, the
+files this session changed (their `+N`/`-N` counts flush right) and the session
+footer — the working set, kept beside the stream instead of scrolling behind it.
+Section headings are a bold name with the dim count appended. It auto-closes
+below 120 columns, never takes focus from a picker or a question card, and
+rebuilds only on events (plan published, tool finished, agent settled), never
+per frame. A pending plan is resolved where plans have always been resolved —
+`/plan off` approves, any typed prompt is revision feedback — and `/plan show`
+reprints the document in the transcript.
 
 **Slash commands** dispatch at input-submit and never reach the model:
 
