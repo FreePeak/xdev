@@ -31,6 +31,12 @@ import (
 	"github.com/FreePeak/xdev/internal/tui"
 )
 
+// mcpNoticeGrace is how long a failed MCP server's notice stays on the
+// composer divider. Longer than a chord's confirmation: the user did not ask
+// for this one, and a missing tool set only becomes visible much later, when
+// the model works around a tool it never had.
+const mcpNoticeGrace = 2 * time.Minute
+
 // runTUI drives the interactive TUI mode (M4).
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	cwd, err := os.Getwd()
@@ -114,10 +120,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// revision note. Headless runs auto-accept (nil reviewer).
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
-	mgr := attachMCP(context.Background(), reg, false)
-	if mgr != nil {
-		defer mgr.Close()
-	}
 	// toolsForTurn routes each turn at the vibe director's restricted view
 	// while the mode is on. The parent registry is never mutated, so exiting
 	// the mode restores the full toolset by construction.
@@ -249,6 +251,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// iteration stalls, xdev now writes the goroutine stacks where `xdev gc`
 	// already collects them.
 	app.SetStallDumpDir(filepath.Join(config.DataDir(), "dumps"))
+	// MCP servers (optional; absent config = nothing happens). Attached once
+	// the app exists, because a failed server is a startup fact the user has
+	// to read — and stderr is not readable under the alt screen (#272). The
+	// composer divider carries it like any other notice, and drops it after
+	// mcpNoticeGrace so a broken server stops shouting.
+	mgr := attachMCP(context.Background(), reg, false, func(msg string) {
+		app.SetNotice(msg, mcpNoticeGrace)
+	})
+	if mgr != nil {
+		defer mgr.Close()
+	}
 	// showThinking drives the reasoning display (issue #20): the layered
 	// config is the source of truth, with --hide-thinking / --print-thoughts
 	// overriding it for this run (display only — the model still thinks).
