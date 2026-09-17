@@ -160,3 +160,26 @@ func TestProxyURLChain(t *testing.T) {
 		t.Fatalf("PI_PROXY_* must take precedence: %q", got)
 	}
 }
+
+func TestIsDevEnv(t *testing.T) {
+	t.Setenv("XDEV_ENV", "dev")
+	t.Cleanup(func() { os.Unsetenv("XDEV_ENV") })
+	if !IsDevEnv() {
+		t.Fatal("XDEV_ENV=dev should report dev")
+	}
+
+	t.Setenv("XDEV_ENV", "production")
+	if IsDevEnv() {
+		t.Fatal("XDEV_ENV=production should not report dev")
+	}
+
+	t.Setenv("XDEV_ENV", "")
+	if IsDevEnv() {
+		t.Fatal("empty XDEV_ENV should not report dev")
+	}
+
+	os.Unsetenv("XDEV_ENV")
+	if IsDevEnv() {
+		t.Fatal("unset XDEV_ENV should not report dev")
+	}
+}
