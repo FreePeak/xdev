@@ -368,8 +368,8 @@ type Settings struct {
 	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
 	// on a @role reference overrides it).
 	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
-	// Memory selects the long-term memory backend (M12 F1, M15 #73): "off"
-	// (default), "local" (MEMORY.md + learned.md under the data dir, with the
+	// Memory selects the long-term memory backend (M12 F1, M15 #73): "local"
+	// (default; MEMORY.md + learned.md under the data dir, with the
 	// memory:// read seam and the learn tool), "mnemopi" (local SQLite store
 	// with banks, a fact link graph and polyphonic recall, M12 #44),
 	// "hindsight" (remote Hindsight HTTP server, M12 #43), or "sharpshooter"
@@ -823,6 +823,13 @@ func defaultSettings() *Settings {
 		Prewalk:            PrewalkSettings{Into: "@smol"},
 		// The group ships enabled but rule-less (no rules = inert).
 		TTSR: &TTSRSettings{Enabled: &show, InterruptMode: "always", ContextMode: "discard", RepeatGap: 3},
+		// Memory ships ON: a lesson recorded in one session is only worth
+		// recording if the next session reads it, and an off-by-default store
+		// is write-only — learned.md fills up while every prompt runs with
+		// nothing injected. An empty store injects nothing, so the default
+		// costs one directory read and no tokens; "memory: off" stays the
+		// explicit opt-out.
+		Memory: "local",
 	}
 }
 

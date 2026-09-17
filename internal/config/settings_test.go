@@ -65,6 +65,32 @@ modelRoles:
 	if s.MemoryLimit != 100<<20 {
 		t.Errorf("memoryLimit default lost: %d", s.MemoryLimit)
 	}
+	if s.Memory != "local" {
+		t.Errorf("memory default lost: %q, want local", s.Memory)
+	}
+}
+
+func TestMemoryDefaultsToLocalAndOffWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	cwd := t.TempDir()
+
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Memory != "local" {
+		t.Fatalf("schema default = %q, want local", s.Memory)
+	}
+
+	overlay := writeFile(t, filepath.Join(t.TempDir(), "off.yml"), "memory: off\n")
+	off, err := LoadSettings(cwd, []string{overlay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Memory != "off" {
+		t.Fatalf("explicit off = %q, want off", off.Memory)
+	}
 }
 
 func TestSettingsShowThinking(t *testing.T) {
