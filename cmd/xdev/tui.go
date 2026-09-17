@@ -2135,6 +2135,24 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			if pending.Len() > 0 {
 				app.AddAssistantBlock(pending.String())
 			}
+		case ai.RoleToolResult:
+			// A resumed session must show the tool calls that produced the
+			// files it changed: the dock's FILES section is read from the
+			// finished result blocks (App.dockChanges), so dropping these on
+			// replay left the panel half empty on every reopen (#291).
+			out := tool.OutcomeOf(m.Details)
+			dur := ""
+			if m.DurationMS > 0 {
+				dur = (time.Duration(m.DurationMS) * time.Millisecond).Round(time.Millisecond).String()
+			}
+			app.AddToolBlock(m.ToolName, "")
+			app.FinishTool(m.ToolName, m.IsError, m.Text(), tui.ToolOutcome{
+				Dur:       dur,
+				Exit:      out.Exit,
+				HasExit:   out.HasExit,
+				Truncated: out.Truncated,
+				Diff:      out.Diff,
+			})
 		}
 	}
 }
