@@ -10,10 +10,11 @@ import (
 // Completion is directory-scoped, the way omp's is: the typed token names ONE
 // directory plus a prefix inside it, so a keystroke costs one readdir of that
 // directory — never a walk of the repo. That is what makes offering hidden and
-// gitignored paths affordable: the walk was the cost, and there is no longer a
-// walk per keystroke. The whole-repo scan survives only as the bare-`@`
-// fallback (nothing to scope to), and it rides the shared FS-scan cache grep
-// and glob already use, so it is one walk per TTL rather than one per keystroke.
+// gitignored paths affordable, and it answers a bare `@` too: with no directory
+// named there is nothing to scope to, so the menu lists the completion root,
+// exactly as omp's does. Nothing on this path walks, so no keystroke can stall
+// the UI thread: the whole-repo scan this used to fall back to cost 5.7s on a
+// 226k-file polyrepo, once per bare `@`, for a menu that showed 200 rows.
 //
 // Sources are injected so this package stays free of tool/cache imports.
 
@@ -41,19 +42,6 @@ func skipName(name string) bool {
 	return false
 }
 
-// skipScanRel reports whether a relative path from the whole-repo fallback is
-// dropped. It is stricter than skipName: a dependency tree may be named
-// explicitly (`@node_modules/…` reads that one directory), but letting every
-// vendored file into the bare-`@` list would bury the project's own paths.
-func skipScanRel(rel string) bool {
-	for _, part := range strings.Split(rel, "/") {
-		if skipName(part) || part == "node_modules" {
-			return true
-		}
-	}
-	return false
-}
-
 // pathMention completes name as an `@` mention on top of prefix, resolving
 // from the completion root: name is one entry inside dir, so the mention has to
 // carry the directory back. A path with spaces is quoted (omp does the same) —
@@ -75,31 +63,29 @@ func pathMention(prefix, dir, name string) string {
 	return prefix + `@"` + full + `"`
 }
 
-// SetPathCompletion enables `@`-file completion: root is the directory shown in
-// the menu header, list reads ONE directory (relative to root, "" for the root
-// itself), scan is the whole-repo fallback for a bare `@`. A nil list disables
-// the feature; a nil scan only disables the bare-`@` listing.
-func (a *App) SetPathCompletion(root string, list func(dir string) []PathEntry, scan func() []string) {
+// SetPathCompletion enables `@`-file completion: root is the completion root,
+// list reads ONE directory (relative to root, "" for the root itself). A nil
+// list disables the feature.
+func (a *App) SetPathCompletion(root string, list func(dir string) []PathEntry) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.pathRoot, a.pathList, a.pathScan = root, list, scan
+	a.pathRoot, a.pathList = root, list
 }
 
 // pathCandidates returns the menu items for the path dropdown as typed so far.
-// An empty token (`@` with nothing after it) names no directory, so it falls
-// back to the whole-repo scan (omp answers the same token with a global fuzzy
-// find); `@/` does name one — the root — and lists it. With no scan wired the
-// empty token simply lists the root directory rather than showing nothing.
+// An empty token (`@` with nothing after it) names no directory, so it lists
+// the completion root — one readdir, which is omp's answer to the same token
+// (`#getFileSuggestions("@")` is a bare readdir of basePath; the fuzzy find
+// only runs once a prefix exists). `@/` also resolves to the root, since
+// splitPathQuery strips the slash to ("",""), so the empty token needs no
+// special case: both land on the root directory read.
 func (a *App) pathCandidates(query string) []suggestion {
 	if a.pathList == nil {
 		return nil
 	}
 	dir, seg := splitPathQuery(query)
-	// Only an empty token falls back to the scan. `@/` names the root, so it
-	// must list the root (splitPathQuery strips the slash to ("", "")) — keying
-	// this on dir/seg instead would send an explicit root at the whole repo.
-	if strings.TrimSpace(query) == "" && a.pathScan != nil {
-		return a.scanCandidates()
+	if strings.TrimSpace(query) == "" {
+		dir, seg = "", "" // a bare `@` has nothing to scope to: list the root
 	}
 	lower := strings.ToLower(seg)
 	var dirs, files []string
@@ -124,28 +110,6 @@ func (a *App) pathCandidates(query string) []suggestion {
 			break
 		}
 		out = append(out, suggestion{Name: name, Tag: "path", kind: kindPath})
-	}
-	return out
-}
-
-// scanCandidates is the bare-`@` fallback: the whole-repo listing, capped.
-// ponytail: it shows the first entries the walk reaches rather than the best
-// ones — ranking 100k+ paths on every keystroke is exactly the cost this file
-// exists to avoid. Upgrade path: have the scanner keep an mtime-ordered index.
-func (a *App) scanCandidates() []suggestion {
-	if a.pathScan == nil {
-		return nil
-	}
-	files := a.pathScan()
-	out := make([]suggestion, 0, min(len(files), maxPathCandidates))
-	for _, rel := range files {
-		if len(out) == maxPathCandidates {
-			break
-		}
-		if rel == "" || rel == "." || skipScanRel(rel) {
-			continue
-		}
-		out = append(out, suggestion{Name: rel, Tag: "path", kind: kindPath})
 	}
 	return out
 }

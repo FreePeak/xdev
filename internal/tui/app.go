@@ -134,8 +134,7 @@ type App struct {
 	branch            string                   // git branch for the top bar ("" when none)
 	commandDir        string                   // markdown command discovery root
 	pathRoot          string                   // @-completion root (empty disables the menu)
-	pathList          func(string) []PathEntry // one directory's entries (the fast path)
-	pathScan          func() []string          // shared FS-scan cache-backed whole-repo source
+	pathList          func(string) []PathEntry // one directory's entries (the only source)
 	extCommands       map[string]string        // "/server:cmd" -> description
 	extRun            ExtensionCommand
 	renderers         map[string]RenderSpec   // tool name -> declarative render spec
