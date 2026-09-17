@@ -2485,6 +2485,12 @@ func (h *printHooks) OnContinuation(text string) {
 	fmt.Fprintf(os.Stderr, "\n[provider cut off mid-message — partial retained, continuation injected]\n")
 }
 
+// OnEmptyTurn surfaces the no-output stall in print mode, where the transcript
+// is stderr and a silent run is the whole symptom (#331).
+func (h *printHooks) OnEmptyTurn(text string) {
+	fmt.Fprintf(os.Stderr, "\n[the model answered with nothing — asked again]\n")
+}
+
 // OnGoalUpdated implements agent.GoalHook: goal transitions surface on stderr
 // in print mode.
 func (h *printHooks) OnGoalUpdated(g agent.Goal) {
