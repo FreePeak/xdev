@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/FreePeak/xdev/internal/theme"
 )
@@ -41,15 +42,17 @@ const (
 	DockHide = "hide"
 )
 
-// dockCols is the panel width INCLUDING both borders — opencode's panel number,
-// which is also the number its own content width subtracts.
+// dockCols is the panel width and dockPad the gutter it keeps on either side, so
+// the content is dockCols-2*dockPad cells wide — opencode's own panel and padding
+// numbers, which give its sections the same 38 columns.
 const (
 	dockCols    = 42
-	dockInner   = dockCols - 2 // paintable cells between the borders
-	dockMinCols = 120          // below this, auto mode closes the panel
-	dockMin     = 20           // the transcript's own floor, shared with rightEdge
-	dockListMax = 6            // rows one list shows before "+N more"
-	dockPlanMax = 18           // rows the plan document may take: the section is
+	dockPad     = 2
+	dockInner   = dockCols - 2*dockPad // paintable cells between the pads
+	dockMinCols = 120                  // below this, auto mode closes the panel
+	dockMin     = 20                   // the transcript's own floor, shared with rightEdge
+	dockListMax = 6                    // rows one list shows before "+N more"
+	dockPlanMax = 18                   // rows the plan document may take: the section is
 	// the reason the panel exists, so it gets the bigger half of the budget.
 )
 
@@ -87,13 +90,38 @@ type DockOps struct {
 	// Agents is the hub roster, one row per child, heading included. It is the
 	// same snapshot /hub reads; the panel never holds a roster of its own.
 	Agents func() string
+	// Session is the panel's identity: the live session's title — the panel's own
+	// title slot — and its short id, the slot's fallback and the footer's heading.
+	// A closure rather than a setter because cmd swaps the store on /new, /resume
+	// and /fork: the panel follows the session, not the process.
+	Session func() (title, id string)
+}
+
+// dockRow is one painted row. text is the row's own line; add and del are the
+// right-aligned change counts a changed-file row carries, in the diff's own two
+// inks; head marks a section heading, which paints as a bold name and the dim
+// count its source appended.
+type dockRow struct {
+	text string
+	add  string // "+41" (diff-added ink), empty on every row but a changed file
+	del  string // "-12" (diff-removed ink)
+	head bool
+}
+
+// right is the fragment a row aligns to the panel's right edge — and so the
+// width a changed file's name has to leave room for.
+func (r dockRow) right() string {
+	if r.add == "" && r.del == "" {
+		return ""
+	}
+	return r.add + " " + r.del
 }
 
 // dockCand is one candidate row of a layout pass, tagged with the section it
 // belongs to (-1 = a separator).
 type dockCand struct {
 	fold int
-	text string
+	row  dockRow
 }
 
 // dockFold is one section as its source described it: rows already fitted to the
@@ -101,7 +129,7 @@ type dockCand struct {
 type dockFold struct {
 	id    string
 	title string
-	rows  []string
+	rows  []dockRow
 	max   int // the section's own row cap, so the render cannot disagree with it
 }
 
@@ -121,11 +149,13 @@ type dockState struct {
 	// heading click on the row map the picker already keeps.
 	fold int8
 
-	version     uint64 // the last bump folded in
-	lines       []string
-	heads       int // section headings drawn, for the panel's title
-	hidden      int // sections the height budget dropped, reported not lost
-	top         int // the band's first row, where the box starts
+	version uint64 // the last bump folded in
+	lines   []dockRow
+	// title and sid are the session's identity, read from the Session source on
+	// every build: title paints the panel's title slot, sid is its fallback and
+	// the footer's heading.
+	title       string
+	sid         string
 	buildW      int
 	bandH       int // the band the rows were budgeted for
 	buildBlocks int // the transcript's shape when the Files fold was read
@@ -269,12 +299,11 @@ func (a *App) dockBuild() {
 		d.lines = nil // closed: no source runs, and the next open frame rebuilds
 		return
 	}
-	top, bandH := a.dockGrid()
+	_, bandH := a.dockGrid()
 	if bandH <= 0 {
 		d.lines = nil // dockOn refuses this frame; belt, so no build has no band
 		return
 	}
-	d.top = top
 	next := dockBumpSeq.Load()
 	// Three things make a build stale: a source said it moved (version), the
 	// grid changed — width, or the band's height, which the composer's growth
@@ -287,16 +316,23 @@ func (a *App) dockBuild() {
 		return
 	}
 	d.version, d.buildW, d.bandH, d.buildBlocks = next, a.width, bandH, len(a.blocks)
+	// The identity slot is read once per build, never per frame — the same rule
+	// every other source follows — so the session's name costs nothing until the
+	// name, the version, or the grid moves.
+	d.title, d.sid = "", ""
+	if d.ops.Session != nil {
+		d.title, d.sid = d.ops.Session()
+	}
 	folds := a.collect()
-	// The footer is the session, not the work: id, directory, branch — the facts
-	// the status row carries when it has room and the panel keeps readable even
-	// when the transcript fills the height.
+	// The footer is the session, not the work: the id, the directory, the branch
+	// — the facts the status row carries when it has room and the panel keeps
+	// readable even when the transcript fills the height.
 	if f, ok := a.dockFooter(); ok {
 		folds = append(folds, f)
 	}
-	d.lines, d.heads, d.hidden = d.layout(folds, bandH)
+	d.lines, _, _ = d.layout(folds, bandH)
 	if d.lines == nil {
-		d.lines = []string{} // the built-and-empty state, so the next frame skips it
+		d.lines = []dockRow{} // the built-and-empty state, so the next frame skips it
 	}
 }
 
@@ -333,15 +369,15 @@ func dockPlanFold(pending string, act bool) (dockFold, bool) {
 	switch {
 	case pending != "":
 		body := strings.Split(strings.TrimRight(sanitizeOutput(pending), "\n"), "\n")
-		rows := []string{dockClip("/plan off approves · or just type your feedback")}
+		rows := []dockRow{{text: dockClip("/plan off approves · or just type your feedback")}}
 		for _, l := range body {
-			rows = append(rows, dockClip(l))
+			rows = append(rows, dockRow{text: dockClip(l)})
 		}
 		return dockFold{id: dockPlanID, max: dockPlanMax,
 			title: fmt.Sprintf("PLAN · proposed (%d lines)", len(body)), rows: rows}, true
 	case act:
 		return dockFold{id: dockPlanID, max: dockListMax, title: "PLAN · writing",
-			rows: []string{dockClip("the model is drafting; propose submits it")}}, true
+			rows: []dockRow{{text: dockClip("the model is drafting; propose submits it")}}}, true
 	}
 	return dockFold{}, false
 }
@@ -356,7 +392,7 @@ func dockFoldOf(id, raw string, max int) (dockFold, bool) {
 	f := dockFold{id: id, title: dockClip(strings.TrimSpace(parts[0])), max: max}
 	for _, l := range parts[1:] {
 		if strings.TrimSpace(l) != "" {
-			f.rows = append(f.rows, dockClip(l))
+			f.rows = append(f.rows, dockRow{text: dockClip(l)})
 		}
 	}
 	return f, true
@@ -403,38 +439,46 @@ func (a *App) dockChanges() (dockFold, bool) {
 	if len(order) == 0 {
 		return dockFold{}, false
 	}
-	rows := make([]string, 0, len(order))
+	rows := make([]dockRow, 0, len(order))
 	for _, p := range order {
 		t := counts[p]
-		rows = append(rows, dockClip(fmt.Sprintf("%s +%d/-%d", dockBase(p), t.add, t.del)))
+		r := dockRow{add: fmt.Sprintf("+%d", t.add), del: fmt.Sprintf("-%d", t.del)}
+		r.text = dockPath(p, dockInner-width(r.right())-1) // -1: a cell between name and counts
+		rows = append(rows, r)
 	}
-	head := fmt.Sprintf("FILES · %d", len(order))
-	if len(order) == 1 {
-		head = "FILES · 1"
-	}
-	return dockFold{id: dockFileID, title: dockClip(head), max: dockListMax, rows: rows}, true
+	return dockFold{id: dockFileID, title: dockClip(fmt.Sprintf("FILES · %d", len(order))),
+		max: dockListMax, rows: rows}, true
 }
 
-// dockBase shortens a path to what fits a 40-column panel: the repo-relative
-// form when the diff carries one, else the basename. A changed file under a deep
-// tree is still identified by its name, and the transcript block has the full
-// path if the human wants it.
-func dockBase(p string) string {
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
+// dockPath fits a changed path to room cells by cutting from the LEFT — opencode's
+// rule — so the file name survives and it is a directory that gets the ellipsis:
+// two app.go in different trees stay distinguishable where the eye lands, which a
+// basename cannot promise. The transcript block still carries the whole path for
+// whoever wants it.
+func dockPath(p string, room int) string {
+	if room <= 0 {
+		return ""
 	}
-	return p
+	if width(p) <= room {
+		return p
+	}
+	return runewidth.TruncatePrefix(p, room, "…")
 }
 
-// dockFooter is the panel's last section: the session identity the issue's footer
-// asks for, from state the App already holds.
+// dockFooter is the panel's last section: the session's identity, from state the
+// App already holds. Its heading carries the id that the title slot above shows
+// only while the session has no name yet.
 func (a *App) dockFooter() (dockFold, bool) {
-	f := dockFold{id: "footer", title: dockClip("SESSION · " + shortID(a.st.SessionID)), max: 3}
+	id := a.dock.sid
+	if id == "" {
+		id = shortID(a.st.SessionID)
+	}
+	f := dockFold{id: "footer", title: dockClip("SESSION · " + id), max: 3}
 	if a.cwd != "" {
-		f.rows = append(f.rows, dockClip(pathDisplay(a.cwd, dockInner)))
+		f.rows = append(f.rows, dockRow{text: dockClip(pathDisplay(a.cwd, dockInner))})
 	}
 	if a.branch != "" {
-		f.rows = dockAppend(f.rows, dockClip("on "+a.branch))
+		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
 	}
 	if len(f.rows) == 0 {
 		return dockFold{}, false
@@ -452,11 +496,11 @@ func (a *App) dockFooter() (dockFold, bool) {
 // part of the cost of cutting, and a panel that trimmed its content into its last
 // pixel would have to clip its own footnote, which is the silent loss this
 // function exists to prevent.
-func (d *dockState) layout(folds []dockFold, bandH int) (rows []string, heads, hidden int) {
+func (d *dockState) layout(folds []dockFold, bandH int) (rows []dockRow, heads, hidden int) {
 	if bandH < 5 {
 		return nil, 0, 0
 	}
-	limit := bandH - 1 // the panel's bottom border row is not ours to paint
+	limit := bandH - 1 // the panel's title slot is not ours to paint
 	// What each section would show at this fold state, before the band decides.
 	want := make([]int, len(folds))
 	for i, f := range folds {
@@ -481,9 +525,9 @@ func (d *dockState) layout(folds []dockFold, bandH int) (rows []string, heads, h
 			cands = append(cands, dockCand{fold: -1})
 		}
 		headAt[i] = len(cands)
-		cands = append(cands, dockCand{i, dockClip(" " + f.title)})
+		cands = append(cands, dockCand{fold: i, row: dockRow{text: dockClip(f.title), head: true}})
 		for j := 0; j < want[i]; j++ {
-			cands = append(cands, dockCand{i, " " + f.rows[j]})
+			cands = append(cands, dockCand{fold: i, row: f.rows[j]})
 		}
 	}
 	for keep := min(len(cands), limit); keep >= 0; keep-- {
@@ -500,7 +544,7 @@ func (d *dockState) layout(folds []dockFold, bandH int) (rows []string, heads, h
 // still fits limit. The markers a cut requires are appended here, so the fit test
 // cannot lie about its own cost; a nil rows means "this prefix is too generous,
 // try a shorter one".
-func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int, fold int8) (rows []string, heads, hidden int) {
+func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int, fold int8) (rows []dockRow, heads, hidden int) {
 	// Candidate rows each section kept, counting its heading.
 	kept := make([]int, len(folds))
 	for _, c := range cands[:keep] {
@@ -511,23 +555,23 @@ func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int,
 	for i, f := range folds {
 		hidden += len(f.rows) - max(kept[i]-1, 0)
 	}
-	out := make([]string, 0, keep+2*len(folds))
+	out := make([]dockRow, 0, keep+2*len(folds))
 	for i, f := range folds {
 		if headAt[i] >= keep {
 			continue // its heading fell off too: counted, never half-painted
 		}
 		if i > 0 {
-			out = append(out, "")
+			out = append(out, dockRow{})
 		}
-		out = append(out, cands[headAt[i]].text)
+		out = append(out, cands[headAt[i]].row)
 		heads++
 		shown := max(kept[i]-1, 0)
 		for j := 0; j < shown; j++ {
-			out = append(out, cands[headAt[i]+1+j].text)
+			out = append(out, cands[headAt[i]+1+j].row)
 		}
 		// A folded section explains itself in the summary, not row by row.
 		if cut := len(f.rows) - shown; cut > 0 && (shown > 0 || fold != foldShut) {
-			out = append(out, dockClip(fmt.Sprintf(" +%d more", cut)))
+			out = append(out, dockRow{text: dockClip(fmt.Sprintf("+%d more", cut))})
 		}
 	}
 	if hidden > 0 {
@@ -535,7 +579,7 @@ func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int,
 		if fold == foldShut {
 			note = fmt.Sprintf("%d rows folded away · ctrl+t opens them", hidden)
 		}
-		out = append(out, "", dockClip(note))
+		out = append(out, dockRow{}, dockRow{text: dockClip(note)})
 	}
 	if len(out) > limit {
 		return nil, 0, hidden
@@ -549,15 +593,6 @@ const (
 	foldOpen
 	foldShut
 )
-
-func dockGap(i int) int {
-	if i == 0 {
-		return 0
-	}
-	return 1
-}
-
-func dockAppend(rows []string, more ...string) []string { return append(rows, more...) }
 
 // dockClip fits one line to the panel's interior with the package's clip():
 // truncate, never wrap. A list row is a path or a one-line status, and a wrapped
@@ -624,48 +659,84 @@ func (a *App) dockGrid() (top, h int) {
 
 // --- paint ---
 
-// drawDock paints the box, the rows the build made and the band they were
-// budgeted for. Caller holds a.mu and has run dockBuild for this frame.
+// dockSplit separates a section heading into the bold name and the dim count its
+// source appended ("TASKS · 1/2 done" → "TASKS" + "· 1/2 done") — opencode's
+// heading anatomy, so a section is found by name and counted only when the eye
+// wants the number. A heading that carries no count paints whole, in bold.
+func dockSplit(title string) (name, count string) {
+	i := strings.Index(title, "·")
+	if i < 0 {
+		return strings.TrimRight(title, " "), ""
+	}
+	name = strings.TrimRight(title[:i], " ")
+	if rest := strings.TrimSpace(title[i+len("·"):]); rest != "" {
+		return name, "· " + rest
+	}
+	return name, ""
+}
+
+// drawDock paints the panel: the surface, the session's own name in the top slot,
+// and the rows the build made for the band they were budgeted for. Caller holds
+// a.mu and has run dockBuild for this frame.
+//
+// There is no box, deliberately. The panel is a surface of its own on the theme's
+// panel background with a two-cell gutter — the shape opencode's sidebar has. A
+// border drawn around a column that already fills its own background is one line
+// of chrome too many, and it costs the interior two columns.
 func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	if h <= 0 {
 		return
 	}
 	d := a.dock
-	th := a.th
-	border := tcell.StyleDefault.Foreground(a.cellColor(th.Get(theme.Border)))
-	body := tcell.StyleDefault
-	if bg, ok := th.Slot(theme.BgBase); ok {
-		body = body.Background(a.cellColor(bg))
+	bg := tcell.ColorDefault
+	if c, ok := a.th.Slot(theme.BgBase); ok {
+		bg = a.cellColor(c)
 	}
-	ink := body.Foreground(a.cellColor(th.Get(theme.TextPrimary)))
-	dim := body.Foreground(a.cellColor(th.Get(theme.GrayDim)))
+	body := tcell.StyleDefault.Background(bg)
+	ink := body.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	// The change counts wear the diff's own inks, on the panel's background: a
+	// file's "+N" is the green its diff block already paints with.
+	ds := a.diffStyle()
+	added, removed := ds.added.Background(bg), ds.removed.Background(bg)
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
-			ch, st := ' ', body
-			switch {
-			case cx == x || cx == x+dockCols-1:
-				ch, st = '│', border
-			case y == top || y == top+h-1:
-				ch, st = '─', border
-			}
-			s.SetContent(cx, y, ch, nil, st)
+			s.SetContent(cx, y, ' ', nil, body)
 		}
 	}
-	head := "CONTEXT"
-	switch d.heads {
-	case 0:
-	case 1:
-		head = "CONTEXT · 1 section"
-	default:
-		head = fmt.Sprintf("CONTEXT · %d sections", d.heads)
+	// The title slot (opencode's sidebar_title): the session's own name, its id
+	// while it has none, and the harness's own id for a caller that wired no
+	// session source at all.
+	title := d.title
+	if title == "" {
+		title = d.sid
 	}
-	drawText(s, x+2, top, dockClip(head), dim.Bold(true))
-	for i, l := range d.lines {
+	if title == "" {
+		title = shortID(a.st.SessionID)
+	}
+	drawText(s, x+dockPad, top, dockClip(title), ink.Bold(true))
+	for i, r := range d.lines {
 		y := top + 1 + i
-		if y >= top+h-1 {
+		if y >= top+h {
 			break
 		}
-		drawText(s, x+1, y, l, ink)
+		switch {
+		case r.head:
+			name, count := dockSplit(r.text)
+			drawText(s, x+dockPad, y, name, ink.Bold(true))
+			if count != "" {
+				drawText(s, x+dockPad+width(name)+1, y, count, dim)
+			}
+		case r.right() != "":
+			// A changed file: the path flush left, its counts flush right, so the
+			// numbers line up down the column whatever the names are.
+			cx := x + dockPad + dockInner - width(r.right())
+			drawText(s, x+dockPad, y, r.text, ink)
+			drawText(s, cx, y, r.add, added)
+			drawText(s, cx+width(r.add)+1, y, r.del, removed)
+		default:
+			drawText(s, x+dockPad, y, r.text, ink)
+		}
 	}
 }
 
