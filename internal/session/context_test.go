@@ -334,3 +334,29 @@ func TestBuildContextDanglingParentStopsPath(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(r.Messages))
 	}
 }
+
+// TestBuildContextHealsEmptyToolOutput covers the sessions already on disk: a
+// transcript written while openai-responses omitted an empty `output` would
+// otherwise 400 on every resume, so the rebuild substitutes the placeholder.
+func TestBuildContextHealsEmptyToolOutput(t *testing.T) {
+	entries := []Entry{
+		userMsg("11111111", "", "go"),
+		asstMsg("22222222", "11111111", "", ai.ToolCallBlock{ID: "call_1", Name: "glob", Arguments: []byte(`{}`)}),
+		&MessageEntry{
+			Env: Envelope{Type: TypeMessage, ID: "33333333", ParentID: "22222222"},
+			Message: ai.Message{Role: ai.RoleToolResult, ToolCallID: "call_1", ToolName: "glob",
+				Content: []ai.Block{ai.TextBlock{Text: "   "}}},
+		},
+	}
+	r := ctx(t, entries, "33333333")
+	last := r.Messages[len(r.Messages)-1]
+	if last.Role != ai.RoleToolResult {
+		t.Fatalf("last message = %v, want the result", last.Role)
+	}
+	if strings.TrimSpace(last.Text()) != ai.ToolOutputPlaceholder {
+		t.Fatalf("stored empty result = %q, want the placeholder", last.Text())
+	}
+	if last.ToolCallID != "call_1" {
+		t.Fatalf("call id lost: %q", last.ToolCallID)
+	}
+}

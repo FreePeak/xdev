@@ -34,6 +34,15 @@ func TestClassify(t *testing.T) {
 		{"413 overflow body", &HTTPError{API: "a", Status: 413, Body: "prompt is too long: exceeds the limit of 12345"}, ClassContextOverflow},
 		{"400 plain", &HTTPError{API: "a", Status: 400, Body: "bad parameter"}, ClassBadRequest},
 		{"400 empty body", &HTTPError{API: "a", Status: 400, Body: ""}, ClassBadRequest},
+		// The one this shipped for: a request the provider rejected on shape
+		// (a Responses `input` item missing the required `output` field, which
+		// an empty toolResult produced). Retried, the next turn rebuilds the
+		// request from history with the placeholder text; left a bad request,
+		// the run ended with the session unrecoverable.
+		{"400 missing required field", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` + "`input[185]` missing required field `output`"}, ClassTransient},
+		{"400 invalid_request_error without a field", &HTTPError{API: "a", Status: 400,
+			Body: `{"error":{"type":"invalid_request_error"}}`}, ClassBadRequest},
 		{"404 unknown", &HTTPError{API: "a", Status: 404, Body: "nope"}, ClassUnknown},
 		{"302 unknown", &HTTPError{API: "a", Status: 302, Body: "redir"}, ClassUnknown},
 		{"transport overflow text", errors.New("agent: stream: prompt exceeds the context window of 1000000"), ClassContextOverflow},
