@@ -211,7 +211,7 @@ type App struct {
 	// that is on screen rather than a re-derivation that could disagree with it.
 	// (UI thread; mu-guarded.)
 	selBarOn    bool
-	selBarW     int // the bar's column width (the last screen column, or 0)
+	selBarX     int // the screen column the bar was painted in (the transcript's last column, or 0)
 	selBarVP    int // visible transcript rows the bar spans
 	selBarTotal int // transcript rows at paint time
 	selBarThumb int // thumb rows at paint time
@@ -2933,11 +2933,14 @@ func (a *App) paint() {
 	// Publish the bar's geometry for the mouse hit-test (selection.go): the
 	// press that grabs the thumb and the drag that moves it act on exactly the
 	// bar painted here — and on no bar at all when the transcript fits, since
-	// sbOk false is what keeps grab off a column that carries content.
+	// sbOk false is what keeps grab off a column that carries content. The
+	// column travels with it: with the context dock open the transcript's last
+	// column is not the terminal's last, and a grab keyed to width-1 answers a
+	// press on the panel's border instead of the bar under the pointer.
 	a.selBarOn, a.selBarVP, a.selBarPos = sbOk, vp, sbStart
-	a.selBarW, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
+	a.selBarX, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
 	if sbOk {
-		a.selBarW = 1
+		a.selBarX = edge - 1
 	}
 	a.selRows, a.selTop = selRows, start
 	if a.selDown {
