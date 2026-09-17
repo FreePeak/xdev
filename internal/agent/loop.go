@@ -1161,6 +1161,13 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	return toolResultMsg(call, res)
 }
 
+// toolResultMsg builds the toolResult message for one finished call. Every
+// result the model is shown passes through here, so this is where a silent tool
+// gets text a provider accepts: an empty toolResult serialized to an
+// openai-responses function_call_output carrying no `output` field at all, and
+// the upstream answered the whole turn with HTTP 400 [invalid_request_error]
+// "`input[185]` missing required field `output`" — a bad request the retry
+// ladder does not retry, so the run ended (ai.Message.EnsureToolOutput).
 func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
 	return ai.Message{
 		Role:       ai.RoleToolResult,
@@ -1169,7 +1176,7 @@ func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
 		ToolName:   call.Name,
 		IsError:    res.IsError,
 		Details:    res.Details,
-	}
+	}.EnsureToolOutput()
 }
 
 // Redactor hides configured secrets in provider-visible text and restores

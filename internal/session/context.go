@@ -162,7 +162,10 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 				if m.ToolCallID != "" && !seenCalls[m.ToolCallID] {
 					continue // orphan result: no prior assistant issued the call
 				}
-				out = append(out, m)
+				// Heal on rebuild: a session stored while the Responses encoder
+				// omitted an empty `output` would otherwise re-send the same
+				// rejected request on every resume (ai.Message.EnsureToolOutput).
+				out = append(out, m.EnsureToolOutput())
 				entryIDs = append(entryIDs, e.Envelope().ID)
 			default:
 				out = append(out, m)
