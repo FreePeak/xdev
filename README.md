@@ -149,6 +149,7 @@ remap in JSON with live reload). What matters for daily work:
 | `Ctrl+R` | previous prompt |
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
+| `Shift+Tab` | ask the model to stop reasoning ⇄ let the model role decide (`/thinking`) |
 | `Ctrl+O` | expand the newest tool result or thinking box |
 | `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
 | `Ctrl+C` | quit (`Esc` cancels the running turn first) |
@@ -169,6 +170,14 @@ whose body is a fixed 12-row window. The wheel over the box scrolls its own
 window, so long reasoning stays readable without pushing the transcript under
 the pointer; `Ctrl+O` expands it to every row.
 
+Display and request are separate switches. The box above is *display*
+(`showThinking`, `/settings showThinking on|off`); `Shift+Tab` (or `/thinking
+off`) is the *request*: the next turn goes out with no reasoning budget at all,
+and the toggle flips between "off" and "auto", where "auto" hands the decision
+back to the model role's `:effort` (`@slow:high`, or the persisted `thinking`
+key). `/thinking low` pins one rung for the rest of the session and writes it to
+the global layer.
+
 The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
 transcript: the pending plan, the task list, the files this session changed, the
 running subagents and the session footer — the working set, kept beside the
@@ -187,6 +196,7 @@ the transcript.
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
 | `/model [@role\|ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |

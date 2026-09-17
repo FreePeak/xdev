@@ -33,8 +33,9 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	// --thinking overrides whatever the model role pinned.
-	if effortRef, err = applyThinkingFlag(launch.Thinking, effortRef); err != nil {
+	// The request-side thinking level: --thinking wins, else the persisted
+	// `thinking` key, else the role's own ":effort".
+	if effortRef, err = applyThinkingFlag(thinkingLevel(lastSettings(), launch.Thinking), effortRef); err != nil {
 		return 2, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)

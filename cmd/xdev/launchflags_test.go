@@ -153,6 +153,46 @@ func TestApplyThinkingFlag(t *testing.T) {
 	}
 }
 
+// TestThinkingLevel pins the precedence ladder the run modes share:
+// --thinking wins when it names a level, otherwise the persisted `thinking`
+// key decides, otherwise "auto" (applyThinkingFlag's role-effort branch).
+func TestThinkingLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		key    string
+		flag   string
+		want   string
+		role   string
+		budget string
+	}{
+		{name: "unset everywhere is auto", key: "", flag: "", want: "auto", role: "medium", budget: "medium"},
+		{name: "settings wins over the role effort", key: "off", flag: "", want: "off", role: "high", budget: ""},
+		{name: "flag wins over the settings key", key: "off", flag: "low", want: "low", role: "high", budget: "low"},
+		{name: "flag auto defers to the settings key", key: "off", flag: "auto", want: "off", role: "high", budget: ""},
+		{name: "settings auto defers to the role effort", key: "auto", flag: "", want: "auto", role: "high", budget: "high"},
+		{name: "padded flag still names a level", key: "off", flag: " medium ", want: "medium", role: "high", budget: "medium"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &config.Settings{Thinking: tc.key}
+			if got := thinkingLevel(s, tc.flag); got != tc.want {
+				t.Fatalf("thinkingLevel(key=%q, flag=%q) = %q, want %q", tc.key, tc.flag, got, tc.want)
+			}
+			// The level then folds against the role's own ":effort" — the whole
+			// chain a run mode applies.
+			effort, err := applyThinkingFlag(thinkingLevel(s, tc.flag), tc.role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if effort != tc.budget {
+				t.Fatalf("folded effort = %q, want %q", effort, tc.budget)
+			}
+		})
+	}
+	if nilLevel := thinkingLevel(nil, ""); nilLevel != "auto" {
+		t.Fatalf("nil settings must still resolve: %q", nilLevel)
+	}
+}
+
 func TestResolveThinkingDisplay(t *testing.T) {
 	if got := resolveThinkingDisplay(false, false); got != nil {
 		t.Errorf("no flag must follow settings, got %v", *got)

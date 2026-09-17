@@ -54,11 +54,32 @@ func TestChordOf(t *testing.T) {
 		{"plain rune", tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone), "a"},
 		{"F5", tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone), "F5"},
 		{"unknown", tcell.NewEventKey(tcell.KeyInsert, 0, tcell.ModNone), ""},
+		// Shift-Tab: tcell delivers it as KeyBacktab (it normalizes Tab+Shift
+		// into this key), and this is the spelling the default map binds — a
+		// "S-Tab" entry would never match a real event.
+		{"Shift-Tab", tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift), "Shift-Tab"},
 	}
 	for _, tc := range tests {
 		if got := chordOf(tc.ev); got != tc.want {
 			t.Errorf("chordOf(%s) = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestResolveThinkingToggle pins the chord end to end: the event a terminal
+// actually sends for Shift-Tab resolves to the action the default map names,
+// and a keybindings.yml remap of that action is not shadowed by the default.
+func TestResolveThinkingToggle(t *testing.T) {
+	m := DefaultKeyMap()
+	if got := m.Chord("thinking-toggle"); got != "Shift-Tab" {
+		t.Fatalf("default chord = %q, want Shift-Tab", got)
+	}
+	if got := m.Resolve(tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift)); got != "thinking-toggle" {
+		t.Fatalf("Resolve(Shift-Tab) = %q, want thinking-toggle", got)
+	}
+	// Tab itself still means menu-accept: the toggle must not eat it.
+	if got := m.Resolve(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)); got != "menu-accept" {
+		t.Fatalf("Resolve(Tab) = %q, want menu-accept", got)
 	}
 }
 

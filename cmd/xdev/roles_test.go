@@ -149,6 +149,13 @@ func TestEffortReachesTheBudget(t *testing.T) {
 	if effortBudget("") != nil || effortBudget("nonsense") != nil {
 		t.Fatal("no/unknown effort must mean no thinking requested")
 	}
+	// "minimal" is documented as the off switch (config.EffortTokens: 0), and a
+	// 0-token budget is not "off" to any adapter — Anthropic rejects
+	// max_tokens<=0, the OpenAI adapters read effort "low". It must fold to nil
+	// here, the one function every run mode and adapter reads.
+	if bud := effortBudget("minimal"); bud != nil {
+		t.Fatalf("minimal must mean no thinking requested, got %+v", bud)
+	}
 }
 
 // #272: frontmatter `model: @role` must expand through modelRoles. Before
