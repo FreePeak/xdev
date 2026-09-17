@@ -167,12 +167,17 @@ func NormalizeSchemaForCCA(raw json.RawMessage) json.RawMessage {
 // SanitizeSchemaForOpenAIResponses rewrites what the OpenAI Responses API
 // rejects: `oneOf` becomes `anyOf`, object schemas always carry `properties`,
 // and regex lookarounds are removed from `pattern` (RE2 has no lookarounds).
+// Root anyOf/oneOf branches that are already object-compatible also gain an
+// explicit `type:"object"` — xAI (and similar strict validators) 400 a tool
+// whose parameters root is a union with an untyped branch (the ask tool's
+// "one of these property sets" shape).
 func SanitizeSchemaForOpenAIResponses(raw json.RawMessage) json.RawMessage {
-	return normalizeSchema(raw, schemaOptions{
+	out := normalizeSchema(raw, schemaOptions{
 		drop:            append(append([]string{}, schemaMetaKeys...), "definitions", "$defs"),
 		ensureProps:     true,
 		stripLookaround: true,
 	})
+	return retypeRootObjectUnions(out)
 }
 
 // NormalizeSchemaForMCP prepares an MCP tool inputSchema before it enters the
@@ -825,6 +830,59 @@ func ensureObjectRoot(raw json.RawMessage) json.RawMessage {
 		node["properties"] = map[string]any{}
 	}
 	return encodeSchemaValue(node, raw)
+}
+
+// retypeRootObjectUnions writes `type:"object"` onto every branch of a tool
+// parameters root anyOf/oneOf when every branch is already object-compatible
+// (no type, or type "object"). xAI's validator 400s the untyped-branch shape
+// (`ask: tool parameter root must be an object type`); under a root that is
+// already an object, typing the branches admits no extra instance. A mixed
+// union (object beside string) is left verbatim — that is the tool's own
+// semantics. Nested unions are not touched: only the live 400 was at the root.
+func retypeRootObjectUnions(raw json.RawMessage) json.RawMessage {
+	v, err := decodeSchemaValue(raw)
+	if err != nil {
+		return raw
+	}
+	node, ok := v.(map[string]any)
+	if !ok {
+		return raw
+	}
+	changed := retypeObjectUnionBranches(node, "anyOf")
+	if retypeObjectUnionBranches(node, "oneOf") {
+		changed = true
+	}
+	if !changed {
+		return raw
+	}
+	return encodeSchemaValue(node, raw)
+}
+
+func retypeObjectUnionBranches(node map[string]any, key string) bool {
+	branches, ok := node[key].([]any)
+	if !ok || len(branches) == 0 {
+		return false
+	}
+	objs := make([]map[string]any, 0, len(branches))
+	for _, b := range branches {
+		obj, ok := b.(map[string]any)
+		if !ok {
+			return false
+		}
+		if tv, has := obj["type"]; has && tv != "object" {
+			return false
+		}
+		objs = append(objs, obj)
+	}
+	wrote := false
+	for _, obj := range objs {
+		if _, has := obj["type"]; has {
+			continue
+		}
+		obj["type"] = "object"
+		wrote = true
+	}
+	return wrote
 }
 
 // --- strict-mode pipeline ---

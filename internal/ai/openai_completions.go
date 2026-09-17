@@ -165,7 +165,7 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 	if req.Thinking != nil {
 		wr.ReasoningEffort = reasoningEffort(req.Thinking.Tokens)
 	}
-	for _, t := range req.Tools {
+	for _, t := range NormalizeToolsForAPI(p.API(), req.Tools) {
 		wr.Tools = append(wr.Tools, openaiWireTool{
 			Type: "function",
 			Function: openaiWireToolSpec{

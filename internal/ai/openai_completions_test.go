@@ -114,6 +114,48 @@ func TestOpenAICompletionsHappyPath(t *testing.T) {
 	}
 }
 
+// TestOpenAICompletionsRetypesAskRootUnion pins that the chat/completions
+// wire runs the OpenAI sanitizer: the ask tool's root anyOf used to leave
+// the gateway as untyped branches and xAI 400'd
+// "ask: tool parameter root must be an object type". Retrying the same
+// request cannot succeed — the schema has to be rewritten before POST.
+func TestOpenAICompletionsRetypesAskRootUnion(t *testing.T) {
+	srv, body := newStreamServer(t, completionsFrames...)
+	p := NewOpenAICompletionsProvider("router", srv.URL, "sk-test", nil, nil)
+	ask := json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"question":{"type":"string"},
+			"options":{"type":"array"},
+			"questions":{"type":"array"}
+		},
+		"anyOf":[
+			{"required":["question","options"]},
+			{"required":["questions"]}
+		]
+	}`)
+	_, err := p.Stream(context.Background(), StreamRequest{
+		Model:    "free",
+		Messages: []Message{{Role: RoleUser, Content: []Block{TextBlock{Text: "hi"}}}},
+		Tools:    []ToolDef{{Name: "ask", Description: "ask", Parameters: ask}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	req := decodeJSON(t, body.get(t))
+	params, _ := jpath(req, "tools", 0, "function", "parameters").(map[string]any)
+	branches, _ := params["anyOf"].([]any)
+	if len(branches) != 2 {
+		t.Fatalf("anyOf = %v, want both required-alternatives kept", params["anyOf"])
+	}
+	for i, b := range branches {
+		obj, _ := b.(map[string]any)
+		if obj["type"] != "object" {
+			t.Fatalf("branch %d = %v, want type object so the 400 cannot fire", i, b)
+		}
+	}
+}
+
 func TestOpenAICompletionsThinking(t *testing.T) {
 	frames := [][2]string{
 		{"", `{"id":"c2","choices":[{"index":0,"delta":{"reasoning_content":"let me"}}]}`},
