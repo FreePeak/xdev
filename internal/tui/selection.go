@@ -528,12 +528,15 @@ func (a *App) selectionText() string {
 }
 
 // selRowAt returns the selectable content of screen row y. Rows the transcript
-// painter recorded come from that capture, which leaves out the accent rail and
-// its padding so a copied line is the text and not the decoration; the capture
-// is viewport-relative, so the top bar's row is subtracted. Every other row —
-// the top bar itself, welcome, composer, status row, an open overlay, or blank
-// space under a short transcript — is read back from the painted grid, trimmed
-// of the trailing cells that only exist to fill the width.
+// painter recorded come from that capture, which leaves out the accent rail, its
+// padding and every run the frame builders marked chrome, so a copied line is
+// the text and not the decoration; the capture is viewport-relative, so the top
+// bar's row is subtracted. Every other row — the top bar itself, welcome, the
+// composer, status row, an open overlay, or blank space under a short
+// transcript — is read back from the painted grid, trimmed of the trailing
+// cells that only exist to fill the width and of the frame the row was drawn
+// in (boxSelectable), which is the only way the composer's border can be left
+// out of a copy: its box is painted cell by cell, never as runs.
 func (a *App) selRowAt(y int) selRow {
 	if vy := y - a.transcriptTop(); vy >= 0 && vy < len(a.selRows) {
 		return a.selRows[vy]
@@ -547,7 +550,8 @@ func (a *App) selRowAt(y int) selRow {
 		}
 		x += w
 	}
-	return selRow{text: strings.TrimRight(sb.String(), " ")}
+	text, x0 := boxSelectable(a.th.Box(), strings.TrimRight(sb.String(), " "), 0)
+	return selRow{text: text, x0: x0}
 }
 
 // cellSlice returns the runes of text occupying cells [a, b) (cells counted by

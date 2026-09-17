@@ -2331,31 +2331,95 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 // block's state). boxBottom closes the same frame; both are shared by every
 // boxed surface so a second frame cannot drift from the first.
 func boxTop(box theme.BoxChars, st tcell.Style, label string, w int) line {
-	top := line{runs: []cell{{text: box.TopLeft, style: st}}}
+	top := line{runs: []cell{{text: box.TopLeft, style: st, chrome: true}}}
 	if label == "" {
-		top.runs = append(top.runs, cell{text: strings.Repeat(box.Horizontal, max(1, w-2)) + box.TopRight, style: st})
+		top.runs = append(top.runs, cell{text: strings.Repeat(box.Horizontal, max(1, w-2)) + box.TopRight, style: st, chrome: true})
 		return top
 	}
 	label = truncateCells(label, max(1, w-6), "…")
+	// The label is content and the rule around it is frame: a drag over the
+	// top border copies the tool's name, not the glyphs framing it.
 	top.runs = append(top.runs,
-		cell{text: box.Horizontal + " ", style: st},
+		cell{text: box.Horizontal + " ", style: st, chrome: true},
 		cell{text: label, style: st.Bold(true)},
-		cell{text: " " + strings.Repeat(box.Horizontal, max(1, w-5-width(label))) + box.TopRight, style: st})
+		cell{text: " " + strings.Repeat(box.Horizontal, max(1, w-5-width(label))) + box.TopRight, style: st, chrome: true})
 	return top
 }
 
 func boxBottom(box theme.BoxChars, st tcell.Style, w int) line {
-	return textline(box.BottomLeft+strings.Repeat(box.Horizontal, max(1, w-2))+box.BottomRight, st)
+	// A closing rule carries no label: every cell of it is frame, so the row
+	// copies as the blank line it looks like.
+	return line{runs: []cell{{text: box.BottomLeft + strings.Repeat(box.Horizontal, max(1, w-2)) + box.BottomRight, style: st, chrome: true}}}
 }
 
 // boxRow frames one interior row: side borders, one pad cell each, and the text
 // padded to the interior width so every right border lands on the same column.
 func boxRow(box theme.BoxChars, border, st tcell.Style, s string, inner int) line {
+	body := strings.TrimRight(fitWidth(s, inner), " ")
 	return line{runs: []cell{
-		{text: box.Vertical + " ", style: border},
-		{text: fitWidth(s, inner), style: st},
-		{text: " " + box.Vertical, style: border},
+		{text: box.Vertical + " ", style: border, chrome: true},
+		{text: body, style: st},
+		{text: strings.Repeat(" ", inner-width(body)) + " " + box.Vertical, style: border, chrome: true},
 	}}
+}
+
+// boxSelectable is the inverse of the frame builders: from a row's painted text
+// and the column that text starts at, it returns what a selection should copy
+// and the column that copy starts at. x0 moves with every dropped cell because
+// the highlight (drawSelection) and the copy (cellSlice) both measure from it —
+// stripping a border without moving x0 would shift every slice two cells left.
+// A box's side borders and the pad cells inside them go, and so does the pad a
+// body row is filled out to its right border with, so a copied box reads as its
+// text and not as its frame. A rule row keeps only the label set into it
+// (`╭─ bash ───╮` copies as `bash`; a bare `╰───╯` as nothing): the label is
+// content, the rule around it is the frame.
+//
+// ponytail: this path recognises a frame by its glyphs, because the surfaces
+// that need it — the composer, the picker panel — paint their borders cell by
+// cell rather than as runs, so there is no run to mark. Transcript rows never
+// come through here (they are captured as runs, where cell.chrome is exact), so
+// the only text it can misread is a cell-by-cell surface whose content happens
+// to open with `│ ` and close with ` │`. If such a row ever appears, the upgrade
+// path is to paint that surface as runs like the frame builders do and let
+// cell.chrome carry it.
+func boxSelectable(box theme.BoxChars, s string, x0 int) (string, int) {
+	// A boxed surface paints its frame inset from the grid's left edge, so the
+	// blanks before it are frame too; a row that is not boxed at all (the top
+	// bar, welcome, the status row) is returned untouched, indent and all.
+	n := len(s) - len(strings.TrimLeft(s, " "))
+	t := s[n:]
+	for _, c := range []string{box.TopLeft, box.BottomLeft} {
+		if rest, ok := strings.CutPrefix(t, c); ok {
+			return ruleLabel(box, rest, x0+n+width(c))
+		}
+	}
+	rest, ok := strings.CutPrefix(t, box.Vertical+" ")
+	if !ok {
+		return s, x0
+	}
+	body, ok := strings.CutSuffix(strings.TrimRight(rest, " "), " "+box.Vertical)
+	if !ok {
+		return s, x0
+	}
+	return strings.TrimRight(body, " "), x0 + n + width(box.Vertical+" ")
+}
+
+// ruleLabel is the label a rule row carries: what sits between the corner and
+// the horizontals, or between two runs of them. Nothing but horizontals is a
+// close, and nothing at all is a bare rule — both copy as no text.
+func ruleLabel(box theme.BoxChars, rest string, x0 int) (string, int) {
+	for strings.HasPrefix(rest, box.Horizontal) {
+		rest, x0 = rest[len(box.Horizontal):], x0+width(box.Horizontal)
+	}
+	label := rest
+	if i := strings.Index(label, box.Horizontal); i >= 0 {
+		label = label[:i]
+	}
+	if label == box.TopRight || label == box.BottomRight {
+		label = ""
+	}
+	x0 += len(label) - len(strings.TrimLeft(label, " "))
+	return strings.TrimSpace(label), x0
 }
 
 // thinkRows is a reasoning block's body, wrapped to the frame's interior width.
@@ -2493,7 +2557,7 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	// budget are cut here rather than allowed to push the right border out of
 	// alignment.
 	cellRow := func(ln line) line {
-		framed := line{runs: []cell{{text: box.Vertical + " ", style: border}}}
+		framed := line{runs: []cell{{text: box.Vertical + " ", style: border, chrome: true}}}
 		col := 0
 		for _, r := range ln.runs {
 			if col >= inner {
@@ -2506,9 +2570,9 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 			col += width(r.text)
 		}
 		if col < inner {
-			framed.runs = append(framed.runs, cell{text: strings.Repeat(" ", inner-col)})
+			framed.runs = append(framed.runs, cell{text: strings.Repeat(" ", inner-col), chrome: true})
 		}
-		framed.runs = append(framed.runs, cell{text: " " + box.Vertical, style: border})
+		framed.runs = append(framed.runs, cell{text: " " + box.Vertical, style: border, chrome: true})
 		return framed
 	}
 
@@ -2745,7 +2809,13 @@ func (a *App) paint() {
 			}
 			drawText(s, 0, y, r.rail, railS)
 		}
-		startX, content := x, strings.Builder{}
+		// What this row contributes to a selection leaves the chrome out: a
+		// frame's border and padding are painted, never copied, and the copy
+		// starts at the column its first content cell occupies, which is the
+		// column the highlight measures from — so what is painted is what is
+		// copied. A row that is chrome end to end (a bare rule) records no
+		// text and copies as the blank line it looks like.
+		startX, content := -1, strings.Builder{}
 		for _, run := range r.ln.runs {
 			st := run.style
 			if banded {
@@ -2754,8 +2824,16 @@ func (a *App) paint() {
 				st = st.Background(r.ln.bg)
 			}
 			drawText(s, x, y, run.text, st)
-			content.WriteString(run.text)
+			if !run.chrome {
+				if startX < 0 {
+					startX = x
+				}
+				content.WriteString(run.text)
+			}
 			x += width(run.text)
+		}
+		if startX < 0 {
+			startX = 0
 		}
 		// Selection hit-testing works off this text (the streaming
 		// cursor is decoration, not content).

@@ -9,10 +9,15 @@ import (
 )
 
 // cell is one styled run within a rendered line: a substring of the source
-// text plus the style it should be painted with.
+// text plus the style it should be painted with. chrome marks a run a mouse
+// selection leaves out: a box's border, the pad cell inside it, the fill that
+// aligns its right border. Chrome is painted, never copied — only the code that
+// draws a run knows whether that run is the frame, which is why a rule row's
+// label is a run of its own and never a frame glyph.
 type cell struct {
-	text  string
-	style tcell.Style
+	text   string
+	style  tcell.Style
+	chrome bool
 }
 
 // line is a rendered visual line: styled runs plus a full-row background
