@@ -8,6 +8,7 @@ package ai
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Role is a message role. omp persists three roles: user, assistant, toolResult.
@@ -257,6 +258,41 @@ func (m *Message) Text() string {
 		}
 	}
 	return out
+}
+
+// ToolOutputPlaceholder is the text a toolResult carries when the tool ran and
+// produced nothing to say (a glob that matched nothing, a write that printed
+// nothing). The TUI, the compaction renderer and the bash sink already say
+// exactly this.
+const ToolOutputPlaceholder = "(no output)"
+
+// EnsureToolOutput returns a toolResult message whose text a provider accepts
+// as the answer to its call.
+//
+// openai-responses marshalled the function_call_output `output` field with
+// omitempty, so a tool result with no text serialized to an item carrying no
+// `output` at all, and the upstream rejected the entire turn:
+//
+//	HTTP 400 [invalid_request_error] `input[185]` missing required field `output`
+//
+// A 400 classifies as a bad request, which the retry ladder does not retry, so
+// the run ended with no way back. Applied both where tool results are BUILT
+// (the agent loop) and where stored history is REBUILT, so a session written
+// before this fix — or a foreign transcript imported with an empty output —
+// recovers on resume instead of repeating the rejected request forever.
+func (m Message) EnsureToolOutput() Message {
+	if strings.TrimSpace(m.Text()) != "" {
+		return m
+	}
+	blocks := make([]Block, 0, len(m.Content)+1)
+	for _, b := range m.Content {
+		if tb, ok := b.(TextBlock); ok && strings.TrimSpace(tb.Text) == "" {
+			continue // an all-blank block IS the empty text the wire dropped
+		}
+		blocks = append(blocks, b)
+	}
+	m.Content = append(blocks, TextBlock{Text: ToolOutputPlaceholder})
+	return m
 }
 
 // ToolCalls returns all toolCall blocks.

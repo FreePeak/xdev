@@ -86,6 +86,23 @@ var (
 	connectionResetRe = regexp.MustCompile(`(?i)(connection reset|connection refused|broken pipe|no such host|i/o timeout|context deadline exceeded|tls: handshake failure)`)
 )
 
+// malformedRequestRe matches a 400 whose body names a missing REQUIRED FIELD:
+// a body the provider rejected on shape, not a request the model asked for. The
+// one this shipped for is openai-responses' `input` item shape —
+//
+//	`input[185]` missing required field `output`
+//
+// — where a toolResult with no text serialized to a function_call_output that
+// omitted the required `output` field. Left a bad request, the retry ladder
+// ends the run; retried, the next turn rebuilds the request from history and
+// the agent loop's placeholder (ai.EnsureToolOutput) makes it valid.
+//
+// ponytail: a body regex is a deliberate shortcut with a ceiling — it retries
+// any missing-field 400, including one a fixed history cannot satisfy, which
+// burns the ladder's attempts before surfacing the same error. The upgrade path
+// is a provider-reported error code on HTTPError instead of body sniffing.
+var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
+
 // Classify maps an error to its recovery class. Wire HTTPError instances
 // classify by status + body; raw transport errors by their message.
 func Classify(err error) ErrClass {
@@ -100,6 +117,9 @@ func Classify(err error) ErrClass {
 		case he.Status == 400 || he.Status == 413 || he.Status == 422:
 			if bodyIndicatesOverflow(he.Body) {
 				return ClassContextOverflow
+			}
+			if malformedRequestRe.MatchString(he.Body) {
+				return ClassTransient
 			}
 			return ClassBadRequest
 		case retriablableStatus(he.Status):

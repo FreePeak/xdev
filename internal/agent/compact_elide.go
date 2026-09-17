@@ -168,7 +168,13 @@ func isEmptyNoop(m ai.Message) bool {
 	case ai.RoleAssistant, ai.RoleUser:
 		return m.Text() == "" && len(m.ToolCalls()) == 0
 	case ai.RoleToolResult:
-		return strings.TrimSpace(m.Text()) == "" && m.Details == nil && !m.IsError
+		if m.Details != nil || m.IsError {
+			return false
+		}
+		// An empty result, or the placeholder ai.EnsureToolOutput substituted
+		// for one so the wire always has an `output`: either way it carries
+		// nothing forward.
+		return strings.TrimSpace(m.Text()) == "" || m.Text() == ai.ToolOutputPlaceholder
 	}
 	return false
 }
