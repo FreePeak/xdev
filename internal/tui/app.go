@@ -2622,6 +2622,10 @@ func (a *App) paint() {
 		a.drawAskCard(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
+		// A gesture made before the first block exists — the composer is the
+		// only selectable surface there — is highlighted here too; the branch
+		// returns, so it never reaches the call at the end of paint().
+		a.drawSelection()
 		return
 	}
 
@@ -2746,7 +2750,11 @@ func (a *App) paint() {
 	if a.selDown {
 		a.selCacheRows(start) // keep the text a held drag has already passed
 	}
-	a.drawSelection()
+	// The highlight is not painted here: the composer, the status row and every
+	// overlay below repaint their own cells in normal video, and a highlight
+	// painted under them is wiped by the same frame (a drag over the composer
+	// copied text and showed nothing, since the composer is exactly the row the
+	// user drags first). It is a screen overlay, so paint() draws it last.
 	// Scroll indicator (grok-style ▲n▼n): rows hidden above/below. It rides the
 	// composer's info divider — at y=0 it overwrote whatever content scrolled
 	// to the top row (a long thinking line, or the last prompt) and any
@@ -2774,6 +2782,9 @@ func (a *App) paint() {
 	a.drawAskCard(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
+	// Last, so it paints over every surface the frame just drew: see the note
+	// where the selection geometry is published above.
+	a.drawSelection()
 }
 
 // drawSlashDropdown renders the "/" autocomplete popup above the composer
