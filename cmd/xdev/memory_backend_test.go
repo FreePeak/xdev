@@ -12,8 +12,8 @@ import (
 )
 
 // TestBuildMemoryBackendSelection pins the dispatch: memory.backend is the
-// only switch, the shipped default is off, and an unknown value stays off
-// instead of picking a backend by accident.
+// only switch, an empty or unknown value stays off instead of picking a
+// backend by accident, and "local" is the schema default (see defaultSettings).
 func TestBuildMemoryBackendSelection(t *testing.T) {
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	cases := map[string]struct {
@@ -23,6 +23,7 @@ func TestBuildMemoryBackendSelection(t *testing.T) {
 		"unset":        {"", "<nil>"},
 		"off":          {"off", "<nil>"},
 		"typo":         {"mnemopii", "<nil>"},
+		"local":        {"local", "*memory.Backend"},
 		"mnemopi":      {"mnemopi", "*memory.Mnemopi"},
 		"hindsight":    {"hindsight", "*memory.Hindsight"},
 		"sharpshooter": {"sharpshooter", "*memory.SharpShooter"},
@@ -58,6 +59,22 @@ func TestBuildMemoryBackendSelection(t *testing.T) {
 	}
 	if buildMemory(nil) != nil {
 		t.Fatal("a nil settings layer must not select a backend")
+	}
+}
+
+// TestBuildMemoryFollowsSchemaDefault: LoadSettings with no memory key
+// must select the local markdown backend, which is the whole point of
+// shipping Memory: "local" — a lesson on disk is injected next session
+// without the user having to flip a switch first.
+func TestBuildMemoryFollowsSchemaDefault(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	s, err := config.LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := buildMemory(s)
+	if _, ok := store.(*memory.Backend); !ok {
+		t.Fatalf("schema default selected %T, want *memory.Backend", store)
 	}
 }
 

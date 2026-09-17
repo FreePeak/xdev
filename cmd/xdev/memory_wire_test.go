@@ -11,10 +11,12 @@ import (
 )
 
 // TestBuildMemorySelectsBackend pins the memory.backend selection (M12 #43):
-// off by default, local for "local", the remote Hindsight backend for
-// "hindsight" — and ONE shared Hindsight instance across the repeated
-// buildMemory calls the prompt, pipeline, and registry paths make (the
-// backend owns the retain queue and the recall cache).
+// empty Memory stays off (the dispatch does not invent a backend), "local"
+// builds the markdown store, "hindsight" builds the remote backend — and
+// ONE shared Hindsight instance across the repeated buildMemory calls the
+// prompt, pipeline, and registry paths make (the backend owns the retain
+// queue and the recall cache). The schema default is "local"; see
+// defaultSettings.
 func TestBuildMemorySelectsBackend(t *testing.T) {
 	if got := buildMemory(nil); got != nil {
 		t.Fatalf("buildMemory(nil) = %v, want nil", got)

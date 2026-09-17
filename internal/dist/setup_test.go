@@ -69,7 +69,7 @@ func TestSetupStarterConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSettings on the starter config: %v", err)
 	}
-	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 200 || s.Memory != "off" {
+	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 200 || s.Memory != "local" {
 		t.Errorf("starter config resolved to %+v, want the shipped defaults", s)
 	}
 	if s.MemoryLimit != 100<<20 {
