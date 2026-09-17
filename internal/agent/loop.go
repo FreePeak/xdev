@@ -27,6 +27,7 @@ type TurnHooks interface {
 	OnToolResultMessage(msg *ai.Message)
 	OnCompaction(tokensBefore int64) // history compacted
 	OnContinuation(text string)      // provider cut-off: a continuation turn was injected
+	OnEmptyTurn(text string)         // the turn said nothing: a nudge turn was injected
 	OnTurnEnd(reason ai.StopReason, err error)
 }
 
@@ -40,6 +41,7 @@ type TurnHooksFunc struct {
 	OnToolResultMsgF func(*ai.Message)
 	OnCompactionF    func(tokensBefore int64)
 	OnContinuationF  func(text string)
+	OnEmptyTurnF     func(text string)
 	OnTurnEndF       func(ai.StopReason, error)
 }
 
@@ -81,6 +83,11 @@ func (h TurnHooksFunc) OnCompaction(before int64) {
 func (h TurnHooksFunc) OnContinuation(text string) {
 	if h.OnContinuationF != nil {
 		h.OnContinuationF(text)
+	}
+}
+func (h TurnHooksFunc) OnEmptyTurn(text string) {
+	if h.OnEmptyTurnF != nil {
+		h.OnEmptyTurnF(text)
 	}
 }
 func (h TurnHooksFunc) OnTurnEnd(s ai.StopReason, err error) {
@@ -126,6 +133,17 @@ const TurnBudgetPrompt = "turn budget reached — wrap up the current step and r
 // never typed it, so the transcript must not invent a ❯ block for it and
 // stats must not count it as typed input (#283).
 const TurnBudgetAttribution = "turn-budget"
+
+// EmptyTurnNudgePrompt is the synthetic user message injected when a turn
+// ends with no text and no tool call. The model never said it was done, so
+// the alternative to asking again is a session that looks like it stopped on
+// its own (#331).
+const EmptyTurnNudgePrompt = "your last turn produced no answer and no tool call — reply with what you have, or state the next step"
+
+// EmptyTurnAttribution tags that nudge as harness text (same contract as
+// TurnBudgetAttribution: no ❯ block, never counted as typed input, never
+// handed back as a rewind draft).
+const EmptyTurnAttribution = "empty-turn"
 
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
@@ -369,6 +387,11 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 	}
 	limit := a.effectiveMaxTurns()
+	// nudged is per run, not per turn: the empty-completion nudge below is
+	// spent once, so a model that can only ever emit reasoning cannot make
+	// the loop spend turns on it (the same shape as the TTSR interrupt
+	// budget and maxEscalationRounds).
+	nudged := false
 	for turn := 0; turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
@@ -433,6 +456,28 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			var cont string
 			if len(queued) == 0 && a.GoalContinuation && a.Goals != nil {
 				cont = a.Goals.ContinuationPrompt()
+			}
+			// Empty completion (#331): the model ended its turn with no text
+			// and no tool call — only reasoning, or nothing at all. That is
+			// the shape a thinking-mode upstream leaves behind when the
+			// turn's content never materialized: a lone "Thought for 0.1s"
+			// whose body is the gateway's own "(context elided)" reasoning
+			// replay placeholder, and the run then ends with nothing on
+			// screen (field report, session 1883e928). Returning here is the
+			// one outcome that cannot be right — the model never said it was
+			// done. One nudge asks it to actually answer.
+			if len(queued) == 0 && cont == "" && !nudged && isEmptyAssistant(*msg) {
+				nudged = true
+				nudge := ai.Message{
+					Role:        ai.RoleUser,
+					Content:     []ai.Block{ai.TextBlock{Text: EmptyTurnNudgePrompt}},
+					Attribution: EmptyTurnAttribution,
+				}
+				history = append(history, nudge)
+				a.persist(nudge)
+				a.Hooks.OnEmptyTurn(EmptyTurnNudgePrompt)
+				emit("turn_end", map[string]any{"turn": turn})
+				continue
 			}
 			if len(queued) == 0 && cont == "" {
 				emit("turn_end", map[string]any{"turn": turn})

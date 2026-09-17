@@ -2034,6 +2034,13 @@ func (h *tuiHooks) OnContinuation(text string) {
 	h.ts.app.AddSystemBlock("· provider cut off mid-message — partial retained, continuation injected")
 }
 
+// OnEmptyTurn names the stall instead of letting the run end on a blank turn:
+// the nudge prompt goes out as a hidden turn, so without this the transcript
+// just stops (#331).
+func (h *tuiHooks) OnEmptyTurn(text string) {
+	h.ts.app.AddSystemBlock("· the model answered with nothing — asked again")
+}
+
 func (h *tuiHooks) OnCompaction(tokensBefore int64) {
 	h.ts.app.AddSystemBlock(fmt.Sprintf("· context compacted (~%d tokens)", tokensBefore))
 }
@@ -2084,6 +2091,12 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			// system event that ends the episode, not as a ❯ block.
 			if m.Attribution == agent.TurnBudgetAttribution {
 				app.AddSystemBlock("· turn budget reached — the run wrapped up here; say \"continue\" to keep going")
+				continue
+			}
+			// The empty-turn nudge is harness text, but a resumed session
+			// must still show why the model spoke twice in a row (#331).
+			if m.Attribution == agent.EmptyTurnAttribution {
+				app.AddSystemBlock("· the model answered with nothing — asked again")
 				continue
 			}
 			if txt := m.Text(); txt != "" {
