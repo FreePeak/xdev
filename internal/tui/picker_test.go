@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -785,5 +786,84 @@ func TestResumeSessionPickerShowsStatus(t *testing.T) {
 		if !gridContains(scr, want) {
 			t.Fatalf("status %q not drawn on the resume picker", want)
 		}
+	}
+}
+
+// TestResumePickerWindowFollowsTerminalHeight: the row window is sized by
+// the terminal, not the fixed 12 it used to be, and the selection scrolls
+// the list past the window — so "load all" is real: the whole list is
+// reachable on screen.
+func TestResumePickerWindowFollowsTerminalHeight(t *testing.T) {
+	app, scr := newTestApp(t, 100, 40)
+	opts := make([]ResumeOption, 40)
+	for i := range opts {
+		opts[i] = ResumeOption{
+			ID:     fmt.Sprintf("id%06d", i),
+			Title:  fmt.Sprintf("session %02d", i),
+			Detail: fmt.Sprintf("id%06d · Jan 02 15:04", i),
+		}
+	}
+	app.SetSessionOps(&SessionOps{
+		Resume: func(string) error { return nil },
+		Recent: func() []ResumeOption { return opts },
+	})
+	if err := app.ResumeSession(""); err != nil {
+		t.Fatal(err)
+	}
+	app.draw()
+	text := screenText(scr)
+	drawn := 0
+	for i := range opts {
+		if strings.Contains(text, fmt.Sprintf("session %02d", i)) {
+			drawn++
+		}
+	}
+	if drawn <= 12 {
+		t.Fatalf("drawn rows = %d, want more than the old fixed 12 on a 40-row terminal", drawn)
+	}
+	// The tail must be reachable by walking down: the window follows the
+	// selection all the way to the last row.
+	for range len(opts) {
+		app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	app.draw()
+	if !gridContains(scr, fmt.Sprintf("session %02d", len(opts)-1)) {
+		t.Fatalf("last row unreachable after scrolling:\n%s", screenText(scr))
+	}
+}
+
+// TestPickerNameColumnFollowsTerminalWidth: the name column takes what the
+// terminal leaves after the detail column, so a wide terminal prints a long
+// session name whole and a narrow one ellipsizes it.
+func TestPickerNameColumnFollowsTerminalWidth(t *testing.T) {
+	const name = "a-very-long-session-name-that-wants-the-whole-row"
+	open := func(w int) (tcell.SimulationScreen, *App) {
+		app, scr := newTestApp(t, w, 30)
+		app.SetSessionOps(&SessionOps{
+			Resume: func(string) error { return nil },
+			Recent: func() []ResumeOption {
+				return []ResumeOption{
+					{ID: "aaaa1111", Title: name, Detail: "aaaa1111 · Jan 02 15:04 · done"},
+					{ID: "bbbb2222", Title: "short", Detail: "bbbb2222 · Jan 02 15:04"},
+				}
+			},
+		})
+		if err := app.ResumeSession(""); err != nil {
+			t.Fatal(err)
+		}
+		app.draw()
+		return scr, app
+	}
+
+	wide, _ := open(140)
+	if !gridContains(wide, name) {
+		t.Fatalf("wide terminal ellipsized a name it had room for:\n%s", screenText(wide))
+	}
+	narrow, _ := open(40)
+	if gridContains(narrow, name) {
+		t.Fatal("narrow terminal printed the name whole — it must clip to the width")
+	}
+	if !gridContains(narrow, "…") {
+		t.Fatalf("clipped name carries no ellipsis:\n%s", screenText(narrow))
 	}
 }

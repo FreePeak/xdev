@@ -90,12 +90,20 @@ func (p *picker) selectItem(itemIdx int) bool {
 	return false
 }
 
-// pickerMaxRows caps the visible row window; the panel never eats the
-// transcript — the list scrolls instead.
-const pickerMaxRows = 12
+// pickerRowCeiling is the row window's ceiling: half the terminal, the same
+// budget the tree selector uses (tree.go). The window scrolls with the
+// selection, so a tall terminal shows more rows — the fixed 12 this replaces
+// made the list read as "12 long" while the store held hundreds.
+func pickerRowCeiling(height int) int { return max(5, height/2) }
+
+// pickerDetailCols is the column the detail ("id · date · status") is worth
+// keeping; the name column takes what is left of the row.
+const pickerDetailCols = 28
 
 func newPicker(opts PickerOptions) *picker {
-	p := &picker{opts: opts, visible: pickerMaxRows}
+	// visible is the last drawn window; 0 until drawPicker measures the
+	// terminal, which is why window() clamps a zero row count to 1.
+	p := &picker{opts: opts}
 	p.refresh()
 	p.selectCurrent()
 	return p
