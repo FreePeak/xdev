@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -291,5 +292,38 @@ func TestAskChatNoteEndsTheTurn(t *testing.T) {
 	}
 	if strings.Contains(res.Text, "recommended") {
 		t.Fatalf("a chat answer must not smuggle in the recommendation: %q", res.Text)
+	}
+}
+
+// TestAskParametersRootUnionIsObjectTyped pins the schema the provider
+// sees: a root anyOf with untyped branches is the 400
+// "ask: tool parameter root must be an object type". Both shapes the
+// tool accepts (flat question+options, batch questions) stay required.
+func TestAskParametersRootUnionIsObjectTyped(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal((&AskTool{}).Parameters(), &schema); err != nil {
+		t.Fatalf("parameters: %v", err)
+	}
+	branches, _ := schema["anyOf"].([]any)
+	if len(branches) != 2 {
+		t.Fatalf("anyOf = %v, want both call shapes", schema["anyOf"])
+	}
+	var sawQuestion, sawQuestions bool
+	for i, b := range branches {
+		obj, _ := b.(map[string]any)
+		if obj["type"] != "object" {
+			t.Fatalf("branch %d = %v, want type object", i, b)
+		}
+		req, _ := obj["required"].([]any)
+		joined := fmt.Sprint(req)
+		if strings.Contains(joined, "question") && strings.Contains(joined, "options") {
+			sawQuestion = true
+		}
+		if strings.Contains(joined, "questions") {
+			sawQuestions = true
+		}
+	}
+	if !sawQuestion || !sawQuestions {
+		t.Fatalf("required-alternatives lost: %v", branches)
 	}
 }

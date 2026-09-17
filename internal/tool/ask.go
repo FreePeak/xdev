@@ -131,8 +131,8 @@ func (t *AskTool) Parameters() json.RawMessage {
     "_note": {"description": "unattended (print/rpc) runs wait ask.timeout (default 60s) then take the recommended option — in a one-shot run, prefer deciding over asking"}
   },
   "anyOf": [
-    {"required": ["question", "options"]},
-    {"required": ["questions"]}
+    {"type": "object", "required": ["question", "options"]},
+    {"type": "object", "required": ["questions"]}
   ]
 }`)
 }
