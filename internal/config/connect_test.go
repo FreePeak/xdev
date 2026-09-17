@@ -84,6 +84,34 @@ func TestConnectCatalogIsUsable(t *testing.T) {
 	}
 }
 
+// extraConnectCatalog is not generated; a regen of connect_catalog.go must
+// not drop xdev-server, and the row must still RegisterProvider.
+func TestExtraConnectCatalog(t *testing.T) {
+	if !HasConnect("xdev-server") {
+		t.Fatal("xdev-server missing from extra catalog")
+	}
+	e, ok := lookupConnect("xdev-server")
+	if !ok {
+		t.Fatal("lookupConnect xdev-server")
+	}
+	if e.BaseURL != "${XDEV_SERVER_URL}/v1" {
+		t.Errorf("baseUrl = %q", e.BaseURL)
+	}
+	if len(e.Env) == 0 || e.Env[0] != "XDEV_SERVER_KEY" {
+		t.Errorf("env = %v, want XDEV_SERVER_KEY", e.Env)
+	}
+	if ConnectDefaultRef("xdev-server") != "xdev-server/free" {
+		t.Errorf("default = %q", ConnectDefaultRef("xdev-server"))
+	}
+	pc, err := ConnectProviderConfig("xdev-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Config{Providers: map[string]*ProviderConfig{}}).RegisterProvider("xdev-server", pc); err != nil {
+		t.Errorf("RegisterProvider: %v", err)
+	}
+}
+
 func TestConnectWritesProviderBlock(t *testing.T) {
 	connectSandbox(t)
 	path := connectTestFile(t, `# my hand-written config
@@ -237,8 +265,8 @@ func TestConnectOptionsState(t *testing.T) {
 	for _, o := range opts {
 		byName[o.Name] = o
 	}
-	if len(opts) != len(connectCatalog) {
-		t.Errorf("listing has %d rows, want %d", len(opts), len(connectCatalog))
+	if len(opts) != len(ConnectNames()) {
+		t.Errorf("listing has %d rows, want %d", len(opts), len(ConnectNames()))
 	}
 	ds := byName["deepseek"]
 	if !ds.Ready || ds.ReadyFrom != "env DEEPSEEK_API_KEY" {

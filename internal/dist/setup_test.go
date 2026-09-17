@@ -50,7 +50,7 @@ func TestSetupCreatesDataDirAndStarterConfig(t *testing.T) {
 		t.Errorf("setup did not report the starter write:\n%s", out)
 	}
 	// The template is printed (not written) for a machine with no providers.
-	if !strings.Contains(out, "defaultModel: onegw/free") {
+	if !strings.Contains(out, "defaultModel: xdev-server/free") {
 		t.Errorf("setup did not print the models.yml template:\n%s", out)
 	}
 	if !strings.Contains(out, "Next steps") {
@@ -134,7 +134,7 @@ func TestSetupReportsConfiguredProviders(t *testing.T) {
 	if !strings.Contains(out, "providers: alpha, zeta") {
 		t.Errorf("setup did not list the configured providers:\n%s", out)
 	}
-	if strings.Contains(out, "defaultModel: onegw/free") {
+	if strings.Contains(out, "defaultModel: xdev-server/free") {
 		t.Errorf("setup printed the template even though models.yml exists:\n%s", out)
 	}
 }
