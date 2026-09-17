@@ -1,11 +1,18 @@
 package config
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func writeFile(t *testing.T, path, body string) string {
@@ -315,6 +322,109 @@ func TestSetGetRoundTrip(t *testing.T) {
 	}
 	if got, _ := Get(path, "theme"); got != "grokday" {
 		t.Fatalf("Set clobbered other keys: %q", got)
+	}
+}
+
+// TestSetRefusesUnknownKey pins the P0 guard: `xdev config set <typo> <value>`
+// used to write the typo and report success, and the NEXT start then rejected
+// the file (per-layer loads are strict KnownFields), moved it aside as
+// .broken-* and came up on defaults — losing every setting the user had. The
+// key is checked against the Settings schema before anything is written, and
+// the result must still decode strictly. Open key sets stay settable: their
+// names are data, not schema.
+func TestSetRefusesUnknownKey(t *testing.T) {
+	const original = "theme: groknight\n"
+	path := writeFile(t, filepath.Join(t.TempDir(), "config.yml"), original)
+	for _, key := range []string{
+		"showThinkng", // the typo that cost a real config its life
+		"typokey",
+		"bash.backgroundTimeoutSeconds",
+		"a.",
+	} {
+		if err := Set(path, key, "1"); err == nil {
+			t.Fatalf("Set(%q) must be refused", key)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(after) != original {
+		t.Fatalf("a refused Set must leave the file untouched:\n%s", after)
+	}
+	for _, kv := range [][2]string{
+		{"theme", "grokday"}, {"maxTurns", "42"}, {"advisor", "true"},
+		{"personality", "friendly"}, {"defaultModel", "onegw/xdev"},
+		{"toolsApproval.bash", "allow"}, {"memoryMnemopi.scope", "project"},
+		{"hooks.preToolUse", "true"},
+	} {
+		if err := Set(path, kv[0], kv[1]); err != nil {
+			t.Fatalf("Set(%q): %v", kv[0], err)
+		}
+	}
+	// What the command wrote must survive the load path it protects.
+	if _, err := LoadSettings(t.TempDir(), []string{path}); err != nil {
+		t.Fatalf("written file rejected on load: %v", err)
+	}
+}
+
+// TestSettingsWritesAreAtomic: Set replaces the file with one rename, so a
+// concurrent reader never catches a truncated file. A plain WriteFile does:
+// the read lands mid-write, the strict load rejects the half-written YAML and
+// the whole config is quarantined as .broken-* — the data loss this writer
+// used to cause whenever two sessions wrote at once.
+func TestSettingsWritesAreAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := Set(path, "theme", "grokday"); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := Set(path, "maxTurns", fmt.Sprint(1000+i)); err != nil {
+				t.Errorf("Set: %v", err)
+				return
+			}
+		}
+	}()
+	// A reader must never catch a half-written file: the bytes it sees have to
+	// decode as a whole Settings document.
+	for i := 0; i < 300; i++ {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var probe Settings
+		d := yaml.NewDecoder(bytes.NewReader(raw))
+		d.KnownFields(true)
+		if err := d.Decode(&probe); err != nil && !errors.Is(err, io.EOF) {
+			t.Fatalf("a reader saw a partial file: %v\n%s", err, raw)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	// The mode survives the rewrite (config.yml is 0600 by convention).
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v err=%v, want 0600", fi.Mode(), err)
+	}
+}
+
+// TestDeleteKeyGuardsTheSameWay: `config reset` writes the file too, so it
+// needs the same unknown-key refusal (a reset must not be a way to brick it).
+func TestDeleteKeyGuardsTheSameWay(t *testing.T) {
+	path := writeFile(t, filepath.Join(t.TempDir(), "config.yml"), "theme: groknight\n")
+	if err := DeleteKey(path, "them"); err == nil {
+		t.Fatal("DeleteKey must refuse an unknown key")
+	}
+	if err := DeleteKey(path, "theme"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := Get(path, "theme"); got != "" {
+		t.Fatalf("theme = %q, want it deleted", got)
 	}
 }
 

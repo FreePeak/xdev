@@ -1902,6 +1902,19 @@ func lastSettings() *config.Settings {
 	return loadedSettings
 }
 
+// persistDefaultModel makes a model switch sticky: the next xdev process (a
+// new session, /new, another pane, a print run) resolves to the model the user
+// last chose instead of snapping back to whatever the file said. The switch
+// itself already happened, so a write failure is logged, not returned — and
+// without persisting, /model would only exist inside one process's live holder.
+func persistDefaultModel(ref string) {
+	if err := config.Set(config.GlobalSettingsPath(), "defaultModel", ref); err != nil {
+		logx.Errorf("persist defaultModel %q: %v", ref, err)
+		return
+	}
+	lastSettings().DefaultModel = ref
+}
+
 // resolveModel applies the precedence: explicit value (flag, already merged
 // over settings.defaultModel by main) → XDEV_MODEL → settings.defaultModel →
 // models.yml default. It returns the resolved provider/model and the effort
