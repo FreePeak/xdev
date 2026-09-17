@@ -258,7 +258,19 @@ func applyThinkingFlag(flagValue, roleEffort string) (string, error) {
 	case "xhigh", "max":
 		return "high", nil
 	}
-	return "", fmt.Errorf("thinking must be off|minimal|low|medium|high|xhigh|max|auto, got %q", flagValue)
+	return "", fmt.Errorf("thinking must be %s, got %q", strings.Join(config.ThinkingLevels, "|"), flagValue)
+}
+
+// thinkingLevel folds the settings key under the flag: --thinking wins when it
+// names a level, otherwise the persisted `thinking` layer decides ("auto" when
+// neither says anything). The role's ":effort" is deliberately NOT consulted
+// here — applyThinkingFlag takes it as the "auto" fallback, which keeps one
+// precedence ladder: flag > settings > role effort.
+func thinkingLevel(settings *config.Settings, flagValue string) string {
+	if lv := strings.TrimSpace(flagValue); lv != "" && lv != "auto" {
+		return lv // trimmed: a padded flag is still the level it names
+	}
+	return settings.ThinkingLevel()
 }
 
 // resolveThinkingDisplay folds --hide-thinking and --print-thoughts onto the

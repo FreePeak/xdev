@@ -93,6 +93,54 @@ func TestMemoryDefaultsToLocalAndOffWins(t *testing.T) {
 	}
 }
 
+// TestSettingsThinkingLevel pins the request-side level key: unset is "auto"
+// (the model role decides), the project layer cannot loosen a global "off"
+// (later layers win, the same rule as showThinking), and a value outside the
+// verbatim vocabulary fails at load instead of degrading to auto.
+func TestSettingsThinkingLevel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ThinkingLevel(); got != "auto" {
+		t.Fatalf("unset thinking = %q, want auto", got)
+	}
+	if nilLevel := (*Settings)(nil).ThinkingLevel(); nilLevel != "auto" {
+		t.Fatalf("nil settings = %q, want auto", nilLevel)
+	}
+
+	// The persisted key survives the merge and is what the flag folds under.
+	writeFile(t, GlobalSettingsPath(), "thinking: off\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ThinkingLevel(); got != "off" {
+		t.Fatalf("global thinking = %q, want off", got)
+	}
+
+	// A repository cannot spend the user's tokens: `thinking` is absent from
+	// repoSafeSettingsKeys, so the project layer is pruned and the global
+	// value stands (the drop is reported, not silent).
+	writeFile(t, projectSettingsPath(cwd), "thinking: high\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ThinkingLevel(); got != "off" {
+		t.Fatalf("project thinking = %q, want the global off", got)
+	}
+
+	writeFile(t, GlobalSettingsPath(), "thinking: bogus\n")
+	if _, err := LoadSettings(cwd, nil); err == nil {
+		t.Fatal("an unknown thinking level must fail at load")
+	}
+}
+
 func TestSettingsShowThinking(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -388,7 +436,7 @@ func TestListRendersTheEnforcedSurface(t *testing.T) {
 			want: []string{
 				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
 				"showThinking true", "advisor false", "memory off",
-				"sidebarMode auto", "config " + path,
+				"sidebarMode auto", "thinking auto", "config " + path,
 			},
 		},
 		{

@@ -452,8 +452,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	// --thinking overrides whatever the model role pinned.
-	if effortRef, err = applyThinkingFlag(launch.Thinking, effortRef); err != nil {
+	// The request-side thinking level: --thinking wins, else the persisted
+	// `thinking` key, else the role's own ":effort".
+	if effortRef, err = applyThinkingFlag(thinkingLevel(settings, launch.Thinking), effortRef); err != nil {
 		return 2, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
@@ -2053,10 +2054,14 @@ func validateModelRef(cfg *config.Config, ref string) error {
 // same way, which is fail-safe rather than fail-open.
 // effortBudget turns a resolved role effort into the reasoning budget the
 // adapters translate into their own vocabularies. An unpinned or unknown
-// effort means no thinking requested.
+// effort means no thinking requested — and so does a zero budget: config
+// calls "minimal" the off switch, but a 0-token ThinkingBudget is not "off"
+// to any adapter (Anthropic rejects max_tokens<=0, OpenAI reads effort as
+// "low"), so it must be dropped here, in the one place every run mode and
+// every adapter reads it.
 func effortBudget(effort string) *ai.ThinkingBudget {
 	tokens, ok := config.EffortBudget(effort)
-	if !ok {
+	if !ok || tokens <= 0 {
 		return nil
 	}
 	return &ai.ThinkingBudget{Tokens: tokens}

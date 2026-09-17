@@ -125,6 +125,13 @@ func validateKey(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("%s must be true|false, got %q", key, value)
+	case "thinking":
+		// Same vocabulary the `thinking` key validates against at load, so a
+		// value this accepts never fails the next start.
+		if slices.Contains(config.ThinkingLevels, value) {
+			return nil
+		}
+		return fmt.Errorf("thinking must be %s, got %q", strings.Join(config.ThinkingLevels, "|"), value)
 	}
 	return nil
 }
@@ -143,6 +150,8 @@ func fallbackValue(s *config.Settings, key string) string {
 		return s.DefaultModel
 	case "showThinking":
 		return fmt.Sprint(s.ShowThinkingOn())
+	case "thinking":
+		return s.ThinkingLevel()
 	case "advisor":
 		return fmt.Sprint(s.Advisor)
 	case "memory":
