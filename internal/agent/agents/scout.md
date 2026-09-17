@@ -2,7 +2,6 @@
 name: scout
 description: read-only codebase recon — locates the code that matters and answers with file:line evidence
 tools: read, grep, glob, ast_grep
-model: @smol
 thinkingLevel: low
 spawns: false
 ---

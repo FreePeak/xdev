@@ -36,7 +36,7 @@ func branchSummaryEntry(t *testing.T, s *session.Store) *session.BranchSummaryEn
 }
 
 // TestSummarizeBranchUsesTheSeamAndMovesTheLeaf pins the generated path: the
-// note comes from the smol-role seam, the entry hangs off the navigation
+// note comes from the wired seam, the entry hangs off the navigation
 // TARGET (omp branchWithSummary — the new branch's context carries it), and
 // the leaf ends up on the summary itself.
 func TestSummarizeBranchUsesTheSeamAndMovesTheLeaf(t *testing.T) {
@@ -95,7 +95,7 @@ func TestSummarizeBranchKeepsMarkerForShortBranchesAndFailures(t *testing.T) {
 		a, s := branchStore(t, true)
 		target := s.Entries()[0].Envelope().ID
 		err := a.SummarizeBranch(context.Background(), target, func(context.Context, string) (string, error) {
-			return "", errors.New("smol role unavailable")
+			return "", errors.New("no model for branch summary")
 		})
 		if err != nil {
 			t.Fatalf("a failing seam must not fail the switch: %v", err)
@@ -106,7 +106,7 @@ func TestSummarizeBranchKeepsMarkerForShortBranchesAndFailures(t *testing.T) {
 		if summary := branchSummaryEntry(t, s); s.LeafID() != summary.Env.ID {
 			t.Fatalf("leaf = %q, want the summary entry %q on the new branch", s.LeafID(), summary.Env.ID)
 		}
-		if !strings.Contains(logs.String(), "smol role unavailable") {
+		if !strings.Contains(logs.String(), "no model for branch summary") {
 			t.Errorf("the failure must be logged, logs:\n%s", logs.String())
 		}
 	})

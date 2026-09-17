@@ -57,7 +57,7 @@ type printOptions struct {
 	// (issue #11: --fork <id|path>).
 	ForkID string
 	// Prewalk enables the one-shot model handoff (research §5); the target
-	// defaults to the @smol role.
+	// defaults to the session model.
 	Prewalk     bool
 	PrewalkInto string
 	// Hooks are extra --hook specs (event=command, or a discovered hook
@@ -72,16 +72,25 @@ type printOptions struct {
 	PlanYoloInto string
 }
 
+// advisorRef is the reviewer model reference: settings.advisorModel when
+// set, else "" so resolveModel falls through to the run model.
+func advisorRef(settings *config.Settings) string {
+	if settings == nil {
+		return ""
+	}
+	return strings.TrimSpace(settings.AdvisorModel)
+}
+
 // buildAdvisor constructs the background reviewer when enabled. The
-// reviewer model comes from the @advisor role; a missing role warns and
-// disables (never fails the run).
+// reviewer model comes from advisorModel, else the run model; an
+// unresolvable one warns and disables (never fails the run).
 func buildAdvisor(cfg *config.Config, settings *config.Settings) *agent.Advisor {
 	if settings == nil || (!settings.Advisor && !launch.Advisor) {
 		return nil
 	}
-	ref, _, err := resolveModel("@advisor", cfg, settings)
+	ref, _, err := resolveModel(advisorRef(settings), cfg, settings)
 	if err != nil {
-		logx.Errorf("advisor: modelRoles.advisor unresolved, disabled: %v", err)
+		logx.Errorf("advisor: %v; disabled", err)
 		return nil
 	}
 	pName, mName, err := config.ParseModelRef(ref)
@@ -165,10 +174,10 @@ func buildAdvisorRuntime(cfg *config.Config, settings *config.Settings, prov ai.
 }
 
 // buildChildAdvisorFactory resolves settings task.agentAdvisor (M11 #39)
-// into the ChildAdvisor seam on the task tool: "on" → the advisor role's
-// model, an explicit value → that model reference, "off"/unset → nil
-// (children run unadvised, the omp default). The model resolve is lazy so
-// a session that never spawns a child never pays for it.
+// into the ChildAdvisor seam on the task tool: "on" → advisorModel (else
+// the run model), an explicit value → that model reference, "off"/unset →
+// nil (children run unadvised, the omp default). The model resolve is lazy
+// so a session that never spawns a child never pays for it.
 func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 	v := ""
 	if settings != nil {
@@ -177,7 +186,7 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 	if v == "" || strings.EqualFold(v, "off") || strings.EqualFold(v, "false") {
 		return nil
 	}
-	ref := "@advisor"
+	ref := advisorRef(settings)
 	if !strings.EqualFold(v, "on") && !strings.EqualFold(v, "true") {
 		ref = v
 	}
@@ -232,7 +241,7 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // of (the TUI). Only there may an active goal auto-continue between turns
 // (omp's goal.continuationModes defaults to interactive); a print/RPC/ACP run
 // must not spend turns of its own after its prompt is answered.
-func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, role, provider, model, cwd string, interactive bool) *agent.FallbackState {
+func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, provider, model, cwd string, interactive bool) *agent.FallbackState {
 	if ag == nil {
 		return nil
 	}
@@ -262,7 +271,7 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	if h := hindsightFrom(settings); h != nil {
 		ag.MemoryContext = h.CompactionContext
 	}
-	st := ag.ArmFallback(settings, role)
+	st := ag.ArmFallback(settings)
 	if st != nil {
 		st.Rotate = func(provider string) (ai.Provider, bool) {
 			return rotateProviderCredential(cfg, provider, ag.Model)
@@ -356,21 +365,6 @@ func redactorFor(cwd string) *config.Redactor {
 	return r
 }
 
-// modelRoleRef returns the role name a model reference was resolved from
-// ("" for a literal provider/model). retry.fallbackChains keys can name a
-// role, so the chain engine needs this to find a role-scoped chain after a
-// role reassignment.
-func modelRoleRef(ref string) string {
-	if !strings.HasPrefix(ref, "@") {
-		return ""
-	}
-	name := strings.TrimPrefix(ref, "@")
-	if i := strings.IndexByte(name, ':'); i >= 0 {
-		name = name[:i]
-	}
-	return name
-}
-
 // advisorDrainCap bounds the final headless review at run exit. Thirty
 // seconds matches the TUI's error drain; a stalled reviewer must not hold
 // the process.
@@ -394,7 +388,7 @@ func resolvePrewalk(opts printOptions, cfg *config.Config, settings *config.Sett
 		return nil // --no-prewalk beats the flag, the setting and the profile
 	}
 	// The handoff is armed by either the flag or prewalk.enabled; the target
-	// is --prewalk-into, then prewalk.into, then @smol.
+	// is --prewalk-into, then prewalk.into, then the session model.
 	enabled := opts.Prewalk || (settings != nil && settings.Prewalk.Enabled)
 	if !enabled {
 		return nil
@@ -403,15 +397,14 @@ func resolvePrewalk(opts printOptions, cfg *config.Config, settings *config.Sett
 	if strings.TrimSpace(into) == "" && settings != nil {
 		into = settings.Prewalk.Into
 	}
-	if strings.TrimSpace(into) == "" {
-		into = "@smol"
-	}
-	return resolveInto(into, cfg, settings, "prewalk")
+	// An empty target means the session model: resolveModel falls through
+	// XDEV_MODEL → defaultModel → models.yml.
+	return resolveInto(strings.TrimSpace(into), cfg, settings, "prewalk")
 }
 
-// resolveInto resolves a model ref or @role to a handoff target (prewalk,
-// plan-yolo). Returns nil after a warning when it cannot resolve: the run
-// starts on the primary model rather than failing.
+// resolveInto resolves a model ref to a handoff target (prewalk, plan-yolo);
+// "" means the session model. Returns nil after a warning when it cannot
+// resolve: the run starts on the primary model rather than failing.
 func resolveInto(refArg string, cfg *config.Config, settings *config.Settings, label string) *agent.FailoverTarget {
 	ref, _, err := resolveModel(refArg, cfg, settings)
 	if err != nil {
@@ -453,7 +446,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		return 2, err
 	}
 	// The request-side thinking level: --thinking wins, else the persisted
-	// `thinking` key, else the role's own ":effort".
+	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
+	// "auto" branch).
 	if effortRef, err = applyThinkingFlag(thinkingLevel(settings, launch.Thinking), effortRef); err != nil {
 		return 2, err
 	}
@@ -497,10 +491,10 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if h, ok := mem.(*memory.Hindsight); ok {
 		h.SetWarnSink(func(msg string) { fmt.Fprintln(os.Stderr, "xdev: "+msg) })
 	}
-	// M15 #73: the sharpshooter backend consolidates friction through the
-	// smol role, resolved here where the config is in hand.
+	// M15 #73: the sharpshooter backend consolidates friction on the session
+	// model, resolved here where the config is in hand.
 	if ss, ok := mem.(*memory.SharpShooter); ok {
-		ss.Complete = memoryRoleComplete(cfg, settings, "@smol")
+		ss.Complete = memoryComplete(cfg, settings)
 	}
 	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
 		tailSystemPrompt(overrides, opts.AppendSystem), mem)
@@ -536,7 +530,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// enqueues a consolidation the exit drain below applies.
 	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
 	hooks := memoryTurnHooks(ph, settings)
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, settings, modelRoleRef(opts.Model), provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -564,16 +558,16 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, reg, cfg, settings, modelRoleRef(opts.Model), provName, modelName, cwd, false)
+	wireAgentMode(ag, reg, cfg, settings, provName, modelName, cwd, false)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
 	ag.TTSR = agent.NewTTSR(ttsrConfig(settings))
 	// Handoff (M5 #23): the document side request mirrors the live turn's
-	// transform on the @smol role, and settings handoff.saveToDisk mirrors
-	// the document under <dataDir>/handoffs.
+	// transform on the session model, and settings handoff.saveToDisk
+	// mirrors the document under <dataDir>/handoffs.
 	ag.Handoff = agent.HandoffSettings{SaveDir: handoffSaveDir(settings)}
-	if t := resolveInto("@smol", cfg, settings, "handoff"); t != nil {
+	if t := resolveInto("", cfg, settings, "handoff"); t != nil {
 		ag.Handoff.Target = *t
 	}
 	// Plan-mode exit: print runs are unattended, so there is no reviewer —
@@ -1280,7 +1274,7 @@ func mcpUnavailable(e string) string {
 // newToolRegistry builds the core four tools plus the parent-facing task
 // tool (M6 subagents). ChildTools deliberately excludes the task tool, so
 // a child can never spawn grandchildren (structural depth guard).
-// thinking is the parent's resolved role effort, forwarded to children so
+// thinking is the parent's resolved effort, forwarded to children so
 // delegation does not silently downgrade (or upgrade) the reasoning budget.
 // registerURISchemes installs the read-tool URI resolvers. Idempotent:
 // re-registering replaces the resolver (tests, repeated startup).
@@ -1406,11 +1400,7 @@ func buildMnemopiMemory(settings *config.Settings) *memory.Mnemopi {
 	// llmMode none leaves it nil, which every caller reports honestly
 	// instead of pretending the pass happened.
 	if mm.LLMMode != "none" {
-		role := "@smol"
-		if mm.LLMMode == "remote" {
-			role = "@default"
-		}
-		m.Complete = mnemopiSeam(settings, role)
+		m.Complete = mnemopiSeam(settings)
 	}
 	if err := m.Ensure(); err != nil {
 		logx.Errorf("memory: cannot open %s, disabling: %v", m.Dir, err)
@@ -1421,9 +1411,9 @@ func buildMnemopiMemory(settings *config.Settings) *memory.Mnemopi {
 	return m
 }
 
-// mnemopiSeam resolves the synthesis role lazily (and once): the backend is
+// mnemopiSeam resolves the synthesis model lazily (and once): the backend is
 // built from settings alone, and only a reflect/sync call needs a model.
-func mnemopiSeam(settings *config.Settings, role string) memory.CompleteFunc {
+func mnemopiSeam(settings *config.Settings) memory.CompleteFunc {
 	var (
 		once sync.Once
 		fn   func(context.Context, string) (string, error)
@@ -1436,9 +1426,9 @@ func mnemopiSeam(settings *config.Settings, role string) memory.CompleteFunc {
 				fail = fmt.Errorf("memory: models.yml: %w", err)
 				return
 			}
-			fn = memoryRoleComplete(cfg, settings, role)
+			fn = memoryComplete(cfg, settings)
 			if fn == nil {
-				fail = fmt.Errorf("memory: no model for role %s", role)
+				fail = fmt.Errorf("memory: no model resolvable for the synthesis pass")
 			}
 		})
 		if fail != nil {
@@ -1605,20 +1595,21 @@ func registerMemoryTools(reg *tool.Registry, mem memory.Store, settings *config.
 }
 
 // buildMemoryPipeline constructs the two-phase local memory pipeline
-// (M12 F1): extraction over changed sessions by the @smol model, then
+// (M12 F1): extraction over changed sessions on the session model, then
 // consolidation into MEMORY.md/learned.md. nil = off (memory backend
-// absent, memoryPipeline not "on", or the role unresolvable).
+// absent, memoryPipeline not "on", or the model unresolvable).
 func buildMemoryPipeline(cfg *config.Config, settings *config.Settings, backend *memory.Backend) *memory.Pipeline {
 	if backend == nil || settings == nil || !settings.MemoryPipelineOn() {
 		return nil
 	}
-	bySmol := memoryRoleComplete(cfg, settings, "@smol")
-	if bySmol == nil {
+	complete := memoryComplete(cfg, settings)
+	if complete == nil {
 		return nil
 	}
 	// M15 #70: an explicit local-tiny opt-in must never silently fall back
-	// to the API (docs/decisions/local-tiny-models.md).
-	bySmol, selErr := tiny.Select(tiny.TaskMemoryExtract, bySmol)
+	// to the API (docs/decisions/local-tiny-models.md). The API path is the
+	// session model.
+	complete, selErr := tiny.Select(tiny.TaskMemoryExtract, complete)
 	if selErr != nil {
 		logx.Errorf("memory pipeline: %v", selErr)
 		return nil
@@ -1626,23 +1617,23 @@ func buildMemoryPipeline(cfg *config.Config, settings *config.Settings, backend 
 	return &memory.Pipeline{
 		Backend:     backend,
 		DataDir:     config.DataDir(),
-		Complete:    bySmol,
-		Consolidate: bySmol,
+		Complete:    complete,
+		Consolidate: complete,
 		OnError:     func(err error) { logx.Errorf("memory pipeline: %v", err) },
 	}
 }
 
-// memoryRoleComplete resolves a model role into a one-shot completion seam
+// memoryComplete resolves the session model into a one-shot completion seam
 // (prompt in, text out) — the shared model-call plumbing for every memory
 // background pass (the pipeline's extraction/consolidation, sharpshooter's
-// friction consolidation). nil when the role is unresolvable.
-func memoryRoleComplete(cfg *config.Config, settings *config.Settings, role string) func(context.Context, string) (string, error) {
+// friction consolidation). nil when no model resolves.
+func memoryComplete(cfg *config.Config, settings *config.Settings) func(context.Context, string) (string, error) {
 	if cfg == nil || settings == nil {
 		return nil
 	}
-	ref, _, err := resolveModel(role, cfg, settings)
+	ref, _, err := resolveModel("", cfg, settings)
 	if err != nil {
-		logx.Errorf("memory: %s unresolved: %v", role, err)
+		logx.Errorf("memory: no model resolvable: %v", err)
 		return nil
 	}
 	pName, mName, err := config.ParseModelRef(ref)
@@ -1746,8 +1737,10 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		Policy:       pol,
 		Thinking:     thinking,
 		Provider:     prov,
-		Model:        childModel(settings, provName, modelName),
-		CWD:          cwd,
+		// Children share the parent's model: there is no separate task
+		// model, and a cross-provider child would need its own client.
+		Model: modelName,
+		CWD:   cwd,
 		// Children live in their own subtree: session.List(config.DataDir())
 		// must never surface them to --continue/--resume.
 		DataDir: filepath.Join(config.DataDir(), "subagents"),
@@ -1770,13 +1763,6 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		// without a restart (#272); a pinned Agents set would have frozen
 		// the startup snapshot.
 		AgentRoots: cwd,
-		// Frontmatter model: "@role" expands through modelRoles. Children
-		// share this provider — a role that lands on another one needs its
-		// own client, which is what childModel refuses too — so it reports
-		// as unresolvable rather than sending "@role" to the wire (#272).
-		ExpandModel: func(ref string) (string, bool) {
-			return roleModelOnProvider(settings, ref, provName)
-		},
 		// Frontmatter thinkingLevel: an effort name becomes the child's
 		// reasoning budget (#272: parsed, then dropped on the floor).
 		ExpandEffort: func(level string) *ai.ThinkingBudget {
@@ -1916,10 +1902,10 @@ func lastSettings() *config.Settings {
 	return loadedSettings
 }
 
-// resolveModel applies the M9 precedence: explicit value (flag, already
-// merged over settings.defaultModel by main) → XDEV_MODEL → @role
-// expansion → models.yml default. It returns the resolved provider/model
-// and the effort the role pinned ("" = none).
+// resolveModel applies the precedence: explicit value (flag, already merged
+// over settings.defaultModel by main) → XDEV_MODEL → settings.defaultModel →
+// models.yml default. It returns the resolved provider/model and the effort
+// an inline ":effort" suffix carried ("" = none).
 func resolveModel(explicit string, cfg *config.Config, settings *config.Settings) (string, string, error) {
 	ref := explicit
 	if ref == "" {
@@ -1927,13 +1913,6 @@ func resolveModel(explicit string, cfg *config.Config, settings *config.Settings
 	}
 	if ref == "" && settings != nil && settings.DefaultModel != "" {
 		ref = settings.DefaultModel
-	}
-	if strings.HasPrefix(ref, "@") && settings != nil {
-		rr, err := config.ResolveModelRef(settings, ref)
-		if err != nil {
-			return "", "", err
-		}
-		return rr.Ref, rr.Effort, nil
 	}
 	if ref == "" {
 		ref = cfg.DefaultModelRef()
@@ -2052,7 +2031,7 @@ func validateModelRef(cfg *config.Config, ref string) error {
 // refuses (the agent loop's Approve==nil contract). The TUI will surface a
 // blocking card when M12's dialog chrome lands; until then it behaves the
 // same way, which is fail-safe rather than fail-open.
-// effortBudget turns a resolved role effort into the reasoning budget the
+// effortBudget turns a resolved effort level into the reasoning budget the
 // adapters translate into their own vocabularies. An unpinned or unknown
 // effort means no thinking requested — and so does a zero budget: config
 // calls "minimal" the off switch, but a 0-token ThinkingBudget is not "off"
@@ -2114,26 +2093,6 @@ func applyPolicy(ag *agent.Agent, settings *config.Settings) {
 	ag.Policy = autoApprovePolicy(pol)
 }
 
-// roleModelOnProvider expands one "@role" (or a literal provider/model, with
-// or without an ":effort" suffix) to a model id usable on the named provider.
-// ok=false means "keep the parent's model": the role does not resolve, or it
-// names another provider, which a child sharing this provider cannot call.
-func roleModelOnProvider(settings *config.Settings, ref, provName string) (string, bool) {
-	if settings == nil {
-		return "", false
-	}
-	rr, err := config.ResolveModelRef(settings, strings.TrimSpace(ref))
-	if err != nil {
-		logx.Debugf("task agent model %q: %v", ref, err)
-		return "", false
-	}
-	p, m, err := config.ParseModelRef(rr.Ref)
-	if err != nil || p != provName || m == "" {
-		return "", false
-	}
-	return m, true
-}
-
 // taskAgentsAtStartup resolves the task-agent surface once, at startup, and
 // reports it (#272): the caller shows the notice where its mode has a console
 // the user reads (the TUI's alt screen swallows stderr, which is why an empty
@@ -2161,27 +2120,6 @@ func taskAgentsAtStartup(cwd string) (notice string, warnings []string, count in
 		b.WriteString("\n· task agent warning: " + w)
 	}
 	return b.String(), warnings, count
-}
-
-// childModel resolves the @task role for subagents (M9: roles resolve
-// across session and children). An unconfigured or role-ineligible @task
-// (it names the same provider/model as the parent, or it fails to resolve)
-// keeps the parent's model: the parent asked for a worker, not a specific
-// switch. A different provider requires rebuilding that provider, which
-// newToolRegistry does through the same models.yml entry.
-func childModel(settings *config.Settings, provName, modelName string) string {
-	if settings == nil || len(settings.ModelRoles) == 0 {
-		return modelName
-	}
-	rr, err := config.ResolveModelRef(settings, "@task")
-	if err != nil || rr.Role == "" {
-		return modelName
-	}
-	p, m, err := config.ParseModelRef(rr.Ref)
-	if err != nil || p != provName {
-		return modelName // cross-provider children need their own client
-	}
-	return m
 }
 
 // wireTaskParent stamps the parent session id onto the registry's task
@@ -2241,14 +2179,14 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 // fits). Providers are built eagerly — the HTTP clients stay idle until
 // a failover actually streams.
 // failoverChain is the ordered failover target list for one model. A declared
-// retry.fallbackChains entry for the active model (or its role) wins and is
+// retry.fallbackChains entry for the active model wins and is
 // resolved through the chain engine, so a hand-written order is honored
 // instead of being overridden by window size (#84). With no chain configured
 // — the common case — every configured provider/model is offered, best window
 // first.
-func failoverChain(cfg *config.Config, settings *config.Settings, role, primaryProv, primaryModel string) []agent.FailoverTarget {
+func failoverChain(cfg *config.Config, settings *config.Settings, primaryProv, primaryModel string) []agent.FailoverTarget {
 	if settings != nil && len(settings.Retry.FallbackChains) > 0 {
-		targets := agent.ResolveFallbackChain(settings, role, primaryProv, primaryModel,
+		targets := agent.ResolveFallbackChain(settings, primaryProv, primaryModel,
 			agent.ConfigCatalog{Config: cfg}, declaredChainTargets(cfg, primaryProv, primaryModel))
 		if out := buildChainTargets(cfg, targets); len(out) > 0 {
 			return out

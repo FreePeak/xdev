@@ -19,7 +19,7 @@ import (
 // instead of summarizing whole sessions, it watches the session stream for
 // friction — the user restating a preference, or an instruction that has to
 // follow a failed turn — and, once a session crosses the detector threshold,
-// consolidates the raw quotes into ONE decision bullet through the smol-role
+// consolidates the raw quotes into ONE decision bullet through the session-model
 // seam and appends it to the matching decision file under memories/.
 //
 // It implements the same Store contract as the local Backend, so Memory
@@ -28,7 +28,7 @@ import (
 type SharpShooter struct {
 	// Dir is the memories directory holding the decision files. Empty = off.
 	Dir string
-	// Complete is the smol-role consolidation seam: prompt in, one JSON
+	// Complete is the model consolidation seam: prompt in, one JSON
 	// decision out. nil writes the strongest friction quote verbatim instead
 	// (a deliberate degradation: no model, no synthesis).
 	Complete func(ctx context.Context, prompt string) (string, error)
@@ -181,7 +181,7 @@ func threshold(v int) int {
 //
 // ponytail: verbatim-after-normalization matching only, so a reworded
 // restatement escapes the detector. The upgrade path is token-overlap
-// similarity (or handing candidate pairs to the smol seam) once a reworded
+// similarity (or handing candidate pairs to the synthesis seam) once a reworded
 // repeat is observed in practice.
 func normalizeTurn(s string) string {
 	s = capTextHint(collapseWS(strings.ToLower(s)), maxDecisionBulletChars, "")
@@ -249,7 +249,7 @@ func (s *SharpShooter) Wait() {
 }
 
 // Consolidate runs one consolidation pass over the friction already observed:
-// the smol seam (or the verbatim fallback) turns the quotes into one decision
+// the synthesis seam (or the verbatim fallback) turns the quotes into one decision
 // bullet appended to the matching decision file. Concurrent passes — this
 // process or another — are rejected with ErrLeaseHeld: the same lease-file
 // algorithm the memory pipeline uses, on this backend's own lease path.
@@ -539,7 +539,7 @@ func (s *SharpShooter) path(scope string) string { return filepath.Join(s.Dir, s
 //
 // ponytail: a file at its cap loses history instead of consolidating it, and a
 // single bullet is always kept whole (bounded by maxDecisionBulletChars). The
-// upgrade path is a merge pass over the file through the smol seam before the
+// upgrade path is a merge pass over the file through the synthesis seam before the
 // drop.
 func (s *SharpShooter) appendBullet(scope, bullet string) error {
 	if s.Off() {

@@ -64,9 +64,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return 2, err
 	}
 	// The request-side thinking level: --thinking wins, else the persisted
-	// `thinking` key, else the role's own ":effort" (applyThinkingFlag's "auto"
-	// branch). roleEffort keeps the UN-folded role effort, so a later
-	// /thinking auto (or the Shift-Tab toggle) re-binds to the role instead of
+	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's "auto"
+	// branch). roleEffort keeps the UN-folded model effort, so a later
+	// /thinking auto (or the Shift-Tab toggle) re-binds to the model instead of
 	// freezing whatever level an earlier call pinned.
 	roleEffort := effortRef
 	startLevel := thinkingLevel(lastSettings(), launch.Thinking)
@@ -106,7 +106,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	prewalkTarget := &agent.FailoverTarget{}
 	prewalkOn := false
 	// Advisor (M11 #12): a background reviewer when settings.advisor is on
-	// AND modelRoles.advisor resolves. It watches transcript snapshots and
+	// AND settings.advisorModel resolves. It watches transcript snapshots and
 	// steers into the live run.
 	adv := buildAdvisor(cfg, lastSettings())
 	var advisorOn atomic.Bool
@@ -410,12 +410,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// a handoff document committed as a normal compaction entry, so the
 	// next turn continues from the document. The side request mirrors a
 	// live turn's transform (system + history + a trailing instruction, no
-	// tools) on the @smol role; the reset closure rewinds the advisor feed
+	// tools) on the session model; the reset closure rewinds the advisor feed
 	// cursor — the todo list and plan mode are the agent's own seams — and
 	// settings handoff.saveToDisk mirrors the document to disk.
 	handoffSettings := func() agent.HandoffSettings {
 		hs := agent.HandoffSettings{SaveDir: handoffSaveDir(lastSettings())}
-		if t := resolveInto("@smol", cfg, lastSettings(), "handoff"); t != nil {
+		if t := resolveInto("", cfg, lastSettings(), "handoff"); t != nil {
 			hs.Target = *t
 		}
 		if adv != nil {
@@ -439,7 +439,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			PlanMode:   planMode,
 			Handoff:    handoffSettings(),
 		}
-		wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true)
+		wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
 	// #272: the alt screen swallows stderr, which is where discovery
@@ -782,7 +782,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Vibe mode (M14 #58): the director scope over the session hub and the
 	// task tool's subagent machinery. Workers inherit the task tool's tool
 	// surface and approval posture; the tier selects the bundled agent
-	// prompt and the resolved role model (parent model as the fallback).
+	// prompt, and every worker runs on the session's live model.
 	if sessionHub != nil {
 		var taskTool *agent.TaskTool
 		if tt, ok := reg.Get(agent.TaskToolName); ok {
@@ -793,24 +793,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Hub:   sessionHub,
 				Task:  taskTool,
 				Tools: reg,
-				Resolve: func(role string) (*agent.VibeModel, error) {
-					if ref, effort, err := resolveModel(role, cfg, lastSettings()); err == nil {
-						pn, mn, perr := config.ParseModelRef(ref)
-						if perr != nil {
-							return nil, perr
-						}
-						pc, has := cfg.Providers[pn]
-						if !has {
-							return nil, fmt.Errorf("unknown provider %q", pn)
-						}
-						prov, berr := buildProvider(pn, pc, mn, cfg)
-						if berr != nil {
-							return nil, berr
-						}
-						return &agent.VibeModel{Provider: prov, Model: mn, Thinking: effortBudget(effort)}, nil
-					}
-					// Unset role: the parent's active model is the fallback
-					// (the task tool's routing).
+				Resolve: func() (*agent.VibeModel, error) {
+					// A worker runs on the session's live model (the same
+					// routing the task tool gives its children).
 					modelMu.Lock()
 					lp, lm, le := live.prov, live.model, live.effort
 					modelMu.Unlock()
@@ -1082,22 +1067,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			modelMu.Unlock()
 			return modelPickerItems(cfg, lastSettings(), cur)
 		},
-		SetRole: func(role, ref string) error {
-			if !config.IsKnownRole(role) {
-				return fmt.Errorf("unknown role @%s", role)
-			}
-			if err := config.Set(config.GlobalSettingsPath(), "modelRoles."+role, ref); err != nil {
-				return err
-			}
-			// Keep the in-memory layer in sync so the follow-up
-			// "@role" switch resolves without a restart.
-			s := lastSettings()
-			if s.ModelRoles == nil {
-				s.ModelRoles = map[string]string{}
-			}
-			s.ModelRoles[role] = ref
-			return nil
-		},
 		Set: setRef,
 		// Cycle advances the active model through the --models
 		// patterns (omp's Ctrl+P): each pattern matches the first
@@ -1165,14 +1134,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		Enabled: func() bool { return adv != nil },
 		Set: func(on bool) error {
 			if on && adv == nil {
-				return fmt.Errorf("advisor unavailable: set modelRoles.advisor and advisor: true in settings")
+				return fmt.Errorf("advisor unavailable: set advisorModel and advisor: true in settings")
 			}
 			advisorOn.Store(on)
 			return nil
 		},
 		Status: func() string {
 			if adv == nil {
-				return "off (no modelRoles.advisor configured)"
+				return "off (no advisorModel configured)"
 			}
 			if adv.Halted() {
 				return "halted after repeated failures"
@@ -1209,11 +1178,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 		Set: func(on bool, into string) error {
 			if on {
-				ref := into
-				if ref == "" {
-					ref = "@smol"
-				}
-				nref, _, err := resolveModel(ref, cfg, lastSettings())
+				// An empty target is the session model: resolveModel
+				// falls through to defaultModel / models.yml.
+				nref, _, err := resolveModel(strings.TrimSpace(into), cfg, lastSettings())
 				if err != nil {
 					return err
 				}
@@ -1595,7 +1562,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Model:      lm,
 				Store:      store,
 				Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
-				Failovers:  failoverChain(cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm),
+				Failovers:  failoverChain(cfg, lastSettings(), lpn, lm),
 				Thinking:   effortBudget(le),
 				// Intercept set below from exts (only when non-nil).
 				Policy:  agentPolicy(),
@@ -1604,7 +1571,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
 			// result here is the case that mattered.
-			if st := wireAgentMode(ag, reg, cfg, lastSettings(), modelRoleRef(opts.Model), lpn, lm, cwd, true); st != nil {
+			if st := wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
 				// The TUI has a console: a silent provider swap or a
 				// cooldown revert is otherwise invisible to the user.
 				st.Notify = func(msg string) { app.AddSystemBlock("· " + msg) }
@@ -1880,17 +1847,6 @@ func titleFromPrompt(text string) string {
 		return string(runes[:40]) + "…"
 	}
 	return line
-}
-
-// roleNamesSorted lists the configured role names in stable order (the
-// /model roles tab and the usage report both want determinism).
-func roleNamesSorted(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // breadcrumbPath prefers the materialized file path and falls back to the
@@ -2170,44 +2126,13 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 	}
 }
 
-// modelPickerViews builds the /model selector's tabs: a roles view whose
-// rows open the assignment list, then "All models" (sectioned by provider)
-// and one view per provider — the same shape omp's /model shows.
+// modelPickerViews builds the /model selector's tabs: "All models"
+// (sectioned by provider) and one view per provider — the same shape omp's
+// /model shows.
 func modelPickerViews(cfg *config.Config, s *config.Settings, current string, app *tui.App) []tui.PickerView {
 	items := modelPickerItems(cfg, s, current)
-	roles := make([]tui.PickerItem, 0, len(config.RoleNames))
-	for _, name := range config.RoleNames {
-		ref, effort := "", ""
-		if s != nil {
-			ref = strings.TrimSpace(s.ModelRoles[name])
-			effort = strings.TrimSpace(s.ModelRolesEffort[name])
-		}
-		// An unset @default is not "unconfigured": resolution falls back to
-		// models.yml's defaultModel, so show that as the effective value.
-		if ref == "" && name == "default" && cfg != nil {
-			ref = cfg.DefaultModelRef()
-		}
-		detail := "unset"
-		if ref != "" {
-			// The arrow reads as "this slot resolves to"; a bare ref would
-			// look like a model row.
-			detail = "→ " + ref
-			if effort != "" {
-				detail += ":" + effort
-			}
-		}
-		roles = append(roles, tui.PickerItem{
-			Label:   "@" + name,
-			Detail:  detail,
-			Value:   "@" + name,
-			Current: sameModelRef(ref, current),
-		})
-	}
-	roleView := tui.PickerView{
-		Name: "Roles", Items: roles, Action: "set",
-		OnSelect: func(role string) { app.OpenRolePicker(strings.TrimPrefix(role, "@")) },
-	}
-	views := []tui.PickerView{roleView}
+	_ = app
+	var views []tui.PickerView
 	if len(items) > 0 {
 		all := make([]tui.PickerItem, len(items))
 		copy(all, items)
@@ -2301,7 +2226,7 @@ func humanCtx(n int) string {
 }
 
 // sameModelRef compares two model refs ignoring an ":effort" suffix, so
-// "@slow:high" and the "onegw/dev" it resolves to mark the same session.
+// "onegw/dev:high" and the "onegw/dev" it resolves to mark the same session.
 func sameModelRef(a, b string) bool {
 	strip := func(s string) string {
 		if i := strings.LastIndex(s, ":"); i >= 0 {

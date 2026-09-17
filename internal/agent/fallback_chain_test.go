@@ -16,10 +16,7 @@ func chainCatalog() ConfigCatalog {
 }
 
 func chainSettings(chains map[string][]string) *config.Settings {
-	return &config.Settings{
-		Retry:      config.RetrySettings{FallbackChains: chains},
-		ModelRoles: map[string]string{"slow": "other/dev"},
-	}
+	return &config.Settings{Retry: config.RetrySettings{FallbackChains: chains}}
 }
 
 func selectors(ts []ChainTarget) []string {
@@ -31,7 +28,7 @@ func selectors(ts []ChainTarget) []string {
 }
 
 // TestResolveFallbackChainPrecedence pins the specificity order (M5 #25):
-// exact model key > role key > provider wildcard > the existing chain.
+// exact model key > provider wildcard > the existing chain.
 func TestResolveFallbackChainPrecedence(t *testing.T) {
 	existing := []ChainTarget{{Provider: "existing", Model: "m"}}
 	cases := []struct {
@@ -43,18 +40,9 @@ func TestResolveFallbackChainPrecedence(t *testing.T) {
 			name: "exact model key wins",
 			chains: map[string][]string{
 				"onegw/free": {"other/dev"},
-				"smol":       {"openrouter/google/gemini-2.5-pro"},
-				"onegw/*":    {"other/dev"},
+				"onegw/*":    {"openrouter/google/gemini-2.5-pro"},
 			},
 			want: []string{"other/dev"},
-		},
-		{
-			name: "role key beats the wildcard",
-			chains: map[string][]string{
-				"smol":    {"openrouter/google/gemini-2.5-pro"},
-				"onegw/*": {"other/dev"},
-			},
-			want: []string{"openrouter/google/gemini-2.5-pro"},
 		},
 		{
 			name:   "provider wildcard is the last configured rung",
@@ -69,7 +57,7 @@ func TestResolveFallbackChainPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ResolveFallbackChain(chainSettings(tc.chains), "smol", "onegw", "free", chainCatalog(), existing)
+			got := ResolveFallbackChain(chainSettings(tc.chains), "onegw", "free", chainCatalog(), existing)
 			if diff := selectors(got); !equalStrings(diff, tc.want) {
 				t.Fatalf("chain = %v, want %v", diff, tc.want)
 			}
@@ -81,7 +69,7 @@ func TestResolveFallbackChainPrecedence(t *testing.T) {
 // and keeps the failing id, resolved against that provider's catalog.
 func TestFallbackChainProviderWildcardKeepsModelID(t *testing.T) {
 	s := chainSettings(map[string][]string{"onegw/dev": {"other/*"}})
-	got := ResolveFallbackChain(s, "", "onegw", "dev", chainCatalog(), nil)
+	got := ResolveFallbackChain(s, "onegw", "dev", chainCatalog(), nil)
 	if diff := selectors(got); !equalStrings(diff, []string{"other/dev"}) {
 		t.Fatalf("chain = %v, want [other/dev]", diff)
 	}
@@ -100,7 +88,7 @@ func TestFallbackChainFuzzyResolve(t *testing.T) {
 	}
 	for _, tc := range cases {
 		s := chainSettings(map[string][]string{"onegw/free": {tc.entry}})
-		got := ResolveFallbackChain(s, "", "onegw", "free", chainCatalog(), nil)
+		got := ResolveFallbackChain(s, "onegw", "free", chainCatalog(), nil)
 		if diff := selectors(got); !equalStrings(diff, []string{tc.want}) {
 			t.Fatalf("entry %q resolved to %v, want %s", tc.entry, diff, tc.want)
 		}
@@ -111,7 +99,7 @@ func TestFallbackChainFuzzyResolve(t *testing.T) {
 // own fallback, and a repeated target keeps only its first position.
 func TestFallbackChainSelfAndDuplicatesDropped(t *testing.T) {
 	s := chainSettings(map[string][]string{"onegw/free": {"onegw/free", "other/dev", "other/dev"}})
-	got := ResolveFallbackChain(s, "", "onegw", "free", chainCatalog(), nil)
+	got := ResolveFallbackChain(s, "onegw", "free", chainCatalog(), nil)
 	if diff := selectors(got); !equalStrings(diff, []string{"other/dev"}) {
 		t.Fatalf("chain = %v, want [other/dev]", diff)
 	}
@@ -122,18 +110,9 @@ func TestFallbackChainSelfAndDuplicatesDropped(t *testing.T) {
 func TestFallbackChainUnresolvableFallsBackToExisting(t *testing.T) {
 	existing := []ChainTarget{{Provider: "existing", Model: "m"}}
 	s := chainSettings(map[string][]string{"onegw/free": {"other/nope-not-a-model"}})
-	got := ResolveFallbackChain(s, "", "onegw", "free", chainCatalog(), existing)
+	got := ResolveFallbackChain(s, "onegw", "free", chainCatalog(), existing)
 	if diff := selectors(got); !equalStrings(diff, []string{"existing/m"}) {
 		t.Fatalf("chain = %v, want the existing chain", diff)
-	}
-}
-
-// TestFallbackChainRoleEntryExpands: an entry may name another role.
-func TestFallbackChainRoleEntryExpands(t *testing.T) {
-	s := chainSettings(map[string][]string{"smol": {"@slow"}})
-	got := ResolveFallbackChain(s, "smol", "onegw", "free", chainCatalog(), nil)
-	if diff := selectors(got); !equalStrings(diff, []string{"other/dev"}) {
-		t.Fatalf("chain = %v, want [other/dev]", diff)
 	}
 }
 
@@ -142,7 +121,7 @@ func TestFallbackChainRoleEntryExpands(t *testing.T) {
 // when the target does not carry the prefixed one.
 func TestFallbackChainPrefixWildcardReprefixesID(t *testing.T) {
 	s := chainSettings(map[string][]string{"onegw/google/*": {"openrouter/google/*"}})
-	got := ResolveFallbackChain(s, "", "onegw", "gemini-2.5-pro", chainCatalog(), nil)
+	got := ResolveFallbackChain(s, "onegw", "gemini-2.5-pro", chainCatalog(), nil)
 	if diff := selectors(got); !equalStrings(diff, []string{"openrouter/google/gemini-2.5-pro"}) {
 		t.Fatalf("chain = %v, want [openrouter/google/gemini-2.5-pro]", diff)
 	}
@@ -150,7 +129,7 @@ func TestFallbackChainPrefixWildcardReprefixesID(t *testing.T) {
 	// The target does not advertise the prefixed id, but a bare-id provider
 	// does: the aggregator→direct carry still resolves.
 	s = chainSettings(map[string][]string{"onegw/google/*": {"other/*"}})
-	got = ResolveFallbackChain(s, "", "onegw", "google/dev", chainCatalog(), nil)
+	got = ResolveFallbackChain(s, "onegw", "google/dev", chainCatalog(), nil)
 	if diff := selectors(got); !equalStrings(diff, []string{"other/dev"}) {
 		t.Fatalf("chain = %v, want [other/dev]", diff)
 	}

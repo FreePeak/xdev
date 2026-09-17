@@ -44,9 +44,9 @@ func commitTestRepo(t *testing.T) (string, string) {
 func TestCommitCmdGeneratesFromStagedDiff(t *testing.T) {
 	dir, _ := commitTestRepo(t)
 
-	var gotPrompt, gotRole string
-	complete := func(_ context.Context, role, prompt string, _ int) (string, error) {
-		gotPrompt, gotRole = prompt, role
+	var gotPrompt, gotModel string
+	complete := func(_ context.Context, ref, prompt string, _ int) (string, error) {
+		gotPrompt, gotModel = prompt, ref
 		return "feat(widget): add the Widget helper\n\nIt gives the package a single entry point.", nil
 	}
 
@@ -54,8 +54,8 @@ func TestCommitCmdGeneratesFromStagedDiff(t *testing.T) {
 	if code := commitCmd([]string{}, dir, &out, &errOut, complete, tool.GitCLI); code != 0 {
 		t.Fatalf("commitCmd = %d (%s)", code, errOut.String())
 	}
-	if gotRole != "@commit" {
-		t.Fatalf("role = %q, want @commit", gotRole)
+	if gotModel != "" {
+		t.Fatalf("model = %q, want the empty ref (the session model resolves it)", gotModel)
 	}
 	if !strings.Contains(gotPrompt, "func Widget() string") {
 		t.Fatalf("the staged diff never reached the prompt:\n%s", gotPrompt)
@@ -70,13 +70,13 @@ func TestCommitCmdGeneratesFromStagedDiff(t *testing.T) {
 		t.Fatal("a message-only run created a commit")
 	}
 
-	// The role flag is what gets resolved.
+	// The --model flag is what gets resolved.
 	out.Reset()
-	if code := commitCmd([]string{"--role", "@smol"}, dir, &out, &errOut, complete, tool.GitCLI); code != 0 {
-		t.Fatalf("commitCmd --role = %d", code)
+	if code := commitCmd([]string{"--model", "onegw/dev"}, dir, &out, &errOut, complete, tool.GitCLI); code != 0 {
+		t.Fatalf("commitCmd --model = %d", code)
 	}
-	if gotRole != "@smol" {
-		t.Fatalf("role = %q, want @smol", gotRole)
+	if gotModel != "onegw/dev" {
+		t.Fatalf("model = %q, want onegw/dev", gotModel)
 	}
 }
 

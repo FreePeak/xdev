@@ -60,11 +60,11 @@ const (
 )
 
 // HandoffSettings is the agent-side handoff configuration (M5 #23). The
-// user-facing knobs are settings `handoff.saveToDisk` and the @smol role;
-// cmd resolves them into these fields.
+// user-facing knob is settings `handoff.saveToDisk`; cmd resolves the
+// session model into these fields.
 type HandoffSettings struct {
-	// Target writes the document (the @smol role). Zero value → the
-	// agent's active provider/model, so a session with no role wired still
+	// Target writes the document (the session model). Zero value → the
+	// agent's active provider/model, so a session with nothing wired still
 	// hands off.
 	Target FailoverTarget
 	// SaveDir mirrors each document to <SaveDir>/<shortid>.md ("" = the

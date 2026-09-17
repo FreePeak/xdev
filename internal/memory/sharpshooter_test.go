@@ -15,7 +15,7 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 )
 
-// sharpStub is the smol-role seam double: it counts calls and replies with a
+// sharpStub is the synthesis-seam double: it counts calls and replies with a
 // canned decision object.
 type sharpStub struct {
 	mu    sync.Mutex

@@ -7,25 +7,6 @@ import (
 	"strings"
 )
 
-func TestChildModelRole(t *testing.T) {
-	same := &config.Settings{ModelRoles: map[string]string{"task": "onegw/dev"}}
-	if got := childModel(same, "onegw", "free"); got != "dev" {
-		t.Fatalf("@task same-provider = %q, want dev", got)
-	}
-	// Cross-provider roles would need a different client; keep the parent's.
-	cross := &config.Settings{ModelRoles: map[string]string{"task": "other/dev"}}
-	if got := childModel(cross, "onegw", "free"); got != "free" {
-		t.Fatalf("@task cross-provider = %q, want free", got)
-	}
-	// No role configured at all → parent model, no error.
-	if got := childModel(&config.Settings{}, "onegw", "free"); got != "free" {
-		t.Fatalf("no roles = %q, want free", got)
-	}
-	if got := childModel(nil, "onegw", "free"); got != "free" {
-		t.Fatalf("nil settings = %q, want free", got)
-	}
-}
-
 func TestResolveModelPrecedence(t *testing.T) {
 	resetProviderModelCache()
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
@@ -34,22 +15,20 @@ func TestResolveModelPrecedence(t *testing.T) {
 		// on the next turn.
 		"onegw": {Models: []config.ModelConfig{{ID: "yml-default"}, {ID: "flag"}}},
 	}}
-	s := &config.Settings{
-		DefaultModel: "onegw/from-settings",
-		ModelRoles:   map[string]string{"smol": "onegw/tiny"},
-	}
+	s := &config.Settings{DefaultModel: "onegw/from-settings"}
 	t.Setenv("XDEV_MODEL", "onegw/from-env")
 	// Explicit (flag/settings-merged) beats env.
 	if got, _, err := resolveModel("onegw/flag", cfg, s); err != nil || got != "onegw/flag" {
 		t.Fatalf("explicit = %q err=%v", got, err)
 	}
-	// Empty explicit still resolves the role form.
-	if got, eff, err := resolveModel("@smol:low", cfg, s); err != nil || got != "onegw/tiny" || eff != "low" {
-		t.Fatalf("role = %q/%q err=%v", got, eff, err)
+	// Empty explicit falls through to XDEV_MODEL.
+	if got, _, err := resolveModel("", cfg, s); err != nil || got != "onegw/from-env" {
+		t.Fatalf("env = %q err=%v", got, err)
 	}
-	// Bogus role surfaces rather than silently using the default.
-	if _, _, err := resolveModel("@nope", cfg, s); err == nil {
-		t.Fatal("unknown role must error")
+	// No env: settings.defaultModel wins over models.yml.
+	t.Setenv("XDEV_MODEL", "")
+	if got, _, err := resolveModel("", cfg, s); err != nil || got != "onegw/from-settings" {
+		t.Fatalf("settings default = %q err=%v", got, err)
 	}
 }
 
@@ -134,13 +113,12 @@ func TestTitleFromPrompt(t *testing.T) {
 // reasoning budget instead of being discarded at the cmd boundary (an
 // earlier revision bound effortRef and then dropped it with `_ =`).
 func TestEffortReachesTheBudget(t *testing.T) {
-	s := &config.Settings{ModelRoles: map[string]string{"smol": "onegw/tiny"}, ModelRolesEffort: map[string]string{"smol": "high"}}
-	_, effort, err := resolveModel("@smol", &config.Config{}, s)
+	_, effort, err := resolveModel("onegw/dev:high", &config.Config{}, &config.Settings{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if effort != "high" {
-		t.Fatalf("pinned role effort lost: %q", effort)
+		t.Fatalf("inline effort lost: %q", effort)
 	}
 	bud := effortBudget(effort)
 	if bud == nil || bud.Tokens != config.EffortTokens["high"] {
@@ -155,33 +133,5 @@ func TestEffortReachesTheBudget(t *testing.T) {
 	// here, the one function every run mode and adapter reads.
 	if bud := effortBudget("minimal"); bud != nil {
 		t.Fatalf("minimal must mean no thinking requested, got %+v", bud)
-	}
-}
-
-// #272: frontmatter `model: @role` must expand through modelRoles. Before
-// the wiring landed, ExpandModel had no assignment outside internal/agent, so
-// every bundled "@smol"/"@slow" was parsed and dropped.
-func TestRoleModelOnProvider(t *testing.T) {
-	s := &config.Settings{ModelRoles: map[string]string{
-		"smol": "onegw/dev",
-		"slow": "other-p/big",
-	}}
-	if got, ok := roleModelOnProvider(s, "@smol", "onegw"); !ok || got != "dev" {
-		t.Fatalf("@smol on onegw = %q,%v want dev,true", got, ok)
-	}
-	// A role on another provider is not usable by a child that shares this
-	// provider's client — same refusal childModel makes.
-	if _, ok := roleModelOnProvider(s, "@slow", "onegw"); ok {
-		t.Fatal("cross-provider role must not expand")
-	}
-	if _, ok := roleModelOnProvider(s, "@nosuch", "onegw"); ok {
-		t.Fatal("unknown role must not expand")
-	}
-	if _, ok := roleModelOnProvider(nil, "@smol", "onegw"); ok {
-		t.Fatal("no settings, no expansion")
-	}
-	// A literal provider/model is a valid frontmatter model too.
-	if got, ok := roleModelOnProvider(s, "onegw/free", "onegw"); !ok || got != "free" {
-		t.Fatalf("literal = %q,%v want free,true", got, ok)
 	}
 }

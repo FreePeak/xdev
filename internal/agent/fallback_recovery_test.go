@@ -333,7 +333,7 @@ func TestCooldownRevertRestoresPrimaryWithModelChange(t *testing.T) {
 		Compaction: CompactionConfig{ContextWindow: 200000},
 		Failovers:  []FailoverTarget{{Provider: fallback, Model: "dev", ContextWindow: 1000000}},
 	}
-	a.ArmFallback(&config.Settings{}, "")
+	a.ArmFallback(&config.Settings{})
 	a.Fallback.Cooldown = time.Minute
 
 	a.switchTarget(1, "recovery")
@@ -384,7 +384,7 @@ func TestRevertNeverKeepsFallback(t *testing.T) {
 	a := &Agent{Provider: primary, Model: "free",
 		Failovers: []FailoverTarget{{Provider: fallback, Model: "dev"}},
 	}
-	a.ArmFallback(&config.Settings{Retry: config.RetrySettings{FallbackRevertPolicy: config.RevertNever}}, "")
+	a.ArmFallback(&config.Settings{Retry: config.RetrySettings{FallbackRevertPolicy: config.RevertNever}})
 	a.Fallback.Cooldown = time.Millisecond
 	a.switchTarget(1, "recovery")
 	a.Fallback.revertAt = time.Now().Add(-time.Second)
@@ -403,7 +403,7 @@ func TestPrewalkSwitchIsNotAutoReverted(t *testing.T) {
 	a := &Agent{Provider: primary, Model: "free",
 		Failovers: []FailoverTarget{{Provider: target, Model: "big"}},
 	}
-	a.ArmFallback(&config.Settings{}, "")
+	a.ArmFallback(&config.Settings{})
 	a.Fallback.Cooldown = time.Millisecond
 	a.switchTarget(1, "prewalk")
 	if a.Fallback.switched {

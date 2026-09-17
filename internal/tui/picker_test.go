@@ -331,15 +331,14 @@ func TestPickerDeleteNilSeamNoOp(t *testing.T) {
 func modelViews(current string) []PickerView {
 	return []PickerView{
 		{
-			Name: "Roles", Action: "set",
+			Name: "All models", Action: "use",
 			Items: []PickerItem{
-				{Label: "@default", Detail: "→ " + current, Value: "@default", Current: true},
-				{Label: "@smol", Detail: "unset", Value: "@smol"},
+				{Label: "onegw/free", Detail: "Free · 1M ctx", Value: "onegw/free", Section: "onegw", Current: true},
+				{Label: "onegw/dev", Detail: "Dev · 1M ctx", Value: "onegw/dev", Section: "onegw"},
 			},
-			OnSelect: func(string) {},
 		},
 		{
-			Name: "All models", Action: "use",
+			Name: "onegw", Action: "use",
 			Items: []PickerItem{
 				{Label: "onegw/free", Detail: "Free · 1M ctx", Value: "onegw/free", Section: "onegw", Current: true},
 				{Label: "onegw/dev", Detail: "Dev · 1M ctx", Value: "onegw/dev", Section: "onegw"},
@@ -352,11 +351,10 @@ func TestPickerFiltersAndSelects(t *testing.T) {
 	p := newPicker(PickerOptions{Title: "model", Views: modelViews("onegw/free")})
 	// Opening parks the selection on the live value, so the user sees where
 	// they are instead of the head of the list.
-	if it, ok := p.selected(); !ok || it.Value != "@default" {
-		t.Fatalf("initial selection = %+v ok=%v, want @default", it, ok)
+	if it, ok := p.selected(); !ok || it.Value != "onegw/free" {
+		t.Fatalf("initial selection = %+v ok=%v, want onegw/free", it, ok)
 	}
-	// Typing filters by label; on the models tab "dev" matches exactly one.
-	p.switchView(1)
+	// Typing filters by label; "dev" matches exactly one row.
 	p.typeFilter('d')
 	p.typeFilter('e')
 	p.typeFilter('v')
@@ -391,16 +389,16 @@ func TestPickerSwitchViewResetsFilterAndParksOnCurrent(t *testing.T) {
 	if p.query != "" {
 		t.Fatalf("view switch kept the filter %q", p.query)
 	}
-	if v := p.active(); v == nil || v.Name != "All models" {
-		t.Fatalf("view = %+v, want All models", v)
+	if v := p.active(); v == nil || v.Name != "onegw" {
+		t.Fatalf("view = %+v, want onegw", v)
 	}
 	if it, _ := p.selected(); it.Value != "onegw/free" {
 		t.Fatalf("selection = %q, want the current model", it.Value)
 	}
 	// Views wrap.
 	p.switchView(1)
-	if v := p.active(); v == nil || v.Name != "Roles" {
-		t.Fatalf("wrapped view = %+v, want Roles", v)
+	if v := p.active(); v == nil || v.Name != "All models" {
+		t.Fatalf("wrapped view = %+v, want All models", v)
 	}
 }
 
@@ -418,30 +416,30 @@ func TestPickerMoveClamps(t *testing.T) {
 	}
 }
 
-// The per-view Enter verb is what lets one picker assign on the roles tab
-// and switch on a model tab without a second key fighting the filter.
+// The per-view Enter verb is what lets a picker hand a row to its own
+// callback (the roles tab used to assign) instead of the picker's.
 func TestPickerChooseUsesViewOverride(t *testing.T) {
-	assigned, used := "", ""
+	picked, used := "", ""
 	views := modelViews("onegw/free")
-	views[0].OnSelect = func(v string) { assigned = v }
+	views[0].OnSelect = func(v string) { picked = v }
 	p := newPicker(PickerOptions{
 		Title: "model", Views: views,
 		OnSelect: func(v string) { used = v },
 	})
 	act, ok := p.choose()
 	if !ok {
-		t.Fatal("choose returned no action on the roles tab")
+		t.Fatal("choose returned no action on the first view")
 	}
 	it, _ := p.selected()
 	act(it.Value)
-	if assigned != "@default" || used != "" {
-		t.Fatalf("view override: assigned=%q used=%q", assigned, used)
+	if picked != "onegw/free" || used != "" {
+		t.Fatalf("view override: picked=%q used=%q", picked, used)
 	}
 	// A view without its own callback falls back to the picker's.
 	p.switchView(1)
 	act, ok = p.choose()
 	if !ok {
-		t.Fatal("choose returned no action on the models tab")
+		t.Fatal("choose returned no action on the provider tab")
 	}
 	it, _ = p.selected()
 	act(it.Value)
@@ -451,43 +449,34 @@ func TestPickerChooseUsesViewOverride(t *testing.T) {
 }
 
 // The footer states two contracts: where you are (position) and what the two
-// acting keys do. Enter takes the ACTIVE view's verb ("set" on Roles); the
-// ⇥ hint names the tab Tab moves TO, not the one already bright — naming the
-// active one made Tab look dead.
+// acting keys do. Enter takes the ACTIVE view's verb; the ⇥ hint names the
+// tab Tab moves TO, not the one already bright — naming the active one made
+// Tab look dead.
 func TestPickerFooterNamesTheAction(t *testing.T) {
 	p := newPicker(PickerOptions{Title: "model", Views: modelViews("onegw/free")})
 	left, right := p.footer()
 	if left != "1/2 items" {
 		t.Errorf("footer left = %q, want the position", left)
 	}
-	if !contains(right, "⏎ set") || !contains(right, "⇥ All models") {
+	if !contains(right, "⏎ use") || !contains(right, "⇥ onegw") {
 		t.Errorf("footer right = %q, want the active verb and the next tab", right)
 	}
-	p.switchView(1) // now on All models: the verb is "use", the hint wraps to Roles
-	if _, right := p.footer(); !contains(right, "⏎ use") || !contains(right, "⇥ Roles") {
+	p.switchView(1) // now on the provider tab: the hint wraps to All models
+	if _, right := p.footer(); !contains(right, "⏎ use") || !contains(right, "⇥ All models") {
 		t.Errorf("footer right after Tab = %q, want the next-tab hint", right)
 	}
 }
 
 // /model with no argument opens the selector and never prints the old
-// "available:" text listing; the roles tab's Enter opens the assign list,
-// whose Enter hands the picked model to SetRole+Set (the cmd flow).
+// "available:" text listing; choosing a row hands the ref to Set.
 func TestSwitchModelOpensPicker(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	var switched []string
-	views := func() []PickerView {
-		vs := modelViews("onegw/free")
-		vs[0].OnSelect = func(role string) { app.OpenRolePicker(strings.TrimPrefix(role, "@")) }
-		return vs
-	}
 	app.SetModelOps(&ModelOps{
 		Current: func() string { return "onegw/free" },
-		Views:   views,
-		Models: func() []PickerItem {
-			return []PickerItem{{Label: "onegw/dev", Value: "onegw/dev"}}
-		},
+		Views:   func() []PickerView { return modelViews("onegw/free") },
+		Models:  func() []PickerItem { return modelViews("onegw/free")[0].Items },
 		Set:     func(ref string) error { switched = append(switched, ref); return nil },
-		SetRole: func(role, ref string) error { return nil },
 	})
 	if err := app.SwitchModel(""); err != nil {
 		t.Fatal(err)
@@ -495,14 +484,11 @@ func TestSwitchModelOpensPicker(t *testing.T) {
 	if !app.PickerOpen() {
 		t.Fatal("/model did not open the picker")
 	}
-	// Down to @smol, Enter -> the roles tab's OnSelect opens the assign list.
+	// onegw/free is current, so Down moves to onegw/dev; Enter takes it.
 	app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-	// Assigning a role also switches the session to it (the whole point of
-	// picking a model for a slot is to use it now), so Set receives @smol.
-	if len(switched) != 1 || switched[0] != "@smol" {
-		t.Fatalf("switched = %v, want [@smol]", switched)
+	if len(switched) != 1 || switched[0] != "onegw/dev" {
+		t.Fatalf("switched = %v, want [onegw/dev]", switched)
 	}
 	if app.PickerOpen() {
 		t.Fatal("picker stayed open after a selection")
@@ -573,29 +559,6 @@ func TestSwitchModelErrorIsReported(t *testing.T) {
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)) // Roles tab -> assign list needs Models
 }
 
-// SetRole persists through ModelOps and re-opens with the new value marked.
-func TestOpenRolePickerAssigns(t *testing.T) {
-	app, _ := newTestApp(t, 100, 30)
-	var gotRole, gotRef string
-	app.SetModelOps(&ModelOps{
-		Current: func() string { return "onegw/free" },
-		Views:   func() []PickerView { return modelViews("onegw/free") },
-		Models: func() []PickerItem {
-			return []PickerItem{{Label: "onegw/dev", Value: "onegw/dev"}}
-		},
-		Set:     func(string) error { return nil },
-		SetRole: func(role, ref string) error { gotRole, gotRef = role, ref; return nil },
-	})
-	app.OpenRolePicker("smol")
-	if !app.PickerOpen() {
-		t.Fatal("assign list did not open")
-	}
-	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-	if gotRole != "smol" || gotRef != "onegw/dev" {
-		t.Fatalf("SetRole(%q, %q), want smol/onegw/dev", gotRole, gotRef)
-	}
-}
-
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
 // --- open implies painted ---
@@ -611,7 +574,7 @@ func TestPickerIsPaintedOnScreen(t *testing.T) {
 	app.OpenPicker(PickerOptions{Title: "model", Views: modelViews("onegw/free")})
 	app.draw()
 	text := screenText(scr)
-	for _, want := range []string{"model", "Roles", "onegw/free", "esc cancel"} {
+	for _, want := range []string{"model", "All models", "onegw/free", "esc cancel"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("picker panel not painted: no %q on screen\n%s", want, text)
 		}

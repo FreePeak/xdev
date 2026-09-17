@@ -35,10 +35,11 @@ func usageTestConfig() *config.Config {
 	}}
 }
 
-// usageTestSettings binds one role to each provider, so the role column proves
-// settings is actually consulted rather than merely accepted.
+// usageTestSettings binds one settings-level model to each provider, so the
+// models column proves settings is actually consulted rather than merely
+// accepted.
 func usageTestSettings() *config.Settings {
-	return &config.Settings{ModelRoles: map[string]string{"main": "onegw/free", "task": "local/qwen3"}}
+	return &config.Settings{DefaultModel: "onegw/free", AdvisorModel: "local/qwen3"}
 }
 
 // usageTestReport is the fixed local telemetry the stub scan returns.
@@ -79,8 +80,8 @@ func TestUsageCmdReportsAccountsLimitsAndObservedUsage(t *testing.T) {
 		"none (provider needs no credential)",
 		"https://gw.example/v1",
 		"local/qwen3",
-		"@main",
-		"@task",
+		"defaultModel",
+		"advisorModel",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q:\n%s", want, got)

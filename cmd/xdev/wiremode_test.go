@@ -34,7 +34,7 @@ func TestWireAgentModeInstallsBothSeams(t *testing.T) {
 
 	reg := tool.NewRegistry()
 	ag := &agent.Agent{Tools: reg, Model: "m"}
-	wireAgentMode(ag, reg, &config.Config{}, &config.Settings{}, "", "p", "m", cwd, false)
+	wireAgentMode(ag, reg, &config.Config{}, &config.Settings{}, "p", "m", cwd, false)
 
 	// 1. Redactor: the secret leaves context as a placeholder and comes back
 	// on the way in (the reversible round trip is the whole contract).
@@ -58,11 +58,11 @@ func TestWireAgentModeInstallsBothSeams(t *testing.T) {
 func TestWireAgentModeToleratesNilRegistry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	if ag.Redactor == nil {
 		t.Fatal("redactor must still be installed with no registry")
 	}
-	wireAgentMode(nil, nil, &config.Config{}, &config.Settings{}, "", "p", "m", t.TempDir(), false) // must not panic
+	wireAgentMode(nil, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false) // must not panic
 }
 
 // The config the redactor reads is the project one, so a secret declared in
@@ -81,7 +81,7 @@ func TestWireAgentModeUsesGlobalSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	if got := ag.Redactor.Apply("token " + secret); strings.Contains(got, secret) {
 		t.Fatalf("global secret not masked: %q", got)
 	}
@@ -102,7 +102,7 @@ func TestFailoverChainHonoursDeclaredOrder(t *testing.T) {
 	s := &config.Settings{Retry: config.RetrySettings{
 		FallbackChains: map[string][]string{"onegw/x": {"mid/m1", "small/s1"}},
 	}}
-	got := failoverChain(cfg, s, "", "onegw", "x")
+	got := failoverChain(cfg, s, "onegw", "x")
 	if len(got) == 0 {
 		t.Skip("providers unbuildable in this environment")
 	}
@@ -114,7 +114,7 @@ func TestFailoverChainHonoursDeclaredOrder(t *testing.T) {
 		t.Fatalf("first target = %q, want the declared mid/m1 (not window-ranked)", got[0].Model)
 	}
 	// With no chain declared, the window ranking still applies.
-	plain := failoverChain(cfg, &config.Settings{}, "", "onegw", "x")
+	plain := failoverChain(cfg, &config.Settings{}, "onegw", "x")
 	if len(plain) == 0 || plain[0].Model != "b1" {
 		t.Fatalf("undeclared chain = %+v, want the biggest window first", plain)
 	}
@@ -135,7 +135,7 @@ func TestWireAgentModeGatesGoalContinuationByMode(t *testing.T) {
 		{"print", false, false},
 	} {
 		ag := &agent.Agent{Model: "m"}
-		wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", "p", "m", t.TempDir(), tc.interactive)
+		wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), tc.interactive)
 		if ag.GoalContinuation != tc.want {
 			t.Fatalf("%s: GoalContinuation = %v, want %v", tc.name, ag.GoalContinuation, tc.want)
 		}
@@ -146,12 +146,9 @@ func TestWireAgentModeGatesGoalContinuationByMode(t *testing.T) {
 func TestWireAgentModeArmsFallbackState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	st := wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "smol", "p", "m", t.TempDir(), false)
+	st := wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	if st == nil {
 		t.Fatal("fallback state not armed — retry.fallbackChains/reserve/revert stay unreachable")
-	}
-	if st.Role != "smol" {
-		t.Fatalf("role = %q, want the active role", st.Role)
 	}
 	if st.Rotate == nil {
 		t.Fatal("credential rotation seam unwired: a spent apiKeys key fails the run")
@@ -167,7 +164,7 @@ func TestWireAgentModeAppliesCompactionSettings(t *testing.T) {
 	s.Compaction.IdleAfter = "90s"
 	s.Compaction.Async = &on
 	ag := &agent.Agent{Model: "m", Compaction: agent.CompactionConfig{ContextWindow: 1000}}
-	wireAgentMode(ag, nil, &config.Config{}, s, "", "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, nil, &config.Config{}, s, "p", "m", t.TempDir(), false)
 	if ag.Compaction.IdleAfter != 90*time.Second {
 		t.Fatalf("IdleAfter = %v, want 90s from settings", ag.Compaction.IdleAfter)
 	}
@@ -203,7 +200,7 @@ func TestAbortCancelsAsyncCompaction(t *testing.T) {
 func TestWireAgentModeCarriesMemoryContext(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "", "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	// Backend off: no seam, and nothing panics.
 	if ag.MemoryContext != nil {
 		t.Fatal("MemoryContext set with no remote backend configured")

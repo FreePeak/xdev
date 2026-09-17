@@ -396,9 +396,7 @@ func TestBundledAgentsDeclareConsumableFrontmatter(t *testing.T) {
 	defs, _ := discoverBundledAgents()
 	for _, d := range defs {
 		if d.Model != "" && !strings.Contains(d.Model, "/") {
-			if !strings.HasPrefix(d.Model, "@") {
-				t.Errorf("%s: model %q is neither @role nor provider/model", d.Name, d.Model)
-			}
+			t.Errorf("%s: model %q is not a provider/model ref", d.Name, d.Model)
 		}
 		if d.ThinkingLevel != "" && !slices.Contains(config.EffortLevels, d.ThinkingLevel) {
 			t.Errorf("%s: thinkingLevel %q not an effort level", d.Name, d.ThinkingLevel)
@@ -447,8 +445,9 @@ func TestDiscoverAgentsReportsUnsupportedKeys(t *testing.T) {
 	}
 }
 
-// The documented form `model: @role` is a reserved YAML indicator; discovery
-// promised it, so it must parse.
+// The old form `model: @role` is a reserved YAML indicator and is still what
+// settled agent files carry; discovery promised it, so it must parse (the
+// alias is then reported at spawn, never expanded).
 func TestDiscoverAgentsBareRoleModelParses(t *testing.T) {
 	dir := t.TempDir()
 	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "roled.md", "---\nname: roled\ndescription: x\nmodel: @smol\n---\nbody")
@@ -463,7 +462,7 @@ func TestDiscoverAgentsBareRoleModelParses(t *testing.T) {
 }
 
 // A stale key next to `model: @smol` must still be reported: the alias is
-// quoted before parsing, and the key scan has to read the same text.
+// quoted before parsing, and the key scan reads the same text.
 func TestDiscoverAgentsReportsStaleKeyAlongsideRoleModel(t *testing.T) {
 	dir := t.TempDir()
 	writeAgentFile(t, filepath.Join(dir, ".xdev", "agents"), "mix.md", "---\nname: mix\ndescription: x\nmodel: @smol\noutput: json\n---\nbody")

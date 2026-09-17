@@ -15,9 +15,9 @@ import (
 )
 
 // runCommit implements `xdev commit` (issue #34): generate a commit message
-// from the staged diff with the @commit role and print it; --apply commits.
+// from the staged diff on the session model and print it; --apply commits.
 // The message is a real model turn over the same diff git itself reports, not
-// a template — the @commit role's model decides subject and body.
+// a template — the model decides subject and body.
 func runCommit(args []string) int {
 	return commitCmd(args, mustGetwd(), os.Stdout, os.Stderr, defaultCommitCompleter, tool.GitCLI)
 }
@@ -25,14 +25,13 @@ func runCommit(args []string) int {
 // commitGit is the git runner seam (tool.GitCLI in production).
 type commitGit func(ctx context.Context, dir string, args ...string) (string, error)
 
-// commitCompleter runs one role-resolution model turn (production: the @commit
-// role through the same resolver a run uses).
-type commitCompleter func(ctx context.Context, role, prompt string, maxTokens int) (string, error)
+// commitCompleter runs one model turn (production: the resolved model ref
+// through the same resolver a run uses).
+type commitCompleter func(ctx context.Context, ref, prompt string, maxTokens int) (string, error)
 
 // commitStats reports the inputs and model behind a generated message.
 type commitStats struct {
 	Model     string `json:"model"`
-	Role      string `json:"role"`
 	DiffBytes int    `json:"diffBytes"`
 	Elapsed   string `json:"elapsed"`
 }
@@ -42,7 +41,7 @@ func commitCmd(args []string, cwd string, out, errOut io.Writer, complete commit
 	fs.SetOutput(errOut)
 	apply := fs.Bool("apply", false, "commit with the generated message")
 	plain := fs.Bool("plain", false, "print only the message (pipes into `git commit -F -`)")
-	role := fs.String("role", "@commit", "role to generate with (a model ref also works)")
+	model := fs.String("model", "", "model ref to generate with (default: the session model)")
 	maxTokens := fs.Int("max-tokens", 1024, "cap on the generated message")
 	fs.Usage = func() {
 		fmt.Fprint(errOut, `usage: xdev commit [flags]
@@ -76,7 +75,7 @@ Flags:
 	}
 
 	start := time.Now()
-	msg, err := complete(ctx, *role, commitPrompt(diff, stat), *maxTokens)
+	msg, err := complete(ctx, *model, commitPrompt(diff, stat), *maxTokens)
 	if err != nil {
 		fmt.Fprintln(errOut, "xdev commit:", err)
 		return 1
@@ -86,7 +85,7 @@ Flags:
 		fmt.Fprintln(errOut, "xdev commit: the model returned an empty message")
 		return 1
 	}
-	stats := &commitStats{Role: *role, DiffBytes: len(diff) + len(stat), Elapsed: time.Since(start).Round(time.Millisecond).String()}
+	stats := &commitStats{DiffBytes: len(diff) + len(stat), Elapsed: time.Since(start).Round(time.Millisecond).String()}
 
 	if *apply {
 		if _, err := git(ctx, cwd, "commit", "-m", msg); err != nil {
@@ -102,7 +101,7 @@ Flags:
 	if *apply {
 		verb = "committed with"
 	}
-	fmt.Fprintf(out, "%s:\n%s\n\n— %s, %s of staged diff, %s\n", verb, msg, *role, commitBytes(stats.DiffBytes), stats.Elapsed)
+	fmt.Fprintf(out, "%s:\n%s\n\n— %s, %s of staged diff, %s\n", verb, msg, stats.Model, commitBytes(stats.DiffBytes), stats.Elapsed)
 	if !*apply {
 		fmt.Fprintln(out, "  apply with: xdev commit --apply   (or: xdev commit --plain | git commit -F -)")
 	}
@@ -160,22 +159,14 @@ func cleanCommitMessage(msg string) string {
 	return strings.TrimRight(text, "\n")
 }
 
-// defaultCommitCompleter resolves the role the way a run does (settings
-// modelRoles → models.yml) and runs one streaming turn.
-func defaultCommitCompleter(ctx context.Context, role, prompt string, maxTokens int) (string, error) {
+// defaultCommitCompleter resolves the model ref the way a run does (flag →
+// settings defaultModel → models.yml) and runs one streaming turn.
+func defaultCommitCompleter(ctx context.Context, ref, prompt string, maxTokens int) (string, error) {
 	cfg, err := config.LoadModelsLayered()
 	if err != nil {
-		cfg = &config.Config{} // still allow an explicit -role model ref
+		cfg = &config.Config{} // still allow an explicit -model ref
 	}
-	ref, _, err := resolveModel(role, cfg, lastSettings())
-	if err != nil && strings.HasPrefix(role, "@") {
-		// An unconfigured role is not worth failing on: the default model is
-		// what a run would use, and the user is told which one answered.
-		if fallback, _, ferr := resolveModel("", cfg, lastSettings()); ferr == nil {
-			fmt.Fprintf(os.Stderr, "xdev commit: role %s is not configured; using the default model %s\n", role, fallback)
-			ref, err = fallback, nil
-		}
-	}
+	ref, _, err = resolveModel(ref, cfg, lastSettings())
 	if err != nil {
 		return "", err
 	}

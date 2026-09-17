@@ -55,8 +55,10 @@ Script: `python3 docs/parity/cli-flagdiff.py` (reproduces the counts below; writ
 Mechanical diff of `omp --help` (49 flags) vs `xdev -h` (45 flags): 12 omp flags absent from xdev,
 **all 12 already in the delta** (`--add-dir`, `--allow-home`, `--approval-mode`, `--extension`,
 `--external-thinking`, `--no-prewalk`, `--no-pty`, `--print`, `--provider`, `--service-tier`,
-`--smol`, `--slow`). 37 shared, 8 xdev-only (`--fork`, `--handoff`, `--max-tokens`, `--max-turns`,
-`--personality`, `--theme`, `--trusted-extension`, `--verbose`). No new flag-existence divergence.
+`--smol`, `--slow` — and the last two were later *removed* on the xdev side, 2026-09-17, so
+this **2026-09-12 measurement is historical**: the delta row records the removal). 37 shared,
+8 xdev-only (`--fork`, `--handoff`, `--max-tokens`, `--max-turns`, `--personality`, `--theme`,
+`--trusted-extension`, `--verbose`). No new flag-existence divergence.
 Beyond the 12, the doc-level flags `-v`, `-c`, `-r`, `-p`, `-e`, `--yolo`, `--plugin-dir`,
 `--provider-session-id`, `--prompt-cache-key` (delta-recorded) were also exercised; each rejects
 with **exit 2 + `flag provided but not defined: -<name>` + root usage** (consistent, loud). One

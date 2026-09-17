@@ -16,7 +16,7 @@ func runDist(sub string, args []string, version string) int {
 }
 
 // distOpenProvider builds the provider `xdev bench` measures through the same
-// path a real run uses — resolveModel (@role/model precedence) → models.yml →
+// path a real run uses — resolveModel (ref/defaultModel precedence) → models.yml →
 // credential chain — so the numbers describe the provider a session gets.
 func distOpenProvider(ref string) (dist.BenchProvider, string, error) {
 	cfg, err := config.LoadModelsLayered()

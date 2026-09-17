@@ -2,7 +2,6 @@
 name: security-reviewer
 description: security review — secrets, injection, auth, unsafe input paths
 tools: read, grep, glob, bash
-model: @slow
 thinkingLevel: high
 spawns: false
 ---
