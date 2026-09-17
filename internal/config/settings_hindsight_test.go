@@ -29,6 +29,7 @@ func TestHindsightSettings(t *testing.T) {
 		"  apiUrl: http://memory.internal:8888",
 		"  apiToken: secret-token-value",
 		"  bankId: team",
+		"  projectSelector: /Users/me/work/leankg",
 		"  scoping: per-project",
 		"  retainMode: last-turn",
 		"  recallBudget: high",
@@ -51,6 +52,9 @@ func TestHindsightSettings(t *testing.T) {
 	if h.APIURL != "http://memory.internal:8888" || h.BankID != "team" || h.Scoping != "per-project" || h.RetainMode != "last-turn" || h.RecallBudget != "high" {
 		t.Fatalf("hindsight block = %+v", h)
 	}
+	if h.ProjectSelector != "/Users/me/work/leankg" {
+		t.Fatalf("projectSelector = %q, want the configured project path", h.ProjectSelector)
+	}
 	if h.AutoRetain == nil || *h.AutoRetain {
 		t.Fatalf("autoRetain = %v, want an explicit false", h.AutoRetain)
 	}
@@ -58,7 +62,7 @@ func TestHindsightSettings(t *testing.T) {
 		t.Fatalf("hindsight numbers = %+v", h)
 	}
 	listed := strings.Join(List(s, "x"), "\n")
-	for _, want := range []string{"memory hindsight", "hindsight.apiUrl http://memory.internal:8888", "hindsight.scoping per-project", "hindsight.bankId team", "hindsight.apiToken (set)"} {
+	for _, want := range []string{"memory hindsight", "hindsight.apiUrl http://memory.internal:8888", "hindsight.scoping per-project", "hindsight.bankId team", "hindsight.projectSelector /Users/me/work/leankg", "hindsight.apiToken (set)"} {
 		if !strings.Contains(listed, want) {
 			t.Errorf("config list missing %q:\n%s", want, listed)
 		}

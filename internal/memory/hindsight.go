@@ -124,6 +124,10 @@ type HindsightConfig struct {
 	// BankMission is carried for parity with omp's hindsight.bankMission
 	// (the server owns its use) and reported by /memory diagnose.
 	BankMission string
+	// ProjectSelector is the multi-project routing key (LeanKG's ?project=):
+	// it rides as a query parameter on the bank paths, never on /health.
+	// Empty sends nothing, so a single-project server is unaffected.
+	ProjectSelector string
 	// Scoping is global | per-project | per-project-tagged.
 	Scoping string
 	// RetainMode is full-session | last-turn: what one cadence retain
@@ -176,6 +180,7 @@ func HindsightConfigFromSettings(settings *config.Settings, cwd string) Hindsigh
 		cfg.URL = h.APIURL
 		cfg.Token = h.APIToken
 		cfg.BankID = h.BankID
+		cfg.ProjectSelector = h.ProjectSelector
 		cfg.BankMission = h.BankMission
 		cfg.Scoping = h.Scoping
 		cfg.RetainMode = h.RetainMode
@@ -209,6 +214,9 @@ func (c *HindsightConfig) applyEnv(get func(string) string) {
 	}
 	if v, ok := envString(get, "HINDSIGHT_TOKEN", "HINDSIGHT_API_TOKEN"); ok {
 		c.Token = v
+	}
+	if v, ok := envString(get, "HINDSIGHT_PROJECT", "HINDSIGHT_BANK_PROJECT"); ok {
+		c.ProjectSelector = v
 	}
 	if v, ok := envString(get, "HINDSIGHT_BANK_ID"); ok {
 		c.BankID = v
@@ -413,16 +421,17 @@ type Hindsight struct {
 	projectID   string
 	projectRoot string
 
-	mu       sync.Mutex
-	queue    []retainItem
-	cached   string
-	cachedAt time.Time
-	warned   bool
-	warnSink func(msg string)
-	flushing bool
-	turns    int
-	pending  []string // user turns since the last cadence retain
-	recent   []string // newest user turns, for the recall query
+	mu          sync.Mutex
+	queue       []retainItem
+	scopeWarned bool
+	cached      string
+	cachedAt    time.Time
+	warned      bool
+	warnSink    func(msg string)
+	flushing    bool
+	turns       int
+	pending     []string // user turns since the last cadence retain
+	recent      []string // newest user turns, for the recall query
 }
 
 // NewHindsight builds the backend. The returned value is ready to use; no
@@ -973,6 +982,9 @@ func (h *Hindsight) Diagnose() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "hindsight backend\n  url      %s\n  bank     %s\n  scope    %s\n  project  %s (%s)\n",
 		h.cfg.URL, h.bank, h.scopeLabel(), h.projectRoot, h.projectID)
+	if h.cfg.ProjectSelector != "" {
+		fmt.Fprintf(&b, "  selector %s\n", h.cfg.ProjectSelector)
+	}
 	if h.cfg.BankMission != "" {
 		fmt.Fprintf(&b, "  mission  %s\n", collapseWS(h.cfg.BankMission))
 	}
@@ -1011,6 +1023,7 @@ func (h *Hindsight) QueueLen() int {
 // AutoRecall is the first-turn recall: the bounded block the prompt injects
 // (and the compaction context reuses).
 func (h *Hindsight) AutoRecall() string {
+	h.warnScope()
 	if h.Off() || !h.autoRecall() {
 		return ""
 	}
@@ -1150,11 +1163,51 @@ func (h *Hindsight) warn(err error) {
 	h.cfg.Logf("%s", msg)
 }
 
+// warnScope names an unresolvable project scope once. Outside a repository
+// there is no project to tag, so the scope degrades to the directory's own
+// name — a tag no other session shares — and recall quietly returns nothing.
+// Saying so is the point: silent emptiness looks exactly like memory working.
+func (h *Hindsight) warnScope() {
+	if h.tag == "" || h.cfg.ProjectSelector != "" || hasRepoRoot(h.projectRoot) {
+		return
+	}
+	h.mu.Lock()
+	first, sink := !h.scopeWarned, h.warnSink
+	h.scopeWarned = true
+	h.mu.Unlock()
+	if !first {
+		return
+	}
+	msg := fmt.Sprintf("hindsight: %s is not inside a repository, so the project tag is the directory itself (%s) and recall is effectively empty; set hindsight.projectSelector to name the project", h.cfg.URL, h.tag)
+	if sink != nil {
+		sink(msg)
+		return
+	}
+	h.cfg.Logf("%s", msg)
+}
+
+// hasRepoRoot reports whether root is a real repository root: ProjectScope
+// falls back to the working directory itself when it finds none.
+func hasRepoRoot(root string) bool {
+	if root == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(root, ".git"))
+	return err == nil
+}
+
 // --- http plumbing ---
 
-// bankPath builds a path under the scoped bank.
+// bankPath builds a path under the scoped bank. ProjectSelector appends the
+// multi-project routing key LeanKG dispatches on (?project=); an empty
+// selector sends no query at all, so a single-project server sees the URLs it
+// always did.
 func (h *Hindsight) bankPath(suffix string) string {
-	return "/v1/default/banks/" + url.PathEscape(h.bank) + suffix
+	p := "/v1/default/banks/" + url.PathEscape(h.bank) + suffix
+	if h.cfg.ProjectSelector != "" {
+		p += "?project=" + url.QueryEscape(h.cfg.ProjectSelector)
+	}
+	return p
 }
 
 // readTags are the tags a recall matches; writeTags the tags a retain

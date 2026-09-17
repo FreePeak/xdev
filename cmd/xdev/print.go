@@ -1461,7 +1461,7 @@ var (
 func hindsightKey(settings *config.Settings) string {
 	wd, _ := os.Getwd()
 	h := settings.Hindsight
-	return strings.Join([]string{h.APIURL, h.BankID, h.Scoping, h.RetainMode, wd}, "|")
+	return strings.Join([]string{h.APIURL, h.BankID, h.ProjectSelector, h.Scoping, h.RetainMode, wd}, "|")
 }
 
 // hindsightFrom returns the memoized backend when hindsight is the configured
