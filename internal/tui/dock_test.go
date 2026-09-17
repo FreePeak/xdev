@@ -29,8 +29,32 @@ func dockTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen, *int) {
 			return "TASKS · 1/2 done\n[x] wire the dock\n[ ] write tests"
 		},
 		Agents: func() string { *runs++; return "AGENTS · 1 running / 1\nrunning reviewer · reading dock.go" },
+		// The identity the panel's title slot reads. Not counted by runs: the
+		// session's name is not one of the lists whose rebuild this file bounds.
+		Session: func() (string, string) { return "opencode sidebar", "sess1234" },
 	})
 	return app, scr, runs
+}
+
+// dockRows builds section rows out of their text, so a fold literal here reads
+// like the source block it stands in for.
+func dockRows(lines ...string) []dockRow {
+	out := make([]dockRow, len(lines))
+	for i, l := range lines {
+		out[i] = dockRow{text: l}
+	}
+	return out
+}
+
+// dockLines flattens laid-out rows back to text, one per line — what the
+// assertions below read.
+func dockLines(rows []dockRow) string {
+	var b strings.Builder
+	for _, r := range rows {
+		b.WriteString(r.text)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // TestDockAutoFollowsWidth pins the width rule: auto is closed on a terminal
@@ -116,11 +140,11 @@ func TestDockFoldKeepsThePlan(t *testing.T) {
 		app.dock.fold = state
 		app.dock.lines = nil
 		folds := []dockFold{
-			{id: dockPlanID, title: "PLAN · proposed (2 lines)", rows: []string{"1. do the thing", "2. verify it"}, max: dockPlanMax},
-			{id: dockTaskID, title: "TASKS · 1/2 done", rows: []string{"[x] wire the dock", "[ ] write tests"}, max: dockListMax},
+			{id: dockPlanID, title: "PLAN · proposed (2 lines)", rows: dockRows("1. do the thing", "2. verify it"), max: dockPlanMax},
+			{id: dockTaskID, title: "TASKS · 1/2 done", rows: dockRows("[x] wire the dock", "[ ] write tests"), max: dockListMax},
 		}
 		rows, heads, hidden := app.dock.layout(folds, 40)
-		joined := strings.Join(rows, "\n")
+		joined := dockLines(rows)
 		if !strings.Contains(joined, "PLAN") || !strings.Contains(joined, "do the thing") {
 			t.Fatalf("fold %d dropped the pending plan:\n%s", state, joined)
 		}
@@ -145,11 +169,11 @@ func TestDockBudgetReportsTheCut(t *testing.T) {
 	d := &dockState{mode: DockShow}
 	long := dockFold{id: dockPlanID, title: "PLAN · proposed (40 lines)", max: dockPlanMax}
 	for i := 0; i < 40; i++ {
-		long.rows = append(long.rows, "step")
+		long.rows = append(long.rows, dockRow{text: "step"})
 	}
 	list := dockFold{id: dockFileID, title: "FILES · 9", max: dockListMax}
 	for i := 0; i < 9; i++ {
-		list.rows = append(list.rows, "a.go +1/-1")
+		list.rows = append(list.rows, dockRow{text: "a.go"})
 	}
 	for bandH := 5; bandH <= 40; bandH++ {
 		rows, _, hidden := d.layout([]dockFold{long, list}, bandH)
@@ -159,8 +183,8 @@ func TestDockBudgetReportsTheCut(t *testing.T) {
 		if hidden == 0 {
 			t.Fatalf("bandH %d: 49 rows of content fit with nothing cut?", bandH)
 		}
-		if !strings.Contains(strings.Join(rows, "\n"), "more") {
-			t.Fatalf("bandH %d: a cut section must say so:\n%s", bandH, strings.Join(rows, "\n"))
+		if !strings.Contains(dockLines(rows), "more") {
+			t.Fatalf("bandH %d: a cut section must say so:\n%s", bandH, dockLines(rows))
 		}
 	}
 	// Too short for even a heading is not an error, it is no panel.
@@ -175,11 +199,11 @@ func TestDockBudgetReportsTheCut(t *testing.T) {
 func TestDockClipsDoNotWrap(t *testing.T) {
 	d := &dockState{mode: DockShow}
 	rows, _, _ := d.layout([]dockFold{{id: dockFileID, title: strings.Repeat("x", 200),
-		rows: []string{strings.Repeat("y", 200)}},
+		rows: dockRows(strings.Repeat("y", 200))},
 	}, 40)
 	for _, r := range rows {
-		if w := len([]rune(r)); w > dockInner {
-			t.Fatalf("row %q is %d cells, the interior is %d", r, w, dockInner)
+		if w := width(r.text); w > dockInner {
+			t.Fatalf("row %q is %d cells, the interior is %d", r.text, w, dockInner)
 		}
 	}
 }
@@ -250,8 +274,9 @@ func TestDockClosesSourcesWhenHidden(t *testing.T) {
 }
 
 // TestDockPaintsThePanel is the whole-surface check at a size where the panel is
-// open: the box is there, its rows are inside it, and the transcript's own text
-// does not paint through the border.
+// open: the session's own name is in the top slot, the sections are under it, and
+// the panel's columns belong to the panel — no transcript text bleeds in, and no
+// box is drawn around any of it.
 func TestDockPaintsThePanel(t *testing.T) {
 	app, scr, _ := dockTestApp(t, 160, 40)
 	app.SetDockMode(DockShow)
@@ -261,8 +286,11 @@ func TestDockPaintsThePanel(t *testing.T) {
 	app.draw()
 
 	text := screenText(scr)
-	if !strings.Contains(text, "CONTEXT") {
-		t.Fatalf("panel title missing:\n%s", text)
+	if !strings.Contains(text, "opencode sidebar") {
+		t.Fatalf("the session's name is missing from the title slot:\n%s", text)
+	}
+	if strings.Contains(text, "CONTEXT") {
+		t.Fatalf("the old panel heading is still painted:\n%s", text)
 	}
 	if !strings.Contains(text, "wire the dock") {
 		t.Fatalf("task rows missing:\n%s", text)
@@ -270,19 +298,99 @@ func TestDockPaintsThePanel(t *testing.T) {
 	if !strings.Contains(text, "reviewer") {
 		t.Fatalf("roster rows missing:\n%s", text)
 	}
-	// The panel's columns belong to the panel: nothing to its left may reach
-	// them, and its right border is the last thing drawn on those rows.
+	// The panel's columns are its own: nothing to its left reaches them, and the
+	// surface is the separator, so nothing draws a box on them either.
 	app.mu.Lock()
 	top, h := app.dockGrid()
 	app.mu.Unlock()
 	for y := top; y < top+h; y++ {
-		for x := 160 - dockCols + 1; x < 159; x++ {
+		for x := 160 - dockCols; x < 160; x++ {
 			ch, _, _, _ := scr.GetContent(x, y)
 			if ch == 'Z' {
 				t.Fatalf("transcript text painted inside the panel at x=%d y=%d", x, y)
 			}
+			if ch == '│' || ch == '─' {
+				t.Fatalf("the panel drew a box (%q) at x=%d y=%d", ch, x, y)
+			}
 		}
 	}
+}
+
+// TestDockAnatomyIsOpencode: a section is a bold name with its count appended
+// dim, and a changed file carries its counts right-aligned at the panel's edge —
+// the two things a reader scans the panel for. The title slot is the session's
+// own name, so the panel says which session it belongs to rather than how many
+// sections it holds.
+func TestDockAnatomyIsOpencode(t *testing.T) {
+	app, scr, _ := dockTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.AddToolBlock("edit", `{"path":"internal/tui/dock.go"}`)
+	app.FinishTool("edit", false, "edited",
+		ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1,2 +1,3 @@\n ctx\n+added\n-removed\n"})
+	app.draw()
+
+	app.mu.Lock()
+	top, _ := app.dockGrid()
+	rows := app.dock.lines
+	app.mu.Unlock()
+
+	left := 160 - dockCols
+	if got := dockRowText(scr, top, left); !strings.Contains(got, "opencode sidebar") {
+		t.Fatalf("title slot row = %q", got)
+	}
+	// Every heading splits into a name and the count its source appended; a
+	// heading that did not would paint its count as part of its name.
+	var heads int
+	var file dockRow
+	for _, r := range rows {
+		if r.head {
+			if name, count := dockSplit(r.text); name == "" || !strings.HasPrefix(count, "· ") {
+				t.Fatalf("heading %q splits into name %q and count %q", r.text, name, count)
+			}
+			heads++
+		}
+		if r.right() != "" {
+			file = r
+		}
+	}
+	if heads == 0 {
+		t.Fatal("no section headings were built")
+	}
+	if file.text != "internal/tui/dock.go" || file.add != "+1" || file.del != "-1" {
+		t.Fatalf("file row %+v", file)
+	}
+	// The name starts at the panel's gutter, and the counts end at its right
+	// edge — the two ends the space-between row holds open.
+	y := top + 1
+	for i, r := range rows {
+		if r.right() != "" {
+			y = top + 1 + i
+			break
+		}
+	}
+	if got := dockRowText(scr, y, left); !strings.HasPrefix(got, strings.Repeat(" ", dockPad)+file.text) {
+		t.Fatalf("file row starts at %q", got)
+	}
+	x := left + dockPad + dockInner - width(file.right())
+	if got := dockRowText(scr, y, x); !strings.HasPrefix(got, "+1 -1") {
+		t.Fatalf("counts are not right-aligned at the panel's edge: %q", got)
+	}
+}
+
+// dockRowText reads one panel row back off the screen from x to the screen's
+// edge, with the trailing blanks trimmed.
+func dockRowText(scr tcell.SimulationScreen, y, x int) string {
+	_, w, _ := scr.GetContents()
+	var b strings.Builder
+	for i := x; i < w; i++ {
+		ch, _, _, _ := scr.GetContent(i, y)
+		if ch == 0 {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(ch)
+	}
+	return strings.TrimRight(b.String(), " ")
 }
 
 // TestDockNarrowTerminalKeepsItsPrompt: at an 80-column terminal the panel must
@@ -382,8 +490,14 @@ func TestDockFilesReadsTheTranscriptDiffs(t *testing.T) {
 	if f.title != "FILES · 2" {
 		t.Fatalf("title %q", f.title)
 	}
-	if len(f.rows) != 2 || f.rows[0] != "app.go +1/-1" || f.rows[1] != "dock.go +1/-1" {
-		t.Fatalf("rows %q", f.rows)
+	// The name keeps its tail — a cut takes the directory, never the file — and
+	// the counts are fields of their own, right-aligned when they paint.
+	want := []dockRow{
+		{text: "internal/tui/app.go", add: "+1", del: "-1"},
+		{text: "internal/tui/dock.go", add: "+1", del: "-1"},
+	}
+	if !slices.Equal(f.rows, want) {
+		t.Fatalf("rows %+v, want %+v", f.rows, want)
 	}
 }
 

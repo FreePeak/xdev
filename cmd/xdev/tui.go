@@ -755,7 +755,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if todoTool != nil { // a typed nil would satisfy the interface and panic on read
 		planMode.SetTodo(todoTool) // the plan view's phase list, same snapshot
 	}
-	ops := tui.DockOps{Plan: planMode.View, Tasks: planMode.Todo}
+	ops := tui.DockOps{
+		Plan:  planMode.View,
+		Tasks: planMode.Todo,
+		// The panel's title slot. It reads through the `store` variable rather
+		// than capturing one store: /new, /resume and /fork all swap it, and a
+		// panel pinned to the session the process started with would show the
+		// old title — and the old id — for the rest of the run.
+		Session: func() (string, string) { return store.Title(), shortSessionID(store.ID()) },
+	}
 	if sessionHub != nil {
 		ops.Agents = func() string { return dockAgentsLabel(sessionHub.Roster()) }
 	}
@@ -1620,8 +1628,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// must not wait on a title request.
 			lastTurnFailed.Store(err != nil)
 			if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
-				go generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
-					append(append([]ai.Message(nil), hist...), *finalMsg))
+				// The bump after the title lands is what repaints the panel's
+				// title slot: the cascade rewrites the store's title on a
+				// goroutine long after this frame, so nothing else would.
+				go func() {
+					generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
+						append(append([]ai.Message(nil), hist...), *finalMsg))
+					app.DockBump()
+				}()
 			}
 			if err != nil {
 				if ctx.Err() != nil {
