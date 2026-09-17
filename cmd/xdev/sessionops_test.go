@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -702,5 +703,52 @@ func TestSearchPickerItemsMatchesStatus(t *testing.T) {
 	got = searchPickerItems(cwd, "done")
 	if len(got) != 1 || got[0].ID != "AAAA1111" {
 		t.Fatalf("query 'done' matches = %v, want only AAAA1111", got)
+	}
+}
+
+// TestRecentResumeOptionsUncapped: /resume with no argument used to hand the
+// picker twelve rows and drop the rest; it now hands over every session in
+// this folder (the picker windows and scrolls them itself) and still skips
+// subagent children and the live session.
+func TestRecentResumeOptionsUncapped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := "/tmp/recent-uncapped"
+	live := "LIVE0000-0000-0000-0000-000000000000"
+	writeStatusSession(t, cwd, live, "the live one", "done", 0)
+	for i := range 20 {
+		writeStatusSession(t, cwd,
+			fmt.Sprintf("RECENT%02d-0000-0000-0000-000000000000", i),
+			fmt.Sprintf("older session %02d", i), "done", time.Duration(i+1)*time.Minute)
+	}
+	// A session from another folder must not leak into the picker.
+	writeStatusSession(t, "/tmp/recent-elsewhere", "OTHER000-0000-0000-0000-000000000000", "elsewhere", "done", time.Minute)
+
+	got := recentResumeOptions(cwd, live)
+	if len(got) != 20 {
+		t.Fatalf("rows = %d, want all 20 (the old code capped at 12)", len(got))
+	}
+	for _, o := range got {
+		if o.ID == live {
+			t.Fatal("the live session was offered for resume")
+		}
+		if !strings.HasPrefix(o.ID, "RECENT") {
+			t.Fatalf("foreign row %q in the current-folder picker", o.ID)
+		}
+		if !strings.Contains(o.Detail, "done") {
+			t.Fatalf("row %q lost its lifecycle status: %q", o.ID, o.Detail)
+		}
+	}
+	// Every session is present exactly once: the cap dropped the tail, not
+	// shuffled it. (Row order is session.List's — newest first by file
+	// mtime — and is pinned by the listing tests, not here.)
+	seen := map[string]bool{}
+	for _, o := range got {
+		seen[o.ID] = true
+	}
+	for i := range 20 {
+		id := fmt.Sprintf("RECENT%02d-0000-0000-0000-000000000000", i)
+		if !seen[id] {
+			t.Fatalf("row %s missing from the picker", id)
+		}
 	}
 }

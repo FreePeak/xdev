@@ -1339,10 +1339,13 @@ func (a *App) handlePickerKey(key *tcell.EventKey) bool {
 		a.pickerMutate(func(p *picker) { p.move(-1) })
 	case tcell.KeyDown, tcell.KeyCtrlN:
 		a.pickerMutate(func(p *picker) { p.move(1) })
+	// Page by the drawn window. visible is 0 until the first paint
+	// measures the terminal (a key can beat the first frame), so page by
+	// at least one row rather than swallowing the key.
 	case tcell.KeyPgUp:
-		a.pickerMutate(func(p *picker) { p.move(-p.visible) })
+		a.pickerMutate(func(p *picker) { p.move(-max(1, p.visible)) })
 	case tcell.KeyPgDn:
-		a.pickerMutate(func(p *picker) { p.move(p.visible) })
+		a.pickerMutate(func(p *picker) { p.move(max(1, p.visible)) })
 	case tcell.KeyRight, tcell.KeyTab:
 		a.pickerMutate(func(p *picker) { p.switchView(1) })
 	case tcell.KeyLeft, tcell.KeyBacktab:
@@ -2862,10 +2865,10 @@ func (a *App) drawPicker(yComposerTop int) {
 	}
 	x0, x1 := 2, w-3
 	inner := x1 - x0 - 1
-	rows := p.visible
-	if rows > pickerMaxRows {
-		rows = pickerMaxRows
-	}
+	// The row window follows the terminal, not a fixed 12: the panel
+	// floats above the composer, so the room above it is the real budget
+	// (clamped below), and the selection scrolls the list past the window.
+	rows := pickerRowCeiling(a.height)
 	tabs := p.viewCount() > 1
 	// chrome = top border + bottom border + footer, plus the tab row.
 	chrome := 3
@@ -2919,7 +2922,14 @@ func (a *App) drawPicker(yComposerTop int) {
 			labelW = max(labelW, width(ln.item.Label))
 		}
 	}
-	labelW = min(labelW+2, 28)
+	// The name column is the terminal's leftovers: the box, the 6 cells of
+	// marker/dot/indent at the row's head, and the detail column the row
+	// keeps. The old fixed 28 wrap made a wide terminal ellipsize names it
+	// had room to print, and a narrow one spend half the row on a detail
+	// that was then clipped away. The floor keeps a name legible when the
+	// row is too narrow for both — the detail is the part that drops (the
+	// room>4 guard below), not the thing being picked.
+	labelW = min(labelW+2, max(12, inner-6-pickerDetailCols))
 	// Publish the row map the mouse router hit-tests against, so a click lands
 	// on exactly the row the user saw.
 	p.hitY0, p.hitItem = y, make([]int, len(lines))
