@@ -160,17 +160,20 @@ the live map.
 Scrolling never fights the stream: a scrolled viewport stays put while output
 arrives, and `▲ n ▼ n` shows how much is hidden. Mouse selection covers the
 whole screen and survives a scroll — hold the drag at the transcript's top or
-bottom edge and it keeps scrolling while you select, and the right-edge
-scrollbar drags like any other. Shift+drag hands the gesture back to the
-terminal's native selection. A boxed row copies as its text: the output and
-the label on the top rule (`╭─ bash ───╮` copies as `bash`), never the frame
-or the pad inside it.
+bottom edge and it keeps scrolling while you select, and the scrollbar — the
+transcript's right edge, wherever the context dock leaves it — drags like any
+other. Shift+drag hands the gesture back to the terminal's native selection.
+A boxed row copies as its text: the output and the label on the top rule
+(`╭─ bash ───╮` copies as `bash`), never the frame or the pad inside it.
 
 Thinking renders like a tool result: a rounded box whose top border carries the
 state (`⠹ Thinking…` while it streams, `Thought for Xs` when it settles) and
-whose body is a fixed 12-row window. The wheel over the box scrolls its own
-window, so long reasoning stays readable without pushing the transcript under
-the pointer; `Ctrl+O` expands it to every row.
+whose body is a fixed 12-row window. The wheel always scrolls the transcript
+until you *click* a reasoning box: the clicked box draws a bold border and then
+the wheel over it scrolls its own window, so long reasoning stays readable
+without the transcript sliding along with it. A click anywhere else — or
+`Ctrl+O`, which expands the newest boxed block to every row — hands the wheel
+back to the transcript.
 
 Display and request are separate switches. The box above is *display*
 (`showThinking`, `/settings showThinking on|off`); `Shift+Tab` (or `/thinking
@@ -181,14 +184,16 @@ key). `/thinking low` pins one rung for the rest of the session and writes it to
 the global layer.
 
 The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
-transcript: the pending plan, the task list, the files this session changed, the
-running subagents and the session footer — the working set, kept beside the
-stream instead of scrolling behind it. It auto-closes below 120 columns, never
-takes focus from a picker or a question card, and rebuilds only on events (plan
-published, tool finished, agent settled), never per frame. A pending plan is
-resolved where plans have always been resolved — `/plan off` approves, any
-typed prompt is revision feedback — and `/plan show` reprints the document in
-the transcript.
+transcript, opencode's sidebar shape: no box, just a surface of its own carrying
+the session's title in the top slot, then the pending plan, the task list, the
+files this session changed (their `+N`/`-N` counts flush right) and the session
+footer — the working set, kept beside the stream instead of scrolling behind it.
+Section headings are a bold name with the dim count appended. It auto-closes
+below 120 columns, never takes focus from a picker or a question card, and
+rebuilds only on events (plan published, tool finished, agent settled), never
+per frame. A pending plan is resolved where plans have always been resolved —
+`/plan off` approves, any typed prompt is revision feedback — and `/plan show`
+reprints the document in the transcript.
 
 **Slash commands** dispatch at input-submit and never reach the model:
 

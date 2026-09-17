@@ -211,7 +211,7 @@ type App struct {
 	// that is on screen rather than a re-derivation that could disagree with it.
 	// (UI thread; mu-guarded.)
 	selBarOn    bool
-	selBarW     int // the bar's column width (the last screen column, or 0)
+	selBarX     int // the screen column the bar was painted in (the transcript's last column, or 0)
 	selBarVP    int // visible transcript rows the bar spans
 	selBarTotal int // transcript rows at paint time
 	selBarThumb int // thumb rows at paint time
@@ -220,6 +220,11 @@ type App struct {
 	// rides the composer divider until selNoticeUntil.
 	selNotice      string
 	selNoticeUntil time.Time
+	// thinkFocus is the reasoning box a click has aimed the wheel at: clicking a
+	// box focuses it and a click anywhere else lets it go, so the wheel scrolls
+	// the transcript by default instead of whatever box happens to sit under the
+	// pointer. -1 = no box focused (app.go scrollThinkBox, selection.go press).
+	thinkFocus int
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
@@ -257,6 +262,7 @@ type blockKey struct {
 	trim     int8 // bounded middle trim: this block's render-window tier
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
+	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
 }
 
 // New creates the App over an initialized screen.
@@ -278,6 +284,9 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		dirty:  make(chan struct{}, 1),
 		quitCh: make(chan struct{}),
 		sm:     newScrollModel(),
+		// No box is focused until a click names one: the wheel is the
+		// transcript's from the first frame.
+		thinkFocus: -1,
 	}
 }
 
@@ -824,6 +833,11 @@ func (a *App) RenameSession(title string) error {
 	if err := a.ops.Rename(title); err != nil {
 		return err
 	}
+	// The title is the panel's title slot, and the panel is already built: a
+	// rename that did not bump would leave the old name up there until something
+	// else moved. The same invalidation a published plan uses, from the same
+	// place — the write that changed what the panel shows.
+	a.DockBump()
 	a.AddSystemBlock("· session renamed: " + title)
 	return nil
 }
@@ -1093,6 +1107,7 @@ func (a *App) Reset() {
 	a.mu.Lock()
 	a.st.Work = 0
 	a.blocks = nil
+	a.thinkFocus = -1 // the focused box went with them
 	a.sm = newScrollModel()
 	a.st.CtxUsed = 0
 	a.clearRenderCache()
@@ -1374,6 +1389,7 @@ func (a *App) SetShowThinking(on bool) {
 			}
 		}
 		a.blocks = kept
+		a.thinkFocus = -1 // a dropped box cannot stay the wheel's target
 	}
 	a.clearRenderCache()
 	a.mu.Unlock()
@@ -1597,6 +1613,7 @@ func (a *App) Run() {
 			return
 		case ev := <-a.keyq:
 			a.handleKey(ev)
+			a.drainKeys()
 			a.draw()
 		case <-a.dirty:
 			a.draw()
@@ -1641,6 +1658,30 @@ func (a *App) Run() {
 			if running || animate || stuck {
 				a.draw()
 			}
+		}
+	}
+}
+
+// keyBurst bounds how many already-queued input events one drain applies before
+// the loop paints. A burst (a wheel flick, a held key, a paste) arrives faster
+// than a frame paints, and drawing once per event queued a whole burst of
+// frames ahead of whatever the user typed next — 600 wheel notches became ~900
+// Show() calls, and the keystroke behind them waited a flush per queued event
+// (~200 ms at 4 ms/frame: the "type after scrolling and the box lags" report).
+// Every event is still applied, in order, so no chord or paste marker is
+// dropped; only the redundant frames go. The budget lets a continuous stream
+// (a held key) still reach the screen.
+const keyBurst = 256
+
+// drainKeys applies the input already waiting in keyq, so a burst costs one
+// frame instead of one per event.
+func (a *App) drainKeys() {
+	for range keyBurst {
+		select {
+		case ev := <-a.keyq:
+			a.handleKey(ev)
+		default:
+			return
 		}
 	}
 }
@@ -2255,7 +2296,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		if !a.showThinking {
 			break
 		}
-		lines = a.thinkBoxLines(b, w)
+		lines = a.thinkBoxLines(i, b, w)
 	case KindTool:
 		// omp's call row: state bullet, bold tool name, and the naming
 		// argument as a phrase — never the raw JSON the model sent. While the
@@ -2451,12 +2492,19 @@ func thinkWindow(n, off int) (start, end int) {
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
 // "Thought for Xs" once it settles) and the body shows a fixed window of it —
-// at most thinkBoxRows rows, scrolled by the wheel over the box
-// (Block.ThinkOff) and dropped entirely by Ctrl+O. The full reasoning always
-// stays in the session JSONL, so the window is a view, never the record.
-func (a *App) thinkBoxLines(b *Block, w int) []line {
+// at most thinkBoxRows rows, scrolled by the wheel once a click has focused the
+// box (App.thinkFocus, Block.ThinkOff) and dropped entirely by Ctrl+O. The full
+// reasoning always stays in the session JSONL, so the window is a view, never
+// the record. The focused box draws a bold rule: no other box takes the wheel,
+// so the frame has to say which one has it.
+func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	box := a.th.Box()
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
+	if i == a.thinkFocus {
+		// Bold is the terminal's own bright variant: the aim reads as the same
+		// hue turned up, not as a second colour with its own meaning.
+		border = border.Bold(true)
+	}
 	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	inner := max(1, w-4) // side borders + one pad cell each
 
@@ -2487,24 +2535,47 @@ func (a *App) thinkBoxLines(b *Block, w int) []line {
 	return append(out, boxBottom(box, border, w))
 }
 
-// scrollThinkBox routes a wheel notch to the reasoning box under the pointer:
-// over the box the notch moves the box's own window (Block.ThinkOff) instead of
-// the transcript, so the wheel reads the reasoning it is pointing at. It reports
-// whether the notch was consumed — at either end of the box's own content the
-// wheel falls through to the transcript, which is the way back out.
+// thinkBoxAt names the reasoning block painted on screen row y, or -1 when that
+// row carries no reasoning box (another kind of block, or chrome). Both the
+// click that focuses a box and the wheel that scrolls the focused one come
+// through here, so focus and scroll can agree on what is under the pointer.
+// Callers hold a.mu; selViewport syncs the layout this hit-test reads.
+func (a *App) thinkBoxAt(y int) int {
+	if len(a.blocks) == 0 {
+		return -1
+	}
+	top, vp := a.selViewport()
+	hdr := a.transcriptTop()
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return -1
+	}
+	bi := a.rowIdx.blockAt(int32(top + y - hdr))
+	if bi < 0 || a.blocks[bi].Kind != KindThinking {
+		return -1
+	}
+	return bi
+}
+
+// scrollThinkBox routes a wheel notch to the reasoning box a click focused
+// (App.thinkFocus); anywhere else the notch is the transcript's, which is the
+// default. Focus is what makes the box's own scroll deliberate: the wheel used
+// to belong to whatever box sat under the pointer, so a box merely passing
+// under a stationary hand stole the notch. It reports whether the notch was
+// consumed — at either end of the box's own content the wheel falls through to
+// the transcript, which is the way back out.
 func (a *App) scrollThinkBox(m *tcell.EventMouse, down bool) bool {
 	_, y := m.Position()
 	a.mu.Lock()
-	top, vp := a.selViewport() // syncs the layout this hit-test reads
-	hdr := a.transcriptTop()
-	var b *Block
-	if bi := a.rowIdx.blockAt(int32(top + y - hdr)); vp > 0 && y >= hdr && y < hdr+vp && bi >= 0 {
-		b = a.blocks[bi]
-	}
-	if b == nil || b.Kind != KindThinking {
+	bi := a.thinkBoxAt(y)
+	if bi < 0 || bi != a.thinkFocus {
+		// Not on the focused box: nothing is focused, or the notch sits over
+		// another box, another kind of block, or chrome. Only a click moves the
+		// focus (selection.go), so the notch leaves it where it is and this one
+		// belongs to the transcript, which is the default.
 		a.mu.Unlock()
 		return false
 	}
+	b := a.blocks[bi]
 	// ThinkOff counts rows above the newest thought, so the wheel's own sense
 	// inverts here: rolling up walks back through the reasoning, rolling down
 	// returns to the live edge. A notch that cannot move the window is not a
@@ -2862,11 +2933,14 @@ func (a *App) paint() {
 	// Publish the bar's geometry for the mouse hit-test (selection.go): the
 	// press that grabs the thumb and the drag that moves it act on exactly the
 	// bar painted here — and on no bar at all when the transcript fits, since
-	// sbOk false is what keeps grab off a column that carries content.
+	// sbOk false is what keeps grab off a column that carries content. The
+	// column travels with it: with the context dock open the transcript's last
+	// column is not the terminal's last, and a grab keyed to width-1 answers a
+	// press on the panel's border instead of the bar under the pointer.
 	a.selBarOn, a.selBarVP, a.selBarPos = sbOk, vp, sbStart
-	a.selBarW, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
+	a.selBarX, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
 	if sbOk {
-		a.selBarW = 1
+		a.selBarX = edge - 1
 	}
 	a.selRows, a.selTop = selRows, start
 	if a.selDown {

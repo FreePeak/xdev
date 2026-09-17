@@ -100,11 +100,15 @@ func TestThinkWindowClampsAtBothEnds(t *testing.T) {
 	}
 }
 
-// TestWheelScrollsTheThinkBoxUnderIt pins the routing: the notch over a
-// reasoning box moves that box's own window and leaves the transcript where it
-// was; the notch anywhere else scrolls the transcript, as it always has.
-func TestWheelScrollsTheThinkBoxUnderIt(t *testing.T) {
-	app, _ := newTestApp(t, 80, 24)
+// TestWheelOnlyScrollsAFocusedThinkBox pins the routing the mouse actually
+// has: the wheel belongs to the transcript until a left click on a reasoning
+// box focuses it, and then — and only then — the notch moves that box's own
+// window. The notch itself never moves the focus, which is the whole point: a
+// box that slides under a stationary pointer used to steal the wheel, so
+// reading the transcript could not be done without scrolling every box it
+// crossed. A click anywhere else hands the wheel back.
+func TestWheelOnlyScrollsAFocusedThinkBox(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
 	longTranscript(t, app, 200) // scrollable prose above the box
 	app.BeginThinking()
 	app.AppendThinking(thinkLines(40))
@@ -136,8 +140,19 @@ func TestWheelScrollsTheThinkBoxUnderIt(t *testing.T) {
 		defer app.mu.Unlock()
 		return app.blocks[len(app.blocks)-1].ThinkOff
 	}
+	focus := func() int {
+		app.mu.Lock()
+		defer app.mu.Unlock()
+		return app.thinkFocus
+	}
+	// wheel and click both go through the real event path, so the press edge and
+	// the wheel's own bit-masking are the ones under test.
 	wheel := func(y int, btn tcell.ButtonMask) {
 		app.handleKey(tcell.NewEventMouse(3, y, btn, tcell.ModNone))
+	}
+	click := func(y int) {
+		wheel(y, tcell.Button1)
+		wheel(y, tcell.ButtonNone)
 	}
 
 	hdr, vp := chrome()
@@ -145,31 +160,58 @@ func TestWheelScrollsTheThinkBoxUnderIt(t *testing.T) {
 		t.Fatalf("thinking box is not fully on screen: boxY=%d hdr=%d vp=%d", y, hdr, vp)
 	}
 
+	// Nothing focused: the notch over the box is the transcript's, and the box
+	// does not move. This is the behavior the click gate exists for.
 	before := transcript()
 	wheel(boxY()+1, tcell.WheelUp)
+	if off := thinkOff(); off != 0 {
+		t.Fatalf("ThinkOff = %d after a notch with nothing focused, want 0", off)
+	}
+	if after := transcript(); after != before+3 {
+		t.Fatalf("transcript offset = %d after a notch over the box, want %d", after, before+3)
+	}
+
+	// The click focuses the box — the last block, and the only reasoning one —
+	// and the frame says so: the focused box draws a bold rule.
+	click(boxY() + 1)
+	app.mu.Lock()
+	box := len(app.blocks) - 1
+	app.mu.Unlock()
+	if got := focus(); got != box {
+		t.Fatalf("thinkFocus = %d after a click on the box, want %d", got, box)
+	}
+	app.draw() // the UI loop repaints after handleKey
+	// The rule, not the label set into it: the label is bold whether the box is
+	// focused or not (boxTop), so only the rule cells carry the focus mark. The
+	// box starts at x=3 (rail + pad), which is its top-left corner.
+	y := boxY()
+	if _, _, attr := cellStyle(scr, 3, y).Decompose(); attr&tcell.AttrBold == 0 {
+		t.Fatalf("focused box's top-left corner at (3,%d) is not bold", y)
+	}
+	// The rule runs the box's full width, so a cell inside it proves the whole
+	// border took the mark, not just the corner glyph.
+	if _, _, attr := cellStyle(scr, 60, y).Decompose(); attr&tcell.AttrBold == 0 {
+		t.Fatalf("focused box's top rule at (60,%d) is not bold", y)
+	}
+
+	// Focused: the notch moves the box's window and leaves the transcript alone.
+	before = transcript()
+	wheel(boxY()+1, tcell.WheelUp)
 	if off := thinkOff(); off != 1 {
-		t.Fatalf("ThinkOff = %d after one notch over the box, want 1", off)
+		t.Fatalf("ThinkOff = %d after one notch on the focused box, want 1", off)
 	}
 	if after := transcript(); after != before {
-		t.Fatalf("transcript moved under the wheel: %d -> %d", before, after)
+		t.Fatalf("transcript moved under a focused box: %d -> %d", before, after)
 	}
 	// The scrolled window is what the box renders: t-028 replaces t-029's row.
-	got := renderBox(app, len(app.blocks)-1, 80)
+	got := renderBox(app, box, 80)
 	if !strings.Contains(got[2], "t-028") {
 		t.Fatalf("scrolled window starts at %q, want t-028", got[2])
 	}
 
-	wheel(hdr, tcell.WheelUp) // above the box: the transcript's own scroll
-	if off := thinkOff(); off != 1 {
-		t.Fatalf("ThinkOff = %d after a notch off the box, want 1", off)
-	}
-	if after := transcript(); after != before+3 {
-		t.Fatalf("transcript offset = %d, want %d", after, before+3)
-	}
-
 	// At the oldest reasoning the wheel falls through instead of stalling.
 	app.mu.Lock()
-	rows := len(app.thinkRows(app.blocks[len(app.blocks)-1], app.contentWidth()))
+	rows := len(app.thinkRows(app.blocks[box], app.contentWidth()))
 	app.mu.Unlock()
 	head := max(0, rows-thinkBoxRows)
 	for range head {
@@ -183,9 +225,25 @@ func TestWheelScrollsTheThinkBoxUnderIt(t *testing.T) {
 	if after := transcript(); after != before+3 {
 		t.Fatalf("wheel at the box's head did not fall through: %d -> %d", before, after)
 	}
+
+	// A click off the box — here the prose above it — takes the focus back, and
+	// the wheel is the transcript's again.
+	click(hdr)
+	if got := focus(); got != -1 {
+		t.Fatalf("thinkFocus = %d after a click off the box, want -1", got)
+	}
+	before = transcript()
+	wheel(boxY()+1, tcell.WheelUp)
+	if off := thinkOff(); off != head {
+		t.Fatalf("ThinkOff = %d after the focus was dropped, want %d", off, head)
+	}
+	if after := transcript(); after != before+3 {
+		t.Fatalf("transcript offset = %d after focus was dropped, want %d", after, before+3)
+	}
 }
 
-// TestBlockAtFindsTheOwningBlock pins the wheel's hit-test: for every row of a
+// TestBlockAtFindsTheOwningBlock pins the hit-test the click arm rides: for
+// every row of a
 // mixed transcript, blockAt names the one block whose span contains it — the
 // mapping the routing trusts, and the mapping a binary search can get wrong at a
 // block's last row (a block owns [start[i], start[i+1]) ).

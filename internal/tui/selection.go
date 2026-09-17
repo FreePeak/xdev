@@ -130,6 +130,13 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
+		// Past the bar: this press is on the transcript, and it aims the wheel.
+		// Pressing a reasoning box focuses it, pressing anywhere else takes the
+		// aim back, so the wheel scrolls the transcript until the human asks for
+		// a box by name. The notch never moves focus (app.go scrollThinkBox),
+		// which is what stops a box from stealing the wheel merely by sliding
+		// under a stationary pointer.
+		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
@@ -333,7 +340,11 @@ func (a *App) selEdgeTick() bool {
 // what every modern overlay bar does, and the one gesture that reaches a row
 // further away in a single press. Callers hold a.mu.
 func (a *App) selBarAt(x, y int) (int, bool) {
-	if !a.selBarOn || a.selBarW <= 0 || x != a.width-1 {
+	// The column is the painter's, not a.width-1: with the context dock open the
+	// transcript's last column sits a panel's width in from the terminal's edge,
+	// and a grab keyed to the edge answers a press on the panel's border while
+	// the bar under the finger ignores it — the drag that does nothing.
+	if !a.selBarOn || x != a.selBarX {
 		return 0, false
 	}
 	fy := y - a.transcriptTop() // the bar's own row space: 0 = first track row
