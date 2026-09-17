@@ -733,6 +733,33 @@ func TestGithub401Hint(t *testing.T) {
 	}
 }
 
+// TestGithubPrCreateUnpushedBranchHint pins the fix for the live failure a
+// session hit: gh in the session cwd aborted with "or use the --head flag"
+// (GH_PROMPT_DISABLED makes its push prompt impossible) while the commits sat
+// on a branch in a sibling worktree. The error must name the branch and the
+// directory gh ran in, and must never claim to have pushed anything.
+func TestGithubPrCreateUnpushedBranchHint(t *testing.T) {
+	stub := newGithubStub(t)
+	stub.fail(1, "Warning: 1 uncommitted change\naborted: you must first push the current branch to a remote, or use the --head flag\n")
+	stub.respondGit("fix/thing\n")
+	res := runGithub(t, NewGithubTool(stub.repo), `{"op":"pr_create","title":"t"}`)
+	if !res.IsError {
+		t.Fatalf("unpushed branch must error, got %q", res.Text)
+	}
+	for _, want := range []string{"aborted:", "never pushes your working tree", `branch "fix/thing"`, stub.repo} {
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("hint missing %q: %q", want, res.Text)
+		}
+	}
+	// The gh argv stays untouched: reading the branch is a git call.
+	argv := stub.calls()[0].args
+	for _, a := range argv {
+		if a == "--head" {
+			t.Fatalf("pr_create must not invent --head: %q", argv)
+		}
+	}
+}
+
 func TestGithubOpValidation(t *testing.T) {
 	stub := newGithubStub(t)
 	tool := NewGithubTool(stub.repo)

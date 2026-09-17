@@ -246,13 +246,20 @@ func capEntries(es []Entry, limit int) []Entry {
 	return es
 }
 
-// missText is the shared name-miss message. It distinguishes the two kinds of
+// missText is the shared name-miss message. It distinguishes three kinds of
 // miss, because the wrong one sends the model hunting for a capability it
 // already has: live, `tool_describe {"name":"web_search"}` answered
 // `unknown tool "web_search"`, the model concluded the tool did not exist, and
 // it shelled out to curl instead. A registered-but-not-deferred name IS
 // callable directly; only a name the registry has never heard of is unknown.
+// An empty name is not a miss at all: it is a malformed bridge call (a
+// provider streaming a nameless tool call — seen live as `unknown tool ""`),
+// so it answers with the shape to resend instead of a catalog to search.
 func (c *Catalog) missText(op, name string) string {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Sprintf("%s: name is required — resend as %s {\"name\":<tool name>,\"args\":{...}} (%s lists the names)",
+			op, ToolCallName, ToolSearchName)
+	}
 	entries := c.Entries()
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
