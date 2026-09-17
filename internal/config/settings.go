@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -1673,8 +1676,14 @@ func timestampForBackup() string {
 }
 
 // Set writes one dotted key into the layer file at path (used by
-// `xdev config set`), preserving the other keys.
+// `xdev config set`), preserving the other keys. The key is checked against
+// the Settings schema first and the result is decoded strictly before it is
+// written: a file the next start rejects is moved aside as *.broken-*, so a
+// typo here would silently cost the user their whole config.
 func Set(path, key, value string) error {
+	if !settingsKeyOK(key) {
+		return fmt.Errorf("config: unknown key %q in %s: the next start would reject the file, move it aside as *.broken-* and come up on defaults. `xdev config list` shows the schema; modelRoles.<name>, modelRolesEffort.<name>, toolsApproval.<tool> and hooks.* take any name", key, path)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -1700,10 +1709,65 @@ func Set(path, key, value string) error {
 	if err != nil {
 		return err
 	}
+	if err := settingsRoundTrip(path, out); err != nil {
+		return err
+	}
+	return writeSettingsAtomic(path, out)
+}
+
+// settingsRoundTrip decodes a candidate file exactly the way the layered load
+// will, so `config set` fails on its own output instead of on the next start.
+func settingsRoundTrip(path string, out []byte) error {
+	var probe Settings
+	d := yaml.NewDecoder(bytes.NewReader(out))
+	d.KnownFields(true)
+	if err := d.Decode(&probe); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("config: %s: refusing to write a file the next start would reject: %w", path, err)
+	}
+	return nil
+}
+
+// writeSettingsAtomic replaces the settings file in one rename, so a reader
+// racing the write never sees a truncated file (which the next start would
+// quarantine as *.broken-*, taking the user's settings with it) and a failed
+// write never truncates what was there. The existing file's mode is kept:
+// config.yml holds no secrets but is created 0600 by DataDir conventions.
+func writeSettingsAtomic(path string, out []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o644)
+	mode := os.FileMode(0o600)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	// One cleanup path for every failure below: dropping the temp file is what
+	// keeps a failed write from leaving a stray next to the real one.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tmp != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err := tmp.Write(out); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	name := tmp.Name()
+	tmp = nil // closed and kept: the rename consumes it
+	if err := os.Rename(name, path); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // yamlScalar interprets a CLI token as bool/int/string, so `set
@@ -1885,8 +1949,12 @@ func hindsightOrDefault(v string) string {
 }
 
 // DeleteKey removes a dotted key from the layer file (config reset),
-// leaving every other entry intact.
+// leaving every other entry intact. Like Set it validates the key and its
+// output, and it replaces the file in one rename.
 func DeleteKey(path, key string) error {
+	if !settingsKeyOK(key) {
+		return fmt.Errorf("config: unknown key %q in %s", key, path)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1918,7 +1986,10 @@ func DeleteKey(path, key string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o644)
+	if err := settingsRoundTrip(path, out); err != nil {
+		return err
+	}
+	return writeSettingsAtomic(path, out)
 }
 
 // Get reads a dotted key out of the layer file ("" when absent).

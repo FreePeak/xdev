@@ -16,8 +16,10 @@ import (
 // point the user's real config had been moved out of the way.
 
 // settingsKeyOK reports whether a dotted key walks a real path in Settings.
-// Inside a map field (`toolsApproval.<tool>`, `proxyGroups.<name>`) any
-// segment is accepted: those key sets are open by design.
+// A map field's own key is data, not schema, so any name is accepted there
+// (`toolsApproval.bash`, `hooks.preToolUse`, and anything the free-form
+// `hooks` block nests inside); the walk then continues into the value type,
+// so a typo below an open key is still caught.
 func settingsKeyOK(key string) bool {
 	parts := strings.Split(key, ".")
 	t := reflect.TypeOf(Settings{})

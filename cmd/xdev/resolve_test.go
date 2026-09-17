@@ -135,3 +135,38 @@ func TestEffortReachesTheBudget(t *testing.T) {
 		t.Fatalf("minimal must mean no thinking requested, got %+v", bud)
 	}
 }
+
+// TestModelSwitchIsSticky: /model used to exist only inside the process that
+// ran it — the next xdev resolved the model from settings.defaultModel and
+// snapped back, so a user who picked onegw/xdev had to pick it again every
+// launch. persistDefaultModel writes the resolved ref to the global layer and
+// updates the in-memory settings, so a fresh resolveModel (what a new process
+// does on startup) lands on the last-chosen model.
+func TestModelSwitchIsSticky(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetProviderModelCache()
+	prev := loadedSettings
+	loadedSettings = &config.Settings{DefaultModel: "onegw/free"}
+	t.Cleanup(func() { loadedSettings = prev })
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw": {Models: []config.ModelConfig{{ID: "free"}, {ID: "xdev"}}},
+	}}
+
+	persistDefaultModel("onegw/xdev")
+
+	if got, _ := config.Get(config.GlobalSettingsPath(), "defaultModel"); got != "onegw/xdev" {
+		t.Fatalf("defaultModel on disk = %q, want onegw/xdev", got)
+	}
+	if _, err := config.LoadSettings(t.TempDir(), nil); err != nil {
+		t.Fatalf("the file a switch wrote must load: %v", err)
+	}
+	// Startup resolution: no flag, no env — the persisted value must win.
+	t.Setenv("XDEV_MODEL", "")
+	got, _, err := resolveModel("", cfg, lastSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "onegw/xdev" {
+		t.Fatalf("next start resolved %q, want the last selected onegw/xdev", got)
+	}
+}
