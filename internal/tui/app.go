@@ -413,6 +413,22 @@ func (a *App) SetStartupNotice(text string) {
 	a.poke()
 }
 
+// SetNotice shows text on the composer divider for d and then drops it, the
+// channel a failed chord already answers on (paste.go setNotice). For a caller
+// off the UI thread — the MCP connect that lands mid-session — so it takes the
+// lock, unlike the UI-thread setNotice it shares the slot with.
+//
+// ponytail: one slot, so a copy confirmation inside d overwrites this notice
+// (and vice versa). Fixing that means a second row of chrome on the divider;
+// worth it only if a real report of a lost notice shows up.
+func (a *App) SetNotice(text string, d time.Duration) {
+	a.mu.Lock()
+	a.selNotice = text
+	a.selNoticeUntil = time.Now().Add(d)
+	a.mu.Unlock()
+	a.poke()
+}
+
 // BeginAssistant starts (or continues into) the streaming assistant block. A
 // stream that arrives with no turn opened (a feed that outlived its cancel)
 // opens its work span here too, so the time segment never loses the seconds

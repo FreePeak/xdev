@@ -476,7 +476,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 
 	// MCP servers (optional; absent config = nothing happens).
-	mgr := attachMCP(context.Background(), reg, true)
+	mgr := attachMCP(context.Background(), reg, true, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}
@@ -1220,13 +1220,13 @@ func mcpConfigPath() string {
 // attachMCP connects configured MCP servers and registers their tools on
 // the parent registry only — children never inherit ambient MCP (PRD M6:
 // subagents run with restricted tool sets). Individual server failures are
-// reported and skipped, never fatal.
+// reported to report (nil = stderr) and skipped, never fatal.
 //
 // Async by design: a server that starts but never answers `initialize`
 // would otherwise stall startup for its whole timeout budget. Registration
 // happens whenever it lands; the registry is mutex-guarded, and a prompt
 // sent before then simply carries fewer tools (the next turn has them).
-func attachMCP(ctx context.Context, reg *tool.Registry, wait bool) *mcpclient.Manager {
+func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(string)) *mcpclient.Manager {
 	cfg, err := mcpclient.LoadConfig(mcpConfigPath())
 	if err != nil {
 		logx.Errorf("mcp config: %v", err)
@@ -1239,17 +1239,24 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool) *mcpclient.Ma
 	if wait {
 		// One-shot modes (print) must have the tools before the first
 		// turn: connect inline, bounded by the per-server init timeout.
-		finishMCP(mgr, reg, ctx, cfg)
+		finishMCP(mgr, reg, ctx, cfg, report)
 		return mgr
 	}
-	go finishMCP(mgr, reg, ctx, cfg)
+	go finishMCP(mgr, reg, ctx, cfg, report)
 	return mgr
 }
 
-// finishMCP connects and registers, reporting failures non-fatally.
-func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config) {
+// finishMCP connects and registers, reporting failures non-fatally. report
+// (optional) is where a mode with a UI of its own — the TUI's composer
+// divider — takes the failure; nil keeps stderr, which is the interface for
+// print, rpc and acp.
+func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config, report func(string)) {
 	connected, errs := mgr.Connect(ctx, cfg)
 	for _, e := range errs {
+		if report != nil {
+			report(mcpUnavailable(e))
+			continue
+		}
 		fmt.Fprintln(os.Stderr, "xdev: mcp server unavailable —", e)
 	}
 	if connected == 0 {
@@ -1258,6 +1265,15 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 	}
 	mcpclient.Register(reg, mgr.Tools())
 	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
+}
+
+// mcpUnavailable names the failed server without the launch error's detail.
+// A caller with a one-line slot gets what it can render: mcpclient already
+// logged the full error, and the divider drops a hint wider than the space
+// beside the model name, so a whole fork/exec path would render as nothing.
+func mcpUnavailable(e string) string {
+	name, _, _ := strings.Cut(e, ": ")
+	return "mcp: " + name + " unavailable"
 }
 
 // newToolRegistry builds the core four tools plus the parent-facing task
