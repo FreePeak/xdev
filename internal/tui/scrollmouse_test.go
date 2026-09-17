@@ -175,8 +175,8 @@ func TestScrollbarThumbDragScrollsTheTranscript(t *testing.T) {
 	hdr := app.transcriptTop()
 	app.mu.Lock()
 	if _, ok := app.selBarAt(79, hdr); !ok {
-		t.Fatalf("press on the bar at (%d,%d) not hit: on=%v w=%d vp=%d",
-			79, hdr, app.selBarOn, app.selBarW, app.selBarVP)
+		t.Fatalf("press on the bar at (%d,%d) not hit: on=%v x=%d vp=%d",
+			79, hdr, app.selBarOn, app.selBarX, app.selBarVP)
 	}
 	press(app, 79, hdr)
 	if !app.selThumbDrag {
@@ -313,5 +313,54 @@ func TestWheelDuringAHeldDragDoesNotRestartIt(t *testing.T) {
 	got := strings.Split(string(scr.GetClipboardData()), "\n")
 	if got[0] != "L050" {
 		t.Fatalf("copy starts at %q, want %q: the wheel restarted the drag (full copy %q)", got[0], "L050", got)
+	}
+}
+
+// TestScrollbarDragStillAnswersWithTheDockOpen pins the second half of the
+// report: the bar moved when the context dock (#291) reserved its columns, so on
+// any terminal wide enough to show the panel the grab tested a column the bar was
+// not in. Dragging the thumb did nothing, and the far-right click it did answer
+// belongs to the panel's border. The hit-test must follow the painted column.
+func TestScrollbarDragStillAnswersWithTheDockOpen(t *testing.T) {
+	const w = 140 // wide enough for the panel and the transcript's floor
+	app, _ := newTestApp(t, w, 24)
+	app.SetDockMode(DockShow) // the shipped default is auto; both open the panel here
+	longTranscript(t, app, 60)
+	app.mu.Lock()
+	if !app.dockOn() {
+		app.mu.Unlock()
+		t.Fatal("the panel is not open; this test is about the dock's columns")
+	}
+	barX := app.rightEdge() - 1 // where app.go paints it
+	if barX == w-1 {
+		app.mu.Unlock()
+		t.Fatalf("rightEdge did not give up a column: the bar is at the terminal edge")
+	}
+	press(app, barX, app.transcriptTop())
+	if !app.selThumbDrag {
+		app.mu.Unlock()
+		t.Fatalf("a press on the bar at (%d,%d) did not grab the thumb", barX, app.transcriptTop())
+	}
+	if app.selDown {
+		app.mu.Unlock()
+		t.Fatal("the bar started a text selection")
+	}
+	total, vp := app.totalLinesLocked(), app.viewportLinesLocked()
+	dragTo(app, barX, app.transcriptTop()) // pull the thumb to the top of the track
+	off, thumbDrag := app.sm.offset, app.selThumbDrag
+	app.mu.Unlock()
+	if off != total-vp {
+		t.Fatalf("dragging the thumb scrolled to offset %d, want %d (the oldest row)", off, total-vp)
+	}
+	if !thumbDrag {
+		t.Fatal("the drag released the thumb: the bar was answering, not the panel")
+	}
+
+	// And the terminal's last column, which is the panel's border, stays the
+	// panel's: it must not scroll or grab anything.
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if _, ok := app.selBarAt(w-1, app.transcriptTop()); ok {
+		t.Fatalf("the panel's border at column %d still answers the bar", w-1)
 	}
 }
