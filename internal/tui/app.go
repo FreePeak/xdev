@@ -824,6 +824,11 @@ func (a *App) RenameSession(title string) error {
 	if err := a.ops.Rename(title); err != nil {
 		return err
 	}
+	// The title is the panel's title slot, and the panel is already built: a
+	// rename that did not bump would leave the old name up there until something
+	// else moved. The same invalidation a published plan uses, from the same
+	// place — the write that changed what the panel shows.
+	a.DockBump()
 	a.AddSystemBlock("· session renamed: " + title)
 	return nil
 }
