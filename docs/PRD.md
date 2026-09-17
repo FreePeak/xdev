@@ -104,6 +104,7 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | Memory local backend (extraction → consolidation → MEMORY.md/learned.md) | memory.md | CORE | M12 |
 | `memory://` read seam + `/memory` view\|stats\|clear | memory.md | CORE | M12 |
 | Mnemopi SQLite-FTS5 backend + `recall`/`retain`/`reflect`/`memory_edit` tools | memory.md | NICE | M13 |
+| Remote Hindsight backend (`memory: hindsight`: auto-recall, cadence retain, offline queue, `recall`/`retain`/`reflect`, `hindsight.projectSelector`) | memory.md | CORE | M12 |
 | `learn` tool + managed skills | skills.md | CORE | M12 |
 | Skills (SKILL.md discovery, `skill://` protocol, `/skill:` commands) | skills.md | CORE | M12 |
 | Theme engine (66-token themes, vars, color detection, symbol presets, live reload) | theme.md | CORE | M12 |
