@@ -189,6 +189,43 @@ func TestOpenAICompletionsThinking(t *testing.T) {
 	}
 }
 
+// TestOpenAICompletionsReasoningOnlyStops pins the wire shape behind #331:
+// a thinking-mode upstream can finish a turn having streamed reasoning and
+// nothing else. The adapter must report that honestly — done/stop with a lone
+// thinking block — rather than inventing empty text, because the agent loop
+// (not the adapter) is what decides a blank turn needs another round.
+func TestOpenAICompletionsReasoningOnlyStops(t *testing.T) {
+	frames := [][2]string{
+		{"", `{"id":"c3","choices":[{"index":0,"delta":{"reasoning_content":"(context elided)"}}]}`},
+		{"", `{"id":"c3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`},
+		{"", `[DONE]`},
+	}
+	srv, _ := newStreamServer(t, frames...)
+	p := NewOpenAICompletionsProvider("router", srv.URL, "", nil, nil)
+	ch, err := p.Stream(context.Background(), StreamRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: []Block{TextBlock{Text: "q"}}}},
+		Thinking: &ThinkingBudget{Tokens: 4096},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	evs := collectEvents(t, ch)
+	done := evs[len(evs)-1]
+	if done.Type != EventDone || done.StopReason != StopReasonStop {
+		t.Fatalf("terminal event = %+v, want done/stop", done)
+	}
+	if got := done.Message.Text(); got != "" {
+		t.Fatalf("reasoning-only turn produced text %q", got)
+	}
+	if len(done.Message.Content) != 1 {
+		t.Fatalf("content = %#v, want the thinking block alone", done.Message.Content)
+	}
+	if th, ok := done.Message.Content[0].(ThinkingBlock); !ok || th.Thinking != "(context elided)" {
+		t.Fatalf("content[0] = %#v, want the reasoning as a thinking block", done.Message.Content[0])
+	}
+}
+
 func TestOpenAICompletionsToolResultRoundTrip(t *testing.T) {
 	srv, body := newStreamServer(t, completionsFrames...)
 	p := NewOpenAICompletionsProvider("router", srv.URL, "", nil, nil)

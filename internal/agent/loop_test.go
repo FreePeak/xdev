@@ -202,6 +202,110 @@ func TestRunWrapsUpAtTurnLimit(t *testing.T) {
 	}
 }
 
+// TestEmptyTurnNudgeIsBounded pins #331: a turn with no text and no tool
+// call — the reasoning-only shape a thinking-mode upstream leaves behind —
+// must not end the run, and the nudge that keeps it alive is spent once per
+// run so a model that only ever stalls cannot loop on it.
+func TestEmptyTurnNudgeIsBounded(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	answered := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "here is the answer"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	answerScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, answered)}}
+	tests := []struct {
+		name       string
+		calls      []fakeScript
+		wantCalls  int
+		wantFinal  string
+		wantNudges int
+	}{
+		{
+			name:       "nudge recovers the run",
+			calls:      []fakeScript{blankScript, answerScript},
+			wantCalls:  2,
+			wantFinal:  "here is the answer",
+			wantNudges: 1,
+		},
+		{
+			name: "a model that only ever stalls is nudged once, not forever",
+			// Four blank scripts are offered; only the first may be spent.
+			calls:      []fakeScript{blankScript, blankScript, blankScript, blankScript},
+			wantCalls:  2,
+			wantFinal:  "",
+			wantNudges: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fakeProvider{calls: tc.calls}
+			a, ends, _ := runAgent(t, p)
+			var nudges []string
+			a.Hooks = TurnHooksFunc{
+				OnMessageEndF: func(m *ai.Message) { *ends = append(*ends, m) },
+				OnEmptyTurnF:  func(text string) { nudges = append(nudges, text) },
+			}
+			final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+			if err != nil {
+				t.Fatalf("a blank turn must not fail the run: %v", err)
+			}
+			if final.Text() != tc.wantFinal {
+				t.Fatalf("final = %q, want %q", final.Text(), tc.wantFinal)
+			}
+			if n := len(p.gotReqs); n != tc.wantCalls {
+				t.Fatalf("stream requests = %d, want %d", n, tc.wantCalls)
+			}
+			if len(nudges) != tc.wantNudges {
+				t.Fatalf("OnEmptyTurn fired %d times, want %d", len(nudges), tc.wantNudges)
+			}
+			// The nudge rides as harness text, never as something the user
+			// typed: the transcript and the stats counter both branch on the
+			// attribution (same contract as TestRunWrapsUpAtTurnLimit).
+			last := p.gotReqs[tc.wantCalls-1]
+			var found bool
+			for _, m := range last.Messages {
+				if m.Text() != EmptyTurnNudgePrompt {
+					continue
+				}
+				found = true
+				if m.Role != ai.RoleUser || m.Attribution != EmptyTurnAttribution {
+					t.Fatalf("nudge message = %+v, want hidden user turn with attribution %q", m, EmptyTurnAttribution)
+				}
+			}
+			if !found {
+				t.Fatalf("nudge prompt missing from the recovery request: %+v", last.Messages)
+			}
+		})
+	}
+}
+
+// TestEmptyTurnNudgeDoesNotFireOnToolCalls guards the other side of #331:
+// a tool-call turn still runs the tools, and a turn that answers in prose
+// still ends the run — the nudge is for the blank turn alone.
+func TestEmptyTurnNudgeDoesNotFireOnToolCalls(t *testing.T) {
+	callMsg := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ToolCallBlock{ID: "c", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}}
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, callMsg)}},
+		{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil,
+			&ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+				Content: []ai.Block{ai.TextBlock{Text: "done"}}})}},
+	}}
+	a, _, _ := runAgent(t, p)
+	var nudges int
+	a.Hooks = TurnHooksFunc{OnEmptyTurnF: func(string) { nudges++ }}
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "done" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if nudges != 0 {
+		t.Fatalf("OnEmptyTurn fired %d times on a tool-call turn", nudges)
+	}
+}
+
 func TestEffectiveMaxTurns(t *testing.T) {
 	if DefaultMaxTurns < 100 {
 		t.Fatalf("DefaultMaxTurns = %d, long tasks would be killed", DefaultMaxTurns)
