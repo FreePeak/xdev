@@ -96,8 +96,11 @@ type openaiRespItem struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
-	// function_call_output
-	Output string `json:"output,omitempty"`
+	// function_call_output. Output is a POINTER so the required field is always
+	// present on that item: omitempty dropped it whenever a tool result had no
+	// text. Only function_call_output sets it, so message and function_call
+	// items stay unaffected.
+	Output *string `json:"output,omitempty"`
 }
 
 type openaiRespTool struct {
@@ -226,10 +229,14 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 			}
 			flush()
 		case RoleToolResult:
+			// Never nil: the field is required even when the tool had nothing to
+			// say. EnsureToolOutput normally substituted its placeholder before
+			// this point; the encoder still guarantees it for any caller.
+			output := m.Text()
 			wr.Input = append(wr.Input, openaiRespItem{
 				Type:   "function_call_output",
 				CallID: m.ToolCallID,
-				Output: m.Text(),
+				Output: &output,
 			})
 		}
 	}
