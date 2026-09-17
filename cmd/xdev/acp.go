@@ -35,6 +35,13 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	// The request-side thinking level. ACP was the one run mode that never
+	// folded this at all, so --thinking was silently ignored under an editor
+	// host; the same ladder as print/RPC/TUI applies: flag > settings
+	// `thinking` > role ":effort".
+	if effortRef, err = applyThinkingFlag(thinkingLevel(lastSettings(), launch.Thinking), effortRef); err != nil {
+		return 2, err
+	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
 		return 2, err

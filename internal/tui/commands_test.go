@@ -390,6 +390,97 @@ func TestDispatchSettingsTogglesThinking(t *testing.T) {
 	}
 }
 
+// TestDispatchThinkingLevel: /thinking is the request-side half of the
+// thinking surface (the /settings showThinking toggle only touches display).
+// Bare reports without writing, "on" is the alias for "auto" (the Shift-Tab
+// toggle's other half), an unknown level is refused before the ops see it, and
+// nil ops degrade to a notice instead of panicking.
+func TestDispatchThinkingLevel(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var set []string
+	level := "off"
+	app.SetThinkingOps(&ThinkingOps{
+		Current: func() string { return level },
+		Set: func(next string) error {
+			set = append(set, next)
+			level = next
+			return nil
+		},
+	})
+	if !dispatch(app, "/thinking") {
+		t.Fatal("/thinking not consumed")
+	}
+	if len(app.blocks) != 1 || app.blocks[0].Text != "thinking off" {
+		t.Fatalf("report block = %+v", app.blocks)
+	}
+	if len(set) != 0 {
+		t.Fatalf("a bare report must not write: %v", set)
+	}
+
+	app.blocks = nil
+	if !dispatch(app, "/thinking high") {
+		t.Fatal("/thinking high not consumed")
+	}
+	if len(set) != 1 || set[0] != "high" {
+		t.Fatalf("set = %v, want [high]", set)
+	}
+	if len(app.blocks) != 1 || app.blocks[0].Text != "thinking high" {
+		t.Fatalf("confirm block = %+v", app.blocks)
+	}
+
+	// "on" is the toggle's other half, and it means auto (the role decides).
+	if !dispatch(app, "/thinking on") {
+		t.Fatal("/thinking on not consumed")
+	}
+	if len(set) != 2 || set[1] != "auto" {
+		t.Fatalf("set = %v, want [high auto]", set)
+	}
+
+	if !dispatch(app, "/thinking bogus") {
+		t.Fatal("/thinking bogus not consumed")
+	}
+	if len(set) != 2 {
+		t.Fatalf("an unknown level must not reach the ops: %v", set)
+	}
+	if got := app.blocks[len(app.blocks)-1].Text; !strings.Contains(got, "off|auto") {
+		t.Fatalf("usage notice = %q", got)
+	}
+
+	app.SetThinkingOps(nil)
+	app.blocks = nil
+	if !dispatch(app, "/thinking off") {
+		t.Fatal("/thinking off not consumed")
+	}
+	if got := app.blocks[len(app.blocks)-1].Text; !strings.Contains(got, "not wired") {
+		t.Fatalf("unwired notice = %q", got)
+	}
+}
+
+// TestToggleThinking is the Shift-Tab chord's shape: off ⇄ auto, never on a
+// pinned level, so the toggle cannot silently change how much a session spends.
+func TestToggleThinking(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	level := "auto"
+	app.SetThinkingOps(&ThinkingOps{
+		Current: func() string { return level },
+		Set:     func(next string) error { level = next; return nil },
+	})
+	app.ToggleThinking()
+	if level != "off" {
+		t.Fatalf("auto must toggle to off, got %q", level)
+	}
+	app.ToggleThinking()
+	if level != "auto" {
+		t.Fatalf("off must toggle back to auto, got %q", level)
+	}
+	// From a pinned level the toggle turns reasoning off (not to that level).
+	level = "high"
+	app.ToggleThinking()
+	if level != "off" {
+		t.Fatalf("a pinned level must toggle to off, got %q", level)
+	}
+}
+
 func TestHelpTextAligned(t *testing.T) {
 	// Isolate the user command root: helpText discovers markdown commands
 	// from the real ~/.xdev/agent/commands too, and a machine that has any
@@ -521,6 +612,8 @@ func (f *fakeAPI) ShareSession() error {
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
 
 func (f *fakeAPI) SettingsView(args string) error { return nil }
+
+func (f *fakeAPI) ThinkingLevel(args string) error { return nil }
 
 // TestExtensionCommandDispatch routes "/server:cmd args" to the extension
 // runner and prints its output as a system block — the consumer that makes

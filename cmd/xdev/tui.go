@@ -63,9 +63,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	// --thinking overrides whatever the model role pinned (the live holder
-	// below reads the resolved value).
-	if effortRef, err = applyThinkingFlag(launch.Thinking, effortRef); err != nil {
+	// The request-side thinking level: --thinking wins, else the persisted
+	// `thinking` key, else the role's own ":effort" (applyThinkingFlag's "auto"
+	// branch). roleEffort keeps the UN-folded role effort, so a later
+	// /thinking auto (or the Shift-Tab toggle) re-binds to the role instead of
+	// freezing whatever level an earlier call pinned.
+	roleEffort := effortRef
+	startLevel := thinkingLevel(lastSettings(), launch.Thinking)
+	if effortRef, err = applyThinkingFlag(startLevel, roleEffort); err != nil {
 		return 2, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
@@ -108,16 +113,29 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	advisorOn.Store(adv != nil)
 	modelMu := &sync.Mutex{}
 	live := &struct {
-		prov     ai.Provider
-		model    string
-		provName string
-		effort   string
-	}{prov, modelName, provName, effortRef}
+		prov       ai.Provider
+		model      string
+		provName   string
+		effort     string
+		roleEffort string
+		level      string
+	}{prov, modelName, provName, effortRef, roleEffort, startLevel}
+	// thinkLevel reads the level in force (modelMu-guarded, like the rest of
+	// the live holder): "auto" lets live.roleEffort decide at fold time.
+	thinkLevel := func() string {
+		modelMu.Lock()
+		defer modelMu.Unlock()
+		return live.level
+	}
 
 	// Tools + system prompt (shared with print mode).
 	// The propose reviewer (TUI): surface the plan and hold the decision
 	// for the user — /plan off resolves accept, any next prompt is the
 	// revision note. Headless runs auto-accept (nil reviewer).
+	// ponytail: the child (task-tool) default budget is stamped here at
+	// startup, so a later /thinking flip reaches the parent turn and vibe
+	// workers but not already-built task children — they follow --thinking and
+	// the persisted key only. Rebuild the registry if that ever matters.
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 	// toolsForTurn routes each turn at the vibe director's restricted view
@@ -303,6 +321,34 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return err
 			}
 			lastSettings().SidebarMode = mode
+			return nil
+		},
+	})
+	// /thinking and the Shift-Tab toggle (#20's other half): the request-side
+	// level, not the display. Persisting and the live holder both live here,
+	// because cmd owns the settings file and the provider holder. A flip takes
+	// effect on the next turn — the same latency /model has, and the same
+	// reason: the turn reads live.effort once, at agent construction.
+	app.SetThinkingOps(&tui.ThinkingOps{
+		Current: thinkLevel,
+		Set: func(level string) error {
+			// Validate before writing: the fold is the only place the
+			// vocabulary is enforced, so a typo must not reach the file.
+			if _, err := applyThinkingFlag(level, ""); err != nil {
+				return err
+			}
+			if err := config.Set(config.GlobalSettingsPath(), "thinking", level); err != nil {
+				return err
+			}
+			modelMu.Lock()
+			le, err := applyThinkingFlag(level, live.roleEffort)
+			if err != nil {
+				modelMu.Unlock()
+				return err
+			}
+			live.effort, live.level = le, level
+			modelMu.Unlock()
+			lastSettings().Thinking = level
 			return nil
 		},
 	})
@@ -1025,8 +1071,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
 			logx.Errorf("model change entry: %v", err)
 		}
+		// A /model (or role) switch changes the ":effort" the role pins, so
+		// re-fold the level the user pinned on top of it: with "auto" the new
+		// role's effort takes effect, with "off" reasoning stays off.
+		roleNe := ne
+		if ne, err = applyThinkingFlag(thinkLevel(), roleNe); err != nil {
+			return err
+		}
 		modelMu.Lock()
-		live.prov, live.model, live.provName, live.effort = nprov, nmodelName, nprovName, ne
+		live.prov, live.model, live.provName, live.effort, live.roleEffort = nprov, nmodelName, nprovName, ne, roleNe
 		modelMu.Unlock()
 		app.SetStatusModel(nprovName + "/" + nmodelName)
 		// The HUD context segment measures against the new window.
