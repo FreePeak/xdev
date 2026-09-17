@@ -23,7 +23,6 @@ import (
 	"github.com/FreePeak/xdev/internal/collab"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dist"
-	"github.com/FreePeak/xdev/internal/fscache"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/theme"
@@ -559,15 +558,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh.
 	//
-	// @-file completion (M7 #8, PRD §IV.6) is wired in two halves. listDir
-	// answers a keystroke with ONE readdir of the directory the typed token
-	// names, which is what makes hidden and gitignored paths affordable to
-	// offer: walking the repo to filter them out was the whole cost, and there
-	// is no walk here. A bare `@` names no directory, so the second half falls
-	// back to the whole-repo scan through the SAME shared FS-scan cache
-	// grep/glob use (one walk per TTL, never one per keystroke); the explicit
-	// options are also what stop a cached hidden-file lookup from handing this
-	// menu a listing that is missing exactly the files it exists to offer.
+	// @-file completion (M7 #8, PRD §IV.6) is wired to ONE readdir of the
+	// directory the typed token names — which is what makes hidden and gitignored
+	// paths affordable to offer: walking the repo to filter them out was the
+	// whole cost, and there is no walk here. A bare `@` names no directory, so it
+	// lists this same root (the cwd) instead of falling back to a whole-repo
+	// scan: that scan cost ~5.7s per keystroke on a 226k-file polyrepo to fill a
+	// 200-row menu, and it ran on the UI thread. Deeper paths are reached by
+	// drilling (`@internal/tui/`).
 	listDir := func(dir string) []tui.PathEntry {
 		full := filepath.Join(cwd, filepath.FromSlash(dir))
 		ents, err := os.ReadDir(full)
@@ -588,19 +586,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		return out // os.ReadDir sorts lexically, which the menu shows as-is
 	}
-	app.SetPathCompletion(cwd, listDir, func() []string {
-		entries, _, _ := tool.SharedFSCache().Scan(fscache.Options{
-			Roots: workspaceDirs(cwd), IncludeHidden: true, MaxEntries: 200,
-		})
-		out := make([]string, 0, len(entries))
-		for _, e := range entries {
-			if !e.IsDir && e.Rel != "." {
-				out = append(out, e.Rel)
-			}
-		}
-		return out
-	})
-
+	app.SetPathCompletion(cwd, listDir)
 	app.SetPickerResume(func(id string) {
 		if id == "" {
 			return

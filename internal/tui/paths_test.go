@@ -58,16 +58,10 @@ func TestSplitPathQueryScopesToDirectory(t *testing.T) {
 }
 
 // appWithTree wires a fake directory tree: each key is a directory, each value
-// its raw entries in os.ReadDir's lexical order. No scan is wired unless one is
-// given, so the directory path is what a test exercises by default.
-func appWithTree(tree map[string][]PathEntry, scan ...string) *App {
-	var scanFn func() []string
-	if len(scan) > 0 {
-		files := scan
-		scanFn = func() []string { return files }
-	}
+// its raw entries in os.ReadDir's lexical order.
+func appWithTree(tree map[string][]PathEntry) *App {
 	a := &App{}
-	a.SetPathCompletion("/proj", func(dir string) []PathEntry { return tree[dir] }, scanFn)
+	a.SetPathCompletion("/proj", func(dir string) []PathEntry { return tree[dir] })
 	return a
 }
 
@@ -148,14 +142,48 @@ func TestPathCandidatesHidesOnlyVCS(t *testing.T) {
 	}
 }
 
-// TestPathCandidatesScanKeepsDepsOut: naming node_modules reads it, but the
-// bare-`@` whole-repo list still drops vendored paths — they would bury the
-// project's own files.
-func TestPathCandidatesScanKeepsDepsOut(t *testing.T) {
-	a := appWithTree(map[string][]PathEntry{}, "a.go", "node_modules/dep.js",
-		"sub/node_modules/other.js")
-	if got := suggNames(a.pathCandidates("")); len(got) != 1 || got[0] != "a.go" {
-		t.Fatalf("bare @ = %v, want [a.go]", got)
+// TestPathCandidatesBareAtListsRoot: a bare `@` names no directory, so it lists
+// the completion root — one readdir, omp's answer to the same token. Hidden and
+// vendored entries at the root are offered; only VCS metadata is dropped.
+func TestPathCandidatesBareAtListsRoot(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"": {{Name: ".git", IsDir: true}, {Name: "cmd", IsDir: true},
+			{Name: "main.go"}, {Name: "node_modules", IsDir: true}},
+	})
+	got := suggNames(a.pathCandidates(""))
+	want := []string{"cmd/", "node_modules/", "main.go"}
+	if len(got) != len(want) {
+		t.Fatalf("bare @ = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bare @ = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestPathCandidatesNeverWalksOnBareAt is the regression guard for the stall
+// this file exists to prevent: the only directory a keystroke may read is the
+// one the token names (the root when it names none). Nothing here may ever ask
+// for a listing that is not a single readdir, however many keystrokes follow.
+func TestPathCandidatesNeverWalksOnBareAt(t *testing.T) {
+	var asked []string
+	a := &App{}
+	a.SetPathCompletion("/proj", func(dir string) []PathEntry {
+		asked = append(asked, dir)
+		return nil
+	})
+	for _, q := range []string{"", "", "a", "/", "internal/"} {
+		a.pathCandidates(q)
+	}
+	want := []string{"", "", "", "", "internal"}
+	if len(asked) != len(want) {
+		t.Fatalf("readdir calls = %q, want %q", asked, want)
+	}
+	for i := range want {
+		if asked[i] != want[i] {
+			t.Fatalf("readdir calls = %q, want %q", asked, want)
+		}
 	}
 }
 
@@ -171,24 +199,12 @@ func TestPathCandidatesTrailingSlashListsDir(t *testing.T) {
 	}
 }
 
-// TestPathCandidatesBareAtFallsBackToScan: with no directory named, the menu
-// still lists the whole-repo scan, minus VCS metadata — including a file that
-// only lives under .git.
-func TestPathCandidatesBareAtFallsBackToScan(t *testing.T) {
-	a := appWithTree(map[string][]PathEntry{}, "a.go", "sub/b.go", ".git/config", "node_modules/dep.js")
-	got := suggNames(a.pathCandidates(""))
-	if len(got) != 2 || got[0] != "a.go" || got[1] != "sub/b.go" {
-		t.Fatalf("bare @ = %v, want [a.go sub/b.go]", got)
-	}
-}
-
 // TestPathCandidatesSlashListsRoot: `@/` names the root explicitly, so it must
-// read that directory — not fall through to the whole-repo scan, which is what
-// splitPathQuery's ("","") for "/" would otherwise trigger.
+// read that directory — the same listing a bare `@` shows.
 func TestPathCandidatesSlashListsRoot(t *testing.T) {
 	a := appWithTree(map[string][]PathEntry{
 		"": {{Name: "cmd", IsDir: true}, {Name: "main.go"}},
-	}, "scan/only.go")
+	})
 	got := suggNames(a.pathCandidates("/"))
 	if len(got) != 2 || got[0] != "cmd/" || got[1] != "main.go" {
 		t.Fatalf("@/ = %v, want [cmd/ main.go]", got)
@@ -234,18 +250,20 @@ func TestPathMentionQuotesSpaces(t *testing.T) {
 }
 
 // TestAppAtCompletionDrivesKeyPath is the end-to-end check through the real
-// key handler: `@` opens the menu, typing a directory prefix narrows it to that
-// directory, Tab on a directory keeps the slash and reopens the menu inside it
-// (so the next keystroke lists the CHILD directory), and Tab on a file closes
-// the mention with a space.
+// key handler: `@` opens the menu on the completion root, typing a directory
+// prefix narrows it to that directory, Tab on a directory keeps the slash and
+// reopens the menu inside it (so the next keystroke lists the CHILD directory),
+// and Tab on a file closes the mention with a space.
 func TestAppAtCompletionDrivesKeyPath(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.SetPathCompletion("/proj", func(dir string) []PathEntry {
 		return map[string][]PathEntry{
+			"":         {{Name: "internal", IsDir: true}, {Name: "main.go"}},
 			"internal": {{Name: "tool", IsDir: true}, {Name: "tui", IsDir: true}},
 		}[dir]
-	}, func() []string { return []string{"main.go"} })
-	// A bare `@` opens the menu on the scan; typing a directory name scopes it.
+	})
+	// The bare `@` opens the menu on the root listing, and typing the directory
+	// name rescopes it.
 	typeRunes(app, "read @internal/")
 	app.mu.Lock()
 	got := suggNames(app.smenu.rows())
