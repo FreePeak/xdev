@@ -81,6 +81,7 @@ func (h *hookLog) OnToolResultMessage(m *ai.Message) {
 }
 func (h *hookLog) OnCompaction(int64)             {}
 func (h *hookLog) OnContinuation(string)          {}
+func (h *hookLog) OnEmptyTurn(string)             {}
 func (h *hookLog) OnTurnEnd(ai.StopReason, error) {}
 
 func TestAgentDeniesBeforeExecuting(t *testing.T) {

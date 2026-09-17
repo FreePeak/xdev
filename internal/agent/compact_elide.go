@@ -161,6 +161,15 @@ func readCalls(msgs []ai.Message) map[string]readRef {
 	return out
 }
 
+// isEmptyAssistant reports an assistant turn that said nothing: no text and
+// no tool call. A reasoning-only turn (a thinking block, then stop) is the
+// live shape of this — the model spent tokens thinking and never answered.
+// The loop nudge and the dropUseless compaction rung both key off it, so the
+// predicate lives here and the tool-result case stays in isEmptyNoop.
+func isEmptyAssistant(m ai.Message) bool {
+	return m.Role == ai.RoleAssistant && m.Text() == "" && len(m.ToolCalls()) == 0
+}
+
 // isEmptyNoop reports a message that carries nothing forward: no text and no
 // tool call, or an empty non-error tool result (dropUseless).
 func isEmptyNoop(m ai.Message) bool {
