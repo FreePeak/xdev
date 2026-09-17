@@ -160,11 +160,11 @@ the live map.
 Scrolling never fights the stream: a scrolled viewport stays put while output
 arrives, and `▲ n ▼ n` shows how much is hidden. Mouse selection covers the
 whole screen and survives a scroll — hold the drag at the transcript's top or
-bottom edge and it keeps scrolling while you select, and the right-edge
-scrollbar drags like any other. Shift+drag hands the gesture back to the
-terminal's native selection. A boxed row copies as its text: the output and
-the label on the top rule (`╭─ bash ───╮` copies as `bash`), never the frame
-or the pad inside it.
+bottom edge and it keeps scrolling while you select, and the scrollbar — the
+transcript's right edge, wherever the context dock leaves it — drags like any
+other. Shift+drag hands the gesture back to the terminal's native selection.
+A boxed row copies as its text: the output and the label on the top rule
+(`╭─ bash ───╮` copies as `bash`), never the frame or the pad inside it.
 
 Thinking renders like a tool result: a rounded box whose top border carries the
 state (`⠹ Thinking…` while it streams, `Thought for Xs` when it settles) and
