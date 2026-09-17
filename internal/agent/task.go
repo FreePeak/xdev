@@ -52,12 +52,6 @@ type TaskTool struct {
 	// (#272). Both empty = no named agents: the default child shape still
 	// works and every `agent` argument fails as unknown.
 	AgentRoots string
-	// ExpandModel resolves an agent's frontmatter model — "@role" aliases
-	// per discovery's documented contract — to a bare model id usable with
-	// this tool's Provider. ok=false keeps the parent's model. Wired from
-	// cmd where the settings live; nil disables expansion (a literal
-	// frontmatter model never needs it).
-	ExpandModel func(ref string) (model string, ok bool)
 	// ExpandEffort resolves an agent's frontmatter thinkingLevel to a
 	// reasoning budget for the child (config.EffortBudget in production).
 	// nil keeps the parent's Thinking.
@@ -402,25 +396,19 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				agentNotes = append(agentNotes, note)
 			}
 		}
-		if def.Model != "" && strings.HasPrefix(def.Model, "@") {
-			// A role alias resolves through modelRoles; an unresolvable one
-			// keeps the parent model (discovery promises expansion, not a
-			// hard failure on a typo) — but says so. Forwarding the raw
-			// "@role" to the wire 404s one turn later (#272), so it never
-			// becomes the child's model.
-			resolved, resolves := "", t.ExpandModel != nil
-			if resolves {
-				resolved, resolves = t.ExpandModel(def.Model)
-			}
-			if resolves {
-				agentModel = resolved
-			} else {
-				note := fmt.Sprintf("agent %q: model %q did not resolve — parent model kept", def.Name, def.Model)
+		if def.Model != "" {
+			// A literal provider/model is the child's model. A bare model
+			// alias ("@…" — the removed model-role form) is not a ref:
+			// report it instead of forwarding it to the wire, which 404s
+			// one turn later (#272). The child then runs on the same model
+			// as its parent.
+			if strings.HasPrefix(def.Model, "@") {
+				note := fmt.Sprintf("agent %q: frontmatter model %q is not a model ref — parent model kept", def.Name, def.Model)
 				logx.Warnf("%s", note)
 				agentNotes = append(agentNotes, note)
+			} else {
+				agentModel = def.Model
 			}
-		} else if def.Model != "" {
-			agentModel = def.Model
 		}
 		// Recursive spawn (omp task.maxRecursionDepth semantics): a child
 		// below the cap gets its own task tool so it can dispatch further
@@ -445,7 +433,6 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				// that discovers keeps discovering, a pinned set stays pinned.
 				Agents:       t.Agents,
 				AgentRoots:   t.AgentRoots,
-				ExpandModel:  t.ExpandModel,
 				ExpandEffort: t.ExpandEffort,
 				Depth:        t.Depth + 1,
 				AgentName:    agentArg,

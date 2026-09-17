@@ -50,9 +50,9 @@ defaultModel: onegw/free
 	}
 }
 
-// The bench provider seam must honour a @role alias the same way a run
-// does — that is the point of routing it through resolveModel.
-func TestDistOpenProviderResolvesRole(t *testing.T) {
+// The bench provider seam must honour the same model resolution a run uses —
+// that is the point of routing it through resolveModel.
+func TestDistOpenProviderResolvesModel(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDEV_AGENT_DIR", dir)
 	t.Setenv("XDEV_MODEL", "")
@@ -72,17 +72,16 @@ func TestDistOpenProviderResolvesRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings.ModelRoles = map[string]string{"smol": "onegw/small"}
 	prev := loadedSettings
 	loadedSettings = settings
 	t.Cleanup(func() { loadedSettings = prev })
 
-	_, model, err := distOpenProvider("@smol")
+	_, model, err := distOpenProvider("onegw/small")
 	if err != nil {
-		t.Fatalf("distOpenProvider(@smol): %v", err)
+		t.Fatalf("distOpenProvider(onegw/small): %v", err)
 	}
 	if model != "small" {
-		t.Errorf("model = %q, want small (the @smol role target)", model)
+		t.Errorf("model = %q, want small", model)
 	}
 }
 

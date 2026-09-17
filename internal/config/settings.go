@@ -108,8 +108,9 @@ type MnemopiSettings struct {
 	Scope string `yaml:"scope"`
 	// Tag is the literal bank tag used by the project-tagged scope.
 	Tag string `yaml:"tag"`
-	// LLMMode is smol (default) | remote | none. It selects which role's
-	// completion the reflect pass runs on; none disables reflect.
+	// LLMMode is smol (default) | remote | none. The two named modes both
+	// run the reflect pass on the session model (they were the @smol and
+	// @default roles); none disables reflect.
 	LLMMode string `yaml:"llmMode"`
 	// RetainEveryNTurns enqueues a consolidation every N turns
 	// (default 3; -1 disables the turn trigger).
@@ -341,12 +342,15 @@ type Settings struct {
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
-	StatusLine   *StatusLineSettings `yaml:"statusLine"`
-	DefaultModel string              `yaml:"defaultModel"`
-	ApprovalMode string              `yaml:"approvalMode"` // always-ask|write|yolo
+	StatusLine *StatusLineSettings `yaml:"statusLine"`
+	// DefaultModel is the run model (provider/model or bare id). Every
+	// background pass — advisor, memory pipeline, titles, branch notes,
+	// handoff — runs on it too: there is one model, no role aliases.
+	DefaultModel string `yaml:"defaultModel"`
+	ApprovalMode string `yaml:"approvalMode"` // always-ask|write|yolo
 	// Prewalk turns the one-shot model handoff on for every run
-	// (prewalk.enabled); prewalk.into is the handoff target (a model ref or
-	// @role, default @smol). The -prewalk flag forces it on and
+	// (prewalk.enabled); prewalk.into is the handoff target (a model ref,
+	// default: the session model). The -prewalk flag forces it on and
 	// -no-prewalk forces it off.
 	Prewalk PrewalkSettings `yaml:"prewalk"`
 	// Models tunes runtime model switching (models.cycle): the ordered
@@ -362,8 +366,7 @@ type Settings struct {
 	Compaction CompactionSettings `yaml:"compaction"`
 	// Retry tunes the resilience ladder (M5 #25): the fallback chain
 	// table, the usage-reserve policy, and the revert-to-primary policy.
-	Retry      RetrySettings     `yaml:"retry"`
-	ModelRoles map[string]string `yaml:"modelRoles"`
+	Retry RetrySettings `yaml:"retry"`
 	// Handoff tunes the handoff-document compaction (M5 #23): the
 	// compaction.methodOrder member `handoff` and its artifacts.
 	Handoff HandoffSettings `yaml:"handoff"`
@@ -374,16 +377,13 @@ type Settings struct {
 	// Bash is the `bash` group (M13 #56): the compound-command opt-in and
 	// the external interceptor.
 	Bash BashSettings `yaml:"bash"`
-	// ModelRolesEffort pins a reasoning effort per role (":effort" suffix
-	// on a @role reference overrides it).
-	ModelRolesEffort map[string]string `yaml:"modelRolesEffort"`
 	// Memory selects the long-term memory backend (M12 F1, M15 #73): "local"
 	// (default; MEMORY.md + learned.md under the data dir, with the
 	// memory:// read seam and the learn tool), "mnemopi" (local SQLite store
 	// with banks, a fact link graph and polyphonic recall, M12 #44),
 	// "hindsight" (remote Hindsight HTTP server, M12 #43), or "sharpshooter"
-	// (friction-gated decision files under <dataDir>/memories, consolidated in
-	// the background through the @smol role). Every backend exposes the same
+	// (friction-gated decision files under <dataDir>/memories, consolidated
+	// in the background on the session model). Every backend exposes the same
 	// Store seam, so memory://, the learn tool and /memory work unchanged.
 	Memory string `yaml:"memory"`
 	// ExperimentalContextManagement gates the notes-backed context windows
@@ -414,9 +414,12 @@ type Settings struct {
 	// internal/memory/hindsight.go for the precedence table).
 	Hindsight HindsightSettings `yaml:"hindsight"`
 	// Advisor runs a background reviewer on the session (M11, research §6).
-	// The reviewer model comes from modelRoles.advisor; without that role
-	// the flag warns and starts disarmed.
+	// The reviewer model comes from advisorModel (else the run model);
+	// without either the flag warns and starts disarmed.
 	Advisor bool `yaml:"advisor"`
+	// AdvisorModel is the reviewer model (provider/model or bare id; else
+	// the run model).
+	AdvisorModel string `yaml:"advisorModel"`
 	// Hooks declares shell-command hooks per event (M11 #12):
 	// event -> one command or a list. First block short-circuits,
 	// last-wins for input/result overrides. See internal/hooks.
@@ -464,8 +467,8 @@ type Settings struct {
 	// non-interrupting asides for this many primary turns.
 	AdvisorImmuneTurns int `yaml:"advisorImmuneTurns"`
 	// TaskAgentAdvisor (M11 #39; omp task.agentAdvisor) attaches an
-	// advisor to spawned subagents: "on" (the modelRoles.advisor model),
-	// "off" (the default), or an explicit model reference.
+	// advisor to spawned subagents: "off" (the default), "on" (the
+	// advisorModel), or an explicit model reference.
 	TaskAgentAdvisor string `yaml:"taskAgentAdvisor"`
 	// TTSR is the stream-rules group (M11 #35): rule conditions are
 	// matched against the assistant deltas; see internal/agent/ttsr.go.
@@ -831,14 +834,11 @@ func defaultSettings() *Settings {
 		MemoryLimit:        100 << 20,
 		MaxTurns:           200,
 		Compaction:         CompactionSettings{MethodOrder: DefaultCompactionMethodOrder},
-		ModelRoles:         map[string]string{},
 		ToolsApproval:      map[string]string{},
-		ModelRolesEffort:   map[string]string{},
 		Hooks:              map[string]any{},
 		ShowThinking:       &show,
 		Personality:        "default",
 		AdvisorImmuneTurns: 3,
-		Prewalk:            PrewalkSettings{Into: "@smol"},
 		// The group ships enabled but rule-less (no rules = inert).
 		TTSR: &TTSRSettings{Enabled: &show, InterruptMode: "always", ContextMode: "discard", RepeatGap: 3},
 		// Memory ships ON: a lesson recorded in one session is only worth
@@ -1096,6 +1096,86 @@ func LoadSettings(cwd string, overlays []string) (*Settings, error) {
 	return s, nil
 }
 
+// migrateLegacySettings rewrites a key this version removed but a settled
+// config file still carries. The layers are strict (KnownFields), so without
+// this the rename would move the user's file to .broken-<stamp> on the next
+// start and quietly run them on defaults.
+//
+// modelRoles is the one such key: the model-role aliases (@smol/@slow/…) are
+// gone, and modelRoles.default was the only binding that did real work — it
+// named the model a run uses, which is now defaultModel. The other roles
+// resolved to that same session model anyway, so dropping them changes
+// nothing a session could observe.
+//
+// ponytail: it reads the "default" (or "main") scalar and discards the rest
+// of the block. A file that pinned several roles to *different* models loses
+// those pins; if per-role overrides come back, they need their own key here.
+// Any shape this cannot read is left alone, so the strict decode reports it
+// like any other typo instead of the shim guessing.
+func migrateLegacySettings(raw []byte) []byte {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return raw
+	}
+	body := documentBody(&doc)
+	if body.Kind != yaml.MappingNode {
+		return raw
+	}
+	changed := false
+	for i := 0; i+1 < len(body.Content); i += 2 {
+		key, val := body.Content[i], body.Content[i+1]
+		if key.Value != "modelRoles" {
+			continue
+		}
+		body.Content = append(body.Content[:i], body.Content[i+2:]...)
+		changed = true
+		// The role block is gone; keep its one meaningful binding.
+		if v, ok := legacyRoleDefault(val); ok && !hasYAMLKey(body, "defaultModel") {
+			body.Content = append(body.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "defaultModel"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: v})
+		}
+		break
+	}
+	if !changed {
+		return raw
+	}
+	out, err := yaml.Marshal(body)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// legacyRoleDefault reads the run-model binding out of a removed modelRoles
+// mapping: "default", or the older "main" spelling. An alias target ("@...")
+// is not a model ref and is ignored.
+func legacyRoleDefault(n *yaml.Node) (string, bool) {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return "", false
+	}
+	for _, want := range []string{"default", "main"} {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value != want {
+				continue
+			}
+			v := strings.TrimSpace(n.Content[i+1].Value)
+			return v, v != "" && !strings.HasPrefix(v, "@")
+		}
+	}
+	return "", false
+}
+
+// hasYAMLKey reports whether a mapping node already declares name.
+func hasYAMLKey(n *yaml.Node, name string) bool {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == name {
+			return true
+		}
+	}
+	return false
+}
+
 // readSettingsFile decodes one layer; (nil, nil, nil) when the file is
 // absent. An untrusted layer is pruned to the repo-safe key set first, and
 // the names it lost come back for the notice.
@@ -1106,6 +1186,7 @@ func readSettingsFile(path string, trusted bool) (*Settings, []string, error) {
 	}
 	var s Settings
 	var ignored []string
+	raw = migrateLegacySettings(raw)
 	if trusted {
 		err = parseYAMLLayer(raw, &s)
 	} else {
@@ -1190,9 +1271,6 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Compaction.Async != nil {
 		s.Compaction.Async = layer.Compaction.Async
 	}
-	for k, v := range layer.ModelRoles {
-		s.ModelRoles[k] = v
-	}
 	for k, v := range layer.ToolsApproval {
 		s.ToolsApproval[k] = v
 	}
@@ -1207,9 +1285,6 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	for k, v := range layer.Hooks {
 		s.Hooks[k] = v
-	}
-	for k, v := range layer.ModelRolesEffort {
-		s.ModelRolesEffort[k] = v
 	}
 	if layer.DisabledProviders != nil {
 		s.DisabledProviders = append([]string(nil), layer.DisabledProviders...)
@@ -1245,6 +1320,9 @@ func (s *Settings) merge(layer *Settings) error {
 		// contributes (there is no expressible "unset" for a plain bool,
 		// and the shipped default is off).
 		s.Advisor = true
+	}
+	if layer.AdvisorModel != "" {
+		s.AdvisorModel = layer.AdvisorModel
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
@@ -1654,14 +1732,14 @@ func yamlScalar(v string) any {
 }
 
 // List renders the resolved settings one key: value per line, in a stable
-// order: map-backed groups (roles, per-role effort, per-tool approval) are
-// sorted by key, and every grouped key the session actually enforces is
-// listed, minus hook bodies — those carry arbitrary commands, so only the
-// configured event count is reported. Credential-bearing values are never
+// order: map-backed groups (per-tool approval) are sorted by key, and every
+// grouped key the session actually enforces is listed, minus hook bodies —
+// those carry arbitrary commands, so only the configured event count is
+// reported. Credential-bearing values are never
 // prewalkIntoOrDefault renders the handoff target for the settings list.
 func prewalkIntoOrDefault(v string) string {
 	if strings.TrimSpace(v) == "" {
-		return "@smol"
+		return "(session model)"
 	}
 	return v
 }
@@ -1725,8 +1803,8 @@ func List(s *Settings, globalPath string) []string {
 	if s.DefaultModel != "" {
 		out = append(out, "defaultModel "+s.DefaultModel)
 	}
-	for _, k := range sortedKeys(s.ModelRoles) {
-		out = append(out, "modelRoles."+k+" "+maskCred(s.ModelRoles[k]))
+	if s.AdvisorModel != "" {
+		out = append(out, "advisorModel "+s.AdvisorModel)
 	}
 	backlog := "off"
 	if s.AdvisorSyncBacklog > 0 {
@@ -1743,9 +1821,6 @@ func List(s *Settings, globalPath string) []string {
 	out = append(out, "advisorSyncBacklog "+backlog,
 		"advisorImmuneTurns "+fmt.Sprint(immune),
 		"taskAgentAdvisor "+taskAdvisor)
-	for _, k := range sortedKeys(s.ModelRolesEffort) {
-		out = append(out, "modelRolesEffort."+k+" "+s.ModelRolesEffort[k])
-	}
 	for _, k := range sortedKeys(s.ToolsApproval) {
 		out = append(out, "toolsApproval."+k+" "+s.ToolsApproval[k])
 	}

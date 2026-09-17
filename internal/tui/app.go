@@ -76,10 +76,10 @@ type App struct {
 	escDraft []rune
 	escUsed  bool
 	smenu    *slashMenu // "/" autocomplete dropdown (nil = closed)
-	// pickers is the modal-list stack: /model opens a roles+models
-	// selector, and "set role" pushes a second list on top. Esc pops one
-	// level; a selection pops them all. While non-empty the picker owns
-	// every key event and the dropdown is closed.
+	// pickers is the modal-list stack: /model opens a models selector, and
+	// a nested list pushes on top of it. Esc pops one level; a selection
+	// pops them all. While non-empty the picker owns every key event and
+	// the dropdown is closed.
 	pickers []*picker
 	// mouseBtnDown tracks the primary button across events, so a press is acted
 	// on once: tcell strips the SGR motion bit and exposes no accessor, so
@@ -1122,9 +1122,9 @@ func (a *App) cycleModel() bool {
 }
 
 // SwitchModel implements CommandAPI /model: with no argument it opens the
-// interactive selector (roles + models); with an argument it switches
-// directly, accepting anything the -model flag accepts (a concrete
-// provider/model, a bare model id, or an @role[:effort] alias).
+// interactive selector; with an argument it switches directly, accepting
+// anything the -model flag accepts (a concrete provider/model, a bare model
+// id, or a model with an inline ":effort" suffix).
 func (a *App) SwitchModel(args string) error {
 	if a.modelOps == nil {
 		return fmt.Errorf("model switching not wired")
@@ -1140,8 +1140,8 @@ func (a *App) SwitchModel(args string) error {
 	if err := a.modelOps.Set(ref); err != nil {
 		return err
 	}
-	// Echo what is actually live, not what was typed: "/model @slow"
-	// switching to onegw/dev must not claim the session runs "@slow".
+	// Echo what is actually live, not what was typed: "/model dev"
+	// switching to onegw/dev must not claim the session runs "dev".
 	echo := ref
 	if a.modelOps.Current != nil {
 		if cur := a.modelOps.Current(); cur != "" {
@@ -1190,8 +1190,7 @@ func (a *App) PickerOpen() bool {
 }
 
 // OpenModelPicker opens the /model selector: one view per provider's
-// concrete models plus a roles view whose rows assign a model to a role.
-// Also bound to Alt+M (omp's app.model.select).
+// concrete models. Also bound to Alt+M (omp's app.model.select).
 func (a *App) OpenModelPicker() {
 	if a.modelOps == nil || a.modelOps.Views == nil {
 		cur := ""
@@ -1237,43 +1236,6 @@ func (a *App) OpenModelPicker() {
 		}
 	}
 	a.OpenPicker(PickerOptions{Title: "model", Views: views, OnSelect: use})
-}
-
-// OpenRolePicker pushes the model list that assigns @role: Enter persists
-// modelRoles.<role> to the global settings layer and switches this session
-// to it, so the choice is visible immediately. Exported because cmd builds
-// the roles view and points its Enter here.
-func (a *App) OpenRolePicker(role string) {
-	if a.modelOps == nil || a.modelOps.Models == nil || a.modelOps.SetRole == nil {
-		a.AddSystemBlock("role assignment not wired")
-		return
-	}
-	models := a.modelOps.Models()
-	if len(models) == 0 {
-		a.AddSystemBlock("no models configured — check ~/.xdev/agent/models.yml")
-		return
-	}
-	a.OpenPicker(PickerOptions{
-		Title:    "set @" + role + " to",
-		Views:    []PickerView{{Name: "models", Action: "set", Items: models}},
-		OnSelect: func(ref string) { a.setRole(role, ref) },
-	})
-}
-
-// setRole persists modelRoles.<role> and, on success, switches this session
-// to the model so the choice is immediately visible.
-func (a *App) setRole(role, ref string) {
-	if err := a.modelOps.SetRole(role, ref); err != nil {
-		a.AddSystemBlock("error: " + err.Error())
-		return
-	}
-	if a.modelOps.Set != nil {
-		if err := a.modelOps.Set("@" + role); err != nil {
-			a.AddSystemBlock("error: " + err.Error())
-			return
-		}
-	}
-	a.AddSystemBlock("@" + role + " → " + ref)
 }
 
 // handlePickerMouse routes a mouse event into the open modal list, with the

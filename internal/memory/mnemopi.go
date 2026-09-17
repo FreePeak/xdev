@@ -37,8 +37,8 @@ type Mnemopi struct {
 	// CWD anchors the project bank (the nearest repository root above it,
 	// lowercased basename). Empty means the process working directory.
 	CWD string
-	// LLMMode is smol | remote | none. It selects which completion the
-	// wiring hands to Complete (none disables reflect entirely).
+	// LLMMode is smol | remote | none — both legacy names mean "run on the
+	// session model"; none disables reflect entirely.
 	LLMMode string
 	// RecallLimit bounds how many hits Recall returns (default 8, max 32).
 	RecallLimit int
@@ -48,7 +48,7 @@ type Mnemopi struct {
 	// RetainEveryNTurns makes NoteTurn fire a consolidation every N turns
 	// (default 3; 0 disables the turn trigger).
 	RetainEveryNTurns int
-	// Complete is the synthesis seam (the pipeline's smol completion):
+	// Complete is the synthesis seam (the pipeline's completion):
 	// prompt in, text out. Nil makes reflect a reported no-op, never a
 	// failed session.
 	Complete CompleteFunc
@@ -1273,7 +1273,7 @@ func (m *Mnemopi) Stats() string {
 
 // --- reflect + queue ---
 
-// Reflect is the synthesis pass: the recent facts go to the smol-role
+// Reflect is the synthesis pass: the recent facts go to the session-model
 // completion seam, and the (bounded) reply is stored as a reflection fact so
 // it is recallable afterwards.
 func (m *Mnemopi) Reflect(ctx context.Context, topic string) (Fact, error) {

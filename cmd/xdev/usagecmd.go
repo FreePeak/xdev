@@ -171,9 +171,11 @@ type usageProvider struct {
 	Auth    string `json:"auth"`
 	// Account names where the credential comes from; Masked is
 	// config.Redact of the credential itself, never the secret.
-	Account  string   `json:"account"`
-	Masked   string   `json:"masked,omitempty"`
-	Roles    []string `json:"roles,omitempty"`
+	Account string `json:"account"`
+	Masked  string `json:"masked,omitempty"`
+	// Models names the settings-level bindings this provider backs: the
+	// run model (defaultModel) and, when set, the reviewer (advisorModel).
+	Models   []string `json:"models,omitempty"`
 	Disabled bool     `json:"disabled,omitempty"`
 	OAuth    bool     `json:"oauth,omitempty"`
 }
@@ -204,7 +206,7 @@ func usageProviderInfo(name string, pc *config.ProviderConfig, settings *config.
 		API:      usageOrDefault(strings.TrimSpace(pc.API), "(api default)"),
 		BaseURL:  usageRedactURL(pc.BaseURL),
 		Auth:     usageOrDefault(strings.TrimSpace(pc.Auth), "api_key"),
-		Roles:    usageRolesFor(settings, name),
+		Models:   usageModelsFor(settings, name),
 		Disabled: settings.ProviderDisabled(name),
 		OAuth:    pc.OAuth != nil,
 	}
@@ -255,24 +257,27 @@ func usageAccount(name string, pc *config.ProviderConfig, auth string, store con
 	return usageOrDefault(res.Source, "none declared"), config.Redact(res.Value)
 }
 
-// usageRolesFor lists the @roles whose model ref belongs to this provider, so
-// "which account does @smol charge" is answerable from the same table. A role
-// that fails to resolve (an alias cycle, a missing target) is skipped: it
-// cannot name an account, and a report is no place to fail a run.
-func usageRolesFor(settings *config.Settings, provider string) []string {
-	if settings == nil || len(settings.ModelRoles) == 0 {
+// usageModelsFor names the settings-level model bindings that belong to this
+// provider, so "which account does the run model charge" is answerable from
+// the same table. An unset or unparseable ref is skipped: it cannot name an
+// account, and a report is no place to fail a run.
+func usageModelsFor(settings *config.Settings, provider string) []string {
+	if settings == nil {
 		return nil
 	}
 	var out []string
-	for _, role := range roleNamesSorted(settings.ModelRoles) {
-		rr, err := config.ResolveModelRef(settings, "@"+role)
-		if err != nil {
+	for _, b := range []struct{ label, ref string }{
+		{"defaultModel", settings.DefaultModel},
+		{"advisorModel", settings.AdvisorModel},
+	} {
+		ref := strings.TrimSpace(b.ref)
+		if ref == "" {
 			continue
 		}
-		if p, _, err := config.ParseModelRef(rr.Ref); err != nil || p != provider {
+		if p, _, err := config.ParseModelRef(ref); err != nil || p != provider {
 			continue
 		}
-		out = append(out, "@"+role)
+		out = append(out, b.label)
 	}
 	return out
 }
@@ -401,8 +406,8 @@ func usageText(r usageReport) string {
 				usageColProvider, truncate(p.Name, usageColProvider), usageColAPI, truncate(p.API, usageColAPI),
 				usageColBaseURL, truncate(p.BaseURL, usageColBaseURL), usageColAuth, truncate(p.Auth, usageColAuth),
 				account)
-			if len(p.Roles) > 0 {
-				fmt.Fprintf(&b, "    roles   %s\n", strings.Join(p.Roles, ", "))
+			if len(p.Models) > 0 {
+				fmt.Fprintf(&b, "    models  %s\n", strings.Join(p.Models, ", "))
 			}
 			if p.Disabled {
 				fmt.Fprintf(&b, "    status  disabled by settings (disabledProviders) — a run would refuse it\n")

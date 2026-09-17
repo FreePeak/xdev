@@ -34,12 +34,11 @@ type Pipeline struct {
 	// DataDir/sessions. Required.
 	DataDir string
 	// Complete is the phase-1 (extraction) model seam: prompt in, text out.
-	// The wiring point resolves a role (@smol, or @default for the issue's
-	// phase-1/`smol`-phase-2 split) and streams one response; nil (or an off
-	// backend) makes the whole pipeline a no-op.
+	// The wiring point resolves the session model and streams one response;
+	// nil (or an off backend) makes the whole pipeline a no-op.
 	Complete func(ctx context.Context, prompt string) (string, error)
 	// Consolidate is the phase-2 (consolidation) seam; nil falls back to
-	// Complete so a single-role wiring needs one func.
+	// Complete so a single-model wiring needs one func.
 	Consolidate func(ctx context.Context, prompt string) (string, error)
 
 	// MaxStarts caps how many sessions one run extracts (default 8).
@@ -286,7 +285,7 @@ func (p *Pipeline) extractSession(ctx context.Context, path string, prev session
 	return sessionState{findings: f, turns: turns}, true, nil
 }
 
-// consolidate is phase 2: one smol-role pass merging the extracted candidates
+// consolidate is phase 2: one model pass merging the extracted candidates
 // into MEMORY.md and appending the new lessons to learned.md, both through
 // the caps the injected summary already enforces.
 func (p *Pipeline) consolidate(ctx context.Context, all Findings, res *Result) error {

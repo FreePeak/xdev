@@ -37,10 +37,6 @@ type modelRow struct {
 	ContextWindow int    `json:"contextWindow,omitempty"`
 	MaxTokens     int    `json:"maxTokens,omitempty"`
 	Source        string `json:"source"` // pinned | discovered
-	// Roles lists the settings roles this model backs (default, smol, ...),
-	// resolved exactly the way resolveModel resolves them, so "@smol" in the
-	// table means the same thing as -model @smol.
-	Roles []string `json:"roles,omitempty"`
 	// Account is the masked credential source the model runs on.
 	Account string `json:"account,omitempty"`
 	// Default marks what a run uses without -model.
@@ -60,7 +56,7 @@ func modelsCmd(args []string, cfg *config.Config, settings *config.Settings, out
   xdev models --refresh       re-discover from the providers' list endpoints
 
 The catalog is what a run resolves through: models.yml pinning merged with live
-discovery (providers with a discovery: block), plus the modelRoles bindings.
+discovery (providers with a discovery: block).
 
 Flags:
 `)
@@ -102,33 +98,14 @@ Flags:
 
 // catalogRows resolves every provider's models through the shared helpers
 // (providerModels merges pinned + discovered, cached per process) and
-// attributes roles, accounts and the default marker.
+// attributes accounts and the default marker.
 func catalogRows(cfg *config.Config, settings *config.Settings) []modelRow {
 	if cfg == nil {
 		return nil
 	}
-	roleFor := map[string][]string{}
-	if settings != nil {
-		for _, role := range config.RoleNames {
-			rr, err := config.ResolveModelRef(settings, "@"+role)
-			if err != nil || rr.Ref == "" {
-				continue
-			}
-			label := role
-			if rr.Effort != "" {
-				label += ":" + rr.Effort
-			}
-			roleFor[rr.Ref] = append(roleFor[rr.Ref], label)
-		}
-	}
-	defaultRef := ""
-	if settings != nil {
-		if rr, err := config.ResolveModelRef(settings, ""); err == nil {
-			defaultRef = rr.Ref
-		}
-	}
-	if defaultRef == "" && cfg != nil {
-		defaultRef = cfg.DefaultModelRef()
+	defaultRef := cfg.DefaultModelRef()
+	if settings != nil && strings.TrimSpace(settings.DefaultModel) != "" {
+		defaultRef = strings.TrimSpace(settings.DefaultModel)
 	}
 
 	var rows []modelRow
@@ -148,7 +125,6 @@ func catalogRows(cfg *config.Config, settings *config.Settings) []modelRow {
 				ContextWindow: m.ContextWindow,
 				MaxTokens:     m.MaxTokens,
 				Source:        modelsSource(pc, m.ID),
-				Roles:         roleFor[ref],
 				Account:       account,
 				Default:       ref == defaultRef,
 			})
@@ -217,7 +193,7 @@ func modelsRender(rows []modelRow, cfg *config.Config, settings *config.Settings
 		b.WriteString("no models configured: add ~/.xdev/agent/models.yml (or run `xdev setup`)\n")
 	default:
 		b.WriteString("MODELS (resolved catalog)\n\n")
-		fmt.Fprintf(&b, "  %-12s %-22s %9s %8s %-11s %-16s %s\n", "PROVIDER", "MODEL", "WINDOW", "MAXOUT", "SOURCE", "ROLES", "ACCOUNT")
+		fmt.Fprintf(&b, "  %-12s %-22s %9s %8s %-11s %s\n", "PROVIDER", "MODEL", "WINDOW", "MAXOUT", "SOURCE", "ACCOUNT")
 		for _, r := range rows {
 			marker := ""
 			if r.Default {
@@ -227,10 +203,10 @@ func modelsRender(rows []modelRow, cfg *config.Config, settings *config.Settings
 			if r.Reasoning {
 				reason = "~"
 			}
-			fmt.Fprintf(&b, "  %-12s %-22s %9s %8s %-11s %-16s %s%s\n",
+			fmt.Fprintf(&b, "  %-12s %-22s %9s %8s %-11s %s%s\n",
 				truncate(r.Provider, 12), truncate(r.Model+reason, 22),
 				modelsNum(r.ContextWindow), modelsNum(r.MaxTokens), r.Source,
-				truncate(strings.Join(r.Roles, ","), 16), r.Account, marker)
+				r.Account, marker)
 		}
 		pinned, discovered := 0, 0
 		for _, r := range rows {
@@ -242,7 +218,7 @@ func modelsRender(rows []modelRow, cfg *config.Config, settings *config.Settings
 		}
 		fmt.Fprintf(&b, "\n  %d %s across %d %s (%d pinned, %d discovered)\n",
 			len(rows), modelsPlural(len(rows), "model"), modelsProviders(rows), modelsPlural(modelsProviders(rows), "provider"), pinned, discovered)
-		b.WriteString("  * default (what a run uses without -model); ~ reasoning model; ROLES are @role bindings\n")
+		b.WriteString("  * default (what a run uses without -model); ~ reasoning model\n")
 	}
 	if refreshed {
 		n := modelsDiscoveryProviders(cfg)

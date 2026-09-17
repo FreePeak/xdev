@@ -470,9 +470,9 @@ func deleteSessionByShortID(shortID, activePath string) error {
 // summarizeAndBranch moves the leaf to targetID and records the branch being
 // left as a branch_summary entry on the new branch (tree selector
 // Shift+Enter; navigateTree computes the target — a user row rewinds to its
-// parent). The branch_summary is generated on the cheap role when the branch
+// parent). The branch_summary is generated on the session model when the branch
 // carries enough context to be worth summarizing (the engine's own
-// threshold); every failure path — no role resolvable, provider error, empty
+// threshold); every failure path — no model resolvable, provider error, empty
 // answer, budget off — falls back to the fixed marker rather than failing the
 // switch (#83: the seam existed with no caller, so every summary was the
 // marker).
@@ -486,8 +486,8 @@ func summarizeAndBranch(store *session.Store, targetID string) error {
 // a tree switch the user just asked for.
 const branchSummaryBudget = 20 * time.Second
 
-// branchSummarizer resolves the summary role into a callable, or nil when the
-// feature is off or the role cannot be reached (nil = marker only).
+// branchSummarizer resolves the session model into a callable, or nil when
+// the feature is off or that model cannot be reached (nil = marker only).
 func branchSummarizer() agent.BranchSummarizer {
 	settings := lastSettings()
 	if settings != nil && !settings.BranchSummaryOn() {
@@ -498,35 +498,34 @@ func branchSummarizer() agent.BranchSummarizer {
 		logx.Debugf("branch summary: config unavailable: %v", err)
 		return nil
 	}
-	for _, ref := range []string{"@tiny", "@smol"} {
-		resolved, _, err := resolveModel(ref, cfg, settings)
-		if err != nil {
-			continue
-		}
-		pName, mName, err := config.ParseModelRef(resolved)
-		if err != nil {
-			continue
-		}
-		pc, ok := cfg.Providers[pName]
-		if !ok {
-			continue
-		}
-		prov, err := buildProvider(pName, pc, mName, cfg)
-		if err != nil {
-			logx.Debugf("branch summary: provider %s unavailable: %v", pName, err)
-			continue
-		}
-		maxTokens := settings.BranchSummaryReserveTokens()
-		return func(ctx context.Context, prompt string) (string, error) {
-			msg, err := ai.Complete(ctx, prov, mName, branchSummarySystem, prompt, maxTokens)
-			if err != nil {
-				return "", err
-			}
-			return strings.TrimSpace(msg.Text()), nil
-		}
+	resolved, _, err := resolveModel("", cfg, settings)
+	if err != nil {
+		logx.Debugf("branch summary: no model resolvable (%v), recording markers", err)
+		return nil
 	}
-	logx.Debugf("branch summary: no role resolvable (@tiny/@smol), recording markers")
-	return nil
+	pName, mName, err := config.ParseModelRef(resolved)
+	if err != nil {
+		logx.Debugf("branch summary: %v, recording markers", err)
+		return nil
+	}
+	pc, ok := cfg.Providers[pName]
+	if !ok {
+		logx.Debugf("branch summary: unknown provider %s, recording markers", pName)
+		return nil
+	}
+	prov, err := buildProvider(pName, pc, mName, cfg)
+	if err != nil {
+		logx.Debugf("branch summary: provider %s unavailable: %v, recording markers", pName, err)
+		return nil
+	}
+	maxTokens := settings.BranchSummaryReserveTokens()
+	return func(ctx context.Context, prompt string) (string, error) {
+		msg, err := ai.Complete(ctx, prov, mName, branchSummarySystem, prompt, maxTokens)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(msg.Text()), nil
+	}
 }
 
 // branchSummarySystem is the writer instruction for a branch note.

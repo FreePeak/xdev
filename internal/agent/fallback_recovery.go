@@ -198,9 +198,6 @@ func parseWindow(raw string) (time.Duration, bool) {
 // (M5 #25). The zero value is usable but inert; Agent.Fallback nil disables
 // every hook. Run is single-goroutine, so no lock is needed.
 type FallbackState struct {
-	// Role is the active model role ("" when the model was chosen
-	// literally); it keys role chains and is reported in notices.
-	Role string
 	// Reserve is the pre-turn usage policy; ReserveFraction the
 	// remaining-quota fraction that counts as near the limit.
 	Reserve         ReservePolicy
@@ -239,12 +236,11 @@ type FallbackState struct {
 
 // NewFallbackState builds the state from settings (nil settings → nil, the
 // feature off).
-func NewFallbackState(s *config.Settings, role string) *FallbackState {
+func NewFallbackState(s *config.Settings) *FallbackState {
 	if s == nil {
 		return nil
 	}
 	st := &FallbackState{
-		Role:            role,
 		Reserve:         ParseReservePolicy(s.ReservePolicy()),
 		ReserveFraction: s.ReserveFraction(),
 		Revert:          s.RevertPolicy(),
@@ -260,15 +256,15 @@ func NewFallbackState(s *config.Settings, role string) *FallbackState {
 // + cmd/xdev's provider construction assigns a.Failovers first) and then
 // sets the seams on the returned value:
 //
-//	st := ag.ArmFallback(settings, role)
+//	st := ag.ArmFallback(settings)
 //	st.Rotate = rotateCredential   // multi-key models.yml pool
 //	st.UsageProbe = usageHeader    // provider usage header
 //	st.Notify = app.notice         // TUI only
-func (a *Agent) ArmFallback(s *config.Settings, role string) *FallbackState {
+func (a *Agent) ArmFallback(s *config.Settings) *FallbackState {
 	if a == nil {
 		return nil
 	}
-	st := NewFallbackState(s, role)
+	st := NewFallbackState(s)
 	if st == nil {
 		return nil
 	}

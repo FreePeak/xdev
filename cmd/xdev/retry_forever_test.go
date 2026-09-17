@@ -25,7 +25,7 @@ func TestWireAgentModePropagatesInfiniteRetry(t *testing.T) {
 		{"off by default", &config.Settings{}, false},
 	} {
 		ag := &agent.Agent{Model: "m"}
-		wireAgentMode(ag, nil, &config.Config{}, tc.s, "", "p", "m", t.TempDir(), false)
+		wireAgentMode(ag, nil, &config.Config{}, tc.s, "p", "m", t.TempDir(), false)
 		if ag.Retry.Infinite != tc.want {
 			t.Errorf("%s: ag.Retry.Infinite = %v, want %v", tc.name, ag.Retry.Infinite, tc.want)
 		}

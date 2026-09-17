@@ -14,9 +14,9 @@ import (
 // Branch summaries (M5 #24): when the session branches away from a long
 // branch, the abandoned stretch is condensed into a branch_summary entry so
 // the model on the new branch knows what was tried. The text comes from the
-// smol role through a seam the call site wires — the same bounded-transcript,
+// run model through a seam the call site wires — the same bounded-transcript,
 // one-provider-call shape the memory pipeline already builds (cmd/xdev's
-// complete("@smol"), and the handoff document helper #23 exposes) — and a
+// complete(), and the handoff document helper #23 exposes) — and a
 // missing or failing seam records the fixed marker instead, because switching
 // branches must never depend on a model round-trip.
 const (
@@ -64,7 +64,7 @@ func (a *Agent) SummarizeBranch(ctx context.Context, targetID string, summarize 
 // summarize may be nil. When set, it is called only for a branch carrying
 // more than BranchSummaryMinTokens of context, is fed a bounded transcript,
 // and its answer is bounded too; any failure is logged and falls back to
-// the marker rather than failing the switch. An unresolvable smol role must
+// the marker rather than failing the switch. An unresolvable model must
 // be passed as nil for the same reason.
 func SummarizeBranchStore(ctx context.Context, store *session.Store, targetID string, summarize BranchSummarizer) error {
 	if store == nil {

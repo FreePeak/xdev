@@ -55,7 +55,7 @@ func TestModelsCatalogMergesPinnedAndDiscovered(t *testing.T) {
 	defer clear(providerModelCache)
 
 	cfg := modelsTestCatalog(t, srv.URL)
-	settings := &config.Settings{ModelRoles: map[string]string{"smol": "onegw/free", "commit": "local/qwen3"}}
+	settings := &config.Settings{DefaultModel: "onegw/free"}
 
 	rows := catalogRows(cfg, settings)
 	if len(rows) != 2 {
@@ -72,8 +72,8 @@ func TestModelsCatalogMergesPinnedAndDiscovered(t *testing.T) {
 	if free.Source != "pinned" || free.ContextWindow != 1000000 || free.MaxTokens != 65536 {
 		t.Fatalf("pinned row = %+v", free)
 	}
-	if len(free.Roles) != 1 || free.Roles[0] != "smol" || !free.Default {
-		t.Fatalf("role/default attribution = %+v", free)
+	if !free.Default {
+		t.Fatalf("default attribution = %+v", free)
 	}
 	if free.Account != "none (local server)" {
 		t.Fatalf("account = %q", free.Account)
@@ -84,9 +84,6 @@ func TestModelsCatalogMergesPinnedAndDiscovered(t *testing.T) {
 	}
 	if discovered.Source != "discovered" || discovered.ContextWindow != 32768 || discovered.MaxTokens != 8192 {
 		t.Fatalf("discovered row = %+v", discovered)
-	}
-	if len(discovered.Roles) != 1 || discovered.Roles[0] != "commit" {
-		t.Fatalf("discovered roles = %+v", discovered.Roles)
 	}
 	if discovered.Default {
 		t.Fatal("a non-default model was marked default")
@@ -116,7 +113,7 @@ func TestModelsCmdRefreshAndFilter(t *testing.T) {
 	defer clear(providerModelCache)
 
 	cfg := modelsTestCatalog(t, srv.URL)
-	settings := &config.Settings{ModelRoles: map[string]string{"smol": "onegw/free"}}
+	settings := &config.Settings{DefaultModel: "onegw/free"}
 
 	var out, errOut bytes.Buffer
 	if code := modelsCmd([]string{"qwen"}, cfg, settings, &out, &errOut); code != 0 {

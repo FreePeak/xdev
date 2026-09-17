@@ -65,24 +65,22 @@ const VibeDirectorPrompt = `You are in VIBE MODE: you are the director, workers 
 - Keep directing other workers while turns are in flight; call vibe_wait only when blocked. Route by difficulty: fast for mechanical execution and drafts, good for design, judgment, and review.
 - A settled turn is not a correct result: read the touched files and inspect the full output before claiming anything is done. Reconcile verified work in todo.`
 
-// VibeTier is one worker tier: the bundled agent it selects and the model
-// role it resolves through.
+// VibeTier is one worker tier: the bundled agent it selects.
 type VibeTier struct {
 	CLI   string // the vibe_spawn cli value
 	Agent string // bundled agent definition
-	Role  string // model role alias
 }
 
 // VibeTiers are the two tiers, fast first.
 var VibeTiers = []VibeTier{
-	{CLI: "fast", Agent: "sonic", Role: "@smol"},
-	{CLI: "good", Agent: "task", Role: "@task"},
+	{CLI: "fast", Agent: "sonic"},
+	{CLI: "good", Agent: "task"},
 }
 
 // VibeTierOf resolves a tier name; the bundled agent names work as aliases.
 func VibeTierOf(name string) (VibeTier, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "fast", "sonic", "smol":
+	case "fast", "sonic":
 		return VibeTiers[0], true
 	case "good", "task":
 		return VibeTiers[1], true
@@ -119,8 +117,8 @@ func vibeAgent(t VibeTier) AgentDefinition {
 }
 
 // VibeModel is the resolved provider/model for one tier. The host resolves
-// it (role alias → settings override → parent model fallback), so the agent
-// package stays free of config layering.
+// it (the session's live model), so the agent package stays free of config
+// layering.
 type VibeModel struct {
 	Provider ai.Provider
 	Model    string
@@ -224,8 +222,9 @@ type VibeConfig struct {
 	// Tools is the parent registry: the source of the director's read and
 	// todo tools, and the toolset restored on exit.
 	Tools *tool.Registry
-	// Resolve maps a tier's model role onto a provider/model.
-	Resolve func(role string) (*VibeModel, error)
+	// Resolve reports the provider/model a worker tier runs on (the
+	// session's live model).
+	Resolve func() (*VibeModel, error)
 	// Persist records a lifecycle event as a session custom entry.
 	Persist func(customType string, data map[string]any)
 	// ParentID stamps worker child sessions with the owning session id.
@@ -610,7 +609,7 @@ var (
 	vibeSpawnParams = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "cli": {"type": "string", "description": "worker tier: fast (sonic/@smol) or good (task/@task)"},
+    "cli": {"type": "string", "description": "worker tier: fast (sonic) or good (task)"},
     "prompt": {"type": "string", "description": "self-contained brief: goal, files, constraints, expected result"},
     "name": {"type": "string", "description": "short worker name (optional; an id is generated when omitted)"}
   },
@@ -892,17 +891,17 @@ func (v *VibeScope) deliver(job, msg string) error {
 	return v.cfg.Hub.Send(job, msg)
 }
 
-// model resolves a tier's role through the host resolver.
+// model resolves a tier's model through the host resolver.
 func (v *VibeScope) model(t VibeTier) (*VibeModel, error) {
 	if v.cfg.Resolve == nil {
 		return nil, fmt.Errorf("no model resolver wired")
 	}
-	m, err := v.cfg.Resolve(t.Role)
+	m, err := v.cfg.Resolve()
 	if err != nil {
 		return nil, err
 	}
 	if m == nil || m.Provider == nil {
-		return nil, fmt.Errorf("tier %s (%s): no provider resolved", t.CLI, t.Role)
+		return nil, fmt.Errorf("tier %s: no provider resolved", t.CLI)
 	}
 	return m, nil
 }

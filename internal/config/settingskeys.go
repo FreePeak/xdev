@@ -16,8 +16,8 @@ import (
 // point the user's real config had been moved out of the way.
 
 // settingsKeyOK reports whether a dotted key walks a real path in Settings.
-// Inside a map field (`modelRoles.<role>`, `proxyGroups.<name>`) any segment
-// is accepted: those key sets are open by design.
+// Inside a map field (`toolsApproval.<tool>`, `proxyGroups.<name>`) any
+// segment is accepted: those key sets are open by design.
 func settingsKeyOK(key string) bool {
 	parts := strings.Split(key, ".")
 	t := reflect.TypeOf(Settings{})

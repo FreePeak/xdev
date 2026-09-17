@@ -33,11 +33,8 @@ showThinking: true      # render reasoning output
 personality: default    # default | friendly | pragmatic | none
 memory: local           # local (MEMORY.md + learned.md under the data dir) | off | mnemopi | hindsight
 
-# Role aliases: "-model @smol", "@slow", "@task" resolve through this map.
-# modelRoles:
-#   smol: xdev-server/qwen3.8-flash
-#   slow: xdev-server/deepseek-v4.1-flash
-#   task: xdev-server/free
+# The reviewer used by the advisor and by task.agentAdvisor: "on".
+# advisorModel: xdev-server/deepseek-v4.1-flash
 `
 
 // setupModelsTemplate is the models.yml shape printed when no provider file

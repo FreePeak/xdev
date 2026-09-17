@@ -18,8 +18,8 @@ import (
 // and logs why; see prewalkGate.
 type Prewalk struct {
 	// Target is the resolved provider+model the run hands off to. Built
-	// by cmd from the --prewalk-into ref (default @smol); an unresolved
-	// target leaves the agent unarmed (nil Prewalk).
+	// by cmd from the --prewalk-into ref (default: the session model); an
+	// unresolved target leaves the agent unarmed (nil Prewalk).
 	Target FailoverTarget
 }
 

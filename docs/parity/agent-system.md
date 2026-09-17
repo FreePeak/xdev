@@ -54,7 +54,7 @@ xdev-broken vs xdev-intentional.
 | 23 | advisor | no `__advisor*.jsonl` transcript persistence → no Agent Hub advisor rows, no `omp stats`-style usage attribution, dump is memory-only | divergence | xdev-broken |
 | 24 | advisor | emission guard: FIFO 256 + note cap 400 vs omp 4096; content-free phrase list `{ok,lgtm,looks good,all good,fine,nothing to add}` missing omp's `stop/done/complete/no issue continue` | nit | xdev-broken |
 | 25 | advisor | `/advisor` lacks `configure` (WATCHDOG.yml editor; non-TUI hosts report TUI-only in omp) | nit | xdev-intentional |
-| 26 | advisor | verified good: `modelRoles.advisor` resolution (unresolved → warn + disarm), `advisorImmuneTurns` default 3, WATCHDOG.md injected as `Especially pay attention to:\n<attention>…</attention>` (8KB cap) **including child advisors**, `taskAgentAdvisor: on/off/<model>` (advisor provider round-trip observed against the child's delta), WATCHDOG.yml roster plumbing (code-verified; roster fan-out not behaviorally exercised) | ok | — |
+| 26 | advisor | verified good: `modelRoles.advisor` resolution (unresolved → warn + disarm; **that key is now `advisorModel`** — the role aliases were removed 2026-09-17, see `docs/parity-delta.md`), `advisorImmuneTurns` default 3, WATCHDOG.md injected as `Especially pay attention to:\n<attention>…</attention>` (8KB cap) **including child advisors**, `taskAgentAdvisor: on/off/<model>` (advisor provider round-trip observed against the child's delta), WATCHDOG.yml roster plumbing (code-verified; roster fan-out not behaviorally exercised) | ok | — |
 | 27 | plan mode | headless `-plan` **auto-accepts the first proposal**: `propose` → `plan accepted (no reviewer wired) — plan mode off; implement it now` (planmode.go:86-90). The read-only guarantee is void in print runs and `--plan-yolo` becomes meaningless (both paths auto-approve) | bug | xdev-broken |
 | 28 | plan mode | full toolset (incl. `write`/`edit`/`bash`/`task`) still advertised while planning; denial happens per call. omp plan mode restricts the toolset (subagents: `read/grep/glob/web_search` + declared `ast_grep`) | divergence | xdev-broken (wasted turns) |
 | 29 | plan mode | exit tool named `propose` (+ `xd://propose`/`xd://resolve` devices) vs omp `resolve` | divergence | xdev-intentional (naming) |
@@ -111,6 +111,7 @@ grep -n "buildAdvisor" cmd/xdev/print.go        # defined, never called; only tu
 
 # 22 child-advisor note dropped
 #    config: modelRoles.advisor + taskAgentAdvisor: "on"; script: task spawn →
+#    (historical key: the advisor model is settings.advisorModel now)
 #    advisor rule answers advise(concern) after the child yielded
 #    → "advise delivered" in advisor turn; no steering text in any later request
 
@@ -131,6 +132,8 @@ xdev -max-turns 3 "probe goal" ; analyze requests
 #    a print/RPC/ACP run (GoalContinuation off) ends at the plan-only yield
 
 # 36 prewalk gate (config: modelRoles.smol: mock/m2; -prewalk)
+#    (historical key: prewalk.into takes a plain ref now; both roles resolved to
+#     their own model here, which the removal no longer allows)
 #    todo init P1/[task] then write → request models: m1, m1, m2 (switch after the write)
 #    write without any todo → all requests m1
 
