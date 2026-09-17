@@ -1005,33 +1005,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("· context cleared — history kept on disk")
 			return nil
 		},
-		Recent: func() []tui.ResumeOption {
-			metas, err := session.List(sessionDataDir())
-			if err != nil {
-				return nil
-			}
-			out := make([]tui.ResumeOption, 0, 12)
-			for _, m := range metas {
-				if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent || m.ID == store.ID() {
-					continue
-				}
-				// The status closes the detail so the row says what happened to
-				// the session (#107) before the user resumes it.
-				detail := m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04")
-				if m.Status != "" {
-					detail += " · " + string(m.Status)
-				}
-				out = append(out, tui.ResumeOption{
-					ID:     m.ID,
-					Title:  m.Title,
-					Detail: detail,
-				})
-				if len(out) >= 12 {
-					break
-				}
-			}
-			return out
-		},
+		Recent: func() []tui.ResumeOption { return recentResumeOptions(cwd, store.ID()) },
 		Drop: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
@@ -2336,6 +2310,32 @@ func sameModelRef(a, b string) bool {
 		return s
 	}
 	return a != "" && strip(a) == strip(b)
+}
+
+// recentResumeOptions lists this folder's resumable sessions for the
+// no-argument /resume picker: subagent children and the live session are
+// filtered out (nothing to resume onto), newest first. No row cap — the
+// picker windows and scrolls its own list, so a cap here was the list's
+// real length (12 was the whole of it).
+func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
+	metas, err := session.List(sessionDataDir())
+	if err != nil {
+		return nil
+	}
+	out := make([]tui.ResumeOption, 0, len(metas))
+	for _, m := range metas {
+		if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent || m.ID == currentID {
+			continue
+		}
+		// The status closes the detail so the row says what happened to
+		// the session (#107) before the user resumes it.
+		detail := m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04")
+		if m.Status != "" {
+			detail += " · " + string(m.Status)
+		}
+		out = append(out, tui.ResumeOption{ID: m.ID, Title: m.Title, Detail: detail})
+	}
+	return out
 }
 
 // resumePickerItems lists resumable sessions as picker rows across ALL
