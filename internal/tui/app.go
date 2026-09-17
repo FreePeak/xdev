@@ -1597,6 +1597,7 @@ func (a *App) Run() {
 			return
 		case ev := <-a.keyq:
 			a.handleKey(ev)
+			a.drainKeys()
 			a.draw()
 		case <-a.dirty:
 			a.draw()
@@ -1641,6 +1642,30 @@ func (a *App) Run() {
 			if running || animate || stuck {
 				a.draw()
 			}
+		}
+	}
+}
+
+// keyBurst bounds how many already-queued input events one drain applies before
+// the loop paints. A burst (a wheel flick, a held key, a paste) arrives faster
+// than a frame paints, and drawing once per event queued a whole burst of
+// frames ahead of whatever the user typed next — 600 wheel notches became ~900
+// Show() calls, and the keystroke behind them waited a flush per queued event
+// (~200 ms at 4 ms/frame: the "type after scrolling and the box lags" report).
+// Every event is still applied, in order, so no chord or paste marker is
+// dropped; only the redundant frames go. The budget lets a continuous stream
+// (a held key) still reach the screen.
+const keyBurst = 256
+
+// drainKeys applies the input already waiting in keyq, so a burst costs one
+// frame instead of one per event.
+func (a *App) drainKeys() {
+	for range keyBurst {
+		select {
+		case ev := <-a.keyq:
+			a.handleKey(ev)
+		default:
+			return
 		}
 	}
 }
