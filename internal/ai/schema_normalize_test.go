@@ -38,6 +38,53 @@ func TestSanitizeSchemaForOpenAIResponses(t *testing.T) {
 	}
 }
 
+// TestSanitizeSchemaForOpenAIResponsesRetypesRootUnions pins the live 400
+// (xAI grok, 2026-09-17): a root object with anyOf[{required:[...]}] is
+// rejected until every branch declares type "object". Nested unions and
+// mixed-type unions stay as the tool wrote them.
+func TestSanitizeSchemaForOpenAIResponsesRetypesRootUnions(t *testing.T) {
+	ask := json.RawMessage(`{
+		"type":"object",
+		"properties":{"question":{"type":"string"},"questions":{"type":"array"}},
+		"anyOf":[{"required":["question"]},{"required":["questions"]}]
+	}`)
+	got := decodeJSON(t, SanitizeSchemaForOpenAIResponses(ask))
+	branches, _ := got["anyOf"].([]any)
+	if len(branches) != 2 {
+		t.Fatalf("anyOf = %v, want both branches kept", got["anyOf"])
+	}
+	for i, b := range branches {
+		obj, _ := b.(map[string]any)
+		if obj["type"] != "object" {
+			t.Fatalf("branch %d = %v, want type object (the 400 is an untyped root union)", i, b)
+		}
+		if _, has := obj["required"]; !has {
+			t.Fatalf("branch %d dropped required: %v", i, b)
+		}
+	}
+
+	nested := json.RawMessage(`{"type":"object","properties":{"choice":{"anyOf":[{"required":["a"]},{"required":["b"]}]}}}`)
+	n := decodeJSON(t, SanitizeSchemaForOpenAIResponses(nested))
+	props, _ := n["properties"].(map[string]any)
+	choice, _ := props["choice"].(map[string]any)
+	inner, _ := choice["anyOf"].([]any)
+	if len(inner) != 2 {
+		t.Fatalf("nested anyOf = %v", choice)
+	}
+	first, _ := inner[0].(map[string]any)
+	if _, has := first["type"]; has {
+		t.Fatalf("nested branch was retyped: %v", first)
+	}
+
+	mixed := json.RawMessage(`{"type":"object","anyOf":[{"type":"string"},{"required":["x"]}]}`)
+	m := decodeJSON(t, SanitizeSchemaForOpenAIResponses(mixed))
+	mb, _ := m["anyOf"].([]any)
+	untyped, _ := mb[1].(map[string]any)
+	if _, has := untyped["type"]; has {
+		t.Fatalf("mixed union must stay mixed, got %v", m["anyOf"])
+	}
+}
+
 // TestSanitizeSchemaForOpenAIResponsesKeepsPatterns pins that a pattern with no
 // lookaround (and escapes, classes) survives byte-for-byte.
 func TestSanitizeSchemaForOpenAIResponsesKeepsPatterns(t *testing.T) {
