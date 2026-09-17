@@ -236,11 +236,33 @@ ride the same approval policy, hooks and output sinks as the built-ins.
 ## Configuration & credentials
 
 Everything lives under `~/.xdev/agent/` — `config.yml`, `models.yml`,
-`credentials.json`, `sessions/`, `agents/`, `commands/`, `themes/` — layered
+`credentials.json`, `sessions/`, `agents/`, `commands/`, `themes/`, `hooks/`,
+`skills/` — layered
 schema defaults → user file → `<project>/.xdev/config.yml` → `-config` overlays,
 and readable with `xdev config list|get|path`. Only the user layer is editable
 through `xdev config set`; project files stay hand-written, because a repository
 that can set your settings is how leaks start.
+
+### What is loaded into the prompt, and when
+
+Two kinds of file reach the system prompt on **every** turn, and a third does not.
+Put a convention in the first two if it must hold every time; recall is a ranked
+search over the last message and will miss.
+
+| Surface | Paths | When it applies |
+|---|---|---|
+| Context files | `~/.xdev/agent/AGENTS.md` **first**, then `AGENTS.md` (or `CLAUDE.md`) walking root→cwd, plus any `--add-dir` root and `@path` imports | all of it, every turn, authoritative — 32 KB cap |
+| Rules | `<repo>/RULES.md` and `~/.xdev/agent/RULES.md` (native, `alwaysApply`), `.cursor/rules/*.mdc`, `.windsurf/rules`, `.clinerules`, `.agent/rules`/`.agents/rules`, Copilot instructions, installed plugins | matching rules, every turn; first source to claim a name wins |
+| Skills | `<cwd>/.xdev/skills/`, `~/.xdev/agent/skills/`, `~/.xdev/agent/managed-skills/`, plus `skills.customDirectories` | by model invocation or `/skill:<name>` |
+| Slash commands | `<cwd>/.xdev/commands/*.md`, `~/.xdev/agent/commands/*.md` | when you type `/<name>`; project wins a collision |
+| Subagents | `<cwd>/.xdev/agents/`, `~/.xdev/agent/agents/` | when dispatched by the `task` tool |
+| **Recall (memory guidance)** | the configured backend (`memory: hindsight` → a bank over HTTP) | **ranked against the last user turn only, cached 60 s, capped at 1024 tokens, and labelled "not authoritative"** |
+
+So a "never do X" rule that only exists as a memory row is not policy: it competes
+for 4 KB with everything else the bank knows, and the block tells the model to
+weigh it. Write it to `AGENTS.md` (habits that span repos) or `RULES.md` (must
+apply even where a same-named rule exists). The full measurement behind this is in
+[docs/decisions/standing-conventions-location.md](docs/decisions/standing-conventions-location.md).
 
 `credentials.json` is written `0600` and **re-verified on every read** — mode
 `0600` and `nlink == 1`, because a write-time chmod says nothing about the file
