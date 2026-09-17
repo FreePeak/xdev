@@ -75,16 +75,14 @@ type ResumeOption struct {
 
 // ModelOps wires the /model command to the live provider state (lives in
 // cmd). Current reports the active ref; Views builds the selector's tabs
-// (roles + one per provider); Models returns the flat model catalog the
-// role-assignment step picks from; Set switches the active model for
-// subsequent turns; SetRole persists modelRoles.<role>. nil ops degrade the
-// command to a notice.
+// (one per provider); Models returns the flat model catalog; Set switches
+// the active model for subsequent turns. nil ops degrade the command to a
+// notice.
 type ModelOps struct {
 	Current func() string
 	Views   func() []PickerView
 	Models  func() []PickerItem
 	Set     func(ref string) error
-	SetRole func(role, ref string) error
 	// Cycle advances through --models patterns (omp Ctrl+P).
 	// ok=false when cycling is not configured (the chord stays
 	// menu-prev in that case).
@@ -426,7 +424,7 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
 		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
 			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
-		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default @smol)",
+		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default: the session model)",
 			Fn: func(app CommandAPI, args string) error { return app.Prewalk(args) }},
 		{Name: "handoff", Description: "replace the context with a handoff document (continues from it)",
 			Fn: func(app CommandAPI, args string) error { return app.Handoff(args) }},
@@ -471,7 +469,7 @@ func builtinCommands() []Command {
 // Handoff implements CommandAPI: /handoff [instruction] hands the live
 // context off to a generated document (M5 #23). The document generation, the
 // compaction-entry commit, and the per-branch reset all live in cmd (the
-// store, the @smol role, and the advisor are wired there); this surfaces the
+// store, the session model, and the advisor are wired there); this surfaces the
 // result — including the document itself, which is the point of the command.
 func (a *App) Handoff(args string) error {
 	if a.ops == nil || a.ops.Handoff == nil {

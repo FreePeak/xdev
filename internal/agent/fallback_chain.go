@@ -14,13 +14,11 @@ import (
 // Keys and entries share one grammar:
 //
 //	onegw/free            exact model selector (key) / literal ref (entry)
-//	smol                  role name (key comes from the active role)
 //	onegw/*               provider wildcard: swap provider, keep the id
 //	openrouter/google/*   provider + id prefix: re-prefix the failing id
-//	@slow                 role reference (entry only)
 //
-// Resolution specificity: exact model key → role key → provider wildcard →
-// the caller's existing models.yml outage chain.
+// Resolution specificity: exact model key → provider wildcard → the
+// caller's existing models.yml outage chain.
 
 // ChainTarget is one resolved fallback as a model ref plus the metadata the
 // chain needs to order itself. Provider construction (HTTP client,
@@ -94,14 +92,14 @@ func ChainTargets(ts []FailoverTarget) []ChainTarget {
 // in the winning chain is unusable — the caller's existing chain is
 // returned unchanged: an explicit chain must never leave a session with
 // fewer failover targets than it had.
-func ResolveFallbackChain(s *config.Settings, role, provider, model string, cat ChainCatalog, existing []ChainTarget) []ChainTarget {
-	entries, ok := fallbackChainEntries(s, role, provider, model)
+func ResolveFallbackChain(s *config.Settings, provider, model string, cat ChainCatalog, existing []ChainTarget) []ChainTarget {
+	entries, ok := fallbackChainEntries(s, provider, model)
 	if !ok {
 		return dedupeTargets(existing, provider, model)
 	}
 	out := make([]ChainTarget, 0, len(entries))
 	for _, e := range entries {
-		t, ok := expandChainEntry(s, e, provider, model, cat)
+		t, ok := expandChainEntry(e, provider, model, cat)
 		if !ok {
 			logx.Errorf("retry.fallbackChains: entry %q for %s/%s resolves to no model", e, provider, model)
 			continue
@@ -116,21 +114,15 @@ func ResolveFallbackChain(s *config.Settings, role, provider, model string, cat 
 }
 
 // fallbackChainEntries returns the winning chain for the active model in
-// specificity order: exact model key ("provider/model", then the bare id so
-// a chain survives a role reassignment), role key, provider wildcard
-// (longest prefix first).
-func fallbackChainEntries(s *config.Settings, role, provider, model string) ([]string, bool) {
+// specificity order: exact model key ("provider/model", then the bare id),
+// provider wildcard (longest prefix first).
+func fallbackChainEntries(s *config.Settings, provider, model string) ([]string, bool) {
 	if s == nil || len(s.Retry.FallbackChains) == 0 {
 		return nil, false
 	}
 	chains := s.Retry.FallbackChains
 	for _, key := range []string{provider + "/" + model, model} {
 		if e := chains[key]; len(e) > 0 {
-			return e, true
-		}
-	}
-	if role != "" {
-		if e := chains[role]; len(e) > 0 {
 			return e, true
 		}
 	}
@@ -171,21 +163,16 @@ func providerPrefixKey(key, provider string) (string, bool) {
 //	                   against that provider's catalog)
 //	openrouter/g/*     the failing id re-prefixed; the bare id is the
 //	                   fallback when the target lacks the prefixed one
-//	@role              the role's configured model, expanded as above
 //	onegw/dev          a literal ref, still fuzzy-resolved so a
 //	                   near-miss name points at a real model
-func expandChainEntry(s *config.Settings, entry, provider, model string, cat ChainCatalog) (ChainTarget, bool) {
+//
+// A "@role" alias is not a model ref: model-role aliases were removed, so the
+// entry fails the provider/model shape below and is reported by the caller
+// like any other unresolvable entry (with a message that names the removal).
+func expandChainEntry(entry, provider, model string, cat ChainCatalog) (ChainTarget, bool) {
 	entry = strings.TrimSpace(entry)
 	if entry == "" {
 		return ChainTarget{}, false
-	}
-	if strings.HasPrefix(entry, "@") {
-		ref, err := config.ResolveModelRef(s, entry)
-		if err != nil {
-			logx.Errorf("retry.fallbackChains: %v", err)
-			return ChainTarget{}, false
-		}
-		entry = ref.Ref
 	}
 	prov, rest, ok := strings.Cut(entry, "/")
 	if !ok || strings.TrimSpace(prov) == "" {

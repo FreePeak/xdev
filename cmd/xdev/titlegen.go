@@ -15,13 +15,13 @@ import (
 // Ai-title cascade (M10 #32 consumer, parity finding #107).
 //
 // The session title used to be purely mechanical ("print 2026-09-13 04:10"),
-// which made /resume a list of timestamps. This asks a cheap role model for a
+// which made /resume a list of timestamps. This asks the session model for a
 // few-word title over the first exchange, using TITLE_SYSTEM.md as the system
 // prompt when the host ships one (the file was discovered and exposed via
 // agent.SystemPromptOverrides.TitleSystemPrompt() with no consumer at all).
 //
 // It is best-effort by design: a title is a nicety, so every failure path
-// (unresolvable role, provider error, timeout, unusable answer) logs at debug
+// (unresolvable model, provider error, timeout, unusable answer) logs at debug
 // and leaves the mechanical title standing. A user's /rename always wins —
 // see shouldGenerateTitle.
 
@@ -33,17 +33,9 @@ const (
 	titleMaxRunes   = 48
 )
 
-// titleRoles is the cascade, cheapest first. @tiny is the shipped role for
-// one-word jobs; @smol and the session model are the fallbacks so a host with
-// fewer roles configured still gets a real title.
-var titleRoles = []string{"@tiny", "@smol"}
-
-// sessionModelRef is the cascade's last resort. Roles have no built-in
-// mapping — a plain models.yml with only `defaultModel` resolves neither
-// @tiny nor @smol — so without this the title generator never fires out of
-// the box and every listing stays "print <timestamp>". One 32-token request
-// against the model already running the session is a fair price for that;
-// the cost warning lives in the prompt (titleMaxTokens).
+// The title request runs on the session's own model: a one-line job on an
+// already-warm provider, one 32-token request, and the cost warning lives in
+// the prompt (titleMaxTokens).
 
 // shouldGenerateTitle reports whether the session wants a generated title:
 // never for a subagent (its title marks the parent), never over a manual
@@ -94,7 +86,7 @@ func generateTitle(cfg *config.Config, settings *config.Settings, cwd, provider,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), titleRequestCap)
 	defer cancel()
-	targets := append(append([]string{}, titleRoles...), sessionModelRef(provider, model))
+	targets := []string{sessionModelRef(provider, model)}
 	for _, ref := range targets {
 		if ref == "" {
 			continue // no live session model to fall back to
@@ -174,7 +166,7 @@ func titleSeed(history []ai.Message) (string, string) {
 	return firstUser, lastAssistant
 }
 
-// titleProvider resolves one role reference into a usable provider.
+// titleProvider resolves one model reference into a usable provider.
 func titleProvider(cfg *config.Config, settings *config.Settings, ref string) (ai.Provider, string, error) {
 	resolved, _, err := resolveModel(ref, cfg, settings)
 	if err != nil {

@@ -130,10 +130,10 @@ xdev acp                                        # ACP server on stdio, for edito
 ```
 
 `xdev --help` lists every launch flag. The flags an omp user expects
-(`-p/-c/-r/-e`, `--approval-mode`, `--smol/--slow/--plan-model`, `--models`,
-`--provider`, `--add-dir`, `--no-prewalk`, `--plugin-dir`) are accepted with the
-same meanings; [docs/parity-delta.md](docs/parity-delta.md) records every
-deliberate difference.
+(`-p/-c/-r/-e`, `--approval-mode`, `--models`, `--provider`, `--add-dir`,
+`--no-prewalk`, `--plugin-dir`) are accepted with the same meanings;
+[docs/parity-delta.md](docs/parity-delta.md) records every deliberate
+difference.
 
 ## Terminal UI
 
@@ -195,7 +195,7 @@ the transcript.
 | `/new` `/fresh` `/clear` `/drop` | start over, rotate provider state, reset context in place, delete the session file |
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
-| `/model [@role\|ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/model [ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
@@ -269,7 +269,7 @@ xdev update                          # verify SHA256SUMS, then replace this bina
 xdev update --channel canary         # pre-release tags (v0.2.0-canary.1)
 xdev update job install              # a twice-daily release check (launchd / systemd)
 xdev update job status               # what it last found, and whether it is installed
-xdev bench --turns 5 --model @smol   # TTFT + decode p50/p95 through your provider
+xdev bench --turns 5 --model onegw/free   # TTFT + decode p50/p95 through your provider
 xdev stats --serve                   # usage dashboard over the local session store
 xdev usage                           # which accounts are configured + what you spent locally
 ```
@@ -394,7 +394,7 @@ renderer over tcell), `config` (layering + the credential chain), and `dist`
 Milestones M0–M15 are landed (2026-09-09 → 2026-09-12): the provider layer and
 its eight transports, the session core, the agent loop and four tools, the TUI,
 compaction and failover, RPC + subagents + MCP, the memory-hardening audit
-(fuzzers, six-platform cross-builds), model roles and auth, session UX, the
+(fuzzers, six-platform cross-builds), model resolution and auth, session UX, the
 agent system (task agents, hub, hooks, advisor, prewalk, plan mode), memory and
 skills, the extended tool set, and the v2 modes (vibe, collab, ACP, profiles,
 `/export` + `/share`, goal mode). The distribution surface — the installer,

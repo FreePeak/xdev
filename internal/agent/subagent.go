@@ -47,7 +47,7 @@ type SubagentSpec struct {
 	// its result is not a child, it is a hang.
 	Policy  tool.ApprovalPolicy
 	Approve ApprovalFunc
-	// Thinking inherits the parent's resolved role effort.
+	// Thinking inherits the parent's resolved effort.
 	Thinking *ai.ThinkingBudget
 	// OnRun (optional) receives the live child Agent just before its run
 	// starts — the hub uses it to expose steering to the parent session.

@@ -34,7 +34,8 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		return 2, err
 	}
 	// The request-side thinking level: --thinking wins, else the persisted
-	// `thinking` key, else the role's own ":effort".
+	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
+	// "auto" branch).
 	if effortRef, err = applyThinkingFlag(thinkingLevel(lastSettings(), launch.Thinking), effortRef); err != nil {
 		return 2, err
 	}
@@ -83,11 +84,11 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 		Policy:     agentPolicy(),
-		Failovers:  failoverChain(cfg, lastSettings(), modelRoleRef(opts.Model), provName, modelName),
+		Failovers:  failoverChain(cfg, lastSettings(), provName, modelName),
 		Thinking:   effortBudget(effortRef),
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
-	wireAgentMode(h.agent, reg, cfg, lastSettings(), modelRoleRef(opts.Model), provName, modelName, cwd, false)
+	wireAgentMode(h.agent, reg, cfg, lastSettings(), provName, modelName, cwd, false)
 	// #90: mailbox arrivals become follow-ups in this session's agent (one
 	// long-lived agent per RPC process, so no indirection is needed).
 	setInboxSink(func(m agent.Message) bool {
@@ -251,7 +252,7 @@ func (h *rpcHandler) State() protocol.State {
 
 func (h *rpcHandler) SetModel(ref string) error {
 	// Route through the shared resolver so RPC accepts what the flag and
-	// /model accept (bare ids, @role aliases, :effort) and a bad id fails
+	// /model accept (bare ids, provider/model refs, :effort) and a bad id fails
 	// here instead of 404ing on the next turn.
 	resolved, _, err := resolveModel(ref, h.cfg, lastSettings())
 	if err != nil {
@@ -278,7 +279,7 @@ func (h *rpcHandler) SetModel(ref string) error {
 	h.agent.Provider = prov
 	h.agent.Model = modelName
 	h.agent.Compaction = agent.CompactionConfig{ContextWindow: modelWindow(h.cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())}
-	h.agent.Failovers = failoverChain(h.cfg, lastSettings(), "", provName, modelName)
+	h.agent.Failovers = failoverChain(h.cfg, lastSettings(), provName, modelName)
 	// Children must spawn on the current model, not the one captured at
 	// startup.
 	if t, ok := h.reg.Get(agent.TaskToolName); ok {
@@ -286,7 +287,7 @@ func (h *rpcHandler) SetModel(ref string) error {
 			tt.Provider, tt.Model = prov, modelName
 		}
 	}
-	// Persist the RESOLVED ref: a raw "@smol" alias in the session log
+	// Persist the RESOLVED ref: a bare id in the session log
 	// would not resolve on resume (print/tui already store provider/model).
 	_ = h.store.Append(&session.ModelChangeEntry{Model: provName + "/" + modelName})
 	return nil

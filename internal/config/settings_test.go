@@ -28,9 +28,9 @@ func TestSettingsLayerPrecedence(t *testing.T) {
 theme: groknight
 approvalMode: write
 maxTurns: 50
-modelRoles:
-  default: onegw/free
-  smol: onegw/tiny
+toolsApproval:
+  bash: allow
+  read: prompt
 disabledProviders: [bedrock]
 `)
 	// The repository layer sticks to what a clone may choose (#114); the
@@ -40,8 +40,8 @@ theme: grokday
 `)
 	overlay := writeFile(t, filepath.Join(t.TempDir(), "extra.yml"), `
 maxTurns: 7
-modelRoles:
-  smol: onegw/dev
+toolsApproval:
+  read: deny
 `)
 
 	s, err := LoadSettings(cwd, []string{overlay})
@@ -58,8 +58,8 @@ modelRoles:
 	if s.MaxTurns != 7 {
 		t.Errorf("overlay should win maxTurns: %d", s.MaxTurns)
 	}
-	if s.ModelRoles["default"] != "onegw/free" || s.ModelRoles["smol"] != "onegw/dev" {
-		t.Errorf("modelRoles must merge per key: %v", s.ModelRoles)
+	if s.ToolsApproval["bash"] != "allow" || s.ToolsApproval["read"] != "deny" {
+		t.Errorf("toolsApproval must merge per key: %v", s.ToolsApproval)
 	}
 	// Defaults still show through where nothing set them.
 	if s.MemoryLimit != 100<<20 {
@@ -224,6 +224,44 @@ func TestBrokenConfigIsPreserved(t *testing.T) {
 	}
 }
 
+// TestLegacyModelRolesMigrates: the model-role aliases were removed, so a
+// config.yml that still carries modelRoles must not be renamed to
+// .broken-<stamp> on the next start — the one binding that meant something
+// (the model a run uses) becomes defaultModel and the file keeps loading.
+func TestLegacyModelRolesMigrates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := writeFile(t, GlobalSettingsPath(), "modelRoles:\n  default: onegw/free\n  smol: onegw/tiny\nshowThinking: true\n")
+	s, err := LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("a legacy modelRoles block must still load: %v", err)
+	}
+	if s.DefaultModel != "onegw/free" {
+		t.Fatalf("defaultModel = %q, want the migrated modelRoles.default", s.DefaultModel)
+	}
+	if !s.ShowThinkingOn() {
+		t.Fatal("the rest of the file was dropped with the migration")
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("the user's file must stay where it is: %v", statErr)
+	}
+	ents, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".broken-") {
+			t.Fatalf("a migrated file was treated as broken: %v", e.Name())
+		}
+	}
+	// An alias target is not a model ref: it is dropped, not forwarded.
+	writeFile(t, GlobalSettingsPath(), "modelRoles:\n  default: \"@smol\"\n")
+	s, err = LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("an alias-valued modelRoles must still load: %v", err)
+	}
+	if s.DefaultModel != "" {
+		t.Fatalf("defaultModel = %q, want empty (an alias is not a ref)", s.DefaultModel)
+	}
+}
+
 func TestSettingsAbsentFilesAreNotErrors(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, err := LoadSettings(t.TempDir(), []string{"/nope/missing.yml"})
@@ -240,7 +278,7 @@ func TestSetGetRoundTrip(t *testing.T) {
 	for _, kv := range [][2]string{
 		{"theme", "grokday"},
 		{"maxTurns", "42"},
-		{"modelRoles.smol", "onegw/dev"},
+		{"toolsApproval.smol", "allow"},
 		{"disabledProviders", "bedrock,vertex"},
 	} {
 		if err := Set(path, kv[0], kv[1]); err != nil {
@@ -256,7 +294,7 @@ func TestSetGetRoundTrip(t *testing.T) {
 	if strings.Contains(body, `maxTurns: "42"`) {
 		t.Fatalf("numbers must not be quoted:\n%s", body)
 	}
-	if !strings.Contains(body, "modelRoles:") || !strings.Contains(body, "smol: onegw/dev") {
+	if !strings.Contains(body, "toolsApproval:") || !strings.Contains(body, "smol: allow") {
 		t.Fatalf("dotted key did not nest:\n%s", body)
 	}
 	// Load the written file as the only overlay (defaults still apply).
@@ -442,16 +480,13 @@ func TestListRendersTheEnforcedSurface(t *testing.T) {
 		{
 			name: "enforced groups: sorted by key, hooks as a count",
 			s: &Settings{
-				ModelRolesEffort: map[string]string{"smol": "low", "advisor": "high"},
-				ToolsApproval:    map[string]string{"read": "allow", "bash": "prompt", "write": "allow"},
-				BashPatterns:     []string{"deny:rm -rf *", "allow:ls"},
-				Hooks:            map[string]any{"post-tool": "secret-hook-body"},
+				ToolsApproval: map[string]string{"read": "allow", "bash": "prompt", "write": "allow"},
+				BashPatterns:  []string{"deny:rm -rf *", "allow:ls"},
+				Hooks:         map[string]any{"post-tool": "secret-hook-body"},
 			},
 			want: []string{
 				"theme ", "approvalMode ", "maxTurns 0", "memoryLimit 0",
 				"showThinking true", "advisor false", "memory off",
-				"modelRolesEffort.advisor high",
-				"modelRolesEffort.smol low",
 				"toolsApproval.bash prompt",
 				"toolsApproval.read allow",
 				"toolsApproval.write allow",

@@ -39,12 +39,11 @@ drift) plus the authoritative `cli-reference.md`. Method: mechanical surface dif
 | `-h`, `--version`, `-v` | **added** | `-h` exits 0; `--version`/`-v` print and exit before any run |
 | `--yolo` | **added** | alias of `--auto-approve` |
 | `--approval-mode <always-ask\|write\|yolo>` | **added** | validated override of `settings.ApprovalMode` (unknown value = settings stand) |
-| `--smol <id>`, `--slow <id>` | **added** | per-run `settings.ModelRoles[smol\|slow]` override |
-| `--plan-model <id>` | **added** | the @plan role. **Collision kept:** xdev's `--plan` stays read-only plan *mode*; omp's `--plan <model>` role override is spelled `--plan-model` |
+| `--smol <id>`, `--slow <id>`, `--plan-model <id>` | **removed (2026-09-17)** | they were per-run writes into `settings.ModelRoles`, which no longer exists. `-model <ref>` is the one per-run model override; use it with `--prewalk-into` (which takes a plain ref) where a second model is genuinely needed |
 | `--models <a,b,c>` | **added (retyped)** | `settings.Models.Cycle` + Ctrl+P cycling (was a bool that printed the catalog; the catalog is the `models` subcommand, as in omp) |
 | `--provider <name>` | **added** | forces the provider when the model ref names none; unknown provider fails fast |
 | `--no-prewalk` | **added** | beats `--prewalk` and `settings.Prewalk.Enabled` |
-| `--prewalk-into` + `prewalk.enabled`/`prewalk.into` | **added** | flag → `prewalk.into` → `@smol`; the flag default is now "" so the setting is reachable |
+| `--prewalk-into` + `prewalk.enabled`/`prewalk.into` | **added** | flag → `prewalk.into` → the session model; the flag default is now "" so the setting is reachable |
 | `-retry-forever` + `retry.infinite` | **added** | the flag writes the setting for one run; `wireAgentMode` copies it into every mode, so once the whole fallback chain drains the ladder keeps re-running it — announcing each round — instead of ending the turn |
 | `-e`, `--extension <path>` | **added** | explicit extension directory load; a non-directory (omp's single-file shape) fails **loudly** on stderr |
 | `--plugin-dir <dir>` | **added** | extra plugin roots via `marketplace.SetExtraRoots` (commands/skills/agents/hooks inherit) |

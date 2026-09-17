@@ -83,7 +83,7 @@ func TestAdvisorFlagForcesTheReviewer(t *testing.T) {
 			Models:  []config.ModelConfig{{ID: "m"}},
 		},
 	}}
-	settings := &config.Settings{ModelRoles: map[string]string{"advisor": "adv-p/m"}}
+	settings := &config.Settings{AdvisorModel: "adv-p/m"}
 
 	withLaunch(t, launchFlags{})
 	if adv := buildAdvisor(cfg, settings); adv != nil {
@@ -534,9 +534,8 @@ func TestPrintModelCatalogListsProvidersModelsAndRoles(t *testing.T) {
 		},
 	}
 	settings := &config.Settings{
-		DefaultModel:     "cat-p/big",
-		ModelRoles:       map[string]string{"smol": "cat-p/small"},
-		ModelRolesEffort: map[string]string{"smol": "low"},
+		DefaultModel: "cat-p/big",
+		AdvisorModel: "cat-p/small",
 	}
 	var buf bytes.Buffer
 	printModelCatalog(&buf, cfg, settings)
@@ -546,7 +545,7 @@ func TestPrintModelCatalogListsProvidersModelsAndRoles(t *testing.T) {
 		"cat-p (openai-completions, http://127.0.0.1:9/v1)",
 		"small  ctx=32000",
 		"big  ctx=200000 reasoning",
-		"smol -> cat-p/small:low",
+		"advisor: cat-p/small",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("catalog output missing %q:\n%s", want, out)

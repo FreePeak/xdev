@@ -308,9 +308,8 @@ func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
 		Provider: p, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}},
 		Agents: []AgentDefinition{{
 			Name: "thinker", Description: "d",
-			Model: "@slow", ThinkingLevel: "high",
+			Model: "other/child-model", ThinkingLevel: "high",
 		}},
-		ExpandModel:  func(ref string) (string, bool) { return "resolved-model", ref == "@slow" },
 		ExpandEffort: effortResolver,
 	}
 	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"thinker"}`))
@@ -324,8 +323,8 @@ func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
 		t.Fatalf("child requests = %d", len(p.gotReqs))
 	}
 	req := p.gotReqs[0]
-	if req.Model != "resolved-model" {
-		t.Fatalf("frontmatter model not expanded on the child request: %q", req.Model)
+	if req.Model != "other/child-model" {
+		t.Fatalf("frontmatter model not applied to the child request: %q", req.Model)
 	}
 	if req.Thinking == nil || req.Thinking.Tokens != config.EffortTokens["high"] {
 		t.Fatalf("thinkingLevel not applied: %+v", req.Thinking)
@@ -335,21 +334,20 @@ func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
 	}
 }
 
-// An unresolvable role never reaches the wire (the raw "@role" 404s one turn
+// A model-role alias never reaches the wire (the raw "@role" 404s one turn
 // later); the parent's model is kept and the parent is told.
-func TestTaskToolUnresolvableModelKeepsParentAndSaysSo(t *testing.T) {
+func TestTaskToolRoleAliasKeepsParentAndSaysSo(t *testing.T) {
 	p := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
 	tt := &TaskTool{
 		Provider: p, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}},
-		Agents:      []AgentDefinition{{Name: "a", Description: "d", Model: "@nosuch"}},
-		ExpandModel: func(string) (string, bool) { return "", false },
+		Agents: []AgentDefinition{{Name: "a", Description: "d", Model: "@nosuch"}},
 	}
 	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"a"}`))
 	if p.gotReqs[0].Model != "parent-model" {
 		t.Fatalf("model = %q", p.gotReqs[0].Model)
 	}
 	if !strings.Contains(res.Text, "@nosuch") {
-		t.Fatalf("handoff must report the unexpanded role: %q", res.Text)
+		t.Fatalf("handoff must report the rejected alias: %q", res.Text)
 	}
 }
 

@@ -67,12 +67,6 @@ type launchFlags struct {
 	// NoPrewalk is --no-prewalk: force the handoff off even when the
 	// prewalk.enabled setting turns it on. omp has the same escape hatch.
 	NoPrewalk bool
-	// Smol/Slow/PlanModel are --smol / --slow / --plan-model: per-run role
-	// model overrides (omp spells the third --plan <model>; xdev keeps
-	// --plan for read-only plan mode and exposes the role as --plan-model).
-	Smol      string
-	Slow      string
-	PlanModel string
 	// Models are the --models patterns for Ctrl+P model cycling (omp
 	// parity). The catalog listing stays on the `models` subcommand.
 	Models []string
@@ -109,20 +103,6 @@ func absClean(p string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(abs), nil
-}
-
-// roleOverride returns the per-run model override for a role name
-// (smol|slow|plan), or "" when the flag was not given.
-func roleOverride(role string) string {
-	switch role {
-	case "smol":
-		return launch.Smol
-	case "slow":
-		return launch.Slow
-	case "plan":
-		return launch.PlanModel
-	}
-	return ""
 }
 
 // approvalModeOverride is the effective tools.approvalMode for this run:
@@ -192,15 +172,6 @@ func homeSwitchDir(cwd string) (string, bool) {
 
 var launch launchFlags
 
-// Role model overrides (--smol / --slow / --plan-model). Process-wide for
-// the same reason as roleOverride: the resolution path is reached from free
-// functions that never see the parsed options.
-var (
-	smolModelFlag string
-	slowModelFlag string
-	planModelFlag string
-)
-
 // splitPatterns flattens the repeatable --models values, splitting each on
 // commas so `--models a,b --models c` and `--models a,b,c` agree.
 func splitPatterns(vals []string) []string {
@@ -236,21 +207,21 @@ func parseCSV(v string) []string {
 	return out
 }
 
-// applyThinkingFlag resolves --thinking against the effort the model role
+// applyThinkingFlag resolves --thinking against the effort the model
 // pinned. The ladder this build has is minimal|low|medium|high
 // (config.EffortTokens is the carrier every adapter translates); the omp
 // vocabulary maps onto it as:
 //
 //	off              → no thinking requested
 //	xhigh, max       → high (the top rung; there is no wider budget)
-//	auto, ""         → keep the role's resolved effort (provider default)
+//	auto, ""         → keep the model's resolved effort (provider default)
 //
 // ponytail: xhigh/max clamp to high instead of widening EffortTokens — a
 // bigger budget needs an adapter-side vocabulary, not a flag.
-func applyThinkingFlag(flagValue, roleEffort string) (string, error) {
+func applyThinkingFlag(flagValue, modelEffort string) (string, error) {
 	switch flagValue {
 	case "", "auto":
-		return roleEffort, nil
+		return modelEffort, nil
 	case "off":
 		return "", nil
 	case "minimal", "low", "medium", "high":
@@ -411,7 +382,7 @@ func applyToolFilter(reg *tool.Registry, allow []string, noTools bool) []string 
 
 // printModelCatalog renders the resolved model catalog: the default ref, every
 // provider with the models actually reachable (pinned plus live discovery),
-// and the configured roles. It is the whole job of --models.
+// and the configured default. It is the whole job of --models.
 func printModelCatalog(w io.Writer, cfg *config.Config, settings *config.Settings) {
 	if cfg == nil {
 		fmt.Fprintln(w, "no models.yml")
@@ -462,21 +433,8 @@ func printModelCatalog(w io.Writer, cfg *config.Config, settings *config.Setting
 			fmt.Fprintln(w, line)
 		}
 	}
-	if settings == nil || len(settings.ModelRoles) == 0 {
-		return
-	}
-	roles := make([]string, 0, len(settings.ModelRoles))
-	for r := range settings.ModelRoles {
-		roles = append(roles, r)
-	}
-	sort.Strings(roles)
-	fmt.Fprintln(w, "roles:")
-	for _, r := range roles {
-		ref := settings.ModelRoles[r]
-		if effort := settings.ModelRolesEffort[r]; effort != "" {
-			ref += ":" + effort
-		}
-		fmt.Fprintf(w, "  %s -> %s\n", r, ref)
+	if settings != nil && settings.AdvisorModel != "" {
+		fmt.Fprintf(w, "advisor: %s\n", settings.AdvisorModel)
 	}
 }
 

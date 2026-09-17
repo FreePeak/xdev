@@ -5,7 +5,7 @@
 //
 //   - Requested reports whether the environment asked for on-device inference
 //     (XDEV_TINY_LOCAL=on). Unset/"off" — the default — keeps every tiny task
-//     on the configured API role, which is the only path that exists in the
+//     on the configured API completer, which is the only path that exists in the
 //     shipped artifact.
 //   - Backend is the local backend compiled into this binary. In the default
 //     build it is a stub that reports unavailability; a `-tags tinycgo` build

@@ -11,20 +11,20 @@ import (
 
 // PickerItem is one selectable row of a picker view.
 type PickerItem struct {
-	Label   string // left column: "@smol", "onegw/dev"
+	Label   string // left column: the provider/model selector
 	Detail  string // dim second column: "→ onegw/free", "Free · 1M ctx"
 	Value   string // opaque value handed to the view's OnSelect
 	Section string // group header drawn above the first row of the group ("" = none)
 	Current bool   // marks the value this session is running on
 }
 
-// PickerView is one tab of a picker. The model selector opens a roles view
+// PickerView is one tab of a picker. The model selector opens a provider view
 // plus one view per provider (omp: an all-models view plus one per
 // provider), so views are tabs rather than a nested menu.
 //
 // Action names what Enter does in this view ("use", "set", "resume"); it is
 // the footer's verb. OnSelect overrides PickerOptions.OnSelect, which is how
-// one picker offers two semantics — the roles tab assigns, a model tab
+// one picker offers one semantics — a model tab
 // switches — without a second key that would fight the type-to-filter.
 type PickerView struct {
 	Name     string

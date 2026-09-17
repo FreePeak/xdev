@@ -2,7 +2,6 @@
 name: sonic
 description: fast mechanical worker — fully-specified edits, searches, running the build
 tools: read, write, edit, bash, grep, glob
-model: @smol
 thinkingLevel: low
 spawns: false
 ---

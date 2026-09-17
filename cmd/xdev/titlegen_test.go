@@ -94,10 +94,9 @@ func TestTitleSeed(t *testing.T) {
 	}
 }
 
-// The cascade must reach the session's own model. @tiny/@smol have no
-// built-in mapping, so a plain models.yml resolved neither and the title
-// stayed "print <timestamp>" for every default install — the feature existed
-// and never ran.
+// The title request must reach the session's own model: a plain models.yml
+// used to resolve no role at all, so the title stayed "print <timestamp>"
+// for every default install — the feature existed and never ran.
 func TestSessionModelRefIsTheLastResort(t *testing.T) {
 	if got := sessionModelRef("onegw", "free"); got != "onegw/free" {
 		t.Fatalf("ref = %q, want onegw/free", got)
@@ -106,11 +105,6 @@ func TestSessionModelRefIsTheLastResort(t *testing.T) {
 		if got := sessionModelRef(c[0], c[1]); got != "" {
 			t.Fatalf("sessionModelRef(%q,%q) = %q, want empty", c[0], c[1], got)
 		}
-	}
-	// An empty fallback ref is skipped rather than sent to the resolver
-	// (which would answer with an error naming the default model instead).
-	if modelRoleRef("onegw/free") != "" {
-		t.Fatal("a literal ref must not be read as a role")
 	}
 }
 

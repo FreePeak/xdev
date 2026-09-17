@@ -149,7 +149,7 @@ func TestHandoffSideRequestMirrorsLiveTurn(t *testing.T) {
 	if len(req.Tools) != 0 {
 		t.Fatalf("handoff sent %d tool definitions, want none", len(req.Tools))
 	}
-	// 5. It runs on the handoff target (the @smol role), not the live model.
+	// 5. It runs on the handoff target, not the live model.
 	if req.Model != "smol-model" {
 		t.Fatalf("handoff model = %q, want smol-model", req.Model)
 	}
