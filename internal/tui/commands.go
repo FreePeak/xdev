@@ -379,6 +379,9 @@ type CommandAPI interface {
 	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
+	// ThinkingLevel is /thinking [level]: bare reports, a level applies and
+	// persists the request-side reasoning level for the next turn.
+	ThinkingLevel(args string) error
 	// ExtensionCommands exposes the "/server:cmd" roster for /help; nil
 	// when no extensions are loaded.
 	ExtensionCommands() map[string]string
@@ -421,6 +424,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings; toggle showThinking on|off",
 			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
+			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default @smol)",
 			Fn: func(app CommandAPI, args string) error { return app.Prewalk(args) }},
 		{Name: "handoff", Description: "replace the context with a handoff document (continues from it)",
@@ -939,4 +944,13 @@ func collapseLine(s string) string {
 		s = s[:i]
 	}
 	return s
+}
+
+// ThinkingOps wires the /thinking command to the live request-side level
+// (lives in cmd, which owns the provider holder and the settings write).
+// Current reports the level in force for the next turn; Set applies and
+// persists one. nil ops degrade the command to a notice.
+type ThinkingOps struct {
+	Current func() string
+	Set     func(level string) error
 }

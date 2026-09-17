@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -440,6 +441,15 @@ type Settings struct {
 	// this layer" exactly the way the zero-skip merge treats every other
 	// string key — the effective default is "auto" (SidebarModeOn).
 	SidebarMode string `yaml:"sidebarMode"`
+	// Thinking is the request-side reasoning level — the other half of
+	// ShowThinking, which only decides whether reasoning is rendered at all.
+	// "auto" lets the model role's ":effort" decide, "off" asks the provider
+	// for no reasoning, and the rest pin a rung of the same ladder --thinking
+	// accepts. A plain string for the same reason SidebarMode is one: "" means
+	// "unset in this layer", and the effective default is "auto"
+	// (ThinkingLevel). Deliberately NOT in repoSafeSettingsKeys: it is not a
+	// display knob but a spend knob, so a cloned repository may not set it.
+	Thinking string `yaml:"thinking"`
 	// Personality selects the prompt-tail preset (M10 #32, omp parity):
 	// default | friendly | pragmatic | none. A PERSONALITY.md override
 	// always beats the preset; "none" omits the block.
@@ -861,6 +871,16 @@ func (s *Settings) SidebarModeOn() string {
 	return "auto"
 }
 
+// ThinkingLevel reports the effective request-side reasoning level: unset is
+// "auto", the value that leaves the model role's ":effort" (or the provider
+// default) in charge.
+func (s *Settings) ThinkingLevel() string {
+	if s == nil || s.Thinking == "" {
+		return "auto"
+	}
+	return s.Thinking
+}
+
 // AllowCompoundCommandsOn reports the effective bash.allowCompoundCommands
 // (nil-safe: the shipped default is off, and a layer that never set it
 // can't turn it on).
@@ -1232,6 +1252,11 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.SidebarMode != "" {
 		s.SidebarMode = layer.SidebarMode
 	}
+	if layer.Thinking != "" {
+		// Same zero-skip rule as SidebarMode: "" never overwrites, so an
+		// explicit "off" in a later layer wins.
+		s.Thinking = layer.Thinking
+	}
 	if layer.Handoff.SaveToDisk {
 		// Same plain-bool rule as Advisor: only a layer that turns it ON
 		// contributes (the shipped default is off).
@@ -1490,6 +1515,13 @@ func (s *Settings) merge(layer *Settings) error {
 	default:
 		return fmt.Errorf("unknown personality %q (want default|friendly|pragmatic|none)", s.Personality)
 	}
+
+	// An empty value is the unset layer ("auto"); anything else must be in the
+	// vocabulary --thinking accepts, so a typo fails at load instead of being
+	// silently downgraded to auto.
+	if s.Thinking != "" && !slices.Contains(ThinkingLevels, s.Thinking) {
+		return fmt.Errorf("unknown thinking %q (want %s)", s.Thinking, strings.Join(ThinkingLevels, "|"))
+	}
 	return nil
 }
 
@@ -1659,6 +1691,7 @@ func List(s *Settings, globalPath string) []string {
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 		"sidebarMode " + s.SidebarModeOn(),
+		"thinking " + s.ThinkingLevel(),
 		"computer " + fmt.Sprint(s.ComputerOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),

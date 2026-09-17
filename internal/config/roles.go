@@ -17,6 +17,13 @@ import (
 // RoleNames are the canonical slots (omp's set; every one is optional).
 var RoleNames = []string{"default", "smol", "slow", "vision", "plan", "commit", "tiny", "task", "advisor"}
 
+// ThinkingLevels is the request-side vocabulary the `thinking` settings key
+// and --thinking share: "auto" leaves the decision to the model role's
+// ":effort" (or the provider default), "off" asks the provider for no
+// reasoning, and the rest pin a rung of EffortLevels. "xhigh"/"max" are the
+// omp names for the top rung; applyThinkingFlag clamps them to "high".
+var ThinkingLevels = []string{"auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
 // EffortLevels are accepted, ordered low→high; "minimal" is the off switch.
 var EffortLevels = []string{"minimal", "low", "medium", "high"}
 

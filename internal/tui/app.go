@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/theme"
 )
@@ -127,6 +129,7 @@ type App struct {
 	treeLabelSave     func(id, label string) error
 	treeLabels        map[string]string        // id→label snapshot, refreshed on open
 	settingsOps       *SettingsOps             // /settings, wired by cmd (nil → notices)
+	thinkingOps       *ThinkingOps             // /thinking, wired by cmd (nil → notices)
 	cwd               string                   // working directory (the status row's left side)
 	branch            string                   // git branch for the top bar ("" when none)
 	commandDir        string                   // markdown command discovery root
@@ -1416,6 +1419,61 @@ func (a *App) SetShowThinking(on bool) {
 // SetSettingsOps wires the /settings command (settings live in cmd).
 func (a *App) SetSettingsOps(ops *SettingsOps) { a.settingsOps = ops }
 
+// SetThinkingOps wires the /thinking command and the Shift-Tab toggle to the
+// live request-side level (cmd owns the provider holder and the settings
+// write). nil ops leave the toggle reporting that it is unwired.
+func (a *App) SetThinkingOps(ops *ThinkingOps) { a.thinkingOps = ops }
+
+// ThinkingLevel implements CommandAPI /thinking: bare reports the level in
+// force, "on" is the alias for "auto" (the Shift-Tab toggle's other half), and
+// any level in config.ThinkingLevels applies to the next turn — unlike
+// /settings showThinking, which only touches the display.
+func (a *App) ThinkingLevel(args string) error {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		a.AddSystemBlock("thinking " + a.currentThinkingLevel())
+		return nil
+	}
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /thinking [off|auto|%s]", strings.Join(config.ThinkingLevels[2:], "|"))
+	}
+	want := fields[0]
+	if want == "on" || want == "true" {
+		want = "auto"
+	}
+	if !slices.Contains(config.ThinkingLevels, want) {
+		return fmt.Errorf("usage: /thinking [off|auto|%s]", strings.Join(config.ThinkingLevels[2:], "|"))
+	}
+	if a.thinkingOps == nil || a.thinkingOps.Set == nil {
+		return fmt.Errorf("thinking is not wired in this build")
+	}
+	if err := a.thinkingOps.Set(want); err != nil {
+		return err
+	}
+	a.AddSystemBlock("thinking " + want)
+	return nil
+}
+
+// ToggleThinking is the Shift-Tab chord: off ⇄ auto, the Claude Code Alt+T
+// shape (the toggle never lands on a pinned budget — it turns reasoning off or
+// hands the decision back to the model role).
+func (a *App) ToggleThinking() {
+	want := "off"
+	if a.currentThinkingLevel() == "off" {
+		want = "auto"
+	}
+	if err := a.ThinkingLevel(want); err != nil {
+		a.AddSystemBlock("thinking: " + err.Error())
+	}
+}
+
+func (a *App) currentThinkingLevel() string {
+	if a.thinkingOps != nil && a.thinkingOps.Current != nil {
+		return a.thinkingOps.Current()
+	}
+	return "auto"
+}
+
 // Thinking reports whether reasoning output is currently displayed.
 func (a *App) Thinking() bool {
 	a.mu.Lock()
@@ -1901,6 +1959,12 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		a.AddSystemBlock("retry is not wired in this build")
+		return
+	case "thinking-toggle":
+		// Shift-Tab. Like the dock chords this runs after every modal
+		// handler, so an open picker keeps first claim on the key (the model
+		// picker binds Shift-Tab to "previous tab").
+		a.ToggleThinking()
 		return
 	case "dock-cycle", "dock-fold":
 		// The context dock's own two chords (#291 §1), handled here — after

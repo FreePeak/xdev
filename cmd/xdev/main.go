@@ -180,7 +180,7 @@ func main() {
 	noTitle := fs.Bool("no-title", false, "skip the session title entirely (the mechanical stamp and the ai-title pass)")
 	modelsPatterns := repeatable{}
 	fs.Var(&modelsPatterns, "models", "comma-separated model patterns for Ctrl+P cycling (the catalog listing is the `models` subcommand)")
-	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the model role's effort)")
+	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the `thinking` settings key, then the model role's effort)")
 	hideThinking := fs.Bool("hide-thinking", false, "hide thinking blocks in TUI output (display only; model thinking is unaffected)")
 	printThoughts := fs.Bool("print-thoughts", false, "include thinking blocks in print-mode output")
 	toolsFlag := fs.String("tools", "", "comma-separated tools to enable (default: all)")

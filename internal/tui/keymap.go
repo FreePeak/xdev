@@ -40,13 +40,14 @@ var BuiltinActions = []string{
 	"expand", // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
 	"clear-input",
 	"app.session.tree",
-	"model-select",   // Alt+M: the /model roles+models selector (omp app.model.select)
-	"app.agents.hub", // Alt+A: the agent-hub roster (omp app.agents.hub)
-	"model-cycle",    // Ctrl+P: cycle the active model through --models patterns
-	"paste-image",    // Ctrl+V: attach the clipboard image (omp app.clipboard.pasteImage)
-	"retry",          // F5: re-run the current session's last turn (omp's retry)
-	"dock-cycle",     // Alt+S: the context dock's display policy (#291 §1)
-	"dock-fold",      // Ctrl+T: walk the dock's section folds
+	"model-select",    // Alt+M: the /model roles+models selector (omp app.model.select)
+	"app.agents.hub",  // Alt+A: the agent-hub roster (omp app.agents.hub)
+	"model-cycle",     // Ctrl+P: cycle the active model through --models patterns
+	"paste-image",     // Ctrl+V: attach the clipboard image (omp app.clipboard.pasteImage)
+	"retry",           // F5: re-run the current session's last turn (omp's retry)
+	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
+	"dock-fold",       // Ctrl+T: walk the dock's section folds
+	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
@@ -119,6 +120,12 @@ func DefaultKeyMap() *KeyMap {
 			// use, and keybindings.yml can move it like any other action.
 			"A-s": "dock-cycle",
 			"C-t": "dock-fold",
+			// The request-side reasoning toggle (omp's alt+t, Claude Code's
+			// Alt+T). Every terminal sends Shift-Tab as KeyBacktab, which
+			// chordOf renders "Shift-Tab" — so that is the chord to bind, not
+			// the "S-Tab" spelling chordOf can never emit. keybindings.yml can
+			// move it like any other action.
+			"Shift-Tab": "thinking-toggle",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
