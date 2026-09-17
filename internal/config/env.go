@@ -143,3 +143,9 @@ func ProxyURL(kind string) string {
 	}
 	return ""
 }
+
+// IsDevEnv reports whether the XDEV_ENV environment variable is
+// set to "dev".
+func IsDevEnv() bool {
+	return os.Getenv("XDEV_ENV") == "dev"
+}
