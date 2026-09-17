@@ -31,7 +31,7 @@ maxTurns: 200           # agent turns per run before the graceful wrap-up
 memoryLimit: 104857600  # bytes; hard RSS backstop (default 100 MB)
 showThinking: true      # render reasoning output
 personality: default    # default | friendly | pragmatic | none
-memory: off             # off | local (MEMORY.md + learned.md under the data dir)
+memory: local           # local (MEMORY.md + learned.md under the data dir) | off | mnemopi | hindsight
 
 # Role aliases: "-model @smol", "@slow", "@task" resolve through this map.
 # modelRoles:
