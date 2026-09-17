@@ -1,0 +1,1044 @@
+package tui
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
+	"github.com/FreePeak/xdev/internal/tool"
+)
+
+// screenText flattens a simulation screen into rows of text.
+func screenText(scr tcell.SimulationScreen) string {
+	prim, w, _ := scr.GetContents()
+	var b strings.Builder
+	for y := 0; y*w < len(prim); y++ {
+		for x := 0; x < w && y*w+x < len(prim); x++ {
+			if r := prim[y*w+x].Runes; len(r) > 0 {
+				b.WriteString(string(r))
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// drawnApp is a test app with a non-empty transcript, so draw() takes the
+// transcript path instead of the welcome screen.
+func drawnApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen) {
+	t.Helper()
+	app, scr := newTestApp(t, w, h)
+	app.AddSystemBlock("ready")
+	return app, scr
+}
+
+// lastRow is the shortcuts/status row (the last line of the dump).
+func lastRow(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
+// TestHUDDefaultKeepsTokenCounter pins the shipped layout: with no
+// statusLine.segments the HUD renders the active-work timer, the token
+// counters and the context total, right aligned, and nothing else. The context
+// segment rides on the model window, so the case that shows no ctx is the one
+// where the window is still unknown.
+func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
+	app, scr := drawnApp(t, 100, 24)
+	app.AddUsage(1200, 340, 1540)
+	app.draw()
+
+	text := screenText(scr)
+	if !strings.Contains(text, "↑1.2k │ ↓340") {
+		t.Fatalf("token counter missing:\n%s", text)
+	}
+	if !strings.Contains(text, "0s") {
+		t.Fatalf("the work timer must read 0s on a session that never ran:\n%s", text)
+	}
+	if strings.Contains(text, "ctx ") {
+		t.Fatalf("the context segment must hide without a known window:\n%s", text)
+	}
+	if strings.Contains(text, "$0.") {
+		t.Fatalf("unconfigured segments must not render:\n%s", text)
+	}
+
+	// The window is the only thing that was missing: with it known, the
+	// default row shows the session's context against it — no settings,
+	// no statusLine.segments.
+	app.SetContextWindow(200000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 1.5k/200k") {
+		t.Fatalf("default layout missing the context total: %q", row)
+	}
+}
+
+// TestHUDContextCountsCachedInput is the regression: a cached turn re-read 93k
+// of prompt and answered with 362 tokens, so the whole request costs 101.8k
+// even though only 8272 input tokens were billed at the full rate. The ctx
+// number is the provider's request total — an input+output sum of 8.6k read 90%
+// low, the bug this segment had. The ↑/↓ counters keep tracking billed
+// input+output, which is what the session paid for, not what it occupies.
+func TestHUDContextCountsCachedInput(t *testing.T) {
+	app, scr := drawnApp(t, 100, 24)
+	app.AddUsage(8272, 362, 101818)
+	app.SetContextWindow(200000)
+	app.draw()
+
+	row := lastRow(screenText(scr))
+	if !strings.Contains(row, "ctx 101.8k/200k") {
+		t.Fatalf("cached prompt tokens missing from the context total: %q", row)
+	}
+	if strings.Contains(row, "ctx 8.6k") {
+		t.Fatalf("the context total must not be the uncached input+output sum: %q", row)
+	}
+	if !strings.Contains(row, "↑8.3k │ ↓362") {
+		t.Fatalf("token counters must keep counting billed input+output: %q", row)
+	}
+}
+
+// TestHUDContextTracksTheSession pins the number's meaning across the
+// transcript resets that end or move a session: /new, /resume and tree
+// navigation empty the live context (so it must not keep showing the old
+// session's), and a replayed transcript measures its rebuilt history back in
+// with the agent's own context count.
+func TestHUDContextTracksTheSession(t *testing.T) {
+	app, scr := drawnApp(t, 100, 24)
+	app.AddUsage(50000, 50000, 100000)
+	app.SetContextWindow(200000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 100k/200k") {
+		t.Fatalf("context total missing after a turn: %q", row)
+	}
+
+	// A reset transcript occupies nothing: the segment hides rather than
+	// keep claiming the previous session's 100k.
+	app.Reset()
+	app.draw()
+	if row := lastRow(screenText(scr)); strings.Contains(row, "ctx ") {
+		t.Fatalf("context total must not survive a session reset: %q", row)
+	}
+
+	// Resume rebuilds the history without sending a request; the replay
+	// measurement brings the number back (and a replayed 40k never overrides
+	// a live 60k that already answered).
+	app.SetContextReplay(40000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 40k/200k") {
+		t.Fatalf("replayed history must report its context: %q", row)
+	}
+	app.AddUsage(30000, 30000, 60000)
+	app.SetContextReplay(40000)
+	app.draw()
+	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 60k/200k") {
+		t.Fatalf("a replay must not stale a live measurement: %q", row)
+	}
+}
+
+// TestHUDConfiguredSegments: settings statusLine.segments picks which
+// segments render, in order, from the statusLine* theme tokens. The row is
+// wide enough for the path plus every segment; a narrow row drops segments by
+// keep-rank so the clock and the decode rate stay readable (see
+// TestStatusRowShowsPathAndMetrics).
+func TestHUDConfiguredSegments(t *testing.T) {
+	app, scr := drawnApp(t, 200, 24)
+	app.AddUsage(50000, 50000, 100000)
+	app.AddCost(0.0123)
+	app.SetContextWindow(200000)
+	app.SetStatusSegments([]string{"theme", "model", "context", "tokens", "cost"})
+	app.draw()
+
+	text := screenText(scr)
+	for _, want := range []string{"groknight", "test/free", "ctx 100k/200k", "↑50k │ ↓50k", "$0.0123"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("configured segment %q missing:\n%s", want, text)
+		}
+	}
+	// Order is the configured order, left to right on the row.
+	row := lastRow(text)
+	at := -1
+	for _, seg := range []string{"groknight", "test/free", "ctx 100k/200k", "↑50k", "$0.0123"} {
+		i := strings.Index(row, seg)
+		if i < 0 || i < at {
+			t.Fatalf("segment %q out of order in %q", seg, row)
+		}
+		at = i
+	}
+
+	// The meter reads the LAST request, not the session total: a second turn
+	// costing 2k re-bases it to 2k/200k, while the cumulative token counters
+	// keep counting up.
+	app.AddUsage(1500, 500, 2000)
+	app.draw()
+	row = lastRow(screenText(scr))
+	if !strings.Contains(row, "ctx 2k/200k") {
+		t.Fatalf("context meter must track the latest request, not the sum of all turns: %q", row)
+	}
+	if !strings.Contains(row, "↑51.5k │ ↓50.5k") {
+		t.Fatalf("token counters must stay cumulative: %q", row)
+	}
+
+	// An unknown name is skipped, not rendered, and the rest still draw.
+	app.SetStatusSegments([]string{"model", "hologram"})
+	app.draw()
+	text = screenText(scr)
+	if strings.Contains(text, "hologram") {
+		t.Fatalf("unknown segment rendered:\n%s", text)
+	}
+	if !strings.Contains(text, "test/free") {
+		t.Fatalf("known segment dropped with the unknown one:\n%s", text)
+	}
+	// A segment whose data is not wired hides instead of drawing an empty
+	// cell, while the segments that do have data keep rendering.
+	app.SetStatusSegments([]string{"context", "cost"})
+	app.SetContextWindow(0)
+	app.draw()
+	got := lastRow(screenText(scr))
+	if strings.Contains(got, "ctx ") {
+		t.Fatalf("context segment without a window must hide: %q", got)
+	}
+	if !strings.Contains(got, "$0.0123") {
+		t.Fatalf("cost segment must survive an unwired context window: %q", got)
+	}
+}
+
+// TestHUDTimeSegment counts WORK time only: the segment renders the banked
+// active spans plus the live span of a run in flight, re-bases on SetWork (the
+// work a replayed history carried), and freezes — it does not tick — while the
+// agent is idle or parked on a question card.
+func TestHUDTimeSegment(t *testing.T) {
+	app, scr := drawnApp(t, 200, 24)
+	app.SetStatusSegments([]string{"time", "tokens"})
+	app.AddUsage(1200, 340, 1540)
+
+	// Fresh app, nothing has run: the honest reading is 0s, not a clock
+	// inherited from process start. "0s" is a reading, so it renders.
+	app.draw()
+	row := lastRow(screenText(scr))
+	if !strings.Contains(row, "0s │ ↑1.2k │ ↓340") {
+		t.Fatalf("zero work must render beside the tokens: %q", row)
+	}
+
+	// A re-based total (resume/fork replay) shows the carried-over work.
+	app.SetWork(2*time.Hour + 5*time.Minute)
+	app.draw()
+	row = lastRow(screenText(scr))
+	if !strings.Contains(row, "2h05m") {
+		t.Fatalf("carried work missing from the row: %q", row)
+	}
+
+	// Idle, the number does not move: a second draw reads the same.
+	app.draw()
+	if r2 := lastRow(screenText(scr)); r2 != row {
+		t.Fatalf("idle HUD time must not tick: %q then %q", row, r2)
+	}
+
+	// A live run counts: an open span adds to the banked total.
+	app.SetRunning(true)
+	app.mu.Lock()
+	app.st.runStart = time.Now().Add(-90 * time.Second)
+	app.mu.Unlock()
+	app.draw()
+	if row = lastRow(screenText(scr)); !strings.Contains(row, "2h06m") {
+		t.Fatalf("open run span must add to the total: %q", row)
+	}
+
+	// Ending the run folds the span in and stops the count.
+	app.SetRunning(false)
+	app.draw()
+	frozen := lastRow(screenText(scr))
+	if !strings.Contains(frozen, "2h06m") {
+		t.Fatalf("the finished span must be banked, not lost: %q", frozen)
+	}
+	app.draw()
+	if r2 := lastRow(screenText(scr)); r2 != frozen {
+		t.Fatalf("a finished run must not keep counting: %q then %q", frozen, r2)
+	}
+}
+
+// TestHUDTimeFreezesOnAskCard: a question card waiting for the human is not
+// work the session did. The number stops mid-run while the card is up, and
+// starts again the moment it is answered.
+func TestHUDTimeFreezesOnAskCard(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	app.SetRunning(true)
+
+	app.mu.Lock()
+	before := app.activeWork()
+	app.mu.Unlock()
+	_, _ = askResultOf(t, app, AskRequest{Question: "which?", Options: []AskOption{{Label: "a"}}}, 5*time.Second, tcell.KeyEnter)
+
+	app.mu.Lock()
+	after := app.activeWork()
+	askWaits := app.st.askWaits
+	app.mu.Unlock()
+	if askWaits != 0 {
+		t.Fatalf("the card left a wait claimed: %d", askWaits)
+	}
+	// The answer is instantaneous, so the run only accrued the few ms the
+	// card spent opening; a wall-clock wait would add whole seconds.
+	if after-before > 500*time.Millisecond {
+		t.Fatalf("the clock ran while the card waited: %v → %v", before, after)
+	}
+}
+
+// statusCell reads one cell from the shortcuts/status row.
+func statusCell(scr tcell.SimulationScreen, x int) tcell.SimCell {
+	prim, w, _ := scr.GetContents()
+	return prim[(len(prim)/w-1)*w+x]
+}
+
+// TestHUDStatusLineBackground proves the statusLineBg token fills the status
+// row, and that a theme leaving it at the terminal default does not.
+func TestHUDStatusLineBackground(t *testing.T) {
+	app, scr := drawnApp(t, 100, 24)
+	app.AddUsage(10, 20, 30)
+	app.draw()
+	if _, bg, _ := statusCell(scr, 96).Style.Decompose(); bg != tcell.ColorDefault {
+		t.Fatalf("default theme must leave the status row transparent, got %v", bg)
+	}
+
+	custom := &theme.Theme{
+		Name:  "banded",
+		Dark:  true,
+		Slots: map[string]theme.Color{theme.StatusLineBg: theme.Hex("#102030")},
+	}
+	app.SetTheme(custom)
+	app.draw()
+	if _, bg, _ := statusCell(scr, 96).Style.Decompose(); bg != tcell.NewRGBColor(0x10, 0x20, 0x30) {
+		t.Fatalf("statusLineBg must fill the status row, got %v", bg)
+	}
+}
+
+// TestSpinnerFramesFromTheme: the running indicator cycles the frames the
+// theme names, not the built-in braille list.
+func TestSpinnerFramesFromTheme(t *testing.T) {
+	app, scr := drawnApp(t, 100, 24)
+	th := theme.Load("groknight")
+	th.Symbols = theme.Symbols{Status: []string{"X", "Y"}}
+	app.SetTheme(th)
+	app.SetRunning(true)
+
+	app.mu.Lock()
+	app.st.spinnerIdx = 0
+	app.mu.Unlock()
+	app.draw()
+	if text := screenText(scr); !strings.Contains(text, "test/free · X") {
+		t.Fatalf("theme frame 0 not drawn:\n%s", text)
+	}
+
+	app.mu.Lock()
+	app.st.spinnerIdx = 1
+	app.mu.Unlock()
+	app.draw()
+	if text := screenText(scr); !strings.Contains(text, "test/free · Y") {
+		t.Fatalf("theme frame 1 not drawn:\n%s", text)
+	}
+}
+
+// TestStatusRowShowsPathAndMetrics pins the bottom row's contract: the
+// working directory on the left, the active-work timer and the decode rate
+// right-aligned, and no keyboard chords anywhere (they live in /hotkeys and
+// the welcome menu now). The metrics own the width: the path tail-truncates
+// and the optional segments drop before the timer or the rate is touched.
+func TestStatusRowShowsPathAndMetrics(t *testing.T) {
+	const deep = "/Volumes/work/harvey/freepeak/checkout/xdev-feature"
+
+	// seededStatusRow draws the row for a deep path with 2h05m of banked work
+	// and a measured 42.5 t/s.
+	seededStatusRow := func(t *testing.T, w int) string {
+		t.Helper()
+		app, scr := drawnApp(t, w, 4)
+		app.AddUsage(50000, 50000, 100000)
+		app.SetWork(2*time.Hour + 5*time.Minute)
+		app.SetLocation(deep)
+		app.mu.Lock()
+		app.st.Rate = 42.5
+		app.mu.Unlock()
+		app.draw()
+		return lastRow(screenText(scr))
+	}
+
+	wide := seededStatusRow(t, 160)
+	for _, want := range []string{deep, "2h05m", "↑50k │ ↓50k", "42.5 t/s"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide row missing %q: %q", want, wide)
+		}
+	}
+
+	narrow := seededStatusRow(t, 60)
+	if !strings.Contains(narrow, "2h05m") || !strings.Contains(narrow, "42.5 t/s") {
+		t.Fatalf("rate and total time must share a narrow row, got %q", narrow)
+	}
+	if strings.Contains(narrow, "↑50k") {
+		t.Fatalf("the token counter must drop before the metrics do: %q", narrow)
+	}
+	// A path too long for the row keeps the components that identify the
+	// project and marks the cut, instead of clipping at the screen edge.
+	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
+		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
+	}
+	for _, gone := range []string{"send", "newline", "cancel", "quit", "⏎", "^J"} {
+		if strings.Contains(narrow, gone) {
+			t.Fatalf("keyboard chords no longer belong on the row: %q", narrow)
+		}
+	}
+
+	tiny := seededStatusRow(t, 40)
+	if !strings.Contains(tiny, "2h05m") || !strings.Contains(tiny, "42.5 t/s") {
+		t.Fatalf("40-column row lost the metrics: %q", tiny)
+	}
+	if !strings.Contains(tiny, "…/xdev-feature") {
+		t.Fatalf("40-column row must shorten the path, not the metrics: %q", tiny)
+	}
+
+	// The home directory abbreviates rather than eating the row.
+	if home, err := os.UserHomeDir(); err == nil {
+		if got := pathDisplay(home+"/work/proj", 40); got != "~/work/proj" {
+			t.Fatalf("home must abbreviate, got %q", got)
+		}
+	}
+}
+
+// TestBoxStyleFromTheme: with the composer frame gone, theme.Box shows
+// through the tool-result box — round keeps today's glyphs, boxSharp swaps
+// the outline, and the ascii preset degenerates it to +-| (BRO-614).
+func TestBoxStyleFromTheme(t *testing.T) {
+	app, scr := drawnApp(t, 60, 20)
+	app.AddToolBlock("bash", `{"command":"echo hi"}`)
+	app.FinishTool("bash", false, "done", ToolOutcome{Dur: "1ms"})
+	app.draw()
+	if text := screenText(scr); !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
+		t.Fatalf("default round tool box missing:\n%s", text)
+	}
+
+	sharp := &theme.Theme{Name: "sharp", Dark: true, Slots: map[string]theme.Color{}, Symbols: theme.Symbols{Box: "sharp"}}
+	app.SetTheme(sharp)
+	app.draw()
+	if text := screenText(scr); !strings.Contains(text, "┌") || !strings.Contains(text, "└") || strings.Contains(text, "╭") {
+		t.Fatalf("sharp tool box missing:\n%s", text)
+	}
+
+	ascii := &theme.Theme{Name: "ascii", Dark: true, Slots: map[string]theme.Color{}, Symbols: theme.Symbols{Preset: "ascii"}}
+	app.SetTheme(ascii)
+	app.draw()
+	if text := screenText(scr); !strings.Contains(text, "+") || !strings.Contains(text, "|") || strings.Contains(text, "╭") || strings.Contains(text, "┌") {
+		t.Fatalf("ascii tool box missing:\n%s", text)
+	}
+}
+
+// TestComposerIsBoxed pins the composer's border box (grok's full TUI —
+// PromptStyle::default carries show_borders: true, chrome_pad_left: 2,
+// chrome_pad_right: 1): ╭─╮ on top, │ on both sides of every draft row,
+// ╰─ model ─╯ underneath. d589778 copied minimal mode's borderless fill band
+// into the interactive TUI, where a text field without an outline reads as a
+// dropped frame.
+func TestComposerIsBoxed(t *testing.T) {
+	app, scr := drawnApp(t, 60, 14)
+	setDraft(&app.ed, "hello there", 11)
+	app.draw()
+	if got := app.composerRows(); got != 3 { // one draft row + two borders
+		t.Fatalf("one-row composer = %d rows, want 3", got)
+	}
+
+	text := screenText(scr)
+	if !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
+		t.Fatalf("composer lost its box:\n%s", text)
+	}
+	if !strings.Contains(text, "│ ❯ hello there") {
+		t.Fatalf("draft row is not framed by side borders:\n%s", text)
+	}
+	if !strings.Contains(text, "╰ test/free") {
+		t.Fatalf("model name left the bottom border:\n%s", text)
+	}
+}
+
+// TestUserBandPaintsUnderGlyphs pins the sent-message band as one surface:
+// every cell of a banded transcript row that carries the prompt's own runes
+// shows the band background, not the terminal default. A run painted with a
+// foreground-only style resets its cells (tcell's zero background is
+// ColorDefault), so the row fill survives only in the gaps and the user
+// input reads as black behind the glyphs inside the band.
+func TestUserBandPaintsUnderGlyphs(t *testing.T) {
+	app, scr := drawnApp(t, 80, 20)
+	app.AddUserBlock("hello band")
+	app.draw()
+
+	band, ok := app.th.Slot(theme.BgHighlight)
+	if !ok {
+		t.Fatal("built-in theme must carry a user band")
+	}
+	want := app.cellColor(band)
+	prim, w, _ := scr.GetContents()
+	x0, y0 := -1, -1
+	for i := range prim {
+		// The top bar also leads with ❯ at (0,0); the band row is a
+		// transcript row, so below the bar and flush left.
+		if i%w == 0 && i >= w && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
+			x0, y0 = i%w, i/w
+			break
+		}
+	}
+	if x0 < 0 {
+		t.Fatal("no user band row painted")
+	}
+	// Cells of "❯ hello band": gutter, space, and the ten prompt runes.
+	for x := range 12 {
+		_, bg, _ := prim[y0*w+x].Style.Decompose()
+		if bg != want {
+			t.Fatalf("band row cell %d (rune %q) bg = %s, want the band %v under the glyphs", x, string(prim[y0*w+x].Runes), bg, band)
+		}
+	}
+}
+
+// askResultOf drives one card to completion and returns its answer.
+func askResultOf(t *testing.T, app *App, req AskRequest, timeout time.Duration, keys ...any) (AskAnswer, bool) {
+	t.Helper()
+	type outcome struct {
+		ans AskAnswer
+		ok  bool
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		ans, ok := app.AskCard(context.Background(), req, timeout)
+		done <- outcome{ans, ok}
+	}()
+	waitAsk(t, app, true)
+	for _, k := range keys {
+		switch v := k.(type) {
+		case tcell.Key:
+			pressKey(app, v)
+		case rune:
+			pressRune(app, v)
+		}
+	}
+	select {
+	case got := <-done:
+		return got.ans, got.ok
+	case <-time.After(3 * time.Second):
+		t.Fatal("ask card did not resolve")
+		return AskAnswer{}, false
+	}
+}
+
+// waitAsk waits for the card to open (or close) without racing the UI thread.
+func waitAsk(t *testing.T, app *App, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if app.AskPending() == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("ask card pending = %v", !want)
+}
+
+func askOptions() AskRequest {
+	return AskRequest{
+		Question: "Which storage backend should the fix target?",
+		Options: []AskOption{
+			{Label: "sqlite", Description: "local file"},
+			{Label: "postgres"},
+			{Label: "mysql"},
+		},
+	}
+}
+
+// askBatchResultOf drives one tabbed card of several questions to completion.
+func askBatchResultOf(t *testing.T, app *App, reqs []AskRequest, timeout time.Duration, keys ...any) ([]AskAnswer, bool) {
+	t.Helper()
+	done := make(chan struct {
+		ans []AskAnswer
+		ok  bool
+	}, 1)
+	go func() {
+		ans, ok := app.AskCardBatch(context.Background(), reqs, timeout)
+		done <- struct {
+			ans []AskAnswer
+			ok  bool
+		}{ans, ok}
+	}()
+	waitAsk(t, app, true)
+	for _, k := range keys {
+		switch v := k.(type) {
+		case tcell.Key:
+			pressKey(app, v)
+		case rune:
+			pressRune(app, v)
+		}
+	}
+	select {
+	case got := <-done:
+		return got.ans, got.ok
+	case <-time.After(3 * time.Second):
+		t.Fatal("ask card did not resolve")
+		return nil, false
+	}
+}
+
+// TestAskCardBatchOneInterruption: two questions answer in ONE card — Enter on
+// the first steps to the next, and the last answer submits both.
+func TestAskCardBatchOneInterruption(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	q1, q2 := askOptions(), askOptions()
+	q1.ID, q2.ID = "backend", "cache"
+	q2.Question = "Turn the cache on?"
+	q2.Options = []AskOption{{Label: "yes"}, {Label: "no"}}
+	// '1' takes sqlite and steps to the cache question, '2' takes "no" and
+	// lands on the review, Enter submits both.
+	answers, ok := askBatchResultOf(t, app, []AskRequest{q1, q2}, 5*time.Second, '1', '2', tcell.KeyEnter)
+	if !ok || len(answers) != 2 {
+		t.Fatalf("batch answers = %+v ok=%v", answers, ok)
+	}
+	if answers[0].Labels[0] != "sqlite" || answers[1].Labels[0] != "no" {
+		t.Fatalf("answers out of order or wrong: %+v", answers)
+	}
+	if app.AskPending() {
+		t.Fatal("card must close after the last answer")
+	}
+}
+
+// TestAskCardChatEscape: the escape hatch closes the card with the note set and
+// NO labels — a host must not read it as a chosen option, nor as a skip.
+func TestAskCardChatEscape(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	ans, ok := askResultOf(t, app, askOptions(), 5*time.Second, 'x')
+	if !ok {
+		t.Fatal("the chat escape is an answer, not a skip")
+	}
+	if len(ans.Labels) != 0 || ans.Note != AskChatLabel {
+		t.Fatalf("escape answer = %+v", ans)
+	}
+}
+
+// TestAskCardTypedAnswer: typing at the card writes the free-text row, and
+// Enter answers with prose instead of an option.
+func TestAskCardTypedAnswer(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	done := make(chan AskAnswer, 1)
+	go func() {
+		ans, _ := app.AskCard(context.Background(), askOptions(), 5*time.Second)
+		done <- ans
+	}()
+	waitAsk(t, app, true)
+	typeRunes(app, "postgres")
+	pressKey(app, tcell.KeyEnter)
+	select {
+	case ans := <-done:
+		if len(ans.Labels) != 0 || ans.Note != "postgres" {
+			t.Fatalf("typed answer = %+v", ans)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("typed answer did not resolve the card")
+	}
+}
+
+// TestAskChatLabelMatchesTheTool: the card and the tool name the escape hatch
+// in different packages, and the value has to be the same string on both sides
+// or a chat answer arrives as an unknown label.
+func TestAskChatLabelMatchesTheTool(t *testing.T) {
+	if AskChatLabel != tool.AskChatNote {
+		t.Fatalf("tui.AskChatLabel = %q, tool.AskChatNote = %q", AskChatLabel, tool.AskChatNote)
+	}
+}
+
+// TestAskCardRendersAndConfirms drives the blocking card end to end through
+// the real key path: Enter answers with the highlighted option.
+func TestAskCardRendersAndConfirms(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	ans, ok := askResultOf(t, app, askOptions(), 5*time.Second, tcell.KeyDown, tcell.KeyEnter)
+	if !ok || len(ans.Labels) != 1 || ans.Labels[0] != "postgres" {
+		t.Fatalf("answer = %+v ok=%v", ans, ok)
+	}
+	if app.AskPending() {
+		t.Fatal("card must close after Enter")
+	}
+}
+
+// TestAskCardDrawsQuestionAndOptions: the card is visible with its question,
+// every option, the recommended marker, and the key hint.
+func TestAskCardDrawsQuestionAndOptions(t *testing.T) {
+	app, scr := drawnApp(t, 100, 30)
+	req := askOptions()
+	req.Recommended = []string{"postgres"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.AskCard(context.Background(), req, 5*time.Second)
+		close(done)
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+	text := screenText(scr)
+	for _, want := range []string{"storage backend", "sqlite", "postgres", "(recommended)", "1-9 quick pick", "Esc skip"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("card missing %q:\n%s", want, text)
+		}
+	}
+	if sel, n := app.AskSelection(); sel != 1 || n != 3 {
+		t.Fatalf("selection = %d/%d", sel, n)
+	}
+	// A modal card swallows typing: nothing reaches the composer.
+	typeRunes(app, "hello")
+	if app.ed.Text() != "" {
+		t.Fatalf("composer received %q while the card was open", app.ed.Text())
+	}
+	pressKey(app, tcell.KeyEsc)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Esc must close the card")
+	}
+	if app.AskPending() {
+		t.Fatal("card must close after Esc")
+	}
+}
+
+// TestAskCardWrapsLongOptionText: a label or a description longer than the card
+// wraps on screen instead of running under the right border, and the
+// description keeps its own indented lines (omp's shape). The words asserted
+// here sit past the old single-line cut, so this fails if the truncation comes
+// back.
+func TestAskCardWrapsLongOptionText(t *testing.T) {
+	app, scr := drawnApp(t, 100, 30)
+	req := AskRequest{
+		Question: "Which storage backend should the fix target?",
+		Options: []AskOption{
+			{
+				Label: "postgres, the shared instance every integration test in the repo already points at, which nobody on the team currently owns or patches",
+				Description: "a local file with no server to run, nothing to page anyone about, and no connection string " +
+					"to put in the environment or rotate on the schedule the platform team agreed to",
+			},
+			{Label: "mysql"},
+		},
+	}
+	// The recommended option is the OTHER one, so the cursor starts away from the
+	// wrapped row: a click on its continuation line proving the hit map works is
+	// then a real move, not the row the cursor was already on.
+	req.Recommended = []string{"mysql"}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.AskCard(context.Background(), req, 5*time.Second)
+		close(done)
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+	text := screenText(scr)
+	// Both wraps have to be on screen: the tail of the label, and the tail of
+	// the description's second line. The old single-line row cut them off at the
+	// border, so neither could appear.
+	for _, want := range []string{
+		"which nobody on the team currently owns or patches",
+		"rotate on the schedule the platform team agreed to",
+		"1-9 quick pick", // and the footer still fits beside them
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("card missing %q:\n%s", want, text)
+		}
+	}
+	var row, cont, desc1, desc2 string
+	for _, ln := range strings.Split(text, "\n") {
+		switch {
+		case strings.Contains(ln, "postgres, the shared instance"):
+			row = ln
+		case strings.Contains(ln, "which nobody on the team"):
+			cont = ln
+		case strings.Contains(ln, "a local file with no server"):
+			desc1 = ln
+		case strings.Contains(ln, "rotate on the schedule"):
+			desc2 = ln
+		}
+	}
+	if row == "" || cont == "" || desc1 == "" || desc2 == "" {
+		t.Fatalf("row=%q cont=%q desc1=%q desc2=%q\n%s", row, cont, desc1, desc2, text)
+	}
+	// The description is its own block, not a tail on the label's line: every
+	// wrapped line — the label's continuation and the description's lines alike —
+	// starts under the label's first character, which is what makes a wrapped row
+	// read as one option (omp's shape). Column of a byte offset, hence width().
+	at := strings.Index(row, "postgres, the shared instance")
+	if at < 0 {
+		t.Fatalf("row line lost its label: %q", row)
+	}
+	col := width(row[:at])
+	for _, ln := range []string{cont, desc1, desc2} {
+		if ind := width(ln) - width(strings.TrimLeft(ln, " ")); ind != col {
+			t.Fatalf("wrapped line %.40q starts at cell %d, want %d:\n%s", ln, ind, col, text)
+		}
+	}
+	// A click on the description's line selects that row: the wrapped lines are
+	// part of the row, not dead space between two of them.
+	if sel, _ := app.AskSelection(); sel != 1 {
+		t.Fatalf("cursor should start on the recommended row, got %d", sel)
+	}
+	clickAskRow(t, app, text, "rotate on the schedule")
+	if sel, _ := app.AskSelection(); sel != 0 {
+		t.Fatalf("clicking a row's description line must select that row, got %d\n%s", sel, text)
+	}
+	// Enter then answers with that row, proving the click landed on the row the
+	// user aimed at and not on its first line only.
+	pressKey(app, tcell.KeyEnter)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Enter must close the card")
+	}
+}
+
+// clickAskRow presses on the card line containing want, at the column its text
+// starts on (the byte offset a mouse report wants is a cell one).
+func clickAskRow(t *testing.T, app *App, text, want string) {
+	t.Helper()
+	for y, line := range strings.Split(text, "\n") {
+		if at := strings.Index(line, want); at >= 0 {
+			app.handleAskMouse(tcell.NewEventMouse(width(line[:at]), y, tcell.Button1, tcell.ModNone), true)
+			return
+		}
+	}
+	t.Fatalf("no card line contains %q:\n%s", want, text)
+}
+
+// TestAskCardQuickPickAndSkip: digits confirm, Esc skips with no labels, and
+// a timeout resolves as a skip so nothing can hang on an unattended card.
+func TestAskCardQuickPickAndSkip(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	if ans, ok := askResultOf(t, app, askOptions(), 5*time.Second, '3'); !ok || ans.Labels[0] != "mysql" {
+		t.Fatalf("quick pick = %+v ok=%v", ans, ok)
+	}
+	ans, ok := askResultOf(t, app, askOptions(), 5*time.Second, tcell.KeyEsc)
+	if ok || len(ans.Labels) != 0 {
+		t.Fatalf("skip = %+v ok=%v", ans, ok)
+	}
+	ans, ok = askResultOf(t, app, askOptions(), 40*time.Millisecond)
+	if ok || len(ans.Labels) != 0 {
+		t.Fatalf("timeout = %+v ok=%v", ans, ok)
+	}
+}
+
+// TestAskCardMultiSelect: Space toggles, Enter returns every toggled label.
+func TestAskCardMultiSelect(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	req := askOptions()
+	req.Multi = true
+	ans, ok := askResultOf(t, app, req, 5*time.Second, tcell.KeyDown, ' ', tcell.KeyUp, ' ', tcell.KeyEnter)
+	if !ok || len(ans.Labels) != 2 || ans.Labels[0] != "sqlite" || ans.Labels[1] != "postgres" {
+		t.Fatalf("multi answer = %+v ok=%v", ans, ok)
+	}
+}
+
+// TestAskCardNilSafe: an empty option list and a canceled context both
+// resolve as a skip instead of parking a card nobody can answer.
+func TestAskCardNilSafe(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	if ans, ok := app.AskCard(context.Background(), AskRequest{Question: "no options"}, time.Second); ok || len(ans.Labels) != 0 {
+		t.Fatalf("empty options = %+v ok=%v", ans, ok)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := app.AskCard(ctx, askOptions(), time.Second); ok {
+		t.Fatal("canceled context must skip")
+	}
+	if app.AskPending() {
+		t.Fatal("no card may stay on screen")
+	}
+}
+
+// TestAskOpsSeam: the seam cmd hands to the ask tool resolves through the
+// card with the timeout the host configured.
+func TestAskOpsSeam(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	ops := app.NewAskOps(30 * time.Millisecond)
+	if ops == nil || ops.Show == nil {
+		t.Fatal("seam must carry Show")
+	}
+	if ans, ok := ops.Show(context.Background(), askOptions(), time.Second); ok || len(ans.Labels) != 0 {
+		t.Fatalf("unattended seam call = %+v ok=%v", ans, ok)
+	}
+	done := make(chan AskAnswer, 1)
+	go func() {
+		ans, _ := ops.Show(context.Background(), askOptions(), time.Second)
+		done <- ans
+	}()
+	waitAsk(t, app, true)
+	pressRune(app, '2')
+	select {
+	case ans := <-done:
+		if len(ans.Labels) != 1 || ans.Labels[0] != "postgres" {
+			t.Fatalf("seam answer = %+v", ans)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("seam did not resolve")
+	}
+}
+
+// TestAskCardNarrowWindowNotice: with no room to draw the card the question
+// still surfaces as a transcript notice, and the call resolves as a skip so
+// the tool's headless policy answers instead of the question vanishing.
+func TestAskCardNarrowWindowNotice(t *testing.T) {
+	app, _ := newTestApp(t, 8, 12)
+	if _, ok := app.AskCard(context.Background(), askOptions(), time.Second); ok {
+		t.Fatal("a window too narrow to draw the card must take the skip path")
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if app.ask != nil {
+		t.Fatal("no card may stay on screen")
+	}
+	if len(app.blocks) == 0 || !strings.Contains(app.blocks[len(app.blocks)-1].Text, "storage backend") {
+		t.Fatalf("question must surface as a notice: %+v", app.blocks)
+	}
+}
+
+// TestAskCardNoRoomClosesTheCard pins the 5b999f0 invariant for ask: a card
+// that cannot paint must close on the next frame instead of parking a modal
+// that owns the keyboard while drawing nothing — the "invisible lock" that
+// read as a dead TUI. The question survives as a transcript notice.
+func TestAskCardNoRoomClosesTheCard(t *testing.T) {
+	// Roomy width, but one row short: the card needs 7 rows above the
+	// composer (border + question + 3 options + footer + border).
+	app, _ := drawnApp(t, 100, 11)
+	req := askOptions()
+	done := make(chan AskAnswer, 1)
+	go func() {
+		// A long timeout: only the draw path may end the wait.
+		ans, _ := app.AskCard(context.Background(), req, time.Minute)
+		done <- ans
+	}()
+	waitAsk(t, app, true)
+
+	app.mu.Lock()
+	yTop := app.height - 1 - app.composerRows()
+	app.mu.Unlock()
+	app.drawAskCard(yTop) // what draw() does each frame, sans the full paint
+
+	waitAsk(t, app, false)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an unpaintable card must release its caller")
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if len(app.blocks) < 2 || !strings.Contains(app.blocks[len(app.blocks)-1].Text, "storage backend") {
+		t.Fatalf("question must surface as a notice: %+v", app.blocks)
+	}
+}
+
+// TestAskCardTimeoutNotices: when nobody answers, the card closes and the
+// transcript records the question with the reason — the wait the caller spent
+// is never invisible.
+func TestAskCardTimeoutNotices(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	before := len(app.Blocks())
+	if _, ok := app.AskCard(context.Background(), askOptions(), 20*time.Millisecond); ok {
+		t.Fatal("a timeout is a skip")
+	}
+	if app.AskPending() {
+		t.Fatal("the card must close on timeout")
+	}
+	blocks := app.Blocks()
+	if len(blocks) != before+1 || !strings.Contains(blocks[len(blocks)-1].Text, "no answer within") {
+		t.Fatalf("timeout must leave a notice: %+v", blocks)
+	}
+}
+
+// TestTopBarCarriesBranchAndLastPrompt pins the persistent header: once a
+// transcript is on screen, row 0 keeps the git branch AND the newest user
+// prompt collapsed to one line — so the request being answered stays visible
+// even while its transcript band scrolls away. With a single prompt the bar
+// names it once, not twice. Neither the directory path nor the model name is
+// on the bar (the status row and the composer's info divider carry them; both
+// removals were user-requested).
+func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	dir := t.TempDir()
+	app.SetLocation(dir)
+	app.mu.Lock()
+	app.branch = "fix/boxes"
+	app.mu.Unlock()
+	app.AddUserBlock("fix the   tool\noutput box please")
+	app.AddSystemBlock(strings.Repeat("line\n", 60)) // guarantees hidden rows
+	app.draw()
+
+	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
+	bar := rows[0]
+	for _, want := range []string{"❯ fix/boxes", "· fix the tool"} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("top bar %q missing %q", bar, want)
+		}
+	}
+	if got := strings.Count(bar, "fix the tool"); got != 1 {
+		t.Fatalf("one prompt must not be painted twice on %q", bar)
+	}
+	if dirName := dir[strings.LastIndex(dir, "/")+1:]; strings.Contains(bar, dirName) {
+		t.Fatalf("top bar still carries the directory path: %q", bar)
+	}
+	app.mu.Lock()
+	model := app.st.Model
+	app.mu.Unlock()
+	if model == "" || strings.Contains(bar, model) {
+		t.Fatalf("top bar %q must not carry the model name %q", bar, model)
+	}
+	// The transcript starts below the bar: the bar is chrome, content rows
+	// belong to the scrollback — and at the tail of a 60-row block the bar
+	// still names the last prompt.
+	if !strings.Contains(rows[1], "line") {
+		t.Fatalf("first transcript row lost to the top bar: %q", rows[1])
+	}
+}
+
+// TestTopBarCarriesFirstAndLastPrompt: the header names the session's opening
+// request as well as the newest one, so a long chat still says what it is about
+// after the first exchange has scrolled out of the viewport. The first entry is
+// clipped and the newest keeps the wider share — the request being answered is
+// the one the bar must not truncate away — and the bar ends in air instead of
+// painting off the right edge.
+func TestTopBarCarriesFirstAndLastPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.mu.Lock()
+	app.branch = "feat/topbar"
+	app.mu.Unlock()
+	app.AddUserBlock("port the top bar to carry the first prompt of the session too please")
+	app.AddAssistantBlock("done — three files touched")
+	app.AddUserBlock("and clip them to the width")
+	app.AddSystemBlock(strings.Repeat("line\n", 60))
+	app.draw()
+
+	bar := strings.TrimRight(strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0], " ")
+	// The opening prompt keeps the front of its collapsed line and pays for it
+	// with an ellipsis; the newest prompt is what the bar refuses to cut.
+	if !strings.Contains(bar, "· port the top bar to carry the first prompt of the ") {
+		t.Fatalf("first prompt missing or misclipped from top bar %q", bar)
+	}
+	if !strings.HasSuffix(bar, "… · and clip them to the width") {
+		t.Fatalf("newest prompt clipped or misplaced on top bar %q", bar)
+	}
+	if len([]rune(bar)) > 99 {
+		t.Fatalf("top bar spills past the right edge (%d cells): %q", len([]rune(bar)), bar)
+	}
+}
+
+// TestTopBarNarrowKeepsNewestPrompt: on a bar too small for both, the newest
+// prompt — the request on screen — is the one that survives.
+func TestTopBarNarrowKeepsNewestPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 44, 24)
+	app.AddUserBlock(strings.Repeat("first ", 20))
+	app.AddUserBlock("second")
+	app.AddSystemBlock(strings.Repeat("line\n", 20))
+	app.draw()
+
+	bar := strings.TrimRight(strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0], " ")
+	if !strings.Contains(bar, "· second") {
+		t.Fatalf("narrow bar must keep the newest prompt: %q", bar)
+	}
+	if len([]rune(bar)) > 43 {
+		t.Fatalf("narrow bar spills past the right edge (%d cells): %q", len([]rune(bar)), bar)
+	}
+}

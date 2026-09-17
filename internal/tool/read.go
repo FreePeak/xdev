@@ -1,0 +1,441 @@
+package tool
+
+// ReadTool: pi-schema `read` — line-numbered windows over text files,
+// directory listings, binary/image detection (PRD §3.6).
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	// readDefaultLimit is the default line window (pi's read cap).
+	readDefaultLimit = 2000
+	// readMaxLineRunes caps the rendered length of a single line; the raw
+	// bytes on disk are never touched.
+	readMaxLineRunes = 2000
+	// readBinaryProbe is how many leading bytes are scanned for NUL to
+	// classify a file as binary.
+	readBinaryProbe = 8 * 1024
+	// readDirMax is how many directory entries a listing shows.
+	readDirMax = 30
+)
+
+var _ Tool = (*ReadTool)(nil)
+
+// ReadTool reads files as line-numbered windows, with directory and
+// binary/image fallbacks. It records a freshness snapshot for every text
+// window so a later edit can detect a file that changed since the read.
+type ReadTool struct {
+	reg *Registry
+}
+
+// NewReadTool returns a ReadTool.
+func NewReadTool() *ReadTool { return &ReadTool{} }
+
+// setRegistry receives the owning registry from Registry.Register.
+func (t *ReadTool) setRegistry(r *Registry) { t.reg = r }
+
+// Name implements Tool.
+func (t *ReadTool) Name() string { return "read" }
+
+// Description implements Tool.
+func (t *ReadTool) Description() string {
+	return "Read a file. Returns [path#tag] header + numbered lines (N:content); quote the header in a later edit. offset/limit window large files. Directories return an entry listing — open files directly instead. Binary/image files are detected and reported, not dumped. .ipynb renders as editable \"# %% [code|markdown|raw] cell:N\" blocks (outputs summarized; run cells with the eval tool)."
+}
+
+// Parameters implements Tool.
+func (t *ReadTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+  "type": "object",
+  "required": ["path"],
+  "properties": {
+    "path": {"type": "string", "description": "File path to read"},
+    "offset": {"type": "integer", "minimum": 1, "description": "1-based line number to start from"},
+    "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return (default 2000)"}
+  }
+}`)
+}
+
+type readArgs struct {
+	Path   string `json:"path"`
+	Offset int    `json:"offset,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+// isSelectorSuffix reports whether s looks like an omp line-selector suffix
+// ("1", "50-100", "5-16,960-973", "raw"): digits, hyphens, commas, dots
+// only, never a path separator.
+func isSelectorSuffix(s string) bool {
+	if s == "" || strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r == '-', r == ',', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Execute implements Tool.
+func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{IsError: true, Text: fmt.Sprintf("read: canceled: %v", err)}, nil
+	}
+	var a readArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return Result{}, fmt.Errorf("read: invalid arguments: %w", err)
+	}
+	if a.Path == "" {
+		return Result{IsError: true, Text: "read: path is required"}, nil
+	}
+	// An omp-style selector suffix ("go.mod:50-100", "go.mod:1") is not a
+	// filename: xdev's read takes offset/limit fields instead. Saying "file
+	// not found" for a file that exists teaches the model the wrong lesson;
+	// name the difference and the fields that do the same job.
+	if base, suffix, ok := strings.Cut(a.Path, ":"); ok && suffix != "" && isSelectorSuffix(suffix) {
+		if _, err := os.Stat(base); err == nil {
+			return Result{IsError: true, Text: fmt.Sprintf("read: %q looks like an omp line selector, but xdev's read takes offset/limit fields instead — re-read with path=%q plus offset/limit", a.Path, base)}, nil
+		}
+	}
+	// A URI no resolver claims must not fall through to the filesystem:
+	// "file not found: memory://root/nope.md" reads as if that file were
+	// missing, so the model retries the call instead of learning the scheme
+	// is not available in this process. Name the scheme and what IS served.
+	if scheme, unknown := unknownURIScheme(a.Path); unknown {
+		return Result{IsError: true, Text: fmt.Sprintf("read: unknown scheme %q in %q — read serves %s", scheme, a.Path, supportedURISchemes())}, nil
+	}
+	// URI seam: skill:// and memory:// resolve to synthesized text, not
+	// files (omp exposes both through read).
+	if text, matched, uerr := resolveURI(a.Path); matched {
+		if uerr != nil {
+			return Result{IsError: true, Text: "read: " + uerr.Error()}, nil
+		}
+		return readURIText(a.Path, text, a.Offset, a.Limit), nil
+	}
+	resolved, err := resolvePath(a.Path)
+	if err != nil {
+		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
+	}
+	st, err := os.Stat(resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Result{IsError: true, Text: fmt.Sprintf("file not found: %s", a.Path)}, nil
+		}
+		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
+	}
+	if st.IsDir() {
+		return readDirectory(resolved), nil
+	}
+
+	head, fileSize, err := readHead(resolved, readBinaryProbe)
+	if err != nil {
+		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
+	}
+	if isImageExt(resolved) {
+		return readImageResult(a.Path, resolved, head, fileSize), nil
+	}
+	if bytes.IndexByte(head, 0) >= 0 {
+		mime := http.DetectContentType(head[:min(int64(len(head)), 512)])
+		return Result{
+			Text: fmt.Sprintf("binary file: %s (%d bytes, %s)", a.Path, fileSize, mime),
+			Details: map[string]any{
+				"resolvedPath": resolved,
+				"lineCount":    0,
+				"totalLines":   0,
+				"truncated":    false,
+				"binary":       true,
+				"mime":         mime,
+				"size":         fileSize,
+			},
+		}, nil
+	}
+	if isNotebookPath(resolved) {
+		if doc, ok := notebookFromDisk(resolved); ok {
+			return t.readNotebookWindow(resolved, doc, a.Offset, a.Limit), nil
+		}
+	}
+	return t.readTextWindow(a.Path, resolved, a.Offset, a.Limit)
+}
+
+// readNotebookWindow serves an .ipynb as its editable cell virtual text (M13
+// #47): cells indexed by marker, outputs summarized. Execution is not part of
+// this path — cells run through the eval tool.
+func (t *ReadTool) readNotebookWindow(resolved string, doc *notebookDoc, offset, limit int) Result {
+	if len(doc.cells) == 0 {
+		return Result{Text: "(notebook has no cells)", Details: map[string]any{
+			"resolvedPath": resolved,
+			"notebook":     true,
+			"cells":        0,
+			"lineCount":    0,
+			"totalLines":   0,
+			"truncated":    false,
+		}}
+	}
+	details := map[string]any{"resolvedPath": resolved, "notebook": true, "cells": len(doc.cells)}
+	return t.windowLines(resolved, doc.renderLines(), offset, limit, details, "")
+}
+
+// readHead returns up to n leading bytes plus the full file size.
+func readHead(path string, n int) ([]byte, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	buf := make([]byte, min(int64(n), st.Size()))
+	if _, err := io.ReadFull(f, buf); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, 0, err
+	}
+	return buf, st.Size(), nil
+}
+
+// readTextWindow renders the offset/limit window with real 1-based line
+// numbers and the omp continuation footer, recording the freshness snapshot
+// (full-file hash + the rendered window's exact text) for later edits.
+func (t *ReadTool) readTextWindow(display, resolved string, offset, limit int) (Result, error) {
+	lines, err := ReadLines(resolved)
+	if err != nil {
+		return Result{IsError: true, Text: fmt.Sprintf("read: %v", err)}, nil
+	}
+	return t.windowLines(resolved, lines, offset, limit, map[string]any{"resolvedPath": resolved}, display), nil
+}
+
+// windowLines renders lines as the offset/limit window with the [path#TAG]
+// snapshot header (when display is set), real 1-based line numbers, and the
+// omp continuation footer, recording the freshness snapshot (content hash +
+// the rendered window's exact text) for later edits. The header tag is what
+// checkFreshness accepts, closing the loop the edit tool's contract assumes:
+// "quote the tag from the header read or the last edit printed". Notebooks
+// pass display "" — their raw-JSON freshness is negotiated separately.
+func (t *ReadTool) windowLines(resolved string, lines []string, offset, limit int, details map[string]any, display string) Result {
+	total := len(lines)
+	details["lineCount"] = 0
+	details["totalLines"] = total
+	details["truncated"] = false
+	if total == 0 {
+		return Result{Text: "(empty file)", Details: details}
+	}
+
+	start := max(offset, 1)
+	if start > total {
+		return Result{
+			Text:    fmt.Sprintf("(no lines in range: file has %d lines, offset %d is past the end)", total, offset),
+			Details: details,
+		}
+	}
+	if limit <= 0 {
+		limit = readDefaultLimit
+	}
+	end := min(start+limit-1, total)
+
+	// (The freshness snapshot itself is recorded on the success path below.)
+
+	var b strings.Builder
+	fullHash := linesHash(lines)
+	if display != "" {
+		fmt.Fprintf(&b, "[%s#%s]\n", display, hashTag(fullHash))
+	}
+	for i, line := range lines[start-1 : end] {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(strconv.Itoa(start + i))
+		b.WriteByte(':')
+		b.WriteString(readTruncateLine(line))
+	}
+	truncated := end < total
+	if truncated {
+		fmt.Fprintf(&b, "\n[Showing lines %d-%d of %d. Use offset=%d to continue]", start, end, total, end+1)
+	}
+	// Success path: the model now holds real line numbers for start..end.
+	window := make(map[int]string, end-start+1)
+	for i := start; i <= end; i++ {
+		window[i] = lines[i-1]
+	}
+	t.reg.recordSnapshot(resolved, fullHash, window)
+	details["lineCount"] = end - start + 1
+	details["truncated"] = truncated
+	return Result{Text: b.String(), Details: details}
+}
+
+// readTruncateLine visually truncates over-long lines; raw file bytes are
+// preserved on disk.
+func readTruncateLine(s string) string {
+	if len(s) <= readMaxLineRunes {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= readMaxLineRunes {
+		return s
+	}
+	return string(runes[:readMaxLineRunes]) + "…"
+}
+
+// readDirectory rejects a directory read with an omp-style entry listing and
+// an intent hint.
+func readDirectory(resolved string) Result {
+	entries, err := os.ReadDir(resolved)
+	if err != nil {
+		return Result{
+			IsError: true,
+			Text:    fmt.Sprintf("read: %v", err),
+			Details: map[string]any{"isDirectory": true, "resolvedPath": resolved},
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir() != entries[j].IsDir() {
+			return entries[i].IsDir()
+		}
+		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+	})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s is a directory (%d entries):\n", resolved, len(entries))
+	shown := entries
+	if len(shown) > readDirMax {
+		shown = shown[:readDirMax]
+	}
+	for _, e := range shown {
+		info, ierr := e.Info()
+		if ierr != nil {
+			fmt.Fprintf(&b, "- %s\n", e.Name())
+			continue
+		}
+		if e.IsDir() {
+			fmt.Fprintf(&b, "- %s/ %s\n", e.Name(), readEntryAge(info.ModTime()))
+		} else {
+			fmt.Fprintf(&b, "- %s %s %s\n", e.Name(), readEntrySize(info.Size()), readEntryAge(info.ModTime()))
+		}
+	}
+	if more := len(entries) - len(shown); more > 0 {
+		fmt.Fprintf(&b, "... and %d more\n", more)
+	}
+	b.WriteString("Open files directly — read a specific file inside this directory.")
+	return Result{
+		IsError: true,
+		Text:    b.String(),
+		Details: map[string]any{"isDirectory": true, "resolvedPath": resolved},
+	}
+}
+
+// readImageResult reports an image file without dumping bytes (no vision in
+// the MVP); dimensions come from the stdlib header decoders when available.
+func readImageResult(display, resolved string, head []byte, size int64) Result {
+	dims := ""
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(head)); err == nil {
+		dims = fmt.Sprintf("%dx%d, ", cfg.Width, cfg.Height)
+	}
+	mime := http.DetectContentType(head[:min(int64(len(head)), 512)])
+	return Result{
+		Text: fmt.Sprintf("image file: %s (%s%d bytes)", display, dims, size),
+		Details: map[string]any{
+			"resolvedPath": resolved,
+			"lineCount":    0,
+			"totalLines":   0,
+			"truncated":    false,
+			"image":        true,
+			"mime":         mime,
+			"size":         size,
+		},
+	}
+}
+
+func isImageExt(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return true
+	default:
+		return false
+	}
+}
+
+// readEntryAge renders a modtime the way omp listings do ("2h ago").
+func readEntryAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", max(int(d.Seconds()), 1))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	case d < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
+	default:
+		return fmt.Sprintf("%dy ago", int(d.Hours()/(24*365)))
+	}
+}
+
+// readEntrySize renders a humanized size ("13 B", "1.2 KB").
+func readEntrySize(n int64) string {
+	f := float64(n)
+	unit := "B"
+	for _, next := range [...]string{"KB", "MB", "GB", "TB", "PB"} {
+		if f < 1024 {
+			break
+		}
+		f /= 1024
+		unit = next
+	}
+	if unit == "B" {
+		return fmt.Sprintf("%.0f %s", f, unit)
+	}
+	return fmt.Sprintf("%.1f %s", f, unit)
+}
+
+// readURIText renders synthesized URI content with the same line-number
+// windowing the file path uses, so the model sees one shape everywhere.
+func readURIText(uri, text string, offset, limit int) Result {
+	if offset <= 0 {
+		offset = 1
+	}
+	if limit <= 0 {
+		limit = readDefaultLimit
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // trailing newline is not a line
+	}
+	total := len(lines)
+	start := offset - 1
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d lines)\n", uri, total)
+	for i := start; i < end; i++ {
+		fmt.Fprintf(&b, "%d:%s\n", i+1, lines[i])
+	}
+	if end < total {
+		fmt.Fprintf(&b, "… (%d more lines; use offset=%d)\n", total-end, end+1)
+	}
+	return Result{Text: strings.TrimRight(b.String(), "\n")}
+}

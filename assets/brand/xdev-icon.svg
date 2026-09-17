@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="xdev">
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="64">
+      <stop offset="0" stop-color="#17171b"/><stop offset="1" stop-color="#0b0b0d"/>
+    </linearGradient>
+    <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="64" y2="64">
+      <stop offset="0" stop-color="#bb9af7"/><stop offset="1" stop-color="#7aa2f7"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#tile)"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="none" stroke="#2a2a31"/>
+  <rect x="12" y="12" width="8" height="8" fill="url(#mark)"/>
+  <rect x="12" y="44" width="8" height="8" fill="url(#mark)"/>
+  <rect x="20" y="20" width="8" height="8" fill="url(#mark)"/>
+  <rect x="20" y="36" width="8" height="8" fill="url(#mark)"/>
+  <rect x="28" y="28" width="8" height="8" fill="url(#mark)"/>
+  <rect x="36" y="20" width="8" height="8" fill="url(#mark)"/>
+  <rect x="36" y="36" width="8" height="8" fill="url(#mark)"/>
+  <rect x="44" y="12" width="8" height="8" fill="url(#mark)"/>
+  <rect x="44" y="44" width="8" height="8" fill="url(#mark)"/>
+</svg>

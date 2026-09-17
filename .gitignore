@@ -1,0 +1,14 @@
+/xdev
+/xdev.exe
+
+# release artifacts (the release workflow and any local packaging write these).
+# Anchored: an unanchored `dist/` also swallows the source package
+# internal/dist/, which makes `git add` silently drop new files there.
+/dist/
+
+# local tool scratch: the edit/write/bash self-tests run in here
+.selftest/
+
+# go test + coverage output
+*.test
+coverage.out

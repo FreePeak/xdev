@@ -1,0 +1,346 @@
+package tool
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func policyBashArgs(t *testing.T, cmd string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"command": cmd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestPolicyZeroValueIsProductDefault(t *testing.T) {
+	// Zero must mean yolo: agents built without an explicit policy (child
+	// sessions, tests) behave like the shipped product, not like a strict
+	// configuration nobody asked for.
+	if ModeOf(ApprovalPolicy{}) != Yolo {
+		t.Fatalf("zero-value mode = %s, want yolo", ModeOf(ApprovalPolicy{}))
+	}
+	var p ApprovalPolicy
+	dec, err := p.Decide("bash", policyBashArgs(t, "rm -rf /"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Yolo is both the zero value and the shipped default, so an unset policy
+	// allows: strictness always arrives explicitly from settings.
+	if dec.Action != ActionAllow {
+		t.Fatalf("zero policy = %s, want allow", dec.Action)
+	}
+	if DefaultApprovalMode != Yolo {
+		t.Fatalf("shipped default mode = %s", DefaultApprovalMode)
+	}
+}
+
+func TestPolicyModeTiers(t *testing.T) {
+	tests := []struct {
+		mode ApprovalMode
+		tool string
+		want Action
+	}{
+		{mode: Write, tool: "read", want: ActionAllow},
+		{mode: Write, tool: "edit", want: ActionPrompt},
+		{mode: Write, tool: "bash", want: ActionPrompt},
+		{mode: AlwaysAsk, tool: "read", want: ActionPrompt},
+		{mode: Yolo, tool: "bash", want: ActionAllow},
+	}
+	for _, tc := range tests {
+		p := ApprovalPolicy{Mode: tc.mode}
+		args := json.RawMessage(`{}`)
+		if tc.tool == "bash" {
+			args = policyBashArgs(t, "ls")
+		}
+		dec, err := p.Decide(tc.tool, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dec.Action != tc.want {
+			t.Errorf("mode %s tool %s = %s, want %s", tc.mode, tc.tool, dec.Action, tc.want)
+		}
+	}
+}
+
+func TestPolicyDenyBeatsPerToolAllow(t *testing.T) {
+	// The whole point of deny-as-absolute: a broad per-tool allow must not
+	// resurrect a specifically denied command.
+	p := ApprovalPolicy{
+		Mode:         Yolo,
+		PerTool:      map[string]Action{"bash": ActionAllow},
+		BashPatterns: []PolicyRule{{Pattern: "rm -rf *", Action: ActionDeny}},
+	}
+	dec, err := p.Decide("bash", policyBashArgs(t, "rm -rf /tmp/x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Action != ActionDeny {
+		t.Fatalf("deny must win, got %s (%s)", dec.Action, dec.Reason)
+	}
+	if !strings.Contains(dec.Reason, "rm -rf *") {
+		t.Fatalf("reason must name the rule: %q", dec.Reason)
+	}
+}
+
+func TestPolicyPromptRuleUnderYolo(t *testing.T) {
+	p := ApprovalPolicy{
+		Mode:         Yolo,
+		BashPatterns: []PolicyRule{{Pattern: "git push *", Action: ActionPrompt}},
+	}
+	if dec, _ := p.Decide("bash", policyBashArgs(t, "git push origin main")); dec.Action != ActionPrompt {
+		t.Fatalf("git push = %s, want prompt", dec.Action)
+	}
+	if dec, _ := p.Decide("bash", policyBashArgs(t, "ls")); dec.Action != ActionAllow {
+		t.Fatalf("ls = %s, want allow", dec.Action)
+	}
+}
+
+func TestPolicyDenyBeatsEarlierAllow(t *testing.T) {
+	// Precedence, not position: the spec resolves deny > prompt > allow, so
+	// a later deny rule still beats an earlier allow. Order only breaks
+	// ties among rules of the same class.
+	p := ApprovalPolicy{
+		Mode: Yolo,
+		BashPatterns: []PolicyRule{
+			{Pattern: "git *", Action: ActionAllow},
+			{Pattern: "git push *", Action: ActionDeny},
+		},
+	}
+	if dec, _ := p.Decide("bash", policyBashArgs(t, "git push origin main")); dec.Action != ActionDeny {
+		t.Fatalf("deny must beat an earlier allow, got %s", dec.Action)
+	}
+	// The allow rule still covers commands nothing denies.
+	if dec, _ := p.Decide("bash", policyBashArgs(t, "git status")); dec.Action != ActionAllow {
+		t.Fatalf("git status = %s, want allow", dec.Action)
+	}
+}
+
+func TestPolicySameClassOrderBreaksTies(t *testing.T) {
+	// Two prompt rules: the first one that matches supplies the reason.
+	p := ApprovalPolicy{
+		Mode: Yolo,
+		BashPatterns: []PolicyRule{
+			{Pattern: "git *", Action: ActionPrompt},
+			{Pattern: "git push *", Action: ActionPrompt},
+		},
+	}
+	dec, err := p.Decide("bash", policyBashArgs(t, "git push"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Action != ActionPrompt || !strings.Contains(dec.Reason, "git *") {
+		t.Fatalf("first same-class rule should win: %+v", dec)
+	}
+}
+
+func TestPolicyTrailingStarMatchesBareCommand(t *testing.T) {
+	// `deny:git push *` is the idiomatic spelling and must also stop a bare
+	// `git push` — a deny rule that misses the no-argument form is a hole.
+	p := ApprovalPolicy{
+		Mode:         Yolo,
+		BashPatterns: []PolicyRule{{Pattern: "git push *", Action: ActionDeny}},
+	}
+	for _, cmd := range []string{"git push", "git push origin main", "git   push"} {
+		dec, _ := p.Decide("bash", policyBashArgs(t, cmd))
+		if dec.Action != ActionDeny && cmd != "git   push" {
+			t.Errorf("%q: got %s, want deny", cmd, dec.Action)
+		}
+	}
+}
+
+func TestPolicyCompoundCommandJudgedConservatively(t *testing.T) {
+	p := ApprovalPolicy{
+		Mode:         Yolo,
+		BashPatterns: []PolicyRule{{Pattern: "rm -rf *", Action: ActionDeny}},
+	}
+	for _, cmd := range []string{
+		"echo hi && rm -rf /",
+		"echo hi; rm -rf /",
+		"true || rm -rf /",
+		"echo a\nrm -rf /",
+	} {
+		if dec, _ := p.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionDeny {
+			t.Errorf("%q: compound smuggled a denied command (got %s)", cmd, dec.Action)
+		}
+	}
+	// Quoted operators are data, not sequencing.
+	if dec, _ := p.Decide("bash", policyBashArgs(t, `echo "rm -rf *"`)); dec.Action != ActionAllow {
+		t.Errorf("quoted text matched a rule: %s", dec.Action)
+	}
+}
+
+func TestPolicyUnknownToolIsConservative(t *testing.T) {
+	// A tool outside the tier table (grep/glob/ast, ext_*/mcp_* registrations)
+	// classifies as TierExec so dynamic tools are governed like bash. The
+	// first version propagated Classify's error, which let Decide skip
+	// enforcement — exempting exactly the tools users extend xdev with.
+	dec, err := ApprovalPolicy{Mode: Write}.Decide("mystery_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("unknown tool must resolve, not error: %v", err)
+	}
+	if dec.Action != ActionPrompt {
+		t.Fatalf("unknown tool under write = %s, want prompt", dec.Action)
+	}
+	// bash.patterns are bash-scoped by design; an unmodeled tool is denied
+	// through its per-tool entry, which applies to every registered name.
+	p2 := ApprovalPolicy{Mode: Yolo, PerTool: map[string]Action{"mystery_tool": ActionDeny}}
+	if dec, _ := p2.Decide("mystery_tool", json.RawMessage(`{}`)); dec.Action != ActionDeny {
+		t.Fatalf("per-tool deny must govern unmodeled tools, got %s", dec.Action)
+	}
+}
+
+func TestParsePolicyRules(t *testing.T) {
+	got, err := ParsePolicyRules([]string{"deny:rm -rf *", "prompt:git push *", "docker *"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("rules = %+v", got)
+	}
+	if got[0].Action != ActionDeny || got[0].Pattern != "rm -rf *" {
+		t.Fatalf("rule 0 = %+v", got[0])
+	}
+	if got[2].Action != ActionPrompt {
+		t.Fatalf("bare pattern must default to prompt: %+v", got[2])
+	}
+	if _, err := ParsePolicyRules([]string{"bogus:ls"}); err == nil {
+		t.Fatal("unknown action must error")
+	}
+	if _, err := ParsePolicyRules([]string{"deny:"}); err == nil {
+		t.Fatal("empty pattern must error")
+	}
+}
+
+func TestPolicyCompoundWholeMatchOptIn(t *testing.T) {
+	// The same rules, the same compound, both settings of
+	// bash.allowCompoundCommands.
+	rules := []PolicyRule{
+		{Pattern: "npm test *", Action: ActionAllow},
+		{Pattern: "docker *", Action: ActionPrompt},
+	}
+	off := ApprovalPolicy{Mode: AlwaysAsk, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: AlwaysAsk, BashPatterns: rules, AllowCompoundCommands: true}
+
+	// Off (the shipped default): a rule written for the whole chain never
+	// fires, so the chain is prompt-worthy under always-ask.
+	if dec, _ := off.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionPrompt {
+		t.Fatalf("opt-in off: got %s, want the per-segment verdict (prompt)", dec.Action)
+	}
+	// On: the compound is matched as ONE string first, so the whole-chain
+	// allow decides it — this is the feature.
+	if dec, _ := on.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionAllow {
+		t.Fatalf("opt-in on: got %s, want the whole-chain allow to decide", dec.Action)
+	}
+	// No whole-command rule matches: resolution falls back to segments, so
+	// the prompt rule on the second command still fires.
+	if dec, _ := on.Decide("bash", policyBashArgs(t, "echo hi && docker build .")); dec.Action != ActionPrompt {
+		t.Fatalf("no whole match must fall back to segments: got %s", dec.Action)
+	}
+}
+
+func TestPolicyCompoundSmugglingStaysDenied(t *testing.T) {
+	// A smuggling case: an allow rule for the compound must never lift the
+	// verdict on a denied segment, with the opt-in off or on. Deny rules are
+	// absolute in both regimes.
+	rules := []PolicyRule{
+		{Pattern: "npm test *", Action: ActionAllow},
+		{Pattern: "rm -rf *", Action: ActionDeny},
+	}
+	off := ApprovalPolicy{Mode: Yolo, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: Yolo, BashPatterns: rules, AllowCompoundCommands: true}
+	for name, p := range map[string]ApprovalPolicy{"off": off, "on": on} {
+		if dec, _ := p.Decide("bash", policyBashArgs(t, "npm test && rm -rf /tmp/x")); dec.Action != ActionDeny {
+			t.Errorf("%s: compound smuggled a denied command: %s", name, dec.Action)
+		}
+	}
+}
+
+func TestPolicyCompoundWholeCommandRuleForms(t *testing.T) {
+	// The operator forms the per-segment resolver must not miss, and the
+	// rules the whole-command layer covers instead. `|` and `$(…)` are
+	// segments, so their commands are judged by the per-segment rules with
+	// the opt-in off; a rule written for the whole chain only fires with it
+	// on.
+	rules := []PolicyRule{
+		{Pattern: "rm -rf *", Action: ActionDeny},
+		{Pattern: "npm test && git push *", Action: ActionPrompt},
+	}
+	off := ApprovalPolicy{Mode: Yolo, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: Yolo, BashPatterns: rules, AllowCompoundCommands: true}
+
+	// Pipelines, subshells, command substitution and backgrounding: denied
+	// in BOTH regimes (the split covers them, so no whole rule is needed).
+	for _, cmd := range []string{
+		"echo hi | rm -rf /tmp/x",
+		"echo hi & rm -rf /tmp/x",
+		"(cd /tmp && rm -rf /tmp/x)",
+		"echo $(rm -rf /tmp/x)",
+		"echo `rm -rf /tmp/x`",
+		"true; rm -rf /tmp/x",
+		"true || rm -rf /tmp/x",
+	} {
+		for name, p := range map[string]ApprovalPolicy{"off": off, "on": on} {
+			if dec, _ := p.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionDeny {
+				t.Errorf("%s: %q = %s, want deny", name, cmd, dec.Action)
+			}
+		}
+	}
+
+	// A rule written across the operator only matches the whole chain...
+	const chain = "npm test && git push origin main"
+	if dec, _ := off.Decide("bash", policyBashArgs(t, chain)); dec.Action != ActionAllow {
+		t.Errorf("opt-in off: whole-chain rule should not fire, got %s", dec.Action)
+	}
+	dec, _ := on.Decide("bash", policyBashArgs(t, chain))
+	if dec.Action != ActionPrompt || !strings.Contains(dec.Reason, "whole command") {
+		t.Errorf("opt-in on: whole-chain prompt rule should fire, got %+v", dec)
+	}
+}
+
+func TestPolicyCompoundOptInPreservesPrecedence(t *testing.T) {
+	// Whole-command matching is the bash-pattern layer, so it stays under an
+	// explicit per-tool rule and keeps prompt above allow.
+	p := ApprovalPolicy{
+		Mode:                  Yolo,
+		AllowCompoundCommands: true,
+		PerTool:               map[string]Action{"bash": ActionPrompt},
+		BashPatterns: []PolicyRule{
+			{Pattern: "npm test *", Action: ActionAllow},
+			{Pattern: "npm *", Action: ActionPrompt},
+		},
+	}
+	if dec, _ := p.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionPrompt {
+		t.Fatalf("per-tool rule must outrank the whole-command layer: %s", dec.Action)
+	}
+	// Within the layer, prompt beats allow regardless of order.
+	q := ApprovalPolicy{
+		Mode:                  Yolo,
+		AllowCompoundCommands: true,
+		BashPatterns: []PolicyRule{
+			{Pattern: "npm test *", Action: ActionAllow},
+			{Pattern: "npm *", Action: ActionPrompt},
+		},
+	}
+	if dec, _ := q.Decide("bash", policyBashArgs(t, "npm test && npm run lint")); dec.Action != ActionPrompt {
+		t.Fatalf("prompt must outrank allow at the whole-command layer: %s", dec.Action)
+	}
+}
+
+func TestPolicyCompoundWholeDenyOnlyFiresWhenOptedIn(t *testing.T) {
+	// A deny rule written across the operators protects the compound it
+	// describes; with the opt-in off the per-segment resolver cannot see it,
+	// which is exactly why deny wants an explicit per-segment rule too.
+	rules := []PolicyRule{{Pattern: "npm test && rm -rf *", Action: ActionDeny}}
+	off := ApprovalPolicy{Mode: Yolo, BashPatterns: rules}
+	on := ApprovalPolicy{Mode: Yolo, BashPatterns: rules, AllowCompoundCommands: true}
+	const cmd = "npm test && rm -rf /tmp/x"
+	if dec, _ := off.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionAllow {
+		t.Errorf("opt-in off: got %s, want allow (rule doesn't match a segment)", dec.Action)
+	}
+	if dec, _ := on.Decide("bash", policyBashArgs(t, cmd)); dec.Action != ActionDeny {
+		t.Errorf("opt-in on: whole-command deny did not fire: %s", dec.Action)
+	}
+}

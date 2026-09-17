@@ -1,0 +1,671 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
+)
+
+func TestWrap(t *testing.T) {
+	got := wrap("hello wonderful world", 10)
+	if strings.Join(got, "|") != "hello|wonderful|world" {
+		t.Fatalf("wrap = %q", got)
+	}
+	got = wrap("a\n\nb", 10)
+	if strings.Join(got, "|") != "a||b" {
+		t.Fatalf("empty lines must survive: %q", got)
+	}
+	// Long word hard-breaks.
+	got = wrap("abcdefghijklmnopqrstuvwxyz", 10)
+	for _, l := range got {
+		if width(l) > 10 {
+			t.Fatalf("line exceeds maxW: %q", l)
+		}
+	}
+	if strings.Join(got, "") != "abcdefghij"+"klmnopqrst"+"uvwxyz" {
+		t.Fatalf("hard break lost content: %q", got)
+	}
+}
+
+func TestEditorSendAndHistory(t *testing.T) {
+	var e Editor
+	typeIn := func(s string) {
+		for _, r := range s {
+			e.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		}
+	}
+	typeIn("hello")
+	if e.Text() != "hello" {
+		t.Fatalf("text = %q", e.Text())
+	}
+	if !e.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)) {
+		t.Fatal("Enter with content must send")
+	}
+	if e.Text() != "" {
+		t.Fatal("editor must reset after send")
+	}
+	// Empty Enter does not send.
+	if e.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)) {
+		t.Fatal("empty Enter must not send")
+	}
+	// History recall.
+	typeIn("second")
+	e.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	e.PushHistory("second")
+	e.PushHistory("hello")
+	e.HandleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	if e.Text() != "hello" {
+		t.Fatalf("Up should recall most recent: %q", e.Text())
+	}
+	e.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	if e.Text() != "" {
+		t.Fatalf("Down past newest should clear: %q", e.Text())
+	}
+}
+
+func TestEditorBackspaceAndWordDelete(t *testing.T) {
+	var e Editor
+	for _, r := range "one two three" {
+		e.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	e.HandleKey(tcell.NewEventKey(tcell.KeyCtrlW, 0, tcell.ModNone))
+	if got := e.Text(); got != "one two " {
+		t.Fatalf("CtrlW = %q", got)
+	}
+	e.HandleKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
+	if got := e.Text(); got != "one two" {
+		t.Fatalf("backspace = %q", got)
+	}
+}
+
+func newTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen) {
+	t.Helper()
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	scr.SetSize(w, h)
+	th := theme.Load("groknight")
+	app := New(scr, th, "test/free", "sess1234")
+	t.Cleanup(func() { scr.Fini() })
+	return app, scr
+}
+
+func TestAppSendFlow(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var sent []string
+	app.SetHandlers(func(text string) { sent = append(sent, text) }, func() {}, func() {})
+
+	for _, r := range "make a file" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+
+	if len(sent) != 1 || sent[0] != "make a file" {
+		t.Fatalf("sent = %v", sent)
+	}
+	app.mu.Lock()
+	n := len(app.blocks)
+	kind := app.blocks[0].Kind
+	edEmpty := app.ed.Text() == ""
+	app.mu.Unlock()
+	if n != 1 || kind != KindUser || !edEmpty {
+		t.Fatalf("blocks=%d kind=%v editorEmpty=%v", n, kind, edEmpty)
+	}
+}
+
+// The composer's submit path must route a "!cmd" draft into shell mode: no
+// user block, no send. Asserted through handleKey because the risk lives in
+// the ordering of that path, not in the router alone.
+func TestAppBangShellModeNotSent(t *testing.T) {
+	orig := Bang
+	t.Cleanup(func() { Bang = orig })
+
+	var ran []string
+	Bang = func(cmd string) error { ran = append(ran, cmd); return nil }
+	app, _ := newTestApp(t, 80, 24)
+	var sent []string
+	app.SetHandlers(func(text string) { sent = append(sent, text) }, func() {}, func() {})
+
+	for _, r := range "!echo hi" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+
+	if len(ran) != 1 || ran[0] != "echo hi" {
+		t.Fatalf("ran = %v, want [echo hi]", ran)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("bang draft was sent to the model: %v", sent)
+	}
+	app.mu.Lock()
+	blocks, empty := len(app.blocks), app.ed.Text() == ""
+	app.mu.Unlock()
+	if blocks != 0 {
+		t.Fatalf("bang draft appended %d transcript blocks, want 0 (no user row)", blocks)
+	}
+	if !empty {
+		t.Fatal("bang draft left the composer dirty")
+	}
+}
+
+// The F5 chord drives the wired retry op on the UI thread; an unwired build
+// says so instead of swallowing the key.
+func TestAppRetryChord(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	retries := 0
+	app.SetRetry(func() { retries++ })
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone))
+
+	if retries != 1 {
+		t.Fatalf("F5 fired retry %d times, want 1", retries)
+	}
+	app.mu.Lock()
+	blocks := len(app.blocks)
+	app.mu.Unlock()
+	if blocks != 0 {
+		t.Fatalf("retry appended %d transcript blocks, want 0 (it re-runs, not resends)", blocks)
+	}
+
+	// Unwired: the chord is a visible notice, never a silent no-op.
+	app2, _ := newTestApp(t, 80, 24)
+	app2.SetHandlers(func(string) {}, func() {}, func() {})
+	app2.handleKey(tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone))
+	app2.mu.Lock()
+	n := len(app2.blocks)
+	notices := n == 1 && app2.blocks[0].Kind == KindSystem
+	app2.mu.Unlock()
+	if !notices {
+		t.Fatalf("unwired F5 must add one system notice, blocks=%d", n)
+	}
+}
+
+func TestStreamingBlocksAndTools(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.BeginAssistant()
+	app.AppendAssistant("Hello ")
+	app.AppendAssistant("world")
+	app.EndAssistant()
+	app.BeginThinking()
+	app.AppendThinking("pondering")
+	app.EndThinking()
+	app.AddToolBlock("read", `{"path":"a.txt"}`)
+	app.FinishTool("read", false, "1:hi\n2:there", ToolOutcome{Dur: "3ms"})
+
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if len(app.blocks) != 4 {
+		t.Fatalf("blocks = %d", len(app.blocks))
+	}
+	if app.blocks[0].Text != "Hello world" || app.blocks[0].stream {
+		t.Fatalf("assistant = %+v", app.blocks[0])
+	}
+	if app.blocks[2].Status != "ok" {
+		t.Fatalf("tool status = %q", app.blocks[2].Status)
+	}
+	if app.blocks[3].Kind != KindToolDone || app.blocks[3].Text != "1:hi\n2:there" {
+		t.Fatalf("result block = %+v", app.blocks[3])
+	}
+}
+
+func TestThinkingDisplayToggle(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.BeginThinking()
+	app.AppendThinking("first line of reasoning\nsecond line")
+	app.EndThinking()
+	app.mu.Lock()
+	if len(app.blocks) != 1 || app.blocks[0].Kind != KindThinking {
+		t.Fatalf("thinking block missing: blocks=%d", len(app.blocks))
+	}
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+	var got []string
+	for _, ln := range lines {
+		got = append(got, lineText(ln))
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"Thought for", "first line of reasoning", "second line"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("thinking render missing %q:\n%s", want, joined)
+		}
+	}
+	// Turning it off drops existing thinking blocks and suppresses new ones.
+	app.SetShowThinking(false)
+	app.mu.Lock()
+	if len(app.blocks) != 0 {
+		t.Fatalf("thinking blocks must be dropped when off: %d", len(app.blocks))
+	}
+	app.mu.Unlock()
+	app.BeginThinking()
+	app.mu.Lock()
+	if len(app.blocks) != 0 {
+		t.Fatalf("thinking block created while off: %d", len(app.blocks))
+	}
+	app.mu.Unlock()
+	// Turning it back on renders the body again.
+	app.SetShowThinking(true)
+	app.BeginThinking()
+	app.AppendThinking("visible again")
+	app.EndThinking()
+	app.mu.Lock()
+	lines = app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	app.mu.Unlock()
+	got = got[:0]
+	for _, ln := range lines {
+		got = append(got, lineText(ln))
+	}
+}
+
+// TestSystemBlockRendersEveryLine pins the multi-line fix: a system notice
+// with embedded newlines (from /help, /model, /settings) must render one
+// row per line, not collapse into a single unreadable row.
+func TestSystemBlockRendersEveryLine(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddSystemBlock("commands:\n  /new   start a fresh session\n  /help  show commands")
+	app.mu.Lock()
+	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], 80)
+	app.mu.Unlock()
+	if len(lines) != 3 {
+		t.Fatalf("system block rows = %d, want 3", len(lines))
+	}
+	if lines[1].runs[0].text != "  /new   start a fresh session" {
+		t.Fatalf("row 1 = %q", lines[1].runs[0].text)
+	}
+}
+
+// lineText concatenates every run of a rendered line, so assertions read the
+// whole visual row (the tool box splits each row into border/content/border
+// runs) instead of one run.
+func lineText(ln line) string {
+	var b strings.Builder
+	for _, r := range ln.runs {
+		b.WriteString(r.text)
+	}
+	return b.String()
+}
+
+// TestToolCallRowShowsNamedArgument pins omp's call row: the tool name and
+// the naming argument as a phrase, never the raw JSON the model sent.
+func TestToolCallRowShowsNamedArgument(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddToolBlock("bash", `{"command":"seq 1 400","timeout":120}`)
+	app.mu.Lock()
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+
+	if len(lines) != 1 {
+		t.Fatalf("call row = %d lines, want 1", len(lines))
+	}
+	got := lineText(lines[0])
+	if !strings.Contains(got, "bash") || !strings.Contains(got, "seq 1 400") {
+		t.Fatalf("call row = %q, want the tool name and its command", got)
+	}
+	if strings.Contains(got, `"command"`) || strings.Contains(got, "timeout") {
+		t.Fatalf("call row leaked the raw arguments: %q", got)
+	}
+}
+
+// TestToolResultRendersBox pins the frame for a result standing alone (no call
+// row above it): a rounded box whose top border names the tool, whose body
+// keeps every output line, and whose wall time prints in omp's footer row
+// rather than in the border.
+func TestToolResultRendersBox(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.FinishTool("bash", false, "line-one\nline-two\nline-three", ToolOutcome{Dur: "5ms"})
+	app.mu.Lock()
+	i := len(app.blocks) - 1
+	lines := app.blockLines(i, app.blocks[i], 80)
+	app.mu.Unlock()
+
+	if len(lines) != 6 { // top + 3 body + footer + bottom
+		t.Fatalf("boxed render = %d lines, want 6:\n%s", len(lines), joinLines(lines))
+	}
+	top := lineText(lines[0])
+	for _, want := range []string{"╭", "bash"} {
+		if !strings.Contains(top, want) {
+			t.Fatalf("top border %q missing %q", top, want)
+		}
+	}
+	body := lineText(lines[1]) + lineText(lines[2]) + lineText(lines[3])
+	for _, want := range []string{"line-one", "line-two", "line-three"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q; got:\n%s", want, body)
+		}
+	}
+	if footer := lineText(lines[4]); !strings.Contains(footer, "Wall: 5ms") {
+		t.Fatalf("footer = %q, want the wall time", footer)
+	}
+	if bottom := lineText(lines[5]); !strings.Contains(bottom, "╰") || !strings.Contains(bottom, "╯") {
+		t.Fatalf("bottom border %q not closed", bottom)
+	}
+	// Every row shares one right edge: widths equal the requested 80 cells.
+	for i, ln := range lines {
+		if w := width(lineText(ln)); w != 80 {
+			t.Fatalf("row %d width = %d, want 80 (%q)", i, w, lineText(ln))
+		}
+	}
+}
+
+// TestToolResultBoxAlignsTabbedOutput pins the omp sanitize-before-frame
+// step: a tab is zero cells to runewidth but paints as an advance to the
+// next 8-column stop, so an unsanitized tab drags its row's right border
+// off the shared edge. Every framed row must still land on one column.
+func TestToolResultBoxAlignsTabbedOutput(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	out := "\tmsg := ai.Message{\n\t\tRole: ai.RoleUser,\n\t}\r\n\x1b[31mred\x1b[0m"
+	app.FinishTool("bash", false, out, ToolOutcome{Dur: "5ms"})
+	app.mu.Lock()
+	i := len(app.blocks) - 1
+	lines := app.blockLines(i, app.blocks[i], 80)
+	app.mu.Unlock()
+
+	for n, ln := range lines {
+		if w := width(lineText(ln)); w != 80 {
+			t.Fatalf("row %d width = %d, want 80 (%q)", n, w, lineText(ln))
+		}
+	}
+	body := lineText(lines[1]) + lineText(lines[2]) + lineText(lines[3])
+	if !strings.Contains(body, "   msg := ai.Message{") || !strings.Contains(body, "      Role: ai.RoleUser,") {
+		t.Fatalf("tab indentation lost, not expanded to the 3-cell stop:\n%s", body)
+	}
+	if strings.ContainsAny(body, "\x1b[") {
+		t.Fatalf("raw escape bytes reached the frame: %q", body)
+	}
+}
+
+// TestToolResultExitCodeSitsInTheFooter pins omp's division of labour: the
+// frame under its own call row repeats no name, the body keeps the output
+// without the marker the footer now reports, and the exit code appears exactly
+// once — as a status, not as prose inside the result.
+func TestToolResultExitCodeSitsInTheFooter(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddToolBlock("bash", `{"command":"sh -c 'exit 9'"}`)
+	app.FinishTool("bash", true, "boom\n[exit code 9]", ToolOutcome{Dur: "80ms", Exit: 9, HasExit: true})
+	app.mu.Lock()
+	i := len(app.blocks) - 1
+	lines := app.blockLines(i, app.blocks[i], 80)
+	app.mu.Unlock()
+
+	if len(lines) != 4 { // top + "boom" + footer + bottom
+		t.Fatalf("frame = %d lines, want 4:\n%s", len(lines), joinLines(lines))
+	}
+	if top := lineText(lines[0]); strings.Contains(top, "bash") {
+		t.Fatalf("top border repeats what the call row above already said: %q", top)
+	}
+	body := lineText(lines[1])
+	if !strings.Contains(body, "boom") || strings.Contains(body, "exit code") {
+		t.Fatalf("body = %q, want the output without the exit marker", body)
+	}
+	footer := lineText(lines[2])
+	for _, want := range []string{"Wall: 80ms", "Exit: 9"} {
+		if !strings.Contains(footer, want) {
+			t.Fatalf("footer %q missing %q", footer, want)
+		}
+	}
+}
+
+// TestToolResultRowWindow pins the bounded render window and the Ctrl+O
+// affordance that closes it: head rows, the hidden-line notice at the hole it
+// describes, tail rows — and every row once expanded, with no notice.
+func TestToolResultRowWindow(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var b strings.Builder
+	for i := 1; i <= 400; i++ {
+		fmt.Fprintf(&b, "row-%03d\n", i)
+	}
+	app.FinishTool("bash", false, strings.TrimSuffix(b.String(), "\n"), ToolOutcome{Dur: "9ms"})
+	render := func() []line {
+		app.mu.Lock()
+		defer app.mu.Unlock()
+		i := len(app.blocks) - 1
+		return app.blockLines(i, app.blocks[i], 80)
+	}
+
+	lines := render()
+	if len(lines) != 200+50+1+3 { // top + head + notice + tail + footer + bottom
+		t.Fatalf("windowed render = %d lines, want 254", len(lines))
+	}
+	if !strings.Contains(lineText(lines[1]), "row-001") {
+		t.Fatalf("first head row = %q", lineText(lines[1]))
+	}
+	if notice := lineText(lines[201]); !strings.Contains(notice, "150 lines hidden") || !strings.Contains(notice, "Ctrl+O") {
+		t.Fatalf("hidden notice = %q", notice)
+	}
+	if !strings.Contains(lineText(lines[251]), "row-400") {
+		t.Fatalf("last tail row = %q", lineText(lines[251]))
+	}
+
+	if !app.ToggleBoxExpand() {
+		t.Fatal("Ctrl+O found no tool result to expand")
+	}
+	lines = render()
+	if len(lines) != 400+3 { // top + every row + footer + bottom
+		t.Fatalf("expanded render = %d lines, want 403", len(lines))
+	}
+	if strings.Contains(lineText(lines[201]), "hidden") {
+		t.Fatalf("expanded frame still hides rows: %q", lineText(lines[201]))
+	}
+	if !strings.Contains(lineText(lines[400]), "row-400") {
+		t.Fatalf("last row after expand = %q", lineText(lines[400]))
+	}
+}
+
+// joinLines renders a line slice as text for failure messages.
+func joinLines(lines []line) string {
+	var b strings.Builder
+	for _, ln := range lines {
+		b.WriteString(lineText(ln))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func TestScrollClamps(t *testing.T) {
+	app, _ := newTestApp(t, 80, 10)
+	for i := range 50 {
+		app.AddSystemBlock(strings.Repeat("line ", 2) + string(rune('a'+i%26)))
+	}
+	app.mu.Lock()
+	total := a_totalLines(app)
+	app.mu.Unlock()
+	if total < 20 {
+		t.Fatalf("expected many lines, got %d", total)
+	}
+	app.scroll(10000, false)
+	app.mu.Lock()
+	off := app.sm.offset
+	maxOK := app.sm.offset <= app.totalLinesLocked()
+	app.mu.Unlock()
+	if off == 0 || !maxOK {
+		t.Fatalf("scroll-up clamp broken: off=%d", off)
+	}
+	if app.sm.Following() {
+		t.Fatalf("scroll-up must clear follow")
+	}
+	app.scroll(10000, true)
+	app.mu.Lock()
+	off = app.sm.offset
+	app.mu.Unlock()
+	if off != 0 {
+		t.Fatalf("scroll-down must return to follow: %d", off)
+	}
+}
+
+// a_totalLines is a test helper around the lock-held method.
+func a_totalLines(app *App) int { return app.totalLinesLocked() }
+
+func TestHumanTokens(t *testing.T) {
+	cases := map[int64]string{0: "0", 999: "999", 1500: "1.5k", 2_500_000: "2.5M"}
+	for in, want := range cases {
+		if got := humanTokens(in); got != want {
+			t.Fatalf("humanTokens(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A tool result that changed a file paints its diff: the rows take the
+// terminal's own ANSI ink on no background — xdev cannot see the emulator's
+// palette, so a colour it picks itself (or a band tinted from it) is free to
+// land on the user's red or green, which is the reported bug — the changed
+// token inside a -/+ pair is lifted with bold, and the plain model preview is
+// not also painted as prose. Text stays what the model saw.
+func TestToolBoxPaintsDiff(t *testing.T) {
+	app := idxApp(100, 40)
+	w := app.contentWidth()
+	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
+	app.AddToolBlock("edit", `{"path":"f.go"}`)
+	app.FinishTool("edit", false, "[f.go#abc]\n1:a\n2:b := 2\n3:c", ToolOutcome{Dur: "12ms", Diff: diff})
+	idx := len(app.blocks) - 1
+	lines := app.blockLines(idx, app.blocks[idx], w)
+	joined := joinedLines(lines)
+	for _, want := range []string{"+b := 2", "-b := 1", "@@ -1,3 +1,3 @@", "--- a/f.go"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("diff row %q missing from the render:\n%s", want, joined)
+		}
+	}
+	// The box paints the change, not the same change twice.
+	if strings.Contains(joined, "2:b := 2") {
+		t.Errorf("model preview painted alongside the diff:\n%s", joined)
+	}
+	// A file change keeps its header line so the box still names what it did.
+	if !strings.Contains(joined, "[f.go#abc]") {
+		t.Errorf("result header dropped:\n%s", joined)
+	}
+	// Every row lands its right border on the same column.
+	frame := width(runsText(lines[0].runs))
+	for _, ln := range lines {
+		if width(runsText(ln.runs)) != frame {
+			t.Fatalf("row %q is %d cells, frame is %d", runsText(ln.runs), width(runsText(ln.runs)), frame)
+		}
+	}
+
+	// A box row is framed by cellRow — run 0 is the left border, and the tail
+	// padding is unstyled — so a diff row's paint is its content's first run.
+	rowRuns := func(prefix string) []cell {
+		for _, ln := range lines {
+			if strings.Contains(runsText(ln.runs), prefix) {
+				return ln.runs[1:]
+			}
+		}
+		t.Fatalf("no diff row containing %q in\n%s", prefix, joined)
+		return nil
+	}
+	inkOf := func(runs []cell) tcell.Color {
+		fg, _, _ := runs[0].style.Decompose()
+		return fg
+	}
+	if got := inkOf(rowRuns("+b := 2")); got != tcell.ColorGreen {
+		t.Errorf("added row ink = %v, want the terminal's green", got)
+	}
+	if got := inkOf(rowRuns("-b := 1")); got != tcell.ColorMaroon {
+		t.Errorf("removed row ink = %v, want the terminal's red", got)
+	}
+	if got := inkOf(rowRuns(" c ")); got != tcell.ColorDefault {
+		t.Errorf("context row ink = %v, want the terminal's own text", got)
+	}
+	// Nothing in the box claims a background: a background is the one thing
+	// xdev cannot check against the terminal it is drawn in.
+	for _, ln := range lines {
+		for _, r := range ln.runs {
+			if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
+				t.Fatalf("diff run %q paints background %v:\n%s", r.text, bg, joined)
+			}
+		}
+	}
+	// Word emphasis: inside a replaced pair the changed token goes bold — an
+	// attribute, so it survives any palette — and only the token, not the row.
+	var bold string
+	for _, r := range rowRuns("+b := 2") {
+		if _, _, attrs := r.style.Decompose(); attrs&tcell.AttrBold != 0 {
+			bold += r.text
+		}
+	}
+	if strings.TrimSpace(bold) != "2" {
+		t.Errorf("bold text on the added row = %q, want %q", strings.TrimSpace(bold), "2")
+	}
+}
+
+// A bash result that merely prints a list is not re-painted as a diff; one
+// that prints a real `git diff` is.
+func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
+	if DiffLooksUnified("- item one\n- item two\n") {
+		t.Error("a bullet list read as a diff")
+	}
+	if DiffLooksUnified("1 file changed, 2 insertions(+)\n") {
+		t.Error("a diffstat read as a diff")
+	}
+	git := "diff --git a/f.go b/f.go\nindex 111..222 100644\n--- a/f.go\n+++ b/f.go\n@@ -1 +1 @@\n-old\n+new\n"
+	if !DiffLooksUnified(git) {
+		t.Error("a real git diff was not detected")
+	}
+
+	app := idxApp(100, 40)
+	w := app.contentWidth()
+	app.AddToolBlock("bash", `{"command":"git diff"}`)
+	app.FinishTool("bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
+	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], w)
+	var addedInk bool
+	for _, ln := range lines {
+		if strings.Contains(runsText(ln.runs), "+new") {
+			fg, _, _ := ln.runs[1].style.Decompose()
+			addedInk = fg == tcell.ColorGreen
+		}
+	}
+	if !addedInk {
+		t.Errorf("bash git diff not painted with the terminal's green:\n%s", joinedLines(lines))
+	}
+
+	// The same tool's ordinary output keeps the plain body colour.
+	app2 := idxApp(100, 40)
+	app2.AddToolBlock("bash", `{"command":"ls"}`)
+	app2.FinishTool("bash", false, "- item one\n- item two\n", ToolOutcome{Dur: "1ms"})
+	ln2 := app2.blockLines(len(app2.blocks)-1, app2.blocks[len(app2.blocks)-1], app2.contentWidth())
+	for _, ln := range ln2 {
+		if txt := runsText(ln.runs); strings.Contains(txt, "item one") {
+			fg, _, _ := ln.runs[1].style.Decompose()
+			if fg == tcell.ColorGreen {
+				t.Errorf("plain bash output painted as a diff addition:\n%s", joinedLines(ln2))
+			}
+		}
+	}
+}
+
+// The terminal's palette is the fallback, not a straitjacket: a theme that
+// names the diff inks — color-blind mode, which exists precisely because
+// red/green is the pair some readers cannot separate, or a custom palette that
+// pins them — still owns them.
+func TestToolBoxDiffHonoursThemeInk(t *testing.T) {
+	app := idxApp(100, 40)
+	app.th = theme.ApplyColorBlindMode(theme.Load("groknight"))
+	w := app.contentWidth()
+	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
+	app.AddToolBlock("edit", `{"path":"f.go"}`)
+	app.FinishTool("edit", false, "[f.go#abc]", ToolOutcome{Dur: "12ms", Diff: diff})
+	idx := len(app.blocks) - 1
+	lines := app.blockLines(idx, app.blocks[idx], w)
+	joined := joinedLines(lines)
+	ink := func(prefix string) tcell.Color {
+		for _, ln := range lines {
+			if strings.Contains(runsText(ln.runs), prefix) {
+				fg, _, _ := ln.runs[1].style.Decompose()
+				return fg
+			}
+		}
+		t.Fatalf("no diff row containing %q in\n%s", prefix, joined)
+		return tcell.ColorDefault
+	}
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
+	rem, _ := app.th.Slot(theme.ToolDiffRemoved)
+	if got := ink("+b := 2"); got != app.cellColor(add) {
+		t.Errorf("added row ink = %v, want the theme's %+v", got, add)
+	}
+	if got := ink("-b := 1"); got != app.cellColor(rem) {
+		t.Errorf("removed row ink = %v, want the theme's %+v", got, rem)
+	}
+}

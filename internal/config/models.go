@@ -1,0 +1,339 @@
+// Package config loads xdev configuration: providers/models (models.yml),
+// settings, and env layering. The models.yml schema matches omp's
+// (baseUrl/apiKey/api/models/discovery) so existing provider files port over.
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+
+	"github.com/FreePeak/xdev/internal/ai"
+)
+
+// DiscoveryConfig selects dynamic model listing.
+type DiscoveryConfig struct {
+	Type     string `yaml:"type"` // "openai-models-list" is the MVP value
+	InjectV1 bool   `yaml:"injectV1,omitempty"`
+}
+
+// ModelConfig is one statically pinned model entry.
+type ModelConfig struct {
+	ID        string `yaml:"id"`
+	Name      string `yaml:"name,omitempty"`
+	Reasoning bool   `yaml:"reasoning,omitempty"`
+	// Vision marks a model that accepts image input. snapcompact's bitmap is
+	// only useful to such a model (#83); without the flag the dropped text
+	// would ride along as bytes nothing can read.
+	Vision        bool `yaml:"vision,omitempty"`
+	ContextWindow int  `yaml:"contextWindow,omitempty"`
+	MaxTokens     int  `yaml:"maxTokens,omitempty"`
+	// BaseURL/APIKey/Headers override the provider-level values per model.
+	BaseURL string            `yaml:"baseUrl,omitempty"`
+	APIKey  string            `yaml:"apiKey,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty"`
+}
+
+// ProviderConfig is one provider block in models.yml.
+type ProviderConfig struct {
+	BaseURL string `yaml:"baseUrl"`
+	APIKey  string `yaml:"apiKey,omitempty"`
+	// APIKeys are sibling credentials for the same provider (M5 #25): a
+	// usage limit on one account rotates to the next instead of leaving
+	// the provider. The chain still starts at apiKey (or the first entry
+	// when apiKey is absent) — apiKeys only supplies the rotation pool.
+	APIKeys []string `yaml:"apiKeys,omitempty"`
+	API     string   `yaml:"api"`
+	// AuthHeader names where a bearer credential rides (e.g.
+	// "x-api-key"); empty means "Authorization".
+	AuthHeader string `yaml:"authHeader,omitempty"`
+	// Auth names the credential style: api_key (default), oauth, or none
+	// (a local server that needs no credential — ollama, lm-studio).
+	Auth      string            `yaml:"auth,omitempty"`
+	Headers   map[string]string `yaml:"headers,omitempty"`
+	Discovery *DiscoveryConfig  `yaml:"discovery,omitempty"`
+	Models    []ModelConfig     `yaml:"models,omitempty"`
+	// OAuth configures the browser login flow for this provider (xdev login
+	// <provider>). Absent = not an OAuth provider.
+	OAuth *OAuthConfig `yaml:"oauth,omitempty"`
+	// Project/Location are the GCP coordinates: google-vertex needs both
+	// (Location defaults to "global"), gemini-cli uses Project when the Code
+	// Assist account has one.
+	Project  string `yaml:"project,omitempty"`
+	Location string `yaml:"location,omitempty"`
+	// Deployment/APIVersion configure azure-openai-responses: the Azure
+	// deployment name (empty = the model id) and the api-version query value.
+	Deployment string `yaml:"deployment,omitempty"`
+	APIVersion string `yaml:"apiVersion,omitempty"`
+	// ToolsFormat pins an in-band tool-call dialect for models that cannot
+	// emit native structured calls (hermes, deepseek, glm, ...). Empty =
+	// native: the provider's own structured tool calls.
+	ToolsFormat string `yaml:"toolsFormat,omitempty"`
+}
+
+// OAuthConfig is one provider's browser-login flow.
+type OAuthConfig struct {
+	AuthorizeURL string   `yaml:"authorizeUrl"`
+	TokenURL     string   `yaml:"tokenUrl"`
+	ClientID     string   `yaml:"clientId"`
+	Scopes       []string `yaml:"scopes,omitempty"`
+	RedirectPort int      `yaml:"redirectPort,omitempty"`
+}
+
+// CredentialPool returns a provider's declared models.yml credentials in
+// rotation order (M5 #25): the per-model apiKey first when model names an
+// entry, then the provider's apiKey, then the apiKeys siblings. Blanks and
+// duplicates are dropped, so pool[0] is exactly the credential the ordinary
+// chain picks and every later index is a real sibling to rotate onto.
+//
+// An empty pool means "no models.yml credential at all" — the caller falls
+// through to the oauth / login / env chain as before.
+func CredentialPool(pc *ProviderConfig, model string) []string {
+	if pc == nil {
+		return nil
+	}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || slices.Contains(out, v) {
+			return
+		}
+		out = append(out, v)
+	}
+	if model != "" {
+		for _, m := range pc.Models {
+			if m.ID == model {
+				add(m.APIKey)
+			}
+		}
+	}
+	add(pc.APIKey)
+	for _, k := range pc.APIKeys {
+		add(k)
+	}
+	return out
+}
+
+// CredentialKey returns the i-th credential of the pool ("" when the index
+// is out of range — an exhausted rotation must not silently reuse the
+// primary credential).
+func CredentialKey(pc *ProviderConfig, model string, i int) string {
+	pool := CredentialPool(pc, model)
+	if i < 0 || i >= len(pool) {
+		return ""
+	}
+	return pool[i]
+}
+
+// Config is the parsed models.yml.
+type Config struct {
+	Providers    map[string]*ProviderConfig `yaml:"providers"`
+	DefaultModel string                     `yaml:"defaultModel,omitempty"` // "provider/model"
+	// ignoredProject names what a repository's .xdev/models.yml tried to set
+	// that the repo-trust boundary refused (#114). Not part of the schema: it
+	// never decodes and never marshals, only the startup notice reads it.
+	ignoredProject []string
+}
+
+// RegisterProvider installs one provider block for the life of this process.
+// Extensions call it at runtime (ext action `register_provider`, PRD M7), so
+// the payload carries the same shape as a models.yml provider entry and the
+// validation happens here — before any request — instead of surfacing as an
+// opaque wire failure. Nothing is persisted: the next run re-registers, and
+// use-time gating (Settings.CheckProvider, disabledProviders) still applies
+// when the provider is built.
+func (c *Config) RegisterProvider(name string, pc *ProviderConfig) error {
+	if c == nil {
+		return fmt.Errorf("config: register_provider: no model registry")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("config: register_provider: name is required")
+	}
+	if strings.ContainsAny(name, "/ \t") {
+		return fmt.Errorf("config: register_provider: name %q must be a bare provider key (no \"/\" or spaces)", name)
+	}
+	if pc == nil {
+		return fmt.Errorf("config: register_provider %q: provider block is required", name)
+	}
+	if strings.TrimSpace(pc.BaseURL) == "" {
+		return fmt.Errorf("config: register_provider %q: baseUrl is required", name)
+	}
+	switch pc.API {
+	case ai.APIOpenAICompletions, ai.APIOpenAIResponses, ai.APIAzureOpenAIResponses,
+		ai.APIOpenAICodexResponses, ai.APIAnthropicMessages, ai.APIGoogleGenerativeAI,
+		ai.APIGoogleVertex, ai.APIGeminiCLI:
+	default:
+		return fmt.Errorf("config: register_provider %q: unsupported api %q (want %s)",
+			name, pc.API, strings.Join(ai.SupportedAPIs(), "|"))
+	}
+	// toolsFormat is validated here so a typo fails before any request instead
+	// of silently falling back to native tool calls.
+	if _, err := ai.ParseToolFormat(pc.ToolsFormat); err != nil {
+		return fmt.Errorf("config: register_provider %q: %w", name, err)
+	}
+	models := 0
+	for _, m := range pc.Models {
+		if strings.TrimSpace(m.ID) != "" {
+			models++
+		}
+	}
+	if models == 0 {
+		return fmt.Errorf("config: register_provider %q: at least one model with an id is required", name)
+	}
+	if c.Providers == nil {
+		c.Providers = map[string]*ProviderConfig{}
+	}
+	c.Providers[name] = pc
+	return nil
+}
+
+// Resolve expands ${VAR} references in s against the process environment.
+// A missing variable expands to the empty string.
+func Resolve(s string) string {
+	if s == "" || !strings.Contains(s, "$") {
+		return s
+	}
+	return os.Expand(s, func(k string) string {
+		if v, ok := os.LookupEnv(k); ok {
+			return v
+		}
+		return ""
+	})
+}
+
+var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// LoadModels parses one models.yml (the trusted shape: every key honored)
+// with ${VAR} references expanded against the process environment.
+func LoadModels(path string) (*Config, error) {
+	cfg, _, err := loadModelsFile(path, true)
+	return cfg, err
+}
+
+// loadModelsFile parses one layer. An untrusted layer (a repository's
+// .xdev/models.yml, #114) is pruned to the repo-safe subset, and ${VAR}
+// expansion is skipped for it: interpolating the environment through a file
+// that arrived with a clone is a read of the user's secrets.
+func loadModelsFile(path string, trusted bool) (*Config, []string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var cfg Config
+	var ignored []string
+	if trusted {
+		err = parseYAMLLayer([]byte(expandEnvYAML(string(raw))), &cfg)
+	} else {
+		ignored, err = pruneTo(raw, &cfg, pruneProjectModels)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]*ProviderConfig{}
+	}
+	return &cfg, ignored, nil
+}
+
+// LoadModelsLayered loads the profile models.yml plus the repository's, with
+// the repository's held to the subset a stranger may choose (#114): model
+// metadata and the transport dialect, never an endpoint, a credential or the
+// default model. On a provider both name, the profile wins outright — a
+// clone that ships .xdev/models.yml must not be able to move the user's
+// traffic anywhere. Missing files are skipped silently.
+func LoadModelsLayered() (*Config, error) {
+	cfg := &Config{Providers: map[string]*ProviderConfig{}}
+	// Project first, profile second, so the profile's entry is the last word.
+	proj, ignored, err := loadModelsFile(projectModelsName, false)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		for k, v := range proj.Providers {
+			cfg.Providers[k] = v
+		}
+	}
+	global, _, err := loadModelsFile(filepath.Join(DataDir(), "models.yml"), true)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		for k, v := range global.Providers {
+			cfg.Providers[k] = v
+		}
+		cfg.DefaultModel = global.DefaultModel
+	}
+	cfg.ignoredProject = ignored
+	return cfg, nil
+}
+
+// IgnoredProjectKeys returns what the repository's models.yml named that the
+// repo-trust boundary refused (#114); see Settings.IgnoredProjectKeys.
+func (c *Config) IgnoredProjectKeys() []string {
+	if c == nil {
+		return nil
+	}
+	return c.ignoredProject
+}
+
+// ParseModelRef splits "provider/model" into its two halves.
+func ParseModelRef(ref string) (provider, model string, err error) {
+	i := strings.Index(ref, "/")
+	if i <= 0 || i == len(ref)-1 {
+		return "", "", fmt.Errorf("invalid model reference %q: want \"provider/model\"", ref)
+	}
+	return ref[:i], ref[i+1:], nil
+}
+
+// DefaultModelRef returns cfg.DefaultModel if set, else the first provider's
+// first pinned model, else "".
+func (c *Config) DefaultModelRef() string {
+	if c.DefaultModel != "" {
+		return c.DefaultModel
+	}
+	// Deterministic: prefer common keys, else first sorted provider.
+	for _, k := range []string{"onegw", "router", "anthropic", "openai"} {
+		if p, ok := c.Providers[k]; ok && len(p.Models) > 0 {
+			return k + "/" + p.Models[0].ID
+		}
+	}
+	keys := sortedKeys(c.Providers)
+	for _, k := range keys {
+		if len(c.Providers[k].Models) > 0 {
+			return k + "/" + c.Providers[k].Models[0].ID
+		}
+	}
+	return ""
+}
+
+func sortedKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+// expandEnvYAML replaces ${VAR} occurrences in scalar YAML values.
+// It operates on the raw text; only quoted or plain scalars containing the
+// pattern are touched, which is safe because keys never match the pattern.
+func expandEnvYAML(s string) string {
+	return envRef.ReplaceAllStringFunc(s, func(m string) string {
+		k := m[2 : len(m)-1]
+		if v, ok := os.LookupEnv(k); ok {
+			return v
+		}
+		return ""
+	})
+}

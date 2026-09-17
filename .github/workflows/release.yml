@@ -1,0 +1,321 @@
+name: release
+
+# The whole release in one pass: compute the next version, build the
+# six-platform static binaries, sign them where credentials exist,
+# then open the GitHub Release and create the tag atomically
+# (`gh release create --target` creates the tag if it does not exist).
+#
+# This avoids the documented trap where a tag pushed with the
+# repository's GITHUB_TOKEN silently does NOT chain-trigger a
+# workflow, which is why the release is not a reaction to a tag push
+# but is run directly by this file.
+#
+# Release model: `main` is the release train — a push to it cuts the next
+# version. (The 2026-09-15 detour through a `release` branch is reverted:
+# main was already the branch every merge lands on, and a second branch
+# meant every release needed a manual cherry-pick push to remember.)
+#
+# Triggers:
+#   push to main          auto-bump the patch version, build, publish
+#   push: tags: ["v*"]    tag already chosen (manual minor/major release)
+#   workflow_dispatch     optional "version" input, else like a main push
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Force a specific release tag (e.g. v0.2.0); auto-computed otherwise"
+        required: false
+
+permissions:
+  contents: read
+
+# Serialize releases: two merges landing together must not race to publish
+# the same next tag (the loser's `gh release create` would fail on it).
+concurrency:
+  group: release-bump
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      target: ${{ steps.plan.outputs.target }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Plan the release
+        id: plan
+        run: |
+          set -euo pipefail
+
+          # Is this run for a tag that already exists (a manual
+          # minor/major release), or for a commit that needs the next
+          # patch version computed?
+          case "${GITHUB_REF}" in
+            refs/tags/v*)
+              VERSION="${GITHUB_REF_NAME}"
+              TARGET="${GITHUB_SHA}" ;;
+            *)
+              # A dispatch can pin the version explicitly.
+              VERSION="${{ github.event.inputs.version }}"
+              if [ -n "$VERSION" ]; then
+                TARGET="${GITHUB_SHA}"
+              # Skip when HEAD itself carries a version tag (a re-run
+              # or the push that created the tag). `git describe` is
+              # NOT usable here: it matches the nearest *reachable*
+              # tag, so once the first release exists every later
+              # push would "see" it and skip forever.
+              elif CURRENT_TAG="$(git tag --points-at HEAD --list 'v*' | head -n 1)" \
+                   && [ -n "$CURRENT_TAG" ]; then
+                VERSION="$CURRENT_TAG"
+                TARGET="${GITHUB_SHA}"
+                echo "::notice::HEAD already released as ${CURRENT_TAG} — re-publishing it"
+              else
+                # Newest tag wins the ordering (numeric, so v0.10.0
+                # beats v0.9.0); the patch component bumps. A repo
+                # with no tags at all opens at v0.1.0, matching the
+                # 0.1.0-dev the binary reports before the first stamp.
+                LATEST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1 || true)"
+                if [ -z "$LATEST_TAG" ]; then
+                  VERSION="v0.1.0"
+                else
+                  CORE="${LATEST_TAG#v}"; CORE="${CORE%%-*}"
+                  MAJOR="$(echo "$CORE" | awk -F. '{print $1+0}')"
+                  MINOR="$(echo "$CORE" | awk -F. '{print $2+0}')"
+                  PATCH="$(echo "$CORE" | awk -F. '{print $3+0}')"
+                  PATCH=$((PATCH + 1))
+                  VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+                fi
+                TARGET="${GITHUB_SHA}"
+              fi ;;
+          esac
+
+          # A `-suffix` tag is a pre-release, which is exactly what
+          # `xdev update --channel canary` resolves and stable skips.
+          PRERELEASE=false
+          case "$VERSION" in *-*) PRERELEASE=true ;; esac
+
+          {
+            echo "version=$VERSION"
+            echo "target=$TARGET"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "planned: ${VERSION} (pre-release: ${PRERELEASE}) at ${TARGET}"
+
+  release-artifacts:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: darwin, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: windows, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.target }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          # Stamp the release version into the binary: `xdev version`
+          # prints it, and `xdev update` compares it against the
+          # release it resolves.
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          go build -trimpath -ldflags "-s -w -X main.version=${{ needs.plan.outputs.version }}" \
+            -o "dist/xdev_${GOOS}_${GOARCH}${ext}" ./cmd/xdev
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xdev-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  macos-sign:
+    # Apple Developer ID signing + notarization for the darwin binaries
+    # (M14 #64). Runs only on a real release (tag push or a release
+    # planned by this workflow) and SKIPS CLEANLY when the signing
+    # secrets are absent — a release must never fail for want of
+    # credentials:
+    #
+    #   APPLE_CERTIFICATE_P12       base64 of the Developer ID Application .p12
+    #   APPLE_CERTIFICATE_PASSWORD  the password set when exporting that .p12
+    #   APPLE_API_KEY_ID            App Store Connect API Key ID
+    #   APPLE_API_ISSUER_ID         App Store Connect API Issuer ID (UUID)
+    #   APPLE_API_KEY               base64 of the App Store Connect .p8 key
+    #
+    # How to produce them: Keychain Access -> right-click the "Developer ID
+    # Application: ..." identity (the entry that expands to a certificate
+    # WITH a private key) -> Export -> .p12; App Store Connect -> Users and
+    # Access -> Integrations -> App Store Connect API -> create a key
+    # (Developer role suffices for notarization) -> download the .p8 once.
+    # Upload each as a repository secret, base64-encoding the binary files:
+    #   base64 -i cert.p12 | gh secret set APPLE_CERTIFICATE_P12
+    # Without all five, the binaries stay ad-hoc signed: `curl | sh` and a
+    # Homebrew formula install work (neither path quarantines), a browser
+    # download or a cask needs Apple's online ticket lookup.
+    needs: [plan, release-artifacts]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    outputs:
+      signed: ${{ steps.secrets.outputs.present }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: xdev-darwin-*
+          path: dist
+          merge-multiple: true
+
+      - name: Detect signing secrets
+        id: secrets
+        run: |
+          if [ -n "${{ secrets.APPLE_CERTIFICATE_P12 }}" ] \
+            && [ -n "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ] \
+            && [ -n "${{ secrets.APPLE_API_KEY_ID }}" ] \
+            && [ -n "${{ secrets.APPLE_API_ISSUER_ID }}" ] \
+            && [ -n "${{ secrets.APPLE_API_KEY }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apple signing secrets are not configured — publishing ad-hoc darwin binaries (see this job's comment for the five required secrets)."
+          fi
+
+      - name: Codesign (Developer ID, hardened runtime)
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/xdev-signing.keychain-db"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings -lut 1800 "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$keychain" > /dev/null
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/Developer ID Application/ {print $2; exit}')"
+          [ -n "$identity" ] || { echo "no Developer ID Application identity in the imported certificate"; exit 1; }
+          # Hardened runtime + a secure timestamp is what notarization
+          # requires. No entitlements: xdev is a static CGO-free Go binary —
+          # it JITs nothing and dlopens nothing, so none of the JS-runtime
+          # allowances (allow-jit, disable-library-validation) apply.
+          for bin in dist/xdev_darwin_arm64 dist/xdev_darwin_amd64; do
+            codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$identity" "$bin"
+            codesign --verify --strict -vv "$bin"
+          done
+          # Fail fast when the signature cannot actually run: a runner-arch
+          # binary (an amd64 one needs Rosetta) is the only live check.
+          case "$(uname -m)" in arm64) arch=arm64 ;; *) arch=amd64 ;; esac
+          "dist/xdev_darwin_${arch}" version
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security delete-keychain "$keychain"
+
+      - name: Notarize
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notary"
+          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary/AuthKey_${APPLE_API_KEY_ID}.p8"
+          for arch in arm64 amd64; do
+            bin="dist/xdev_darwin_${arch}"
+            # notarytool takes an archive, not a bare Mach-O executable.
+            ditto -c -k --keepParent "$bin" "$RUNNER_TEMP/notary/${arch}.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/notary/${arch}.zip" \
+              --key "$RUNNER_TEMP/notary/AuthKey_${APPLE_API_KEY_ID}.p8" \
+              --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          done
+          # Deliberately no `stapler staple`: it only stamps .app/.pkg/.dmg
+          # bundles. The binary IS notarized (the ticket is keyed to its
+          # cdhash and Gatekeeper fetches it online); it just cannot carry
+          # the ticket inline. An offline-installable artifact would mean
+          # wrapping the binary in a notarized .pkg/.dmg, which the curl
+          # and Homebrew paths do not need.
+          rm -rf "$RUNNER_TEMP/notary"
+
+      - name: Upload signed darwin binaries
+        if: steps.secrets.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdev-darwin-signed
+          path: dist/*
+          overwrite: true
+
+  publish-release:
+    # One GitHub release per tag: every platform binary plus ONE merged
+    # SHA256SUMS computed over the final (signed, when credentials
+    # exist) artifacts. `xdev update` verifies against this manifest.
+    needs: [plan, release-artifacts, macos-sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Downloading last means the signed darwin binaries win over the
+      # unsigned ones from release-artifacts.
+      - uses: actions/download-artifact@v4
+        if: needs.macos-sign.outputs.signed == 'true'
+        with:
+          name: xdev-darwin-signed
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          # The per-platform manifests are superseded: signing rewrites the
+          # darwin binaries, so their hashes would be stale, and `xdev
+          # update` verifies against this merged manifest.
+          rm -f SHA256SUMS_*.txt
+          sha256sum xdev_* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.plan.outputs.version }}"
+          target="${{ needs.plan.outputs.target }}"
+          flags=""
+          case "${{ needs.plan.outputs.prerelease }}" in
+            yes|true) flags="--prerelease" ;;
+          esac
+          # `--generate-notes` creates the release body from the tag's
+          # commits; `--target` atomically creates the tag when it does
+          # not exist (the release and the version are one operation).
+          # `--clobber` upload keeps a re-run of the same release
+          # idempotent.
+          gh release create "$version" --repo "$GITHUB_REPOSITORY" --target "$target" \
+            --title "$version" --generate-notes $flags dist/* \
+            || gh release upload "$version" --repo "$GITHUB_REPOSITORY" --clobber dist/*
