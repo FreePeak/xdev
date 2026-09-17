@@ -68,8 +68,11 @@ type ConnectOption struct {
 // ConnectNames lists the catalog keys in sorted order: map iteration would make
 // the picker's row order — and therefore its tests — random.
 func ConnectNames() []string {
-	out := make([]string, 0, len(connectCatalog))
+	out := make([]string, 0, len(connectCatalog)+len(extraConnectCatalog))
 	for k := range connectCatalog {
+		out = append(out, k)
+	}
+	for k := range extraConnectCatalog {
 		out = append(out, k)
 	}
 	sort.Strings(out)
@@ -77,15 +80,18 @@ func ConnectNames() []string {
 }
 
 // HasConnect reports whether a name is in the catalog.
-func HasConnect(name string) bool { _, ok := connectCatalog[name]; return ok }
+func HasConnect(name string) bool { _, ok := lookupConnect(name); return ok }
 
 // ConnectOptions lists the catalog against local state. It writes nothing and
 // requests nothing; the caller loads cfg/store so a broken file is reported
 // once, in the caller's words, rather than from inside a listing.
 func ConnectOptions(cfg *Config, store CredentialStore) []ConnectOption {
-	out := make([]ConnectOption, 0, len(connectCatalog))
+	out := make([]ConnectOption, 0, len(connectCatalog)+len(extraConnectCatalog))
 	for _, name := range ConnectNames() {
-		e := connectCatalog[name]
+		e, ok := lookupConnect(name)
+		if !ok {
+			continue
+		}
 		opt := ConnectOption{
 			Name: name, Title: e.Title, BaseURL: e.BaseURL, API: e.API,
 			Doc: e.Doc, Models: len(e.Models), Plan: isPlan(name),
@@ -145,7 +151,7 @@ func isPlan(name string) bool {
 // ConnectProviderConfig builds the models.yml block for one catalog row. The
 // credential is written as a ${VAR} reference, never as the key.
 func ConnectProviderConfig(name string) (*ProviderConfig, error) {
-	e, ok := connectCatalog[name]
+	e, ok := lookupConnect(name)
 	if !ok {
 		return nil, fmt.Errorf("connect: unknown provider %q (xdev connect --list shows the catalog)", name)
 	}
@@ -169,7 +175,7 @@ func ConnectProviderConfig(name string) (*ProviderConfig, error) {
 // ConnectModelRefs lists a row's models as "name/model" refs ("" name is the
 // catalog's own key).
 func ConnectModelRefs(name string) []string {
-	e, ok := connectCatalog[name]
+	e, ok := lookupConnect(name)
 	if !ok {
 		return nil
 	}
