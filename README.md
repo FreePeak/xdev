@@ -80,13 +80,16 @@ provider at it:
 ```yaml
 # ~/.xdev/agent/models.yml
 providers:
-  onegw:
-    baseUrl: http://127.0.0.1:8080/v1
-    apiKey: ${ONEGW_KEY}              # or keychain:dev.xdev.credential.onegw
+  xdev-server:
+    baseUrl: ${XDEV_SERVER_URL}/v1
+    apiKey: ${XDEV_SERVER_KEY}        # gateway key (ONEGW_KEYS on the host)
     api: openai-completions
-    models: [{ id: free, name: Free, contextWindow: 1000000 }]
-defaultModel: onegw/free
+    models: [{ id: free, name: Free, contextWindow: 200000 }]
+defaultModel: xdev-server/free
 ```
+
+Or: `export XDEV_SERVER_URL=http://<gateway-host>:8080`, then
+`xdev connect xdev-server --set-default` and `export XDEV_SERVER_KEY=...`.
 
 Claude Pro/Max and Codex subscriptions work through the browser OAuth flow:
 
@@ -120,7 +123,7 @@ xdev                                            # the TUI (a bare call on a TTY)
 xdev "add pagination to /users, then run the tests"
 xdev -continue "now cover the empty page"       # latest session in this cwd
 xdev -resume 01a0 "pick up where we left off"   # by session-id prefix
-xdev -model onegw/dev "…"                       # explicit provider/model
+xdev -model xdev-server/free "…"                # explicit provider/model
 xdev < prompt.txt                               # headless: the prompt on stdin
 xdev rpc                                        # JSONL-over-stdio, for embedders
 xdev acp                                        # ACP server on stdio, for editors
