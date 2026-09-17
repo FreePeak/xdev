@@ -88,8 +88,8 @@ func newTestVibeScope(t *testing.T, p *fakeProvider, log *vibeLog, childTools []
 		Hub:   NewHub(),
 		Task:  &TaskTool{Provider: p, Model: "parent-model", CWD: "/tmp", ChildTools: childTools},
 		Tools: vibeParentRegistry(),
-		Resolve: func(role string) (*VibeModel, error) {
-			return &VibeModel{Provider: p, Model: role + "-model"}, nil
+		Resolve: func() (*VibeModel, error) {
+			return &VibeModel{Provider: p, Model: "parent-model"}, nil
 		},
 		Persist:  log.persist,
 		ParentID: func() string { return "sess-parent" },
@@ -173,18 +173,17 @@ func TestVibeEnterRefusesConflictingModes(t *testing.T) {
 // Each tier selects its bundled agent and its role model, and the spec the
 // worker runs under carries both (model, provider, tier prompt, tools).
 func TestVibeTierMapping(t *testing.T) {
-	cases := []struct{ in, cli, agent, role string }{
-		{"fast", "fast", "sonic", "@smol"},
-		{"sonic", "fast", "sonic", "@smol"},
-		{"smol", "fast", "sonic", "@smol"},
-		{"good", "good", "task", "@task"},
-		{"task", "good", "task", "@task"},
-		{" GOOD ", "good", "task", "@task"},
+	cases := []struct{ in, cli, agent string }{
+		{"fast", "fast", "sonic"},
+		{"sonic", "fast", "sonic"},
+		{"good", "good", "task"},
+		{"task", "good", "task"},
+		{" GOOD ", "good", "task"},
 	}
 	for _, tt := range cases {
 		got, ok := VibeTierOf(tt.in)
-		if !ok || got.CLI != tt.cli || got.Agent != tt.agent || got.Role != tt.role {
-			t.Errorf("VibeTierOf(%q) = %+v, %v; want %s/%s/%s", tt.in, got, ok, tt.cli, tt.agent, tt.role)
+		if !ok || got.CLI != tt.cli || got.Agent != tt.agent {
+			t.Errorf("VibeTierOf(%q) = %+v, %v; want %s/%s", tt.in, got, ok, tt.cli, tt.agent)
 		}
 	}
 	for _, bad := range []string{"", "slow", "medium"} {
@@ -194,7 +193,6 @@ func TestVibeTierMapping(t *testing.T) {
 	}
 
 	p := &fakeProvider{}
-	var asked []string
 	v := NewVibeScope(VibeConfig{
 		Task: &TaskTool{
 			Provider:   p,
@@ -202,9 +200,8 @@ func TestVibeTierMapping(t *testing.T) {
 			CWD:        "/tmp/work",
 			ChildTools: []tool.Tool{echoTool{}},
 		},
-		Resolve: func(role string) (*VibeModel, error) {
-			asked = append(asked, role)
-			return &VibeModel{Provider: p, Model: strings.TrimPrefix(role, "@") + "-model", Thinking: &ai.ThinkingBudget{Tokens: 7}}, nil
+		Resolve: func() (*VibeModel, error) {
+			return &VibeModel{Provider: p, Model: "session-model", Thinking: &ai.ThinkingBudget{Tokens: 7}}, nil
 		},
 	})
 
@@ -214,8 +211,8 @@ func TestVibeTierMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := v.specFor(fast, VibeWorker{ID: "w1"}, m, "do the thing")
-	if spec.Model != "smol-model" || spec.Provider != ai.Provider(p) {
-		t.Fatalf("fast spec model = %q/%v, want the @smol resolution", spec.Model, spec.Provider)
+	if spec.Model != "session-model" || spec.Provider != ai.Provider(p) {
+		t.Fatalf("fast spec model = %q/%v, want the session model", spec.Model, spec.Provider)
 	}
 	if !strings.Contains(spec.System, SubagentSystemPromptBase) || !strings.Contains(spec.System, "fast execution worker") {
 		t.Fatalf("fast spec must carry the bundled sonic prompt: %q", spec.System)
@@ -230,11 +227,8 @@ func TestVibeTierMapping(t *testing.T) {
 	good, _ := VibeTierOf("good")
 	m, _ = v.model(good)
 	spec = v.specFor(good, VibeWorker{ID: "w2"}, m, "review it")
-	if spec.Model != "task-model" || !strings.Contains(spec.System, "senior worker") {
+	if spec.Model != "session-model" || !strings.Contains(spec.System, "senior worker") {
 		t.Fatalf("good spec = %+v (%q)", spec, spec.System)
-	}
-	if !slices.Equal(asked, []string{"@smol", "@task"}) {
-		t.Fatalf("resolved roles = %v, want [@smol @task]", asked)
 	}
 }
 

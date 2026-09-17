@@ -2,7 +2,7 @@
 
 *Issue: [#70](https://github.com/FreePeak/xdev/issues/70) · Milestone: M15 (full-parity tail) · Date: 2026-09-12 · Status: **accepted***
 
-**Decision: option (a) stays the shipped path — tiny tasks run on the configured API role — and option (b) is recorded as the upgrade path, made reachable now through the `internal/tiny` seam. Option (c) is rejected for generation and kept only as a note for non-generative classification work.**
+**Decision: option (a) stays the shipped path — tiny tasks run on the configured session model — and option (b) is recorded as the upgrade path, made reachable now through the `internal/tiny` seam. Option (c) is rejected for generation and kept only as a note for non-generative classification work.**
 
 ---
 
@@ -22,9 +22,9 @@ The mechanism that makes this tolerable is process shape, not model size: **exac
 
 ### What xdev actually has
 
-- **Memory pipeline: exists.** `internal/memory/pipeline.go` (M12 #13) runs phase 1 (extraction over changed sessions) and phase 2 (consolidation into `MEMORY.md`/`learned.md`) behind two func seams, `Pipeline.Complete` and `Pipeline.Consolidate`, resolved from the **`@smol` role** at wiring time (`cmd/xdev/print.go` `buildMemoryPipeline`). This is exactly where an on-device backend would plug in.
+- **Memory pipeline: exists.** `internal/memory/pipeline.go` (M12 #13) runs phase 1 (extraction over changed sessions) and phase 2 (consolidation into `MEMORY.md`/`learned.md`) behind two func seams, `Pipeline.Complete` and `Pipeline.Consolidate`, resolved from the **session model** at wiring time (`cmd/xdev/print.go` `buildMemoryPipeline` — `memoryComplete`, which resolves the run model). This is exactly where an on-device backend would plug in.
 - **Session titles: do not exist as a model task.** New sessions get mechanical titles — `openSession` in `cmd/xdev/print.go` sets `"print 2026-09-12 14:03"` / `"continued …"`, imported sessions get `"imported: <kind> <first user text>"` (`internal/session/import.go`). `TITLE_SYSTEM.md` is discovered but unused; the recorded read point for a generated title is `agent.SystemPromptOverrides.TitleSystemPrompt()`. **There is no title call site to swap for a local model today.**
-- A `tiny` role slot exists in `internal/config/roles.go` (`RoleNames`) and is unused by the memory pipeline, which resolves `@smol`.
+- Model-role aliases no longer exist at all (*removed 2026-09-17*: `internal/config/roles.go` became `effort.go`, keeping only the `:effort` vocabulary), so there is no role slot to hand a tiny model to.
 - **Auto thinking classifier: no xdev counterpart.**
 - No local inference code, no weights, no worker, no new dependency.
 
@@ -93,17 +93,17 @@ The seam — `internal/tiny` — is the whole of the "make (b) cheap" work:
 - `internal/tiny/local_cgo.go` (`//go:build tinycgo`) — the option-B placeholder: the tag wires a backend, no runtime is linked, so it still refuses with `ErrNotBuilt`.
 - Tests: the default path returns the API completer unchanged; the opt-in without a runtime fails with `ErrNotBuilt` **and never calls the API completer**; the stub reports unavailability; a bad `XDEV_TINY_LOCAL` value fails loudly; under `-tags tinycgo` the placeholder still refuses.
 
-**Where the seam is consulted (wiring, one call site):** `cmd/xdev/print.go`, `buildMemoryPipeline`, immediately after `bySmol := complete("@smol")`:
+**Where the seam is consulted (wiring, one call site):** `cmd/xdev/print.go`, `buildMemoryPipeline`, on the completion seam `memoryComplete` resolves from the session model:
 
 ```go
-	bySmol, selErr := tiny.Select(tiny.TaskMemoryExtract, bySmol)
+	complete, selErr := tiny.Select(tiny.TaskMemoryExtract, complete)
 	if selErr != nil {
 		logx.Errorf("memory pipeline: %v", selErr)
 		return nil // never fall back to the API after an explicit local opt-in
 	}
 ```
 
-Observed end-to-end with that wiring on the default CGO-free build (a configured `@smol` role, `XDEV_TINY_LOCAL=on`): the run completes normally and the startup wiring logs one actionable line — `ERROR memory pipeline: tiny: memory-extract: no local tiny backend built into this binary (backend "none (CGO-free static build)"; see docs/decisions/local-tiny-models.md)` — while the same run without the env var logs nothing and keeps the API path unchanged.
+Observed end-to-end with that wiring on the default CGO-free build (a configured default model, `XDEV_TINY_LOCAL=on`): the run completes normally and the startup wiring logs one actionable line — `ERROR memory pipeline: tiny: memory-extract: no local tiny backend built into this binary (backend "none (CGO-free static build)"; see docs/decisions/local-tiny-models.md)` — while the same run without the env var logs nothing and keeps the API path unchanged.
 
 (`task`/title wiring, when the title generator exists: same call with `tiny.TaskTitle` at the `TitleSystemPrompt` read point.)
 
@@ -119,6 +119,6 @@ Observed end-to-end with that wiring on the default CGO-free build (a configured
 
 - **No local inference in the shipped binary** — `ponytail:` ceiling marked in `internal/tiny/local_stub.go`; upgrade path is §5.
 - **No `tinycgo` runtime** — the tag compiles the seam, not inference; `ponytail:` ceiling marked in `internal/tiny/local_cgo.go`.
-- **No new setting, provider, or role.** `XDEV_TINY_LOCAL` (env / dotenv chain) is the whole opt-in surface; `@smol` remains the API role and unchanged in behavior.
+- **No new setting, provider, or role.** `XDEV_TINY_LOCAL` (env / dotenv chain) is the whole opt-in surface; the API fallback remains the session model and is unchanged in behavior.
 - **No title-generation work.** This issue does not create the title task; the decision doc records that xdev titles are mechanical and that `TaskTitle` is the future consultation point.
 - **No dependency added.** If option B is taken with a *linked* runtime, the report must say plainly that cgo was introduced and confined to the tagged artifact.

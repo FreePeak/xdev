@@ -8,16 +8,15 @@ import (
 )
 
 // TestSettingsRetryKeys pins the retry group layering contract (M5 #25): the
-// three chain-key kinds survive KnownFields decoding, and the policy
-// accessors normalize the spellings the agent consumes.
+// chain-key kinds survive KnownFields decoding, and the policy accessors
+// normalize the spellings the agent consumes.
 func TestSettingsRetryKeys(t *testing.T) {
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	cwd := t.TempDir()
 	writeFile(t, GlobalSettingsPath(), `
 retry:
   fallbackChains:
-    smol: ["other/dev"]
-    onegw/free: ["openrouter/google/gemini-2.5-pro", "@slow"]
+    other/dev: ["openrouter/google/gemini-2.5-pro", "small/s1"]
     "onegw/*": ["other/*"]
   reserveThreshold: auto
   reservePct: 25
@@ -29,10 +28,10 @@ retry:
 		t.Fatal(err)
 	}
 	chains := s.Retry.FallbackChains
-	if len(chains) != 3 {
-		t.Fatalf("chains = %v, want three keys", chains)
+	if len(chains) != 2 {
+		t.Fatalf("chains = %v, want two keys", chains)
 	}
-	if got := chains["onegw/free"]; len(got) != 2 || got[0] != "openrouter/google/gemini-2.5-pro" || got[1] != "@slow" {
+	if got := chains["other/dev"]; len(got) != 2 || got[0] != "openrouter/google/gemini-2.5-pro" || got[1] != "small/s1" {
 		t.Fatalf("model chain = %v", got)
 	}
 	if got := chains["onegw/*"]; len(got) != 1 || got[0] != "other/*" {
@@ -76,7 +75,7 @@ func TestSettingsRetryValidation(t *testing.T) {
 		{"reserve threshold", "retry:\n  reserveThreshold: maybe\n", "reserveThreshold"},
 		{"revert policy", "retry:\n  fallbackRevertPolicy: pinned\n", "fallbackRevertPolicy"},
 		{"cooldown", "retry:\n  fallbackCooldown: soon\n", "fallbackCooldown"},
-		{"empty entry", "retry:\n  fallbackChains:\n    smol: [\"\"]\n", "entry"},
+		{"empty entry", "retry:\n  fallbackChains:\n    other/dev: [\"\"]\n", "entry"},
 		{"reserve pct", "retry:\n  reservePct: 300\n", "reservePct"},
 	}
 	for _, tc := range cases {
@@ -99,13 +98,13 @@ func TestSettingsRetryValidation(t *testing.T) {
 func TestSettingsRetryLayerMerge(t *testing.T) {
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	cwd := t.TempDir()
-	writeFile(t, GlobalSettingsPath(), "retry:\n  fallbackChains:\n    smol: [\"other/dev\"]\n")
-	extra := writeFile(t, filepath.Join(t.TempDir(), "chains.yml"), "retry:\n  fallbackChains:\n    slow: [\"third/big\"]\n")
+	writeFile(t, GlobalSettingsPath(), "retry:\n  fallbackChains:\n    other/dev: [\"other/dev\"]\n")
+	extra := writeFile(t, filepath.Join(t.TempDir(), "chains.yml"), "retry:\n  fallbackChains:\n    third/big: [\"third/big\"]\n")
 	s, err := LoadSettings(cwd, []string{extra})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Retry.FallbackChains) != 2 || s.Retry.FallbackChains["smol"][0] != "other/dev" || s.Retry.FallbackChains["slow"][0] != "third/big" {
+	if len(s.Retry.FallbackChains) != 2 || s.Retry.FallbackChains["other/dev"][0] != "other/dev" || s.Retry.FallbackChains["third/big"][0] != "third/big" {
 		t.Fatalf("chains = %v, want both layers", s.Retry.FallbackChains)
 	}
 }
@@ -118,7 +117,7 @@ func TestSettingsRetrySetRoundTrip(t *testing.T) {
 	if err := Set(overlay, "retry.reserveThreshold", "confirm"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Set(overlay, "retry.fallbackChains.smol", "other/dev,third/big"); err != nil {
+	if err := Set(overlay, "retry.fallbackChains.other-dev", "other/dev,third/big"); err != nil {
 		t.Fatal(err)
 	}
 	s, err := LoadSettings(t.TempDir(), []string{overlay})
@@ -128,7 +127,7 @@ func TestSettingsRetrySetRoundTrip(t *testing.T) {
 	if s.ReservePolicy() != ReserveThresholdConfirm {
 		t.Fatalf("reserve policy = %q", s.ReservePolicy())
 	}
-	if got := s.Retry.FallbackChains["smol"]; len(got) != 2 || got[1] != "third/big" {
+	if got := s.Retry.FallbackChains["other-dev"]; len(got) != 2 || got[1] != "third/big" {
 		t.Fatalf("chain = %v", got)
 	}
 }

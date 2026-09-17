@@ -40,7 +40,7 @@ var BuiltinActions = []string{
 	"expand", // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
 	"clear-input",
 	"app.session.tree",
-	"model-select",    // Alt+M: the /model roles+models selector (omp app.model.select)
+	"model-select",    // Alt+M: the /model selector (omp app.model.select)
 	"app.agents.hub",  // Alt+A: the agent-hub roster (omp app.agents.hub)
 	"model-cycle",     // Ctrl+P: cycle the active model through --models patterns
 	"paste-image",     // Ctrl+V: attach the clipboard image (omp app.clipboard.pasteImage)

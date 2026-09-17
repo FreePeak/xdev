@@ -2,7 +2,6 @@
 name: reviewer
 description: code review of a diff or area — correctness, edge cases, missing tests
 tools: read, grep, glob, bash
-model: @slow
 thinkingLevel: high
 spawns: false
 ---

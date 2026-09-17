@@ -49,7 +49,7 @@ func benchMain(args []string, version string, open OpenProvider, out, errw io.Wr
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 	fs.SetOutput(errw)
 	turns := fs.Int("turns", benchDefaultTurns, "measured turns (1-20)")
-	modelRef := fs.String("model", "", "model to measure (provider/model or @role; default: configured model)")
+	modelRef := fs.String("model", "", "model to measure (provider/model; default: the configured model)")
 	maxTokens := fs.Int("max-tokens", 256, "output token cap per turn")
 	fs.Usage = func() {
 		fmt.Fprint(errw, "usage: xdev bench [--turns N] [--model ref] [--max-tokens N]\n\nReports time-to-first-token and decode throughput (p50/p95) for the\nconfigured provider — no tools, one request per turn.\n\nFlags:\n")

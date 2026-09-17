@@ -223,7 +223,7 @@ type Agent struct {
 	Redactor Redactor
 	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
-	// the active model role. nil asks for none.
+	// the active model. nil asks for none.
 	Thinking *ai.ThinkingBudget
 	// Prewalk is the one-shot model handoff (nil = disabled): after the
 	// first successful edit/write, the run switches to the target model

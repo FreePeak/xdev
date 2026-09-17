@@ -39,9 +39,8 @@ const (
 	DefaultReservePct       = 10
 )
 
-// RetrySettings is the `retry` group. FallbackChains keys are three-way:
+// RetrySettings is the `retry` group. FallbackChains keys are two-way:
 //
-//	smol                          role name
 //	onegw/free                    exact model selector
 //	onegw/*  openrouter/google/*  provider wildcard
 //

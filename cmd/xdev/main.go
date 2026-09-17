@@ -43,7 +43,7 @@ func mustGetwd() string {
 }
 
 // loadedSettings is the layered configuration main() resolved, shared
-// with the run modes (they need modelRoles/defaultModel).
+// with the run modes (they need defaultModel).
 var loadedSettings *config.Settings
 
 // appliedLimit is the process memory limit actually set, for the usage
@@ -121,7 +121,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev compress [--dry-run]    compact a session through the compaction ladder
   xdev cleanse [--dry-run]     redact secrets from a transcript (writes .bak)
   xdev gc [--yes]              storage GC: orphaned blobs/artifacts/subagents
-  xdev commit [--apply]        commit message from the staged diff (@commit role)
+  xdev commit [--apply]        commit message from the staged diff
   xdev worktree|wt <sub>       git worktrees: list | add | remove | prune
   xdev plugin <sub>            plugins: list | search | install | remove | info
   xdev share [id|path]         serve an E2E-encrypted view-only snapshot
@@ -160,14 +160,14 @@ func main() {
 	verbose := fs.Bool("verbose", false, "log to stderr")
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write once a plan todo list exists")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
-	prewalkInto := fs.String("prewalk-into", "", "prewalk target: model ref or @role (default: prewalk.into, else @smol)")
+	prewalkInto := fs.String("prewalk-into", "", "prewalk target: model ref (default: prewalk.into, else the session model)")
 	noRules := fs.Bool("no-rules", false, "disable rules discovery (.omp/rules, RULES.md, third-party rulebooks)")
 	hookFlag := repeatable{}
 	fs.Var(&hookFlag, "hook", "hook to run: event=command, or the name of a discovered hook (repeatable)")
 	trustedExtension := repeatable{}
 	fs.Var(&trustedExtension, "trusted-extension", "extension whose hooks/ directory is trusted and loaded (repeatable)")
 	planYolo := fs.Bool("plan-yolo", false, "plan mode with the first proposal auto-approved (implies -plan)")
-	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref or @role to switch to after the first approved proposal (default: stay)")
+	planYoloInto := fs.String("plan-yolo-into", "", "with -plan-yolo: model ref to switch to after the first approved proposal (default: stay)")
 	profileName := fs.String("profile", "", "named profile: relocate the user base to <base>/profiles/<name> (or set XDEV_PROFILE)")
 	aliasName := fs.String("alias", "", "agent identity name for this session: other sessions address it by this name")
 	modeFlag := fs.String("mode", "", "run mode: print | tui | rpc | acp (alternative to the subcommand)")
@@ -180,7 +180,7 @@ func main() {
 	noTitle := fs.Bool("no-title", false, "skip the session title entirely (the mechanical stamp and the ai-title pass)")
 	modelsPatterns := repeatable{}
 	fs.Var(&modelsPatterns, "models", "comma-separated model patterns for Ctrl+P cycling (the catalog listing is the `models` subcommand)")
-	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the `thinking` settings key, then the model role's effort)")
+	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the `thinking` settings key, then the model's inline `:effort`)")
 	hideThinking := fs.Bool("hide-thinking", false, "hide thinking blocks in TUI output (display only; model thinking is unaffected)")
 	printThoughts := fs.Bool("print-thoughts", false, "include thinking blocks in print-mode output")
 	toolsFlag := fs.String("tools", "", "comma-separated tools to enable (default: all)")
@@ -189,7 +189,7 @@ func main() {
 	autoApprove := fs.Bool("auto-approve", false, "auto-approve every tool call (approval mode yolo; explicit per-tool denies and bash patterns still apply)")
 	fs.BoolVar(autoApprove, "yolo", false, "alias for --auto-approve")
 	approvalModeFlag := fs.String("approval-mode", "", "approval mode for this run: always-ask | write | yolo (overrides tools.approvalMode)")
-	advisorFlag := fs.Bool("advisor", false, "enable the advisor runtime (a background reviewer; needs modelRoles.advisor)")
+	advisorFlag := fs.Bool("advisor", false, "enable the advisor runtime (a background reviewer; needs advisorModel)")
 	maxTimeFlag := fs.String("max-time", "", "stop the run after this duration (600 = 600s, 10m, 1h)")
 	noExtensions := fs.Bool("no-extensions", false, "disable extension discovery (no extension tool, command, or policy hook loads)")
 	skillsFlag := fs.String("skills", "", "comma-separated glob patterns filtering which skills are advertised (e.g. git-*,docker)")
@@ -201,9 +201,6 @@ func main() {
 	fs.BoolVar(continueLast, "c", false, "alias for --continue")
 	fs.StringVar(resumePrefix, "r", "", "alias for --resume (session id prefix)")
 	fs.StringVar(resumePrefix, "session", "", "resume a session by id prefix (alias: --session)")
-	fs.StringVar(&smolModelFlag, "smol", "", "role override: model for the @smol role (alias for the fast model)")
-	fs.StringVar(&slowModelFlag, "slow", "", "role override: model for the @slow / @plan role")
-	fs.StringVar(&planModelFlag, "plan-model", "", "role override: model for the @plan role (omp spells this --plan <model>)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
 	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
 	providerFlag := fs.String("provider", "", "force the provider when the model ref does not name one")
@@ -323,9 +320,6 @@ func main() {
 		NoSkills:        *noSkills,
 		Advisor:         *advisorFlag,
 		NoPrewalk:       *noPrewalk,
-		Smol:            smolModelFlag,
-		Slow:            slowModelFlag,
-		PlanModel:       planModelFlag,
 		Models:          splitPatterns(modelsPatterns),
 		Provider:        *providerFlag,
 		ExtraDirs:       addDirs,
@@ -335,15 +329,10 @@ func main() {
 		PluginDirs:      pluginDirs,
 	}
 	// --- launch-flag overrides onto the layered settings. Each one is a
-	// documented flag, so each must win over the file: approval mode,
-	// per-role model overrides, and the prewalk off-switch.
+	// documented flag, so each must win over the file: approval mode and
+	// the prewalk off-switch.
 	if mode := approvalModeOverride(); mode != "" {
 		settings.ApprovalMode = mode
-	}
-	for _, role := range []string{"smol", "slow", "plan"} {
-		if m := roleOverride(role); m != "" {
-			settings.ModelRoles[role] = m
-		}
 	}
 	// --plugin-dir roots join plugin discovery (commands/skills/agents/hooks).
 	if len(launch.PluginDirs) > 0 {

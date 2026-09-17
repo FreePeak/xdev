@@ -29,8 +29,9 @@ type AgentDefinition struct {
 	Tools stringList `yaml:"tools,omitempty"`
 	// Spawns is "*" (unrestricted), a CSV allowlist, or empty (cannot spawn).
 	Spawns interface{} `yaml:"spawns,omitempty"`
-	// Model is a role alias (@role, expanded through modelRoles by the host's
-	// TaskTool.ExpandModel) or a literal provider/model.
+	// Model is a literal provider/model the child runs on ("" = inherit the
+	// parent's). A "@role" alias is no longer a thing: it is reported as
+	// unexpanded and the parent model is kept.
 	Model string `yaml:"model,omitempty"`
 	// ThinkingLevel sets the child's reasoning effort (a config.EffortLevels
 	// name); empty inherits the parent's.
@@ -244,7 +245,7 @@ func parseAgentDef(data []byte, source string) (AgentDefinition, error) {
 }
 
 // quoteAtValues quotes a bare "@..." scalar value, which YAML 1.2 reserves:
-// `model: @smol` — the exact form discovery documents — otherwise dies as
+// `model: @smol` — the form old agent files still carry — otherwise dies as
 // "found character that cannot start any token" and the agent is skipped
 // (#272). Only a whole-value alias is touched; a quoted or list value is
 // already valid, and a value with trailing text is left to the parser.
