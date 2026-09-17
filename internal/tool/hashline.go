@@ -49,6 +49,10 @@ var (
 	// fires when digits stand after the colon, so "PUT 3:" keeps its
 	// single-line meaning and "PUT 3: +row" keeps its inline body.
 	hashlineColonRe = regexp.MustCompile(`^(PUT\s+(?:[<>]\s*)?\d+)\s*:(=?)\s*(\d+)`)
+	// hashlineDiffRe matches a unified-diff hunk header, "@@ -1,3 +1,3 @@".
+	// Some models reach for the diff dialect regardless of the advertised
+	// schema; naming it turns a parser complaint into a one-line correction.
+	hashlineDiffRe = regexp.MustCompile(`^@@\s*-?\d`)
 )
 
 // looksLikeHashline reports whether s reads as patch text rather than some
@@ -90,6 +94,14 @@ func parseHashline(text, defaultPath string) (hashlineSection, error) {
 	sec.path = defaultPath
 
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	// A document that carries a hunk header is a unified diff, not a patch in
+	// this grammar: say so once, on the hunk line, before the parse loop turns
+	// the diff's "--- a/f" first line into a confusing "[path] header" error.
+	for n, l := range lines {
+		if hashlineDiffRe.MatchString(strings.TrimLeft(l, " \t")) {
+			return sec, fmt.Errorf("edit: line %d: %q is a unified-diff hunk header — this tool does not take diffs. Send the hashline form: a \"[path]\" header, then \"PUT 3.=5:\" / \"CUT 5\" / \"REM 5.=7\" / \"MV new.go\" over 1-based line numbers, each PUT followed by \"+\" body rows", n+1, truncateOneLine(l, 40))
+		}
+	}
 	i := 0
 	headerSeen := false
 	for i < len(lines) {
@@ -191,7 +203,7 @@ func parseHashlineOp(raw string, next int, lines []string, lineNo int) (editOp, 
 	if isOpWord(firstWord(raw)) {
 		return editOp{}, next, fmt.Errorf("edit: line %d: %q names a range this grammar cannot express (want e.g. \"PUT 3.=5:\" or \"CUT 5\")", lineNo, truncateOneLine(raw, 40))
 	}
-	return editOp{}, next, fmt.Errorf("edit: line %d: expected a PUT/CUT/REM/MV op line or a [path] header, got %q", lineNo, truncateOneLine(raw, 40))
+	return editOp{}, next, fmt.Errorf("edit: line %d: expected a PUT/CUT/REM/MV op line or a [path] header, got %q — a header is the path INSIDE the brackets (\"[src/a.go#1a2b]\"), on its own line, before any op", lineNo, truncateOneLine(raw, 40))
 }
 
 // hashlineBody consumes the rows under a PUT op line. A row is passed through
@@ -224,7 +236,7 @@ func hashlineBody(i int, lines []string, lineNo int) ([]string, int, error) {
 		if strings.HasPrefix(head, "-") {
 			return body, i + 1, fmt.Errorf("edit: line %d (under the op on line %d): \"-\" rows are not how this grammar deletes — leave the line out of the range the op names and give only \"+\" content rows", i+1, lineNo)
 		}
-		return body, i + 1, fmt.Errorf("edit: line %d (under the op on line %d): body rows start with \"+\", got %q", i+1, lineNo, truncateOneLine(raw, 40))
+		return body, i + 1, fmt.Errorf("edit: line %d (under the op on line %d): body rows start with \"+\", got %q — every row under a PUT carries exactly one leading \"+\" (it is transport: \"++\" writes a literal \"+\")", i+1, lineNo, truncateOneLine(raw, 40))
 	}
 	return body, i, nil
 }

@@ -318,4 +318,15 @@ jobs:
           # idempotent.
           gh release create "$version" --repo "$GITHUB_REPOSITORY" --target "$target" \
             --title "$version" --generate-notes $flags dist/* \
-            || gh release upload "$version" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          || true
+          # Upload one asset at a time. `gh release upload --clobber`
+          # re-uploads every listed asset even on a fresh release, which
+          # makes GitHub return HTTP 422 ("ReleaseAsset.name already
+          # exists") on the first one — GitHub treats a 422 from upload
+          # as fatal (not catchable), so the `||` fallthrough on `gh
+          # release create` never fires and the whole job dies. Loop
+          # per-asset and swallow per-asset failures: on a re-run the
+          # existing assets are skipped, the new ones still land.
+          for asset in dist/*; do
+            gh release upload "$version" --repo "$GITHUB_REPOSITORY" --clobber "$asset" 2>/dev/null || true
+          done
