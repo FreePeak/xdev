@@ -1037,6 +1037,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetStatusModel(nprovName + "/" + nmodelName)
 		// The HUD context segment measures against the new window.
 		app.SetContextWindow(int64(modelWindow(cfg, nprovName, nmodelName)))
+		persistDefaultModel(nprovName + "/" + nmodelName)
 		return nil
 	}
 
