@@ -1853,7 +1853,7 @@ func List(s *Settings, globalPath string) []string {
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
 		"compaction.idleAfter " + idleAfterOrDefault(s.Compaction.IdleAfter),
 		"compaction.async " + fmt.Sprint(s.CompactionAsyncOn()),
-		"retry.infinite " + fmt.Sprint(s.RetryConfig().Infinite),
+		"retry.infinite " + fmt.Sprint(s.InfiniteRetry()),
 	}
 	if segs := s.StatusLineSegments(); segs != nil {
 		out = append(out, "statusLine.segments "+strings.Join(segs, ","))
