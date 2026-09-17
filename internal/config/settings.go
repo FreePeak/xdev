@@ -205,6 +205,11 @@ type HindsightSettings struct {
 	APIToken string `yaml:"apiToken"`
 	// BankID is the bank base; empty derives it from the scoping mode.
 	BankID string `yaml:"bankId"`
+	// ProjectSelector names the project on a multi-project LeanKG server
+	// (LEANKG_PROJECT_DIRS): it rides as `?project=` on the bank paths.
+	// Empty sends no selector, so a single-project server sees the URLs it
+	// always did and the client stays byte-compatible with both.
+	ProjectSelector string `yaml:"projectSelector"`
 	// BankMission is an advisory mission string carried for parity.
 	BankMission string `yaml:"bankMission"`
 	// Scoping is global | per-project | per-project-tagged (default).
@@ -259,6 +264,9 @@ func (h *HindsightSettings) merge(layer HindsightSettings) error {
 	}
 	if layer.BankMission != "" {
 		h.BankMission = layer.BankMission
+	}
+	if layer.ProjectSelector != "" {
+		h.ProjectSelector = layer.ProjectSelector
 	}
 	if layer.Scoping != "" {
 		switch layer.Scoping {
@@ -1721,6 +1729,9 @@ func List(s *Settings, globalPath string) []string {
 		out = append(out, "hindsight.apiUrl "+hindsightOrDefault(s.Hindsight.APIURL),
 			"hindsight.scoping "+hindsightOrDefault(s.Hindsight.Scoping),
 			"hindsight.bankId "+hindsightOrDefault(s.Hindsight.BankID))
+		if s.Hindsight.ProjectSelector != "" {
+			out = append(out, "hindsight.projectSelector "+s.Hindsight.ProjectSelector)
+		}
 		if s.Hindsight.APIToken != "" {
 			out = append(out, "hindsight.apiToken (set)")
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 type fixtureRecord struct {
 	method string
 	path   string
+	query  string
 	body   map[string]any
 	auth   string
 }
@@ -42,7 +44,7 @@ func (f *hindsightFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 	f.mu.Lock()
-	f.requests = append(f.requests, fixtureRecord{method: r.Method, path: r.URL.Path, body: body, auth: r.Header.Get("Authorization")})
+	f.requests = append(f.requests, fixtureRecord{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: body, auth: r.Header.Get("Authorization")})
 	status := f.status
 	results, reflectText := f.results, f.reflectText
 	f.mu.Unlock()
@@ -162,6 +164,103 @@ func TestHindsightRecallRequestShape(t *testing.T) {
 	}
 	if tags, _ := got.body["tags"].([]any); len(tags) != 1 || tags[0] != "project:myrepo" {
 		t.Errorf("tags = %v, want [project:myrepo]", got.body["tags"])
+	}
+}
+
+// TestHindsightProjectSelectorRidesBankPathsOnly: the selector is LeanKG's
+// multi-project routing key, so it belongs on the bank paths. /health is
+// served by the server itself, outside any project — a selector there would
+// 404 a healthy multi-project server. And an empty selector must produce the
+// exact URLs a single-project server saw before this knob existed.
+func TestHindsightProjectSelectorRidesBankPathsOnly(t *testing.T) {
+	srv := func(t *testing.T, selector string) *hindsightFixture {
+		t.Helper()
+		h, f, _, _ := newFixtureBackend(t, HindsightConfig{ProjectSelector: selector}, nil)
+		h.NoteUserTurn("what does Alice prefer?")
+		_ = h.GuidanceBlock()
+		if _, err := h.Enqueue(); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		_ = h.Stats()
+		_ = h.Diagnose()
+		return f
+	}
+
+	f := srv(t, "leankg")
+	if f.calls("/health")[0].query != "" {
+		t.Errorf("/health carried a selector: %q", f.calls("/health")[0].query)
+	}
+	for _, suffix := range []string{"/memories/recall", "/memories", "/stats"} {
+		for _, got := range f.calls(suffix) {
+			if got.query != "project=leankg" {
+				t.Errorf("%s %s query = %q, want project=leankg", got.method, got.path, got.query)
+			}
+		}
+	}
+
+	// No selector: not even a bare "?" may appear.
+	bare := srv(t, "")
+	for _, got := range bare.all() {
+		if got.query != "" {
+			t.Errorf("%s %s grew a query with no selector configured: %q", got.method, got.path, got.query)
+		}
+	}
+}
+
+// TestHindsightLeanKGContractShape pins the exact wire the LeanKG pairing
+// uses — bank omp, project-scoped tag, multi-project selector — so a change
+// that silently retargets the bank or drops the selector fails here instead
+// of looking like an empty memory on the live server.
+func TestHindsightLeanKGContractShape(t *testing.T) {
+	root := repoRoot(t, "xdev")
+	h, f, _, _ := newFixtureBackend(t, HindsightConfig{
+		BankID:          "omp",
+		ProjectSelector: "/Users/me/work/freepeak/leankg",
+		Scoping:         HindsightScopingTagged,
+		ProjectRoot:     root,
+	}, nil)
+	_ = h.GuidanceBlock()
+
+	got := f.calls("/memories/recall")[0]
+	if want := "/v1/default/banks/omp/memories/recall"; got.path != want {
+		t.Errorf("path = %q, want the configured bank %q", got.path, want)
+	}
+	if got.query != "project="+url.QueryEscape("/Users/me/work/freepeak/leankg") {
+		t.Errorf("query = %q, want the encoded selector", got.query)
+	}
+	if tags, _ := got.body["tags"].([]any); len(tags) != 1 || tags[0] != "project:xdev" {
+		t.Errorf("tags = %v, want [project:xdev]", got.body["tags"])
+	}
+}
+
+// TestHindsightWarnsOnceWhenProjectScopeIsUnresolvable: outside a repository
+// ProjectScope falls back to the directory itself, so the tag becomes a name
+// nothing else on the server carries and recall returns nothing — measured
+// against LeanKG, a tag no entry holds yields 0 results rather than a global
+// answer. The emptiness must be said once, and said not at all once a
+// selector names the project.
+func TestHindsightWarnsOnceWhenProjectScopeIsUnresolvable(t *testing.T) {
+	// A temp dir with no .git above it: ProjectScope falls back to the dir.
+	h, _, logs, _ := newFixtureBackend(t, HindsightConfig{ProjectRoot: t.TempDir()}, nil)
+	_ = h.AutoRecall()
+	_ = h.AutoRecall()
+	scopeWarns := 0
+	for _, m := range *logs {
+		if strings.Contains(m, "not inside a repository") {
+			scopeWarns++
+		}
+	}
+	if scopeWarns != 1 {
+		t.Errorf("scope warnings = %d in %v, want exactly 1", scopeWarns, *logs)
+	}
+
+	// A named selector resolves the scope: nothing to warn about.
+	named, _, quiet, _ := newFixtureBackend(t, HindsightConfig{ProjectRoot: t.TempDir(), ProjectSelector: "leankg"}, nil)
+	_ = named.AutoRecall()
+	for _, m := range *quiet {
+		if strings.Contains(m, "not inside a repository") {
+			t.Errorf("warned despite a selector: %v", *quiet)
+		}
 	}
 }
 
@@ -653,10 +752,12 @@ func TestHindsightConfigFromSettingsAndEnv(t *testing.T) {
 	t.Setenv("HINDSIGHT_RETAIN_EVERY_N_TURNS", "5")
 	t.Setenv("HINDSIGHT_RECALL_BUDGET", "nonsense")
 	t.Setenv("HINDSIGHT_SCOPING", "global")
+	t.Setenv("HINDSIGHT_PROJECT", "leankg")
 
 	settings := &config.Settings{Memory: "hindsight", Hindsight: config.HindsightSettings{
 		APIURL:              "http://ignored-by-env:1",
 		APIToken:            "settings-token",
+		ProjectSelector:     "from-settings",
 		BankID:              "team",
 		RecallMaxTokens:     2048,
 		RetainEveryNTurns:   9,
@@ -665,6 +766,9 @@ func TestHindsightConfigFromSettingsAndEnv(t *testing.T) {
 	}}
 	h := NewHindsight(HindsightConfigFromSettings(settings, repoRoot(t, "MyRepo")))
 
+	if h.cfg.ProjectSelector != "leankg" {
+		t.Errorf("HINDSIGHT_PROJECT = %q, want it to beat the settings value", h.cfg.ProjectSelector)
+	}
 	if h.cfg.URL != "http://example.test:9000" {
 		t.Errorf("env URL did not win: %q", h.cfg.URL)
 	}
