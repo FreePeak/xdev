@@ -54,6 +54,17 @@ func TestClassify(t *testing.T) {
 			Body: `{"error":{"code":"model_not_found","message":"no provider for model xdev"}}`}, ClassTransient},
 		{"404 upstream_error relaying a model verdict", &HTTPError{API: "openai-completions", Status: 404,
 			Body: `{"error":{"code":"404","message":"Thank you for participating in the Stealth Union Alpha testing period. This model was Unbiased's Pareto. Use it now: https://openrouter.ai/unbiased/pareto","type":"upstream_error"}}`}, ClassTransient},
+		// A 400 the gateway rejects because a tool name (from an MCP
+		// server or extension binary) exceeds 64 characters. The
+		// name comes from external sources xdev does not control;
+		// retried, the next turn rebuilds the request from history
+		// and only uses names the model already called, which never
+		// exceed the limit. Left a bad request, the run ended with
+		// no way back (the session-killing "name must be at most
+		// 64 characters" failure).
+		{"400 tool name too long", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` +
+				"`name` must be at most 64 characters, got 73"}, ClassTransient},
 		{"302 unknown", &HTTPError{API: "a", Status: 302, Body: "redir"}, ClassUnknown},
 		{"transport overflow text", errors.New("agent: stream: prompt exceeds the context window of 1000000"), ClassContextOverflow},
 		{"connection reset", errors.New("a: Post \"http://x\": read tcp: connection reset by peer"), ClassTransient},

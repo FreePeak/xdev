@@ -126,7 +126,15 @@ var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
 // path is a provider-reported error code on HTTPError instead of body sniffing.
 var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error`)
 
-// Classify maps an error to its recovery class. Wire HTTPError instances
+// toolNameTooLongRe matches a 400 the gateway rejects because a tool
+// name exceeds the provider's 64-character ceiling. Names come from
+// external sources (MCP servers, extension binaries) that xdev does
+// not control, so the right fix at this layer is to retry: the next
+// turn rebuilds the request from history, and names the model already
+// called (a persisted assistant message) never exceed the limit. Left
+// a bad request, the run ended with no way back.
+var toolNameTooLongRe = regexp.MustCompile(`(?i)name.*at most 64`)
+
 // classify by status + body; raw transport errors by their message.
 func Classify(err error) ErrClass {
 	if err == nil {
@@ -141,7 +149,7 @@ func Classify(err error) ErrClass {
 			if bodyIndicatesOverflow(he.Body) {
 				return ClassContextOverflow
 			}
-			if malformedRequestRe.MatchString(he.Body) {
+			if malformedRequestRe.MatchString(he.Body) || toolNameTooLongRe.MatchString(he.Body) {
 				return ClassTransient
 			}
 			return ClassBadRequest
