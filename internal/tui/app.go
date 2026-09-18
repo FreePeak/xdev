@@ -90,6 +90,16 @@ type App struct {
 	// without this edge a single click would look like a press at every drag
 	// report the terminal sends along the way.
 	mouseBtnDown bool
+	// debugMouse renders every mouse event on the status bar
+	// (settings `tui.debugMouse`, off by default): the button, the
+	// press/drag/release edge, the wheel direction and the coordinates.
+	// It is the only way to see what the terminal is actually sending —
+	// tcell strips the SGR motion bit, so a held drag looks like a
+	// press at every report, and the gesture a user thinks they made
+	// is not always the one that arrives.
+	// (UI thread; mu-guarded.)
+	debugMouse     bool
+	debugMouseLine string
 	keyMap       *KeyMap // remappable keybinding layer
 	st           Status
 	// The decode window of the message being streamed: the first and last
@@ -1452,6 +1462,20 @@ func (a *App) SetShowThinking(on bool) {
 	a.poke()
 }
 
+// SetDebugMouse enables rendering of every mouse event on the
+// status bar (settings `tui.debugMouse`). Off by default: the log
+// is opt-in so a normal session does not scroll the HUD with
+// pointer noise.
+func (a *App) SetDebugMouse(on bool) {
+	a.mu.Lock()
+	a.debugMouse = on
+	if !on {
+		a.debugMouseLine = ""
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
 // SetSettingsOps wires the /settings command (settings live in cmd).
 func (a *App) SetSettingsOps(ops *SettingsOps) { a.settingsOps = ops }
 
@@ -1779,6 +1803,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// look like a fresh press and restart the selection under it.
 			if m.Buttons()&(tcell.WheelUp|tcell.WheelDown|tcell.WheelLeft|tcell.WheelRight) == 0 {
 				a.mouseBtnDown = held
+			}
+			// debugMouse renders the event on the status bar when opted in.
+			if a.debugMouse {
+				a.debugMouseLine = mouseDebugLine(m, press)
 			}
 			a.mu.Unlock()
 			// A modal owns the mouse first: omp's lists move the selection on
@@ -3573,6 +3601,11 @@ var statusSegments = map[string]bool{
 	"theme":   true,
 	"time":    true,
 	"command": true,
+	// debugMouse renders the last mouse event on the status bar
+	// (settings `tui.debugMouse`, off by default). It always shows
+	// when enabled: the segment never hides, so the log is visible
+	// the moment it is opted in.
+	"debugMouse": true,
 }
 
 // defaultStatusSegments is the shipped layout: the work timer, the token
@@ -3650,8 +3683,63 @@ func (a *App) hudSegment(name string) (text, token string) {
 		return "⌚ " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
+	case "debugMouse":
+		return a.debugMouseLine, theme.StatusLineSep
 	}
 	return "", ""
+}
+
+// mouseDebugLine formats one mouse event for the status bar: the button,
+// the press/drag/release edge, the wheel direction and the coordinates.
+// It is the only way to see what the terminal is actually sending —
+// tcell strips the SGR motion bit, so a held drag looks like a press at
+// every report, and the gesture a user thinks they made is not always
+// the one that arrives.
+func mouseDebugLine(m *tcell.EventMouse, press bool) string {
+	x, y := m.Position()
+	var btn string
+	switch {
+	case m.Buttons()&(tcell.WheelUp|tcell.WheelDown|tcell.WheelLeft|tcell.WheelRight) != 0:
+		switch {
+		case m.Buttons()&tcell.WheelUp != 0:
+			btn = "wheel↑"
+		case m.Buttons()&tcell.WheelDown != 0:
+			btn = "wheel↓"
+		case m.Buttons()&tcell.WheelLeft != 0:
+			btn = "wheel←"
+		default:
+			btn = "wheel→"
+		}
+	case m.Buttons()&tcell.Button1 != 0:
+		btn = "btn1"
+	case m.Buttons()&tcell.Button2 != 0:
+		btn = "btn2"
+	case m.Buttons()&tcell.Button3 != 0:
+		btn = "btn3"
+	default:
+		btn = "up"
+	}
+	edge := "move"
+	if press {
+		edge = "press"
+	} else if m.Buttons() == 0 {
+		edge = "release"
+	}
+	mod := m.Modifiers()
+	var mods string
+	if mod&tcell.ModShift != 0 {
+		mods += "S"
+	}
+	if mod&tcell.ModAlt != 0 {
+		mods += "A"
+	}
+	if mod&tcell.ModCtrl != 0 {
+		mods += "C"
+	}
+	if mods != "" {
+		mods = "+" + mods
+	}
+	return fmt.Sprintf("%s%s %s @%d,%d", btn, mods, edge, x, y)
 }
 
 // hudPart is one rendered HUD segment, carrying the segment name the

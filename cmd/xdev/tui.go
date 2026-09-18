@@ -286,6 +286,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
+	// debugMouse renders every mouse event on the status bar (settings
+	// `tui.debugMouse`, off by default). It is opt-in so a normal
+	// session does not scroll the HUD with pointer noise.
+	app.SetDebugMouse(lastSettings().DebugMouse)
 	// The context dock (#291 §1): the fixed-width column right of the transcript.
 	// Its sources are the state the session already keeps — the proposed plan and
 	// the task list through PlanMode, the hub roster through the same snapshot
