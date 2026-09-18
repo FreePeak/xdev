@@ -19,6 +19,13 @@ var extraConnectCatalog = map[string]connectEntry{
 			{ID: "mimo-v2.5", Name: "Mimo v2.5", ContextWindow: 200000, MaxTokens: 8192},
 		},
 	},
+	"cursor": {
+		Title:   "Cursor",
+		BaseURL: "https://api.cursor.com/v1",
+		API:     "openai-completions",
+		Env:     []string{"CURSOR_API_KEY"},
+		Doc:     "https://cursor.com/docs/api",
+	},
 }
 
 func lookupConnect(name string) (connectEntry, bool) {

@@ -131,6 +131,17 @@ func connectCredential(name string, e connectEntry, cfg *Config, store Credentia
 			return v, "credentials.json"
 		}
 	}
+	// Cursor's own IDE stores a session JWT locally (the Keychain item
+	// "cursor-access-token", or state.vscdb's cursorAuth/accessToken on
+	// macOS). It is a bearer api.cursor.com/v1 accepts, so a Cursor
+	// subscription connects with no key pasted and no env var exported —
+	// the IDE is the credential. It sits above the environment so that
+	// exporting CURSOR_API_KEY is never the only way in.
+	if isCursorProvider(name) {
+		if v := cursorTokenSource(); v != "" {
+			return v, cursorLocalTokenSource()
+		}
+	}
 	for _, ev := range e.Env {
 		if v := strings.TrimSpace(os.Getenv(ev)); v != "" {
 			return v, "env " + ev
@@ -144,6 +155,9 @@ func connectCredential(name string, e connectEntry, cfg *Config, store Credentia
 // field; every host that sells one puts the word in its own name, which is also
 // how opencode's list reads. Listing garnish: no behavior hangs on it.
 func isPlan(name string) bool {
+	if name == "cursor" {
+		return true
+	}
 	return strings.Contains(name, "coding-plan") || strings.Contains(name, "token-plan") ||
 		strings.Contains(name, "step-plan") || strings.HasSuffix(name, "-pass")
 }
