@@ -204,8 +204,8 @@ func TestRunWrapsUpAtTurnLimit(t *testing.T) {
 
 // TestEmptyTurnNudgeIsBounded pins #331: a turn with no text and no tool
 // call — the reasoning-only shape a thinking-mode upstream leaves behind —
-// must not end the run, and the nudge that keeps it alive is spent once per
-// run so a model that only ever stalls cannot loop on it.
+// must not end the run, and the nudge that keeps it alive is bounded per run
+// so a model that only ever stalls cannot loop on it.
 func TestEmptyTurnNudgeIsBounded(t *testing.T) {
 	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
 		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
@@ -227,14 +227,6 @@ func TestEmptyTurnNudgeIsBounded(t *testing.T) {
 			wantFinal:  "here is the answer",
 			wantNudges: 1,
 		},
-		{
-			name: "a model that only ever stalls is nudged once, not forever",
-			// Four blank scripts are offered; only the first may be spent.
-			calls:      []fakeScript{blankScript, blankScript, blankScript, blankScript},
-			wantCalls:  2,
-			wantFinal:  "",
-			wantNudges: 1,
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,7 +239,7 @@ func TestEmptyTurnNudgeIsBounded(t *testing.T) {
 			}
 			final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
 			if err != nil {
-				t.Fatalf("a blank turn must not fail the run: %v", err)
+				t.Fatalf("Run: %v", err)
 			}
 			if final.Text() != tc.wantFinal {
 				t.Fatalf("final = %q, want %q", final.Text(), tc.wantFinal)
@@ -276,6 +268,32 @@ func TestEmptyTurnNudgeIsBounded(t *testing.T) {
 				t.Fatalf("nudge prompt missing from the recovery request: %+v", last.Messages)
 			}
 		})
+	}
+}
+
+// TestEmptyTurnStallSurfacesAsAnError is the other end of #331: once the
+// nudges are spent and the model still answers nothing, the run ends with
+// ErrEmptyTurn instead of a nil-error stop that the TUI paints as a plain
+// halt with nothing on screen (field report, session 1883e928).
+func TestEmptyTurnStallSurfacesAsAnError(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	// Three blank scripts: the two nudges are spent, the third answer ends
+	// the run with the error and no fourth request is made.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, blankScript, blankScript}}
+	a, _, _ := runAgent(t, p)
+	var nudges int
+	a.Hooks = TurnHooksFunc{OnEmptyTurnF: func(string) { nudges++ }}
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if !errors.Is(err, ErrEmptyTurn) {
+		t.Fatalf("a stalled run must surface ErrEmptyTurn, got %v", err)
+	}
+	if nudges != maxEmptyTurnNudges {
+		t.Fatalf("OnEmptyTurn fired %d times, want %d", nudges, maxEmptyTurnNudges)
+	}
+	if n := len(p.gotReqs); n != maxEmptyTurnNudges+1 {
+		t.Fatalf("stream requests = %d, want %d", n, maxEmptyTurnNudges+1)
 	}
 }
 
