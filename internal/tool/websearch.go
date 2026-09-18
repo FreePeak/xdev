@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/websearch"
@@ -58,6 +59,12 @@ func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (Resu
 	}
 	if strings.TrimSpace(a.Query) == "" {
 		return Result{Text: "web_search: query is required", IsError: true}, nil
+	}
+	if a.MaxResults < 0 {
+		return Result{Text: fmt.Sprintf("web_search: max_results must be non-negative, got %d", a.MaxResults), IsError: true}, nil
+	}
+	if a.MaxResults > websearch.MaxResultsCeiling {
+		return Result{Text: fmt.Sprintf("web_search: max_results %d exceeds the ceiling of %d", a.MaxResults, websearch.MaxResultsCeiling), IsError: true}, nil
 	}
 	if t.Searcher == nil {
 		return Result{Text: "web_search: no searcher configured", IsError: true}, nil

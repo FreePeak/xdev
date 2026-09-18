@@ -715,6 +715,9 @@ func sanitizeURL(raw string) string {
 // sanitizeResults strips every row of provider markup, drops rows whose URL
 // is not fetchable, and caps the row count.
 func sanitizeResults(in []webResult, limit int) []webResult {
+	if limit < 0 {
+		limit = 0
+	}
 	out := make([]webResult, 0, min(len(in), limit))
 	for _, r := range in {
 		u := sanitizeURL(r.URL)

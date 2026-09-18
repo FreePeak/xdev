@@ -37,6 +37,26 @@ func TestWebSearchToolArgumentHandling(t *testing.T) {
 	}
 }
 
+// TestWebSearchToolRejectsBadMaxResults: a negative or over-ceiling
+// max_results is an argument error, not a silent clamp — the engine's limit()
+// would otherwise happily honor 21, and a negative would underflow the
+// per-provider request count.
+func TestWebSearchToolRejectsBadMaxResults(t *testing.T) {
+	ws := NewWebSearchTool(websearch.Settings{})
+	for _, tc := range []struct {
+		args string
+		want string
+	}{
+		{`{"query":"x","max_results":-1}`, "must be non-negative"},
+		{`{"query":"x","max_results":21}`, "exceeds the ceiling"},
+	} {
+		res, err := ws.Execute(context.Background(), json.RawMessage(tc.args))
+		if err != nil || !res.IsError || !strings.Contains(res.Text, tc.want) {
+			t.Fatalf("%s: err=%v res=%+v", tc.args, err, res)
+		}
+	}
+}
+
 // TestWebSearchToolDelegatesToSearcher proves the wrapper wires the engine's
 // answer through unchanged: with a keyless tavily-only chain the engine
 // reports the skip, and the wrapper must surface it as a failed result with
