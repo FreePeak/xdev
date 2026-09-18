@@ -39,7 +39,7 @@ func (p *OpenAICodexResponsesProvider) API() string  { return APIOpenAICodexResp
 
 // HealthCheck implements ai.HealthChecker.
 func (p *OpenAICodexResponsesProvider) HealthCheck(ctx context.Context) error {
-	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIOpenAICodexResponses)
+	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIOpenAICodexResponses)
 }
 
 // Stream implements Provider: the Responses wire plus the Codex

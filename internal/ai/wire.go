@@ -118,13 +118,36 @@ func parseToolArgs(api, id, raw string) json.RawMessage {
 	return json.RawMessage("{}")
 }
 
+// modelsProbeURL is the catalog endpoint a HealthCheck probes: {base}/models,
+// or {base}/v1/models only when the base URL carries no version segment of
+// its own. The chat wire builds {base}/chat/completions from the same base,
+// so a base that already ends in /v1 (onegw, and every OpenAI-shaped gateway)
+// must not be handed a second one: /v1/v1/models 404s on a healthy host, and
+// the probe then reports a live gateway as down. This is the same rule
+// internal/config's discovery applies, so a probe never asks for a path the
+// provider is not already serving.
+func modelsProbeURL(baseURL string) string {
+	b := strings.TrimSuffix(baseURL, "/")
+	if strings.Contains(b, "/v1") { // also matches /v1beta
+		return b + "/models"
+	}
+	return b + "/v1/models"
+}
+
 // healthCheckOneGet runs a single GET against the provider's catalog
-// endpoint. It is the cheap liveness probe every provider's
-// HealthCheck delegates to: no body, no auth header (the agent's
-// key rides on the httpClient), and a short timeout so a dead
-// host fails fast instead of burning the escalation ladder. A
-// non-2xx or transport error is a non-nil error; the caller decides
-// whether to fail over.
+// endpoint. It is the cheap liveness probe every provider's HealthCheck
+// delegates to: no body, no auth header (the agent's key rides on the
+// httpClient), and a short timeout so a dead host fails fast instead of
+// burning the escalation ladder.
+//
+// Only a transport failure is an error. The probe asks one question — is the
+// host answering? — and any HTTP status answers it: a 200, or a 401 from a
+// gateway that wants the key this probe deliberately does not send (onegw's
+// catalog), or even a 404 from a mirror serving no catalog at all. Reading
+// those as "down" is what made a live gateway unusable: the turn was refused
+// before a single request was spent, and the real fault was never reported by
+// the request that would have failed on it. A host that is genuinely down
+// accepts no connection at all — that, and only that, is the error below.
 func healthCheckOneGet(ctx context.Context, hc *http.Client, url string, headers map[string]string, api string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -139,9 +162,6 @@ func healthCheckOneGet(ctx context.Context, hc *http.Client, url string, headers
 		return fmt.Errorf("%s: health check: %w", api, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s: health check: upstream HTTP %d", api, resp.StatusCode)
-	}
 	return nil
 }
 

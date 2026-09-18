@@ -46,7 +46,7 @@ func (p *OpenAICompletionsProvider) API() string  { return APIOpenAICompletions 
 // the host answers requests without carrying a request body or the
 // user's key (onegw serves the catalog unauthenticated).
 func (p *OpenAICompletionsProvider) HealthCheck(ctx context.Context) error {
-	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIOpenAICompletions)
+	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIOpenAICompletions)
 }
 
 // Wire shapes for the request body.

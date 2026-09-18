@@ -46,7 +46,7 @@ func (p *GeminiCLIProvider) API() string  { return APIGeminiCLI }
 
 // HealthCheck implements ai.HealthChecker.
 func (p *GeminiCLIProvider) HealthCheck(ctx context.Context) error {
-	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIGeminiCLI)
+	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIGeminiCLI)
 }
 
 // envelopeBody wraps the GenerateContent request in the CLI envelope.

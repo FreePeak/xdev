@@ -46,7 +46,7 @@ func (p *AnthropicProvider) API() string  { return APIAnthropicMessages }
 // live call carries it; the endpoint answers catalog reads to any
 // caller.
 func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
-	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIAnthropicMessages)
+	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIAnthropicMessages)
 }
 
 func (p *AnthropicProvider) endpoint() string {

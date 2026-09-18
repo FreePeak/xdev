@@ -37,7 +37,7 @@ type OpenAIResponsesProvider struct {
 
 // HealthCheck implements ai.HealthChecker.
 func (p *OpenAIResponsesProvider) HealthCheck(ctx context.Context) error {
-	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIOpenAIResponses)
+	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIOpenAIResponses)
 }
 
 // responsesBehavior is the option set the Responses variants differ by.

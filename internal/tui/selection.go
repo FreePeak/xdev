@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -85,33 +84,35 @@ func (a *App) clearClick() {
 // is the next click in a sequence; otherwise it starts fresh.
 // On count >= 2 it converts the click into a word or line selection
 // instead of a drag. count=1 starts a normal drag.
-func (a *App) handleClick(x, y int) {
-		now := time.Now()
-		fmt.Printf("DEBUG handleClick: x=%d y=%d selClickCount=%d selClickTime=%v\n", x, y, a.selClickCount, a.selClickTime)
-		if a.selClickCount > 0 &&
-			now.Sub(a.selClickTime) <= clickWordWindow &&
-			abs(x-a.selClickX) <= clickWordTol &&
-			abs(y-a.selClickY) <= clickWordTol {
-			a.selClickCount++
-		} else {
-			a.selClickCount = 1
-		}
-		a.selClickTime = now
-		a.selClickX, a.selClickY = x, y
-
-		if a.selClickCount >= 2 {
-			// Double or triple click: consume it - no drag follows.
-			a.clearClick()
-			if a.selClickCount >= 3 {
-				a.selStartLineSelect(x, y)
-			} else {
-				a.selStartWordSelect(x, y)
-			}
-			a.poke()
-			return
-		}
-		// Count 1: a normal drag starts on the next mouse motion.
+func (a *App) handleClick(x, y int) bool {
+	now := time.Now()
+	if a.selClickCount > 0 &&
+		now.Sub(a.selClickTime) <= clickWordWindow &&
+		abs(x-a.selClickX) <= clickWordTol &&
+		abs(y-a.selClickY) <= clickWordTol {
+		a.selClickCount++
+	} else {
+		a.selClickCount = 1
 	}
+	a.selClickTime = now
+	a.selClickX, a.selClickY = x, y
+
+	if a.selClickCount >= 2 {
+		// Double or triple click: consume it - no drag follows. The caller
+		// must not then re-anchor the gesture at the raw click point: that
+		// would collapse the word/line selection back into a no-motion click
+		// and copy nothing. true says "handled, stop here".
+		if a.selClickCount >= 3 {
+			a.selStartLineSelect(x, y)
+		} else {
+			a.selStartWordSelect(x, y)
+		}
+		a.poke()
+		return true
+	}
+	// Count 1: a normal drag starts on the next mouse motion.
+	return false
+}
 
 // selStartWordSelect begins a word-selection gesture at (x, y):
 // finds the word boundaries on the row under the pointer and pins
@@ -123,12 +124,16 @@ func (a *App) selStartWordSelect(x, y int) {
 		a.selShown = true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false
+		row := a.selRowAt(y)
 		a.selAnchor = selCorner{x: x, y: y, doc: -1}
 		a.selEnd = a.selCornerAt(x, y)
 		lo, hi := a.selWordAt(x, y)
 		if lo >= 0 {
-			a.selAnchor.x = lo
-			a.selEnd.x = hi
+			// selWordAt returns text-relative columns; pin the
+			// anchor and end to screen coordinates so the span
+			// resolves against the rendered row's x0.
+			a.selAnchor.x = lo + row.x0
+			a.selEnd.x = hi + row.x0
 		}
 		a.poke()
 }
@@ -267,28 +272,27 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// a box by name. The notch never moves focus (app.go scrollThinkBox),
 		// which is what stops a box from stealing the wheel merely by sliding
 		// under a stationary pointer.
+		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
 		// handleClick tracks click count from the previous
 		// release and starts a word/line selection on double/triple
 		// click, or a normal drag otherwise.
-		a.handleClick(x, y)
-		if a.selDown {
-			a.selCache = map[int]selRow{}
-			a.selDocMode = false
-			a.selAnchor = a.selCornerAt(x, y)
-			a.selDocMode = a.selAnchor.doc >= 0
-			a.selEnd = a.selAnchor
-			a.poke()
+		// handleClick tracks click count from the previous release and
+		// starts a word/line selection on double/triple click, or a normal
+		// drag otherwise. If it consumed the press (double/triple) it already
+		// anchored the gesture and the click ends here; a single click anchors
+		// it at this point so a following drag can expand it and the release
+		// copies what was covered.
+		if a.handleClick(x, y) {
+			break
 		}
-		if !a.selDown {
-			a.selDown, a.selShown = true, true
-			a.selCache = map[int]selRow{}
-			a.selDocMode = false
-			a.selAnchor = a.selCornerAt(x, y)
-			a.selDocMode = a.selAnchor.doc >= 0
-			a.selEnd = a.selAnchor
-			a.poke()
-		}
+		a.selDown, a.selShown = true, true
+		a.selCache = map[int]selRow{}
+		a.selDocMode = false
+		a.selAnchor = a.selCornerAt(x, y)
+		a.selDocMode = a.selAnchor.doc >= 0
+		a.selEnd = a.selCornerAt(x, y)
+		a.poke()
 	case btn&tcell.Button1 != 0 && a.selThumbDrag: // thumb drag on the scrollbar
 		a.selThumbTo(y)
 		a.poke()

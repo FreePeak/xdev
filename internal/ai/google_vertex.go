@@ -50,7 +50,7 @@ func (p *GoogleVertexProvider) Name() string { return p.name }
 
 // HealthCheck implements ai.HealthChecker.
 func (p *GoogleVertexProvider) HealthCheck(ctx context.Context) error {
-	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIGoogleVertex)
+	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIGoogleVertex)
 }
 
 
