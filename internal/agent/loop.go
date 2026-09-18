@@ -391,6 +391,12 @@ type Agent struct {
 	// discovered from the tool registry on the first Run.
 	Goals *GoalState
 
+	// Todo is the session-scoped todo tracker (M3/TODO-tracker,
+	// nil = todo mode off). The tracker owns the stop-time reminder
+	// loop, the mid-run nudge counters, and the failed-todo reminder.
+	// Discovered from the registry on first Run when a todo tool exists.
+	Todo *TodoTracker
+
 	// GoalContinuation lets an active goal keep the run going: a turn that
 	// ends with no tool calls injects the goal's continuation prompt and
 	// continues instead of idling (omp's goal-continuation message). Only a
@@ -525,6 +531,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	if a.Goals != nil {
 		a.Goals.SetOnUpdate(GoalNotify(a.Hooks))
 	}
+	// Todo mode (M3/TODO-tracker): the todo tool owns the live
+	// phased list; the tracker owns the reminder loop. Discovered
+	// from the registry on first Run (same shape as Goals) so every
+	// mode that wires a todo tool gets the engine for free.
+	if a.Todo == nil {
+		a.Todo = TodoStateOf(a.Tools)
+	}
 	// Magic keywords (research §8): standalone prose words in the user's
 	// prompt inject a hidden, user-attributed notice for this turn. The
 	// notice is persisted so a compaction rebuild replays it consistently.
@@ -648,6 +661,20 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// Messages queued during the final turn continue the run
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
+			// Todo reminder (M3/TODO-tracker): an assistant turn that
+			// ends with open todo work gets a developer-role reminder
+			// injected into the history so the model sees it next turn.
+			// omp's checkCompletion fires the same text at this boundary
+			// (todo-tracker.ts:199-285); the tracker's counters gate
+			// the attempt and exclude blocked tasks.
+			if rem := a.todoReminder(); rem != "" {
+				m := ai.Message{
+					Role:    ai.RoleUser,
+					Content: []ai.Block{ai.TextBlock{Text: rem}},
+				}
+				history = append(history, m)
+				a.persist(m)
+			}
 			// Goal continuation (M11 #40 tail): an active goal must not idle.
 			// This yield would have ended the run with the objective
 			// untouched — the reminder only ever rode along with a turn the
@@ -1356,6 +1383,34 @@ func (a *Agent) popFollowUp() string {
 	return ""
 }
 
+// todoReminder renders the stop-time reminder when the tracker
+// says it is ready, or "" otherwise. AcknowledgeReminder
+// advances the counters, so this function both checks readiness
+// and fires the reminder in one call (no double-injection).
+func (a *Agent) todoReminder() string {
+	if a == nil || a.Todo == nil {
+		return ""
+	}
+	if !a.Todo.ReminderReady() {
+		return ""
+	}
+	a.Todo.AcknowledgeReminder()
+	return a.Todo.FormatReminder(a.Todo.Attempt())
+}
+
+// isTodoMutatingTool reports whether a finished tool call counts toward
+// the todo tracker's mid-run nudge counter (omp's MUTATING_TOOLS list:
+// bash, eval, edit, write, ast_edit). A successful todo call resets
+// the counter via OnTodoResult, so todo itself is deliberately absent.
+func isTodoMutatingTool(name string) bool {
+	switch name {
+	case "bash", "eval", "edit", "write", "ast_edit":
+		return true
+	default:
+		return false
+	}
+}
+
 // healthCheckProvider probes the active provider's liveness via the
 // ai.HealthChecker seam (nil-safe: nil provider or no interface
 // method = probe unavailable = probe passes). Called once per
@@ -1804,6 +1859,17 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		return toolResultMsg(call, res, time.Since(started))
 	}
 	res, err := a.executeTool(ctx, t, args)
+	// Todo tracker (M3/TODO-tracker): every finished tool result
+	// feeds the mid-run nudge counter. A successful todo call
+	// resets it; a failed todo call flags the next turn. Mutating
+	// tools (bash, eval, edit, write, ast_edit) are counted.
+	if a.Todo != nil {
+		if call.Name == "todo" {
+			a.Todo.OnTodoResult(err)
+		} else {
+			a.Todo.OnMutatingToolResult()
+		}
+	}
 	dur := time.Since(started)
 	if err != nil {
 		res = tool.Result{Text: fmt.Sprintf("tool %q failed: %v", call.Name, err), IsError: true}
