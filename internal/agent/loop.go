@@ -145,6 +145,25 @@ const EmptyTurnNudgePrompt = "your last turn produced no answer and no tool call
 // handed back as a rewind draft).
 const EmptyTurnAttribution = "empty-turn"
 
+// ErrEmptyTurn is the failure voice of a model that answered nothing
+// after every nudge was spent. Ending the run is what the old code did;
+// ending it with an ERROR is what makes the stop visible and retryable
+// upward, instead of a silent "the session just stopped" (#331 field
+// report: session 1883e928 painted a stop and no error).
+var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call")
+
+// maxEmptyTurnNudges bounds blank-turn recovery. One was the old bound and
+// it is not enough: a thinking-mode upstream that answers every request
+// with a lone reasoning block burned the single nudge and the run then
+// ended with lastAssistant still nil.
+const maxEmptyTurnNudges = 2
+
+// maxPostContentContinuations bounds retain-and-continue when the ladder is
+// bounded (retry.infinite, default on, lifts it). A mid-stream failure
+// after visible content cannot be replayed — that would double-emit it —
+// so recovery resumes from the retained partial instead.
+const maxPostContentContinuations = 3
+
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
 
@@ -393,11 +412,11 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 	}
 	limit := a.effectiveMaxTurns()
-	// nudged is per run, not per turn: the empty-completion nudge below is
-	// spent once, so a model that can only ever emit reasoning cannot make
-	// the loop spend turns on it (the same shape as the TTSR interrupt
-	// budget and maxEscalationRounds).
-	nudged := false
+	// nudges is per run, not per turn: the empty-completion nudge below is
+	// spent at most maxEmptyTurnNudges times, so a model that can only ever
+	// emit reasoning cannot make the loop spend unbounded turns on it (the
+	// same shape as the TTSR interrupt budget and maxEscalationRounds).
+	nudges := 0
 	for turn := 0; turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
@@ -472,8 +491,8 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// screen (field report, session 1883e928). Returning here is the
 			// one outcome that cannot be right — the model never said it was
 			// done. One nudge asks it to actually answer.
-			if len(queued) == 0 && cont == "" && !nudged && isEmptyAssistant(*msg) {
-				nudged = true
+			if nudges < maxEmptyTurnNudges && isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
+				nudges++
 				nudge := ai.Message{
 					Role:        ai.RoleUser,
 					Content:     []ai.Block{ai.TextBlock{Text: EmptyTurnNudgePrompt}},
@@ -484,6 +503,10 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				a.Hooks.OnEmptyTurn(EmptyTurnNudgePrompt)
 				emit("turn_end", map[string]any{"turn": turn})
 				continue
+			}
+			if isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
+				emit("turn_end", map[string]any{"turn": turn})
+				return msg, ErrEmptyTurn
 			}
 			if len(queued) == 0 && cont == "" {
 				emit("turn_end", map[string]any{"turn": turn})
@@ -656,11 +679,18 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		case ai.ClassTransient:
 			if turnContentEmitted(err) {
 				// Retain-and-continue (M5 tail): persist the partial,
-				// follow with a continuation prompt, resume once. Only
-				// text/thinking partials qualify — a tool call without
-				// its result is not a request a provider would accept.
+				// follow with a continuation prompt, resume. On a BOUNDED
+				// ladder (retry.infinite off) the budget is
+				// maxPostContentContinuations; retry.infinite (the default)
+				// lifts it. Only text/thinking partials qualify — a tool
+				// call without its result is not a request a provider
+				// would accept.
 				var te *turnError
-				if !continued && errors.As(err, &te) && te.partial != nil {
+				resumeLeft := maxPostContentContinuations
+				if policy.Infinite {
+					resumeLeft = -1
+				}
+				if !continued && (policy.Infinite || resumeLeft > 0) && errors.As(err, &te) && te.partial != nil {
 					history = append(history, *te.partial)
 					a.persist(*te.partial)
 					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}, Attribution: ContinuationAttribution}
@@ -668,6 +698,11 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					a.persist(cont)
 					continued = true
 					a.Hooks.OnContinuation(ContinuationPrompt)
+					if policy.Infinite {
+						logx.Errorf("recovery: post-content failure on an infinite ladder (retry.infinite)")
+					} else {
+						logx.Errorf("recovery: post-content failure %d of %d", maxPostContentContinuations-resumeLeft+1, maxPostContentContinuations)
+					}
 					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
 						return nil, history, serr
 					}
