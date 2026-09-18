@@ -433,3 +433,162 @@ func TestSetNoticeRidesTheDividerAndExpires(t *testing.T) {
 		t.Fatalf("notice row = %q, want the expired notice gone", line)
 	}
 }
+
+// TestDoubleClickSelectsWord pins the double-click contract: a second
+// primary-button press within clickWordWindow of the first, at the same
+// screen position, selects the whole word under the pointer. The
+// selection is highlighted and the text is copied to the clipboard on
+// release, exactly like a drag.
+func TestDoubleClickSelectsWord(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.AddSystemBlock("hello world")
+	app.draw()
+
+	y := contentRow(t, app, "hello world")
+	app.mu.Lock()
+	// First click: press + release (no motion = click, not drag).
+	press(app, 3, y)
+	release(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	// Click cleared the highlight (no motion).
+	if app.selShown {
+		t.Fatal("first click left a highlight on screen")
+	}
+
+	// Second click within the window: press only — the double-click
+	// handler converts it to a word selection.
+	app.mu.Lock()
+	press(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	if !app.selShown {
+		t.Fatal("double-click did not start a selection")
+	}
+	if !app.selDown {
+		t.Fatal("double-click did not set selDown")
+	}
+
+	// Release the gesture: the word "hello" is copied.
+	app.mu.Lock()
+	release(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	if got := string(scr.GetClipboardData()); got != "hello" {
+		t.Fatalf("double-click clipboard = %q, want %q", got, "hello")
+	}
+}
+
+// TestTripleClickSelectsLine pins the triple-click contract: a third
+// primary-button press within clickWordWindow of the second, at the same
+// screen position, selects the entire line under the pointer.
+func TestTripleClickSelectsLine(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.AddSystemBlock("hello world")
+	app.draw()
+
+	y := contentRow(t, app, "hello world")
+
+	// Three rapid clicks at the same position.
+	app.mu.Lock()
+	press(app, 3, y)
+	release(app, 3, y)
+	press(app, 3, y)
+	release(app, 3, y)
+	press(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	if !app.selShown {
+		t.Fatal("triple-click did not start a selection")
+	}
+
+	app.mu.Lock()
+	release(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	// The whole line "hello world" is copied.
+	if got := string(scr.GetClipboardData()); got != "hello world" {
+		t.Fatalf("triple-click clipboard = %q, want %q", got, "hello world")
+	}
+}
+
+// TestClickCountResetsOutsideWindow pins that the click count resets
+// when the time between releases exceeds clickWordWindow.
+func TestClickCountResetsOutsideWindow(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.AddSystemBlock("hello world")
+	app.draw()
+
+	y := contentRow(t, app, "hello world")
+
+	// First click.
+	app.mu.Lock()
+	press(app, 3, y)
+	release(app, 3, y)
+	app.mu.Unlock()
+
+	// Sleep past the window so the second click is not a double-click.
+	time.Sleep(500 * time.Millisecond)
+
+	// Second click: should be treated as count=1, not count=2.
+	app.mu.Lock()
+	press(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	// A single click starts a normal drag (selDown=true) rather than
+	// a word selection.
+	if !app.selDown {
+		t.Fatal("second click after window did not start a drag")
+	}
+
+	app.mu.Lock()
+	release(app, 3, y)
+	app.mu.Unlock()
+	app.draw()
+
+	// No word was selected; the clipboard should be empty.
+	if got := string(scr.GetClipboardData()); got != "" {
+		t.Fatalf("clipboard = %q, want empty", got)
+	}
+}
+
+// TestClickCountResetsOnMove pins that the click count resets when
+// the second click is at a different screen position.
+func TestClickCountResetsOnMove(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.AddSystemBlock("hello world")
+	app.draw()
+
+	y := contentRow(t, app, "hello world")
+
+	// First click at x=3.
+	app.mu.Lock()
+	press(app, 3, y)
+	release(app, 3, y)
+	app.mu.Unlock()
+
+	// Second click far away: should be treated as count=1.
+	app.mu.Lock()
+	press(app, 30, y)
+	app.mu.Unlock()
+	app.draw()
+
+	if !app.selDown {
+		t.Fatal("second click at different position did not start a drag")
+	}
+
+	app.mu.Lock()
+	release(app, 30, y)
+	app.mu.Unlock()
+	app.draw()
+
+	if got := string(scr.GetClipboardData()); got != "" {
+		t.Fatalf("clipboard = %q, want empty", got)
+	}
+}

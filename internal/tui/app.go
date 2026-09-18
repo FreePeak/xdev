@@ -226,6 +226,16 @@ type App struct {
 	// selNotice is the copy confirmation (omp's showStatus for a copy); it
 	// rides the composer divider until selNoticeUntil.
 	selNotice      string
+	selClickTime  time.Time
+	selClickCount int
+	selClickX, selClickY int
+	selClickLocked bool // re-entry guard (no mu needed on the App)
+	// Double/triple-click detection: selClickTime/selClickCount/selClickX/Y
+	// track the last primary-button release so rapid repeats on the same
+	// position expand the gesture — double-click selects the word,
+	// triple-click selects the whole line. Window and tolerance are pinned
+	// constants (clickWordWindow, clickWordTol), not settings.
+	// Guarded by mu; reset by clearClick.
 	selNoticeUntil time.Time
 	// thinkFocus is the reasoning box a click has aimed the wheel at: clicking a
 	// box focuses it and a click anywhere else lets it go, so the wheel scrolls

@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
@@ -67,6 +69,132 @@ type selCorner struct {
 // selGrace is how long the copy confirmation stays on the divider.
 const selGrace = 2 * time.Second
 
+// clearClick resets the click-count state after a double/triple-click
+// gesture completes (or when a new gesture begins from a different
+// position). Callers hold a.mu.
+func (a *App) clearClick() {
+		a.selClickCount = 0
+		a.selClickTime = time.Time{}
+		a.selClickX, a.selClickY = 0, 0
+}
+
+// handleClick is the press-side logic for a primary button that is
+// not a drag start (no selDown yet, not on the scrollbar). It advances
+// the click count from the release state of the previous click: if the
+// previous release was within clickWordWindow and clickWordTol, this
+// is the next click in a sequence; otherwise it starts fresh.
+// On count >= 2 it converts the click into a word or line selection
+// instead of a drag. count=1 starts a normal drag.
+func (a *App) handleClick(x, y int) {
+		now := time.Now()
+		fmt.Printf("DEBUG handleClick: x=%d y=%d selClickCount=%d selClickTime=%v\n", x, y, a.selClickCount, a.selClickTime)
+		if a.selClickCount > 0 &&
+			now.Sub(a.selClickTime) <= clickWordWindow &&
+			abs(x-a.selClickX) <= clickWordTol &&
+			abs(y-a.selClickY) <= clickWordTol {
+			a.selClickCount++
+		} else {
+			a.selClickCount = 1
+		}
+		a.selClickTime = now
+		a.selClickX, a.selClickY = x, y
+
+		if a.selClickCount >= 2 {
+			// Double or triple click: consume it - no drag follows.
+			a.clearClick()
+			if a.selClickCount >= 3 {
+				a.selStartLineSelect(x, y)
+			} else {
+				a.selStartWordSelect(x, y)
+			}
+			a.poke()
+			return
+		}
+		// Count 1: a normal drag starts on the next mouse motion.
+	}
+
+// selStartWordSelect begins a word-selection gesture at (x, y):
+// finds the word boundaries on the row under the pointer and pins
+// the anchor and end there, so a drag expands the selection word by
+// word. If no word is found at the position (whitespace click),
+// it falls back to a character drag from the click point.
+func (a *App) selStartWordSelect(x, y int) {
+		a.selDown = true
+		a.selShown = true
+		a.selCache = map[int]selRow{}
+		a.selDocMode = false
+		a.selAnchor = selCorner{x: x, y: y, doc: -1}
+		a.selEnd = a.selCornerAt(x, y)
+		lo, hi := a.selWordAt(x, y)
+		if lo >= 0 {
+			a.selAnchor.x = lo
+			a.selEnd.x = hi
+		}
+		a.poke()
+}
+
+// selStartLineSelect begins a line-selection gesture at (x, y):
+// selects the full width of the screen row under the pointer.
+func (a *App) selStartLineSelect(x, y int) {
+		a.selDown = true
+		a.selShown = true
+		a.selCache = map[int]selRow{}
+		a.selDocMode = false
+		a.selAnchor = selCorner{x: 0, y: y, doc: -1}
+		a.selEnd = selCorner{x: a.width - 1, y: y, doc: -1}
+		a.poke()
+}
+
+// selWordAt returns the grapheme-safe (lo, hi) cell range of the
+// word under screen position (x, y) on its rendered row, or (-1, -1)
+// if the position is not on a word. Uses width for cell width so wide
+// characters are not split. Callers hold a.mu.
+func (a *App) selWordAt(x, y int) (int, int) {
+		row := a.selRowAt(y)
+		text := row.text
+		if text == "" {
+			return -1, -1
+		}
+		col := 0
+		for i, r := range text {
+			w := width(string(r))
+			if col+w > x {
+				start := col
+				end := col + w
+				for j := i; j > 0; {
+					prev, sz := utf8.DecodeLastRuneInString(text[:j])
+					if prev == ' ' || prev == '\t' || unicode.IsSpace(prev) {
+						break
+					}
+					start -= width(string(prev))
+					j -= sz
+				}
+				for j := i + utf8.RuneLen(r); j < len(text); {
+					next, sz := utf8.DecodeRuneInString(text[j:])
+					if next == ' ' || next == '\t' || unicode.IsSpace(next) {
+						break
+					}
+					end += width(string(next))
+					j += sz
+				}
+				if end-start <= 0 {
+					return -1, -1
+				}
+				return start, end - 1
+			}
+			col += w
+		}
+		return -1, -1
+}
+
+// abs returns the absolute value of n.
+func abs(n int) int {
+		if n < 0 {
+			return -n
+		}
+		return n
+}
+
 // selEdgeDelay and selEdgeStep shape the held-drag edge auto-scroll: once the
 // pointer has sat on the transcript's first or last row for selEdgeDelay, the
 // viewport moves selEdgeStep rows per UI tick (33ms). A terminal's edge drag
@@ -78,6 +206,9 @@ const selGrace = 2 * time.Second
 const (
 	selEdgeDelay = 400 * time.Millisecond
 	selEdgeStep  = 2
+	clickWordWindow = 400 * time.Millisecond
+	clickWordTol    = 2 // x,y tolerance for treating clicks as the same position
+
 )
 
 // handleMouse routes mouse events for selection. Wheel stays with the scroll
@@ -136,15 +267,28 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// a box by name. The notch never moves focus (app.go scrollThinkBox),
 		// which is what stops a box from stealing the wheel merely by sliding
 		// under a stationary pointer.
-		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
-		a.selDown, a.selShown = true, true
-		a.selCache = map[int]selRow{}
-		a.selDocMode = false // classify this corner by where it landed
-		a.selAnchor = a.selCornerAt(x, y)
-		a.selDocMode = a.selAnchor.doc >= 0
-		a.selEnd = a.selAnchor
-		a.poke()
+		// handleClick tracks click count from the previous
+		// release and starts a word/line selection on double/triple
+		// click, or a normal drag otherwise.
+		a.handleClick(x, y)
+		if a.selDown {
+			a.selCache = map[int]selRow{}
+			a.selDocMode = false
+			a.selAnchor = a.selCornerAt(x, y)
+			a.selDocMode = a.selAnchor.doc >= 0
+			a.selEnd = a.selAnchor
+			a.poke()
+		}
+		if !a.selDown {
+			a.selDown, a.selShown = true, true
+			a.selCache = map[int]selRow{}
+			a.selDocMode = false
+			a.selAnchor = a.selCornerAt(x, y)
+			a.selDocMode = a.selAnchor.doc >= 0
+			a.selEnd = a.selAnchor
+			a.poke()
+		}
 	case btn&tcell.Button1 != 0 && a.selThumbDrag: // thumb drag on the scrollbar
 		a.selThumbTo(y)
 		a.poke()
