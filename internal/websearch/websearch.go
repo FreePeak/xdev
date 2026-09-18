@@ -55,8 +55,17 @@ type Settings struct {
 	MaxResults int `yaml:"maxResults"`
 }
 
-// DefaultProviders is the schema-default chain order.
+// DefaultProviders is the schema-default chain order — the
+// providers listed when nothing is configured. It is NOT the
+// runtime default: chain() skips keyed providers (tavily/brave)
+// without a credential, so an unconfigured install actually
+// runs the DuckDuckGo no-JS endpoint (runtimeDefaultProviders).
 var DefaultProviders = []string{"tavily", "brave", "duckduckgo"}
+
+// runtimeDefaultProviders is the chain the engine actually runs
+// when nothing is configured. chain() skips keyed providers
+// without a credential, leaving only duckduckgo here.
+var runtimeDefaultProviders = []string{"duckduckgo"}
 
 const (
 	// DefaultTimeout bounds ONE provider attempt. Per-provider (not per-call)
@@ -195,7 +204,7 @@ func (s *Searcher) apiKey(name string) string {
 func (s *Searcher) chain() ([]webProvider, []string) {
 	names := s.Providers
 	if len(names) == 0 {
-		names = DefaultProviders
+		names = runtimeDefaultProviders // keyed providers without a key are skipped below
 	}
 	timeout := s.Timeout
 	if timeout <= 0 {

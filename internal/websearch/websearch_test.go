@@ -467,6 +467,36 @@ func TestLimitAndTimeoutResolution(t *testing.T) {
 	}
 }
 
+// TestRuntimeDefaultIsKeyless: an unconfigured searcher must not spend its
+// budget on two skip notes. The schema default lists tavily/brave/duckduckgo,
+// but chain() starts from runtimeDefaultProviders so the keyed providers are
+// never even built — the answer is a real DuckDuckGo run, not a footer of
+// "tavily: skipped: no API key" / "brave: skipped: no API key".
+func TestRuntimeDefaultIsKeyless(t *testing.T) {
+	if !reflect.DeepEqual(runtimeDefaultProviders, []string{"duckduckgo"}) {
+		t.Fatalf("runtimeDefaultProviders = %v", runtimeDefaultProviders)
+	}
+	s := New(Settings{})
+	providers, notes := s.chain()
+	if len(providers) != 1 || providers[0].name() != "duckduckgo" {
+		t.Fatalf("unconfigured chain = %v", providers)
+	}
+	if len(notes) != 0 {
+		t.Fatalf("unconfigured chain must not emit skip notes: %v", notes)
+	}
+	// An explicit chain still honors the user's order, and a keyed
+	// provider without a key is still skipped there.
+	s2 := New(Settings{Providers: []string{"tavily", "duckduckgo"}})
+	t.Setenv("TAVILY_API_KEY", "")
+	providers2, notes2 := s2.chain()
+	if len(providers2) != 1 || providers2[0].name() != "duckduckgo" {
+		t.Fatalf("explicit chain = %v", providers2)
+	}
+	if !strings.Contains(strings.Join(notes2, " "), "tavily: skipped: no API key") {
+		t.Fatalf("keyed provider must still be skipped when named: %v", notes2)
+	}
+}
+
 func TestSanitizeSnippet(t *testing.T) {
 	long := strings.Repeat("word ", 200)
 	cases := []struct{ name, in, want string }{
