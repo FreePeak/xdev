@@ -542,6 +542,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			vibeScope.Restore(workers, on)
 		}
 		app.Reset()
+		app.SetLocation(ns.CWD())
 		saveBreadcrumb(breadcrumbPath(ns))
 		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
@@ -1863,6 +1864,12 @@ func breadcrumbPath(s *session.Store) string {
 type tuiSession struct {
 	store *session.Store
 	app   *tui.App
+	// mu guards ttftRequest (tuiHooks writes it on OnStart /
+	// onTurnEnd, both on different goroutines) — same lock the
+	// hooks use, lives on the session because the hooks reference
+	// ts, not themselves.
+	mu sync.Mutex
+	ttftRequest time.Time
 }
 
 // tuiHooks implements agent.TurnHooks for the TUI.
@@ -1871,9 +1878,19 @@ type tuiHooks struct {
 	// feed (optional) hands the advisor a fresh transcript snapshot after
 	// each assistant message — the reviewer steers into the live run.
 	feed func()
+	// ttftRequest is set by OnStart; OnMessageEnd computes the
+	// turn's ttft from it and writes it via onTurnEnd (nil-safe).
+	// OnStart fires on the agent goroutine, OnTurnEnd on the Run
+	// goroutine — mu serializes the two writers.
+	mu sync.Mutex
+	ttftRequest time.Time
 }
 
-func (h *tuiHooks) OnStart(req ai.StreamRequest) {}
+func (h *tuiHooks) OnStart(req ai.StreamRequest) {
+	h.ts.mu.Lock()
+	h.ts.ttftRequest = time.Now()
+	h.ts.mu.Unlock()
+}
 
 func (h *tuiHooks) OnEvent(ev ai.Event) {
 	switch ev.Type {
@@ -2035,6 +2052,30 @@ func (h *tuiHooks) OnMessageEnd(msg *ai.Message) {
 	// A message's end is the last word on what it said about the plan, and the
 	// transcript gained a block the panel's height budget has to account for.
 	h.ts.app.DockBump()
+	if msg.TTFTMS > 0 {
+		h.ts.mu.Lock()
+		req := h.ts.ttftRequest
+		h.ts.mu.Unlock()
+		if req.IsZero() {
+			// OnStart hasn't fired for this turn (idle
+			// resume, or the clock went backwards) — leave
+			// the turn's ttft unwritten.
+		} else {
+			h.onTurnEnd(msg.TTFTMS)
+		}
+	}
+}
+
+// OnMessageEnd persists the assistant message and reports its
+// ttft to OnTurnEnd (only when OnStart's clock is newer — i.e.
+// this turn, not the session start). Called on the agent goroutine;
+// OnTurnEnd fires on the Run goroutine, so the lock serializes
+// the two writers and neither clobbers a real value.
+func (h *tuiHooks) onTurnEnd(ttft int64) {
+	h.ts.mu.Lock()
+	defer h.ts.mu.Unlock()
+	h.ts.ttftRequest = time.Time{} // consumed: a real OnTurnEnd is coming
+	h.ts.app.SetTTFT(ttft)
 }
 
 func (h *tuiHooks) OnToolResultMessage(msg *ai.Message) {
@@ -2288,7 +2329,7 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 		}
 		// The status closes the detail so the row says what happened to
 		// the session (#107) before the user resumes it.
-		detail := m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04")
+		detail := m.ID[:8] + " · " + m.ModTime.Format("Jan 02 15:04") + " · " + m.CWD
 		if m.Status != "" {
 			detail += " · " + string(m.Status)
 		}
@@ -2323,6 +2364,7 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 			Pinned: pins[m.ID[:8]],
 			InCwd:  m.CWD == cwd,
 			Status: string(m.Status),
+			CWD:    m.CWD,
 		})
 		if len(out) >= 50 {
 			break

@@ -686,13 +686,13 @@ func TestPickerMouseWheelAndClick(t *testing.T) {
 // session the user killed mid-turn is legible before Enter (#107).
 func TestSessionPickerRowCarriesStatus(t *testing.T) {
 	done := sessionPickerRowText(SessionPickerItem{
-		ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", Status: "done",
+		ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", CWD: "/home/user/proj", Status: "done",
 	})
 	if !strings.HasSuffix(done, "done") {
 		t.Fatalf("row does not end on the status: %q", done)
 	}
 	cut := sessionPickerRowText(SessionPickerItem{
-		ID: "bbbb2222", Title: "alpha parser notes", Mtime: "Jan 02 15:04", Size: "2 KB", Status: "interrupted",
+		ID: "bbbb2222", Title: "alpha parser notes", Mtime: "Jan 02 15:04", Size: "2 KB", CWD: "/home/user/proj", Status: "interrupted",
 	})
 	if !strings.HasSuffix(cut, "interrupted") {
 		t.Fatalf("row does not end on the status: %q", cut)
@@ -701,8 +701,8 @@ func TestSessionPickerRowCarriesStatus(t *testing.T) {
 		t.Fatalf("statuses bled between rows: %q / %q", done, cut)
 	}
 	// An unclassified row (a caller that never read a tail) stays as it was.
-	plain := sessionPickerRowText(SessionPickerItem{ID: "cccc3333", Title: "t", Mtime: "Jan 02 15:04", Size: "3 KB"})
-	if want := "cccc3333  t  Jan 02 15:04  3 KB"; plain != want {
+	plain := sessionPickerRowText(SessionPickerItem{ID: "cccc3333", Title: "t", Mtime: "Jan 02 15:04", Size: "3 KB", CWD: ""})
+	if want := "cccc3333  t  Jan 02 15:04  3 KB  "; plain != want {
 		t.Fatalf("unclassified row = %q, want %q", plain, want)
 	}
 }
