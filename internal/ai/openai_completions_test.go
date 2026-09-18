@@ -336,3 +336,54 @@ func TestOpenAICompletionsTTFTIncludesGatewayQueue(t *testing.T) {
 		t.Fatalf("duration %dms < ttft %dms", done.Message.DurationMS, done.Message.TTFTMS)
 	}
 }
+
+// TestOpenAICompletionsThinkingReplayEchoesReasoning pins the #351 fix:
+// prior assistant thinking must ride the stable "reasoning" alias on this
+// wire (onegw+DeepSeek read it as reasoning_content, so tool-loop
+// continuations stop tripping the upstream's echo 400), while plain OpenAI
+// upstreams keep a byte-identical shape when there is no thinking to echo.
+func TestOpenAICompletionsThinkingReplayEchoesReasoning(t *testing.T) {
+	think := Message{Role: RoleAssistant, Content: []Block{
+		ThinkingBlock{Thinking: "read files first"},
+		ToolCallBlock{ID: "c1", Name: "read", Arguments: json.RawMessage(`{"path":"a"}`)},
+	}}
+	plain := Message{Role: RoleAssistant, Content: []Block{
+		TextBlock{Text: "done"},
+		ToolCallBlock{ID: "c2", Name: "bash", Arguments: json.RawMessage(`{}`)},
+	}}
+	ph := Message{Role: RoleAssistant, Content: []Block{
+		ThinkingBlock{Thinking: "(context elided)"},
+	}}
+	text := Message{Role: RoleAssistant, Content: []Block{
+		TextBlock{Text: "no thinking here"},
+	}}
+	p := NewOpenAICompletionsProvider("router", "http://x", "", nil, nil)
+	body, err := p.buildRequest(StreamRequest{Model: "m", Messages: []Message{think, plain, ph, text}})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	var wire struct {
+		Messages []struct {
+			Role      string          `json:"role"`
+			Reasoning json.RawMessage `json:"reasoning"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("decode: %v\n%s", err, body)
+	}
+	if len(wire.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4\n%s", len(wire.Messages), body)
+	}
+	var echo struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(wire.Messages[0].Reasoning, &echo); err != nil || echo.Content != "read files first" {
+		t.Fatalf("echo turn reasoning = %s, want the real thinking\n%s", wire.Messages[0].Reasoning, body)
+	}
+	for i, want := range map[int]bool{1: true, 2: true, 3: true} {
+		if string(wire.Messages[i].Reasoning) != "" {
+			t.Fatalf("message %d carries reasoning %s, want none\n%s", i, wire.Messages[i].Reasoning, body)
+		}
+		_ = want
+	}
+}

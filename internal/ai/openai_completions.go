@@ -49,6 +49,17 @@ func (p *OpenAICompletionsProvider) HealthCheck(ctx context.Context) error {
 	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIOpenAICompletions)
 }
 
+// openaiWireReasoning carries prior assistant thinking on the
+// stable "reasoning" alias inside a per-assistant message (json:"content").
+// Onegw and DeepSeek-style upstreams read it as reasoning_content
+// (server.go normalizeRoles), so echoing thinking here keeps the
+// tool-loop 400-guard satisfied by *real* history instead of the
+// synthetic "(context elided)" placeholder. Plain OpenAI upstreams
+// ignore unknown message keys, leaving their wire byte-identical.
+type openaiWireReasoning struct {
+	Content string `json:"content"`
+}
+
 // Wire shapes for the request body.
 
 type openaiWireFunction struct {
@@ -71,6 +82,11 @@ type openaiWireMessage struct {
 	Content    any                  `json:"content"`
 	ToolCalls  []openaiWireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string               `json:"tool_call_id,omitempty"`
+	// Reasoning replays prior-turn thinking under the stable alias
+	// onegw+DeepSeek read as reasoning_content. Plain OpenAI ignores
+	// unknown keys, so it is omitted unless at least one ThinkingBlock
+	// was kept on the message.
+	Reasoning *openaiWireReasoning `json:"reasoning,omitempty"`
 }
 
 // openaiWirePart is one element of a multimodal content array. Only image_url
@@ -147,9 +163,11 @@ func userContent(m Message) any {
 }
 
 // buildRequest maps the unified conversation onto the chat/completions shape.
-// Content is a plain string on this wire; thinking blocks are dropped (the
-// OpenAI API rejects replaying reasoning); assistant tool calls ride in
-// tool_calls with content null.
+// Content is a plain string on this wire; thinking blocks are replayed
+// under the stable "reasoning" alias instead (plain OpenAI upstreams ignore
+// unknown keys; DeepSeek routes and onegw read it as reasoning_content,
+// so the tool-loop 400-guard is satisfied by real history). Assistant
+// tool calls ride in tool_calls with content null.
 func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, error) {
 	model := req.Model
 	if model == "" {
@@ -188,11 +206,22 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 			wr.Messages = append(wr.Messages, openaiWireMessage{Role: "user", Content: userContent(m)})
 		case RoleAssistant:
 			var toolCalls []openaiWireToolCall
-			var text strings.Builder
+			var text, think strings.Builder
 			for _, b := range m.Content {
 				switch t := b.(type) {
 				case TextBlock:
 					text.WriteString(t.Text)
+				case ThinkingBlock:
+					// Replay thinking under the stable alias onegw and
+					// DeepSeek routes read as reasoning_content. Drop
+					// the synthetic "(context elided)" placeholder:
+					// re-echoing synthesis only perpetuates the loop.
+					if t.Thinking != "" && t.Thinking != "(context elided)" {
+						if think.Len() > 0 {
+							think.WriteString("\n")
+						}
+						think.WriteString(t.Thinking)
+					}
 				case ToolCallBlock:
 					toolCalls = append(toolCalls, openaiWireToolCall{
 						ID:   t.ID,
@@ -205,6 +234,9 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 				}
 			}
 			wm := openaiWireMessage{Role: "assistant", Content: nil, ToolCalls: toolCalls}
+			if think.Len() > 0 {
+				wm.Reasoning = &openaiWireReasoning{Content: think.String()}
+			}
 			if toolCalls == nil {
 				wm.Content = text.String()
 			}
