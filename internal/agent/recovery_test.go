@@ -373,6 +373,62 @@ func TestFailoverAfterRetryLadderDrains(t *testing.T) {
 	}
 }
 
+// TestModelGone404FailsOverInsteadOfEndingTheRun is the end-to-end pin for the
+// reported failure: the pinned model left the gateway's upstream catalog, so
+// every turn started with
+//
+//	agent: stream start: openai-completions: HTTP 404: {"error":{"code":"404",
+//	"message":"… This model was Unbiased's Pareto. …","type":"upstream_error"}}
+//
+// ai.Classify called a 404 ClassUnknown, the recovery switch has no case for
+// it, and the run ended on the first try with a backup target sitting right
+// there in the chain. A 404 that NAMES a model verdict now classifies transient
+// (see ai.modelVerdictRe), so the ladder retries and then fails over.
+func TestModelGone404FailsOverInsteadOfEndingTheRun(t *testing.T) {
+	gone := &ai.HTTPError{API: "openai-completions", Status: 404,
+		Body: `{"error":{"code":"404","message":"Thank you for participating in the Stealth Union Alpha testing period. This model was Unbiased's Pareto. Use it now: https://openrouter.ai/unbiased/pareto","type":"upstream_error"}}`}
+	primary := &fakeProvider{calls: []fakeScript{{err: gone}, {err: gone}}}
+	backup := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{textEvent("ok on backup"), doneEvent("ok on backup")}},
+	}}
+	a, s := ladderAgent(t, primary, backup)
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err != nil {
+		t.Fatalf("Run: a model-gone 404 must fail over, got %v", err)
+	}
+	if final.Text() != "ok on backup" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if a.Model != "backup1" {
+		t.Fatalf("model after failover = %q, want backup1", a.Model)
+	}
+	if len(primary.gotReqs) != 2 {
+		t.Fatalf("primary calls = %d, want 2 (first + 1 retry)", len(primary.gotReqs))
+	}
+	if len(backup.gotReqs) != 1 {
+		t.Fatalf("backup calls = %d, want 1", len(backup.gotReqs))
+	}
+}
+
+// TestBare404StillEndsTheRun is the other direction on the same ladder: a 404
+// with no model verdict in the body is a dead route (wrong base URL, wrong
+// path), so it must still end the run instead of burning the chain and the
+// escalation rounds on a request no target can serve.
+func TestBare404StillEndsTheRun(t *testing.T) {
+	dead := &ai.HTTPError{API: "openai-completions", Status: 404, Body: "nope"}
+	primary := &fakeProvider{calls: []fakeScript{{err: dead}}}
+	backup := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{textEvent("unreachable"), doneEvent("unreachable")}},
+	}}
+	a, s := ladderAgent(t, primary, backup)
+	if _, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi")); err == nil {
+		t.Fatal("a bare 404 must still end the run")
+	}
+	if len(primary.gotReqs) != 1 || len(backup.gotReqs) != 0 {
+		t.Fatalf("calls = primary %d / backup %d, want 1/0 (no retry, no failover)",
+			len(primary.gotReqs), len(backup.gotReqs))
+	}
+}
 func TestFailoverChainExhaustedSurfaces(t *testing.T) {
 	// Every target drains its ladder. The primary gets exactly one ladder
 	// (the chain never bounces back mid-turn); the last target then runs
