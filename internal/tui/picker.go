@@ -332,6 +332,7 @@ const (
 // cmd (SessionMeta exposes bytes, not entry counts, and counting lines per
 // row would stat-read up to a dozen large files per keypress).
 type SessionPickerItem struct {
+	CWD      string // session's working directory — shown in /resume rows
 	ID     string // short id (8 hex)
 	Title  string
 	Mtime  string // formatted, e.g. "Jan 02 15:04"
@@ -687,7 +688,7 @@ func sessionPickerRowText(it SessionPickerItem) string {
 	if title == "" {
 		title = "(untitled)"
 	}
-	row := fmt.Sprintf("%s  %s  %s  %s", it.ID, title, it.Mtime, it.Size)
+	row := fmt.Sprintf("%s  %s  %s  %s  %s", it.ID, title, it.Mtime, it.Size, it.CWD)
 	if it.Status != "" {
 		row += "  " + it.Status
 	}

@@ -301,6 +301,12 @@ type Agent struct {
 
 	steerMu  sync.Mutex
 	steering []Steering
+	// requestStart is the wall clock oneTurn stamps at the start of
+	// a streaming request; OnMessageEnd/Run end both read it under
+	// requestMu to compute the turn's ttft (ms) and reset it so a
+	// stale clock can't overwrite a real value. zero = no request in flight.
+	requestStart time.Time
+	requestMu    sync.Mutex
 }
 
 func (a *Agent) effectiveMaxTurns() int {
@@ -554,8 +560,23 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		return lastAssistant, err
 	}
 	a.Hooks.OnMessageEnd(msg)
+	a.flushTTFT()
 	emit("turn_end", map[string]any{"turn": limit})
 	return msg, nil
+}
+
+// flushTTFT hands the last completed turn's ttft (ms) to OnTurnEnd
+// (nil-safe). Called at Run end so a turn whose OnMessageEnd already
+// wrote msg.TTFTMS still surfaces it — Run outlives oneTurn, so a
+// zero clock there means the turn's hook still has to deliver it.
+func (a *Agent) flushTTFT() {
+	a.requestMu.Lock()
+	start := a.requestStart
+	a.requestStart = time.Time{}
+	a.requestMu.Unlock()
+	if f, ok := a.Hooks.(interface{ FlushTTFT() }); ok && !start.IsZero() {
+		f.FlushTTFT()
+	}
 }
 
 // goalSystem appends the bounded goal reminder for the active goal to the
@@ -824,6 +845,9 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	// caller's context is untouched.
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.requestMu.Lock()
+	a.requestStart = time.Now()
+	a.requestMu.Unlock()
 	req := a.liveRequest(system, history, a.toolDefs())
 	a.Hooks.OnStart(req)
 
@@ -937,6 +961,13 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	}
 	msg.StopReason = stop
 	msg.Usage = usage
+	a.requestMu.Lock()
+	if a.requestStart.IsZero() {
+		msg.TTFTMS = time.Since(started).Milliseconds()
+	} else {
+		msg.TTFTMS = time.Since(a.requestStart).Milliseconds()
+	}
+	a.requestMu.Unlock()
 	msg.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	msg.DurationMS = time.Since(started).Milliseconds()
 	// Preserve toolCall blocks in emission order (provider-done messages
