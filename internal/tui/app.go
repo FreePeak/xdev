@@ -31,6 +31,10 @@ type Status struct {
 	// All three feed the optional HUD segments (statusLine.segments).
 	Cost      float64
 	CtxWindow int64
+	// TTFT is the last completed turn's time-to-first-token in ms
+	// (0 = no turn has finished). SetTTFT writes it; the "⌚ ttft"
+	// HUD segment reads it.
+	TTFT int64
 	// CtxUsed is the LIVE context occupancy: the token count of the most recent
 	// completed request — every input token, cached or fresh, plus the output
 	// (the provider's own total, so it covers the system prompt, the whole
@@ -702,6 +706,15 @@ func (a *App) AddCost(usd float64) {
 	a.mu.Lock()
 	a.st.Cost += usd
 	a.mu.Unlock()
+}
+
+// SetTTFT stores the last completed turn's time-to-first-token (ms)
+// for the HUD ⌚ ttft segment. Zero clears it.
+func (a *App) SetTTFT(ms int64) {
+	a.mu.Lock()
+	a.st.TTFT = ms
+	a.mu.Unlock()
+	a.poke()
 }
 
 // SetContextReplay measures a replayed transcript for the HUD's context
@@ -3546,6 +3559,7 @@ var statusSegments = map[string]bool{
 	"context": true,
 	"cost":    true,
 	"rate":    true,
+	"ttft":    true,
 	"theme":   true,
 	"time":    true,
 	"command": true,
@@ -3561,7 +3575,7 @@ var statusSegments = map[string]bool{
 // either half is unknown (an undiscovered window, or a session that has not
 // answered yet), so a fresh run keeps a clean row. The model keeps its
 // composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"command", "time", "tokens", "context", "rate"}
+var defaultStatusSegments = []string{"time", "tokens", "context", "rate", "ttft"}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -3617,6 +3631,13 @@ func (a *App) hudSegment(name string) (text, token string) {
 			return "", ""
 		}
 		return fmt.Sprintf("⚡ %.1f t/s", rate), theme.StatusLineSpend
+	case "ttft":
+		// ⌚ ttft: per-turn time-to-first-token. SetTTFT writes it;
+		// the segment stays hidden until a turn has actually finished.
+		if a.st.TTFT <= 0 {
+			return "", ""
+		}
+		return "⌚ " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
 	}
