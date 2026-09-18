@@ -62,18 +62,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
+	provName, modelName, err := config.ParseModelRef(modelRef)
+	if err != nil {
+		return 2, err
+	}
 	// The request-side thinking level: --thinking wins, else the persisted
 	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's "auto"
 	// branch). roleEffort keeps the UN-folded model effort, so a later
 	// /thinking auto (or the Shift-Tab toggle) re-binds to the model instead of
-	// freezing whatever level an earlier call pinned.
+	// freezing whatever level an earlier call pinned. startLevel is the level
+	// the user chose, BEFORE the model check: a model that cannot reason runs
+	// at "auto" while the choice stays sticky, so switching back to a
+	// reasoning model restores it.
 	roleEffort := effortRef
 	startLevel := thinkingLevel(lastSettings(), launch.Thinking)
-	if effortRef, err = applyThinkingFlag(startLevel, roleEffort); err != nil {
-		return 2, err
-	}
-	provName, modelName, err := config.ParseModelRef(modelRef)
-	if err != nil {
+	appliedLevel := thinkingForModel(startLevel, provName, modelName, cfg)
+	if effortRef, err = applyThinkingFlag(appliedLevel, roleEffort); err != nil {
 		return 2, err
 	}
 	pc, ok := cfg.Providers[provName]
@@ -344,7 +348,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return err
 			}
 			modelMu.Lock()
-			le, err := applyThinkingFlag(level, live.roleEffort)
+			// A level pinned while a non-reasoning model is live still lands
+			// in live.level (the sticky choice), but live.effort follows what
+			// this model can actually take — the same fallback a /model switch
+			// makes, so the two paths cannot disagree about the wire.
+			applied := thinkingForModel(level, live.provName, live.model, cfg)
+			le, err := applyThinkingFlag(applied, live.roleEffort)
 			if err != nil {
 				modelMu.Unlock()
 				return err
@@ -1031,14 +1040,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		// A /model (or role) switch changes the ":effort" the role pins, so
 		// re-fold the level the user pinned on top of it: with "auto" the new
-		// role's effort takes effect, with "off" reasoning stays off.
+		// role's effort takes effect, with "off" reasoning stays off. The
+		// pinned level stays sticky — live.level keeps what the user chose —
+		// but a model the catalog marks as non-reasoning runs at "auto", and
+		// the switch says so once instead of silently spending (or not
+		// spending) a budget the user never sees change.
 		roleNe := ne
-		if ne, err = applyThinkingFlag(thinkLevel(), roleNe); err != nil {
+		pinned := thinkLevel()
+		applied := thinkingForModel(pinned, nprovName, nmodelName, cfg)
+		if applied != pinned {
+			app.AddSystemBlock("· " + nprovName + "/" + nmodelName + " cannot reason — thinking " + pinned + " → auto (still " + pinned + " on a model that can)")
+		}
+		if ne, err = applyThinkingFlag(applied, roleNe); err != nil {
 			return err
 		}
-		modelMu.Lock()
-		live.prov, live.model, live.provName, live.effort, live.roleEffort = nprov, nmodelName, nprovName, ne, roleNe
-		modelMu.Unlock()
 		app.SetStatusModel(nprovName + "/" + nmodelName)
 		// The HUD context segment measures against the new window.
 		app.SetContextWindow(int64(modelWindow(cfg, nprovName, nmodelName)))

@@ -153,6 +153,49 @@ func TestApplyThinkingFlag(t *testing.T) {
 	}
 }
 
+// TestThinkingForModel pins the sticky-with-fallback rule: a pinned level is
+// remembered as-is, but a rung that actually asks for a reasoning budget
+// cannot ride out to a model the catalog marks as non-reasoning — it falls
+// back to "auto" instead of failing (or silently degrading) at the wire.
+// "off"/"minimal" are already no-reasoning requests every model accepts; an
+// unlisted model is unknown, not unsupported, so the level rides through.
+func TestThinkingForModel(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw": {Models: []config.ModelConfig{
+			{ID: "thinker", Reasoning: true},
+			{ID: "plain"},
+		}},
+	}}
+	resetProviderModelCache()
+	defer resetProviderModelCache()
+	for _, tc := range []struct {
+		name           string
+		level, prov, mo string
+		want           string
+	}{
+		{name: "pinned rung on a reasoning model rides through", level: "high", prov: "onegw", mo: "thinker", want: "high"},
+		{name: "pinned rung on a non-reasoning model falls to auto", level: "high", prov: "onegw", mo: "plain", want: "auto"},
+		{name: "xhigh/max are rungs too", level: "max", prov: "onegw", mo: "plain", want: "auto"},
+		{name: "off is not a rung — untouched", level: "off", prov: "onegw", mo: "plain", want: "off"},
+		{name: "minimal is not a rung — untouched", level: "minimal", prov: "onegw", mo: "plain", want: "minimal"},
+		{name: "auto is untouched", level: "auto", prov: "onegw", mo: "plain", want: "auto"},
+		{name: "unlisted model is unknown, not unsupported", level: "high", prov: "onegw", mo: "ghost", want: "high"},
+		{name: "unknown provider is unknown", level: "high", prov: "void", mo: "ghost", want: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := thinkingForModel(tc.level, tc.prov, tc.mo, cfg); got != tc.want {
+				t.Fatalf("thinkingForModel(%q, %s/%s) = %q, want %q", tc.level, tc.prov, tc.mo, got, tc.want)
+			}
+		})
+	}
+	if _, known := modelReasoning(cfg, "onegw", "ghost"); known {
+		t.Fatal("an unlisted model must report unknown, not supported/unsupported")
+	}
+	if ok, known := modelReasoning(cfg, "onegw", "thinker"); !known || !ok {
+		t.Fatalf("thinker = (%v,%v), want (true,true)", ok, known)
+	}
+}
+
 // TestThinkingLevel pins the precedence ladder the run modes share:
 // --thinking wins when it names a level, otherwise the persisted `thinking`
 // key decides, otherwise "auto" (applyThinkingFlag's role-effort branch).

@@ -445,14 +445,16 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	// The request-side thinking level: --thinking wins, else the persisted
-	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
-	// "auto" branch).
-	if effortRef, err = applyThinkingFlag(thinkingLevel(settings, launch.Thinking), effortRef); err != nil {
-		return 2, err
-	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
+		return 2, err
+	}
+	// The request-side thinking level: --thinking wins, else the persisted
+	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
+	// "auto" branch). A model the catalog marks as non-reasoning falls back to
+	// "auto" — the level stays sticky across a model switch, but it never
+	// rides out to an upstream that cannot take it.
+	if effortRef, err = applyThinkingFlag(thinkingForModel(thinkingLevel(settings, launch.Thinking), provName, modelName, cfg), effortRef); err != nil {
 		return 2, err
 	}
 	pc, ok := cfg.Providers[provName]
@@ -890,6 +892,28 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		}
 	}
 	return 0
+}
+
+// modelReasoning reports whether the catalog says this model can reason
+// (models.yml `reasoning: true`, or a discovery response that said so). A
+// model the catalog does not list is reported UNKNOWN — the caller decides
+// what to do with "no opinion", because a gateway routinely serves ids that
+// models.yml never pinned and guessing "cannot reason" would silently drop a
+// budget the user asked for.
+func modelReasoning(cfg *config.Config, provider, model string) (supported, known bool) {
+	if cfg == nil {
+		return false, false
+	}
+	pc, ok := cfg.Providers[provider]
+	if !ok {
+		return false, false
+	}
+	for _, m := range providerModels(provider, pc) {
+		if m.ID == model {
+			return m.Reasoning, true
+		}
+	}
+	return false, false
 }
 
 // providerModels merges pinned + discovered models once per provider per

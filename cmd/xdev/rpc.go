@@ -33,14 +33,14 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	// The request-side thinking level: --thinking wins, else the persisted
-	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
-	// "auto" branch).
-	if effortRef, err = applyThinkingFlag(thinkingLevel(lastSettings(), launch.Thinking), effortRef); err != nil {
-		return 2, err
-	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
+		return 2, err
+	}
+	// The request-side thinking level: --thinking wins, else the persisted
+	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
+	// "auto" branch), with a non-reasoning model falling back to "auto".
+	if effortRef, err = applyThinkingFlag(thinkingForModel(thinkingLevel(lastSettings(), launch.Thinking), provName, modelName, cfg), effortRef); err != nil {
 		return 2, err
 	}
 	pc, ok := cfg.Providers[provName]
