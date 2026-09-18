@@ -348,7 +348,8 @@ func main() {
 	// this object through lastSettings(), so one write covers TUI, print,
 	// RPC and ACP.
 	if *retryForever {
-		settings.Retry.Infinite = true
+		infiniteFlag := true
+		settings.Retry.Infinite = &infiniteFlag
 	}
 	// --models patterns enable Ctrl+P cycling; the catalog print stays on
 	// the `models` subcommand (omp keeps the same split).

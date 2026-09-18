@@ -66,7 +66,7 @@ type RetrySettings struct {
 	// `connection refused`) is survived however long it lasts. Off by
 	// default: a hard failure misclassified as transient would then
 	// spin forever. -retry-forever forces it on for one run.
-	Infinite bool `yaml:"infinite"`
+	Infinite *bool `yaml:"infinite"`
 }
 
 // RetryConfig returns the retry group (nil-safe: a missing layer means the
@@ -76,6 +76,16 @@ func (s *Settings) RetryConfig() RetrySettings {
 		return RetrySettings{}
 	}
 	return s.Retry
+}
+
+// InfiniteRetry reports whether retry.infinite is on. It is default-on:
+// an outage may not end a run. An explicit false bounds the ladder again
+// (a one-way merge can never express "I want the bounded ladder").
+func (s *Settings) InfiniteRetry() bool {
+	if s == nil || s.Retry.Infinite == nil {
+		return true
+	}
+	return *s.Retry.Infinite
 }
 
 // ReservePolicy returns the normalized retry.reserveThreshold value.
@@ -160,10 +170,10 @@ func (s *Settings) mergeRetry(layer *Settings) error {
 		}
 		s.Retry.FallbackCooldown = layer.Retry.FallbackCooldown
 	}
-	// One-way like prewalk.enabled: a later layer turns "always retry" on,
+	// One-way: a later layer may only turn "always retry" on,
 	// never off — the shipped default stays the bounded ladder.
-	if layer.Retry.Infinite {
-		s.Retry.Infinite = true
+	if layer.Retry.Infinite != nil && *layer.Retry.Infinite {
+		s.Retry.Infinite = layer.Retry.Infinite
 	}
 	return validateRetryChains(s.Retry.FallbackChains)
 }

@@ -16,7 +16,7 @@ func TestSettingsRetryInfinite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.RetryConfig().Infinite {
+	if s.RetryConfig().Infinite == nil || !*s.RetryConfig().Infinite {
 		t.Fatal("retry.infinite did not survive decoding")
 	}
 
@@ -27,7 +27,7 @@ func TestSettingsRetryInfinite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s2.RetryConfig().Infinite {
+	if s2.RetryConfig().Infinite == nil || !*s2.RetryConfig().Infinite {
 		t.Fatal("a false layer turned retry.infinite off; the merge must be one-way")
 	}
 	// The flag shape round-trips through `config set`, and the list shows it.
@@ -39,7 +39,7 @@ func TestSettingsRetryInfinite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s3.RetryConfig().Infinite {
+	if s3.RetryConfig().Infinite == nil || !*s3.RetryConfig().Infinite {
 		t.Fatal("config set retry.infinite true did not read back")
 	}
 	var found bool

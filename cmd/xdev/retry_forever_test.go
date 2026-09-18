@@ -21,8 +21,9 @@ func TestWireAgentModePropagatesInfiniteRetry(t *testing.T) {
 		s    *config.Settings
 		want bool
 	}{
-		{"on", &config.Settings{Retry: config.RetrySettings{Infinite: true}}, true},
-		{"off by default", &config.Settings{}, false},
+		{"on", &config.Settings{Retry: config.RetrySettings{Infinite: boolPtr(true)}}, true},
+		{"off by default", &config.Settings{}, true},
+
 	} {
 		ag := &agent.Agent{Model: "m"}
 		wireAgentMode(ag, nil, &config.Config{}, tc.s, "p", "m", t.TempDir(), false)
@@ -52,3 +53,6 @@ func TestAllTargetsDownPrintsVerbatim(t *testing.T) {
 		t.Fatalf("the round announcement collapsed to the per-attempt notice: %q", out)
 	}
 }
+
+
+func boolPtr(b bool) *bool { return &b }
