@@ -66,7 +66,7 @@ func TestInfiniteRoundIsAnnouncedOnTheStream(t *testing.T) {
 				}
 			}
 		},
-		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnMessageEndF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
 		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
 	}
 	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
@@ -98,5 +98,59 @@ func TestInfiniteRidesWithDefaults(t *testing.T) {
 	p := (RetryPolicy{Infinite: true}).withDefaults()
 	if !p.Infinite || p.MaxRetries != DefaultRetryPolicy().MaxRetries {
 		t.Fatalf("withDefaults = %+v", p)
+	}
+}
+
+// TestInfiniteRetainsAndContinues proves that with policy.Infinite,
+// the post-content retain-and-continue path survives MULTIPLE
+// post-content failures — each failure keeps the partial, adds a
+// continuation, and re-runs the ladder (policy.Infinite lifts the
+// bounded guard at loop.go:643). This is the regression test for
+// the reported bug where retry.infinite never re-entered the
+// post-content arm because it returned unconditionally.
+func TestInfiniteRetainsAndContinues(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("thinking... "),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall"}),
+		}},
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("more... "),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall again"}),
+		}},
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("even more... "),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall third time"}),
+		}},
+		{events: []ai.Event{
+			textEvent("back online"), doneEvent("back online"),
+		}},
+	}}
+	a, st, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = RetryPolicy{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+	msg, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("infinite post-content retry must recover: %v", err)
+	}
+	if msg == nil || !strings.Contains(msg.Text(), "back online") {
+		t.Fatalf("final message must contain the eventual success: %q", msg.Text())
+	}
+	// 1 initial + 3 post-content continuations + 1 success = 4 requests.
+	if len(p.gotReqs) != 4 {
+		t.Fatalf("stream calls = %d, want 4", len(p.gotReqs))
+	}
+	// All partials and continuation prompts are persisted in the
+	// history, so a rebuild keeps the full chain.
+	res, err := session.BuildContext(st.Entries(), st.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, m := range res.Messages {
+		joined += m.Text() + "\n"
+	}
+	if !strings.Contains(joined, "thinking...") || !strings.Contains(joined, "your previous message") ||
+		!strings.Contains(joined, "back online") {
+		t.Fatalf("rebuild must keep all partials + continuations + final:\n%s", joined)
 	}
 }

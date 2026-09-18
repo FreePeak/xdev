@@ -696,7 +696,10 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					}
 					continue
 				}
-				return nil, history, err
+				if continued && !policy.Infinite {
+					return nil, history, err
+				}
+				continue
 			}
 			if attempt >= policy.MaxRetries {
 				// Ladder drained: fail over to the next model-host.
