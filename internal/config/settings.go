@@ -342,6 +342,14 @@ type Settings struct {
 	// survives protanopia and deuteranopia (M12 F4). Applied to the
 	// resolved theme at load.
 	ColorBlindMode bool `yaml:"colorBlindMode"`
+	// DebugMouse renders every mouse event on the status bar
+	// (settings `tui.debugMouse`, off by default): the button, the
+	// press/drag/release edge, the wheel direction and the coordinates.
+	// It is the only way to see what the terminal is actually sending —
+	// tcell strips the SGR motion bit, so a held drag looks like a
+	// press at every report, and the gesture a user thinks they made
+	// is not always the one that arrives.
+	DebugMouse bool `yaml:"debugMouse"`
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
@@ -1219,6 +1227,11 @@ func (s *Settings) merge(layer *Settings) error {
 		// contributes (same rule as advisor).
 		s.ColorBlindMode = true
 	}
+	if layer.DebugMouse {
+		// Same plain-bool rule as ColorBlindMode: only a layer
+		// that turns it ON contributes.
+		s.DebugMouse = true
+	}
 	if layer.StatusLine != nil {
 		if s.StatusLine == nil {
 			s.StatusLine = &StatusLineSettings{}
@@ -1822,6 +1835,7 @@ func List(s *Settings, globalPath string) []string {
 	out := []string{
 		"theme " + s.Theme,
 		"colorBlindMode " + fmt.Sprint(s.ColorBlindMode),
+		"debugMouse " + fmt.Sprint(s.DebugMouse),
 		"approvalMode " + s.ApprovalMode,
 		"prewalk.enabled " + fmt.Sprint(s.Prewalk.Enabled),
 		"prewalk.into " + prewalkIntoOrDefault(s.Prewalk.Into),
