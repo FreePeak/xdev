@@ -3,12 +3,13 @@ package browser
 // The `browser` tool (M13 #50, research parity-tools-providers §D): a
 // minimal CDP client for an already-running Chrome.
 //
-// v1 attaches only. xdev never launches a browser, never creates a profile,
-// and never closes a user tab — `close` releases xdev's handle. That keeps
-// the blast radius of a tool the model can call on its own to "the websocket
-// is gone", and makes the failure mode a sentence the model can fix
-// ("start Chrome with --remote-debugging-port=9222") instead of a silent
-// headless browser.
+// Attach-first: when a browser is already listening on the configured
+// endpoint (a Chrome the user started with --remote-debugging-port) xdev
+// attaches to it and never touches the window, the profile or the user's
+// tabs — `close` releases xdev's handle. When nothing answers, xdev starts a
+// throwaway Chrome on that endpoint with its own profile (see launch.go)
+// instead of failing with instructions the model cannot carry out. An
+// explicit browser.autolaunch: false restores attach-only.
 //
 // Every op is bounded: a per-op timeout, a page-text cap, a JS-result cap,
 // and a screenshot byte cap. Page text is sanitized before it reaches the
@@ -37,7 +38,9 @@ import (
 const (
 	// DefaultTimeout bounds one op when the caller omits timeout.
 	DefaultTimeout = 30 * time.Second
-	// MinTimeout / MaxTimeout clamp the per-op timeout argument.
+	// MinTimeout / MaxTimeout clamp the per-op timeout argument. MinTimeout
+	// also bounds a cold attach: a launch that cannot open the port fails
+	// quickly instead of hanging the op.
 	MinTimeout = time.Second
 	MaxTimeout = 300 * time.Second
 
@@ -53,23 +56,45 @@ const (
 	// loadWait / loadPoll bound the post-navigate wait for readyState.
 	loadWait = 15 * time.Second
 	loadPoll = 100 * time.Millisecond
-
 	// defaultTabName is the handle used when the caller omits name.
 	defaultTabName = "main"
+
+	// profileDirName is the launched browser's profile directory under the
+	// tool's ProfileDir: a private profile, never the user's.
+	profileDirName = "profile"
 )
 
 // pngMagic identifies a PNG payload; a screenshot must be one.
-var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
-
 // Settings is the browser config block (`browser:` in config.yml).
 type Settings struct {
-	// CDPURL is the DevTools HTTP discovery base of a running browser
+	// CDPURL is the DevTools HTTP discovery base of the browser to drive
 	// ("http://127.0.0.1:9222", or the /json/list URL itself). Empty means
 	// $XDEV_BROWSER_CDP_URL, then Chrome's default port.
 	CDPURL string `yaml:"cdpUrl"`
 	// Timeout is the per-op limit in seconds (default 30, clamped 1..300).
 	Timeout int `yaml:"timeout"`
+	// Autolaunch, when set, starts a browser on CDPURL if nothing answers
+	// there: false is attach-only (every call reports the dead endpoint),
+	// true is the explicit form of the default. A pointer because the
+	// default is ON and an absent key must not read as "off".
+	Autolaunch *bool `yaml:"autolaunch"`
+	// NoAutolaunch is the resolved inverse of Autolaunch, filled in by
+	// config.BrowserConfig.
+	NoAutolaunch bool `yaml:"-"`
+	// ProfileDir is filled in by config.BrowserConfig with the private
+	// --user-data-dir a launched browser gets. It is not a config key:
+	// empty means the tool never launches one.
+	ProfileDir string `yaml:"-"`
 }
+
+// AutolaunchOn reports whether xdev may start a browser itself: the default
+// is on, so only an explicit `autolaunch: false` turns it off.
+func (s Settings) AutolaunchOn() bool {
+	return s.Autolaunch == nil || *s.Autolaunch
+}
+
+// pngMagic identifies a PNG payload; a screenshot must be one.
+var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
 
 // Tool is the `browser` tool. One instance per session: named tabs and their
 // CDP connections are per-instance state.
@@ -78,7 +103,13 @@ type Tool struct {
 	Cfg Settings
 	// Blobs receives screenshots. nil means a store under the system temp dir.
 	Blobs *session.BlobStore
-
+	// ProfileDir is the private --user-data-dir of a browser xdev launches
+	// itself (a profileDir under the data dir). Empty means the tool only
+	// ever attaches to a browser already running.
+	ProfileDir string
+	// launchErr records a failed auto-launch, so the next attach reports
+	// that failure instead of repeating the launch.
+	launchErr error
 	// ponytail: one mutex guards the tab map for the whole attach sequence,
 	// so the first two concurrent ops on a cold/slow endpoint serialize. The
 	// endpoint is loopback and Chrome answers instantly or refuses instantly;
@@ -415,8 +446,21 @@ func (t *Tool) ensure(ctx context.Context, name string) (*tab, error) {
 		claimed[other.targetID] = n
 	}
 	endpoint := t.endpoint()
-	targets, err := ListTargets(ctx, endpoint)
+	targets, err := ListTargets(ctx, endpoint, t.autolaunch())
+	if err != nil && t.autolaunch() && t.launchErr == nil && ctx.Err() == nil {
+		// Nothing is listening: start a browser on the endpoint and retry
+		// once. A launch that fails is remembered, so the next call reports
+		// the cause instead of launching again.
+		if lerr := ensureLaunched(ctx, endpoint, filepath.Join(t.ProfileDir, profileDirName)); lerr != nil {
+			t.launchErr = lerr
+		} else {
+			targets, err = ListTargets(ctx, endpoint, true)
+		}
+	}
 	if err != nil {
+		if t.launchErr != nil {
+			return nil, t.launchErr
+		}
 		return nil, err
 	}
 	tgt, ok := pickPage(targets, claimed)
@@ -714,3 +758,11 @@ func stripControl(s string) string {
 }
 
 func isControl(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }
+
+// autolaunch reports whether this tool may start a browser itself: an
+// explicit browser.autolaunch: false, or no profile dir to launch one with,
+// means attach-only and the unreachable-endpoint error names starting Chrome
+// by hand.
+func (t *Tool) autolaunch() bool {
+	return t.Cfg.AutolaunchOn() && t.ProfileDir != ""
+}

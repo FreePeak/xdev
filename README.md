@@ -226,7 +226,8 @@ nothing per turn.
 The rest of the surface: `grep`/`glob` (the host's `rg` is used when present),
 `eval` (a persistent Python kernel; a `.ipynb` reads and edits as cell blocks),
 `ast_grep`/`ast_edit`, `lsp`, `debug` (DAP over stdio: dlv, debugpy, lldb-dap),
-`browser` (CDP attach to a Chrome you started — it never launches one),
+`browser` (CDP: attaches to a Chrome you started, else launches one on a
+private profile — `browser.autolaunch: false` keeps it attach-only),
 `web_search`, `github`, `security_scan`, `computer`, `tts`, `generate_image`,
 `checkpoint` / `rewind`, `todo`, `ask`, `task` + `hub` + `send_message` /
 `inbox` for subagents and cross-session mail, and the memory and skill tools.

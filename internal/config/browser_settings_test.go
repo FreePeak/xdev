@@ -27,9 +27,29 @@ func TestBrowserSettingsLayer(t *testing.T) {
 	if got.Timeout != 45 {
 		t.Errorf("browser.timeout = %d, want 45", got.Timeout)
 	}
+	// autolaunch defaults on and an explicit false survives the load; the
+	// profile dir is always filled in, so the tool can launch when asked.
+	if !got.AutolaunchOn() {
+		t.Error("browser.autolaunch must default on")
+	}
+	if got.ProfileDir == "" {
+		t.Error("BrowserConfig must resolve a launch profile dir")
+	}
 	var absent Settings
 	if absent.BrowserConfig().CDPURL != "" {
 		t.Error("an absent browser block must stay empty (tool default applies)")
+	}
+	if !absent.BrowserConfig().AutolaunchOn() {
+		t.Error("an absent browser block must autolaunch")
+	}
+
+	attachOnly := writeFile(t, filepath.Join(t.TempDir(), "attach.yml"), "browser:\n  autolaunch: false\n")
+	s, err = LoadSettings(cwd, []string{attachOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.BrowserConfig().AutolaunchOn() {
+		t.Error("browser.autolaunch: false must stay off")
 	}
 }
 
