@@ -3575,7 +3575,7 @@ var statusSegments = map[string]bool{
 // either half is unknown (an undiscovered window, or a session that has not
 // answered yet), so a fresh run keeps a clean row. The model keeps its
 // composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"time", "tokens", "context", "rate", "ttft"}
+var defaultStatusSegments = []string{"command", "time", "tokens", "context", "rate"}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
