@@ -95,6 +95,13 @@ type App struct {
 	deltaFirst, deltaLast time.Time
 	deltaRunes            int64
 
+	// cmd is the active tool call the session is running (set by
+	// the agent loop via SetActiveCommand, displayed left of the
+	// path). cmdMu guards cmd/cmdActive separately from st so the
+	// drawer never reads a half-written command.
+	cmd       string
+	cmdActive bool
+	cmdMu     sync.Mutex
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
 	statusSegs []string
@@ -297,6 +304,32 @@ func (a *App) SetLocation(cwd string) {
 	a.cwd = cwd
 	a.branch = gitBranch(cwd)
 	a.mu.Unlock()
+}
+
+// SetActiveCommand sets the running tool call shown on the status
+// row's left side (the cwd is its right neighbor). Empty name and
+// active=false clear it (a run ending, or a prompt-only turn).
+func (a *App) SetActiveCommand(name string, active bool) {
+	a.cmdMu.Lock()
+	a.cmd = name
+	a.cmdActive = active
+	a.cmdMu.Unlock()
+	a.poke()
+}
+
+// hudCommand renders the left side of the status row while a
+// tool is running: "● name". Empty when nothing is running so
+// callers skip it; safe for narrow terminals because the
+// segment block absorbs the squeeze.
+func (a *App) hudCommand() string {
+	a.cmdMu.Lock()
+	name := a.cmd
+	active := a.cmdActive
+	a.cmdMu.Unlock()
+	if !active || name == "" {
+		return ""
+	}
+	return "● " + name
 }
 
 // SetStatusModel updates the status-line model name (wired by cmd on
@@ -3426,6 +3459,18 @@ func draftHint(above, below int) string {
 // on a small terminal.
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
+	// The running tool call leads the row: "● <name> · cd <cwd>" on
+	// the left, the configured segments right-aligned.
+	cmdLabel := a.hudCommand()
+	if cmdLabel != "" {
+		pathLbl := pathDisplay(a.cwd, a.width-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
+		if pathLbl != "" {
+			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+			drawText(a.scr, 2, y, pathLbl, pathSt)
+		}
+		a.drawHUD(y, 2+width(cmdLabel)+width(pathLbl)+2, parts)
+		return
+	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the path is what shrinks.
 	budget := a.width - 2 - hudEssentialWidth(parts) - 1
@@ -3503,6 +3548,7 @@ var statusSegments = map[string]bool{
 	"rate":    true,
 	"theme":   true,
 	"time":    true,
+	"command": true,
 }
 
 // defaultStatusSegments is the shipped layout: the work timer, the token
@@ -3515,7 +3561,7 @@ var statusSegments = map[string]bool{
 // either half is unknown (an undiscovered window, or a session that has not
 // answered yet), so a fresh run keeps a clean row. The model keeps its
 // composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"time", "tokens", "context", "rate"}
+var defaultStatusSegments = []string{"command", "time", "tokens", "context", "rate"}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))

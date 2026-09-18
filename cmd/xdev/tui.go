@@ -1998,6 +1998,7 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 // reads the naming field out of them (omp's `name · detail` row), so nothing
 // here pre-flattens the JSON into a preview the terminal then has to unpick.
 func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
+	h.ts.app.SetActiveCommand(call.Name, true)
 	h.ts.app.AddToolBlock(call.Name, string(call.Arguments))
 }
 
@@ -2013,6 +2014,7 @@ func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Du
 		Truncated: out.Truncated,
 		Diff:      out.Diff,
 	})
+	h.ts.app.SetActiveCommand(call.Name, false)
 	// The dock's Files section is read from the transcript's diff blocks, and the
 	// task list from the todo tool's state: both move here, and nowhere else in a
 	// quiet session. One bump per finished call, no per-frame source read.
