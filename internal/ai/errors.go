@@ -103,6 +103,29 @@ var (
 // is a provider-reported error code on HTTPError instead of body sniffing.
 var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
 
+// modelVerdictRe matches a 404 whose body is a gateway relaying an upstream
+// verdict about the MODEL rather than a dead route. Live 2026-09-18 through
+// onegw (`defaultModel: onegw/xdev`): the pinned model had left the upstream's
+// catalog, and every turn ended with
+//
+//	HTTP 404 {"error":{"code":"404","message":"… This model was Unbiased's
+//	Pareto. Use it now: …","type":"upstream_error"}}
+//
+// A bare 404 is a dead route and stays terminal (wrong base URL, wrong path —
+// retrying only re-sends the same request). A 404 that NAMES a model verdict
+// indicts THIS target alone: the same request served by the next chain target
+// works, which is what onegw's own router concludes (`types.APIError.
+// ModelScoped`: it benches the (provider, model) pair and falls through
+// instead of rotating the account pool). The vocabulary is the gateway's:
+// onegw's `model_not_found` / `no provider for model` routing verdicts and the
+// `upstream_error` type it wraps an upstream 404 in.
+//
+// ponytail: a body regex is a deliberate shortcut with a ceiling — it trusts
+// any 404 that mentions these words, so a proxy whose error page happens to
+// carry them retries the ladder before surfacing the same 404. The upgrade
+// path is a provider-reported error code on HTTPError instead of body sniffing.
+var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error`)
+
 // Classify maps an error to its recovery class. Wire HTTPError instances
 // classify by status + body; raw transport errors by their message.
 func Classify(err error) ErrClass {
@@ -122,6 +145,12 @@ func Classify(err error) ErrClass {
 				return ClassTransient
 			}
 			return ClassBadRequest
+		case he.Status == 404 && modelVerdictRe.MatchString(he.Body):
+			// The model left the catalog; the ROUTE is fine. Retriable so
+			// the ladder fails over to the next chain target (see
+			// modelVerdictRe). In-place retries are bounded by MaxRetries,
+			// and a bare 404 (no verdict in the body) stays terminal.
+			return ClassTransient
 		case retriablableStatus(he.Status):
 			return ClassTransient
 		default:

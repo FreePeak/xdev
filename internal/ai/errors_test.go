@@ -43,7 +43,17 @@ func TestClassify(t *testing.T) {
 			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` + "`input[185]` missing required field `output`"}, ClassTransient},
 		{"400 invalid_request_error without a field", &HTTPError{API: "a", Status: 400,
 			Body: `{"error":{"type":"invalid_request_error"}}`}, ClassBadRequest},
-		{"404 unknown", &HTTPError{API: "a", Status: 404, Body: "nope"}, ClassUnknown},
+		// A 404 is a dead route unless the body is a gateway relaying an
+		// upstream verdict about the MODEL. Live 2026-09-18: `onegw/xdev`
+		// left its upstream's catalog and every turn ended on
+		// `HTTP 404 … "type":"upstream_error"` — the retry ladder never saw
+		// a class it acts on, so the run ended instead of failing over.
+		{"404 dead route", &HTTPError{API: "a", Status: 404, Body: "nope"}, ClassUnknown},
+		{"404 empty body", &HTTPError{API: "a", Status: 404, Body: ""}, ClassUnknown},
+		{"404 model_not_found", &HTTPError{API: "openai-completions", Status: 404,
+			Body: `{"error":{"code":"model_not_found","message":"no provider for model xdev"}}`}, ClassTransient},
+		{"404 upstream_error relaying a model verdict", &HTTPError{API: "openai-completions", Status: 404,
+			Body: `{"error":{"code":"404","message":"Thank you for participating in the Stealth Union Alpha testing period. This model was Unbiased's Pareto. Use it now: https://openrouter.ai/unbiased/pareto","type":"upstream_error"}}`}, ClassTransient},
 		{"302 unknown", &HTTPError{API: "a", Status: 302, Body: "redir"}, ClassUnknown},
 		{"transport overflow text", errors.New("agent: stream: prompt exceeds the context window of 1000000"), ClassContextOverflow},
 		{"connection reset", errors.New("a: Post \"http://x\": read tcp: connection reset by peer"), ClassTransient},
