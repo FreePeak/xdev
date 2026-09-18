@@ -72,9 +72,9 @@ const selGrace = 2 * time.Second
 // gesture completes (or when a new gesture begins from a different
 // position). Callers hold a.mu.
 func (a *App) clearClick() {
-		a.selClickCount = 0
-		a.selClickTime = time.Time{}
-		a.selClickX, a.selClickY = 0, 0
+	a.selClickCount = 0
+	a.selClickTime = time.Time{}
+	a.selClickX, a.selClickY = 0, 0
 }
 
 // handleClick is the press-side logic for a primary button that is
@@ -102,6 +102,13 @@ func (a *App) handleClick(x, y int) bool {
 		// must not then re-anchor the gesture at the raw click point: that
 		// would collapse the word/line selection back into a no-motion click
 		// and copy nothing. true says "handled, stop here".
+		//
+		// clearClick is deliberately NOT called here: its call zeroed
+		// selClickTime as well as the count, so the third press of a
+		// triple-click sequence saw count=0 and started fresh at 1 —
+		// triple-click was indistinguishable from a single click. The
+		// count resets on its own when the position moves or the window
+		// expires.
 		if a.selClickCount >= 3 {
 			a.selStartLineSelect(x, y)
 		} else {
@@ -120,34 +127,34 @@ func (a *App) handleClick(x, y int) bool {
 // word. If no word is found at the position (whitespace click),
 // it falls back to a character drag from the click point.
 func (a *App) selStartWordSelect(x, y int) {
-		a.selDown = true
-		a.selShown = true
-		a.selCache = map[int]selRow{}
-		a.selDocMode = false
+	a.selDown = true
+	a.selShown = true
+	a.selCache = map[int]selRow{}
+	a.selDocMode = false
+	a.selAnchor = selCorner{x: x, y: y, doc: -1}
+	a.selEnd = a.selCornerAt(x, y)
+	lo, hi := a.selWordAt(x, y)
+	if lo >= 0 {
+		// x is a screen column and selWordAt counts within the
+		// text (which starts at row.x0), so translate the
+		// text-relative word bounds into document columns.
 		row := a.selRowAt(y)
-		a.selAnchor = selCorner{x: x, y: y, doc: -1}
-		a.selEnd = a.selCornerAt(x, y)
-		lo, hi := a.selWordAt(x, y)
-		if lo >= 0 {
-			// selWordAt returns text-relative columns; pin the
-			// anchor and end to screen coordinates so the span
-			// resolves against the rendered row's x0.
-			a.selAnchor.x = lo + row.x0
-			a.selEnd.x = hi + row.x0
-		}
-		a.poke()
+		a.selAnchor.x = lo + row.x0
+		a.selEnd.x = hi + row.x0
+	}
+	a.poke()
 }
 
 // selStartLineSelect begins a line-selection gesture at (x, y):
 // selects the full width of the screen row under the pointer.
 func (a *App) selStartLineSelect(x, y int) {
-		a.selDown = true
-		a.selShown = true
-		a.selCache = map[int]selRow{}
-		a.selDocMode = false
-		a.selAnchor = selCorner{x: 0, y: y, doc: -1}
-		a.selEnd = selCorner{x: a.width - 1, y: y, doc: -1}
-		a.poke()
+	a.selDown = true
+	a.selShown = true
+	a.selCache = map[int]selRow{}
+	a.selDocMode = false
+	a.selAnchor = selCorner{x: 0, y: y, doc: -1}
+	a.selEnd = selCorner{x: a.width - 1, y: y, doc: -1}
+	a.poke()
 }
 
 // selWordAt returns the grapheme-safe (lo, hi) cell range of the
@@ -155,49 +162,49 @@ func (a *App) selStartLineSelect(x, y int) {
 // if the position is not on a word. Uses width for cell width so wide
 // characters are not split. Callers hold a.mu.
 func (a *App) selWordAt(x, y int) (int, int) {
-		row := a.selRowAt(y)
-		text := row.text
-		if text == "" {
-			return -1, -1
-		}
-		col := 0
-		for i, r := range text {
-			w := width(string(r))
-			if col+w > x {
-				start := col
-				end := col + w
-				for j := i; j > 0; {
-					prev, sz := utf8.DecodeLastRuneInString(text[:j])
-					if prev == ' ' || prev == '\t' || unicode.IsSpace(prev) {
-						break
-					}
-					start -= width(string(prev))
-					j -= sz
-				}
-				for j := i + utf8.RuneLen(r); j < len(text); {
-					next, sz := utf8.DecodeRuneInString(text[j:])
-					if next == ' ' || next == '\t' || unicode.IsSpace(next) {
-						break
-					}
-					end += width(string(next))
-					j += sz
-				}
-				if end-start <= 0 {
-					return -1, -1
-				}
-				return start, end - 1
-			}
-			col += w
-		}
+	row := a.selRowAt(y)
+	text := row.text
+	if text == "" {
 		return -1, -1
+	}
+	col := 0
+	for i, r := range text {
+		w := width(string(r))
+		if col+w > x {
+			start := col
+			end := col + w
+			for j := i; j > 0; {
+				prev, sz := utf8.DecodeLastRuneInString(text[:j])
+				if prev == ' ' || prev == '\t' || unicode.IsSpace(prev) {
+					break
+				}
+				start -= width(string(prev))
+				j -= sz
+			}
+			for j := i + utf8.RuneLen(r); j < len(text); {
+				next, sz := utf8.DecodeRuneInString(text[j:])
+				if next == ' ' || next == '\t' || unicode.IsSpace(next) {
+					break
+				}
+				end += width(string(next))
+				j += sz
+			}
+			if end-start <= 0 {
+				return -1, -1
+			}
+			return start, end - 1
+		}
+		col += w
+	}
+	return -1, -1
 }
 
 // abs returns the absolute value of n.
 func abs(n int) int {
-		if n < 0 {
-			return -n
-		}
-		return n
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // selEdgeDelay and selEdgeStep shape the held-drag edge auto-scroll: once the
@@ -209,8 +216,8 @@ func abs(n int) int {
 // the hand stopped. The delay guards against a fast sweep across an edge row
 // turning a two-row selection into a page turn.
 const (
-	selEdgeDelay = 400 * time.Millisecond
-	selEdgeStep  = 2
+	selEdgeDelay    = 400 * time.Millisecond
+	selEdgeStep     = 2
 	clickWordWindow = 400 * time.Millisecond
 	clickWordTol    = 2 // x,y tolerance for treating clicks as the same position
 
@@ -271,7 +278,8 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// aim back, so the wheel scrolls the transcript until the human asks for
 		// a box by name. The notch never moves focus (app.go scrollThinkBox),
 		// which is what stops a box from stealing the wheel merely by sliding
-		// under a stationary pointer.
+		// under a stationary pointer. thinkBoxAt returns -1 for "no box", which
+		// is exactly the "aim back at the transcript" value.
 		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
 		// handleClick tracks click count from the previous
@@ -280,9 +288,10 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// handleClick tracks click count from the previous release and
 		// starts a word/line selection on double/triple click, or a normal
 		// drag otherwise. If it consumed the press (double/triple) it already
-		// anchored the gesture and the click ends here; a single click anchors
-		// it at this point so a following drag can expand it and the release
-		// copies what was covered.
+		// anchored the gesture and the click ends here: re-anchoring at the
+		// raw click point would collapse the word/line selection back into a
+		// no-motion click and copy nothing. A single click falls through and
+		// anchors here so a following drag can expand it.
 		if a.handleClick(x, y) {
 			break
 		}
