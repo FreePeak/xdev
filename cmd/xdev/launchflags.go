@@ -244,6 +244,32 @@ func thinkingLevel(settings *config.Settings, flagValue string) string {
 	return settings.ThinkingLevel()
 }
 
+// thinkingForModel adapts a pinned request-side level to the model about to
+// run. The level the user chose stays sticky — it is remembered, reported and
+// re-applied on the next model that can take it — but a rung that actually
+// asks for a reasoning budget (low|medium|high, plus the xhigh/max names that
+// clamp to high) cannot ride out to a model the catalog marks as
+// non-reasoning: it falls back to "auto", which hands the decision to the
+// model's own ":effort" and in practice sends no reasoning parameter at all.
+//
+// "off" and "minimal" are deliberately left alone: both already mean "no
+// reasoning requested", which every model accepts, so downgrading them would
+// only lose the user's stated intent. A model the catalog does not list is
+// left alone too — a gateway serves ids models.yml never pinned, and reading
+// "not listed" as "cannot reason" would silently drop a budget the user asked
+// for (modelReasoning reports that case as unknown, not as unsupported).
+func thinkingForModel(level, provider, model string, cfg *config.Config) string {
+	switch level {
+	case "low", "medium", "high", "xhigh", "max":
+	default:
+		return level
+	}
+	if supported, known := modelReasoning(cfg, provider, model); known && !supported {
+		return "auto"
+	}
+	return level
+}
+
 // resolveThinkingDisplay folds --hide-thinking and --print-thoughts onto the
 // settings default (nil = follow settings). Both drive the one showThinking
 // seam: print mode renders thinking blocks through printHooks, the TUI
