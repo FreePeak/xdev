@@ -33,6 +33,11 @@ type GoogleGenAIProvider struct {
 	unwrapResponse bool
 }
 
+// HealthCheck implements ai.HealthChecker.
+func (p *GoogleGenAIProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIGoogleGenerativeAI)
+}
+
 // NewGoogleGenAIProvider builds a provider. A nil hc uses the shared
 // transport.
 func NewGoogleGenAIProvider(name, baseURL, apiKey string, headers map[string]string, hc *http.Client) *GoogleGenAIProvider {

@@ -54,6 +54,11 @@ func NewAzureResponsesProvider(name, baseURL, apiKey string, headers map[string]
 	}
 }
 
+// HealthCheck implements ai.HealthChecker.
+func (p *AzureResponsesProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIAzureOpenAIResponses)
+}
+
 func (p *AzureResponsesProvider) Name() string { return p.name }
 func (p *AzureResponsesProvider) API() string  { return APIAzureOpenAIResponses }
 

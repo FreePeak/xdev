@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 )
 
@@ -40,6 +41,42 @@ type CacheOpts struct {
 	// completed tool round instead of the newest message, so a throwaway
 	// request never writes a cache entry nothing later reads.
 	SideRequest bool
+}
+
+// HealthChecker is an optional provider seam (M5 tail): a model-host that
+// is down is not a transient blip — retrying it burns the ladder on a dead
+// endpoint. A provider that implements this answers a cheap liveness probe
+// (no request body, no auth cost) so the escalation loop can fail over
+// before the backoff ladder drains. A nil or non-implementing provider is
+// treated as always healthy: the loop falls back to the ladder.
+type HealthChecker interface {
+	// HealthCheck returns nil when the host answers a liveness probe and
+	// a non-nil error when it does not. The probe must not charge the
+	// user's quota — a GET to a public health endpoint, or a HEAD of
+	// /v1/models, is the shape.
+	HealthCheck(ctx context.Context) error
+}
+
+// HealthCheckProvider wraps a provider with a custom liveness
+// probe URL (a provider-declared healthCheckURL). The default
+// /v1/models probe is free for onegw; this exists for gateways
+// that expose a cheaper endpoint.
+type HealthCheckProvider struct {
+	Provider
+	url string
+	hc  *http.Client
+}
+
+// HealthCheck implements ai.HealthChecker against the configured URL.
+func (h *HealthCheckProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, h.hc, h.url, nil, h.Provider.API())
+}
+
+// NewHealthCheckProvider wraps inner with a custom liveness-probe URL.
+// HealthCheck is exposed directly so the agent's health-check
+// seam can reach it.
+func NewHealthCheckProvider(inner Provider, url string, hc *http.Client) *HealthCheckProvider {
+	return &HealthCheckProvider{Provider: inner, url: url, hc: hc}
 }
 
 // cacheWanted reports whether one request opts into cache markers: a caller

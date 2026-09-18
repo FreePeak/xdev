@@ -37,6 +37,11 @@ func NewOpenAICodexResponsesProvider(name, baseURL, apiKey string, headers map[s
 func (p *OpenAICodexResponsesProvider) Name() string { return p.name }
 func (p *OpenAICodexResponsesProvider) API() string  { return APIOpenAICodexResponses }
 
+// HealthCheck implements ai.HealthChecker.
+func (p *OpenAICodexResponsesProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIOpenAICodexResponses)
+}
+
 // Stream implements Provider: the Responses wire plus the Codex
 // instructions/store mapping.
 func (p *OpenAICodexResponsesProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {

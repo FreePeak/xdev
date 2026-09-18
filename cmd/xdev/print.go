@@ -264,7 +264,7 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 		ag.Compaction.Async = settings.CompactionAsyncOn()
 		// retry.infinite rides here: every build site (print/tui/rpc/acp)
 		// goes through this function, and none of them set ag.Retry at all.
-		ag.Retry.Infinite = settings.InfiniteRetry()
+		ag.Retry.Infinite = settings.RetryConfig().Infinite
 	}
 	// #86: a compaction summary must carry the memories the remote backend
 	// recalled, or they are lost for the rest of the session.
@@ -863,6 +863,13 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 	format, err := ai.ParseToolFormat(pc.ToolsFormat)
 	if err != nil {
 		return nil, fmt.Errorf("provider %q: %w", name, err)
+	}
+	// healthCheckURL wraps the provider with a custom liveness
+	// probe when the config declares one. The default /v1/models
+	// probe is free for onegw; this exists for gateways that
+	// expose a cheaper endpoint.
+	if url := config.Resolve(pc.HealthCheckURL); url != "" {
+		prov = ai.NewHealthCheckProvider(prov, url, hc)
 	}
 	return ai.NewInBandProvider(prov, format), nil
 }

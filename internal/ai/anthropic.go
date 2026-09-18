@@ -41,7 +41,14 @@ func NewAnthropicProvider(name, baseURL, apiKey string, headers map[string]strin
 func (p *AnthropicProvider) Name() string { return p.name }
 func (p *AnthropicProvider) API() string  { return APIAnthropicMessages }
 
-// endpoint honors base URLs that already end in /v1.
+
+// HealthCheck implements ai.HealthChecker. No key on the probe — the
+// live call carries it; the endpoint answers catalog reads to any
+// caller.
+func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIAnthropicMessages)
+}
+
 func (p *AnthropicProvider) endpoint() string {
 	if strings.HasSuffix(p.baseURL, "/v1") {
 		return p.baseURL + "/messages"
