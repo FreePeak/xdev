@@ -42,6 +42,13 @@ func NewOpenAICompletionsProvider(name, baseURL, apiKey string, headers map[stri
 func (p *OpenAICompletionsProvider) Name() string { return p.name }
 func (p *OpenAICompletionsProvider) API() string  { return APIOpenAICompletions }
 
+// HealthCheck implements ai.HealthChecker: a GET to /v1/models verifies
+// the host answers requests without carrying a request body or the
+// user's key (onegw serves the catalog unauthenticated).
+func (p *OpenAICompletionsProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIOpenAICompletions)
+}
+
 // Wire shapes for the request body.
 
 type openaiWireFunction struct {

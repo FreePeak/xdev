@@ -47,7 +47,12 @@ func NewGoogleVertexProvider(name, baseURL, apiKey string, headers map[string]st
 }
 
 func (p *GoogleVertexProvider) Name() string { return p.name }
-func (p *GoogleVertexProvider) API() string  { return APIGoogleVertex }
+
+// HealthCheck implements ai.HealthChecker.
+func (p *GoogleVertexProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIGoogleVertex)
+}
+
 
 // Stream implements Provider.
 func (p *GoogleVertexProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {

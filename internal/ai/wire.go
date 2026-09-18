@@ -117,3 +117,31 @@ func parseToolArgs(api, id, raw string) json.RawMessage {
 	logx.Errorf("%s: unparseable tool call %s arguments, sent as {}; the model must re-issue it: %s", api, id, raw)
 	return json.RawMessage("{}")
 }
+
+// healthCheckOneGet runs a single GET against the provider's catalog
+// endpoint. It is the cheap liveness probe every provider's
+// HealthCheck delegates to: no body, no auth header (the agent's
+// key rides on the httpClient), and a short timeout so a dead
+// host fails fast instead of burning the escalation ladder. A
+// non-2xx or transport error is a non-nil error; the caller decides
+// whether to fail over.
+func healthCheckOneGet(ctx context.Context, hc *http.Client, url string, headers map[string]string, api string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("%s: health check: build request: %w", api, err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s: health check: %w", api, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("%s: health check: upstream HTTP %d", api, resp.StatusCode)
+	}
+	return nil
+}
+

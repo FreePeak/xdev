@@ -35,6 +35,11 @@ type OpenAIResponsesProvider struct {
 	behavior responsesBehavior
 }
 
+// HealthCheck implements ai.HealthChecker.
+func (p *OpenAIResponsesProvider) HealthCheck(ctx context.Context) error {
+	return healthCheckOneGet(ctx, p.httpClient, p.baseURL+"/v1/models", nil, APIOpenAIResponses)
+}
+
 // responsesBehavior is the option set the Responses variants differ by.
 type responsesBehavior struct {
 	// sanitize runs SanitizeSchemaForOpenAIResponses over every tool schema.

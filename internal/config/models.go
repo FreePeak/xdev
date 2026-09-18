@@ -72,6 +72,8 @@ type ProviderConfig struct {
 	// emit native structured calls (hermes, deepseek, glm, ...). Empty =
 	// native: the provider's own structured tool calls.
 	ToolsFormat string `yaml:"toolsFormat,omitempty"`
+	// HealthCheckURL overrides the provider's default liveness probe (/v1/models). Empty = default.
+	HealthCheckURL string `yaml:"healthCheckURL,omitempty"`
 }
 
 // OAuthConfig is one provider's browser-login flow.
