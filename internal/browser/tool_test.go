@@ -118,8 +118,8 @@ func TestOpenAndNavigate(t *testing.T) {
 	if _, ok := f.lastCall("Page.navigate"); ok {
 		t.Error("open without url must not navigate")
 	}
-	if f.listHits() != 1 {
-		t.Errorf("/json/list hits = %d, want 1", f.listHits())
+	if f.listPageHits() != 1 {
+		t.Errorf("/json/list hits = %d, want 1", f.listPageHits())
 	}
 
 	// A second Chrome tab is what makes a second handle possible: this
@@ -428,13 +428,13 @@ func TestClose(t *testing.T) {
 	if res := exec(t, tl, map[string]any{"op": "close"}); !strings.Contains(res.Text, "no tab named") {
 		t.Errorf("second close = %+v", res)
 	}
-	if hits := f.listHits(); hits != 1 {
+	if hits := f.listPageHits(); hits != 1 {
 		t.Errorf("/json/list hits = %d, want 1 before re-attach", hits)
 	}
 	if res := exec(t, tl, map[string]any{"op": "eval", "expression": "1"}); res.IsError {
 		t.Fatalf("eval after close failed: %s", res.Text)
 	}
-	if hits := f.listHits(); hits != 2 {
+	if hits := f.listPageHits(); hits != 2 {
 		t.Errorf("/json/list hits = %d, want 2 after re-attach", hits)
 	}
 

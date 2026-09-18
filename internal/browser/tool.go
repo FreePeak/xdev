@@ -3,12 +3,13 @@ package browser
 // The `browser` tool (M13 #50, research parity-tools-providers §D): a
 // minimal CDP client for an already-running Chrome.
 //
-// v1 attaches only. xdev never launches a browser, never creates a profile,
-// and never closes a user tab — `close` releases xdev's handle. That keeps
-// the blast radius of a tool the model can call on its own to "the websocket
-// is gone", and makes the failure mode a sentence the model can fix
-// ("start Chrome with --remote-debugging-port=9222") instead of a silent
-// headless browser.
+// Attach-first: when a browser is already listening on the configured
+// endpoint (a Chrome the user started with --remote-debugging-port) xdev
+// attaches to it and never touches the window, the profile or the user's
+// tabs — `close` releases xdev's handle. When nothing answers, xdev starts a
+// throwaway Chrome on that endpoint with its own profile (see launch.go)
+// instead of failing with instructions the model cannot carry out. An
+// explicit browser.autolaunch: false restores attach-only.
 //
 // Every op is bounded: a per-op timeout, a page-text cap, a JS-result cap,
 // and a screenshot byte cap. Page text is sanitized before it reaches the
@@ -37,7 +38,9 @@ import (
 const (
 	// DefaultTimeout bounds one op when the caller omits timeout.
 	DefaultTimeout = 30 * time.Second
-	// MinTimeout / MaxTimeout clamp the per-op timeout argument.
+	// MinTimeout / MaxTimeout clamp the per-op timeout argument. MinTimeout
+	// also bounds a cold attach: a launch that cannot open the port fails
+	// quickly instead of hanging the op.
 	MinTimeout = time.Second
 	MaxTimeout = 300 * time.Second
 
@@ -53,36 +56,107 @@ const (
 	// loadWait / loadPoll bound the post-navigate wait for readyState.
 	loadWait = 15 * time.Second
 	loadPoll = 100 * time.Millisecond
-
 	// defaultTabName is the handle used when the caller omits name.
 	defaultTabName = "main"
+
+	// profileDirName is the launched browser's profile directory under the
+	// tool's ProfileDir: a private profile, never the user's.
+	profileDirName = "profile"
 )
 
 // pngMagic identifies a PNG payload; a screenshot must be one.
-var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
-
 // Settings is the browser config block (`browser:` in config.yml).
 type Settings struct {
-	// CDPURL is the DevTools HTTP discovery base of a running browser
+	// CDPURL is the DevTools HTTP discovery base of the browser to drive
 	// ("http://127.0.0.1:9222", or the /json/list URL itself). Empty means
 	// $XDEV_BROWSER_CDP_URL, then Chrome's default port.
 	CDPURL string `yaml:"cdpUrl"`
 	// Timeout is the per-op limit in seconds (default 30, clamped 1..300).
 	Timeout int `yaml:"timeout"`
+	// Autolaunch, when set, starts a browser on CDPURL if nothing answers
+	// there: false is attach-only (every call reports the dead endpoint),
+	// true is the explicit form of the default. A pointer because the
+	// default is ON and an absent key must not read as "off".
+	Autolaunch *bool `yaml:"autolaunch"`
+	// NoAutolaunch is the resolved inverse of Autolaunch, filled in by
+	// config.BrowserConfig.
+	NoAutolaunch bool `yaml:"-"`
+	// IdleExit, when set, closes a browser xdev launched after that many
+	// seconds with no browser op: 0 means never (keep it for the session,
+	// the pre-idle-exit behavior). A pointer because the default is on.
+	// It never touches a browser the user started.
+	IdleExit *int `yaml:"idleExit"`
+	// ProfileDir is filled in by config.BrowserConfig with the private
+	// --user-data-dir a launched browser gets. It is not a config key:
+	// empty means the tool never launches one.
+	ProfileDir string `yaml:"-"`
 }
 
+// idleExitDefault is how long a launched browser stays up with no browser op
+// when browser.idleExit is not set.
+const idleExitDefault = 300 // five minutes
+
+// AutolaunchOn reports whether xdev may start a browser itself: the default
+// is on, so only an explicit `autolaunch: false` turns it off.
+func (s Settings) AutolaunchOn() bool {
+	return s.Autolaunch == nil || *s.Autolaunch
+}
+
+// IdleTimeoutOn is how long a launched browser sits idle before it is closed.
+// Zero means the idle exit is off; negative is treated as off rather than as
+// an instant, surprising close.
+func (s Settings) IdleTimeoutOn() time.Duration {
+	if s.IdleExit == nil {
+		return idleExitDefault * time.Second
+	}
+	if *s.IdleExit <= 0 {
+		return 0
+	}
+	return time.Duration(*s.IdleExit) * time.Second
+}
+
+// pngMagic identifies a PNG payload; a screenshot must be one.
+var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+
 // Tool is the `browser` tool. One instance per session: named tabs and their
-// CDP connections are per-instance state.
+// CDP connections are per-instance state, and so is the browser it launched
+// for itself (if any) — that one is the tool's to stop again.
 type Tool struct {
 	// Cfg is the browser: settings block (zero value = defaults).
 	Cfg Settings
 	// Blobs receives screenshots. nil means a store under the system temp dir.
 	Blobs *session.BlobStore
+	// ProfileDir is the private --user-data-dir of a browser xdev launches
+	// itself (a profileDir under the data dir). Empty means the tool only
+	// ever attaches to a browser already running.
+	ProfileDir string
+	// launchErr records a failed auto-launch, so the next attach reports
+	// that failure instead of repeating the launch.
+	launchErr error
+	// bot is the browser this tool launched and therefore owns: only the
+	// idle timer or Close stops it. A browser the user started is never in
+	// here.
+	bot *launched
+	// idleTimer fires after Cfg.IdleTimeoutOn() with no op and stops bot.
+	// One reusable timer for the tool's life: Reset starts it (and restarts
+	// one that already fired), so connecting and disconnecting it per op,
+	// which is where the leaks are, never happens. nil means idle exit is
+	// off or no browser was launched yet.
+	idleTimer *time.Timer
+	// botWG tracks a stop in flight so Close can wait for it.
+	botWG sync.WaitGroup
 
-	// ponytail: one mutex guards the tab map for the whole attach sequence,
-	// so the first two concurrent ops on a cold/slow endpoint serialize. The
-	// endpoint is loopback and Chrome answers instantly or refuses instantly;
-	// an upgrade path is a per-name in-flight placeholder if that ever bites.
+	// stopped records why the browser this tool launched is gone, so the
+	// next op can say so instead of reporting a bare connection error. The
+	// tool interface has no event stream: a Result text is the only channel
+	// a tool has to tell the model anything out of band.
+	stopped string
+
+	// ponytail: one mutex guards the tab map and the bot/idle pair for the
+	// whole attach sequence, so the first two concurrent ops on a cold/slow
+	// endpoint serialize. The endpoint is loopback and Chrome answers
+	// instantly or refuses instantly; an upgrade path is a per-name
+	// in-flight placeholder if that ever bites.
 	mu   sync.Mutex
 	tabs map[string]*tab
 }
@@ -108,7 +182,9 @@ func NewTool(cfg Settings, blobs *session.BlobStore) *Tool {
 	return &Tool{Cfg: cfg, Blobs: blobs, tabs: map[string]*tab{}}
 }
 
-// Close releases every attached connection. The browser tabs stay open.
+// Close releases every attached connection and stops the browser this tool
+// launched, if any: handles and page close while xdev is leaving. A browser
+// the user started is only detached from, never stopped.
 func (t *Tool) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -116,7 +192,79 @@ func (t *Tool) Close() error {
 		_ = tb.c.Close()
 		delete(t.tabs, name)
 	}
+	if t.idleTimer != nil {
+		t.idleTimer.Stop()
+	}
+	t.bot.stop(context.Background())
+	t.bot = nil
+	t.botWG.Wait() // a stop already in flight owns its own t.bot copy
 	return nil
+}
+
+// startIdle arms the idle clock for a browser this tool just launched. The
+// timer is created once and reused: Reset restarts a fired timer, and the
+// callback re-reads t.bot, so a timer that fires after a Close is a no-op.
+func (t *Tool) startIdle() {
+	timeout := t.Cfg.IdleTimeoutOn()
+	if timeout <= 0 {
+		return
+	}
+	if t.idleTimer == nil {
+		t.idleTimer = time.AfterFunc(timeout, func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.stopIdle()
+		})
+		return
+	}
+	t.idleTimer.Reset(timeout)
+}
+
+// pingIdle restarts the idle clock; the tool calls it for every op. With idle
+// exit off, or before any launch, it does nothing.
+func (t *Tool) pingIdle() {
+	if t.idleTimer != nil {
+		t.idleTimer.Reset(t.Cfg.IdleTimeoutOn())
+	}
+}
+
+// stopIdle stops the browser this tool launched and tells the session, so an
+// event caller learns its browser went away instead of finding a dead port.
+// The caller must hold t.mu.
+func (t *Tool) stopIdle() {
+	bot := t.bot
+	if bot == nil {
+		return
+	}
+	t.bot = nil
+	t.launchErr = nil
+	t.stopped = fmt.Sprintf("xdev's browser on %s was closed after %s idle; the next op attaches or launches again", bot.endpoint, t.Cfg.IdleTimeoutOn())
+	t.botWG.Add(1)
+	go func() {
+		defer t.botWG.Done()
+		// Deliberately not the op context: the timer fires between ops, so
+		// the sweep needs a context of its own.
+		bot.stop(context.Background())
+	}()
+}
+
+// pendingIdleNotice reports, once, that the browser this tool launched was
+// closed for being idle. The tool interface has no event stream, so the next
+// Result text is the only channel that reaches the model: the notice rides on
+// whatever op comes next and is then cleared, so it is not repeated.
+func (t *Tool) pendingIdleNotice() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// Something else answers on the endpoint now (a browser of the user's, or
+	// a relaunch): whatever closed was not this tool's.
+	if t.bot == nil {
+		if err := probeTargets(context.Background(), t.endpoint()); err == nil {
+			t.stopped = ""
+		}
+	}
+	notice := t.stopped
+	t.stopped = ""
+	return notice
 }
 
 // Name implements tool.Tool.
@@ -193,8 +341,13 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tool.Result, e
 	default:
 		return errResult(fmt.Sprintf("browser: unknown op %q (open|snapshot|screenshot|click|type|eval|close)", in.Op)), nil
 	}
+	t.pingIdle()
+	notice := t.pendingIdleNotice()
 	if err != nil {
 		return errResult(err.Error()), nil
+	}
+	if notice != "" {
+		res.Text = notice + "\n" + res.Text
 	}
 	return res, nil
 }
@@ -241,6 +394,7 @@ func (t *Tool) opSnapshot(ctx context.Context, in args) (tool.Result, error) {
 	tb.opMu.Lock()
 	defer tb.opMu.Unlock()
 
+	t.pingIdle()
 	text, err := tb.evaluate(ctx, snapshotExpr)
 	if err != nil {
 		return tool.Result{}, err
@@ -271,6 +425,7 @@ func (t *Tool) opScreenshot(ctx context.Context, in args) (tool.Result, error) {
 	tb.opMu.Lock()
 	defer tb.opMu.Unlock()
 
+	t.pingIdle()
 	raw, err := tb.c.Call(ctx, "Page.captureScreenshot", map[string]any{"format": "png"})
 	if err != nil {
 		return tool.Result{}, err
@@ -321,6 +476,8 @@ func (t *Tool) opClick(ctx context.Context, in args) (tool.Result, error) {
 	tb.opMu.Lock()
 	defer tb.opMu.Unlock()
 
+	t.pingIdle()
+
 	out, err := tb.evaluate(ctx, clickExpr(sel))
 	if err != nil {
 		return tool.Result{}, err
@@ -340,6 +497,8 @@ func (t *Tool) opType(ctx context.Context, in args) (tool.Result, error) {
 	}
 	tb.opMu.Lock()
 	defer tb.opMu.Unlock()
+
+	t.pingIdle()
 
 	out, err := tb.evaluate(ctx, typeExpr(sel, in.Text))
 	if err != nil {
@@ -361,6 +520,7 @@ func (t *Tool) opEval(ctx context.Context, in args) (tool.Result, error) {
 	tb.opMu.Lock()
 	defer tb.opMu.Unlock()
 
+	t.pingIdle()
 	out, err := tb.evaluate(ctx, expr)
 	if err != nil {
 		return tool.Result{}, err
@@ -415,8 +575,25 @@ func (t *Tool) ensure(ctx context.Context, name string) (*tab, error) {
 		claimed[other.targetID] = n
 	}
 	endpoint := t.endpoint()
-	targets, err := ListTargets(ctx, endpoint)
+	targets, err := ListTargets(ctx, endpoint, t.autolaunch())
+	if err != nil && t.autolaunch() && t.launchErr == nil && ctx.Err() == nil {
+		// Nothing is listening: start a browser on the endpoint, remember
+		// that xdev owns it, and retry once. A launch that fails is
+		// remembered too, so the next call reports the cause instead of
+		// launching again.
+		bot, lerr := ensureLaunched(ctx, endpoint, filepath.Join(t.ProfileDir, profileDirName))
+		if lerr != nil {
+			t.launchErr = lerr
+		} else {
+			t.bot = bot
+			t.startIdle()
+			targets, err = ListTargets(ctx, endpoint, true)
+		}
+	}
 	if err != nil {
+		if t.launchErr != nil {
+			return nil, t.launchErr
+		}
 		return nil, err
 	}
 	tgt, ok := pickPage(targets, claimed)
@@ -714,3 +891,11 @@ func stripControl(s string) string {
 }
 
 func isControl(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }
+
+// autolaunch reports whether this tool may start a browser itself: an
+// explicit browser.autolaunch: false, or no profile dir to launch one with,
+// means attach-only and the unreachable-endpoint error names starting Chrome
+// by hand.
+func (t *Tool) autolaunch() bool {
+	return t.Cfg.AutolaunchOn() && t.ProfileDir != ""
+}

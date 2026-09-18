@@ -2,13 +2,12 @@ package browser
 
 // CDP client + target discovery (M13 #50).
 //
-// Attach-only by design: xdev discovers pages through Chrome's HTTP
-// discovery endpoint (/json/list) and then drives the page's own websocket.
-// It never launches a browser and never creates a profile — the tool is a
-// client of a Chrome the user started with --remote-debugging-port, which
-// keeps the "real logged-in session" and "fresh throwaway profile" cases
-// separate and makes a missing browser an actionable error instead of a
-// silent headless fallback.
+// xdev discovers pages through Chrome's HTTP discovery endpoint (/json/list)
+// and then drives the page's own websocket. It prefers a browser the user
+// already started with --remote-debugging-port — the real logged-in session,
+// which the tool never touches beyond the pages it drives. When nothing is
+// listening it starts its own browser on a private profile (launch.go);
+// browser.autolaunch: false keeps attach-only.
 
 import (
 	"context"
@@ -19,7 +18,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 )
 
 // maxDiscoveryBytes caps the /json/list response: a browser with a hundred
@@ -78,7 +76,8 @@ func dialCDP(ctx context.Context, wsURL string) (*cdpConn, error) {
 	return c, nil
 }
 
-// alive reports whether the connection is still usable.
+// alive reports whether the connection is still usable (the read loop has not
+// failed it).
 func (c *cdpConn) alive() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -234,23 +233,38 @@ func discoveryURL(endpoint string) string {
 }
 
 // ListTargets reads the browser's target list from the discovery endpoint.
-// A connection failure is turned into the "no browser here" error the model
-// needs to act on.
-func ListTargets(ctx context.Context, endpoint string) ([]Target, error) {
+// A connection failure is turned into the "no browser here" error the caller
+// needs to act on; autolaunch selects which remedy that error names.
+//
+// ponytail: no client timeout — the caller's context carries the per-op
+// deadline (the tool always passes one), so a hung endpoint cannot outlive
+// the call. A bare-Endpoint caller (tests) relies on its own context.
+func ListTargets(ctx context.Context, endpoint string, autolaunch bool) ([]Target, error) {
+	return listTargets(ctx, endpoint, autolaunch, false)
+}
+
+// probeTargets is ListTargets for the tool's liveness probes (is a browser
+// answering at all?), not for the attach sequence. Same request, tagged so a
+// test fake can count the two separately.
+func probeTargets(ctx context.Context, endpoint string) error {
+	_, err := listTargets(ctx, endpoint, false, true)
+	return err
+}
+
+func listTargets(ctx context.Context, endpoint string, autolaunch, probe bool) ([]Target, error) {
 	url := discoveryURL(endpoint)
+	if probe {
+		url += "?_xdev=probe"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("browser: discovery request: %w", err)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, unreachableErr(endpoint, err)
+		return nil, unreachableErr(endpoint, err, autolaunch)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("browser: %s returned %s", url, resp.Status)
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryBytes))
 	if err != nil {
 		return nil, fmt.Errorf("browser: reading %s: %w", url, err)
@@ -262,10 +276,15 @@ func ListTargets(ctx context.Context, endpoint string) ([]Target, error) {
 	return targets, nil
 }
 
-// unreachableErr names the fix, not just the failure: xdev attaches to an
-// existing browser, so "nothing on that port" always means the user has to
-// start Chrome with remote debugging enabled.
-func unreachableErr(endpoint string, err error) error {
+// unreachableErr names the fix, not just the failure: "nothing on that port"
+// means the endpoint is not a running browser, and what to do about it
+// depends on whether xdev is allowed to start one itself.
+func unreachableErr(endpoint string, err error, autolaunch bool) error {
+	if autolaunch {
+		return fmt.Errorf("browser: no Chrome DevTools endpoint at %s (%v); could not auto-launch one — set $%s to a Chrome/Chromium binary, or start one yourself with "+
+			"--remote-debugging-port=9222 (Chrome 136+ also needs a non-default --user-data-dir=<dir>), "+
+			"then retry — browser.autolaunch: false turns the launch off", endpoint, err, envBinary)
+	}
 	return fmt.Errorf("browser: no Chrome DevTools endpoint at %s (%v); start Chrome/Chromium with "+
 		"--remote-debugging-port=9222 (Chrome 136+ also needs a non-default --user-data-dir=<dir>), "+
 		"then retry — or set browser.cdpUrl / $%s to the right endpoint", endpoint, err, envEndpoint)

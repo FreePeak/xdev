@@ -496,8 +496,9 @@ type Settings struct {
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
 	// Browser configures the browser tool (M13 #50): the CDP discovery
-	// endpoint of an already-running Chrome. xdev never launches a browser,
-	// so an empty block means "attach to 127.0.0.1:9222".
+	// endpoint of a Chrome, and whether xdev may start one on it when
+	// nothing answers. An empty block means "attach to 127.0.0.1:9222,
+	// launching a private-profile Chrome there if nothing is listening".
 	Browser BrowserSettings `yaml:"browser"`
 	// Ask configures the ask tool (M11 #36): ask.timeout bounds how long
 	// a headless run waits for an answer before the recommended option
@@ -1006,14 +1007,18 @@ func (s *Settings) HandoffSaveToDisk() bool {
 	return s != nil && s.Handoff.SaveToDisk
 }
 
-// BrowserConfig returns the browser block; the zero value is the default
-// endpoint on Chrome's standard debugging port (same nil tolerance as
-// WebSearchConfig for pre-main callers).
+// BrowserConfig returns the browser block plus the profile directory a
+// launched browser gets, and resolves browser.autolaunch (a *bool so an
+// unset key means on, not off — see the BrowserSettings type).
 func (s *Settings) BrowserConfig() browser.Settings {
 	if s == nil {
-		return browser.Settings{}
+		return browser.Settings{ProfileDir: filepath.Join(DataDir(), "browser")}
 	}
-	return s.Browser
+	cfg := s.Browser
+	cfg.NoAutolaunch = !s.Browser.AutolaunchOn()
+	cfg.ProfileDir = filepath.Join(DataDir(), "browser")
+	cfg.IdleExit = s.Browser.IdleExit
+	return cfg
 }
 
 // AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
@@ -1548,6 +1553,16 @@ func (s *Settings) merge(layer *Settings) error {
 			return fmt.Errorf("browser.timeout must be positive, got %d", layer.Browser.Timeout)
 		}
 		s.Browser.Timeout = layer.Browser.Timeout
+	}
+	// A plain false means "off" here, unlike the plain-bool settings above:
+	// autolaunch defaults ON, so the pointer is what lets a layer say no.
+	if layer.Browser.Autolaunch != nil {
+		s.Browser.Autolaunch = layer.Browser.Autolaunch
+	}
+	// idleExit takes any int: 0 (or less) means "keep the launched browser
+	// for the session", so only nil — an absent key — keeps the default.
+	if layer.Browser.IdleExit != nil {
+		s.Browser.IdleExit = layer.Browser.IdleExit
 	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
