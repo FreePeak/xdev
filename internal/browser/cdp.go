@@ -240,7 +240,22 @@ func discoveryURL(endpoint string) string {
 // deadline (the tool always passes one), so a hung endpoint cannot outlive
 // the call. A bare-Endpoint caller (tests) relies on its own context.
 func ListTargets(ctx context.Context, endpoint string, autolaunch bool) ([]Target, error) {
+	return listTargets(ctx, endpoint, autolaunch, false)
+}
+
+// probeTargets is ListTargets for the tool's liveness probes (is a browser
+// answering at all?), not for the attach sequence. Same request, tagged so a
+// test fake can count the two separately.
+func probeTargets(ctx context.Context, endpoint string) error {
+	_, err := listTargets(ctx, endpoint, false, true)
+	return err
+}
+
+func listTargets(ctx context.Context, endpoint string, autolaunch, probe bool) ([]Target, error) {
 	url := discoveryURL(endpoint)
+	if probe {
+		url += "?_xdev=probe"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("browser: discovery request: %w", err)

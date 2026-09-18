@@ -24,16 +24,42 @@ import (
 // previous run cannot be mistaken for a live endpoint someone else owns.
 const e2eEndpoint = "http://127.0.0.1:9231"
 
+// e2eLaunchBudget is how long this test waits for a real browser to come and
+// go; a cold Chrome start is a second or two, an idle exit a couple more.
+const e2eLaunchBudget = 20 * time.Second
+
+// e2eWaitForPort blocks until the endpoint answers (up) or stops answering
+// (down), and fails the test on timeout.
+func e2eWaitForPort(t *testing.T, up bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(e2eLaunchBudget)
+	for {
+		_, err := ListTargets(context.Background(), e2eEndpoint, false)
+		if (err == nil) == up {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the launched browser did not %s within %s", what, e2eLaunchBudget)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func TestRealChromeAutolaunch(t *testing.T) {
 	if os.Getenv("XDEV_BROWSER_E2E") != "1" {
 		t.Skip("set XDEV_BROWSER_E2E=1 to launch a real browser")
 	}
-	installProbe(t, e2eEndpoint)
+	if installProbe(t, e2eEndpoint) {
+		stopE2EBrowser(t)
+	}
 	t.Setenv(envEndpoint, e2eEndpoint)
 	// Keep the launched browser's profile out of t.TempDir: the test cannot
 	// remove a directory a live Chrome is still writing to.
 	profile := filepath.Join(os.TempDir(), "xdev-browser-e2e-profile")
-	tl := NewTool(Settings{}, session.NewBlobStore(t.TempDir()))
+	// idleExit: 2 so the run also proves the browser xdev launched goes away
+	// by itself, without waiting the default five minutes.
+	idle := 2
+	tl := NewTool(Settings{IdleExit: &idle}, session.NewBlobStore(t.TempDir()))
 	tl.ProfileDir = profile
 	defer tl.Close()
 
@@ -66,6 +92,25 @@ func TestRealChromeAutolaunch(t *testing.T) {
 
 	if closeRes := call(map[string]any{"op": "close", "all": true}); closeRes.IsError {
 		t.Fatalf("close = %+v", closeRes)
+	}
+
+	// Nothing touches the browser from here: after idleExit the browser xdev
+	// launched must be gone, and the next op must say so.
+	e2eWaitForPort(t, false, "close itself after the idle timeout")
+	// A fresh endpoint is live again, but a new tab has to be opened for it:
+	// snapshot alone would be looking for the page the old browser had.
+	reopened := call(map[string]any{"op": "open", "url": "data:text/html,<title>again</title><h1>hi</h1>"})
+	if reopened.IsError {
+		t.Fatalf("open after idle exit failed: %s", reopened.Text)
+	}
+	e2eWaitForPort(t, true, "come back for the next op")
+	if !strings.Contains(reopened.Text, "was closed after") {
+		t.Fatalf("open after idle exit = %q, want the idle-exit notice", reopened.Text)
+	}
+	t.Logf("after idle exit: %s", reopened.Text)
+	// The notice is one-shot: the following op is clean.
+	if again := call(map[string]any{"op": "eval", "expression": "document.title"}); strings.Contains(again.Text, "was closed after") {
+		t.Fatalf("the idle-exit notice repeated: %q", again.Text)
 	}
 }
 

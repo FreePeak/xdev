@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBrowserSettingsLayer(t *testing.T) {
@@ -32,6 +33,9 @@ func TestBrowserSettingsLayer(t *testing.T) {
 	if !got.AutolaunchOn() {
 		t.Error("browser.autolaunch must default on")
 	}
+	if got.IdleTimeoutOn() != 300*time.Second {
+		t.Errorf("browser.idleExit default = %s, want 5m", got.IdleTimeoutOn())
+	}
 	if got.ProfileDir == "" {
 		t.Error("BrowserConfig must resolve a launch profile dir")
 	}
@@ -48,8 +52,27 @@ func TestBrowserSettingsLayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.BrowserConfig().AutolaunchOn() {
-		t.Error("browser.autolaunch: false must stay off")
+
+	// idleExit layers like the rest: a value sets it, 0 means "keep the
+	// browser for the session".
+	idle := writeFile(t, filepath.Join(t.TempDir(), "idle.yml"), "browser:\n  idleExit: 30\n")
+	s, err = LoadSettings(cwd, []string{idle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.BrowserConfig().IdleTimeoutOn(); got != 30*time.Second {
+		t.Errorf("browser.idleExit: 30 gives %s, want 30s", got)
+	}
+	never := writeFile(t, filepath.Join(t.TempDir(), "never.yml"), "browser:\n  idleExit: 0\n")
+	s, err = LoadSettings(cwd, []string{never})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.BrowserConfig().IdleTimeoutOn(); got != 0 {
+		t.Errorf("browser.idleExit: 0 gives %s, want the idle exit off", got)
+	}
+	if !s.BrowserConfig().AutolaunchOn() {
+		t.Error("idleExit must not disturb autolaunch")
 	}
 }
 

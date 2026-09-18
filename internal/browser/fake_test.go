@@ -35,8 +35,11 @@ type fakeCDP struct {
 	hangs    map[string]bool
 	// preEvents are event frames written before the reply to that method.
 	preEvents map[string]json.RawMessage
-	// listCount counts /json/list hits (attach/re-attach assertions).
-	listCount int
+	// listCount counts every /json/list hit; listPageCount counts only the
+	// attach-shaped ones (the idle-notice probe marks itself, see
+	// targetListURL).
+	listCount     int
+	listPageCount int
 }
 
 type fakeCall struct {
@@ -103,6 +106,16 @@ func (f *fakeCDP) setHandler(handler cdpHandler) {
 	f.handler = handler
 }
 
+// listPageHits counts /json/list requests that asked for pages (the tool's
+// attach sequence). It excludes the probe pendingIdleNotice makes to tell "no
+// browser is listening" from "a browser is listening again": that probe is
+// bookkeeping, not an attach.
+func (f *fakeCDP) listPageHits() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listPageCount
+}
+
 func (f *fakeCDP) listHits() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -132,6 +145,9 @@ func (f *fakeCDP) lastCall(method string) (json.RawMessage, bool) {
 func (f *fakeCDP) serveList(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.listCount++
+	if r.URL.Query().Get("_xdev") != "probe" {
+		f.listPageCount++
+	}
 	pages := append([]Target(nil), f.pages...)
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")

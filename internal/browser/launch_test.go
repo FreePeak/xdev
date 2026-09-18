@@ -2,6 +2,8 @@ package browser
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -65,6 +67,49 @@ func TestAutolaunchOn(t *testing.T) {
 	tl.Cfg.Autolaunch = &off
 	if tl.autolaunch() {
 		t.Error("autolaunch: false must win over the profile dir")
+	}
+}
+
+// TestIdleTimeoutOn asserts the idle exit default and that 0 (or less) turns
+// it off rather than closing an instant after launch.
+func TestIdleTimeoutOn(t *testing.T) {
+	if got := (Settings{}).IdleTimeoutOn(); got != 5*time.Minute {
+		t.Errorf("default idle timeout = %s, want 5m", got)
+	}
+	twenty := 20
+	if got := (Settings{IdleExit: &twenty}).IdleTimeoutOn(); got != 20*time.Second {
+		t.Errorf("idleExit: 20 gives %s, want 20s", got)
+	}
+	for _, secs := range []int{0, -1} {
+		s := secs
+		if got := (Settings{IdleExit: &s}).IdleTimeoutOn(); got != 0 {
+			t.Errorf("idleExit: %d gives %s, want the idle exit off", secs, got)
+		}
+	}
+}
+
+// TestPendingIdleNotice asserts the one channel the tool has to explain an
+// out-of-band event: the idle exit's notice rides on the next Result and is
+// then cleared, so it is reported once and not repeated on every op.
+func TestPendingIdleNotice(t *testing.T) {
+	tl := &Tool{Cfg: Settings{CDPURL: "http://127.0.0.1:9"}, tabs: map[string]*tab{}}
+	tl.stopped = "xdev's browser on http://127.0.0.1:9 was closed after 5m0s idle"
+	if got := tl.pendingIdleNotice(); !strings.Contains(got, "was closed after") {
+		t.Fatalf("notice = %q, want the idle-exit explanation", got)
+	}
+	if again := tl.pendingIdleNotice(); again != "" {
+		t.Fatalf("notice repeated: %q", again)
+	}
+	// A live endpoint that the tool did not launch (nothing in bot) means
+	// the notice describes a browser that is not the one answering.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	tl.stopped = "stale"
+	tl.Cfg.CDPURL = srv.URL
+	if got := tl.pendingIdleNotice(); got != "" {
+		t.Fatalf("notice on a live endpoint = %q, want none", got)
 	}
 }
 
@@ -135,7 +180,10 @@ func TestEnsureLaunchedFailsFast(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), MinTimeout)
 	defer cancel()
 	start := time.Now()
-	err := ensureLaunched(ctx, endpoint, filepath.Join(dir, "profile"))
+	bot, err := ensureLaunched(ctx, endpoint, filepath.Join(dir, "profile"))
+	if bot != nil {
+		t.Fatal("a failed launch must not report a browser")
+	}
 	if err == nil {
 		t.Fatal("ensureLaunched must fail when the port never opens")
 	}

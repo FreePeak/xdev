@@ -1017,6 +1017,7 @@ func (s *Settings) BrowserConfig() browser.Settings {
 	cfg := s.Browser
 	cfg.NoAutolaunch = !s.Browser.AutolaunchOn()
 	cfg.ProfileDir = filepath.Join(DataDir(), "browser")
+	cfg.IdleExit = s.Browser.IdleExit
 	return cfg
 }
 
@@ -1557,6 +1558,11 @@ func (s *Settings) merge(layer *Settings) error {
 	// autolaunch defaults ON, so the pointer is what lets a layer say no.
 	if layer.Browser.Autolaunch != nil {
 		s.Browser.Autolaunch = layer.Browser.Autolaunch
+	}
+	// idleExit takes any int: 0 (or less) means "keep the launched browser
+	// for the session", so only nil — an absent key — keeps the default.
+	if layer.Browser.IdleExit != nil {
+		s.Browser.IdleExit = layer.Browser.IdleExit
 	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout

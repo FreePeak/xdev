@@ -6,16 +6,19 @@ package browser
 // Attach-first: when something already answers on the endpoint (a Chrome the
 // user started with --remote-debugging-port) xdev attaches to it and this
 // file is never reached. Only "connection refused" gets here — and the answer
-// to that is a browser of xdev's own on a private profile, not a failure the
-// model has to relay to a user who asked for a screenshot.
+// to that is a browser of xdev's own on a private profile, which the tool
+// then owns: it is stopped again after idling unused (Settings.IdleTimeout).
 //
 // The user's browser is still never touched: a launched browser runs on its
 // own --user-data-dir and only ever listens on loopback.
 //
 // os/exec is aliased: the package already has an `exec` test helper.
+
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -26,10 +29,12 @@ import (
 )
 
 // launchMaxWait is the ceiling on a cold auto-launch; launchPoll is how often
-// its port is probed.
+// a fresh browser's port is probed; stopSweepWait bounds the page sweep in
+// stop() so a wedged browser cannot hang the caller.
 const (
 	launchMaxWait = 15 * time.Second
 	launchPoll    = 150 * time.Millisecond
+	stopSweepWait = 5 * time.Second
 )
 
 // launchBudget bounds a cold auto-launch (starting the binary plus waiting
@@ -205,34 +210,92 @@ func splitHostPort(addr string) (host, port string, ok bool) {
 	return addr[:i], addr[i+1:], true
 }
 
-// ensureLaunched starts a browser on the endpoint and waits for its discovery
-// port to answer. A browser that never opens the port (someone else took it,
-// or the binary ignored the flag) is killed, so a failed launch leaves
-// nothing behind.
-func ensureLaunched(ctx context.Context, endpoint, profileDir string) error {
+// ensureLaunched starts a browser on the endpoint, waits for its discovery
+// port to answer, and hands the live process back so idle exit can stop it.
+// A browser that never opens the port (someone else took it, or the binary
+// ignored the flag) is killed, so a failed launch leaves nothing behind.
+func ensureLaunched(ctx context.Context, endpoint, profileDir string) (*launched, error) {
 	proc, err := launchBrowser(endpoint, profileDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	wait := launchBudget(ctx)
 	deadline := time.Now().Add(wait)
 	for {
 		if _, err := ListTargets(ctx, endpoint, true); err == nil {
-			return nil
+			return &launched{proc: proc, endpoint: endpoint}, nil
 		}
 		if ctx.Err() != nil {
 			_ = proc.Kill()
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 		if time.Now().After(deadline) {
 			_ = proc.Kill()
-			return fmt.Errorf("launched a browser for %s but its DevTools port did not answer within %s", endpoint, wait)
+			return nil, fmt.Errorf("launched a browser for %s but its DevTools port did not answer within %s", endpoint, wait)
 		}
 		select {
 		case <-ctx.Done():
 			_ = proc.Kill()
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(launchPoll):
 		}
 	}
+}
+
+// launched is a browser xdev started itself, and what stopping it needs.
+type launched struct {
+	proc     *os.Process
+	endpoint string
+}
+
+// stop ends a browser xdev launched: every page it is showing, then the
+// process. The page sweep runs first because killing the process alone hits
+// the same thing the idle timer exists to fix.
+func (l *launched) stop(ctx context.Context) {
+	if l == nil || l.proc == nil {
+		return
+	}
+	// A wedged browser must not make Close hang: bound the sweep, then kill
+	// regardless.
+	ctx, cancel := context.WithTimeout(ctx, stopSweepWait)
+	defer cancel()
+	for _, tgt := range browsablePages(ctx, l.endpoint) {
+		_ = closeTarget(ctx, l.endpoint, tgt.ID)
+	}
+	_ = l.proc.Kill()    // the browser itself
+	_ = l.proc.Release() // and its handle
+}
+
+// browsablePages lists the pages worth closing, best-effort: a browser that
+// has already gone answers with nothing.
+func browsablePages(ctx context.Context, endpoint string) []Target {
+	targets, err := ListTargets(ctx, endpoint, true)
+	if err != nil {
+		return nil
+	}
+	var pages []Target
+	for _, t := range targets {
+		if t.Type == "page" {
+			pages = append(pages, t)
+		}
+	}
+	return pages
+}
+
+// closeTarget asks the browser to close one page. Chrome's HTTP API is enough
+// here (no websocket to negotiate), and a page that refuses is not worth a
+// retry loop.
+func closeTarget(ctx context.Context, endpoint, targetID string) error {
+	url := strings.TrimRight(endpoint, "/") + "/json/close/" + targetID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
