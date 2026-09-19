@@ -284,11 +284,10 @@ func (a *App) pasteClipboard() {
 	if a.clipImage == nil {
 		a.clipImage = clipboardImage
 	}
-	if a.vision != nil && !a.vision() {
-		a.setNotice("the current model takes no image input — switch with /model, or paste the file path instead")
-		a.poke()
-		return
-	}
+	// pasteClipboard pastes images regardless of the model's vision
+	// capability: a model that cannot read the attachment answers with
+	// text, so a wrong "no" would block the user on a feature nobody
+	// configured. (Removed: the a.vision() gate.)
 	data, mime, err := a.clipImage()
 	if err != nil {
 		// A chord that fails must say so, or it looks dead.

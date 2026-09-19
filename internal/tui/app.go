@@ -100,8 +100,8 @@ type App struct {
 	// (UI thread; mu-guarded.)
 	debugMouse     bool
 	debugMouseLine string
-	keyMap       *KeyMap // remappable keybinding layer
-	st           Status
+	keyMap         *KeyMap // remappable keybinding layer
+	st             Status
 	// The decode window of the message being streamed: the first and last
 	// delta, and the runes between them. AddUsage closes the window and
 	// turns it into st.Rate; starting a run discards an unfinished one.
@@ -239,11 +239,11 @@ type App struct {
 	selBarPos   int // thumb's first track row at paint time
 	// selNotice is the copy confirmation (omp's showStatus for a copy); it
 	// rides the composer divider until selNoticeUntil.
-	selNotice      string
-	selClickTime  time.Time
-	selClickCount int
+	selNotice            string
+	selClickTime         time.Time
+	selClickCount        int
 	selClickX, selClickY int
-	selClickLocked bool // re-entry guard (no mu needed on the App)
+	selClickLocked       bool // re-entry guard (no mu needed on the App)
 	// Double/triple-click detection: selClickTime/selClickCount/selClickX/Y
 	// track the last primary-button release so rapid repeats on the same
 	// position expand the gesture — double-click selects the word,
@@ -275,6 +275,12 @@ type App struct {
 	// state, its built rows. Nil until a source is wired; every reader of it
 	// tolerates that, because a session with no dock is a normal session.
 	dock *dockState
+	// selDockRows is the dock panel's rows, populated by paint()
+	// while the dock is on, so a selection drag over the panel
+	// copies the dock text (session id, task name) instead of
+	// the transcript rows painted underneath. nil when the dock
+	// is off. Callers hold a.mu.
+	selDockRows []selRow
 	// dockSetMode persists a display policy the human changed with Alt+s
 	// (settings `sidebarMode`); nil = this session cannot persist it.
 	dockSetMode func(mode string)
@@ -2870,7 +2876,7 @@ func (a *App) paint() {
 	// no longer on screen.
 	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
 	// draws no bar must not leave last frame's grab live on the last column.
-	a.scrollHint, a.selRows, a.selBarOn = "", nil, false
+	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows = "", nil, false, nil
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -3053,6 +3059,7 @@ func (a *App) paint() {
 	if a.dockOn() {
 		dtop, dh := a.dockGrid()
 		a.drawDock(s, w-dockCols, dtop, dh)
+		a.selDockRows = a.selDockRowsForPaint()
 	}
 	a.drawSessionPicker(composerTop)
 	a.drawHubRoster(composerTop)
