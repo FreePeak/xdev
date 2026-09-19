@@ -815,8 +815,6 @@ func (a *App) dockClick(x, y int) string {
 // and pushes the viewport to its first row; returns whether one was
 // found.
 func (a *App) dockJumpToBlock(path string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
 		if b.Kind != KindToolDone || b.Diff == "" {
