@@ -106,6 +106,7 @@ type dockRow struct {
 	add  string // "+41" (diff-added ink), empty on every row but a changed file
 	del  string // "-12" (diff-removed ink)
 	head bool
+	path string // full file path of a FILES row, so a click resolves it without re-parsing the clipped text
 }
 
 // right is the fragment a row aligns to the panel's right edge — and so the
@@ -442,7 +443,7 @@ func (a *App) dockChanges() (dockFold, bool) {
 	rows := make([]dockRow, 0, len(order))
 	for _, p := range order {
 		t := counts[p]
-		r := dockRow{add: fmt.Sprintf("+%d", t.add), del: fmt.Sprintf("-%d", t.del)}
+		r := dockRow{add: fmt.Sprintf("+%d", t.add), del: fmt.Sprintf("-%d", t.del), path: p}
 		r.text = dockPath(p, dockInner-width(r.right())-1) // -1: a cell between name and counts
 		rows = append(rows, r)
 	}
@@ -740,6 +741,192 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	}
 }
 
+// dockClick resolves a screen cell inside the panel to the file path
+// the click hit, or "" for everything that is not a changed-file row.
+// Callers hold a.mu.
+func (a *App) dockClick(x, y int) string {
+	if !a.dockOn() {
+		return ""
+	}
+	d := a.dock
+	if d == nil || d.lines == nil {
+		return ""
+	}
+	top, h := a.dockGrid()
+	if y < top+1 || y >= top+h {
+		return ""
+	}
+	i := y - top - 1
+	if i < 0 || i >= len(d.lines) {
+		return ""
+	}
+	return d.lines[i].path
+}
+
+// dockJumpToBlock walks the transcript for the most recent finished
+// tool result that changed path, marks it expanded so its diff paints,
+// and pushes the viewport to its first row; returns whether one was
+// found.
+func (a *App) dockJumpToBlock(path string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindToolDone || b.Diff == "" {
+			continue
+		}
+		if !strings.Contains(b.Diff, path) {
+			continue
+		}
+		b.Expanded = true
+		a.sync(a.contentWidth())
+		if i < len(a.rowIdx.start) && a.rowIdx.start[i+1] > a.rowIdx.start[i] {
+			target := int(a.rowIdx.start[i]) + a.transcriptTop()
+			vp := a.viewportLinesLocked()
+			cur := a.sm.Start(a.totalLinesLocked(), vp)
+			n := target - cur
+			if n < 0 {
+				n = -n
+			}
+			a.sm.ScrollUp(max(1, n-1), a.totalLinesLocked(), vp)
+			return true
+		}
+		return true
+	}
+	return false
+}
+
+// diffOverlay is the state of a full-width overlay shown when the
+// user clicks a changed file: the dock is ~40 columns, so the unified
+// diff gets its own surface. Esc closes it.
+type diffOverlay struct {
+	path      string
+	diff      string
+	lines     []line
+	width     int
+	scrollVp  int
+	scrollOff int
+}
+
+// openDiffOverlay renders the diff for the newest finished tool block
+// that touches path and stores it as the active overlay.
+func (a *App) openDiffOverlay(path string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindToolDone || b.Diff == "" {
+			continue
+		}
+		if !strings.Contains(b.Diff, path) {
+			continue
+		}
+		b.Expanded = true
+		w := a.contentWidth()
+		ov := &diffOverlay{path: path, diff: b.Diff, width: w}
+		ov.lines = a.diffCells(ov.diff, ov.width-4)
+		ov.scrollVp = max(1, len(ov.lines))
+		ov.scrollOff = 0
+		a.diffOv = ov
+		return true
+	}
+	return false
+}
+
+// closeDiffOverlay dismisses the overlay on the next frame.
+func (a *App) closeDiffOverlay() {
+	a.mu.Lock()
+	a.diffOv = nil
+	a.mu.Unlock()
+	a.poke()
+}
+
+// drawDiffOverlay renders the full-width diff surface above the composer.
+func (a *App) drawDiffOverlay(yComposerTop int) {
+	ov := a.diffOv
+	if ov == nil {
+		return
+	}
+	s := a.scr
+	w := a.width
+	x := 2
+	y0 := 1
+	panelH := yComposerTop - y0 - 1
+	if panelH < 4 {
+		return
+	}
+	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
+	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	bg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+	box := a.th.Box()
+	fillPanelRows(s, y0, y0+panelH-1, x, w-x, bg)
+	top := boxTop(box, brdSt, "", w-2*x)
+	bot := boxBottom(box, brdSt, w-2*x)
+	cx := x
+	for _, r := range top.runs {
+		drawText(s, cx, y0, r.text, r.style)
+		cx += width(r.text)
+	}
+	cx = x
+	for _, r := range bot.runs {
+		drawText(s, cx, y0+panelH-1, r.text, r.style)
+		cx += width(r.text)
+	}
+	vr := boxRune(box.Vertical)
+	for y := y0 + 1; y < y0+panelH-1; y++ {
+		s.SetContent(x, y, vr, nil, brdSt)
+		s.SetContent(w-x-1, y, vr, nil, brdSt)
+	}
+	drawText(s, x+2, y0+1, "diff "+ov.path, fgSt.Bold(true))
+	ds := a.diffStyle()
+	start := ov.scrollOff
+	end := start + ov.scrollVp
+	if end > len(ov.lines) {
+		end = len(ov.lines)
+	}
+	for i := start; i < end; i++ {
+		y := y0 + 2 + (i - start)
+		if y >= y0+panelH-1 {
+			break
+		}
+		ln := ov.lines[i]
+		if len(ln.runs) > 0 && strings.HasPrefix(ln.runs[0].text, "+") {
+			for _, r := range ln.runs {
+				drawText(s, x+2, y, r.text, ds.added)
+			}
+		} else if len(ln.runs) > 0 && strings.HasPrefix(ln.runs[0].text, "-") {
+			for _, r := range ln.runs {
+				drawText(s, x+2, y, r.text, ds.removed)
+			}
+		} else {
+			for _, r := range ln.runs {
+				drawText(s, x+2, y, r.text, r.style)
+			}
+		}
+	}
+	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll", dimSt)
+}
+
+// diffBodyScroll advances the overlay viewport by n lines (down=true)
+// or toward older rows (down=false).
+func (a *App) diffBodyScroll(n int, down bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ov := a.diffOv
+	if ov == nil || len(ov.lines) == 0 {
+		return
+	}
+	maxOff := max(0, len(ov.lines)-ov.scrollVp)
+	if down {
+		ov.scrollOff += n
+	} else {
+		ov.scrollOff -= n
+	}
+	ov.scrollOff = max(0, min(ov.scrollOff, maxOff))
+	a.poke()
+}
+
 // --- keys ---
 
 // dockKey routes the panel's two chords, called from the keymap's action switch —
@@ -752,13 +939,41 @@ func (a *App) dockKey(action string) bool {
 		a.dockCycle()
 	case "dock-fold":
 		a.dockFoldCycle()
+	case "dock-close-diff":
+		return a.dockCloseDiff()
+	case "dock-toggle-diff":
+		return a.dockToggleDiff()
 	default:
 		return false
 	}
 	return true
 }
 
-// dockFoldCycle walks the section states: source-decided, all open, all but the
+// dockCloseDiff dismisses the overlay on Esc.
+func (a *App) dockCloseDiff() bool {
+	if a.diffOv != nil {
+		a.closeDiffOverlay()
+		return true
+	}
+	return false
+}
+
+// dockToggleDiff closes the overlay if open, or re-opens it
+// for the dock's last changed-file row.
+func (a *App) dockToggleDiff() bool {
+	if a.diffOv != nil {
+		a.closeDiffOverlay()
+		return true
+	}
+	for i := len(a.dock.lines) - 1; i >= 0; i-- {
+		if a.dock.lines[i].path != "" {
+			return a.openDiffOverlay(a.dock.lines[i].path)
+		}
+	}
+	return false
+}
+
+
 // pending document shut, and back. The proposal is never folded away — the human
 // is being asked something, and a fold that hides the question has answered it.
 func (a *App) dockFoldCycle() {
@@ -768,4 +983,10 @@ func (a *App) dockFoldCycle() {
 	d.lines = nil // the fold state is what the row budget depends on
 	a.mu.Unlock()
 	a.poke()
+}
+
+// dockOverlayScroll advances the diff overlay's viewport
+// by n lines (down=true) or toward older rows (down=false).
+func (a *App) dockOverlayScroll(n int, down bool) {
+	a.diffBodyScroll(n, down)
 }
