@@ -1,6 +1,8 @@
 package typesafe
 
-import "testing"
+import (
+	"testing"
+)
 
 // TestConfigIdempotent exercises the Config() defaulting path
 // once, to keep coverage green if settings_test is the only file

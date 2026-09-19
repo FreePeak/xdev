@@ -7,16 +7,30 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"time"
 )
 
-// baseURL is the API root; systemOnePath is appended to it. Kept as a
-// base (not the full endpoint) so a test can point it at an httptest
-// origin and still exercise the real path, and so TYPESAFE_BASE_URL
-// semantics match the official SDKs.
-var baseURL = "https://api.typesafe.ai"
+// baseURL is the API root; systemOnePath is appended to it. It
+// is a var so tests can override it (point at an httptest server)
+// and so TYPESAFE_BASE_URL lets operators redirect the client
+// (e.g. staging) without recompiling.
+var baseURL = func() string {
+	if v := os.Getenv("TYPESAFE_BASE_URL"); v != "" {
+		return v
+	}
+	return "https://api.typesafe.ai"
+}()
 
 // systemOnePath is the System One evaluation endpoint.
 const systemOnePath = "/v1/systemone"
+
+// DefaultModel is the model the tool sends when the caller omits one.
+const DefaultModel = "jev-latest"
+
+// DefaultTimeout bounds a single request to the API.
+const DefaultTimeout = 10 * time.Second
 
 // EvalRequest is the payload POST /v1/systemone expects.
 type EvalRequest struct {
@@ -35,19 +49,25 @@ type EvalResponse struct {
 
 // Evaluator talks to the TypeSafe System One endpoint.
 type Evaluator struct {
-	client *http.Client
-	model  string
-	key    string
+	client     *http.Client
+	model      string
+	key        string
+	httpClient *http.Client // override for tests; nil means use client
 }
 
 // NewEvaluator builds an evaluator from a configured settings block.
 func NewEvaluator(s Settings) *Evaluator {
 	return &Evaluator{
-		client: &http.Client{Timeout: s.Timeout},
-		model:  s.Model,
-		key:    s.APIKey,
+		client:     &http.Client{Timeout: s.Timeout},
+		model:      s.Model,
+		key:        s.APIKey,
+		httpClient: nil,
 	}
 }
+
+// TestEvaluatorHTTP sets an alternate http.Client for Evaluate.
+// Tests build a request through Evaluate without touching baseURL.
+func (e *Evaluator) TestEvaluatorHTTP(c *http.Client) { e.httpClient = c }
 
 // Evaluate sends state + questions to System One and returns the
 // parsed answer map. An empty or unparseable body returns an empty map.
@@ -62,14 +82,22 @@ func (e *Evaluator) Evaluate(ctx context.Context, state map[string]any, question
 		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+systemOnePath, bytes.NewReader(body))
+	endpoint, err := url.JoinPath(baseURL, systemOnePath)
+	if err != nil {
+		return nil, fmt.Errorf("typesafe: build URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+e.key)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := e.client.Do(req)
+	client := e.client
+	if e.httpClient != nil {
+		client = e.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: request failed: %w", err)
 	}
