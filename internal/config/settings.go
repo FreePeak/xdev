@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/FreePeak/xdev/internal/websearch"
+	"github.com/FreePeak/xdev/internal/typesafe"
 )
 
 // Settings layering (M9 #10, research parity-session-ux §10): schema
@@ -495,6 +496,10 @@ type Settings struct {
 	// WebSearch configures the web_search provider chain (M13 #48):
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
+	// TypeSafe configures the typesafe tool (M15): the System One model
+	// and request timeout. The API key comes from TYPESAFE_API_KEY at
+	// request time, never from the settings file.
+	TypeSafe TypeSafeSettings `yaml:"typesafe"`
 	// Browser configures the browser tool (M13 #50): the CDP discovery
 	// endpoint of an already-running Chrome. xdev never launches a browser,
 	// so an empty block means "attach to 127.0.0.1:9222".
@@ -780,6 +785,12 @@ type WebSearchSettings = websearch.Settings
 // BrowserSettings is the browser: config block (M13 #50). Same alias rule as
 // WebSearchSettings: the engine (internal/browser) owns the struct.
 type BrowserSettings = browser.Settings
+// TypeSafeSettings is the typesafe config block: the System One model
+// and request timeout (M15). The API key is never a config field — it
+// comes from TYPESAFE_API_KEY at request time, so a leaked settings
+// file never carries a credential. Aliased (not redeclared) for the
+// same import-cycle reason as WebSearchSettings.
+type TypeSafeSettings = typesafe.Settings
 
 // defaultSettings is the schema-defaults layer.
 // memoryOrDefault reports the effective memory backend ("" = off).
@@ -998,6 +1009,18 @@ func (s *Settings) ImageGenConfig() imagegen.Settings {
 		}
 	}
 	return cfg
+}
+// TypeSafeConfig returns the typesafe block with ${VAR} references in
+// Settings.ApiKey expanded and model/timeout defaulted. Nil-safe: the
+// zero value is a keyless block, which the tool reports as a missing
+// TYPESAFE_API_KEY instead of making a request.
+func (s *Settings) TypeSafeConfig() typesafe.Settings {
+	if s == nil {
+		return typesafe.Settings{}
+	}
+	cfg := s.TypeSafe
+	cfg.APIKey = Resolve(cfg.APIKey)
+	return cfg.Config()
 }
 
 // HandoffSaveToDisk reports whether handoff documents are mirrored to disk
