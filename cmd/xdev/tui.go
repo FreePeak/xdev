@@ -228,8 +228,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// is wiped) and the session file is closed. It reads `store` at exit, so
 	// /new, /fork and /resume change what the line names.
 	defer func() {
-		if hint := resumeHint(store, cwd); hint != "" {
-			fmt.Println(hint)
+		if text := exitMenuText(store, cwd); text != "" {
+			fmt.Print(text)
 		}
 	}()
 	defer func() {
