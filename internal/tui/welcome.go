@@ -173,6 +173,19 @@ func (a *App) topPrompts() (first, last string) {
 	return first, last
 }
 
+// firstUserPrompt returns the first user message of the session,
+// unclipped (no byte ceiling): the dock title may be long and only
+// the front-end trims it for display. Caller holds a.mu.
+func (a *App) firstUserPrompt() string {
+	for _, b := range a.blocks {
+		if b.Kind != KindUser {
+			continue
+		}
+		return b.Text
+	}
+	return ""
+}
+
 // topPromptCells is the smallest share of the bar at which one prompt still
 // says something — a word plus the ellipsis that admits it was cut. Below two
 // shares there is nothing to gain from naming both prompts, so the bar keeps

@@ -708,7 +708,7 @@ func (a *App) dockTitle() string {
 	if d := a.dock; d != nil && d.title != "" {
 		return d.title
 	}
-	if first, _ := a.topPrompts(); first != "" {
+	if first := a.firstUserPrompt(); first != "" {
 		return first
 	}
 	return ""
@@ -1017,7 +1017,6 @@ func (a *App) dockToggleDiff() bool {
 	}
 	return false
 }
-
 
 // pending document shut, and back. The proposal is never folded away — the human
 // is being asked something, and a fold that hides the question has answered it.
