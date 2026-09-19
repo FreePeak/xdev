@@ -14,6 +14,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
+	"github.com/FreePeak/xdev/internal/typesafe"
 )
 
 // TurnHooks receive turn progress. print mode prints deltas; the session
@@ -228,6 +229,16 @@ type Agent struct {
 	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
 	MaxTurns int
+	// SessionBudget, when set, runs a Jev advisory before
+	// the hard wall-clock cap bites. nil disables the advisory.
+	SessionBudget *typesafe.SessionBudget
+	// SessionEvaluator runs the advisory request.
+	SessionEvaluator *typesafe.Evaluator
+	// sessionStart is the wall clock Run() stamps at entry.
+	sessionStart time.Time
+	// budgetAdvisoryLast is when the last advisory fired,
+	// so the early nudge does not run every turn.
+	budgetAdvisoryLast time.Time
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
@@ -353,6 +364,7 @@ func (a *Agent) drainSteering() []Steering {
 // failing the run.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (final *ai.Message, runErr error) {
+	a.sessionStart = time.Now()
 	if a.Hooks == nil {
 		a.Hooks = TurnHooksFunc{} // no-op: an unwired agent must not panic mid-turn
 	}
@@ -412,6 +424,35 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 	}
 	limit := a.effectiveMaxTurns()
+	// maybeBudgetAdvisory asks System One whether the session
+	// should continue. It fires at WarnPct (default 90%) of Max
+	// (VWrapUp) and at Max itself (VStopNow). Throttled:
+	// one advisory per budget window, never one-per-turn.
+	maybeBudgetAdvisory := func() {
+		if a.SessionBudget == nil || a.SessionEvaluator == nil {
+			return
+		}
+		elapsed := time.Since(a.sessionStart)
+		max := a.SessionBudget.Max
+		warn := time.Duration(float64(max) * a.SessionBudget.WarnPct)
+		var v typesafe.Verdict
+		switch {
+		case elapsed >= max:
+			if !a.budgetAdvisoryLast.IsZero() && time.Since(a.budgetAdvisoryLast) < max {
+				return
+			}
+			v = typesafe.VStopNow
+		case elapsed >= warn:
+			if !a.budgetAdvisoryLast.IsZero() && time.Since(a.budgetAdvisoryLast) < max-warn {
+				return
+			}
+			v = typesafe.VWrapUp
+		default:
+			return
+		}
+		a.budgetAdvisoryLast = time.Now()
+		a.budgetAdvisory(ctx, v)
+	}
 	// nudges is per run, not per turn: the empty-completion nudge below is
 	// spent at most maxEmptyTurnNudges times, so a model that can only ever
 	// emit reasoning cannot make the loop spend unbounded turns on it (the
@@ -431,6 +472,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 
 		turnsUsed = turn + 1
 		emit("turn_start", map[string]any{"turn": turn})
+		maybeBudgetAdvisory()
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
 		for _, s := range a.drainSteering() {
@@ -548,6 +590,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 		emit("turn_end", map[string]any{"turn": turn})
 	}
+	maybeBudgetAdvisory()
 	// Budget exhausted: ask for one wrap-up message rather than erroring.
 	// The prompt is persisted so a store rebuild keeps it, and tool calls in
 	// the wrap-up reply are NOT executed (session/context neutralizes the
