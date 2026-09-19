@@ -150,7 +150,11 @@ const EmptyTurnAttribution = "empty-turn"
 // ending it with an ERROR is what makes the stop visible and retryable
 // upward, instead of a silent "the session just stopped" (#331 field
 // report: session 1883e928 painted a stop and no error).
-var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call")
+// ErrEmptyTurnSuffix is appended to ErrEmptyTurn so callers can
+// detect the condition and recover from it.
+const ErrEmptyTurnSuffix = "empty-turn"
+
+var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call: " + ErrEmptyTurnSuffix)
 
 // maxEmptyTurnNudges bounds blank-turn recovery. One was the old bound and
 // it is not enough: a thinking-mode upstream that answers every request

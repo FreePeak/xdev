@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -175,6 +176,17 @@ func (h *rpcHandler) Prompt(id, text string) {
 	go func() {
 		defer cancel()
 		msg, err := h.agent.Run(ctx, h.buildSys(), hist)
+		if err != nil && errors.Is(err, agent.ErrEmptyTurn) {
+			// The model answered nothing after every nudge was spent
+			// (a thinking-mode upstream leaving only a reasoning block,
+			// or nothing at all). Rebuild context from the persisted
+			// history and re-run the agent so the session auto-resumes
+			// instead of dying with a dead-end error (#331).
+			ctxRes, rerr := session.BuildContext(h.store.Entries(), h.store.LeafID(), session.SystemPrompt{})
+			if rerr == nil {
+				msg, err = h.agent.Run(ctx, h.buildSys(), ctxRes.Messages)
+			}
+		}
 		resp := protocol.Response{Ok: err == nil}
 		if err != nil {
 			resp.Err = err.Error()

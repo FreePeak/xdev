@@ -656,10 +656,20 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			fmt.Fprintf(os.Stderr, "\nxdev: -max-time %s exceeded\n", launch.MaxTime)
+		} else if errors.Is(err, agent.ErrEmptyTurn) {
+			fmt.Fprintln(os.Stderr, "\nxdev: the model produced no answer — retrying from history")
+			ctxRes, rerr := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+			if rerr == nil {
+				final, err = ag.Run(ctx, hookBus.Context(ctx, buildSys()), ctxRes.Messages)
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
+				exitCode = 1
+			}
 		} else {
 			fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
+			exitCode = 1
 		}
-		exitCode = 1
 	}
 	// Advisor exit drain (T3 #20): a headless run cannot steer a finished
 	// turn, so the last review is taken synchronously (30s cap) and printed.
