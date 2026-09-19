@@ -2445,6 +2445,10 @@ type printHooks struct {
 	// reviewer needs the run to steer into, and the run needs the hooks at
 	// construction — the same late-assignment the TUI uses.
 	advisorFeed func()
+	// retryCounter tracks consecutive transient stream errors in the
+	// current turn, so repeated "stream error: retrying" lines collapse
+	// into a single "stream error: retrying (xN)".
+	retryCounter int
 }
 
 func (h *printHooks) OnStart(req ai.StreamRequest) {}
@@ -2471,10 +2475,17 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 			break
 		}
 		// The recovery ladder retries transient wire errors; printing the
-		// full message once per attempt is noise (and alarming). Hard
-		// errors still print verbatim — the turn ends on them.
+		// full message once per attempt is noise (and alarming).
+		// Repeated errors count up: "stream error: retrying", then
+		// "stream error: retrying (x2)", "(x3)" — hard errors still
+		// print verbatim — the turn ends on them.
 		if ai.Classify(ev.Err) == ai.ClassTransient {
-			fmt.Fprintln(os.Stderr, "\n[stream error: retrying]")
+			h.retryCounter++
+			if h.retryCounter == 1 {
+				fmt.Fprintln(os.Stderr, "\n[stream error: retrying]")
+			} else {
+				fmt.Fprintf(os.Stderr, "\n[stream error: retrying (x%d)]\n", h.retryCounter)
+			}
 			break
 		}
 		fmt.Fprintf(os.Stderr, "\n[stream error: %v]\n", ev.Err)
