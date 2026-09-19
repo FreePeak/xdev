@@ -1897,6 +1897,10 @@ type tuiHooks struct {
 	// feed (optional) hands the advisor a fresh transcript snapshot after
 	// each assistant message — the reviewer steers into the live run.
 	feed func()
+	// retryCounter tracks consecutive transient stream errors in the
+	// current turn, so repeated "stream error — retrying" lines collapse
+	// into a single "· stream error — retrying (xN)".
+	retryCounter int
 	// ttftRequest is set by OnStart; OnMessageEnd computes the
 	// turn's ttft from it and writes it via onTurnEnd (nil-safe).
 	// OnStart fires on the agent goroutine, OnTurnEnd on the Run
@@ -1946,9 +1950,16 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		}
 		// A transient blip is being retried by the recovery ladder: the
 		// wire error would flash once per attempt, so it collapses to a
-		// notice. Hard errors still print verbatim — the turn ends on them.
+		// notice. Repeated transient errors in one turn count up:
+		// "· stream error — retrying", then "· stream error — retrying (x2)",
+		// "(x3)" — hard errors still print verbatim — the turn ends on them.
 		if ai.Classify(ev.Err) == ai.ClassTransient {
-			h.ts.app.AddSystemBlock("· stream error — retrying")
+			h.retryCounter++
+			if h.retryCounter == 1 {
+				h.ts.app.AddSystemBlock("· stream error — retrying")
+			} else {
+				h.ts.app.AddSystemBlock(fmt.Sprintf("· stream error — retrying (x%d)", h.retryCounter))
+			}
 			break
 		}
 		h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error())
