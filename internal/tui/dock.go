@@ -109,6 +109,20 @@ type dockRow struct {
 	path string // full file path of a FILES row, so a click resolves it without re-parsing the clipped text
 }
 
+// dockRowText returns the selectable text of a dock row: the row's
+// own text plus its change counts, as the user should copy it.
+// Separator rows (all empty) copy as nothing, so a drag across
+// two sections does not glue them together.
+func (r dockRow) dockRowText() string {
+	if r.text == "" && r.add == "" && r.del == "" {
+		return ""
+	}
+	if r.add != "" || r.del != "" {
+		return strings.TrimSpace(r.text + " " + r.add + " " + r.del)
+	}
+	return r.text
+}
+
 // right is the fragment a row aligns to the panel's right edge — and so the
 // width a changed file's name has to leave room for.
 func (r dockRow) right() string {
@@ -285,6 +299,16 @@ func (a *App) dockCycle() {
 		a.dockSetMode(mode)
 	}
 	a.poke()
+}
+
+// dockGridY returns the top screen row of the dock panel, or -1
+// when it is not on. Callers hold a.mu.
+func (a *App) dockGridY() int {
+	if !a.dockOn() {
+		return -1
+	}
+	top, _ := a.dockGrid()
+	return top
 }
 
 // --- build ---
@@ -676,6 +700,39 @@ func dockSplit(title string) (name, count string) {
 	return name, ""
 }
 
+// dockTitle is the prompt the dock title takes when the session has one:
+// the session title names the conversation, the first prompt names
+// what it is about. Tried before the id so a dock with a live session
+// shows its task, not its hash.
+func (a *App) dockTitle() string {
+	if d := a.dock; d != nil && d.title != "" {
+		return d.title
+	}
+	if first, _ := a.topPrompts(); first != "" {
+		return first
+	}
+	return ""
+}
+
+// selDockRowsForPaint returns the dock's rows as selectable
+// rows with their screen y positions. Callers hold a.mu.
+func (a *App) selDockRowsForPaint() []selRow {
+	if !a.dockOn() || a.dock.lines == nil {
+		return nil
+	}
+	x0 := a.width - dockCols + dockPad
+	rows := make([]selRow, 0, len(a.dock.lines))
+	dg := a.dockGridY()
+	for i, r := range a.dock.lines {
+		t := r.dockRowText()
+		if t == "" {
+			continue
+		}
+		rows = append(rows, selRow{text: t, x0: x0, y: dg + 1 + i})
+	}
+	return rows
+}
+
 // drawDock paints the panel: the surface, the session's own name in the top slot,
 // and the rows the build made for the band they were budgeted for. Caller holds
 // a.mu and has run dockBuild for this frame.
@@ -705,17 +762,7 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 			s.SetContent(cx, y, ' ', nil, body)
 		}
 	}
-	// The title slot (opencode's sidebar_title): the session's own name, its id
-	// while it has none, and the harness's own id for a caller that wired no
-	// session source at all.
-	title := d.title
-	if title == "" {
-		title = d.sid
-	}
-	if title == "" {
-		title = shortID(a.st.SessionID)
-	}
-	drawText(s, x+dockPad, top, dockClip(title), ink.Bold(true))
+	drawText(s, x+dockPad, top, dockClip(a.dockTitle()), ink.Bold(true))
 	for i, r := range d.lines {
 		y := top + 1 + i
 		if y >= top+h {

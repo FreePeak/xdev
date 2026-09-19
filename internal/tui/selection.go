@@ -56,6 +56,7 @@ import (
 type selRow struct {
 	text string
 	x0   int
+	y    int // screen row this row lives on; for dock rows only
 }
 
 // selCorner is one corner of a drag. x and y are the screen cell the pointer was
@@ -715,6 +716,13 @@ func (a *App) selectionText() string {
 // in (boxSelectable), which is the only way the composer's border can be left
 // out of a copy: its box is painted cell by cell, never as runs.
 func (a *App) selRowAt(y int) selRow {
+	if a.selDockRows != nil {
+		for _, r := range a.selDockRows {
+			if r.y == y {
+				return r
+			}
+		}
+	}
 	if vy := y - a.transcriptTop(); vy >= 0 && vy < len(a.selRows) {
 		return a.selRows[vy]
 	}
