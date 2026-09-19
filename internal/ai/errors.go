@@ -124,7 +124,7 @@ var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
 // any 404 that mentions these words, so a proxy whose error page happens to
 // carry them retries the ladder before surfacing the same 404. The upgrade
 // path is a provider-reported error code on HTTPError instead of body sniffing.
-var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error`)
+var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error|404 page not found`)
 
 // toolNameTooLongRe matches a 400 the gateway rejects because a tool
 // name exceeds the provider's 64-character ceiling. Names come from
