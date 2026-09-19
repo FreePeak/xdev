@@ -167,7 +167,22 @@ func readCalls(msgs []ai.Message) map[string]readRef {
 // The loop nudge and the dropUseless compaction rung both key off it, so the
 // predicate lives here and the tool-result case stays in isEmptyNoop.
 func isEmptyAssistant(m ai.Message) bool {
-	return m.Role == ai.RoleAssistant && m.Text() == "" && len(m.ToolCalls()) == 0
+	if m.Role != ai.RoleAssistant {
+		return false
+	}
+	if m.Text() != "" || len(m.ToolCalls()) != 0 {
+		return false
+	}
+	// A reasoning-only turn (thinking blocks, then stop_reason=stop)
+	// is empty: the model spent tokens thinking and never answered.
+	// Without this a thinking-only turn slipped through as non-empty
+	// and the loop never nudged, never ended (#389).
+	for _, b := range m.Content {
+		if _, ok := b.(ai.ThinkingBlock); ok {
+			return true
+		}
+	}
+	return true
 }
 
 // isEmptyNoop reports a message that carries nothing forward: no text and no
