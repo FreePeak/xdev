@@ -182,7 +182,7 @@ func TestHindsightProjectSelectorRidesBankPathsOnly(t *testing.T) {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		_ = h.Stats()
-		_ = h.Diagnose()
+		_,_ = h.Diagnose()
 		return f
 	}
 
@@ -691,7 +691,7 @@ func TestHindsightClearDiagnoseStatsAndRead(t *testing.T) {
 		}
 	}
 
-	diag := collapseWS(h.Diagnose())
+	diag := collapseWS(func() string { s, _ := h.Diagnose(); return s }())
 	for _, want := range []string{"hindsight backend", "bank xdev", "tag project:myrepo", "auth none", "health ok"} {
 		if !strings.Contains(diag, want) {
 			t.Errorf("diagnose missing %q:\n%s", want, diag)
@@ -732,7 +732,7 @@ func TestHindsightClearDiagnoseStatsAndRead(t *testing.T) {
 
 	// A dead server: diagnose and stats say so instead of failing.
 	dead := NewHindsight(HindsightConfig{URL: "http://127.0.0.1:1", ProjectRoot: repoRoot(t, "Dead2"), Logf: func(string, ...any) {}})
-	if got := dead.Diagnose(); !strings.Contains(got, "unreachable") {
+	if got, _ := dead.Diagnose(); !strings.Contains(got, "unreachable") {
 		t.Errorf("dead diagnose = %q", got)
 	}
 	if got := dead.Stats(); !strings.Contains(got, "server unreachable") {

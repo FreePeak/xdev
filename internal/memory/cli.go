@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// This file is the CLI-facing surface of the local backend (M15 #72: the
-// mnemopi-CLI equivalent). It only reads and writes the same two markdown
+// This file is the CLI-facing surface of the local backend (M15 #72).
+// It only reads and writes the same two markdown
 // files the agent's prompt injection uses — no second store, no second
 // format — plus a bounded scratch file that was never part of the injected
 // summary.

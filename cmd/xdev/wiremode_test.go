@@ -11,7 +11,6 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
-	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -204,33 +203,5 @@ func TestWireAgentModeCarriesMemoryContext(t *testing.T) {
 	// Backend off: no seam, and nothing panics.
 	if ag.MemoryContext != nil {
 		t.Fatal("MemoryContext set with no remote backend configured")
-	}
-}
-
-// #89: the friction detector only ever saw print-mode turns. The shared feed
-// helper is what the TUI submit path calls now, so it is pinned here: only the
-// sharpshooter backend observes, an empty turn is not scored, and a turn after
-// a failure carries the AfterFailure signal the detector weights.
-func TestObserveFrictionFeedsSharpshooter(t *testing.T) {
-	dir := t.TempDir()
-	ss := &memory.SharpShooter{Dir: dir, Threshold: 2}
-	if observeFriction(ss, "use tabs", false) {
-		t.Fatal("a first statement is not friction")
-	}
-	observeFriction(ss, "   ", false) // no text: no score
-	// The restatement (+2, its own threshold) is what a friction feed exists
-	// to catch.
-	if !observeFriction(ss, "use tabs", true) {
-		t.Fatal("the repeated instruction did not cross the threshold: the feed is inert")
-	}
-	// A crossed threshold may have queued a background consolidation; wait so
-	// the temp dir is not removed under it.
-	ss.Wait()
-	// Every other backend is a no-op (and must not panic).
-	if observeFriction(&memory.Backend{Dir: dir}, "x", false) {
-		t.Fatal("markdown backend reported friction")
-	}
-	if observeFriction(nil, "x", false) {
-		t.Fatal("nil backend reported friction")
 	}
 }

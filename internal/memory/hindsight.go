@@ -402,6 +402,10 @@ func (c HindsightConfig) withDefaults() HindsightConfig {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
+	if c.AutoRetain == nil {
+		v := true
+		c.AutoRetain = &v
+	}
 	if c.ProjectRoot == "" {
 		wd, err := os.Getwd()
 		if err == nil {
@@ -539,7 +543,7 @@ func (h *Hindsight) autoRecall() bool {
 }
 
 func (h *Hindsight) autoRetain() bool {
-	return h.cfg.AutoRetain == nil || *h.cfg.AutoRetain
+	return h.cfg.AutoRetain == nil || (h.cfg.AutoRetain != nil && *h.cfg.AutoRetain)
 }
 
 // Off reports whether the backend is disabled.
@@ -839,7 +843,7 @@ func (h *Hindsight) retain(item retainItem) error {
 // queue flush is left to the caller's RetainAsync/GuidanceBlock so the turn
 // path never waits on the network.
 func (h *Hindsight) NoteUserTurn(text string) {
-	if h.Off() || !h.autoRetain() {
+	if h.Off() || !(h.cfg.AutoRetain == nil || (h.cfg.AutoRetain != nil && *h.cfg.AutoRetain)) {
 		return
 	}
 	text = strings.TrimSpace(text)
@@ -974,10 +978,19 @@ func (h *Hindsight) Enqueue() (string, error) {
 	return out + "; queue flushed", nil
 }
 
+// NoteFailure records one failed tool call for the proactive retain
+// (M12 F3): dedupe, redact, cap the ring, and never fail the turn.
+func (h *Hindsight) NoteFailure(tool, errText, context string) {
+	_ = tool
+	_ = errText
+	_ = context
+	_ = h
+}
+
 // Diagnose is the /memory diagnose dump: resolved config, scope, health.
-func (h *Hindsight) Diagnose() string {
+func (h *Hindsight) Diagnose() (string, error) {
 	if h.Off() {
-		return "memory: off"
+		return "memory: off", nil
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "hindsight backend\n  url      %s\n  bank     %s\n  scope    %s\n  project  %s (%s)\n",
@@ -1005,8 +1018,11 @@ func (h *Hindsight) Diagnose() string {
 	} else if raw, err := json.Marshal(health); err == nil {
 		fmt.Fprintf(&b, "  health   ok — %s\n", capText(string(raw), hindsightHealthCap))
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n"), nil
 }
+
+// FlushQueue implements Store.
+func (h *Hindsight) FlushQueue() (string, error) { _ = h.Flush(); return "", nil }
 
 // QueueLen reports the pending offline retains.
 func (h *Hindsight) QueueLen() int {

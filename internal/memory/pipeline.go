@@ -338,9 +338,8 @@ func (p *Pipeline) watermarkPath() string { return filepath.Join(p.Backend.Dir, 
 
 // acquireFileLease takes a cross-process lease file and returns its release
 // func plus this run's id. A lease older than ttl (a crashed run) is stolen.
-// The pipeline and the sharpshooter consolidation pass share this algorithm
-// on their own lease paths, so two xdev processes never write memory state
-// concurrently.
+// Two xdev processes never write memory state concurrently: the pipeline
+// takes this lease, so a second process backs off instead of racing it.
 //
 // ponytail: two lock stealers can both win the remove-then-create race, so a
 // crash exactly at the stale boundary can double-run once. Phase writes are

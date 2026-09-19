@@ -351,7 +351,7 @@ func TestSetRefusesUnknownKey(t *testing.T) {
 	for _, kv := range [][2]string{
 		{"theme", "grokday"}, {"maxTurns", "42"}, {"advisor", "true"},
 		{"personality", "friendly"}, {"defaultModel", "onegw/xdev"},
-		{"toolsApproval.bash", "allow"}, {"memoryMnemopi.scope", "project"},
+		{"toolsApproval.bash", "allow"},
 		{"hooks.preToolUse", "true"},
 	} {
 		if err := Set(path, kv[0], kv[1]); err != nil {

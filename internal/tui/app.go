@@ -1027,8 +1027,8 @@ func (a *App) Theme(args string) error {
 }
 
 // Memory implements CommandAPI /memory: view|stats|clear plus the
-// backend-specific verbs (queue|sync|enqueue for the mnemopi store, diagnose
-// for the remote Hindsight backend). The grammar lives in MemoryOps.Dispatch
+// backend-specific verbs (diagnose|enqueue for the remote backend). The
+// grammar lives in MemoryOps.Dispatch
 // so every backend answers the same verbs through one place.
 func (a *App) Memory(args string) error {
 	block, err := a.memoryOps.Dispatch(args)

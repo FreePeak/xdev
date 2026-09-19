@@ -231,7 +231,8 @@ type ConnectOps struct {
 
 // MemoryOps wires the /memory command (backend lives in cmd). View, Stats and
 // Clear are the backend-agnostic verbs; Diagnose is the remote backend's
-// health dump and Queue/Sync/Enqueue are the queue-backed store's (mnemopi);
+// health dump; Queue/Sync/Enqueue ride along for interface stability and are
+// nil unless a backend wires them;
 // a nil func is reported as unwired, never a silent no-op.
 type MemoryOps struct {
 	View  func() string
@@ -254,7 +255,7 @@ type MemoryOps struct {
 // the same verbs through one place.
 func (o *MemoryOps) Dispatch(args string) (string, error) {
 	if o == nil {
-		return "", errors.New("memory not wired (set memory: local, mnemopi, hindsight or sharpshooter in settings)")
+		return "", errors.New("memory not wired (set memory: local or hindsight in settings)")
 	}
 	trimmed := strings.TrimSpace(args)
 	verb, rest := trimmed, ""
@@ -287,21 +288,21 @@ func (o *MemoryOps) Dispatch(args string) (string, error) {
 		return o.Diagnose(), nil
 	case "queue":
 		if o.Queue == nil {
-			return "", errors.New("memory queue: this backend keeps no retain queue (memory: mnemopi has one)")
+			return "", errors.New("memory queue is not available for this backend")
 		}
 		return o.Queue(), nil
 	case "sync":
 		if o.Sync == nil {
-			return "", errors.New("memory sync: this backend keeps no retain queue (memory: mnemopi has one; hindsight syncs server-side)")
+			return "", errors.New("memory sync is not available for this backend (hindsight syncs server-side)")
 		}
 		return o.Sync()
 	case "enqueue", "rebuild":
 		if o.Enqueue == nil {
-			return "", errors.New("memory enqueue: this backend has no queue to enqueue into (memory: mnemopi or hindsight)")
+			return "", errors.New("memory enqueue is not available for this backend (memory: hindsight has one)")
 		}
 		return o.Enqueue(rest)
 	default:
-		return "", fmt.Errorf("memory: use view|stats|clear, or queue|sync|enqueue <text> (mnemopi) or diagnose|enqueue (hindsight)")
+		return "", fmt.Errorf("memory: use view|stats|clear, or diagnose|enqueue (hindsight)")
 	}
 }
 

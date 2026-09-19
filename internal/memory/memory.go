@@ -41,10 +41,13 @@ const (
 )
 
 // Store is the backend contract every memory consumer programs against:
-// prompt injection (GuidanceBlock), the memory:// read seam (Read), the
-// learn tool (SaveLesson), and /memory (Summary/Stats/Paths/Clear). The
-// local Backend and the friction-gated SharpShooter both implement it, so
-// memory.backend selects storage without touching a single caller.
+// prompt injection (GuidanceBlock / CompactionContext), the memory:// read
+// seam (Read), the learn tool (SaveLesson), the turn boundary (NoteUserTurn
+// / RetainAsync / EndSession / NoteFailure) and /memory (Summary / Stats /
+// Paths / Clear / Diagnose / Enqueue). The local Backend and the remote
+// memory service both implement it, so no caller branches on the backend —
+// a backend with no cadence, queue or server simply makes the matching
+// methods no-ops that report the backend cannot do it.
 type Store interface {
 	// Off reports whether the backend is disabled (nil-safe).
 	Off() bool
@@ -52,6 +55,9 @@ type Store interface {
 	Summary() string
 	// GuidanceBlock wraps Summary in the injected block shape ("" = nothing).
 	GuidanceBlock() string
+	// CompactionContext is the recalled block a compaction summary must
+	// carry ("" = nothing to preserve).
+	CompactionContext() string
 	// Read resolves a memory:// URL to text.
 	Read(uri string) (string, error)
 	// Stats is the /memory stats report.
@@ -62,39 +68,28 @@ type Store interface {
 	Paths() (summary, lessons string)
 	// SaveLesson records one durable lesson (the learn tool).
 	SaveLesson(text, context string) error
+	// SetWarnSink routes the one-time server-unreachable warning.
+	SetWarnSink(sink func(msg string))
+	// NoteUserTurn records one user turn at the turn boundary.
+	NoteUserTurn(text string)
+	// NoteFailure records one failed tool call for the proactive retain:
+	// the backend decides what is worth keeping (dedupe, budget), and it
+	// never fails the turn.
+	NoteFailure(tool, errText, context string)
+	// RetainAsync flushes queued retains off the critical path.
+	RetainAsync()
+	// EndSession is the session boundary (queued retains drain, bounded).
+	EndSession() error
+	// Diagnose is the /memory diagnose report ("" + error when the backend
+	// has no server to describe).
+	Diagnose() (string, error)
+	// FlushQueue flushes the offline retain queue now and reports it
+	// (/memory enqueue with no argument).
+	FlushQueue() (string, error)
 }
-
-// Every shipped backend satisfies the seam; a compile-time check, so a
-// signature drift is a build failure, not a runtime nil.
-var (
-	_ Store = (*Backend)(nil)
-	_ Store = (*SharpShooter)(nil)
-	_ Store = (*Mnemopi)(nil)
-	_ Store = (*Hindsight)(nil)
-)
 
 // Off reports whether the backend is disabled.
 func (b *Backend) Off() bool { return b == nil || b.Dir == "" }
-
-// PipelineStore is the wider contract the two-phase memory pipeline needs:
-// a backend it can consolidate INTO (create the storage, replace the
-// summary). The local markdown backend and the mnemopi SQLite backend
-// satisfy it; the friction-gated SharpShooter does not, because its
-// decision files are written by the friction detector, not by the pipeline.
-type PipelineStore interface {
-	Store
-	Ensure() error
-	WriteSummary(text string) error
-}
-
-// The two consolidation-capable stores (M12 #13): the local markdown
-// backend and the mnemopi SQLite backend. SharpShooter and Hindsight are
-// deliberately absent — their state is written by the friction detector and
-// the remote server respectively, not by the pipeline.
-var (
-	_ PipelineStore = (*Backend)(nil)
-	_ PipelineStore = (*Mnemopi)(nil)
-)
 
 func (b *Backend) paths() (summary, lessons string) {
 	return filepath.Join(b.Dir, "MEMORY.md"), filepath.Join(b.Dir, "learned.md")
@@ -133,6 +128,36 @@ func (b *Backend) Summary() string {
 // injects, or "" when there is nothing to inject.
 func (b *Backend) GuidanceBlock() string {
 	return guidanceBlock(b.Summary())
+}
+// CompactionContext is the local backend's compaction contribution: the same
+// injected summary.
+func (b *Backend) CompactionContext() string { return b.Summary() }
+
+// SetWarnSink is a no-op locally: there is no server to be unreachable.
+func (b *Backend) SetWarnSink(func(msg string)) {}
+
+// NoteUserTurn is a no-op locally: the markdown store has no retain cadence;
+// user turns reach it through the consolidation pipeline or the learn tool.
+func (b *Backend) NoteUserTurn(string) {}
+
+// NoteFailure is a no-op locally: without a server-side bank there is
+// nowhere to proactively retain to. The learn tool stays the explicit path.
+func (b *Backend) NoteFailure(_, _, _ string) {}
+
+// RetainAsync is a no-op locally: the markdown store has no retain queue.
+func (b *Backend) RetainAsync() {}
+
+// EndSession is a no-op locally: nothing is queued.
+func (b *Backend) EndSession() error { return nil }
+
+// Diagnose reports that the local backend has no server to describe.
+func (b *Backend) Diagnose() (string, error) {
+	return "", fmt.Errorf("memory diagnose is not available for this backend (hindsight only)")
+}
+
+// FlushQueue reports that the local backend keeps no retain queue.
+func (b *Backend) FlushQueue() (string, error) {
+	return "", fmt.Errorf("memory enqueue: this backend keeps no retain queue (memory: hindsight has one)")
 }
 
 // SaveLesson appends a lesson (newest last) with a timestamp header.

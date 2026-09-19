@@ -252,6 +252,11 @@ type HindsightSettings struct {
 	RecallTimeoutMS  int `yaml:"recallTimeoutMs"`
 	RetainTimeoutMS  int `yaml:"retainTimeoutMs"`
 	ReflectTimeoutMS int `yaml:"reflectTimeoutMs"`
+	// FailureDedupeWindowMS bounds how long one failure signature stays
+	// in the in-session dedupe ring (default 300000, 5m).
+	FailureDedupeWindowMS int `yaml:"failureDedupeWindowMs"`
+	// FailureMaxKept caps the ring (default 256).
+	FailureMaxKept int `yaml:"failureMaxKept"`
 }
 
 // merge applies a later hindsight layer over the receiver. The enums are
@@ -320,7 +325,8 @@ func (h *HindsightSettings) merge(layer HindsightSettings) error {
 		{&layer.SummaryCapChars, &h.SummaryCapChars, "summaryCapChars"},
 		{&layer.RecallTTLSeconds, &h.RecallTTLSeconds, "recallTTLSeconds"},
 		{&layer.RequestTimeoutMS, &h.RequestTimeoutMS, "requestTimeoutMs"},
-		{&layer.RecallTimeoutMS, &h.RecallTimeoutMS, "recallTimeoutMs"},
+		{&layer.FailureDedupeWindowMS, &h.FailureDedupeWindowMS, "failureDedupeWindowMs"},
+		{&layer.FailureMaxKept, &h.FailureMaxKept, "failureMaxKept"},
 		{&layer.RetainTimeoutMS, &h.RetainTimeoutMS, "retainTimeoutMs"},
 		{&layer.ReflectTimeoutMS, &h.ReflectTimeoutMS, "reflectTimeoutMs"},
 	} {

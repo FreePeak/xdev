@@ -118,7 +118,7 @@ func validateKey(key, value string) error {
 		if config.ValidMemoryBackend(value) {
 			return nil
 		}
-		return fmt.Errorf("memory must be off|local|mnemopi|hindsight|sharpshooter, got %q", value)
+		return fmt.Errorf("memory must be off|local|hindsight, got %q", value)
 	case "showThinking", "advisor":
 		switch value {
 		case "true", "false":
