@@ -493,8 +493,8 @@ func TestDockFilesReadsTheTranscriptDiffs(t *testing.T) {
 	// The name keeps its tail — a cut takes the directory, never the file — and
 	// the counts are fields of their own, right-aligned when they paint.
 	want := []dockRow{
-		{text: "internal/tui/app.go", add: "+1", del: "-1"},
-		{text: "internal/tui/dock.go", add: "+1", del: "-1"},
+		{text: "internal/tui/app.go", add: "+1", del: "-1", path: "internal/tui/app.go"},
+		{text: "internal/tui/dock.go", add: "+1", del: "-1", path: "internal/tui/dock.go"},
 	}
 	if !slices.Equal(f.rows, want) {
 		t.Fatalf("rows %+v, want %+v", f.rows, want)

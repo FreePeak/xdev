@@ -120,6 +120,7 @@ func DefaultKeyMap() *KeyMap {
 			// use, and keybindings.yml can move it like any other action.
 			"A-s": "dock-cycle",
 			"C-t": "dock-fold",
+
 			// The request-side reasoning toggle (omp's alt+t, Claude Code's
 			// Alt+T). Every terminal sends Shift-Tab as KeyBacktab, which
 			// chordOf renders "Shift-Tab" — so that is the chord to bind, not

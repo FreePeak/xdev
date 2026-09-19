@@ -122,6 +122,10 @@ type App struct {
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
 
+	// diffOv is the full-width diff overlay shown when the user
+	// clicks a changed file in the dock; nil when closed.
+	diffOv *diffOverlay
+
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
@@ -3055,6 +3059,8 @@ func (a *App) paint() {
 		a.drawDock(s, w-dockCols, dtop, dh)
 	}
 	a.drawSessionPicker(composerTop)
+	a.drawDiffOverlay(composerTop)
+
 	a.drawHubRoster(composerTop)
 	a.drawTreeSelector(composerTop)
 	a.drawPicker(composerTop)

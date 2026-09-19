@@ -292,6 +292,15 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// raw click point would collapse the word/line selection back into a
 		// no-motion click and copy nothing. A single click falls through and
 		// anchors here so a following drag can expand it.
+		// A click on a FILES row jumps the transcript
+		// to that file's diff block: the panel is chrome, so it
+		// takes no keyboard, but a click on a changed file
+		// has to reach the transcript.
+		if path := a.dockClick(x, y); path != "" {
+			a.dockJumpToBlock(path)
+			a.poke()
+			break
+		}
 		if a.handleClick(x, y) {
 			break
 		}
