@@ -122,7 +122,8 @@ func WithCompactionEvent(h TurnHooks, i Interceptor) TurnHooks {
 	return compactionNotifier{TurnHooks: h, intercept: i}
 }
 
-// DefaultMaxTurns bounds one Run against runaway tool loops.
+// DefaultMaxTurns is retained for the -max-turns flag and historical reference.
+// effectiveMaxTurns returns MaxTurns directly; MaxTurns=0 means unbounded.
 const DefaultMaxTurns = 200
 
 // DefaultSessionTokenBudget is the hard cap on tokens one Run may spend. 0 means unbounded.
@@ -233,7 +234,7 @@ type Agent struct {
 	// compactAsync holds the one background summarize the async trigger
 	// may have in flight (nil = none; see compact_async.go).
 	compactAsync *asyncCompactState
-	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
+	// MaxTurns caps one Run's turns; 0 means unbounded (no cap).
 	MaxTurns int
 	// SessionTokenBudget caps one Run's total token spend
 	// (provider requests + retries). 0 → DefaultSessionTokenBudget.
@@ -319,25 +320,8 @@ type Agent struct {
 	requestMu    sync.Mutex
 }
 
-// goalActive reports whether a goal is still in flight (status "active").
-// A goal in flight removes the turn cap so the session runs until the
-// goal is completed, dropped, or budget-exhausted — Claude Code style.
-func (a *Agent) goalActive() bool {
-	if a.Goals == nil {
-		return false
-	}
-	v, ok := a.Goals.View()
-	return ok && v.Status == GoalActive
-}
-
 func (a *Agent) effectiveMaxTurns() int {
-	if a.MaxTurns > 0 {
-		return a.MaxTurns
-	}
-	if a.goalActive() {
-		return 0 // unbounded: run until the goal is completed
-	}
-	return DefaultMaxTurns
+	return a.MaxTurns
 }
 
 // effectiveSessionTokenBudget returns the hard token cap for one Run.
@@ -378,8 +362,8 @@ func (a *Agent) drainSteering() []Steering {
 	return out
 }
 
-// Run executes turns until the model stops calling tools or the turn budget
-// (Agent.MaxTurns, else DefaultMaxTurns) runs out. history is the
+// Run executes turns until the model stops calling tools.
+// history is the
 // conversation so far (mutable within this run: assistant and toolResult
 // messages are appended as the run progresses).
 // On budget exhaustion it asks the model for one wrap-up message instead of

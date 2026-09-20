@@ -179,7 +179,7 @@ requires all of the following to be addressed:
 |---|---|---|---|
 | 1 | **Context window budget correct** | ✅ FIXED (this change) | `modelWindow()` now returns a real number, not 0 |
 | 2 | **Compaction actually fires** | ✅ Already works | `compact.go` threshold trigger — fires when `ContextWindow > 0` (now always true) |
-| 3 | **Agent turn budget** | ⚠️ Exists, finite | `Agent.MaxTurns` (default 200) — hard cap on turns per session |
+| 3 | **Agent turn budget** | ✅ Removed | No turn cap: `MaxTurns=0` (default) is unbounded; `Agent.MaxTurns` can still set an explicit cap |
 | 4 | **Process memory backstop** | ✅ Already works | `debug.SetMemoryLimit` via `XDEV_MEMLIMIT` (default 100 MB RSS) — runaway turns degrade to "compact now" |
 | 5 | **Session persistence** | ✅ Already works | Append-only JSONL — sessions survive process death |
 | 6 | **No disk leak** | ⚠️ Not proven | Blobs, session files, and compacted tails accumulate indefinitely; no TTL or hard cap documented |
@@ -188,14 +188,12 @@ requires all of the following to be addressed:
 
 ### What "infinity session" actually needs
 
-A true infinity session requires **three things this change does NOT provide**:
+A true infinity session requires **two things this change does NOT provide**:
 
-1. **Turn budget removal or very high limit** — `MaxTurns` caps at 200 by
-   default. For "infinity," either remove the cap or document how to raise it.
-2. **Disk budget guard** — nothing prevents the JSONL session file, blob store,
+1. **Disk budget guard** — nothing prevents the JSONL session file, blob store,
    and compacted history from growing forever. A long-running session with
    millions of turns needs a retention policy (compact-and-drop-old-tail).
-3. **Operator awareness** — even with compaction working, a 24-hour session
+2. **Operator awareness** — even with compaction working, a 24-hour session
    against a model with a 200k context will still hit wall-clock and token-cost
    limits. The operator needs to know *this is expected and bounded by memory*.
 

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/ai"
-	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -326,31 +325,17 @@ func TestEmptyTurnNudgeDoesNotFireOnToolCalls(t *testing.T) {
 }
 
 func TestEffectiveMaxTurns(t *testing.T) {
-	if DefaultMaxTurns < 100 {
-		t.Fatalf("DefaultMaxTurns = %d, long tasks would be killed", DefaultMaxTurns)
-	}
 	tests := []struct {
 		name string
 		set  int
 		want int
 	}{
-		{"zero means default", 0, DefaultMaxTurns},
+		{"unbounded by default", 0, 0},
 		{"explicit wins", 5, 5},
-		{"negative means default", -1, DefaultMaxTurns},
-		{"goal active: 0 (unbounded)", 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := &Agent{MaxTurns: tt.set}
-			if tt.name == "goal active: 0 (unbounded)" {
-				store := session.OpenMem("/proj", "t")
-				defer store.Close()
-				gs := NewGoalState(store)
-				if _, err := gs.Create("g", 0); err != nil {
-					t.Fatal(err)
-				}
-				a.Goals = gs
-			}
 			if got := a.effectiveMaxTurns(); got != tt.want {
 				t.Fatalf("effectiveMaxTurns() = %d, want %d", got, tt.want)
 			}

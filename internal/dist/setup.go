@@ -27,7 +27,7 @@ const setupStarterConfig = `# xdev configuration — written by "xdev setup".
 
 theme: auto             # groknight | grokday | auto
 approvalMode: yolo      # always-ask | write | yolo
-maxTurns: 200           # agent turns per run before the graceful wrap-up
+maxTurns: 0             # agent turns per run; 0 = unbounded (no cap)
 memoryLimit: 104857600  # bytes; hard RSS backstop (default 100 MB)
 showThinking: true      # render reasoning output
 personality: default    # default | friendly | pragmatic | none
