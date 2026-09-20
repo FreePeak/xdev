@@ -1322,13 +1322,17 @@ func mcpNameList(mgr *mcpclient.Manager) string {
 	return fmt.Sprintf("%d servers", len(names))
 }
 
-// mcpUnavailable names the failed server without the launch error's detail.
-// A caller with a one-line slot gets what it can render: mcpclient already
-// logged the full error, and the divider drops a hint wider than the space
-// beside the model name, so a whole fork/exec path would render as nothing.
+// mcpUnavailable names the failed server without the launch error's
+// detail. A caller with a one-line slot gets what it can render:
+// mcpclient already logged the full error, and the divider drops a
+// hint wider than the space beside the model name, so a whole
+// fork/exec path would render as nothing.
 func mcpUnavailable(e string) string {
-	name, _, _ := strings.Cut(e, ": ")
-	return "mcp: " + name + " unavailable"
+	name, rest, _ := strings.Cut(e, ": ")
+	if rest == "" {
+		return "mcp: " + name + " unavailable"
+	}
+	return "mcp: " + name + " unavailable — see `xdev mcps` for configured URLs"
 }
 
 // newToolRegistry builds the core four tools plus the parent-facing task
