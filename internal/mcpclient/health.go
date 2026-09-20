@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -78,7 +77,7 @@ func (sc *ServerConfig) StartAuto() (*exec.Cmd, error) {
 	cmd.Dir = sc.AutoStart.Cwd
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = setProcAttr()
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("autoStart: %w", err)
 	}

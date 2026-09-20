@@ -925,7 +925,10 @@ func (a *App) openDiffOverlay(path string) bool {
 		w := a.contentWidth()
 		ov := &diffOverlay{path: path, diff: b.Diff, width: w}
 		ov.lines = a.diffCells(ov.diff, ov.width-4)
-		ov.scrollVp = max(1, len(ov.lines))
+		// scrollVp is the painted body height, not the full line count —
+		// setting it to len(lines) made maxOff always 0 so nothing scrolled.
+		// drawDiffOverlay refreshes this from the real panel each frame.
+		ov.scrollVp = max(1, a.height-a.composerRows()-6)
 		ov.scrollOff = 0
 		a.diffOv = ov
 		return true
@@ -980,6 +983,13 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	}
 	drawText(s, x+2, y0+1, "diff "+ov.path, fgSt.Bold(true))
 	ds := a.diffStyle()
+	// Body rows: title at y0+1, footer at y0+panelH-2, bottom border at
+	// y0+panelH-1 → panelH-3 interior lines the viewport can show.
+	ov.scrollVp = max(1, panelH-3)
+	maxOff := max(0, len(ov.lines)-ov.scrollVp)
+	if ov.scrollOff > maxOff {
+		ov.scrollOff = maxOff
+	}
 	start := ov.scrollOff
 	end := start + ov.scrollVp
 	if end > len(ov.lines) {
@@ -1105,4 +1115,43 @@ func (a *App) dockFoldCycle() {
 // by n lines (down=true) or toward older rows (down=false).
 func (a *App) dockOverlayScroll(n int, down bool) {
 	a.diffBodyScroll(n, down)
+}
+
+// handleDiffOverlayKey owns ↑↓ / PgUp/PgDn / Home/End while the diff
+// overlay is open. The footer advertises ↑↓ scroll; without this the
+// arrows fell through to the composer/transcript and the overlay never
+// moved. Returns true when the key was consumed.
+func (a *App) handleDiffOverlayKey(key *tcell.EventKey) bool {
+	a.mu.Lock()
+	ov := a.diffOv
+	a.mu.Unlock()
+	if ov == nil {
+		return false
+	}
+	switch key.Key() {
+	case tcell.KeyUp:
+		a.diffBodyScroll(1, false)
+	case tcell.KeyDown:
+		a.diffBodyScroll(1, true)
+	case tcell.KeyPgUp:
+		a.diffBodyScroll(max(1, ov.scrollVp-1), false)
+	case tcell.KeyPgDn:
+		a.diffBodyScroll(max(1, ov.scrollVp-1), true)
+	case tcell.KeyHome:
+		a.diffBodyScroll(len(ov.lines), false)
+	case tcell.KeyEnd:
+		a.diffBodyScroll(len(ov.lines), true)
+	default:
+		return false
+	}
+	return true
+}
+
+// diffOverlayOpen reports whether the full-width diff surface is up.
+// Callers that only need the presence check (wheel, scroll actions) use
+// this so they do not race a frame that just closed it.
+func (a *App) diffOverlayOpen() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.diffOv != nil
 }
