@@ -1,9 +1,10 @@
 // Package main implements `xdev mcps` — the CLI equivalent of the
 // in-session `/mcps` slash command: lists configured MCP servers
-// and whether they are enabled (M6 #7).
+// and whether they are enabled, reachable, and auto-startable (M6 #7).
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -21,24 +22,18 @@ func runMcps(args []string) int {
 		fmt.Println("no MCP servers configured")
 		return 0
 	}
-	names := make([]string, 0, len(cfg.Servers))
-	for n := range cfg.Servers {
-		names = append(names, n)
+	ctx := context.Background()
+	statuses, err := mcpclient.ServerHealthProbe(ctx, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev: mcp health:", err)
 	}
-	for _, n := range names {
-		sc := cfg.Servers[n]
-		state := "enabled"
-		if sc.Disabled {
-			state = "disabled"
+	for _, st := range statuses {
+		auto := ""
+		sc := cfg.Servers[st.Name]
+		if sc != nil && sc.AutoStart != nil {
+			auto = " (auto-start)"
 		}
-		if sc.Enabled != nil && !*sc.Enabled {
-			state = "disabled"
-		}
-		transport := "stdio"
-		if sc.URL != "" {
-			transport = "http"
-		}
-		fmt.Printf("  %s  %s  %s\n", n, state, transport)
+		fmt.Printf("  %s  %-11s  %s%s\n", st.Name, st.State, st.Transport, auto)
 	}
 	return 0
 }

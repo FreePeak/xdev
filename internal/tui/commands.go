@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -17,6 +18,11 @@ import (
 // mcpsSeam is the test hook for MCP config loading.
 // When set (in tests), mcpsCommand calls through it.
 var mcpsSeam func() (cfg *mcpclient.Config, err error)
+
+// probeSeam is the test hook for the reachability probe. When set (in
+// tests), mcpsCommand calls through it instead of mcpclient.ServerHealthProbe,
+// so a test can assert states without spinning up real servers.
+var probeSeam func(cfg *mcpclient.Config) ([]mcpclient.ServerStatus, error)
 
 // Command is one slash command: /Name, /Alias... — Fn runs at input-submit
 // time, before a user message is created, so dispatched commands never
@@ -497,6 +503,15 @@ func mcpsCommand(app CommandAPI, args string) error {
 		app.AddSystemBlock("no MCP servers configured")
 		return nil
 	}
+	var statuses []mcpclient.ServerStatus
+	if probeSeam != nil {
+		statuses, err = probeSeam(cfg)
+	} else {
+		statuses, err = mcpclient.ServerHealthProbe(context.Background(), cfg)
+	}
+	if err != nil {
+		app.AddSystemBlock("mcp health probe: " + err.Error())
+	}
 	names := make([]string, 0, len(cfg.Servers))
 	for n := range cfg.Servers {
 		names = append(names, n)
@@ -517,7 +532,16 @@ func mcpsCommand(app CommandAPI, args string) error {
 		if sc.URL != "" {
 			transport = "http"
 		}
-		fmt.Fprintf(&b, "\n  %s  %-9s  %s", n, state, transport)
+		// Overlay the live probe: a server that is enabled but
+		// unreachable shows "unreachable" so the user can tell a
+		// broken server from a disabled one.
+		for _, st := range statuses {
+			if st.Name == n && st.State != "disabled" && st.State != "enabled" {
+				state = st.State
+				break
+			}
+		}
+		fmt.Fprintf(&b, "\n  %s  %-11s  %s", n, state, transport)
 	}
 	app.AddSystemBlock(b.String())
 	return nil
