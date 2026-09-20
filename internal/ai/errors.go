@@ -49,6 +49,10 @@ const (
 	// ClassContextOverflow: the request exceeded the model's context
 	// window; the compaction engine owns recovery.
 	ClassContextOverflow
+	// ClassEmptyTurn: the model produced no answer and no tool call
+	// (a reasoning-only turn, or nothing at all). The session
+	// layer rebuilds context from the persisted history and retries.
+	ClassEmptyTurn
 	// ClassBadRequest: 400/413/422 without overflow markers — fail fast.
 	ClassBadRequest
 )
@@ -139,6 +143,11 @@ var toolNameTooLongRe = regexp.MustCompile(`(?i)name.*at most 64`)
 func Classify(err error) ErrClass {
 	if err == nil {
 		return ClassUnknown
+	}
+	// Empty turn (#389, #331): a model that produced nothing
+	// is not a transport failure.
+	if strings.Contains(err.Error(), "empty-turn") {
+		return ClassEmptyTurn
 	}
 	var he *HTTPError
 	if errors.As(err, &he) {
