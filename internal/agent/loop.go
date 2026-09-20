@@ -313,9 +313,23 @@ type Agent struct {
 	requestMu    sync.Mutex
 }
 
+// goalActive reports whether a goal is still in flight (status "active").
+// A goal in flight removes the turn cap so the session runs until the
+// goal is completed, dropped, or budget-exhausted — Claude Code style.
+func (a *Agent) goalActive() bool {
+	if a.Goals == nil {
+		return false
+	}
+	v, ok := a.Goals.View()
+	return ok && v.Status == GoalActive
+}
+
 func (a *Agent) effectiveMaxTurns() int {
 	if a.MaxTurns > 0 {
 		return a.MaxTurns
+	}
+	if a.goalActive() {
+		return 0 // unbounded: run until the goal is completed
 	}
 	return DefaultMaxTurns
 }
@@ -421,7 +435,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// emit reasoning cannot make the loop spend unbounded turns on it (the
 	// same shape as the TTSR interrupt budget and maxEscalationRounds).
 	nudges := 0
-	for turn := 0; turn < limit; turn++ {
+	for turn := 0; limit == 0 || turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
 			// An abort also drops any in-flight background summarize: nothing
