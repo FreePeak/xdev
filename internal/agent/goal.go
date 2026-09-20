@@ -367,6 +367,15 @@ func (g *GoalState) AddUsage(tokens int64) bool {
 	return true
 }
 
+// IsBudgetExhausted reports whether AddUsage already flipped
+// this goal to budget_exhausted (the goal's own budget is
+// crossed). Used by the loop to hard-stop the run (#2).
+func (g *GoalState) IsBudgetExhausted() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.current != nil && g.current.Status == GoalBudgetExhausted
+}
+
 // mutate runs fn under the state lock and, when it succeeds, persists and
 // publishes the resulting snapshot.
 func (g *GoalState) mutate(fn func() error) (Goal, error) {
