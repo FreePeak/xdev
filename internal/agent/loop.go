@@ -965,11 +965,15 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	)
 	closeBlock := func() {
 		if thinkOpen {
-			msg.Content = append(msg.Content, ai.ThinkingBlock{Thinking: thinking.String()})
+			if th := ai.CleanUTF8(thinking.String()); th != "" {
+				msg.Content = append(msg.Content, ai.ThinkingBlock{Thinking: th})
+			}
 			thinkOpen = false
 		}
 		if textOpen {
-			msg.Content = append(msg.Content, ai.TextBlock{Text: text.String()})
+			if tx := ai.CleanUTF8(text.String()); tx != "" {
+				msg.Content = append(msg.Content, ai.TextBlock{Text: tx})
+			}
 			textOpen = false
 		}
 	}

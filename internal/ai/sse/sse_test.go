@@ -2,6 +2,7 @@ package sse
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"io"
 	"strings"
@@ -106,5 +107,33 @@ func TestParsePartialRealToolArgs(t *testing.T) {
 	got, err := ParsePartial(full)
 	if err != nil || string(got) != full {
 		t.Fatalf("full parse = %s, %v", got, err)
+	}
+}
+
+func TestReaderRejectsInvalidUTF8(t *testing.T) {
+	// A data line carrying raw invalid bytes must fail the frame as
+	// ErrMalformed — never silently substitute U+FFFD for the adapters.
+	stream := "data: {\"delta\":\"\xff\xfe\"}\n\n"
+	r := NewReader(strings.NewReader(stream))
+	_, err := r.Next(context.Background())
+	if err == nil {
+		t.Fatal("want ErrMalformed for invalid UTF-8 data line")
+	}
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("want ErrMalformed, got %v", err)
+	}
+}
+
+func TestReaderAcceptsCJKAndVietnamese(t *testing.T) {
+	// English + Mandarin + Vietnamese diacritics must pass through intact.
+	payload := `{"reasoning_content":"plan: 你好世界 Xin chào Việt Nam"}`
+	stream := "data: " + payload + "\n\n"
+	r := NewReader(strings.NewReader(stream))
+	f, err := r.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if f.Data != payload {
+		t.Fatalf("data = %q, want %q", f.Data, payload)
 	}
 }

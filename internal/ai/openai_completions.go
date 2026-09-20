@@ -338,14 +338,14 @@ func (p *OpenAICompletionsProvider) stream(ctx context.Context, r io.Reader, mod
 	closeText := func() {
 		if inText {
 			inText = false
-			msg.Content = append(msg.Content, TextBlock{Text: text.String()})
+			msg.Content = append(msg.Content, TextBlock{Text: CleanUTF8(text.String())})
 			emit(Event{Type: EventTextEnd})
 		}
 	}
 	closeThink := func() {
 		if inThink {
 			inThink = false
-			msg.Content = append(msg.Content, ThinkingBlock{Thinking: thinkBuf.String(), ThinkingSignature: "reasoning_content"})
+			msg.Content = append(msg.Content, ThinkingBlock{Thinking: CleanUTF8(thinkBuf.String()), ThinkingSignature: "reasoning_content"})
 			emit(Event{Type: EventThinkingEnd})
 		}
 	}
@@ -457,22 +457,30 @@ func (p *OpenAICompletionsProvider) stream(ctx context.Context, r io.Reader, mod
 				}
 			}
 			if think != "" {
-				if !inThink {
-					closeText()
-					inThink = true
-					emit(Event{Type: EventThinkingStart})
+				think = CleanUTF8(think)
+				if think == "" {
+					// Was pure mojibake — skip rather than open an empty box.
+				} else {
+					if !inThink {
+						closeText()
+						inThink = true
+						emit(Event{Type: EventThinkingStart})
+					}
+					thinkBuf.WriteString(think)
+					emit(Event{Type: EventThinkingDelta, Delta: think})
 				}
-				thinkBuf.WriteString(think)
-				emit(Event{Type: EventThinkingDelta, Delta: think})
 			}
 			if d.Content != "" {
-				if !inText {
-					closeThink()
-					inText = true
-					emit(Event{Type: EventTextStart})
+				content := CleanUTF8(d.Content)
+				if content != "" {
+					if !inText {
+						closeThink()
+						inText = true
+						emit(Event{Type: EventTextStart})
+					}
+					text.WriteString(content)
+					emit(Event{Type: EventTextDelta, Delta: content, Snapshot: text.String()})
 				}
-				text.WriteString(d.Content)
-				emit(Event{Type: EventTextDelta, Delta: d.Content, Snapshot: text.String()})
 			}
 			for _, tc := range d.ToolCalls {
 				st := toolCalls[tc.Index]
