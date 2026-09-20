@@ -14,6 +14,11 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 )
 
+// DefaultCompactionRatio is the fraction of the context window
+// that triggers compaction: compaction fires when this fraction
+// of the window is used, freeing space before it overflows.
+const DefaultCompactionRatio = 0.80
+
 const (
 	// DefaultReserveTokens is the context head-room a compaction aims to
 	// free up to; the effective reserve is never below 15% of the window.
@@ -102,9 +107,11 @@ func (c CompactionConfig) reserve() int64 {
 	if r <= 0 {
 		r = DefaultReserveTokens
 	}
-	// Effective reserve ≥ 15% of the window (omp resolveBudgetReserveTokens).
-	if w := int64(c.ContextWindow); w > 0 && r < w*15/100 {
-		r = w * 15 / 100
+	// Effective reserve ≥ 20% of the window: with a 20% head-room
+	// the 80% threshold trigger fires before the window overflows
+	// and forces a provider-error recovery (RCA #1).
+	if w := int64(c.ContextWindow); w > 0 && r < w*20/100 {
+		r = w * 20 / 100
 	}
 	return r
 }

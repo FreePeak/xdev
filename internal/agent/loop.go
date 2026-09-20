@@ -125,6 +125,9 @@ func WithCompactionEvent(h TurnHooks, i Interceptor) TurnHooks {
 // DefaultMaxTurns bounds one Run against runaway tool loops.
 const DefaultMaxTurns = 200
 
+// DefaultSessionTokenBudget is the hard cap on tokens one Run may spend. 0 means unbounded.
+const DefaultSessionTokenBudget = 5000000
+
 // TurnBudgetPrompt is the synthetic user message injected when a Run hits
 // its turn cap: the model gets one wrap-up turn instead of a hard error.
 const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the user can say \"continue\""
@@ -232,6 +235,9 @@ type Agent struct {
 	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
 	MaxTurns int
+	// SessionTokenBudget caps one Run's total token spend
+	// (provider requests + retries). 0 → DefaultSessionTokenBudget.
+	SessionTokenBudget int
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
@@ -334,6 +340,15 @@ func (a *Agent) effectiveMaxTurns() int {
 	return DefaultMaxTurns
 }
 
+// effectiveSessionTokenBudget returns the hard token cap for one Run.
+// 0 → DefaultSessionTokenBudget.
+func (a *Agent) effectiveSessionTokenBudget() int64 {
+	if a.SessionTokenBudget > 0 {
+		return int64(a.SessionTokenBudget)
+	}
+	return DefaultSessionTokenBudget
+}
+
 // Steering is a queued user message injected at a step boundary.
 // Kind steer: inject into the current in-flight run's next step.
 // Kind followUp: start a new run after the current one.
@@ -430,6 +445,14 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 	}
 	limit := a.effectiveMaxTurns()
+	// sessionTokenBudget caps one Run's total token spend.
+	// 0 → DefaultSessionTokenBudget.
+	// RCA #1: this is the hard stop the root-cause analysis found
+	// missing — a session can burn millions of tokens before
+	// compaction or the turn cap kicks in.
+	sessionTokenBudget := a.effectiveSessionTokenBudget()
+	spentSoFar := int64(0)
+	budgetHit := false
 	// nudges is per run, not per turn: the empty-completion nudge below is
 	// spent at most maxEmptyTurnNudges times, so a model that can only ever
 	// emit reasoning cannot make the loop spend unbounded turns on it (the
@@ -482,6 +505,17 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		// the objective is never completed implicitly.
 		if a.Goals != nil && msg.Usage != nil {
 			a.Goals.AddUsage(msg.Usage.TotalTokens)
+		}
+
+		// Session budget (RCA #1): cap one Run's total token spend.
+		// When crossed, break to the loop's exit — the turn-budget
+		// machinery handles the wrap-up (same shape as hitting MaxTurns).
+		if msg.Usage != nil && sessionTokenBudget > 0 {
+			spentSoFar += msg.Usage.TotalTokens
+			if spentSoFar >= sessionTokenBudget {
+				budgetHit = true
+				break
+			}
 		}
 
 		if len(msg.ToolCalls()) == 0 {
@@ -565,6 +599,9 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			return msg, nil
 		}
 		emit("turn_end", map[string]any{"turn": turn})
+		if budgetHit {
+			break
+		}
 	}
 	// Budget exhausted: ask for one wrap-up message rather than erroring.
 	// The prompt is persisted so a store rebuild keeps it, and tool calls in
