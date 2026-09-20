@@ -100,8 +100,8 @@ type App struct {
 	// (UI thread; mu-guarded.)
 	debugMouse     bool
 	debugMouseLine string
-	logMu   sync.Mutex
-	logFile *os.File
+	logMu          sync.Mutex
+	logFile        *os.File
 	keyMap         *KeyMap // remappable keybinding layer
 	st             Status
 	// The decode window of the message being streamed: the first and last
@@ -1868,11 +1868,17 @@ func (a *App) handleKey(ev tcell.Event) {
 			}
 			switch m.Buttons() {
 			case tcell.WheelUp:
-				if !a.scrollThinkBox(m, false) {
+				// Diff overlay owns the wheel while open — same as a modal —
+				// otherwise the notch scrolls the transcript underneath it.
+				if a.diffOverlayOpen() {
+					a.dockOverlayScroll(3, false)
+				} else if !a.scrollThinkBox(m, false) {
 					a.scroll(3, false)
 				}
 			case tcell.WheelDown:
-				if !a.scrollThinkBox(m, true) {
+				if a.diffOverlayOpen() {
+					a.dockOverlayScroll(3, true)
+				} else if !a.scrollThinkBox(m, true) {
 					a.scroll(3, true)
 				}
 			default:
@@ -1911,6 +1917,11 @@ func (a *App) handleKey(ev tcell.Event) {
 	// The trajectory ledger is modal on the same terms as the tree selector:
 	// it owns every key while open, so nothing underneath it navigates.
 	if a.handleTrajectoryKey(key) {
+		return
+	}
+	// Diff overlay is modal for navigation: ↑↓/PgUp/PgDn/Home/End scroll
+	// its body; Esc still reaches cancel below to close it.
+	if a.handleDiffOverlayKey(key) {
 		return
 	}
 
@@ -2067,22 +2078,72 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.onQuit()
 		return
 	case "scroll-up":
-		a.scroll(1, false)
+		if a.diffOverlayOpen() {
+			a.dockOverlayScroll(1, false)
+		} else {
+			a.scroll(1, false)
+		}
 		return
 	case "scroll-down":
-		a.scroll(1, true)
+		if a.diffOverlayOpen() {
+			a.dockOverlayScroll(1, true)
+		} else {
+			a.scroll(1, true)
+		}
 		return
 	case "scroll-page-up":
-		a.scrollPage(false)
+		if a.diffOverlayOpen() {
+			// handleDiffOverlayKey already owns bare PgUp; this covers a
+			// remapped chord that resolves to the scroll-page action.
+			a.mu.Lock()
+			vp := 1
+			if a.diffOv != nil {
+				vp = max(1, a.diffOv.scrollVp-1)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(vp, false)
+		} else {
+			a.scrollPage(false)
+		}
 		return
 	case "scroll-page-down":
-		a.scrollPage(true)
+		if a.diffOverlayOpen() {
+			a.mu.Lock()
+			vp := 1
+			if a.diffOv != nil {
+				vp = max(1, a.diffOv.scrollVp-1)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(vp, true)
+		} else {
+			a.scrollPage(true)
+		}
 		return
 	case "scroll-top":
-		a.scrollTo(false)
+		if a.diffOverlayOpen() {
+			a.mu.Lock()
+			n := 0
+			if a.diffOv != nil {
+				n = len(a.diffOv.lines)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(n, false)
+		} else {
+			a.scrollTo(false)
+		}
 		return
 	case "scroll-bottom":
-		a.scrollTo(true)
+		if a.diffOverlayOpen() {
+			a.mu.Lock()
+			n := 0
+			if a.diffOv != nil {
+				n = len(a.diffOv.lines)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(n, true)
+		} else {
+			a.scrollTo(true)
+		}
 		return
 	case "redraw":
 		a.Invalidate()

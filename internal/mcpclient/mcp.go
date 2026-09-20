@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -55,6 +56,42 @@ type ServerConfig struct {
 	// Source names the file (or gemini:<extension>) the entry came from.
 	// The loader sets it; it is never read from the file.
 	Source string `yaml:"-"`
+	// AutoStart is an optional recipe for launching this server when it is
+	// unreachable. Used for local HTTP servers (e.g. leankg) that ship as a
+	// binary the user may not have started yet.
+	AutoStart *AutoStartConfig `yaml:"autoStart,omitempty"`
+}
+
+// AutoStartConfig describes how to launch a local MCP server on demand.
+type AutoStartConfig struct {
+	Command          string   `yaml:"command,omitempty"`
+	Args             []string `yaml:"args,omitempty"`
+	Cwd              string   `yaml:"cwd,omitempty"`
+	HealthURL        string   `yaml:"healthUrl,omitempty"`
+	HealthTimeoutSec int      `yaml:"healthTimeoutSec,omitempty"`
+}
+
+// HealthEndpoint returns the URL used to probe whether an HTTP MCP server
+// is up. AutoStart.HealthURL wins when set; otherwise the server URL's path
+// is replaced with /health and any query is dropped.
+func (sc *ServerConfig) HealthEndpoint() string {
+	if sc == nil {
+		return ""
+	}
+	if sc.AutoStart != nil && sc.AutoStart.HealthURL != "" {
+		return sc.AutoStart.HealthURL
+	}
+	if sc.URL == "" {
+		return ""
+	}
+	u, err := url.Parse(sc.URL)
+	if err != nil {
+		return ""
+	}
+	u.Path = "/health"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 // IsEnabled reports whether the server should connect: an explicit
@@ -208,6 +245,7 @@ func (m *Manager) Tools() []tool.Tool {
 	}
 	return out
 }
+
 // Servers returns the connected server names, sorted. The dock
 // reads this for its MCP section; nil means MCP is off.
 func (m *Manager) Servers() []string {
