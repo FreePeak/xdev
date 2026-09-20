@@ -103,8 +103,11 @@ func TestSubagentYieldsAfterNudge(t *testing.T) {
 }
 
 func TestSubagentFailureSurfaces(t *testing.T) {
+	// Auth is retried (bounded). Script enough 401s to drain the
+	// escalation bound so the failure still surfaces to the parent.
+	auth := &ai.HTTPError{API: "a", Status: 401, Body: "no key"}
 	p := &fakeProvider{calls: []fakeScript{
-		{err: &ai.HTTPError{API: "a", Status: 401, Body: "no key"}},
+		{err: auth}, {err: auth}, {err: auth},
 	}}
 	res, err := SpawnChild(context.Background(), SubagentSpec{
 		Name: "doomed", Prompt: "x", Provider: p,

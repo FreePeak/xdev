@@ -27,6 +27,13 @@ func TestClassify(t *testing.T) {
 		{"nil", nil, ClassUnknown},
 		{"401 auth", &HTTPError{API: "a", Status: 401, Body: "invalid api key"}, ClassAuthFailed},
 		{"403 auth", &HTTPError{API: "a", Status: 403, Body: "forbidden"}, ClassAuthFailed},
+		// Gateway 403 wrapping a non-JSON upstream body — retry, not auth-fail.
+		{"403 upstream JSON error", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `{"error":{"code":"server_error","message":"Upstream response was not valid JSON","type":"server_error"}}`}, ClassTransient},
+		{"403 upstream plain text", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `Upstream response was not valid JSON`}, ClassTransient},
+		{"403 auth json", &HTTPError{API: "a", Status: 403,
+			Body: `{"error":{"code":"access_denied","message":"Forbidden","type":"auth_error"}}`}, ClassAuthFailed},
 		// A 403 the gateway wraps when the UPSTREAM served an invalid
 		// response — the upstream hiccupped, not xdev's request, so the
 		// same turn retried may succeed.

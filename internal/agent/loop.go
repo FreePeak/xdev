@@ -662,9 +662,12 @@ func turnContentEmitted(err error) bool {
 // content transient errors retain the partial message and continue once
 // (replaying would double-emit the visible content); context overflow
 // promotes to a bigger window first and compacts only at the top of the
-// ladder; auth/bad-request failures surface as-is. The returned history
-// carries everything recovery appended (partials, continuation prompts,
-// compacted rebuilds) so the caller's loop stays consistent.
+// ladder. Auth / bad-request / unknown failures are retried from the
+// current context window (bounded by maxEscalationRounds; retry.infinite
+// lifts the bound) so a transient upstream verdict does not end the
+// session. The returned history carries everything recovery appended
+// (partials, continuation prompts, compacted rebuilds) so the caller's
+// loop stays consistent.
 func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history []ai.Message) (*ai.Message, []ai.Message, error) {
 	a.ttsrBeginTurn()
 	// A turn that burned its interrupt budget stays quiet until it ends.
@@ -820,6 +823,27 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			history = rebuilt
 			continue
 		default:
+			// Retry everything else (auth, bad request, unknown):
+			// rebuild history from the persisted session when one
+			// is attached and re-send the same request on the
+			// current context window. Escalation is bounded by
+			// maxEscalationRounds; retry.infinite lifts it so an
+			// outage of any length is survived. The last provider
+			// error is returned as-is once the bound is spent.
+			if escalation < maxEscalationRounds || policy.Infinite {
+				escalation++
+				attempt = 0
+				logx.Errorf("recovery: retrying %v from current context", ai.Classify(err))
+				if a.Store != nil {
+					if res, buildErr := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{}); buildErr == nil {
+						history = res.Messages
+					}
+				}
+				if serr := sleepBackoff(ctx, policy.delay(attempt)); serr != nil {
+					return nil, history, serr
+				}
+				continue
+			}
 			return nil, history, err
 		}
 		// omp's auto_retry_* pair (#92): a hook that logs provider health

@@ -89,10 +89,14 @@ var (
 	prematureCloseRe  = regexp.MustCompile(`(?i)stream closed before a (finish_reason|terminal response event)|(unexpected|premature) EOF|body closed before|stream ended without (finish_reason|response\.completed|message_stop|done)`)
 	connectionResetRe = regexp.MustCompile(`(?i)(connection reset|connection refused|broken pipe|no such host|i/o timeout|context deadline exceeded|tls: handshake failure)`)
 	// serverErrorRe matches a 403 the gateway wraps when the UPSTREAM
-	// served an invalid response — "Upstream request failed: [server_error]
-	// Upstream response was not valid JSON": the upstream hiccupped, not
-	// xdev's request, so the same turn retried may succeed.
-	serverErrorRe = regexp.MustCompile(`(?i)upstream request failed.*server_error.*not valid json`)
+	// served an invalid / non-JSON response. Live bodies look like:
+	//
+	//   Upstream request failed: [server_error] Upstream response was not valid JSON
+	//   {"error":{"code":"server_error","message":"Upstream response was not valid JSON","type":"server_error"}}
+	//
+	// The upstream hiccupped, not xdev's request, so the same turn
+	// retried may succeed. A plain JSON 403 (access denied) stays auth.
+	serverErrorRe = regexp.MustCompile(`(?i)(upstream (request failed.*)?(response )?was not valid json|\[server_error\].*not valid json)`)
 )
 
 // malformedRequestRe matches a 400 whose body names a missing REQUIRED FIELD:
@@ -145,7 +149,7 @@ var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no 
 // and the retry ladder re-enters (beside the routing-verdict 404s in
 // modelVerdictRe). A gateway 400 that names no upstream (bare
 // invalid_request_error) stays ClassBadRequest and fails fast.
-var upstreamRefusalRe = regexp.MustCompile(`(?i)error from provider \([^)]*\): upstream request`)
+var upstreamRefusalRe = regexp.MustCompile(`(?i)error from provider \([^)]*\): (upstream request|upstream response was not valid json)`)
 
 // toolNameTooLongRe matches a 400 the gateway rejects because a tool
 // name exceeds the provider's 64-character ceiling. Names come from
@@ -172,11 +176,11 @@ func Classify(err error) ErrClass {
 		case he.Status == 401:
 			return ClassAuthFailed
 		case he.Status == 403 && serverErrorRe.MatchString(he.Body):
-			// A 403 the gateway wraps when the UPSTREAM served an
-			// invalid response ("Upstream request failed: [server_error]
-			// Upstream response was not valid JSON") — the upstream
-			// hiccupped, not xdev's request, so the same turn retried
-			// may succeed.
+			// A 403 whose body says the upstream's response was not
+			// valid JSON / server_error: the gateway/proxy could not
+			// parse the provider's answer, so the provider never
+			// rejected the request itself — retrying may succeed.
+			// A JSON-carrying 403 falls through to ClassAuthFailed.
 			return ClassTransient
 		case he.Status == 403:
 			return ClassAuthFailed
