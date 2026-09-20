@@ -1017,6 +1017,26 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	}
 	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll", dimSt)
 }
+// closeDiffOverlayOnClick dismisses the diff overlay when the human
+// clicks outside it, or re-opens it when clicking a different changed
+// file in the dock. The overlay is a modal surface covering the whole
+// width and hiding the transcript; a dock click re-points it to a
+// different file, anything else closes it, so the overlay is never
+// pinned — fixing "always showing" and "no way to close".
+// Caller holds a.mu (handleMouse press branch).
+func (a *App) closeDiffOverlayOnClick(x, y int) {
+	overlayTop, overlayBot := 1, a.height-1-a.composerRows()
+	inside := x >= 2 && x < a.width-2 && y >= overlayTop && y < overlayBot
+	if inside {
+		if path := a.dockClick(x, y); path != "" {
+			a.openDiffOverlay(path)
+			a.poke()
+			return
+		}
+	}
+	a.closeDiffOverlay()
+}
+
 
 // diffBodyScroll advances the overlay viewport by n lines (down=true)
 // or toward older rows (down=false).
