@@ -114,7 +114,61 @@ A hard <100 MB RSS budget is enforced by `debug.SetMemoryLimit`
 now" instead of an OOM kill — the compaction ladder fires at
 `memlimit.HighPressure` (`internal/agent/compact.go:394`).
 
-## 7. Notes
+## 7. Session cost discipline (turn budget vs token budget)
+
+The agent loop has **two** session budgets, but only one of them
+actually gates the run:
+
+- **Turn budget** (`MaxTurns`, default 200) — this is the real gate.
+  The run loop is `for turn := 0; limit == 0 || turn < limit; turn++`
+  (`internal/agent/loop.go:461`). `limit = effectiveMaxTurns()`.
+  Nothing else appears in that condition.
+- **Token budget** (`SessionTokenBudget`, default 5M) — this is a
+  *break clause*, not a gate. It is accumulated after each turn
+  completes (`spentSoFar += msg.Usage.TotalTokens` at
+  `loop.go:514`) and breaks the loop at `loop.go:516`.
+
+Why this matters for a long-lived streaming session:
+
+1. **The token budget can't shorten a turn.** The check fires *after*
+   `oneTurnWithRecovery` returns, so a single turn that burns more than
+   the remaining budget (e.g. a long thinking block or a large tool
+   result) completes in full before the break fires. At minimum one
+   turn's worth of tokens leaks past the cap.
+
+2. **The token budget can't abort an in-flight stream.** There is no
+   per-call or per-delta accounting mid-stream. If the model streams
+   a 3M-token response and `SessionTokenBudget` is nearly exhausted,
+   the session keeps streaming until that response lands, then breaks
+   at the turn boundary.
+
+3. **The post-run wrap-up names it "turn budget" regardless of cause.**
+   When either budget is crossed, the run appends `TurnBudgetPrompt`
+   (`"turn budget reached — wrap up the current step and report status…"`,
+   `loop.go:131`) with `TurnBudgetAttribution` (`loop.go:138`) and emits
+   `turn_end` with `{"turn": limit}` (`loop.go:619`) — the turn number,
+   not the token position. A consumer of the event stream cannot
+   distinguish "stopped at 200 turns" from "stopped at 5M tokens".
+
+4. **The turn cap dominates in practice.** Setting `SessionTokenBudget =
+   1_000_000` but leaving `MaxTurns = 0` (unbounded) still gives you
+   the default 200 turns — the turn gate is the dominant bound for
+   most real sessions because turns are short relative to 1M tokens.
+
+This is intentional: the token budget was added as **RCA #1**
+(`loop.go:450-452`) to stop sessions from burning millions of tokens
+before compaction or the turn cap kicked in. It was bolted onto the
+existing turn-gated loop as a break clause rather than replacing the
+turn gate, and the naming was never updated.
+
+If you need a hard token stop — abort mid-stream, report the budget as
+the cause, and skip the wrap-up turn — the loop condition at
+`loop.go:461` needs to consult `spentSoFar`, the provider call needs a
+context that aborts when the budget is crossed during streaming, and
+`turn_end` needs a `stopReason` that distinguishes `token_budget` from
+`turn_limit`.
+
+---
 
 - This is NOT a single git repo monorepo — each subdirectory may be
   independently versioned. Build from the `xdev` root.
