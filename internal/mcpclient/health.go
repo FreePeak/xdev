@@ -75,9 +75,14 @@ func (sc *ServerConfig) StartAuto() (*exec.Cmd, error) {
 	}
 	cmd := exec.Command(sc.AutoStart.Command, sc.AutoStart.Args...)
 	cmd.Dir = sc.AutoStart.Cwd
+	cmd.Env = os.Environ()
+	for k, v := range sc.AutoStart.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = setProcAttr()
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("autoStart: %w", err)
 	}

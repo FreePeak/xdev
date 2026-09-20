@@ -180,6 +180,13 @@ func (sc *ServerConfig) resolveSecrets(server string) error {
 		return err
 	}
 	sc.Env, sc.Headers = env, headers
+	if sc.AutoStart != nil {
+		aenv, err := resolveValues(server, "autoStart.env", sc.AutoStart.Env)
+		if err != nil {
+			return err
+		}
+		sc.AutoStart.Env = aenv
+	}
 	return nil
 }
 
