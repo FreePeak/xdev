@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -125,10 +126,26 @@ func wrap(s string, maxW int) []string {
 			continue
 		}
 		// Word wrap; hard-break words longer than maxW.
+		// Advance rune-by-rune to find the byte index where display
+		// width reaches maxW — always at a rune boundary. Using a
+		// byte index directly would split multi-byte UTF-8 (CJK,
+		// Thai, emoji) into garbled fragments.
 		for width(line) > maxW {
-			cut := maxW
-			for cut > 1 && width(line[:cut]) > maxW {
-				cut--
+			cut := 0
+			w := 0
+			for _, r := range line {
+				rw := runewidth.RuneWidth(r)
+				if w+rw > maxW {
+					break
+				}
+				w += rw
+				cut += utf8.RuneLen(r)
+			}
+			if cut == 0 {
+				// A single rune wider than maxW (e.g. CJK at
+				// maxW=1): hard-break it as a rune boundary.
+				r := []rune(line)[0]
+				cut = utf8.RuneLen(r)
 			}
 			if sp := strings.LastIndexAny(line[:cut], " \t"); sp > 0 {
 				cut = sp
