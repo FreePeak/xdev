@@ -800,7 +800,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// reg.MCPNames for the dock section. A nil manager
 		// means MCP is off and the section renders nothing.
 		MCP: func() string { return reg.MCPNames() },
+		// The panel's one button row: the heading is the ledger's own count,
+		// read through `store` so /new, /resume and /fork move it with the
+		// session. The click opens the same ledger /trajectory opens.
+		Trajectory: func() string { return trajectoryHeading(store) },
 	}
+	// The ledger's records come from the same store, read on open rather than
+	// held: a snapshot kept live would walk the session on every rebuild.
+	app.SetTrajectoryOps(&tui.TrajectoryOps{
+		Records: func() []tui.TrajectoryRecord { return trajectoryRows(store) },
+	})
 	if sessionHub != nil {
 		ops.Agents = func() string { return dockAgentsLabel(sessionHub.Roster()) }
 	}
@@ -1912,7 +1921,7 @@ type tuiSession struct {
 	// onTurnEnd, both on different goroutines) — same lock the
 	// hooks use, lives on the session because the hooks reference
 	// ts, not themselves.
-	mu sync.Mutex
+	mu          sync.Mutex
 	ttftRequest time.Time
 }
 
@@ -1930,7 +1939,7 @@ type tuiHooks struct {
 	// turn's ttft from it and writes it via onTurnEnd (nil-safe).
 	// OnStart fires on the agent goroutine, OnTurnEnd on the Run
 	// goroutine — mu serializes the two writers.
-	mu sync.Mutex
+	mu          sync.Mutex
 	ttftRequest time.Time
 }
 
@@ -2593,6 +2602,141 @@ func treeEntries(store *session.Store) []tui.TreeEntry {
 		out = append(out, te)
 	}
 	return out
+}
+
+// trajectoryRows snapshots the session as ledger rows, in file order: the
+// ledger is the session's own record sequence, so /tree's branch layout is
+// deliberately not reproduced here. Rows are numbered from 1 as they are read.
+func trajectoryRows(store *session.Store) []tui.TrajectoryRecord {
+	entries := store.Entries()
+	out := make([]tui.TrajectoryRecord, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, trajectoryRow(e, len(out)+1))
+	}
+	return out
+}
+
+// trajectoryRow is one ledger row: the entry's own label, its full body for the
+// inspector, and the machine facts that ride beside it. A row is built once per
+// open, never cached — the ledger reads the store when it opens and the panel
+// only ever reads the count.
+func trajectoryRow(e session.Entry, i int) tui.TrajectoryRecord {
+	env := e.Envelope()
+	rec := tui.TrajectoryRecord{Index: i, Kind: env.Type}
+	// A harness-written user turn (goal continuation, provider cut-off, budget
+	// wrap-up) is not a turn the human took, so it does not open one.
+	turn := false
+	switch t := e.(type) {
+	case *session.MessageEntry:
+		m := &t.Message
+		rec.Kind = string(m.Role)
+		rec.Text = clipSummary(ai.MessageLabel(m), 80)
+		rec.Detail = trajectoryDetail(m)
+		rec.Meta = trajectoryMeta(m)
+		if m.Role == ai.RoleUser {
+			turn = m.Attribution == "" || m.Attribution == "user"
+		}
+	case *session.CompactionEntry:
+		rec.Kind = "compacted"
+		rec.Text = clipSummary(ai.MessageLabel(&t.Summary), 80)
+		rec.Detail = trajectoryDetail(&t.Summary)
+		if t.TokensBefore > 0 {
+			rec.Meta = fmt.Sprintf("from %s tokens", tui.HumanTokens(t.TokensBefore))
+		}
+		if t.Method != "" {
+			rec.Meta = strings.TrimSpace(rec.Meta + " · " + t.Method)
+		}
+	case *session.BranchSummaryEntry:
+		rec.Kind = "branch"
+		rec.Text = clipSummary(ai.MessageLabel(&t.Summary), 80)
+		rec.Detail = trajectoryDetail(&t.Summary)
+	case *session.ModelChangeEntry:
+		rec.Kind = "model"
+		rec.Text, rec.Detail = t.Model, t.Model
+	case *session.ResetBoundaryEntry:
+		rec.Kind, rec.Text = "reset", "(context cut here)"
+	case *session.CustomEntry:
+		rec.Kind, rec.Text = "custom", "("+t.CustomType+")"
+		if len(t.Data) > 0 {
+			if b, err := json.MarshalIndent(t.Data, "", "  "); err == nil {
+				rec.Detail = string(b)
+			}
+		}
+	}
+	rec.Turn = turn
+	return rec
+}
+
+// trajectoryDetail is the inspector body: the message's own text, with streamed
+// reasoning under it when it produced any. The row's preview is one line, so the
+// pane is where a full prompt, tool payload or reasoning actually gets read.
+func trajectoryDetail(m *ai.Message) string {
+	parts := make([]string, 0, 2)
+	if txt := strings.TrimRight(m.Text(), "\n"); strings.TrimSpace(txt) != "" {
+		parts = append(parts, txt)
+	}
+	if think := trajectoryThinking(m); think != "" {
+		parts = append(parts, "reasoning:\n"+think)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// trajectoryThinking joins the message's reasoning blocks for the inspector;
+// they never reach the preview because MessageLabel answers with text first.
+func trajectoryThinking(m *ai.Message) string {
+	var b strings.Builder
+	for _, blk := range m.Content {
+		t, ok := blk.(ai.ThinkingBlock)
+		if !ok || strings.TrimSpace(t.Thinking) == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(strings.TrimRight(t.Thinking, "\n"))
+	}
+	return b.String()
+}
+
+// trajectoryMeta is the machine-fact line the inspector shows beneath the body:
+// what the provider billed, how long the request took, and how a tool ended.
+// Empty for an entry that carries none, so the pane shows no blank footer.
+func trajectoryMeta(m *ai.Message) string {
+	var parts []string
+	if m.Usage != nil {
+		if m.Usage.TotalTokens > 0 {
+			parts = append(parts, tui.HumanTokens(m.Usage.TotalTokens)+" tokens")
+		}
+		if m.Usage.Cost != nil && m.Usage.Cost.Total > 0 {
+			parts = append(parts, fmt.Sprintf("$%.4f", m.Usage.Cost.Total))
+		}
+	}
+	if m.DurationMS > 0 {
+		parts = append(parts, (time.Duration(m.DurationMS) * time.Millisecond).Round(time.Millisecond).String())
+	}
+	if m.Role == ai.RoleToolResult {
+		if out := tool.OutcomeOf(m.Details); out.HasExit {
+			parts = append(parts, fmt.Sprintf("exit %d", out.Exit))
+		}
+		if m.IsError {
+			parts = append(parts, "error")
+		}
+	}
+	// The model that answered is worth a slot on the fact line only when the
+	// session has switched models: the ledger's /model rows already say so.
+	return strings.Join(parts, " · ")
+}
+
+// trajectoryHeading is the dock row's title: the ledger's own count, read
+// cheaply. It is deliberately not the record list — the panel rebuilds only
+// when something moved, and walking a long session there is the per-frame cost
+// the rebuild cap exists to avoid.
+func trajectoryHeading(store *session.Store) string {
+	n := len(store.Entries())
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("TRAJECTORY · %d records", n)
 }
 
 // clipSummary collapses whitespace and truncates a one-line entry preview.

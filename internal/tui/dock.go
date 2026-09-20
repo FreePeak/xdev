@@ -63,7 +63,10 @@ const (
 	dockTaskID  = "tasks"
 	dockFileID  = "files"
 	dockAgentID = "agents"
-	dockMCPID = "mcp"
+	dockMCPID   = "mcp"
+	// dockTrajID is the panel's own action row rather than a source of session
+	// facts: its one row opens the trajectory ledger on a click.
+	dockTrajID = "trajectory"
 )
 
 // dockBumpSeq is the version every source stamps. Package-level and atomic
@@ -99,6 +102,11 @@ type DockOps struct {
 	// MCP is the connected MCP server names. It is the registry's
 	// snapshot; a nil source means MCP is off and the section is omitted.
 	MCP func() string
+	// Trajectory is the panel's one action row: a click opens the ledger
+	// /trajectory opens. A count, not the records — the ledger builds its rows
+	// when it opens, and a source that walked the session on every rebuild is
+	// the per-frame cost the panel's rebuild cap exists to avoid.
+	Trajectory func() string
 }
 
 // dockRow is one painted row. text is the row's own line; add and del are the
@@ -111,6 +119,7 @@ type dockRow struct {
 	del  string // "-12" (diff-removed ink)
 	head bool
 	path string // full file path of a FILES row, so a click resolves it without re-parsing the clipped text
+	act  string // non-file action a click opens ("trajectory"): the panel's own buttons
 }
 
 // dockRowText returns the selectable text of a dock row: the row's
@@ -222,8 +231,8 @@ func dockMCLabel(raw string) (dockFold, bool) {
 		return dockFold{}, false
 	}
 	return dockFold{id: dockMCPID, title: dockClip("MCP · " + raw), max: dockListMax,
-		rows: []dockRow{{text: dockClip(raw)}}},
-	true
+			rows: []dockRow{{text: dockClip(raw)}}},
+		true
 }
 
 func (a *App) SetDockModeFunc(set func(mode string)) {
@@ -402,7 +411,26 @@ func (a *App) collect() []dockFold {
 	}
 	add(dockAgentID, ops.Agents)
 	add(dockMCPID, ops.MCP)
+	if f, ok := a.dockTrajFold(); ok {
+		out = append(out, f)
+	}
 	return out
+}
+
+// dockTrajFold is the panel's one button row: the ledger /trajectory opens,
+// wired or omitted. It carries no session facts of its own — the heading comes
+// from the same source the ledger reads — and the row is the panel's only
+// clickable non-file row, so dockRowAt hands its act back to the caller.
+func (a *App) dockTrajFold() (dockFold, bool) {
+	if a.dock.ops.Trajectory == nil {
+		return dockFold{}, false
+	}
+	head := strings.TrimSpace(a.dock.ops.Trajectory())
+	if head == "" {
+		return dockFold{}, false
+	}
+	return dockFold{id: dockTrajID, title: dockClip(head), max: 1,
+		rows: []dockRow{{text: dockClip("click to open the ledger"), act: dockTrajID}}}, true
 }
 
 // dockPlanFold is the §2 surface: the proposed document, with the gesture that
@@ -799,6 +827,10 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 			drawText(s, x+dockPad, y, r.text, ink)
 			drawText(s, cx, y, r.add, added)
 			drawText(s, cx+width(r.add)+1, y, r.del, removed)
+		case r.act != "":
+			// A button row: the panel's own action, not a fact about the
+			// session, so it wears the accent the links wear.
+			drawText(s, x+dockPad, y, r.text, body.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
 		default:
 			drawText(s, x+dockPad, y, r.text, ink)
 		}
@@ -809,22 +841,30 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 // the click hit, or "" for everything that is not a changed-file row.
 // Callers hold a.mu.
 func (a *App) dockClick(x, y int) string {
+	path, _ := a.dockRowAt(x, y)
+	return path
+}
+
+// dockRowAt resolves a screen cell to the row's own action: the file path a
+// FILES row opens, or the act a button row carries ("" on everything else).
+// Callers hold a.mu.
+func (a *App) dockRowAt(x, y int) (path, act string) {
 	if !a.dockOn() {
-		return ""
+		return "", ""
 	}
 	d := a.dock
 	if d == nil || d.lines == nil {
-		return ""
+		return "", ""
 	}
 	top, h := a.dockGrid()
 	if y < top+1 || y >= top+h {
-		return ""
+		return "", ""
 	}
 	i := y - top - 1
 	if i < 0 || i >= len(d.lines) {
-		return ""
+		return "", ""
 	}
-	return d.lines[i].path
+	return d.lines[i].path, d.lines[i].act
 }
 
 // dockJumpToBlock walks the transcript for the most recent finished
@@ -1007,6 +1047,21 @@ func (a *App) dockKey(action string) bool {
 		return false
 	}
 	return true
+}
+
+// dockAct runs the panel's own button rows — the surfaces a click opens that
+// are not the diff overlay. The click path already holds a.mu, so every action
+// here must be safe under it: the trajectory ledger opens through its own
+// registry lock, never a.mu.
+// ponytail: one action. The upgrade path is dockKey's action vocabulary if a
+// second button row ever earns its place.
+func (a *App) dockAct(act string) bool {
+	switch act {
+	case dockTrajID:
+		return a.OpenTrajectory()
+	default:
+		return false
+	}
 }
 
 // dockCloseDiff dismisses the overlay on Esc.
