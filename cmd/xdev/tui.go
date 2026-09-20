@@ -281,6 +281,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetNotice(msg, mcpNoticeGrace)
 	})
 	if mgr != nil {
+		reg.MCPNames = func() string { return mcpNameList(mgr) }
 		defer mgr.Close()
 	}
 	// showThinking drives the reasoning display (issue #20): the layered
@@ -777,6 +778,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// panel pinned to the session the process started with would show the
 		// old title — and the old id — for the rest of the run.
 		Session: func() (string, string) { return store.Title(), shortSessionID(store.ID()) },
+		// MCP is connected by attachMCP into reg; read from
+		// reg.MCPNames for the dock section. A nil manager
+		// means MCP is off and the section renders nothing.
+		MCP: func() string { return reg.MCPNames() },
 	}
 	if sessionHub != nil {
 		ops.Agents = func() string { return dockAgentsLabel(sessionHub.Roster()) }
