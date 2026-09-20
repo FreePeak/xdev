@@ -1992,7 +1992,10 @@ func (a *App) handleKey(ev tcell.Event) {
 		// Esc aborts a running turn; idle it is a no-op (the dropdown,
 		// when open, was already closed by the menu branch above).
 		// The diff overlay (opened from a dock click) is dismissed first.
-		if a.diffOv != nil {
+		a.mu.Lock()
+		hasOverlay := a.diffOv != nil
+		a.mu.Unlock()
+		if hasOverlay {
 			a.closeDiffOverlay()
 			return
 		}
