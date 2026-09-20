@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/FreePeak/xdev/internal/typesafe"
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/browser"
@@ -36,6 +35,7 @@ import (
 	"github.com/FreePeak/xdev/internal/tiny"
 	"github.com/FreePeak/xdev/internal/tool"
 	"github.com/FreePeak/xdev/internal/tts"
+	"github.com/FreePeak/xdev/internal/typesafe"
 )
 
 // printOptions configures one one-shot run.
@@ -887,12 +887,15 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 	return ai.NewInBandProvider(prov, format), nil
 }
 
-// modelWindow resolves the context window for one provider/model pair
-// (0 when the model is undiscovered — compaction stays disabled then).
+// modelWindow resolves the context window for one provider/model pair.
+// A discovered model returns its own window; anything else falls back to
+// agent.ResolveMaxContextTokens() — XDEV_MAX_CONTEXT_TOKENS when set, else
+// MaxContextTokensDefault. Returning 0 here would silently disable
+// compaction for every model the catalog does not pin.
 func modelWindow(cfg *config.Config, provider, model string) int {
 	pc, ok := cfg.Providers[provider]
 	if !ok {
-		return 0
+		return agent.ResolveMaxContextTokens()
 	}
 	// Pinned entries first; discovered ones (a local server's live model
 	// list) fill what models.yml never named, so compaction knows the real
@@ -902,7 +905,7 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 			return m.ContextWindow
 		}
 	}
-	return 0
+	return agent.ResolveMaxContextTokens()
 }
 
 // modelReasoning reports whether the catalog says this model can reason
