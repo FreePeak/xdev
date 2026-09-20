@@ -1039,7 +1039,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if err != nil {
 			return err
 		}
-		_ = nprov
+		modelMu.Lock()
+		live.prov, live.model, live.provName = nprov, nmodelName, nprovName
+		modelMu.Unlock()
 		if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
 			logx.Errorf("model change entry: %v", err)
 		}
