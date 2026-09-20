@@ -151,3 +151,23 @@ func decodeJSON(t *testing.T, b []byte) map[string]any {
 	}
 	return m
 }
+
+func TestCleanUTF8DropsInvalidAndFFFD(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"hello", "hello"},
+		{"你好世界", "你好世界"},
+		{"Xin chào Việt Nam", "Xin chào Việt Nam"},
+		{"a\xffb", "ab"},
+		{"a\uFFFDb", "ab"},
+		{"\uFFFD", ""},
+		{"", ""},
+		{"plan: 你好 + chào \uFFFD junk", "plan: 你好 + chào  junk"},
+	}
+	for _, tc := range cases {
+		if got := CleanUTF8(tc.in); got != tc.want {
+			t.Errorf("CleanUTF8(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

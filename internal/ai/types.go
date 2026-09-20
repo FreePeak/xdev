@@ -141,7 +141,9 @@ func ParseBlock(data []byte) (Block, error) {
 		if err := json.Unmarshal(data, &b); err != nil {
 			return nil, err
 		}
-		return ThinkingBlock{Thinking: b.Thinking, ThinkingSignature: b.ThinkingSignature}, nil
+		// Drop invalid UTF-8 / U+FFFD so a resumed session never re-frames
+		// the mojibake a prior corrupt stream left behind.
+		return ThinkingBlock{Thinking: CleanUTF8(b.Thinking), ThinkingSignature: b.ThinkingSignature}, nil
 	case "toolCall":
 		var b ToolCallBlock
 		if err := json.Unmarshal(data, &b); err != nil {

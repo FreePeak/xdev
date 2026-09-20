@@ -69,6 +69,9 @@ type AutoStartConfig struct {
 	Cwd              string   `yaml:"cwd,omitempty"`
 	HealthURL        string   `yaml:"healthUrl,omitempty"`
 	HealthTimeoutSec int      `yaml:"healthTimeoutSec,omitempty"`
+	// PidFile records the launched process, so a second xdev run waits
+	// for the existing daemon instead of starting a duplicate.
+	PidFile string `yaml:"pidFile,omitempty"`
 }
 
 // HealthEndpoint returns the URL used to probe whether an HTTP MCP server

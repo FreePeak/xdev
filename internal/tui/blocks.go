@@ -78,7 +78,14 @@ func sanitizeOutput(s string) string {
 	if strings.IndexByte(s, 0x1b) >= 0 {
 		s = ansiSeq.ReplaceAllString(s, "")
 	}
-	if !strings.ContainsFunc(s, func(r rune) bool { return r == '\t' || r == '\r' || r < 0x20 || (r >= 0x7f && r <= 0x9f) }) {
+	// U+FFFD is the replacement character Go's encoding/json writes when a
+	// vendor splices invalid UTF-8 into a JSON string. Dropping it here
+	// keeps the thinking box (and every other framed block) free of
+	// mojibake for english / mandarin / vietnamese text alike, even when a
+	// delta slipped past the wire-layer cleanUTF8.
+	if !strings.ContainsFunc(s, func(r rune) bool {
+		return r == '\t' || r == '\r' || r == '\uFFFD' || r < 0x20 || (r >= 0x7f && r <= 0x9f)
+	}) {
 		return s
 	}
 	var b strings.Builder
@@ -91,6 +98,8 @@ func sanitizeOutput(s string) string {
 			b.WriteRune('\n')
 		case r == '\r':
 			// CRLF: the \n carries the break.
+		case r == '\uFFFD':
+			// Drop the replacement character — never paint mojibake.
 		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
 		default:
 			b.WriteRune(r)

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FreePeak/xdev/internal/logx"
 )
@@ -165,3 +166,28 @@ func healthCheckOneGet(ctx context.Context, hc *http.Client, url string, headers
 	return nil
 }
 
+
+// cleanUTF8 keeps only valid UTF-8 runes and drops U+FFFD. A vendor that
+// splices invalid bytes into its SSE JSON (or already substitutes U+FFFD
+// before framing) would otherwise land mojibake in the thinking box and
+// the session JSONL. English, Mandarin, Vietnamese and every other real
+// script pass through unchanged — they are valid UTF-8 without U+FFFD.
+//
+// Used at every text/thinking emit so a single call site cannot forget.
+func CleanUTF8(s string) string {
+	if s == "" {
+		return s
+	}
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "")
+	}
+	if !strings.ContainsRune(s, '\uFFFD') {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\uFFFD' {
+			return -1
+		}
+		return r
+	}, s)
+}

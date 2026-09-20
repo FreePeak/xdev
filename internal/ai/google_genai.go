@@ -352,7 +352,7 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 		closeText()
 		content := make([]Block, 0, len(order)+1)
 		if text.Len() > 0 {
-			content = append(content, TextBlock{Text: text.String()})
+			content = append(content, TextBlock{Text: CleanUTF8(text.String())})
 		}
 		for _, idx := range order {
 			content = append(content, *toolCalls[idx])
@@ -436,12 +436,16 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 
 				case part.Text != "":
 					if part.Thought {
+						delta := CleanUTF8(part.Text)
+						if delta == "" {
+							continue
+						}
 						closeText()
 						if !inThinking {
 							inThinking = true
 							emit(Event{Type: EventThinkingStart})
 						}
-						emit(Event{Type: EventThinkingDelta, Delta: part.Text})
+						emit(Event{Type: EventThinkingDelta, Delta: delta})
 						continue
 					}
 					closeThinking()
@@ -449,8 +453,11 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 						inText = true
 						emit(Event{Type: EventTextStart})
 					}
-					text.WriteString(part.Text)
-					emit(Event{Type: EventTextDelta, Delta: part.Text, Snapshot: text.String()})
+					delta := CleanUTF8(part.Text)
+					if delta != "" {
+						text.WriteString(delta)
+						emit(Event{Type: EventTextDelta, Delta: delta, Snapshot: text.String()})
+					}
 				}
 			}
 		}
