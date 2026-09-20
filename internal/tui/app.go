@@ -100,6 +100,8 @@ type App struct {
 	// (UI thread; mu-guarded.)
 	debugMouse     bool
 	debugMouseLine string
+	logMu   sync.Mutex
+	logFile *os.File
 	keyMap         *KeyMap // remappable keybinding layer
 	st             Status
 	// The decode window of the message being streamed: the first and last
@@ -1486,6 +1488,38 @@ func (a *App) SetDebugMouse(on bool) {
 	a.poke()
 }
 
+// SetLogFile opens <f> for writing a TUI screen transcript
+// (one text dump per paint frame). Off by default (nil).
+func (a *App) SetLogFile(f *os.File) {
+	a.logMu.Lock()
+	a.logFile = f
+	a.logMu.Unlock()
+}
+
+// logFrame writes a text dump of the screen buffer to
+// the log file (if open). It snapshots the pointer under
+// logMu, then writes without any lock so a stalled terminal
+// cannot hold up the UI loop.
+func (a *App) logFrame() {
+	a.logMu.Lock()
+	f := a.logFile
+	a.logMu.Unlock()
+	if f == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(f, "\n=== frame %d ===\n", time.Now().UnixNano())
+	for y := 0; y < a.height; y++ {
+		for x := 0; x < a.width; x++ {
+			text, _, _ := a.scr.Get(x, y)
+			if text != "" {
+				_, _ = f.WriteString(text)
+			}
+		}
+		_, _ = f.WriteString("\n")
+	}
+	_ = f.Sync()
+}
+
 // SetSettingsOps wires the /settings command (settings live in cmd).
 func (a *App) SetSettingsOps(ops *SettingsOps) { a.settingsOps = ops }
 
@@ -1696,6 +1730,7 @@ func (a *App) Run() {
 	}()
 
 	a.draw()
+	a.logFrameAfterDraw()
 	for {
 		a.beat()
 		select {
@@ -1705,8 +1740,10 @@ func (a *App) Run() {
 			a.handleKey(ev)
 			a.drainKeys()
 			a.draw()
+			a.logFrameAfterDraw()
 		case <-a.dirty:
 			a.draw()
+			a.logFrameAfterDraw()
 		case <-tick.C:
 			// A paste window whose end marker never arrived must still close,
 			// or the keys held inside it would never reach the user again
@@ -1747,6 +1784,7 @@ func (a *App) Run() {
 			// no tick to stay correct.
 			if running || animate || stuck {
 				a.draw()
+				a.logFrameAfterDraw()
 			}
 		}
 	}
@@ -2873,6 +2911,10 @@ func (a *App) draw() {
 	a.paint()
 	a.scr.Show()
 }
+
+// logFrameAfterDraw is called once per frame after draw()
+// to snapshot the screen buffer to the log file when --log is active.
+func (a *App) logFrameAfterDraw() { a.logFrame() }
 
 // paint renders the current state into the screen buffer. a.mu guards the
 // state reads; it must NEVER be held across the Show() flush (see draw).

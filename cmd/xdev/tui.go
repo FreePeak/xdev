@@ -266,6 +266,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer setCursorReset()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	// --log: write a TUI screen transcript to <path> after each
+	// paint frame (off by default). Relative paths resolve under
+	// config.DataDir(); the file is opened truncated and closed on exit.
+	if launch.LogFile != "" {
+		logPath := launch.LogFile
+		if !filepath.IsAbs(logPath) {
+			logPath = filepath.Join(config.DataDir(), logPath)
+		}
+		if dir := filepath.Dir(logPath); dir != "" {
+			_ = os.MkdirAll(dir, 0o700)
+		}
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			return 2, fmt.Errorf("tui: log file: %w", err)
+		}
+		defer f.Close()
+		app.SetLogFile(f)
+	}
 	// A frozen TUI is otherwise undiagnosable after the fact: the UI loop is
 	// single-goroutine, so anything that fails to return there kills keys,
 	// Ctrl+C and output together while the process stays alive. If one loop
