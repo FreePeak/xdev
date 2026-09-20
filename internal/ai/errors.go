@@ -88,6 +88,11 @@ var (
 	// compaction/handoff side requests .../done).
 	prematureCloseRe  = regexp.MustCompile(`(?i)stream closed before a (finish_reason|terminal response event)|(unexpected|premature) EOF|body closed before|stream ended without (finish_reason|response\.completed|message_stop|done)`)
 	connectionResetRe = regexp.MustCompile(`(?i)(connection reset|connection refused|broken pipe|no such host|i/o timeout|context deadline exceeded|tls: handshake failure)`)
+	// serverErrorRe matches a 403 the gateway wraps when the UPSTREAM
+	// served an invalid response — "Upstream request failed: [server_error]
+	// Upstream response was not valid JSON": the upstream hiccupped, not
+	// xdev's request, so the same turn retried may succeed.
+	serverErrorRe = regexp.MustCompile(`(?i)upstream request failed.*server_error.*not valid json`)
 )
 
 // malformedRequestRe matches a 400 whose body names a missing REQUIRED FIELD:
@@ -164,7 +169,16 @@ func Classify(err error) ErrClass {
 	var he *HTTPError
 	if errors.As(err, &he) {
 		switch {
-		case he.Status == 401 || he.Status == 403:
+		case he.Status == 401:
+			return ClassAuthFailed
+		case he.Status == 403 && serverErrorRe.MatchString(he.Body):
+			// A 403 the gateway wraps when the UPSTREAM served an
+			// invalid response ("Upstream request failed: [server_error]
+			// Upstream response was not valid JSON") — the upstream
+			// hiccupped, not xdev's request, so the same turn retried
+			// may succeed.
+			return ClassTransient
+		case he.Status == 403:
 			return ClassAuthFailed
 		case he.Status == 400 || he.Status == 413 || he.Status == 422:
 			if bodyIndicatesOverflow(he.Body) {

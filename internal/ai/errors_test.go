@@ -27,7 +27,11 @@ func TestClassify(t *testing.T) {
 		{"nil", nil, ClassUnknown},
 		{"401 auth", &HTTPError{API: "a", Status: 401, Body: "invalid api key"}, ClassAuthFailed},
 		{"403 auth", &HTTPError{API: "a", Status: 403, Body: "forbidden"}, ClassAuthFailed},
-		{"429 rate limit", &HTTPError{API: "a", Status: 429, Body: "rate limited"}, ClassTransient},
+		// A 403 the gateway wraps when the UPSTREAM served an invalid
+		// response — the upstream hiccupped, not xdev's request, so the
+		// same turn retried may succeed.
+		{"403 upstream server_error", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `{"error":{"message":"Error from provider (openai): Upstream request failed: [server_error] Upstream response was not valid JSON","type":"server_error"}}`}, ClassTransient},
 		{"500 server", &HTTPError{API: "a", Status: 500, Body: "boom"}, ClassTransient},
 		{"408 timeout", &HTTPError{API: "a", Status: 408, Body: "slow"}, ClassTransient},
 		{"400 overflow body", &HTTPError{API: "a", Status: 400, Body: "This model's maximum context length is 128000 tokens"}, ClassContextOverflow},
