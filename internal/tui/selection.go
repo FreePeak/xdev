@@ -258,6 +258,16 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// (released outside the window) must not leave the app wedged, and a
 		// stale edge would swallow the gesture that should recover it.
 		a.selEdgeStop()
+		a.selEdgeStop()
+		// The diff overlay (opened from a dock click) is dismissed first:
+		// a click anywhere outside it closes it, a click on a dock FILES
+		// row re-opens the diff for that file. Without this the overlay
+		// stays pinned for every subsequent frame — the "always showing"
+		// and "no way to close" symptoms.
+		if a.diffOv != nil {
+			a.closeDiffOverlayOnClick(x, y)
+			break
+		}
 		// A press on the scrollbar grabs the bar, not the text: the drag that
 		// follows moves the viewport, and the gesture owns no selection at all
 		// — the rows the painter recorded belong to the frame the bar was hit
@@ -299,14 +309,9 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// reach the diff surface. (Jumping to the block
 		// without opening the overlay left the click doing
 		// nothing the eye could see — the file diff view
-		// was unreachable.) The panel's own button rows ride
-		// the same hit test and open what their chord opens.
-		if path, act := a.dockRowAt(x, y); path != "" || act != "" {
-			if path != "" {
-				a.openDiffOverlay(path)
-			} else {
-				a.dockAct(act)
-			}
+		// was unreachable.)
+		if path := a.dockClick(x, y); path != "" {
+			a.openDiffOverlay(path)
 			a.poke()
 			break
 		}
