@@ -514,6 +514,15 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	wireTaskParent(reg, store)
+	// Auto-activate goal mode: every session runs until its goal is
+	// completed or explicitly dropped — no 200-turn stop (#387).
+	gs := agent.NewGoalState(store)
+	if v, ok := gs.View(); !ok || v.Status == agent.GoalDropped {
+		if _, err := gs.Create("session goal", 0); err != nil {
+			logx.Errorf("goal: auto-create: %v", err)
+		}
+	}
+	reg.Register(&agent.GoalTool{Goals: gs})
 	// #272: in print mode stderr is the user's surface (stdout is the model's
 	// and a script parses it), so only what needs saying goes there.
 	if notice, warnings, count := taskAgentsAtStartup(cwd); count == 0 || len(warnings) > 0 {
@@ -1857,7 +1866,6 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M11 #40: goal mode — one session-scoped objective with an optional
 	// token budget. The agent loop reads the same state for the per-turn
 	// reminder and budget accounting; wireTaskParent binds the store.
-	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
 	// M13 #51: checkpoint/rewind — named session-tree bookmarks. rewind
 	// re-points the leaf at a checkpoint and records the caller's report as
 	// a branch summary; wireTaskParent binds the live session.

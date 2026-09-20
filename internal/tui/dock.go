@@ -873,8 +873,6 @@ type diffOverlay struct {
 // openDiffOverlay renders the diff for the newest finished tool block
 // that touches path and stores it as the active overlay.
 func (a *App) openDiffOverlay(path string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
 		if b.Kind != KindToolDone || b.Diff == "" {
@@ -1023,6 +1021,8 @@ func (a *App) dockCloseDiff() bool {
 // dockToggleDiff closes the overlay if open, or re-opens it
 // for the dock's last changed-file row.
 func (a *App) dockToggleDiff() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.diffOv != nil {
 		a.closeDiffOverlay()
 		return true
