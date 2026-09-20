@@ -64,11 +64,21 @@ type ServerConfig struct {
 
 // AutoStartConfig describes how to launch a local MCP server on demand.
 type AutoStartConfig struct {
-	Command          string   `yaml:"command,omitempty"`
-	Args             []string `yaml:"args,omitempty"`
-	Cwd              string   `yaml:"cwd,omitempty"`
-	HealthURL        string   `yaml:"healthUrl,omitempty"`
-	HealthTimeoutSec int      `yaml:"healthTimeoutSec,omitempty"`
+	// Command + Args launch the server (detached, in its own session,
+	// so it outlives the xdev process that spawned it).
+	Command string   `yaml:"command,omitempty"`
+	Args    []string `yaml:"args,omitempty"`
+	// Cwd is the working directory for the launch (empty = inherit).
+	Cwd string `yaml:"cwd,omitempty"`
+	// Env is the environment for the launched process (merged over the
+	// parent's). The loader resolves ${VAR} and !command forms at load
+	// time, exactly like ServerConfig.Env.
+	Env map[string]string `yaml:"env,omitempty"`
+	// HealthURL overrides the health probe URL derived from URL. Set it
+	// when the server's health endpoint is not at <scheme://host/health>.
+	HealthURL string `yaml:"healthUrl,omitempty"`
+	// HealthTimeoutSec bounds the post-launch health probe (default 30).
+	HealthTimeoutSec int `yaml:"healthTimeoutSec,omitempty"`
 	// PidFile records the launched process, so a second xdev run waits
 	// for the existing daemon instead of starting a duplicate.
 	PidFile string `yaml:"pidFile,omitempty"`
