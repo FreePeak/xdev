@@ -160,6 +160,7 @@ func main() {
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	apiKeyValue := fs.String("api-key", "", "credential for this run only (never persisted)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
+	logFile := fs.String("log", "", "write TUI screen transcript to <path> after each frame (off by default)")
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write once a plan todo list exists")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
 	prewalkInto := fs.String("prewalk-into", "", "prewalk target: model ref (default: prewalk.into, else the session model)")
@@ -329,6 +330,7 @@ func main() {
 		NoPTY:           *noPTY,
 		Extensions:      extensionPaths,
 		PluginDirs:      pluginDirs,
+		LogFile:       *logFile,
 	}
 	// --- launch-flag overrides onto the layered settings. Each one is a
 	// documented flag, so each must win over the file: approval mode and
