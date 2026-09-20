@@ -65,6 +65,14 @@ func TestClassify(t *testing.T) {
 		{"400 tool name too long", &HTTPError{API: "openai-completions", Status: 400,
 			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` +
 				"`name` must be at most 64 characters, got 73"}, ClassTransient},
+		// A 400 the gateway relays when the UPSTREAM refused the request
+		// ("Error from provider (Console Go): Upstream request could not
+		// be processed") — the same turn served seconds later succeeds,
+		// so the ladder must retry instead of ending the run.
+		{"400 upstream refusal relayed by gateway", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Error from provider (Console Go): Upstream request could not be processed","type":"invalid_request_error"}}`}, ClassTransient},
+		{"400 upstream refusal (other provider)", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"message":"Error from provider (openai): Upstream request failed: Endpoint is unavailable.","type":"invalid_request_error"}}`}, ClassTransient},
 		{"302 unknown", &HTTPError{API: "a", Status: 302, Body: "redir"}, ClassUnknown},
 		{"transport overflow text", errors.New("agent: stream: prompt exceeds the context window of 1000000"), ClassContextOverflow},
 		{"connection reset", errors.New("a: Post \"http://x\": read tcp: connection reset by peer"), ClassTransient},
