@@ -208,6 +208,18 @@ func (m *Manager) Tools() []tool.Tool {
 	}
 	return out
 }
+// Servers returns the connected server names, sorted. The dock
+// reads this for its MCP section; nil means MCP is off.
+func (m *Manager) Servers() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.sessions))
+	for name := range m.sessions {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // Close tears every session down (process transports are killed).
 func (m *Manager) Close() {

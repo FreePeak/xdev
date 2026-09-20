@@ -32,6 +32,7 @@ func dockTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen, *int) {
 		// The identity the panel's title slot reads. Not counted by runs: the
 		// session's name is not one of the lists whose rebuild this file bounds.
 		Session: func() (string, string) { return "opencode sidebar", "sess1234" },
+		MCP: func() string { return "MCP · 3 servers" },
 	})
 	return app, scr, runs
 }

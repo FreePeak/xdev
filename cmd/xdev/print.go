@@ -1305,6 +1305,21 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 	}
 	mcpclient.Register(reg, mgr.Tools())
 	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
+	reg.MCPNames = func() string { return mcpNameList(mgr) }
+}
+
+// mcpNameList returns a "1 server" / "3 servers" label from
+// the manager's connected sessions, sorted. Empty when no
+// server is configured.
+func mcpNameList(mgr *mcpclient.Manager) string {
+	names := mgr.Servers()
+	if len(names) == 0 {
+		return ""
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	return fmt.Sprintf("%d servers", len(names))
 }
 
 // mcpUnavailable names the failed server without the launch error's detail.

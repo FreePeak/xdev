@@ -63,6 +63,7 @@ const (
 	dockTaskID  = "tasks"
 	dockFileID  = "files"
 	dockAgentID = "agents"
+	dockMCPID = "mcp"
 )
 
 // dockBumpSeq is the version every source stamps. Package-level and atomic
@@ -95,6 +96,9 @@ type DockOps struct {
 	// A closure rather than a setter because cmd swaps the store on /new, /resume
 	// and /fork: the panel follows the session, not the process.
 	Session func() (title, id string)
+	// MCP is the connected MCP server names. It is the registry's
+	// snapshot; a nil source means MCP is off and the section is omitted.
+	MCP func() string
 }
 
 // dockRow is one painted row. text is the row's own line; add and del are the
@@ -210,6 +214,18 @@ func (a *App) SetDockOps(ops DockOps) {
 // SetDockModeFunc wires the persistence of a policy the human changed with Alt+s
 // (settings `sidebarMode`). nil = a session that cannot persist it, which is every
 // non-TUI caller and every test.
+// dockMCLabel is the MCP section's body: one row per connected
+// server, "1 server" / "3 servers" in the heading, no rows when
+// nothing is configured.
+func dockMCLabel(raw string) (dockFold, bool) {
+	if raw == "" {
+		return dockFold{}, false
+	}
+	return dockFold{id: dockMCPID, title: dockClip("MCP · " + raw), max: dockListMax,
+		rows: []dockRow{{text: dockClip(raw)}}},
+	true
+}
+
 func (a *App) SetDockModeFunc(set func(mode string)) {
 	a.dockSetMode = set
 }
@@ -385,6 +401,7 @@ func (a *App) collect() []dockFold {
 		out = append(out, f)
 	}
 	add(dockAgentID, ops.Agents)
+	add(dockMCPID, ops.MCP)
 	return out
 }
 
