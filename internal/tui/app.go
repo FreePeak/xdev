@@ -1863,7 +1863,7 @@ func (a *App) handleKey(ev tcell.Event) {
 			// outranks the rest — while it is up it takes the wheel and the
 			// click, or the human scrolls the transcript underneath a question
 			// they were trying to answer.
-			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) {
+			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleTrajectoryMouse(m, press) {
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
@@ -1906,6 +1906,11 @@ func (a *App) handleKey(ev tcell.Event) {
 	// The tree selector is modal too: it owns every key while open
 	// (filters, search, labels, Enter/Esc).
 	if a.handleTreeKey(key) {
+		return
+	}
+	// The trajectory ledger is modal on the same terms as the tree selector:
+	// it owns every key while open, so nothing underneath it navigates.
+	if a.handleTrajectoryKey(key) {
 		return
 	}
 
@@ -2940,6 +2945,7 @@ func (a *App) paint() {
 		a.drawSessionPicker(composerTop)
 		a.drawHubRoster(composerTop)
 		a.drawTreeSelector(composerTop)
+		a.drawTrajectory(composerTop)
 		a.drawPicker(composerTop)
 		a.drawSlashDropdown(composerTop)
 		a.drawAskCard(composerTop)
@@ -3119,6 +3125,7 @@ func (a *App) paint() {
 	a.drawDiffOverlay(composerTop)
 
 	a.drawHubRoster(composerTop)
+	a.drawTrajectory(composerTop)
 	a.drawTreeSelector(composerTop)
 	a.drawPicker(composerTop)
 	a.drawSlashDropdown(composerTop)
@@ -3703,7 +3710,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 		if a.st.TokensIn == 0 && a.st.TokensOut == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("↑%s │ ↓%s", humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut)), theme.StatusLineSpend
+		return fmt.Sprintf("↑%s │ ↓%s", HumanTokens(a.st.TokensIn), HumanTokens(a.st.TokensOut)), theme.StatusLineSpend
 	case "context":
 		// used/total of the LIVE context: what the next request costs against
 		// the model's window. Hidden until both halves are known — an
@@ -3711,7 +3718,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 		if a.st.CtxWindow <= 0 || a.st.CtxUsed == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("ctx %s/%s", humanTokens(a.st.CtxUsed), humanTokens(a.st.CtxWindow)), theme.StatusLineContext
+		return fmt.Sprintf("ctx %s/%s", HumanTokens(a.st.CtxUsed), HumanTokens(a.st.CtxWindow)), theme.StatusLineContext
 	case "cost":
 		if a.st.Cost <= 0 {
 			return "", ""
@@ -3919,10 +3926,10 @@ func shortID(id string) string {
 	return id
 }
 
-// humanTokens renders 1234 as "1.2k" and a round 200000 as "200k": the HUD
+// HumanTokens renders 1234 as "1.2k" and a round 200000 as "200k": the HUD
 // meter shows round windows and round spend, where ".0" is pure noise in a
 // row that is always competing with the working-directory path for width.
-func humanTokens(n int64) string {
+func HumanTokens(n int64) string {
 	switch {
 	case n >= 1_000_000:
 		s := fmt.Sprintf("%.1f", float64(n)/1_000_000)

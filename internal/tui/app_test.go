@@ -547,8 +547,8 @@ func a_totalLines(app *App) int { return app.totalLinesLocked() }
 func TestHumanTokens(t *testing.T) {
 	cases := map[int64]string{0: "0", 999: "999", 1500: "1.5k", 2_500_000: "2.5M"}
 	for in, want := range cases {
-		if got := humanTokens(in); got != want {
-			t.Fatalf("humanTokens(%d) = %q, want %q", in, got, want)
+		if got := HumanTokens(in); got != want {
+			t.Fatalf("HumanTokens(%d) = %q, want %q", in, got, want)
 		}
 	}
 }

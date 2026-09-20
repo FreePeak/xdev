@@ -299,9 +299,14 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// reach the diff surface. (Jumping to the block
 		// without opening the overlay left the click doing
 		// nothing the eye could see — the file diff view
-		// was unreachable.)
-		if path := a.dockClick(x, y); path != "" {
-			a.openDiffOverlay(path)
+		// was unreachable.) The panel's own button rows ride
+		// the same hit test and open what their chord opens.
+		if path, act := a.dockRowAt(x, y); path != "" || act != "" {
+			if path != "" {
+				a.openDiffOverlay(path)
+			} else {
+				a.dockAct(act)
+			}
 			a.poke()
 			break
 		}

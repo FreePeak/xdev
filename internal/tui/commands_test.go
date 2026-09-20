@@ -493,12 +493,12 @@ func TestHelpTextAligned(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "commands:") {
 		t.Fatalf("first line = %q", lines[0])
 	}
-	// Every entry line: two-space indent, command column padded to 12
-	// cells before the description (aligned list).
+	// Every entry line: two-space indent, command column padded to the widest
+	// name-plus-alias entry (now "/trajectory, /traj") before the description.
 	want := []string{
-		"  /new      start a new session",
-		"  /fresh    rotate provider state; keep this session",
-		"  /quit, /q quit xdev",
+		"  /new               start a new session",
+		"  /fresh             rotate provider state; keep this session",
+		"  /quit, /q          quit xdev",
 	}
 	for _, w := range want {
 		if !strings.Contains(got, "\n"+w) {
@@ -588,8 +588,8 @@ func TestAppCommandHook(t *testing.T) {
 func (f *fakeAPI) OpenTreeSelector()               {}
 func (f *fakeAPI) BranchSession(args string) error { return nil }
 func (f *fakeAPI) HubRoster() error                { return nil }
-
-func (f *fakeAPI) KeyMap() *KeyMap { return DefaultKeyMap() }
+func (f *fakeAPI) Trajectory() error               { return nil }
+func (f *fakeAPI) KeyMap() *KeyMap                 { return DefaultKeyMap() }
 
 func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
 	f.extCalls = append(f.extCalls, name+" "+args)

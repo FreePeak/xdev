@@ -370,6 +370,9 @@ type CommandAPI interface {
 	SwitchModel(args string) error
 	PlanMode(args string) error
 	Vibe(args string) error
+	// Trajectory is /trajectory: the session's event ledger, opened as a
+	// modal list where a row's inspector shows the record's full body.
+	Trajectory() error
 	Goal(args string) error
 	Advisor(args string) error
 	Memory(args string) error
@@ -447,6 +450,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},
 		{Name: "connect", Description: "connect a provider from the catalog: /connect [name]",
 			Fn: func(app CommandAPI, args string) error { return app.Connect(args) }},
+		{Name: "trajectory", Aliases: []string{"traj"}, Description: "session event ledger: one row per record, Enter for details",
+			Fn: func(app CommandAPI, args string) error { return app.Trajectory() }},
 		{Name: "hub", Description: "agent hub roster: live status, kill/revive, transcripts",
 			Fn: func(app CommandAPI, args string) error { return app.HubRoster() }},
 		{Name: "hotkeys", Description: "show keybinding map",
