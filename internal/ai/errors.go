@@ -130,6 +130,18 @@ var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
 // path is a provider-reported error code on HTTPError instead of body sniffing.
 var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error|404 page not found`)
 
+// upstreamRefusalRe matches a 400 the gateway wraps when the UPSTREAM
+// refused the request, not one the gateway itself rejected on shape:
+//
+//	HTTP 400 {"error":{"code":"400","message":"Error from provider (Console Go): Upstream request could not be processed","type":"invalid_request_error"}}
+//
+// "from provider (Console …)" is a relay of an upstream verdict — the
+// same turn served seconds later succeeds, so it classifies transient
+// and the retry ladder re-enters (beside the routing-verdict 404s in
+// modelVerdictRe). A gateway 400 that names no upstream (bare
+// invalid_request_error) stays ClassBadRequest and fails fast.
+var upstreamRefusalRe = regexp.MustCompile(`(?i)error from provider \([^)]*\): upstream request`)
+
 // toolNameTooLongRe matches a 400 the gateway rejects because a tool
 // name exceeds the provider's 64-character ceiling. Names come from
 // external sources (MCP servers, extension binaries) that xdev does
@@ -158,7 +170,7 @@ func Classify(err error) ErrClass {
 			if bodyIndicatesOverflow(he.Body) {
 				return ClassContextOverflow
 			}
-			if malformedRequestRe.MatchString(he.Body) || toolNameTooLongRe.MatchString(he.Body) {
+			if malformedRequestRe.MatchString(he.Body) || toolNameTooLongRe.MatchString(he.Body) || upstreamRefusalRe.MatchString(he.Body) {
 				return ClassTransient
 			}
 			return ClassBadRequest
