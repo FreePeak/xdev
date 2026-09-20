@@ -771,6 +771,19 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, fmt.Errorf("agent: context overflow unrecoverable: %w", err)
 			}
 			history, compacted = rebuilt, true
+		case ai.ClassEmptyTurn:
+			// Empty turn (#389, #331): the model answered nothing —
+			// reasoning-only, or nothing at all. Rebuild context
+			// from the persisted history and re-run the ladder.
+			rebuilt, rerr := a.recoverEmptyTurn(ctx, history)
+			if rerr != nil {
+				return nil, history, fmt.Errorf("agent: empty turn unrecoverable: %w", rerr)
+			}
+			if rebuilt == nil {
+				return nil, history, err
+			}
+			history = rebuilt
+			continue
 		default:
 			return nil, history, err
 		}
@@ -822,6 +835,17 @@ func (a *Agent) recoverOverflow(ctx context.Context) []ai.Message {
 		return nil
 	}
 	return res.Messages
+}
+
+func (a *Agent) recoverEmptyTurn(ctx context.Context, history []ai.Message) ([]ai.Message, error) {
+	if a.Store == nil {
+		return nil, nil
+	}
+	res, err := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		return nil, err
+	}
+	return res.Messages, nil
 }
 
 // persist appends m to the session mirror when one is attached. The hooks
