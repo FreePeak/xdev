@@ -90,17 +90,18 @@ func TestBadRequestMissingOutputRetriesInsteadOfEndingTheRun(t *testing.T) {
 		t.Fatalf("stream calls = %d, want 2 (the 400 then the retry)", len(p.gotReqs))
 	}
 
-	// The other direction, on the same ladder: a 400 that names nothing
-	// retryable is still terminal, so a genuinely malformed request fails fast
-	// instead of burning the whole budget.
+	// The other direction: a plain 400 (ClassBadRequest) is now retried
+	// from the current context window, bounded by escalation rounds.
+	// After the bound is spent the error surfaces instead of looping.
 	plain := &ai.HTTPError{API: "openai-completions", Status: 400, Body: `{"error":{"message":"bad model"}}`}
-	p2 := &fakeProvider{calls: []fakeScript{{err: plain}}}
+	p2 := &fakeProvider{calls: []fakeScript{{err: plain}, {err: plain}, {err: plain}}}
 	a2, _, p2 := storeAgent(t, p2, CompactionConfig{})
 	a2.Retry = fastRetry()
 	if _, err := a2.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err == nil {
-		t.Fatal("a plain 400 must still end the run")
+		t.Fatal("a plain 400 must still end the run after retries")
 	}
-	if len(p2.gotReqs) != 1 {
-		t.Fatalf("stream calls = %d, want 1 (no retry for a plain 400)", len(p2.gotReqs))
+	want := 1 + maxEscalationRounds
+	if len(p2.gotReqs) != want {
+		t.Fatalf("stream calls = %d, want %d (initial + escalation retries)", len(p2.gotReqs), want)
 	}
 }

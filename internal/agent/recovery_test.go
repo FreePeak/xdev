@@ -74,21 +74,30 @@ func TestRetryTransientPreContentSucceeds(t *testing.T) {
 	}
 }
 
-func TestRetryAuthFailsFast(t *testing.T) {
+func TestRetryAuthRetriesThenSurfaces(t *testing.T) {
+	// Auth failures used to fail fast. The ladder now retries every
+	// class from the current context window (bounded by escalation
+	// rounds) so a transient upstream 401/403 is survived; a real
+	// bad key still surfaces after the bound is spent.
+	auth := &ai.HTTPError{API: "openai-completions", Status: 401, Body: `{"error":{"type":"authentication_error","message":"invalid api key"}}`}
 	p := &fakeProvider{calls: []fakeScript{
-		{err: &ai.HTTPError{API: "openai-completions", Status: 401, Body: `{"error":{"type":"authentication_error","message":"invalid api key"}}`}},
+		{err: auth},
+		{err: auth},
+		{err: auth},
 	}}
 	a, _, p := storeAgent(t, p, CompactionConfig{})
-	a.Retry = RetryPolicy{MaxRetries: 5, BaseDelay: time.Millisecond}
+	a.Retry = RetryPolicy{MaxRetries: 5, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
 	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
 	if err == nil {
-		t.Fatal("Run: expected 401 error")
+		t.Fatal("Run: expected 401 error after retries")
 	}
 	if !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("err = %v", err)
 	}
-	if len(p.gotReqs) != 1 {
-		t.Fatalf("stream calls = %d, want 1 (auth must fail fast)", len(p.gotReqs))
+	// 1 initial + maxEscalationRounds retries.
+	want := 1 + maxEscalationRounds
+	if len(p.gotReqs) != want {
+		t.Fatalf("stream calls = %d, want %d (initial + escalation retries)", len(p.gotReqs), want)
 	}
 }
 
@@ -414,19 +423,24 @@ func TestModelGone404FailsOverInsteadOfEndingTheRun(t *testing.T) {
 // with no model verdict in the body is a dead route (wrong base URL, wrong
 // path), so it must still end the run instead of burning the chain and the
 // escalation rounds on a request no target can serve.
-func TestBare404StillEndsTheRun(t *testing.T) {
+func TestBare404RetriesThenEndsTheRun(t *testing.T) {
+	// A bare 404 (no model verdict) is ClassUnknown. The ladder now
+	// retries unknown errors from the current context, but does not
+	// fail over — only ClassTransient climbs the chain. After the
+	// escalation bound is spent the error surfaces on the primary.
 	dead := &ai.HTTPError{API: "openai-completions", Status: 404, Body: "nope"}
-	primary := &fakeProvider{calls: []fakeScript{{err: dead}}}
+	primary := &fakeProvider{calls: []fakeScript{{err: dead}, {err: dead}, {err: dead}}}
 	backup := &fakeProvider{calls: []fakeScript{
 		{events: []ai.Event{textEvent("unreachable"), doneEvent("unreachable")}},
 	}}
 	a, s := ladderAgent(t, primary, backup)
 	if _, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi")); err == nil {
-		t.Fatal("a bare 404 must still end the run")
+		t.Fatal("a bare 404 must still end the run after retries")
 	}
-	if len(primary.gotReqs) != 1 || len(backup.gotReqs) != 0 {
-		t.Fatalf("calls = primary %d / backup %d, want 1/0 (no retry, no failover)",
-			len(primary.gotReqs), len(backup.gotReqs))
+	want := 1 + maxEscalationRounds
+	if len(primary.gotReqs) != want || len(backup.gotReqs) != 0 {
+		t.Fatalf("calls = primary %d / backup %d, want %d/0 (retry primary only, no failover)",
+			len(primary.gotReqs), len(backup.gotReqs), want)
 	}
 }
 func TestFailoverChainExhaustedSurfaces(t *testing.T) {

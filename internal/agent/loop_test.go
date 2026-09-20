@@ -370,7 +370,14 @@ func TestRunRunawayToolLoopTerminates(t *testing.T) {
 }
 
 func TestRunStreamError(t *testing.T) {
-	p := &fakeProvider{calls: []fakeScript{{err: errors.New("boom")}}}
+	// Unknown stream-start errors are retried from the current context
+	// (bounded by escalation). Script enough failures to drain the bound
+	// so the original provider error still surfaces.
+	p := &fakeProvider{calls: []fakeScript{
+		{err: errors.New("boom")},
+		{err: errors.New("boom")},
+		{err: errors.New("boom")},
+	}}
 	a, _, _ := runAgent(t, p)
 	_, err := a.Run(context.Background(), "sys", nil)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
