@@ -9,9 +9,14 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
 )
+
+// mcpsSeam is the test hook for MCP config loading.
+// When set (in tests), mcpsCommand calls through it.
+var mcpsSeam func() (cfg *mcpclient.Config, err error)
 
 // Command is one slash command: /Name, /Alias... — Fn runs at input-submit
 // time, before a user message is created, so dispatched commands never
@@ -463,7 +468,59 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(app)); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
 			Fn: func(app CommandAPI, args string) error { app.Quit(); return nil }},
+		{Name: "mcps", Description: "list configured MCP servers and their status",
+			Fn: func(app CommandAPI, args string) error { return mcpsCommand(app, args) }},
 	}
+}
+
+// mcpsCommand implements /mcps: list configured MCP servers
+// and their status (M6 #7). Absent config → "no MCP servers
+// configured"; errors from the loader surface as an error block.
+// Uses mcpsSeam when set (tests), otherwise mcpclient.LoadConfig.
+func mcpsCommand(app CommandAPI, args string) error {
+	var cfg *mcpclient.Config
+	var err error
+	if mcpsSeam != nil {
+		cfg, err = mcpsSeam()
+	} else {
+		cfg, err = mcpclient.LoadConfig(mcpConfigPath())
+	}
+	if err != nil {
+		return fmt.Errorf("mcp config: %v", err)
+	}
+	if len(cfg.Servers) == 0 {
+		app.AddSystemBlock("no MCP servers configured")
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Servers))
+	for n := range cfg.Servers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("MCP servers:")
+	for _, n := range names {
+		sc := cfg.Servers[n]
+		state := "enabled"
+		if sc.Disabled {
+			state = "disabled"
+		}
+		if sc.Enabled != nil && !*sc.Enabled {
+			state = "disabled"
+		}
+		transport := "stdio"
+		if sc.URL != "" {
+			transport = "http"
+		}
+		fmt.Fprintf(&b, "\n  %s  %-9s  %s", n, state, transport)
+	}
+	app.AddSystemBlock(b.String())
+	return nil
+}
+
+// mcpConfigPath is <dataDir>/mcp.yml (absent = MCP off, PRD §2).
+func mcpConfigPath() string {
+	return filepath.Join(config.DataDir(), "mcp.yml")
 }
 
 // Handoff implements CommandAPI: /handoff [instruction] hands the live

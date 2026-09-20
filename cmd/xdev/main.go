@@ -53,6 +53,7 @@ var appliedLimit int64
 // subcommands are the first-arg names that select a mode instead of a
 // prompt. One entry per subcommand keeps merges (and reviews) trivial.
 var subcommands = map[string]bool{
+	"mcps": true,
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
@@ -98,6 +99,7 @@ func handoffSaveDir(s *config.Settings) string {
 // survives in the text users read.
 const rootUsage = `xdev %s — lightweight coding agent (Go)
 
+  xdev mcps                  list configured MCP servers and their status
   xdev                         interactive TUI (bare invocation, TTY)
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
@@ -491,6 +493,10 @@ func main() {
 		os.Exit(code)
 	}
 
+	if mode == "mcps" {
+		os.Exit(runMcps(args))
+	}
+
 	if mode == "acp" {
 		opts := printOptions{
 			Model:        *model,
@@ -731,3 +737,4 @@ func stdinIsTerminal() bool {
 func startupIsInteractive(prompt string, forcePrint, tty bool) bool {
 	return prompt == "" && !forcePrint && tty
 }
+
