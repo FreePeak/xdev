@@ -267,6 +267,60 @@ enabledServers: [forced, hidden]
 	}
 }
 
+// TestServerStateInMcps tests that xdev mcps reports each
+// configured server with its transport and enablement state.
+// A remote server must show "http", stdio "stdio", and an
+// explicit enabled:false must read "disabled".
+func TestServerStateInMcps(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "mcp.yml"), `servers:
+    leankg:
+        url: http://localhost:9699/mcp?project=/path/to/leankg
+    atlassian:
+        command: uvx
+        args: [mcp-atlassian]
+        enabled: false
+    cursor:
+        command: cursor
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "mcp.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		state     string
+		transport string
+	}{
+		"leankg":    {state: "enabled", transport: "http"},
+		"atlassian": {state: "disabled", transport: "stdio"},
+		"cursor":    {state: "enabled", transport: "stdio"},
+	}
+	for name, w := range want {
+		sc := cfg.Servers[name]
+		if sc == nil {
+			t.Errorf("%s: missing", name)
+			continue
+		}
+		state := "enabled"
+		if sc.Disabled {
+			state = "disabled"
+		}
+		if sc.Enabled != nil && !*sc.Enabled {
+			state = "disabled"
+		}
+		if state != w.state {
+			t.Errorf("%s: state = %q, want %q", name, state, w.state)
+		}
+		transport := "stdio"
+		if sc.URL != "" {
+			transport = "http"
+		}
+		if transport != w.transport {
+			t.Errorf("%s: transport = %q, want %q", name, transport, w.transport)
+		}
+	}
+}
+
 // TestExpandVars pins ${VAR} / ${VAR:-default} expansion, where an
 // unresolved placeholder stays literal.
 func TestExpandVars(t *testing.T) {

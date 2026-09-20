@@ -8,7 +8,6 @@ import (
 	"github.com/FreePeak/xdev/internal/mcpclient"
 )
 
-
 // errMcpLoad is a sentinel for the config-loader error path.
 var errMcpLoad = errors.New("mcp load boom")
 
@@ -51,8 +50,8 @@ func TestMcpsCommandListsServers(t *testing.T) {
 	mcpsSeam = func() (*mcpclient.Config, error) {
 		return &mcpclient.Config{
 			Servers: map[string]*mcpclient.ServerConfig{
-				"browser":        {URL: "http://localhost:3000"},
-				"filesystem":     {},
+				"browser":         {URL: "http://localhost:3000"},
+				"filesystem":      {},
 				"disabled-server": {Disabled: true},
 			},
 		}, nil
@@ -75,3 +74,41 @@ func TestMcpsCommandListsServers(t *testing.T) {
 		t.Fatalf("/mcps must never reach the model: %q", f.sent)
 	}
 }
+
+// TestMcpsCommandListsServerStates verifies /mcps renders each
+// server with the correct enablement state and transport type —
+// an unreachable remote server still reads enabled (config is
+// separate from reachability).
+func TestMcpsCommandListsServerStates(t *testing.T) {
+	mcpsSeam = func() (*mcpclient.Config, error) {
+		return &mcpclient.Config{
+			Servers: map[string]*mcpclient.ServerConfig{
+				"leankg":        {URL: "http://localhost:9699/mcp"},
+				"atlassian":     {Command: "uvx", Args: []string{"mcp-atlassian"}},
+				"broken-remote": {URL: "http://localhost:9999/nope", Enabled: boolPtr(false)},
+			},
+		}, nil
+	}
+
+	f := &fakeAPI{}
+	if !dispatch(f, "/mcps") {
+		t.Fatal("/mcps not consumed")
+	}
+	if len(f.blocks) != 1 {
+		t.Fatalf("blocks = %v", f.blocks)
+	}
+	text := f.blocks[0]
+	for _, want := range []string{
+		"MCP servers:", "leankg", "atlassian", "broken-remote",
+		"enabled", "disabled", "http", "stdio",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in:\n%s", want, text)
+		}
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("/mcps must never reach the model: %q", f.sent)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

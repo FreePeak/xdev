@@ -38,7 +38,7 @@ func TestFailedMCPServerReportsToTheSinkNotStderr(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("sink got %v, want one notice for the broken server", got)
 	}
-	if want := "mcp: broken unavailable"; got[0] != want {
+	if want := "mcp: broken unavailable — see `xdev mcps` for configured URLs"; got[0] != want {
 		t.Errorf("notice = %q, want %q", got[0], want)
 	}
 	if stderr != "" {
