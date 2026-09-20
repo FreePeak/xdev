@@ -24,8 +24,10 @@ package tui
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/FreePeak/xdev/internal/theme"
 )
@@ -338,9 +340,25 @@ func wrapCells(ln line, maxW int) []line {
 	}
 	for _, r := range ln.runs {
 		for width(r.text) > maxW-lineWidth(cur) {
-			cut := maxW - lineWidth(cur)
-			for cut > 1 && width(r.text[:cut]) > cut {
-				cut--
+			// Advance rune-by-rune to find the byte index
+			// where display width reaches the budget — always
+			// at a rune boundary. Byte slicing splits multi-
+			// byte UTF-8 (CJK, Thai, emoji) into garbled
+			// fragments (shared root cause with wrap()).
+			budget := maxW - lineWidth(cur)
+			cut := 0
+			w := 0
+			for _, rr := range r.text {
+				rw := runewidth.RuneWidth(rr)
+				if w+rw > budget {
+					break
+				}
+				w += rw
+				cut += utf8.RuneLen(rr)
+			}
+			if cut == 0 {
+				rr := []rune(r.text)[0]
+				cut = utf8.RuneLen(rr)
 			}
 			if sp := strings.LastIndexAny(r.text[:cut], " \t"); sp > 0 {
 				cut = sp + 1

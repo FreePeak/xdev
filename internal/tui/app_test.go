@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -28,6 +29,49 @@ func TestWrap(t *testing.T) {
 	}
 	if strings.Join(got, "") != "abcdefghij"+"klmnopqrst"+"uvwxyz" {
 		t.Fatalf("hard break lost content: %q", got)
+	}
+	// Multi-byte UTF-8 (CJK, Thai, Arabic) must never be split
+	// mid-rune: every output line must be valid UTF-8 and every
+	// rune must be whole. Byte slicing used to break characters
+	// here, producing the garbled mixed-script fragments seen in
+	// the thinking box (issue: "6 rows hidden").
+	for _, tc := range []struct {
+		s    string
+		maxW int
+	}{
+		{"abcdefghijklmnopqrstuvwxyz我们热爱编程", 10},
+		{"สวัสดีครับโลกสวยงาม", 8},
+		{"مرحبا بالعالم الجميل", 10},
+		{"日本語テスト日本語テスト", 12},
+		{"emoji 😀🎉 test wrap here", 10},
+		{"a我们b泰国c阿拉伯d", 6},
+	} {
+		got := wrap(tc.s, tc.maxW)
+		for _, l := range got {
+			if !utf8.ValidString(l) {
+				t.Fatalf("wrap(%q, %d) produced invalid UTF-8: %q", tc.s, tc.maxW, l)
+			}
+			if width(l) > tc.maxW {
+				t.Fatalf("wrap(%q, %d) line exceeds maxW: %q (%d cells)", tc.s, tc.maxW, l, width(l))
+			}
+		}
+		// No rune is lost or split: strip spaces and every
+		// source rune appears in the output exactly once.
+		srcContent := strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, tc.s)
+		outContent := strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, strings.Join(got, ""))
+		if srcContent != outContent {
+			t.Fatalf("wrap(%q, %d) content mismatch:\n  src: %q\n  out: %q", tc.s, tc.maxW, srcContent, outContent)
+		}
 	}
 }
 
