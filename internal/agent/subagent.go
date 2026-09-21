@@ -173,6 +173,12 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 	if cwd == "" {
 		cwd = "."
 	}
+	// The child gets the SAME always-loaded conventions its parent does. Until
+	// this line existed the context-file hierarchy reached only the parent
+	// prompt (cmd/xdev/print.go promptFnWithMemory), so a spawn ran with the
+	// bare base prose and none of the standing rules — and a subagent is
+	// exactly the actor handed "just make this one-line fix".
+	spec.System = childSystem(spec, cwd)
 	title := "subagent: " + spec.Name
 	store := session.OpenMem(cwd, title)
 	// A child is user-invisible: titleSource "subagent" marks it so resume
@@ -370,6 +376,23 @@ func strictRetry(ctx context.Context, ag *Agent, yt *yieldTool, spec SubagentSpe
 	if _, err := ag.Run(cctx, spec.System, hist.Messages); err != nil {
 		logx.Debugf("subagent retry run: %v", err)
 	}
+}
+
+// childSystem is the child's system prompt: whatever the spec (or a named
+// agent definition) supplied, plus the always-loaded context-file hierarchy
+// for the child's working directory. Appending — never replacing — is the
+// point: a definition prompt is authored guidance, the global conventions are
+// policy, and a definition that omits the policy must not be able to drop it.
+//
+// No memory guidance block here: recall is keyed to a session's own history
+// and a child in a fresh session has none, so the parent's accumulated
+// lessons would arrive in a context they were never about.
+func childSystem(spec SubagentSpec, cwd string) string {
+	files := LoadContextFiles(cwd)
+	if files == "" {
+		return spec.System
+	}
+	return spec.System + "\n\n# Project context\n" + files
 }
 
 // schema returns the configured output schema (nil-safe).

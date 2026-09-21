@@ -280,3 +280,51 @@ func TestSubagentYieldOnlyIsolation(t *testing.T) {
 		t.Fatalf("child transcript leaked into the parent-visible result: %s", blob)
 	}
 }
+
+// The context-file hierarchy reached only the PARENT prompt: SpawnChild ran
+// the child on whatever spec.System held, so a spawn carried the bare base
+// prose and none of the standing conventions. A subagent is exactly the actor
+// handed "just make this one-line fix", which is the case the conventions
+// exist for — pin that the child request carries them.
+func TestSubagentChildGetsContextFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userDir := filepath.Join(home, ".xdev", "agent")
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const rule = "the main checkout is READ-ONLY — report a PR URL when done"
+	if err := os.WriteFile(filepath.Join(userDir, "AGENTS.md"), []byte(rule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj := t.TempDir()
+	if err := os.WriteFile(filepath.Join(proj, "AGENTS.md"), []byte("project rule here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	spec := SubagentSpec{Name: "ctx", Prompt: "x", Provider: p, CWD: proj, System: "definition prose"}
+	res, err := SpawnChild(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "yielded" {
+		t.Fatalf("res = %+v", res)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.gotReqs) == 0 {
+		t.Fatal("no request captured")
+	}
+	sys := p.gotReqs[0].System
+	for _, want := range []string{rule, "project rule here", "definition prose"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("child system prompt missing %q:\n%s", want, sys)
+		}
+	}
+	// The caller's spec is not mutated: the appended prompt is local to the
+	// spawn, so a reused spec does not accumulate copies on each child.
+	if spec.System != "definition prose" {
+		t.Errorf("spec.System mutated: %q", spec.System)
+	}
+}
