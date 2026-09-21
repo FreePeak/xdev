@@ -2224,6 +2224,9 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			if m.Attribution == agent.GoalContinuationAttribution {
 				continue
 			}
+			if m.Attribution == agent.PromptContinuationAttribution {
+				continue
+			}
 			// The turn-budget wrap-up is harness text too, but it explains
 			// why the transcript stops mid-task — so it replays as the
 			// system event that ends the episode, not as a ❯ block.

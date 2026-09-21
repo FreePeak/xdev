@@ -160,6 +160,22 @@ const EmptyTurnNudgePrompt = "your last turn produced no answer and no tool call
 // handed back as a rewind draft).
 const EmptyTurnAttribution = "empty-turn"
 
+// PromptContinuationAttribution tags the hidden nudge that keeps a TUI
+// prompt running after a mid-task yield (no /goal required). Same
+// contract as GoalContinuationAttribution: no ❯ block, never typed input.
+const PromptContinuationAttribution = "prompt-continuation"
+
+// PromptContinuationPrompt is injected when an interactive run has already
+// used tools (or still has open todos) and the model yields with text and
+// no tool calls. The user asked for Claude-style keep-going, not a
+// "should I continue?" pause.
+const PromptContinuationPrompt = "the user's request is not finished: take the next concrete step now with tools. Do not ask the user to approve or continue. Do not stop at a plan or a status report. If the work is fully verified complete, say so in one sentence and stop."
+
+// maxPromptContinuations bounds keep-going without /goal. A completed
+// answer after tools still gets at most this many nudges; two consecutive
+// text-only yields after a nudge end the run.
+const maxPromptContinuations = 8
+
 // ErrEmptyTurn is the failure voice of a model that answered nothing
 // after every nudge was spent. Ending the run is what the old code did;
 // ending it with an ERROR is what makes the stop visible and retryable
@@ -323,6 +339,12 @@ type Agent struct {
 	// turn budget is spent.
 	GoalContinuation bool
 
+	// PromptContinuation keeps an interactive prompt running after a
+	// mid-task yield (tools already used this Run, or open todos) without
+	// requiring /goal. Off by default so print/RPC/ACP still end at the
+	// first text-only yield.
+	PromptContinuation bool
+
 	// Handoff configures the handoff-document compaction (M5 #23): the
 	// side-request target, the artifact mirror, and the per-branch reset
 	// seam. See handoff.go.
@@ -463,6 +485,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// emit reasoning cannot make the loop spend unbounded turns on it (the
 	// same shape as the TTSR interrupt budget and maxEscalationRounds).
 	nudges := 0
+	promptConts := 0
 	for turn := 0; limit == 0 || turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
@@ -549,8 +572,39 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// type it), persisted so a store rebuild keeps it; the goal's own
 			// complete/drop/budget_exhausted is what ends the run.
 			var cont string
+			var contAttr string
 			if len(queued) == 0 && a.GoalContinuation && a.Goals != nil {
 				cont = a.Goals.ContinuationPrompt()
+				if cont != "" {
+					contAttr = GoalContinuationAttribution
+				}
+			}
+			if cont == "" && len(queued) == 0 && a.PromptContinuation && promptConts < maxPromptContinuations {
+				lastWasPromptCont := false
+				usedTools := false
+				for _, h := range history {
+					if h.Role == ai.RoleAssistant && len(h.ToolCalls()) > 0 {
+						usedTools = true
+					}
+					if h.Role == ai.RoleUser && h.Attribution == PromptContinuationAttribution {
+						lastWasPromptCont = true
+					} else if h.Role == ai.RoleUser {
+						lastWasPromptCont = false
+					}
+				}
+				openTodos := false
+				if a.Tools != nil {
+					if t, ok := a.Tools.Get("todo"); ok {
+						if tt, ok := t.(interface{ Snapshot() []tool.TodoPhase }); ok {
+							openTodos = len(tool.OpenForReminder(tt.Snapshot())) > 0
+						}
+					}
+				}
+				if !lastWasPromptCont && (usedTools || openTodos) {
+					cont = PromptContinuationPrompt
+					contAttr = PromptContinuationAttribution
+					promptConts++
+				}
 			}
 			// Empty completion (#331): the model ended its turn with no text
 			// and no tool call — only reasoning, or nothing at all. That is
@@ -609,7 +663,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				m := ai.Message{
 					Role:        ai.RoleUser,
 					Content:     []ai.Block{ai.TextBlock{Text: cont}},
-					Attribution: GoalContinuationAttribution,
+					Attribution: contAttr,
 				}
 				history = append(history, m)
 				a.persist(m)

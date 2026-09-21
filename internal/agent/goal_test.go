@@ -357,3 +357,49 @@ func TestGoalPersistsAcrossReopen(t *testing.T) {
 		t.Fatal("a session switch must not leak the previous session's goal")
 	}
 }
+
+func TestPromptContinuationKeepsTheRunGoing(t *testing.T) {
+	yield := func(text string) fakeScript {
+		return fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+			Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: text}},
+		})}}
+	}
+	withTools := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{
+			ai.TextBlock{Text: "working"},
+			ai.ToolCallBlock{ID: "e1", Name: "echo", Arguments: json.RawMessage(`{"v":"x"}`)},
+		},
+	})}}
+	p := &fakeProvider{calls: []fakeScript{withTools, yield("status only"), yield("still going"), yield("done")}}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, PromptContinuation: true}
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do it"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 3 {
+		t.Fatalf("stream requests = %d, want 3 (tools, first yield, nudged second yield)", len(p.gotReqs))
+	}
+	last := p.gotReqs[2].Messages[len(p.gotReqs[2].Messages)-1]
+	if last.Role != ai.RoleUser || last.Attribution != PromptContinuationAttribution {
+		t.Fatalf("prompt continuation never reached the model: %+v", last)
+	}
+}
+
+func TestPromptContinuationOffWithoutTools(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "hello"}},
+	})}}}}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, PromptContinuation: true}
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 1 {
+		t.Fatalf("plain greeting continued: %d requests", len(p.gotReqs))
+	}
+}

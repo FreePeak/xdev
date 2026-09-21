@@ -139,6 +139,9 @@ func TestWireAgentModeGatesGoalContinuationByMode(t *testing.T) {
 		if ag.GoalContinuation != tc.want {
 			t.Fatalf("%s: GoalContinuation = %v, want %v", tc.name, ag.GoalContinuation, tc.want)
 		}
+		if ag.PromptContinuation != tc.want {
+			t.Fatalf("%s: PromptContinuation = %v, want %v", tc.name, ag.PromptContinuation, tc.want)
+		}
 	}
 }
 
