@@ -54,6 +54,9 @@ const (
 	dockListMax = 6                    // rows one list shows before "+N more"
 	dockPlanMax = 18                   // rows the plan document may take: the section is
 	// the reason the panel exists, so it gets the bigger half of the budget.
+	// dockTitleMax bounds the rows the session's own name may take: a name is read
+	// whole, but not at the price of the work it names.
+	dockTitleMax = 3
 )
 
 // Section ids, in the order the panel paints them: what the session is doing,
@@ -187,6 +190,9 @@ type dockState struct {
 	buildW      int
 	bandH       int // the band the rows were budgeted for
 	buildBlocks int // the transcript's shape when the Files fold was read
+	// titleLines is the title slot as painted: the session's name wrapped to
+	// the interior, one entry per row. The slot is never zero rows.
+	titleLines []string
 }
 
 // --- display policy ---
@@ -373,6 +379,7 @@ func (a *App) dockBuild() {
 	if d.ops.Session != nil {
 		d.title, d.sid = d.ops.Session()
 	}
+	d.titleLines = a.dockTitleLines(bandH)
 	folds := a.collect()
 	// The footer is the session, not the work: the id, the directory, the branch
 	// — the facts the status row carries when it has room and the panel keeps
@@ -570,7 +577,7 @@ func (d *dockState) layout(folds []dockFold, bandH int) (rows []dockRow, heads, 
 	if bandH < 5 {
 		return nil, 0, 0
 	}
-	limit := bandH - 1 // the panel's title slot is not ours to paint
+	limit := bandH - d.titleRows() // the panel's title slot is not ours to paint
 	// What each section would show at this fold state, before the band decides.
 	want := make([]int, len(folds))
 	for i, f := range folds {
@@ -759,6 +766,34 @@ func (a *App) dockTitle() string {
 	return ""
 }
 
+// titleRows is the rows the title slot paints, which is what every geometry
+// below the slot has to shift by: 1 before the first build, the wrapped slot
+// after it. Never zero — the panel's name always has its row.
+func (d *dockState) titleRows() int {
+	if d == nil || len(d.titleLines) == 0 {
+		return 1
+	}
+	return len(d.titleLines)
+}
+
+// dockTitleLines wraps the session's name to the panel's interior instead of
+// clipping it. The name is the one string in the panel a human reads whole, and
+// a "\u2026" at 38 cells turned "showing full title" into a riddle. The rows are
+// not free: layout spends them out of the content budget, and dockTitleMax
+// bounds what the name may take from the work it names. Caller holds a.mu.
+func (a *App) dockTitleLines(bandH int) []string {
+	lines := wrap(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner)
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	if head := min(dockTitleMax, max(1, bandH-4)); len(lines) > head {
+		// A name too long even wrapped keeps the clip's ellipsis on its last
+		// row, so the cut is still admitted and never silent.
+		return append(lines[:head-1:head-1], clip(strings.Join(lines[head-1:], " "), dockInner))
+	}
+	return lines
+}
+
 // selDockRowsForPaint returns the dock's rows as selectable
 // rows with their screen y positions. Callers hold a.mu.
 func (a *App) selDockRowsForPaint() []selRow {
@@ -773,7 +808,7 @@ func (a *App) selDockRowsForPaint() []selRow {
 		if t == "" {
 			continue
 		}
-		rows = append(rows, selRow{text: t, x0: x0, y: dg + 1 + i})
+		rows = append(rows, selRow{text: t, x0: x0, y: dg + a.dock.titleRows() + i})
 	}
 	return rows
 }
@@ -807,9 +842,12 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 			s.SetContent(cx, y, ' ', nil, body)
 		}
 	}
-	drawText(s, x+dockPad, top, dockClip(a.dockTitle()), ink.Bold(true))
+	head := d.titleRows()
+	for i, line := range d.titleLines {
+		drawText(s, x+dockPad, top+i, line, ink.Bold(true))
+	}
 	for i, r := range d.lines {
-		y := top + 1 + i
+		y := top + head + i
 		if y >= top+h {
 			break
 		}
@@ -857,10 +895,11 @@ func (a *App) dockRowAt(x, y int) (path, act string) {
 		return "", ""
 	}
 	top, h := a.dockGrid()
-	if y < top+1 || y >= top+h {
+	head := d.titleRows() // the title slot's rows, not the transcript's
+	if y < top+head || y >= top+h {
 		return "", ""
 	}
-	i := y - top - 1
+	i := y - top - head
 	if i < 0 || i >= len(d.lines) {
 		return "", ""
 	}
@@ -1017,6 +1056,7 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	}
 	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll", dimSt)
 }
+
 // closeDiffOverlayOnClick dismisses the diff overlay when the human
 // clicks outside it, or re-opens it when clicking a different changed
 // file in the dock. The overlay is a modal surface covering the whole
@@ -1036,7 +1076,6 @@ func (a *App) closeDiffOverlayOnClick(x, y int) {
 	}
 	a.closeDiffOverlay()
 }
-
 
 // diffBodyScroll advances the overlay viewport by n lines (down=true)
 // or toward older rows (down=false).
