@@ -32,7 +32,7 @@ func dockTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen, *int) {
 		// The identity the panel's title slot reads. Not counted by runs: the
 		// session's name is not one of the lists whose rebuild this file bounds.
 		Session: func() (string, string) { return "opencode sidebar", "sess1234" },
-		MCP: func() string { return "MCP · 3 servers" },
+		MCP:     func() string { return "MCP · 3 servers" },
 	})
 	return app, scr, runs
 }
@@ -206,6 +206,93 @@ func TestDockClipsDoNotWrap(t *testing.T) {
 		if w := width(r.text); w > dockInner {
 			t.Fatalf("row %q is %d cells, the interior is %d", r.text, w, dockInner)
 		}
+	}
+}
+
+// TestDockTitleWrapsNotClips is the reported bug: a long session title must be
+// readable in the panel, not cut with "…". The slot wraps across rows, the rows
+// below it shift down by however many it took, and a name long enough to eat the
+// work it names is still bounded — with the cut admitted on its last row.
+func TestDockTitleWrapsNotClips(t *testing.T) {
+	long := strings.Repeat("full title ", 6) // 66 cells: two rows of 38, plus a tail
+	app, _, _ := dockTestApp(t, 200, 40)
+	app.SetDockOps(DockOps{
+		Session: func() (string, string) { return long, "sess1234" },
+		Tasks:   func() string { return "TASKS · 0/1 done\ndo the thing" },
+	})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	app.dockBuild()
+	head := app.dock.titleRows()
+	lines := append([]string(nil), app.dock.titleLines...)
+	app.mu.Unlock()
+
+	if head < 2 {
+		t.Fatalf("a 66-cell title took %d row(s): %v", head, lines)
+	}
+	if head > dockTitleMax {
+		t.Fatalf("the title took %d rows, cap is %d", head, dockTitleMax)
+	}
+	if joined := strings.Join(lines, " "); !strings.Contains(joined, "full title full") {
+		t.Fatalf("title rows lost the text: %v", lines)
+	}
+	if strings.Contains(lines[0], "…") {
+		t.Fatalf("row 0 still clips: %q", lines[0])
+	}
+	for _, l := range lines {
+		if w := width(l); w > dockInner {
+			t.Fatalf("title row %q is %d cells, the interior is %d", l, w, dockInner)
+		}
+	}
+
+	// The slot's rows are paid for out of the content budget, not painted over
+	// the first section: the transcript's row 1 is still the title's last row.
+	app.draw()
+	scr := app.scr.(tcell.SimulationScreen)
+	left := 200 - dockCols + dockPad
+	top, _ := func() (int, int) { app.mu.Lock(); defer app.mu.Unlock(); return app.dockGrid() }()
+	if got := dockRowText(scr, top+head-1, left); !strings.Contains(got, "full title") {
+		t.Fatalf("title's last row = %q, want the wrapped name", got)
+	}
+	if got := dockRowText(scr, top+head, left); !strings.HasPrefix(got, "TASKS") {
+		t.Fatalf("first section row = %q, want it under the title slot", got)
+	}
+}
+
+// TestDockTitleBoundedAndClickMapFollows: an absurd title cannot push the panel's
+// sections out of the band, and a click resolves against the rows as painted —
+// which start below the slot however many rows it took.
+func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	app.SetDockOps(DockOps{
+		Session: func() (string, string) { return strings.Repeat("word ", 200), "sess1234" },
+		Tasks:   func() string { return "TASKS · 0/1 done\n" + strings.Repeat("z", 30) },
+	})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.dockBuild()
+	head := app.dock.titleRows()
+	if head != dockTitleMax {
+		t.Fatalf("a 1000-cell title took %d rows, want the cap %d", head, dockTitleMax)
+	}
+	// The title wraps away the "…" for a real name; the cap is where one comes
+	// back, so the same setting cannot lie about having shown the whole title.
+	if !strings.Contains(app.dock.titleLines[head-1], "…") {
+		t.Fatalf("a title cut at the cap must admit it: %q", app.dock.titleLines[head-1])
+	}
+	if len(app.dock.lines) == 0 {
+		t.Fatal("the cap must leave the sections their rows")
+	}
+	top, _ := app.dockGrid()
+	if _, act := app.dockRowAt(200-dockCols+1, top+head-1); act != "" {
+		t.Fatalf("the title slot must not answer clicks as a row: act %q", act)
+	}
+	if _, act := app.dockRowAt(200-dockCols+1, top+head); act != "" {
+		t.Fatalf("a heading row must not answer clicks: act %q", act)
+	}
+	if path, _ := app.dockRowAt(200-dockCols+1, top+head+1); path != "" {
+		t.Fatalf("a task row must not resolve as a file: %q", path)
 	}
 }
 
