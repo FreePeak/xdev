@@ -612,6 +612,7 @@ func (f *fakeAPI) ShareSession() error {
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
 
 func (f *fakeAPI) SettingsView(args string) error { return nil }
+func (f *fakeAPI) SettingsOverlay() error         { return nil }
 
 func (f *fakeAPI) ThinkingLevel(args string) error { return nil }
 

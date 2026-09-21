@@ -135,39 +135,40 @@ type App struct {
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops               *SessionOps
-	modelOps          *ModelOps                              // session lifecycle, wired by cmd (nil → notices)
-	planOps           *PlanOps                               // /plan, wired by cmd (nil → notices)
-	advisorOps        *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
-	memoryOps         *MemoryOps                             // /memory, wired by cmd (nil → notices)
-	themeOps          *ThemeOps                              // /theme, wired by cmd (nil → notices)
-	connectOps        *ConnectOps                            // /connect, wired by cmd (nil → notices)
-	prewalkOps        *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
-	goalOps           *GoalOps                               // /goal, wired by cmd (nil → notices)
-	vibeOps           *VibeOps                               // /vibe, wired by cmd (nil → notices)
-	spick             *sessionPicker                         // /resume selector (nil = closed)
-	onPickerResume    func(id string)                        // wired by cmd: performs the resume
-	onPickerSearch    func(query string) []SessionPickerItem // wired by cmd: prompt-text matches (nil → local id+title filter)
-	onPickerPinToggle func(id string)                        // wired by cmd: persists the pin sidecar
-	onPickerDelete    func(id string) error                  // wired by cmd: deletes JSONL + artifacts after confirmation
-	tpick             *treeSelector                          // /tree selector (nil = closed)
-	treeData          func() []TreeEntry                     // entry snapshot, wired by cmd
-	treeLabelLoad     func() map[string]string
-	treeLabelSave     func(id, label string) error
-	treeLabels        map[string]string        // id→label snapshot, refreshed on open
-	settingsOps       *SettingsOps             // /settings, wired by cmd (nil → notices)
-	thinkingOps       *ThinkingOps             // /thinking, wired by cmd (nil → notices)
-	cwd               string                   // working directory (the status row's left side)
-	branch            string                   // git branch for the top bar ("" when none)
-	commandDir        string                   // markdown command discovery root
-	pathRoot          string                   // @-completion root (empty disables the menu)
-	pathList          func(string) []PathEntry // one directory's entries (the only source)
-	extCommands       map[string]string        // "/server:cmd" -> description
-	extRun            ExtensionCommand
-	renderers         map[string]RenderSpec   // tool name -> declarative render spec
-	sessionBranch     func(args string) error // /branch to an entry id
-	resumeList        func(cwd string) error  // /resume session listing
-	onSend            func(text string)
+	ops                *SessionOps
+	modelOps           *ModelOps                              // session lifecycle, wired by cmd (nil → notices)
+	planOps            *PlanOps                               // /plan, wired by cmd (nil → notices)
+	advisorOps         *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
+	memoryOps          *MemoryOps                             // /memory, wired by cmd (nil → notices)
+	themeOps           *ThemeOps                              // /theme, wired by cmd (nil → notices)
+	connectOps         *ConnectOps                            // /connect, wired by cmd (nil → notices)
+	prewalkOps         *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
+	goalOps            *GoalOps                               // /goal, wired by cmd (nil → notices)
+	vibeOps            *VibeOps                               // /vibe, wired by cmd (nil → notices)
+	spick              *sessionPicker                         // /resume selector (nil = closed)
+	onPickerResume     func(id string)                        // wired by cmd: performs the resume
+	onPickerSearch     func(query string) []SessionPickerItem // wired by cmd: prompt-text matches (nil → local id+title filter)
+	onPickerPinToggle  func(id string)                        // wired by cmd: persists the pin sidecar
+	onPickerDelete     func(id string) error                  // wired by cmd: deletes JSONL + artifacts after confirmation
+	tpick              *treeSelector                          // /tree selector (nil = closed)
+	treeData           func() []TreeEntry                     // entry snapshot, wired by cmd
+	treeLabelLoad      func() map[string]string
+	treeLabelSave      func(id, label string) error
+	treeLabels         map[string]string        // id→label snapshot, refreshed on open
+	settingsOps        *SettingsOps             // /settings, wired by cmd (nil → notices)
+	settingsOverlayOps *SettingsOverlayOps      // /settings overlay, wired by cmd (nil → disabled)
+	thinkingOps        *ThinkingOps             // /thinking, wired by cmd (nil → notices)
+	cwd                string                   // working directory (the status row's left side)
+	branch             string                   // git branch for the top bar ("" when none)
+	commandDir         string                   // markdown command discovery root
+	pathRoot           string                   // @-completion root (empty disables the menu)
+	pathList           func(string) []PathEntry // one directory's entries (the only source)
+	extCommands        map[string]string        // "/server:cmd" -> description
+	extRun             ExtensionCommand
+	renderers          map[string]RenderSpec   // tool name -> declarative render spec
+	sessionBranch      func(args string) error // /branch to an entry id
+	resumeList         func(cwd string) error  // /resume session listing
+	onSend             func(text string)
 	// onSendImages is the multimodal send: the draft with every attached
 	// image's chip stripped, plus the payloads in prompt order. It returns
 	// true when it took the turn. False (or nil) means the attachments cannot
@@ -1864,7 +1865,7 @@ func (a *App) handleKey(ev tcell.Event) {
 			// outranks the rest — while it is up it takes the wheel and the
 			// click, or the human scrolls the transcript underneath a question
 			// they were trying to answer.
-			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleTrajectoryMouse(m, press) {
+			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleSettingsOverlayMouse(m, press) || a.handleTrajectoryMouse(m, press) {
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
@@ -1917,6 +1918,10 @@ func (a *App) handleKey(ev tcell.Event) {
 	}
 	// The trajectory ledger is modal on the same terms as the tree selector:
 	// it owns every key while open, so nothing underneath it navigates.
+	// The settings overlay is modal: it owns every key while open.
+	if a.handleSettingsOverlayKey(key) {
+		return
+	}
 	if a.handleTrajectoryKey(key) {
 		return
 	}
@@ -2179,6 +2184,13 @@ func (a *App) handleKey(ev tcell.Event) {
 		// handler, so an open picker keeps first claim on the key (the model
 		// picker binds Shift-Tab to "previous tab").
 		a.ToggleThinking()
+		return
+	case "app.settings":
+		if a.SettingsOverlayOpen() {
+			a.CloseSettingsOverlay()
+		} else {
+			a.OpenSettingsOverlay()
+		}
 		return
 	case "dock-cycle", "dock-fold":
 		// The context dock's own two chords (#291 §1), handled here — after
@@ -3013,6 +3025,7 @@ func (a *App) paint() {
 		a.drawPicker(composerTop)
 		a.drawSlashDropdown(composerTop)
 		a.drawAskCard(composerTop)
+		a.drawSettingsOverlay(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
 		// A gesture made before the first block exists — the composer is the
@@ -3194,6 +3207,7 @@ func (a *App) paint() {
 	a.drawPicker(composerTop)
 	a.drawSlashDropdown(composerTop)
 	a.drawAskCard(composerTop)
+	a.drawSettingsOverlay(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
 	// Last, so it paints over every surface the frame just drew: see the note

@@ -394,6 +394,8 @@ type CommandAPI interface {
 	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
+	// SettingsOverlay opens the visual settings panel (grok-style overlay).
+	SettingsOverlay() error
 	// ThinkingLevel is /thinking [level]: bare reports, a level applies and
 	// persists the request-side reasoning level for the next turn.
 	ThinkingLevel(args string) error
@@ -437,8 +439,13 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
-		{Name: "settings", Description: "show settings; toggle showThinking on|off",
-			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "settings", Description: "show settings overlay, or toggle: /settings [overlay|showThinking on|off]",
+			Fn: func(app CommandAPI, args string) error {
+				if strings.TrimSpace(args) == "overlay" {
+					return app.SettingsOverlay()
+				}
+				return app.SettingsView(args)
+			}},
 		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
 			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default: the session model)",

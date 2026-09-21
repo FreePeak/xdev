@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"gopkg.in/yaml.v3"
@@ -48,6 +50,7 @@ var BuiltinActions = []string{
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
 	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
+	"app.settings",    // Alt+,: the settings overlay (grok settings panel)
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
@@ -119,6 +122,7 @@ func DefaultKeyMap() *KeyMap {
 			// panel rides the Alt+letter class the model and hub selectors already
 			// use, and keybindings.yml can move it like any other action.
 			"A-s": "dock-cycle",
+			"A-,": "app.settings",
 			"C-t": "dock-fold",
 
 			// The request-side reasoning toggle (omp's alt+t, Claude Code's
@@ -366,6 +370,13 @@ func keyName(ev *tcell.EventKey) string {
 			return string(r)
 		}
 		if r >= 'A' && r <= 'Z' {
+			return string(r)
+		}
+		// Punctuation is bindable too: a chord like Alt+, (the settings
+		// panel) is a real sequence every terminal sends as ESC + the byte,
+		// and refusing to name it would leave the binding in the table
+		// unresolvable — a listed chord the runtime ignores.
+		if r < utf8.RuneSelf && unicode.IsPunct(r) {
 			return string(r)
 		}
 		return ""
