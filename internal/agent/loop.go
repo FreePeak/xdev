@@ -866,7 +866,9 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					} else {
 						logx.Errorf("recovery: post-content failure 1 of %d", maxPostContentContinuations)
 					}
-					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
+					d := policy.delay(1)
+					a.noticeContinuationRetry(d)
+					if serr := sleepBackoff(ctx, d); serr != nil {
 						return nil, history, serr
 					}
 					continue
@@ -878,7 +880,9 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// so a stream that dies after content without a partial
 				// never busy-spins the CPU / freezes the TUI.
 				if policy.Infinite {
-					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
+					d := policy.delay(1)
+					a.noticeContinuationRetry(d)
+					if serr := sleepBackoff(ctx, d); serr != nil {
 						return nil, history, serr
 					}
 					continue
@@ -1031,6 +1035,21 @@ func (a *Agent) noticeEmptyTurnRetry(round int, d time.Duration) {
 		return
 	}
 	a.Hooks.OnEvent(ai.Errorf(&EmptyTurnRetryError{Round: round, Delay: d}))
+}
+
+// noticeContinuationRetry raises one retain-and-continue round on the event
+// stream: the partial was kept, a continuation turn was injected, and the
+// ladder is about to wait d before re-asking. Same contract as
+// noticeAllTargetsDown and noticeEmptyTurnRetry — nil-safe, so a mode that
+// installs no hooks stays quiet and keeps its logx line. It exists because a
+// post-content retry is the one recovery the console otherwise shows as a
+// bare "stream error" line: the partial is on screen, so a silent backoff
+// reads as the turn hanging.
+func (a *Agent) noticeContinuationRetry(d time.Duration) {
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&ContinuationRetryError{Delay: d}))
 }
 
 // recoverOverflow forces a compaction (ignoring the threshold — the
