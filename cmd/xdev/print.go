@@ -263,8 +263,10 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	if settings != nil {
 		ag.Compaction.IdleAfter = settings.CompactionIdleAfter()
 		ag.Compaction.Async = settings.CompactionAsyncOn()
-		// retry.infinite rides here: every build site (print/tui/rpc/acp)
-		// goes through this function, and none of them set ag.Retry at all.
+		// retry.infinite and retry.retryAllErrors ride here: every
+		// build site (print/tui/rpc/acp) goes through this function,
+		// and none of them set ag.Retry at all.
+		ag.Retry.RetryAllErrors = settings.RetryAllErrors()
 		ag.Retry.Infinite = settings.InfiniteRetry()
 	}
 	// #86: a compaction summary must carry the memories the remote backend

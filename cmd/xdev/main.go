@@ -206,6 +206,7 @@ func main() {
 	fs.StringVar(resumePrefix, "session", "", "resume a session by id prefix (alias: --session)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
 	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
+	retryAllErrors := fs.Bool("retry-all-errors", false, "retry every error class, including empty turns (retry.retryAllErrors for this run)")
 	providerFlag := fs.String("provider", "", "force the provider when the model ref does not name one")
 	addDirs := repeatable{}
 	fs.Var(&addDirs, "add-dir", "extra workspace root beyond the launch cwd: joins context-file discovery and is named in the prompt (repeatable)")
@@ -354,6 +355,12 @@ func main() {
 	if *retryForever {
 		infiniteFlag := true
 		settings.Retry.Infinite = &infiniteFlag
+	}
+	// -retry-all-errors is the one-run form of retry.retryAllErrors: the
+	// same layered-settings pattern as -retry-forever.
+	if *retryAllErrors {
+		allErrorsFlag := true
+		settings.Retry.RetryAllErrors = &allErrorsFlag
 	}
 	// --models patterns enable Ctrl+P cycling; the catalog print stays on
 	// the `models` subcommand (omp keeps the same split).

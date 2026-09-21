@@ -13,6 +13,19 @@ type RetryPolicy struct {
 	MaxRetries int           // attempts after the first failure
 	BaseDelay  time.Duration // first backoff
 	MaxDelay   time.Duration // backoff cap
+	// RetryAllErrors makes every error class — including
+	// empty turns (ErrEmptyTurn, "the model produced no answer")
+	// — retryable: Run rebuilds context from history and
+	// re-runs the ladder instead of ending the session, so a
+	// transient upstream stall never looks like a silent death
+	// (#331 follow-up: keep going until the goal is done).
+	// Off by default — an empty turn is usually the model being
+	// done, and retrying it forever burns tokens on a hard stop.
+	// RetryPolicy.Infinite already lifts the transient and
+	// overflow bounds; this controls the empty-turn bound
+	// independently because a model that can only ever answer
+	// nothing would otherwise loop with no out.
+	RetryAllErrors bool
 	// Infinite is retry.infinite / -retry-forever: once the failover chain
 	// has drained, keep re-running the ladder instead of surfacing the
 	// error, so an outage of any length is survived. Off by default — see

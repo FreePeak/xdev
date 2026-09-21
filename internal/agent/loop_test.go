@@ -1,12 +1,14 @@
 package agent
 
 import (
+
 	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -338,6 +340,59 @@ func TestEmptyTurnStallSurfacesAsAnError(t *testing.T) {
 	}
 	if n := len(p.gotReqs); n != maxEmptyTurnNudges+1 {
 		t.Fatalf("stream requests = %d, want %d", n, maxEmptyTurnNudges+1)
+	}
+}
+// TestEmptyTurnRetryAllErrors pins the retry-all-errors path: with
+// RetryAllErrors on, a model that answers nothing after the nudges
+// are spent keeps going — the loop rebuilds context, waits a
+// backoff, and re-runs until the model answers or the budget fires,
+// instead of surfacing ErrEmptyTurn.
+func TestEmptyTurnRetryAllErrors(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	answered := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "here is the answer"}}}
+	answerScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, answered)}}
+	// Two blank turns (the two nudges) + one recovery attempt that
+	// answers — the flag lifts the empty-turn bound.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, answerScript}}
+	a, _, _ := runAgent(t, p)
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryAllErrors: true}
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "here is the answer" {
+		t.Fatalf("final = %q, want %q", final.Text(), "here is the answer")
+	}
+	// Two blank turns (nudges) + one answer = 3 stream requests.
+	if n := len(p.gotReqs); n != 3 {
+		t.Fatalf("stream requests = %d, want 3", n)
+	}
+}
+// TestEmptyTurnRetryAllErrorsStillStalls pins the other side: with
+// RetryAllErrors on but no store to rebuild from, the flag has no
+// recovery path and the run still ends with an error — it burns
+// through the scripted blanks and surfaces "script exhausted"
+// rather than looping forever.
+func TestEmptyTurnRetryAllErrorsStillStalls(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	// 1 initial + 2 nudges = 3 blanks to drain the nudge budget,
+	// then the 4th call exhausts the script. With RetryAllErrors
+	// on and no store, the loop keeps going past the nudges but
+	// still ends — it does not loop forever.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, blankScript, blankScript}}
+	a, _, _ := runAgent(t, p)
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryAllErrors: true}
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("a stalled run with no store must surface an error, got nil")
+	}
+	if errors.Is(err, ErrEmptyTurn) {
+		t.Fatal("with RetryAllErrors on and no store, the run must not surface ErrEmptyTurn — it keeps going until the script exhausts")
 	}
 }
 
