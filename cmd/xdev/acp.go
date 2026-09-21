@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/FreePeak/xdev/internal/acp"
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
@@ -170,6 +170,19 @@ func (h *acpHandler) Prompt(ctx context.Context, sessionID string, blocks []acp.
 	// The server turns a cancelled turn into stopReason "cancelled"; any other
 	// error is answered as a JSON-RPC error.
 	msg, err := s.ag.Run(ctx, h.buildSys(), history(s.store))
+	if err != nil && errors.Is(err, agent.ErrEmptyTurn) {
+		// The model answered nothing after every nudge was spent
+		// (a thinking-mode upstream leaving only a reasoning block,
+		// or nothing at all). Rebuild context from the persisted
+		// history and re-run the agent so the session auto-resumes
+		// instead of dying with a dead-end error (#331). Same
+		// recovery print and rpc modes already had; ACP (the
+		// Claude Code / Copilot CLI bridge) was the other gap.
+		ctxRes, rerr := session.BuildContext(s.store.Entries(), s.store.LeafID(), session.SystemPrompt{})
+		if rerr == nil {
+			msg, err = s.ag.Run(ctx, h.buildSys(), ctxRes.Messages)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
