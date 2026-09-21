@@ -247,6 +247,7 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 		return nil
 	}
 	ag.GoalContinuation = interactive
+	ag.PromptContinuation = interactive
 	if reg != nil {
 		ag.WireCatalog(reg.Catalog())
 	}
