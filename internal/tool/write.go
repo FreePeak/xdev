@@ -130,8 +130,13 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 			details["unifiedDiff"] = diff
 		}
 	}
+	text := fmt.Sprintf("Wrote %s (%d bytes, %d lines)", a.Path, len(data), writeContentLines(a.Content))
+	if note := verifyGoSyntax(resolved, data); note != "" {
+		text += "\n" + note
+		details["syntaxWarning"] = note
+	}
 	return Result{
-		Text:    fmt.Sprintf("Wrote %s (%d bytes, %d lines)", a.Path, len(data), writeContentLines(a.Content)),
+		Text:    text,
 		Details: details,
 	}, nil
 }
