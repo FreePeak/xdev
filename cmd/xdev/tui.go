@@ -1340,7 +1340,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// the loop both reach it through the registry (agent.GoalStateOf), and a
 	// builder-shared registration made every registry in the tree carry a
 	// goal while the TUI — which registers its own agent — had none, so /goal
-	// answered "goal not wired" in every session (#396). It goes in before
+	// answered "goal not wired" in every session. It goes in before
 	// wireTaskParent binds it, so an early call cannot read unbound state.
 	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
 	wireTaskParent(reg, store)
