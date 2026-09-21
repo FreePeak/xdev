@@ -84,3 +84,31 @@ func TestTrajectoryDetailShowsToolPayloads(t *testing.T) {
 		}
 	}
 }
+
+// TestTrajectoryMetaToolLatency pins that a toolResult carrying DurationMS
+// (persisted by the agent loop) shows wall time on the ledger fact line, and
+// that older bash-only durationMs-in-Details still surfaces as a fallback.
+func TestTrajectoryMetaToolLatency(t *testing.T) {
+	m := &ai.Message{
+		Role:       ai.RoleToolResult,
+		ToolName:   "bash",
+		DurationMS: 70,
+		Details:    map[string]any{"exitCode": 0},
+	}
+	got := trajectoryMeta(m)
+	for _, want := range []string{"70ms", "exit 0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("tool meta missing %q in %q", want, got)
+		}
+	}
+
+	legacy := &ai.Message{
+		Role:     ai.RoleToolResult,
+		ToolName: "bash",
+		Details:  map[string]any{"exitCode": 0, "durationMs": float64(1250)},
+	}
+	got = trajectoryMeta(legacy)
+	if !strings.Contains(got, "1.25s") {
+		t.Fatalf("legacy details duration missing from %q", got)
+	}
+}

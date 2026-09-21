@@ -2787,15 +2787,25 @@ func trajectoryMeta(m *ai.Message) string {
 			parts = append(parts, fmt.Sprintf("$%.4f", u.Cost.Total))
 		}
 	}
-	if m.DurationMS > 0 {
-		parts = append(parts, (time.Duration(m.DurationMS) * time.Millisecond).Round(time.Millisecond).String())
+	durMS := m.DurationMS
+	var toolOut tool.Outcome
+	if m.Role == ai.RoleToolResult {
+		toolOut = tool.OutcomeOf(m.Details)
+		// Older tool results only carried wall time inside Details (bash
+		// durationMs); prefer the message field when the loop stamped it.
+		if durMS <= 0 {
+			durMS = toolOut.DurationMS
+		}
+	}
+	if durMS > 0 {
+		parts = append(parts, (time.Duration(durMS) * time.Millisecond).Round(time.Millisecond).String())
 	}
 	if m.TTFTMS > 0 {
 		parts = append(parts, "ttft "+(time.Duration(m.TTFTMS)*time.Millisecond).Round(time.Millisecond).String())
 	}
 	if m.Role == ai.RoleToolResult {
-		if out := tool.OutcomeOf(m.Details); out.HasExit {
-			parts = append(parts, fmt.Sprintf("exit %d", out.Exit))
+		if toolOut.HasExit {
+			parts = append(parts, fmt.Sprintf("exit %d", toolOut.Exit))
 		}
 		if m.IsError {
 			parts = append(parts, "error")
