@@ -28,12 +28,28 @@ func runMcps(args []string) int {
 		fmt.Fprintln(os.Stderr, "xdev: mcp health:", err)
 	}
 	for _, st := range statuses {
-		auto := ""
 		sc := cfg.Servers[st.Name]
+		auto := ""
 		if sc != nil && sc.AutoStart != nil {
 			auto = " (auto-start)"
 		}
 		fmt.Printf("  %s  %-11s  %s%s\n", st.Name, st.State, st.Transport, auto)
+		if st.State == "unreachable" || st.State == "error" {
+			if sc != nil {
+				if sc.URL != "" {
+					fmt.Printf("    url: %s\n", sc.URL)
+				} else if sc.Command != "" {
+					fmt.Printf("    command: %s\n", sc.Command)
+				}
+			}
+			if st.ErrorDetail != "" {
+				fmt.Printf("    error: %s\n", st.ErrorDetail)
+			}
+			if st.ErrorTime != "" {
+				fmt.Printf("    since: %s\n", st.ErrorTime)
+			}
+			fmt.Printf("    fix: xdev mcps fix %s\n", st.Name)
+		}
 	}
 	return 0
 }
