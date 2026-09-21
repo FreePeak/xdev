@@ -179,10 +179,18 @@ var toolArgKeys = []string{"command", "path", "file_path", "pattern", "query", "
 // collapsed, with " …" when the argument continued. Unparseable arguments, or
 // ones naming nothing, fall back to the flattened JSON so an unfamiliar tool
 // still says something instead of rendering an empty row.
+//
+// JSON gives no promise that a command is valid UTF-8: an `input` field the
+// model built by slicing bytes holds a torn rune, and 711 xdev sessions carry
+// U+FFFD for exactly that reason. The call row is the one render path with no
+// sanitizer on it, so the tear used to reach the terminal — a lone continuation
+// byte where every consumer downstream assumes runes. Invalid bytes are
+// dropped, not replaced: the row's cell widths stay truthful, or the box
+// borders land elsewhere.
 func toolDetail(rawArgs string) string {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal([]byte(rawArgs), &fields) != nil {
-		return strings.Join(strings.Fields(rawArgs), " ")
+		return utf8Only(strings.Join(strings.Fields(rawArgs), " "))
 	}
 	for _, k := range toolArgKeys {
 		v, ok := fields[k]
@@ -190,11 +198,15 @@ func toolDetail(rawArgs string) string {
 		if !ok || json.Unmarshal(v, &s) != nil {
 			continue
 		}
+		// Every byte index below is a rune boundary or nothing: the 400-byte
+		// cap would otherwise tear a rune exactly where an omp-shaped command
+		// crosses it, which is the same defect this sanitize exists to stop.
+		s = utf8Only(s)
 		head, rest, multiline := strings.Cut(strings.TrimRight(s, "\n"), "\n")
 		if len(head) > 400 {
 			// A write call's first line can be enormous; the row shows a
 			// phrase, so stop working past what any terminal can display.
-			head, multiline = head[:400], true
+			head, multiline = head[:runeBoundary(head, 400)], true
 		}
 		head = strings.Join(strings.Fields(head), " ")
 		if head == "" {
@@ -205,8 +217,25 @@ func toolDetail(rawArgs string) string {
 		}
 		return head
 	}
-	return strings.Join(strings.Fields(rawArgs), " ")
+	return utf8Only(strings.Join(strings.Fields(rawArgs), " "))
 }
+
+// runeBoundary is the largest index <= i that starts a rune, so a byte slice
+// cut there cannot split one. i itself when it already is a boundary.
+func runeBoundary(s string, i int) int {
+	if i > len(s) {
+		i = len(s)
+	}
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
+// utf8Only drops invalid bytes. Dropped rather than replaced (U+FFFD): the
+// replacement char is one cell wide where the torn bytes were zero, and a row
+// whose width is a lie paints its box border in the wrong column.
+func utf8Only(s string) string { return strings.ToValidUTF8(s, "") }
 
 // toolSummary splits the call row into the two runs it renders: the tool name
 // (bold) and its detail, truncated so the row fits maxW cells.

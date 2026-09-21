@@ -27,6 +27,13 @@ const (
 	stallAfter = 5 * time.Second
 	// stallCheck is the watchdog's poll interval.
 	stallCheck = time.Second
+	// stallSlowLog is when a loop that is still beating names its slowest
+	// iteration. Five seconds is the stall threshold; ten is the floor for
+	// /export, /dump and a transcript snapshot, and a synchronous terminal
+	// flush under a paste the user still holds (45s and 60s measured, #20)
+	// is exactly the case the stall dump could never record because the loop
+	// always recovered.
+	stallSlowLog = 10 * time.Second
 	// stallStackCap bounds the dump. Every goroutine's stack can exceed a
 	// megabyte on a busy session; the head is where the stuck loop is, and a
 	// truncated tail is still worth more than no file.
@@ -40,6 +47,24 @@ const (
 func (a *App) SetStallDumpDir(dir string) {
 	a.stallDir = dir
 }
+
+// beatDone closes one loop iteration and names it when it took absurdly long.
+// A stall dump only fires for a loop that never comes back; the slow-but-alive
+// iteration is the one the user actually reports ("it froze while I was
+// pasting"), so it leaves a line naming the phase instead of no trace at all.
+// The phase is which part of the loop ran, so waiting on a key ("event") is
+// told apart from the background repaint tick.
+func (a *App) beatDone(phase string, start time.Time) {
+	a.beat()
+	if d := time.Since(start); d >= slowIteration {
+		fmt.Fprintf(os.Stderr, "xdev: UI loop iteration took %s (%s)\n", d.Truncate(time.Millisecond), phase)
+	}
+}
+
+// slowIteration is when beatDone names an iteration; it is a variable rather
+// than the shipped constant only so a test can drive it without sleeping ten
+// seconds. Production never writes it.
+var slowIteration = stallSlowLog
 
 // beat records that the UI loop is making progress. Called from Run once per
 // iteration, so a hung handleKey/draw simply stops updating it.
