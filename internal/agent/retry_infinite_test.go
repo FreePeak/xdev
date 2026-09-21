@@ -66,7 +66,7 @@ func TestInfiniteRoundIsAnnouncedOnTheStream(t *testing.T) {
 				}
 			}
 		},
-		OnMessageEndF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
 		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
 	}
 	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
@@ -111,6 +111,59 @@ func TestDelayClampsNonPositiveAttempt(t *testing.T) {
 	}
 	if d := p.delay(-3); d <= 0 {
 		t.Fatalf("delay(-3) = %v, want a positive backoff", d)
+	}
+}
+
+// A retain-and-continue round is announced on the stream (same rule as the
+// all-targets-down round): the partial and the continuation prompt are already
+// in the transcript, so a silent backoff between them is the one shape the
+// console showed as the turn hanging. EmptyTurnRetryError's contract, one
+// recovery earlier.
+func TestContinuationRoundIsAnnouncedOnTheStream(t *testing.T) {
+	var mu sync.Mutex
+	var announced []error
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
+			ai.Event{Type: ai.EventTextStart}, textEvent("cut off here"),
+			ai.Errorf(&ai.HTTPError{API: "a", Status: 500, Body: "stall"}),
+		}},
+		{events: []ai.Event{textEvent("done"), doneEvent("done")}},
+	}}
+	a, s, _ := storeAgent(t, p, CompactionConfig{})
+	a.Hooks = TurnHooksFunc{
+		OnEventF: func(ev ai.Event) {
+			if ev.Type != ai.EventError {
+				return
+			}
+			var cont *ContinuationRetryError
+			if errors.As(ev.Err, &cont) {
+				mu.Lock()
+				announced = append(announced, ev.Err)
+				mu.Unlock()
+			}
+		},
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a.Retry = RetryPolicy{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final == nil || !strings.Contains(final.Text(), "done") {
+		t.Fatalf("final = %v, want the recovered message", final)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(announced) != 1 {
+		t.Fatalf("announcements = %d, want one per continuation round", len(announced))
+	}
+	cont := announced[0].(*ContinuationRetryError)
+	if cont.Delay <= 0 {
+		t.Fatalf("announcement = %v, want the backoff it sleeps", cont)
+	}
+	if !strings.Contains(cont.Error(), "cut off") {
+		t.Fatalf("announcement text = %q", cont.Error())
 	}
 }
 

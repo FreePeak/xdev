@@ -1999,9 +1999,17 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	case ai.EventError:
 		// An unbounded-wait round (retry.infinite / retry.retryAllErrors)
 		// says "still waiting" once per round — show it, not the blip notice.
+		// The retain-and-continue round is the same shape: its partials are
+		// already on screen, so without its own line the only thing the turn
+		// shows is the collapsed blip below.
 		var down *agent.AllTargetsDownError
 		if errors.As(ev.Err, &down) {
 			h.ts.app.AddSystemBlock(ev.Err.Error())
+			break
+		}
+		var cont *agent.ContinuationRetryError
+		if errors.As(ev.Err, &cont) {
+			h.ts.app.AddSystemBlock("· " + ev.Err.Error())
 			break
 		}
 		var empty *agent.EmptyTurnRetryError

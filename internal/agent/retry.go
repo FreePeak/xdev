@@ -95,6 +95,22 @@ func (e *EmptyTurnRetryError) Error() string {
 		e.Delay.Round(time.Second), e.Round)
 }
 
+// ContinuationRetryError is the voice of a retain-and-continue round
+// (oneTurnWithRecovery's post-content path): the partial was kept, a
+// continuation turn was injected, and the ladder is about to wait Delay
+// before re-asking. Same contract as AllTargetsDownError and
+// EmptyTurnRetryError — a console that collapses the wire error into one
+// notice still has the wait to print. Unlike those two it carries no
+// underlying failure: the recovery already happened.
+type ContinuationRetryError struct {
+	Delay time.Duration // backoff before the continuation turn is re-sent
+}
+
+func (e *ContinuationRetryError) Error() string {
+	return fmt.Sprintf("provider cut off mid-message — continuation injected, retrying in %s",
+		e.Delay.Round(time.Second))
+}
+
 // delay computes the backoff for attempt n (1-based): base·2^(n−1) capped,
 // with 25% downward jitter so simultaneous failures don't retry in lockstep.
 // n < 1 is treated as 1: callers that reset attempt to 0 before sleeping
