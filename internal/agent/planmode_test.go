@@ -243,3 +243,42 @@ func TestPlanModeTodoIsDisplayOnly(t *testing.T) {
 		t.Fatal("a nil PlanMode must be unreadable, not fatal")
 	}
 }
+
+// #420: undeclared tools fail closed in plan mode; ConcurrentOK is false.
+func TestPlanModeUndeclaredToolDenied(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(undeclaredPlanTool{})
+	pm := &PlanMode{active: true}
+	call := ai.ToolCallBlock{ID: "1", Name: "synth_undeclared", Arguments: json.RawMessage(`{}`)}
+	res, blocked := applyPlanMode(pm, call, reg)
+	if !blocked || !res.IsError {
+		t.Fatalf("undeclared tool must be denied: blocked=%v res=%+v", blocked, res)
+	}
+	if !strings.Contains(res.Text, "plan mode:") {
+		t.Fatalf("denial text = %q", res.Text)
+	}
+	ttool, _ := reg.Get("synth_undeclared")
+	if tool.ConcurrentOK(ttool) {
+		t.Fatal("undeclared tool must not be ConcurrentOK")
+	}
+}
+
+// #420: former planReadOnlyTools still pass via Caps, not the deleted map.
+func TestPlanModeCapsAllowGrep(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&tool.GrepTool{CWD: t.TempDir()})
+	pm := &PlanMode{active: true}
+	call := ai.ToolCallBlock{ID: "1", Name: "grep", Arguments: json.RawMessage(`{"pattern":"x"}`)}
+	if _, blocked := applyPlanMode(pm, call, reg); blocked {
+		t.Fatal("grep must pass plan mode via Caps")
+	}
+}
+
+type undeclaredPlanTool struct{}
+
+func (undeclaredPlanTool) Name() string                { return "synth_undeclared" }
+func (undeclaredPlanTool) Description() string         { return "no caps" }
+func (undeclaredPlanTool) Parameters() json.RawMessage { return json.RawMessage(`{}`) }
+func (undeclaredPlanTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{Text: "ran"}, nil
+}

@@ -1440,7 +1440,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
 	// to propose while the sub-state is active. Checked before approval —
 	// a read-only run must never reach an approval prompt for a mutation.
-	if denied, blocked := applyPlanMode(a.PlanMode, call); blocked {
+	if denied, blocked := applyPlanMode(a.PlanMode, call, a.Tools); blocked {
 		a.Hooks.OnToolEnd(call, denied, time.Since(started))
 		return toolResultMsg(call, denied, time.Since(started))
 	}
