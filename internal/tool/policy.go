@@ -106,13 +106,15 @@ type Decision struct {
 // Decide resolves one invocation. Precedence:
 //
 //	deny rule > explicit per-tool rule > bash pattern (whole command first
-//	when the compound opt-in is on, else per segment) > mode+tier default
+//	when the compound opt-in is on, else per segment) > Caps.AlwaysAsk >
+//	mode+tier default
 //
-// A tool name outside the tier table (grep/glob/ast tools, ext_*/mcp_*)
-// classifies conservatively as TierExec, so dynamically registered tools
-// are subject to the same policy as bash instead of silently exempt — the
-// most destructive assumption is the only safe default for a tool nobody
-// modeled. Decide errors only on malformed policy state.
+// A tool name outside the core-four Classify set (grep/glob/ast tools,
+// ext_*/mcp_*) classifies conservatively as TierExec, so dynamically
+// registered tools are subject to the same policy as bash instead of
+// silently exempt — the most destructive assumption is the only safe
+// default for a tool nobody modeled. Decide errors only on malformed
+// policy state.
 func (p ApprovalPolicy) Decide(toolName string, args json.RawMessage) (Decision, error) {
 	tier := TierExec // conservative default for unmodeled tools
 	if t, err := Classify(toolName, args); err == nil {
@@ -164,6 +166,11 @@ func (p ApprovalPolicy) Decide(toolName string, args json.RawMessage) (Decision,
 				return Decision{Action: ActionPrompt, Reason: "bash.patterns prompt " + quote(r.Pattern)}, nil
 			}
 		}
+	}
+	// Caps.AlwaysAsk forces a prompt even under yolo. Explicit per-tool
+	// allow above still wins; AlwaysAsk only overrides mode-based allows.
+	if c, ok := CapsByName(toolName); ok && c.AlwaysAsk {
+		return Decision{Action: ActionPrompt, Reason: "tool " + toolName + " declares AlwaysAsk"}, nil
 	}
 	if NeedsApproval(p.Mode, tier) {
 		return Decision{Action: ActionPrompt, Reason: "approval mode " + p.Mode.String() + " requires a prompt for " + tier.String() + " tools"}, nil
