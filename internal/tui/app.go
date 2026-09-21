@@ -1733,8 +1733,9 @@ func (a *App) Run() {
 
 	a.draw()
 	a.logFrameAfterDraw()
+
 	for {
-		a.beat()
+		iter := time.Now()
 		select {
 		case <-a.quitCh:
 			return
@@ -1743,9 +1744,11 @@ func (a *App) Run() {
 			a.drainKeys()
 			a.draw()
 			a.logFrameAfterDraw()
+			a.beatDone("event", iter)
 		case <-a.dirty:
 			a.draw()
 			a.logFrameAfterDraw()
+			a.beatDone("dirty", iter)
 		case <-tick.C:
 			// A paste window whose end marker never arrived must still close,
 			// or the keys held inside it would never reach the user again
@@ -1788,6 +1791,7 @@ func (a *App) Run() {
 				a.draw()
 				a.logFrameAfterDraw()
 			}
+			a.beatDone("tick", iter)
 		}
 	}
 }
