@@ -966,19 +966,19 @@ grep -n 'private checkPlanMode' -A 40 packages/core/src/permission/service.ts
 
 ## 10. Issues filed from this study
 
-| # | Proposal | Tier | Evidence |
+| Issue | Proposal | Tier | Evidence |
 |---|---|---|---|
-| (a) | Tool capability manifests: one declaration, four consumers | 1 | §4.1 |
-| (b) | Streaming execution of read-only tools during the model stream | 1 | §1.4 |
-| (c) | Compaction rapid-refill circuit breaker | 1 | §6.3 |
-| (d) | The prompt contract paragraphs (mid-turn invisibility, compaction, harness facts) | 1 | §3.2 |
-| (e) | Abort-aware stream reads + attempt-escalated idle timeout | 1 | §5.3 |
-| (f) | Sectioned system prompt with declared cache hints | 2 | §3.1 |
-| (g) | Permission: racing hook/broker responders, `allowAlways: false\|"session"`, `alwaysAsk` | 2 | §7.4 |
-| (h) | Residency facts + a registered detached-work counter | 2 | §7.1–7.2 |
-| (i) | Plan mode by declared capability, two-tool enter/exit, plan file before flip | 1–2 | §2 |
-| (j) | Subagent profile scoping: `injectAgentsMd`, permissionMode, plan-tool removal, child notes | 2 | §4.3 |
-| (k) | Microcompact as a pre-request tier with a boundary event | 2 | §6.1 |
+| [#420](https://github.com/FreePeak/xdev/issues/420) | Tool capability manifests: one declaration, four consumers | 1 | §4.1 |
+| [#421](https://github.com/FreePeak/xdev/issues/421) | Streaming execution of read-only tools during the model stream | 1 | §1.4 |
+| [#422](https://github.com/FreePeak/xdev/issues/422) | Compaction rapid-refill + failure circuit breakers | 1 | §6.3, §6.4 |
+| [#423](https://github.com/FreePeak/xdev/issues/423) | The prompt contract paragraphs (mid-turn invisibility, compaction, harness facts) | 1 | §3.2 |
+| [#424](https://github.com/FreePeak/xdev/issues/424) | Abort-aware stream reads + attempt-escalated idle timeout | 1 | §5.3 |
+| [#425](https://github.com/FreePeak/xdev/issues/425) | Sectioned system prompt with declared cache hints | 2 | §3.1 |
+| [#426](https://github.com/FreePeak/xdev/issues/426) | Permission: racing hook/broker responders, `allowAlways: false\|"session"`, `alwaysAsk` | 2 | §7.4 |
+| [#427](https://github.com/FreePeak/xdev/issues/427) | Plan mode: capability policy, filtered toolset, no reviewer ⇒ the plan is the deliverable | 1–2 | §2 |
+| [#428](https://github.com/FreePeak/xdev/issues/428) | Residency facts + a registered detached-work counter | 2 | §7.1–7.2 |
+| [#429](https://github.com/FreePeak/xdev/issues/429) | Subagent profile scoping: `injectAgentsMd`, permissionMode, plan-tool removal, child notes | 2 | §4.3 |
+| [#430](https://github.com/FreePeak/xdev/issues/430) | Microcompact as a pre-request tier with a boundary event | 2 | §6.1 |
 
 Filing was done on 2026-09-22; the PRD's §3 (architecture) and §5 (key decisions) were updated in the
 same change with the four ideas that change a stated design assumption rather than adding a feature

@@ -282,9 +282,6 @@ xdev/
   - **Interaction contract:** simple mode (arrows + `Shift+Arrow` turn jumps, Space/letter refocuses prompt) and opt-in vim mode (`j/k`, `H/L` turns, `J/K` responses, `h/l` fold, `e` expand, `y` copy, `Enter`/`Ctrl+F` fullscreen viewer, `Ctrl+E` thinking folds); `Tab` prompt↔scrollback focus; blocking cards (permission/ask) own the keyboard with `Tab`/`Shift+Tab` row walk and layered `Esc`-steps-back semantics; `Esc` mid-turn = cancel panel (never kills in-flight tools silently — offers keep-running).
   - **Parity is layout + block styling + interaction + palette — NOT 1:1 behavior.** Grok features that fight tcell's low-alloc model or the <100 MB RSS budget are **config-off-by-default or dropped**: 30 fps accent-wave animation (off; static accent rail is the default rendering), mouse hover highlights (off), background blending/`bg_blend` runtime color generation (off — every color comes from the quantized theme table, never blended at draw time). If any later ship, they are opt-in and must re-justify against the memory budget in M8's audit.
 
-
-
-- **Capability manifest (decision pending, ZCode cross-check §4.1).** ZCode's `ToolMetadata` declares `{readOnly, destructive, concurrentSafe, sideEffectScope, needsApproval, alwaysAsk, requiresUserInteraction, timeoutMs, maxOutputBytes, riskLevel, providerVisible, stopTurnOnSuccess}` beside the schemas, and four consumers read *the same declaration*: the plan-mode permission policy, the tool scheduler, the streaming-execution gate, and the approval gate. The rule stated in its own comments is the argument for it — `stopTurnOnSuccess` "is the tool's intrinsic capability declaration (like concurrentSafe/destructive), read by the executor, **not guessed at the call site by tool name**". xdev's `tool.Tool` is `Name/Description/Parameters/Execute`, so three name-keyed tables exist in parallel (`internal/tool/policy.go`, `planReadOnlyTools`, the scheduler's `READ_ONLY_TOOLS`) and a fourth consumer cannot be added without a fifth table. Filed as its own issue; it is the prerequisite for the streaming-execution item above and for closing T3 #27/#28.
 ### 3.6 Tools
 
 - `read`/`write`/`edit`/`bash` **exactly per pi's input schemas** (model familiarity is an asset). omp-style line-numbered snapshots + hashline anchors (`PUT N.=M:`, `MV`, `CUT`, `REM`) are the proven edit UX — pure string ops in Go.
@@ -295,8 +292,7 @@ xdev/
 - AST tools: **no tree-sitter embedding** (CGO + memory); shell out to the `ast-grep` binary if present — preserves the CGO-free guarantee.
 - Approvals: port the tier model (read-only/write/exec) + `bash.patterns` allow/deny/prompt with conservative compound-command combination; approvals stay **separate** from interception (approval decides *whether to run*, interception routes *to a better tool*); real containment is external sandboxing (document container recipes like pi).
 
-- **Capability manifest on the tool contract** (ZCode cross-check §4.1 — a decision, not yet a design): each tool declares `{readOnly, destructive, concurrentSafe, sideEffectScope, needsApproval, alwaysAsk?, requiresUserInteraction?, timeoutMs, maxOutputBytes, riskLevel, resultBudget}` next to its schemas, and the plan-mode policy, the scheduler, the approval gate and (if it lands) the streaming-execution gate all read *that* declaration. Today xdev keeps three parallel name-keyed tables (`internal/tool/policy.go` tiers, `planReadOnlyTools`, the scheduler's `READ_ONLY_TOOLS`) and a fourth consumer would need a fifth table; the peer's own rule is the argument — an intrinsic capability is "read by the executor, not guessed at the call site by tool name". Filed as its own issue, because a manifest that only the plan gate consumes would be worse than the maps.
-
+- **Capability manifest on the tool contract** (a decision, not yet a design — [ZCode cross-check](research/zcode-internals.md) §4.1, issue [#420](https://github.com/FreePeak/xdev/issues/420)): each tool declares `{readOnly, destructive, concurrentSafe, sideEffectScope, needsApproval, alwaysAsk?, requiresUserInteraction?, timeoutMs, maxOutputBytes, riskLevel, resultBudget}` next to its schemas, and the plan-mode policy, the scheduler, the approval gate and (if it lands) the streaming-execution gate all read *that* declaration. Today xdev keeps three parallel name-keyed tables (`internal/tool/policy.go` tiers, `planReadOnlyTools` in `internal/agent/planmode.go`, the scheduler's `READ_ONLY_TOOLS`) and a fourth consumer would need a fifth table; the peer's rule is the argument — an intrinsic capability is "read by the executor, not guessed at the call site by tool name". A manifest that only the plan gate consumes would be worse than the maps, which is why it is filed as its own issue rather than as a rider on the plan-mode fix.
 ### 3.7 Memory budget (hard <100 MB RSS)
 
 
@@ -559,45 +555,45 @@ stated-and-wired, not as proven.
 
 **Adopt (changes a stated design assumption, not just a feature):**
 
-- **A tool's capabilities are a declaration, not a name lookup.** `ToolMetadata` carries
+- **[#420](https://github.com/FreePeak/xdev/issues/420) A tool's capabilities are a declaration, not a name lookup.** `ToolMetadata` carries
   `readOnly`/`destructive`/`concurrentSafe`/`sideEffectScope`/`needsApproval`/`alwaysAsk`/
   `stopTurnOnSuccess` beside the schemas, and four consumers read the same declaration. xdev's three
   parallel name-keyed tables (plan mode's `planReadOnlyTools`, `internal/tool/policy.go`'s tiers, the
   scheduler's `READ_ONLY_TOOLS`) are what a manifest replaces — and plan mode's fail-open list is the
   first casualty it fixes (T3 #27/#28). §3.6, §3.4.
-- **Compaction needs a breaker.** `MAX_CONSECUTIVE_RAPID_REFILLS = 3` /
+- **[#422](https://github.com/FreePeak/xdev/issues/422) Compaction needs a breaker.** `MAX_CONSECUTIVE_RAPID_REFILLS = 3` /
   `RAPID_REFILL_TOOL_TURN_THRESHOLD = 3`: compaction that does not buy space is a failure mode, and
   xdev counts nothing today. §3.2.
-- **Read-only tools can run during the stream.** Gated on the manifest, with a fallback to
+- **[#421](https://github.com/FreePeak/xdev/issues/421) Read-only tools can run during the stream.** Gated on the manifest, with a fallback to
   end-of-stream execution on failure and preserved results on a mid-stream model failure. §3.4.
-- **A stream read must be abortable while the provider is wedged**, alongside xdev's source-side
+- **[#424](https://github.com/FreePeak/xdev/issues/424) A stream read must be abortable while the provider is wedged**, alongside xdev's source-side
   liveness judgement (both properties, one watchdog). §3.3, §3.9.
-- **The prompt states its own contract.** Three short paragraphs — mid-turn text may be invisible;
+- **[#423](https://github.com/FreePeak/xdev/issues/423) The prompt states its own contract.** Three short paragraphs — mid-turn text may be invisible;
   compaction is coming so do not wrap up early; how permissions/hooks/system turns behave — that
   xdev has the machinery for and never mentions. §3.4.
 
 **Verify / design further:**
 
-- **Sectioned prompt with declared cache hints** (`{injectionTarget, cacheHint}` → one system message
+- **[#425](https://github.com/FreePeak/xdev/issues/425) Sectioned prompt with declared cache hints** (`{injectionTarget, cacheHint}` → one system message
   per group, each cache-marked) — the structural form of the manual cache discipline in
   [research/omp-prompt-cache-2026-09-15.md](research/omp-prompt-cache-2026-09-15.md). §3.4.
-- **Microcompact as a pre-request tier** with a provider-visible boundary event; xdev's `shake`/`soft`
+- **[#430](https://github.com/FreePeak/xdev/issues/430) Microcompact as a pre-request tier** with a provider-visible boundary event; xdev's `shake`/`soft`
   rungs only run at a boundary that is already paying for a summary. §3.2.
-- **Permission: two racing responders** (hook chain and interactive broker start concurrently, either
+- **[#426](https://github.com/FreePeak/xdev/issues/426) Permission: two racing responders** (hook chain and interactive broker start concurrently, either
   wins, a failed hook forfeits rather than denies, a modified input re-checks its permission) plus
   `allowAlways: false | "session"` and `alwaysAsk` that survives yolo and plan-mode pass-through. §3.6.
-- **Residency vocabulary** — `SessionResidencyFacts` + a counter every detached promise registers in
+- **[#428](https://github.com/FreePeak/xdev/issues/428) Residency vocabulary** — `SessionResidencyFacts` + a counter every detached promise registers in
   the tick that starts it — not as a pool port (xdev is one session per process) but as the answer to
   "what is this session still doing", which `--bg`/attach (#131) and a correct resume of a busy
   session both need. §3.2, §3.9.
-- **Subagent profile scoping**: `injectAgentsMd: false` for a read-only explore child, per-profile
+- **[#429](https://github.com/FreePeak/xdev/issues/429) Subagent profile scoping**: `injectAgentsMd: false` for a read-only explore child, per-profile
   `permissionMode`, the plan tools force-removed from every child, and the child note "do NOT write
   report/summary .md files — return findings directly". §3.4.
+- **[#427](https://github.com/FreePeak/xdev/issues/427) Plan mode by declared capability** — deny by default in plan mode, two tools with a free enter and a gated exit, the advertised toolset filtered while planning, and a reviewer-less proposal ending the run instead of auto-accepting (closes parity T3 #27/#28). §2.
 
 **Reject (with the reason recorded):**
 
-- **SQLite as the session store.** ~2.7 klines of migration/codec machinery for a benefit xdev gets
-  from `BuildContext`, against two stated goals (JSONL interop; the RSS budget).
+- **SQLite as the session store.** ~2.7 klines of migration/codec machinery for a benefit xdev gets from `BuildContext`, against two stated goals (JSONL interop; the RSS budget).
 - **The Vercel AI SDK.** PRD §1 non-goal stands; the portable half is the *seams* (`bindModel` freezes
   baseURL/protocol/options at model-creation time so a config hot-reload cannot silently re-point a
   running session — the same class of bug as `fix/model-live-switch`, 2026-09-20).
