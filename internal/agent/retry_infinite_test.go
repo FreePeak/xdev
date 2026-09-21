@@ -114,6 +114,38 @@ func TestDelayClampsNonPositiveAttempt(t *testing.T) {
 	}
 }
 
+// retry.infinite / retry.retryAllErrors are default-on, so the round counters
+// feeding delay() have no ceiling. Past the point where base·2^(n−1) overflowed
+// int64 (n = 36 at the default 500ms base) the old multiply produced a negative
+// duration, slipped past the MaxDelay clamp and panicked inside rand.Int64N
+// ("invalid argument to Int64N") — the crash that took the TUI down after a long
+// retry or thinking loop. Every round must stay inside the policy's own max.
+func TestDelayCannotOverflowAtUnboundedRounds(t *testing.T) {
+	p := DefaultRetryPolicy()
+	for _, n := range []int{1, 2, 8, 33, 35, 36, 40, 57, 62, 63, 64, 1000, 1 << 20} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("delay(%d) panicked: %v", n, r)
+				}
+			}()
+			d := p.delay(n)
+			if d <= 0 {
+				t.Fatalf("delay(%d) = %v, want a positive backoff", n, d)
+			}
+			if d > p.MaxDelay {
+				t.Fatalf("delay(%d) = %v, want at most the %v cap", n, d, p.MaxDelay)
+			}
+		}()
+	}
+	// A bounded ladder saturates at its own max too (a policy that never sets
+	// MaxDelay must not be the one that panics).
+	q := RetryPolicy{BaseDelay: 10 * time.Millisecond}
+	if d := q.delay(50); d <= 0 || d > q.BaseDelay {
+		t.Fatalf("delay(50) with no MaxDelay = %v, want (0, %v]", d, q.BaseDelay)
+	}
+}
+
 // A retain-and-continue round is announced on the stream (same rule as the
 // all-targets-down round): the partial and the continuation prompt are already
 // in the transcript, so a silent backoff between them is the one shape the
