@@ -351,6 +351,68 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return nil
 		},
 	})
+
+	// Settings overlay (Alt+,): the settings this session already has a live
+	// seam for. The panel owns its key handling and rendering; what is wired
+	// here is the two things only cmd can do — read the layered values the
+	// session actually resolved, and persist a change to the global layer the
+	// way `xdev config set` does. Rows are declared once, with the live apply
+	// each one performs, so the three callbacks cannot drift apart: a setting
+	// with no seam here has no row, which is why the overlay shows the
+	// resolved state rather than a generic editor of the config file.
+	app.SetSettingsOverlayOps(&tui.SettingsOverlayOps{
+		Path: config.GlobalSettingsPath(),
+		Read: func() []tui.SettingsRow {
+			s := lastSettings()
+			rows := []tui.SettingsRow{
+				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
+					Editable: true, Kind: "toggle"},
+				// thinking is a select, not a toggle: the vocabulary is the
+				// level ladder, and it lives behind one door (ThinkingOps.Set)
+				// so a level set here and a level set by /thinking cannot
+				// disagree about the wire.
+				{Key: "thinking", Label: "Thinking level", Value: s.ThinkingLevel(),
+					Editable: true, Kind: "select", Options: append([]string(nil), config.ThinkingLevels...)},
+				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
+					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
+				{Key: "theme", Label: "Theme", Value: s.Theme, Editable: false, Kind: "text"},
+				{Key: "approvalMode", Label: "Approval mode", Value: s.ApprovalMode, Editable: false, Kind: "text"},
+				{Key: "defaultModel", Label: "Model", Value: s.DefaultModel, Editable: false, Kind: "text"},
+				{Key: "memory", Label: "Memory", Value: s.Memory, Editable: false, Kind: "text"},
+				{Key: "advisor", Label: "Advisor", Value: fmt.Sprint(s.Advisor), Editable: false, Kind: "text"},
+				{Key: "colorBlindMode", Label: "Color-blind mode", Value: fmt.Sprint(s.ColorBlindMode), Editable: false, Kind: "text"},
+				{Key: "debugMouse", Label: "Debug mouse", Value: fmt.Sprint(s.DebugMouse),
+					Editable: true, Kind: "toggle"},
+			}
+			return rows
+		},
+		Write: func(key, value string) error {
+			// The one write path: the global layer, exactly what
+			// `xdev config set` edits. config.Set validates the key against
+			// the schema and round-trips the file before it lands, so a bad
+			// value fails here instead of quarantining the user's config on
+			// the next start.
+			if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
+				return err
+			}
+			// Fold the new value into the in-memory layer as well: a later
+			// /settings (or a refresh of this panel) reads the session's
+			// resolved settings, so without this it would show the old value
+			// until the next process.
+			switch key {
+			case "showThinking":
+				v := value == "true"
+				lastSettings().ShowThinking = &v
+			case "thinking":
+				lastSettings().Thinking = value
+			case "sidebarMode":
+				lastSettings().SidebarMode = value
+			case "debugMouse":
+				lastSettings().DebugMouse = value == "true"
+			}
+			return nil
+		},
+	})
 	// /thinking and the Shift-Tab toggle (#20's other half): the request-side
 	// level, not the display. Persisting and the live holder both live here,
 	// because cmd owns the settings file and the provider holder. A flip takes

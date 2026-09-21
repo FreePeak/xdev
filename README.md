@@ -149,6 +149,7 @@ remap in JSON with live reload). What matters for daily work:
 | `Ctrl+R` | previous prompt |
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
+| `Alt+,` | settings panel: live-edit the session's settings (Enter changes the row under the cursor) |
 | `Shift+Tab` | ask the model to stop reasoning ⇄ let the model role decide (`/thinking`) |
 | `Ctrl+O` | expand the newest tool result or thinking box |
 | `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
@@ -202,7 +203,7 @@ reprints the document in the transcript.
 | `/new` `/fresh` `/clear` `/drop` | start over, rotate provider state, reset context in place, delete the session file |
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
-| `/model [ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/model [ref]` `/connect [name]` `/theme <name>` `/settings [overlay]` `/hotkeys` | model, provider catalog, theme and display control (`/settings overlay` — or `Alt+,` — opens the settings panel; `/settings sidebarMode auto\|show\|hide` pins the dock) |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
