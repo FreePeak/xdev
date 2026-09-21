@@ -1991,10 +1991,15 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			}
 		}
 	case ai.EventError:
-		// An unbounded-wait round (retry.infinite) says "still waiting"
-		// once per round — show it, not the blip notice.
+		// An unbounded-wait round (retry.infinite / retry.retryAllErrors)
+		// says "still waiting" once per round — show it, not the blip notice.
 		var down *agent.AllTargetsDownError
 		if errors.As(ev.Err, &down) {
+			h.ts.app.AddSystemBlock(ev.Err.Error())
+			break
+		}
+		var empty *agent.EmptyTurnRetryError
+		if errors.As(ev.Err, &empty) {
 			h.ts.app.AddSystemBlock(ev.Err.Error())
 			break
 		}

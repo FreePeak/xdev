@@ -1,7 +1,6 @@
 package agent
 
 import (
-
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -393,6 +393,55 @@ func TestEmptyTurnRetryAllErrorsStillStalls(t *testing.T) {
 	}
 	if errors.Is(err, ErrEmptyTurn) {
 		t.Fatal("with RetryAllErrors on and no store, the run must not surface ErrEmptyTurn — it keeps going until the script exhausts")
+	}
+}
+
+// TestEmptyTurnRetryAllErrorsAnnouncesOnStream pins the freeze fix: with
+// RetryAllErrors on, each empty-turn recovery after the nudge budget is
+// spent raises EmptyTurnRetryError through OnEvent so the TUI/print
+// surfaces "still waiting" instead of looking hung.
+func TestEmptyTurnRetryAllErrorsAnnouncesOnStream(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	answered := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "recovered"}}}
+	answerScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, answered)}}
+	// 1 initial + 2 nudges drain the budget; 3rd blank triggers the
+	// RetryAllErrors recovery (and its announcement); 4th answers.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, blankScript, answerScript}}
+	var announced []error
+	a, s, _ := storeAgent(t, p, CompactionConfig{})
+	a.Hooks = TurnHooksFunc{
+		OnEventF: func(ev ai.Event) {
+			if ev.Type != ai.EventError {
+				return
+			}
+			var empty *EmptyTurnRetryError
+			if errors.As(ev.Err, &empty) {
+				announced = append(announced, ev.Err)
+			}
+		},
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryAllErrors: true}
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "recovered" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(announced) < 1 {
+		t.Fatal("empty-turn recovery must announce on the event stream")
+	}
+	var empty *EmptyTurnRetryError
+	if !errors.As(announced[0], &empty) || empty.Round < 1 || empty.Delay <= 0 {
+		t.Fatalf("announcement = %v, want round/delay", announced[0])
+	}
+	if !strings.Contains(announced[0].Error(), "empty turn") {
+		t.Fatalf("announcement text = %q", announced[0])
 	}
 }
 

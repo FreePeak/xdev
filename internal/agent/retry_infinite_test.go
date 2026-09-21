@@ -91,13 +91,26 @@ func TestInfiniteRoundIsAnnouncedOnTheStream(t *testing.T) {
 	}
 }
 
-// A zero-ish RetryPolicy handed to the loop keeps its Infinite flag through
-// the default fill-in — otherwise the settings copy in wireAgentMode (which
-// never sets the timings) is dropped and the feature is unreachable.
+// A zero-ish RetryPolicy handed to the loop keeps its Infinite and
+// RetryAllErrors flags through the default fill-in — otherwise the
+// settings copy in wireAgentMode (which never sets the timings) is
+// dropped and the feature is unreachable.
 func TestInfiniteRidesWithDefaults(t *testing.T) {
-	p := (RetryPolicy{Infinite: true}).withDefaults()
-	if !p.Infinite || p.MaxRetries != DefaultRetryPolicy().MaxRetries {
+	p := (RetryPolicy{Infinite: true, RetryAllErrors: true}).withDefaults()
+	if !p.Infinite || !p.RetryAllErrors || p.MaxRetries != DefaultRetryPolicy().MaxRetries {
 		t.Fatalf("withDefaults = %+v", p)
+	}
+}
+
+// delay(0) used to compute base·2^(−1) via a huge shift and then
+// busy-spin callers that reset attempt to 0 before sleeping. Clamp to 1.
+func TestDelayClampsNonPositiveAttempt(t *testing.T) {
+	p := RetryPolicy{BaseDelay: 10 * time.Millisecond, MaxDelay: 10 * time.Millisecond}
+	if d := p.delay(0); d <= 0 {
+		t.Fatalf("delay(0) = %v, want a positive backoff", d)
+	}
+	if d := p.delay(-3); d <= 0 {
+		t.Fatalf("delay(-3) = %v, want a positive backoff", d)
 	}
 }
 

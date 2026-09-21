@@ -486,6 +486,10 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// same shape as the TTSR interrupt budget and maxEscalationRounds).
 	nudges := 0
 	promptConts := 0
+	// emptyRetries counts RetryAllErrors empty-turn recoveries after the
+	// nudge budget is spent. Used for escalating backoff and the
+	// "still waiting" notice so the run never looks frozen.
+	emptyRetries := 0
 	for turn := 0; limit == 0 || turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
@@ -638,12 +642,23 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 					// flag on we treat "nothing" as transient and
 					// loop until the model actually answers or the
 					// context/turn/token budget fires.
+					//
+					// Each round announces on the event stream and
+					// escalates the backoff (same shape as
+					// retry.infinite's all-targets-down notice) so a
+					// long empty-turn stall reads as waiting, not hung.
+					emptyRetries++
+					policy := a.Retry.withDefaults()
+					d := policy.delay(emptyRetries)
 					emit("turn_end", map[string]any{"turn": turn})
 					if a.Store != nil {
 						rebuilt, _ := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{})
 						history = rebuilt.Messages
 					}
-					sleepBackoff(ctx, a.Retry.withDefaults().delay(1))
+					a.noticeEmptyTurnRetry(emptyRetries, d)
+					if serr := sleepBackoff(ctx, d); serr != nil {
+						return lastAssistant, serr
+					}
 					continue
 				}
 				emit("turn_end", map[string]any{"turn": turn})
@@ -828,28 +843,28 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			if turnContentEmitted(err) {
 				// Retain-and-continue (M5 tail): persist the partial,
 				// follow with a continuation prompt, resume. On a BOUNDED
-				// ladder (retry.infinite off) the budget is
-				// maxPostContentContinuations; retry.infinite (the default)
-				// lifts it. Only text/thinking partials qualify — a tool
-				// call without its result is not a request a provider
-				// would accept.
+				// ladder (retry.infinite off) the budget is one shot via
+				// continued; retry.infinite (the default) keeps retaining
+				// every partial and never tight-loops without backoff.
+				// Only text/thinking partials qualify — a tool call
+				// without its result is not a request a provider would
+				// accept.
 				var te *turnError
-				resumeLeft := maxPostContentContinuations
-				if policy.Infinite {
-					resumeLeft = -1
-				}
-				if !continued && (policy.Infinite || resumeLeft > 0) && errors.As(err, &te) && te.partial != nil {
+				canRetain := errors.As(err, &te) && te.partial != nil
+				if canRetain && (policy.Infinite || !continued) {
 					history = append(history, *te.partial)
 					a.persist(*te.partial)
 					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}, Attribution: ContinuationAttribution}
 					history = append(history, cont)
 					a.persist(cont)
-					continued = true
+					if !policy.Infinite {
+						continued = true
+					}
 					a.Hooks.OnContinuation(ContinuationPrompt)
 					if policy.Infinite {
 						logx.Errorf("recovery: post-content failure on an infinite ladder (retry.infinite)")
 					} else {
-						logx.Errorf("recovery: post-content failure %d of %d", maxPostContentContinuations-resumeLeft+1, maxPostContentContinuations)
+						logx.Errorf("recovery: post-content failure 1 of %d", maxPostContentContinuations)
 					}
 					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
 						return nil, history, serr
@@ -859,7 +874,16 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				if continued && !policy.Infinite {
 					return nil, history, err
 				}
-				continue
+				// Infinite ladder with nothing retainable: still back off
+				// so a stream that dies after content without a partial
+				// never busy-spins the CPU / freezes the TUI.
+				if policy.Infinite {
+					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
+						return nil, history, serr
+					}
+					continue
+				}
+				return nil, history, err
 			}
 			if attempt >= policy.MaxRetries {
 				// Ladder drained: fail over to the next model-host.
@@ -919,6 +943,8 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// Empty turn (#389, #331): the model answered nothing —
 			// reasoning-only, or nothing at all. Rebuild context
 			// from the persisted history and re-run the ladder.
+			// Always back off + announce: a silent continue here was
+			// the freeze the TUI painted as "retrying forever".
 			rebuilt, rerr := a.recoverEmptyTurn(ctx, history)
 			if rerr != nil {
 				return nil, history, fmt.Errorf("agent: empty turn unrecoverable: %w", rerr)
@@ -927,6 +953,12 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, err
 			}
 			history = rebuilt
+			escalation++
+			d := policy.delay(escalation)
+			a.noticeEmptyTurnRetry(escalation, d)
+			if serr := sleepBackoff(ctx, d); serr != nil {
+				return nil, history, serr
+			}
 			continue
 		default:
 			// Retry everything else (auth, bad request, unknown):
@@ -945,7 +977,14 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 						history = res.Messages
 					}
 				}
-				if serr := sleepBackoff(ctx, policy.delay(attempt)); serr != nil {
+				// delay(escalation) — attempt was just reset to 0, and
+				// delay(0) used to busy-spin. Escalating by round keeps
+				// a hard-failing upstream from hammering the wire.
+				d := policy.delay(escalation)
+				if policy.Infinite {
+					a.noticeAllTargetsDown(escalation, d, err)
+				}
+				if serr := sleepBackoff(ctx, d); serr != nil {
 					return nil, history, serr
 				}
 				continue
@@ -982,6 +1021,16 @@ func (a *Agent) noticeAllTargetsDown(round int, d time.Duration, last error) {
 		return
 	}
 	a.Hooks.OnEvent(ai.Errorf(&AllTargetsDownError{Round: round, Delay: d, LastErr: last}))
+}
+
+// noticeEmptyTurnRetry raises one empty-turn recovery round on the event
+// stream (retry.retryAllErrors). Same contract as noticeAllTargetsDown:
+// a long stall must read as waiting, not as hung.
+func (a *Agent) noticeEmptyTurnRetry(round int, d time.Duration) {
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&EmptyTurnRetryError{Round: round, Delay: d}))
 }
 
 // recoverOverflow forces a compaction (ignoring the threshold — the
