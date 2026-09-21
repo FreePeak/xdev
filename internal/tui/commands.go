@@ -552,11 +552,27 @@ func mcpConfigPath() string {
 	return filepath.Join(config.DataDir(), "mcp.yml")
 }
 
+// serverURL renders the URL for a server config, falling
+// back to the command when it is a stdio server.
+func serverURL(sc *mcpclient.ServerConfig) string {
+	if sc == nil {
+		return "(unknown)"
+	}
+	if sc.URL != "" {
+		return sc.URL
+	}
+	if sc.Command != "" {
+		return sc.Command
+	}
+	return "(no url/command)"
+}
+
 // Handoff implements CommandAPI: /handoff [instruction] hands the live
-// context off to a generated document (M5 #23). The document generation, the
-// compaction-entry commit, and the per-branch reset all live in cmd (the
-// store, the session model, and the advisor are wired there); this surfaces the
-// result — including the document itself, which is the point of the command.
+// context off to a generated document (M5 #23). The document generation,
+// the per-branch reset and the commit all live in cmd (the store,
+// the session model, and the advisor are wired there); this surfaces
+// the result — including the document itself, which is the point of the
+// command.
 func (a *App) Handoff(args string) error {
 	if a.ops == nil || a.ops.Handoff == nil {
 		return fmt.Errorf("handoff not wired")

@@ -126,12 +126,23 @@ func WithCompactionEvent(h TurnHooks, i Interceptor) TurnHooks {
 // effectiveMaxTurns returns MaxTurns directly; MaxTurns=0 means unbounded.
 const DefaultMaxTurns = 200
 
-// DefaultSessionTokenBudget is the hard cap on tokens one Run may spend. 0 means unbounded.
-const DefaultSessionTokenBudget = 5000000
+// DefaultTurnTokenBudget is the per-turn token cap. 0 means unbounded.
+//
+// This used to be a *session* budget (5M tokens cumulative), and crossing it
+// ended the run with a wrap-up message asking the user to say "continue" —
+// so a long task that legitimately burned millions of tokens across many
+// turns stopped dead mid-work and needed a human to restart it. A session
+// is not a single turn: the provider caps one turn's output, so the same
+// number is a per-turn floor that a real turn can never reach, and when it
+// does the turn wraps up and the session keeps going instead of ending.
+const DefaultTurnTokenBudget = 5000000
 
-// TurnBudgetPrompt is the synthetic user message injected when a Run hits
-// its turn cap: the model gets one wrap-up turn instead of a hard error.
-const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the user can say \"continue\""
+// TurnBudgetPrompt is the synthetic user message injected when a single
+// turn crosses the per-turn token cap: the model gets one wrap-up turn
+// instead of the run ending. The session keeps going after it — the
+// wrap-up is a turn boundary, not a run end — so the user is never asked
+// to say "continue".
+const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the session keeps going"
 
 // TurnBudgetAttribution tags that wrap-up prompt as harness text: the user
 // never typed it, so the transcript must not invent a ❯ block for it and
@@ -236,9 +247,12 @@ type Agent struct {
 	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means unbounded (no cap).
 	MaxTurns int
-	// SessionTokenBudget caps one Run's total token spend
-	// (provider requests + retries). 0 → DefaultSessionTokenBudget.
-	SessionTokenBudget int
+	// TurnTokenBudget caps one turn's token spend (provider requests +
+	// retries). 0 → DefaultTurnTokenBudget. It is per-turn, not cumulative:
+	// a session is not a turn, so capping the session ends a long task that
+	// legitimately burned millions of tokens across many turns and asks the
+	// user to say "continue" to restart it.
+	TurnTokenBudget int
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
@@ -324,13 +338,13 @@ func (a *Agent) effectiveMaxTurns() int {
 	return a.MaxTurns
 }
 
-// effectiveSessionTokenBudget returns the hard token cap for one Run.
-// 0 → DefaultSessionTokenBudget.
-func (a *Agent) effectiveSessionTokenBudget() int64 {
-	if a.SessionTokenBudget > 0 {
-		return int64(a.SessionTokenBudget)
+// effectiveTurnTokenBudget returns the per-turn token cap. 0 →
+// DefaultTurnTokenBudget.
+func (a *Agent) effectiveTurnTokenBudget() int64 {
+	if a.TurnTokenBudget > 0 {
+		return int64(a.TurnTokenBudget)
 	}
-	return DefaultSessionTokenBudget
+	return DefaultTurnTokenBudget
 }
 
 // Steering is a queued user message injected at a step boundary.
@@ -366,8 +380,9 @@ func (a *Agent) drainSteering() []Steering {
 // history is the
 // conversation so far (mutable within this run: assistant and toolResult
 // messages are appended as the run progresses).
-// On budget exhaustion it asks the model for one wrap-up message instead of
-// failing the run.
+// The per-turn token cap wraps up a turn inline and the session keeps
+// going; only the turn cap (MaxTurns) ends the run, and it does so with
+// one wrap-up message rather than an error.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (final *ai.Message, runErr error) {
 	if a.Hooks == nil {
@@ -429,14 +444,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 	}
 	limit := a.effectiveMaxTurns()
-	// sessionTokenBudget caps one Run's total token spend.
-	// 0 → DefaultSessionTokenBudget.
-	// RCA #1: this is the hard stop the root-cause analysis found
-	// missing — a session can burn millions of tokens before
-	// compaction or the turn cap kicks in.
-	sessionTokenBudget := a.effectiveSessionTokenBudget()
-	spentSoFar := int64(0)
-	budgetHit := false
+	// Per-turn token cap (RCA #1): a session is not a turn, so capping the
+	// session ended a long task that legitimately burned millions of tokens
+	// across many turns and asked the user to say "continue" to restart it.
+	// The cap is per-turn: the provider caps one turn's output, so this
+	// number is a per-turn floor a real turn cannot reach, and when it does
+	// the turn wraps up and the session keeps going instead of ending.
+	turnTokenBudget := a.effectiveTurnTokenBudget()
 	// nudges is per run, not per turn: the empty-completion nudge below is
 	// spent at most maxEmptyTurnNudges times, so a model that can only ever
 	// emit reasoning cannot make the loop spend unbounded turns on it (the
@@ -491,15 +505,28 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			a.Goals.AddUsage(msg.Usage.TotalTokens)
 		}
 
-		// Session budget (RCA #1): cap one Run's total token spend.
-		// When crossed, break to the loop's exit — the turn-budget
-		// machinery handles the wrap-up (same shape as hitting MaxTurns).
-		if msg.Usage != nil && sessionTokenBudget > 0 {
-			spentSoFar += msg.Usage.TotalTokens
-			if spentSoFar >= sessionTokenBudget {
-				budgetHit = true
-				break
+		// Per-turn token cap (RCA #1): a session is not a turn, so capping
+		// the session ended a long task that legitimately burned millions of
+		// tokens across many turns and asked the user to say "continue" to
+		// restart it. The cap is per-turn: the provider caps one turn's
+		// output, so this number is a per-turn floor a real turn cannot
+		// reach. When a single turn does cross it, the turn wraps up with a
+		// status report and the session keeps going instead of ending — the
+		// wrap-up's tool calls run, because the session is staying alive and
+		// the model is still working (the old "do not execute them" contract
+		// only made sense while the run was ending).
+		if turnTokenBudget > 0 && msg.Usage != nil && msg.Usage.TotalTokens >= turnTokenBudget {
+			wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
+			history = append(history, wrap)
+			a.persist(wrap)
+			wrapMsg, _, werr := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
+			if werr != nil {
+				return lastAssistant, werr
 			}
+			a.Hooks.OnMessageEnd(wrapMsg)
+			lastAssistant = wrapMsg
+			emit("turn_end", map[string]any{"turn": turn})
+			continue
 		}
 
 		if len(msg.ToolCalls()) == 0 {
@@ -583,25 +610,26 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			return msg, nil
 		}
 		emit("turn_end", map[string]any{"turn": turn})
-		if budgetHit {
-			break
+	}
+
+	// Turn cap reached: ask for one wrap-up message rather than erroring.
+	// The per-turn token cap is handled inline above and never ends the
+	// run; only a user-set turn limit stops the session here.
+	if limit > 0 {
+		wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
+		history = append(history, wrap)
+		a.persist(wrap)
+		msg, _, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
+		if err != nil {
+			return lastAssistant, err
 		}
+		a.Hooks.OnMessageEnd(msg)
+		a.flushTTFT()
+		emit("turn_end", map[string]any{"turn": limit})
+		return msg, nil
 	}
-	// Budget exhausted: ask for one wrap-up message rather than erroring.
-	// The prompt is persisted so a store rebuild keeps it, and tool calls in
-	// the wrap-up reply are NOT executed (session/context neutralizes the
-	// dangling calls on rebuild — the budget is spent by design).
-	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
-	history = append(history, wrap)
-	a.persist(wrap)
-	msg, _, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
-	if err != nil {
-		return lastAssistant, err
-	}
-	a.Hooks.OnMessageEnd(msg)
-	a.flushTTFT()
-	emit("turn_end", map[string]any{"turn": limit})
-	return msg, nil
+
+	return lastAssistant, nil
 }
 
 // flushTTFT hands the last completed turn's ttft (ms) to OnTurnEnd

@@ -202,6 +202,50 @@ func TestRunWrapsUpAtTurnLimit(t *testing.T) {
 	}
 }
 
+// TestRunWrapsUpAtPerTurnTokenBudget pins the per-turn cap (RCA #1):
+// a single turn crossing the per-turn token budget wraps up inline and
+// the session keeps going — the run does not end asking the user to
+// say "continue" (the session is not a turn).
+func TestRunWrapsUpAtPerTurnTokenBudget(t *testing.T) {
+	// First turn blows past the per-turn token cap (5M).
+	toolMsg := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ToolCallBlock{ID: "c", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}}
+	toolScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop,
+		&ai.Usage{TotalTokens: 6_000_000}, toolMsg)}}
+	// The inline wrap-up turn reports the status and the run keeps going.
+	wrapped := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "wrapped up"}}}
+	wrapScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, wrapped)}}
+	// A normal next turn returns normally.
+	doneScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil,
+		&ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: "done"}}})}}
+	p := &fakeProvider{calls: []fakeScript{toolScript, wrapScript, doneScript}}
+	a, ends, _ := runAgent(t, p)
+	a.TurnTokenBudget = 5_000_000
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
+	if err != nil {
+		t.Fatalf("per-turn budget must not fail the run, got %v", err)
+	}
+	if final.Text() != "done" {
+		t.Fatalf("final = %q, want \"done\" — per-turn budget wrapped up inline and run kept going", final.Text())
+	}
+	if n := len(p.gotReqs); n != 3 {
+		t.Fatalf("stream requests = %d, want 3 (turn + inline wrap-up + next turn)", n)
+	}
+	if len(*ends) != 2 {
+		t.Fatalf("message_end hooks = %d, want 2 (wrap-up + done; the turn that crossed the cap is dropped before OnMessageEnd, same as the old session-budget break)", len(*ends))
+	}
+	// The turn that crossed the cap got a wrap-up user message injected
+	// (the TurnBudgetPrompt), not a run-ending stop.
+	req := p.gotReqs[1]
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != ai.RoleUser || last.Text() != TurnBudgetPrompt {
+		t.Fatalf("wrap-up prompt missing from second request: %+v", last)
+	}
+}
+
 // TestEmptyTurnNudgeIsBounded pins #331: a turn with no text and no tool
 // call — the reasoning-only shape a thinking-mode upstream leaves behind —
 // must not end the run, and the nudge that keeps it alive is bounded per run

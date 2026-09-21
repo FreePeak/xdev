@@ -2228,7 +2228,7 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			// why the transcript stops mid-task — so it replays as the
 			// system event that ends the episode, not as a ❯ block.
 			if m.Attribution == agent.TurnBudgetAttribution {
-				app.AddSystemBlock("· turn budget reached — the run wrapped up here; say \"continue\" to keep going")
+				app.AddSystemBlock("· turn wrapped up — the session keeps going instead of asking you to say \"continue\"")
 				continue
 			}
 			// The empty-turn nudge is harness text, but a resumed session
