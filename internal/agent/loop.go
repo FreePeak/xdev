@@ -153,7 +153,11 @@ const EmptyTurnAttribution = "empty-turn"
 // after every nudge was spent. Ending the run is what the old code did;
 // ending it with an ERROR is what makes the stop visible and retryable
 // upward, instead of a silent "the session just stopped" (#331 field
-// report: session 1883e928 painted a stop and no error).
+// report: session 1883e928 painted a stop and no error). When
+// Retry.RetryAllErrors is on, Run never returns this error: it
+// rebuilds context from history and re-runs the ladder instead, so a
+// transient upstream stall never looks like a silent death (#331
+// follow-up: keep going until the goal is done).
 // ErrEmptyTurnSuffix is appended to ErrEmptyTurn so callers can
 // detect the condition and recover from it.
 const ErrEmptyTurnSuffix = "empty-turn"
@@ -205,7 +209,10 @@ type Agent struct {
 	// MaxTokens caps assistant output (0 → provider default).
 	MaxTokens int
 	// Retry tunes the transient-error backoff ladder; zero value →
-	// DefaultRetryPolicy.
+	// DefaultRetryPolicy. RetryAllErrors on the policy lifts the
+	// empty-turn bound (see loop.go's empty-turn return path): a
+	// model that answers nothing keeps getting retried instead of
+	// ending the session.
 	Retry RetryPolicy
 	// Failovers is the ordered backup-model chain (M5): overflow promotes
 	// to a bigger window, a drained retry ladder fails over to the next
@@ -541,6 +548,23 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				continue
 			}
 			if isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
+				if a.Retry.RetryAllErrors {
+					// Retry-all-errors (#331 follow-up): the model
+					// answered nothing, but we keep going — rebuild
+					// context from the persisted history, wait a
+					// backoff, then re-run the ladder. The nudge
+					// above already asked the model once; with the
+					// flag on we treat "nothing" as transient and
+					// loop until the model actually answers or the
+					// context/turn/token budget fires.
+					emit("turn_end", map[string]any{"turn": turn})
+					if a.Store != nil {
+						rebuilt, _ := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{})
+						history = rebuilt.Messages
+					}
+					sleepBackoff(ctx, a.Retry.withDefaults().delay(1))
+					continue
+				}
 				emit("turn_end", map[string]any{"turn": turn})
 				return msg, ErrEmptyTurn
 			}
