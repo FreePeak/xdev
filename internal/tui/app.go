@@ -2725,6 +2725,19 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
 	}
 
+	body := strings.TrimRight(b.Text, "\n")
+	// A body the model never wrote is not rendered: the box keeps its frame
+	// and its state header, and says what happened in one dim row. The full
+	// text stays in the session JSONL — the box is a view, never the record —
+	// so nothing is lost, and the transcript no longer paints a wall of
+	// mojibake that hides the turn's real content.
+	if junkThinking(body) {
+		return []line{
+			boxTop(box, border, hdr, w),
+			boxRow(box, border, bodySt, junkReasoningNotice, inner),
+			boxBottom(box, border, w),
+		}
+	}
 	rows := a.thinkRows(b, w)
 	start, end := 0, len(rows)
 	if !b.Expanded {
