@@ -115,6 +115,17 @@ func (e *ContinuationRetryError) Error() string {
 // with 25% downward jitter so simultaneous failures don't retry in lockstep.
 // n < 1 is treated as 1: callers that reset attempt to 0 before sleeping
 // (escalation / auth rebuild) must still wait, not busy-spin.
+//
+// The exponential is saturated before it is multiplied. retry.infinite and
+// retry.retryAllErrors are both default-on, so the round counters that feed n
+// (escalation, emptyRetries) have no ceiling, and measured against the old
+// multiply with the default 500ms base / 8s cap: n = 1…35 land at or below
+// the cap, then every n from 36 to 56 except 39, 43, 44, 47, 49, 52, 53 and
+// 55 panics with "invalid argument to Int64N" (the int64 overflow leaves a
+// negative duration that the MaxDelay clamp cannot catch, because d > max is
+// false for a negative), and n = 57+ wraps to exactly zero — which
+// sleepBackoff reads as "nothing to wait for", the busy-spin half of the bug.
+// The panic is the crash the TUI dies with; the zero is the freeze.
 func (p RetryPolicy) delay(n int) time.Duration {
 	if n < 1 {
 		n = 1
@@ -123,8 +134,21 @@ func (p RetryPolicy) delay(n int) time.Duration {
 	if base <= 0 {
 		base = 500 * time.Millisecond
 	}
-	d := base * time.Duration(1<<uint(n-1))
-	if max := p.MaxDelay; max > 0 && d > max {
+	max := p.MaxDelay
+	if max <= 0 {
+		max = base
+	}
+	d := base
+	for i := 1; i < n && d < max; i++ {
+		if d > max/2 {
+			// The next doubling would pass max, and max is the cap anyway:
+			// stopping here is where the old multiply-and-clamp landed too.
+			d = max
+			break
+		}
+		d *= 2
+	}
+	if d > max {
 		d = max
 	}
 	return d - time.Duration(rand.Int64N(int64(d)/4+1))
