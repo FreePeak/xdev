@@ -1138,9 +1138,10 @@ func (a *App) dockOverlayScroll(n int, down bool) {
 }
 
 // handleDiffOverlayKey owns ↑↓ / PgUp/PgDn / Home/End while the diff
-// overlay is open. The footer advertises ↑↓ scroll; without this the
-// arrows fell through to the composer/transcript and the overlay never
-// moved. Returns true when the key was consumed.
+// overlay is open, and Esc closes it. The footer advertises ↑↓ scroll;
+// without the Esc case it fell through to the double-Esc rewind block
+// in handleKey and the overlay could never be dismissed by keyboard —
+// "Esc close" in the footer was a lie. Returns true when the key was consumed.
 func (a *App) handleDiffOverlayKey(key *tcell.EventKey) bool {
 	a.mu.Lock()
 	ov := a.diffOv
@@ -1149,6 +1150,9 @@ func (a *App) handleDiffOverlayKey(key *tcell.EventKey) bool {
 		return false
 	}
 	switch key.Key() {
+	case tcell.KeyEsc:
+		a.closeDiffOverlay()
+		return true
 	case tcell.KeyUp:
 		a.diffBodyScroll(1, false)
 	case tcell.KeyDown:

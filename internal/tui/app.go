@@ -1920,7 +1920,9 @@ func (a *App) handleKey(ev tcell.Event) {
 		return
 	}
 	// Diff overlay is modal for navigation: ↑↓/PgUp/PgDn/Home/End scroll
-	// its body; Esc still reaches cancel below to close it.
+	// its body, and Esc closes it — the same modal contract the tree
+	// selector and trajectory ledger use, so the double-Esc rewind block
+	// below never sees an Esc while the overlay is up.
 	if a.handleDiffOverlayKey(key) {
 		return
 	}
