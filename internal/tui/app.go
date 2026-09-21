@@ -989,11 +989,12 @@ func (a *App) Prewalk(args string) error {
 // SetGoalOps wires the /goal command (the goal state lives in cmd).
 func (a *App) SetGoalOps(ops *GoalOps) { a.goalOps = ops }
 
-// Goal implements CommandAPI /goal: a bare /goal (or /goal view) shows the
-// current goal and budget; the verbs create/resume/evidence/complete/drop
-// drive the same state the goal tool owns, so an interactive session steers
-// its own objective without a model turn. The args used to be dropped, which
-// made `/goal create …` look like a dead command.
+// Goal implements CommandAPI /goal: `/goal <objective>` names the session's
+// objective and starts working on it; a bare /goal shows the current goal and
+// budget, and complete/drop close it. The ops drive the same state the goal
+// tool owns, so an interactive session steers its own objective without a
+// model turn. The argument used to be a required verb, which made the obvious
+// spelling — `/goal <what I want>` — a usage error.
 func (a *App) Goal(args string) error {
 	block, err := a.goalOps.Dispatch(args)
 	if err != nil {

@@ -134,22 +134,22 @@ type PrewalkOps struct {
 }
 
 // GoalOps wires the /goal command to the live goal state (lives in cmd).
-// View renders the current goal and budget. The verbs mirror the goal tool's
-// ops so an interactive session can drive a goal without asking the model to
-// do it; a nil verb is reported as unwired, never a silent no-op.
+// View renders the current goal and budget. Set points the session at a new
+// objective and starts working on it; a nil op is reported as unwired, never a
+// silent no-op.
 type GoalOps struct {
 	View     func() string
-	Create   func(objective string) (string, error)
-	Resume   func(objective string) (string, error)
-	Evidence func(note string) (string, error)
+	Set      func(objective string) (string, error)
+	Continue func(objective string) (string, error)
 	Complete func(notes []string) (string, error)
 	Drop     func() (string, error)
 }
 
-// Dispatch runs one /goal subcommand and returns the block to display. With
-// no argument (or any read verb) it shows the current goal; an unknown verb is
-// a usage error naming the grammar, because silently viewing made
-// `/goal create …` look like a dead command.
+// Dispatch runs /goal. The argument is the objective — "/goal ship the
+// exporter" sets it and starts the run; a bare /goal shows the current goal
+// and budget; `complete` and `drop` are the two words that close it. There
+// used to be a verb per op (`create`/`resume`/`evidence`), and that grammar
+// made the obvious spelling — "/goal <what I want>" — a usage error.
 func (o *GoalOps) Dispatch(args string) (string, error) {
 	if o == nil || o.View == nil {
 		return "", errors.New("goal not wired")
@@ -159,50 +159,53 @@ func (o *GoalOps) Dispatch(args string) (string, error) {
 	if i := strings.IndexFunc(trimmed, func(r rune) bool { return r == ' ' || r == '\t' }); i >= 0 {
 		verb, rest = trimmed[:i], strings.TrimSpace(trimmed[i+1:])
 	}
+	switch verb {
+	case "":
+		return o.View(), nil
 	// Read intent: every synonym for "show me the goal" routes to view. The
 	// command used to reject `check` / `show` outright while its help named no
 	// verb at all, so a user asking after the goal had only invented words to
 	// try (same class as `/theme list`).
-	switch verb {
-	case "", "view", "get", "status", "show", "check", "list", "info":
+	case "view", "get", "status", "show", "check", "list", "info":
 		return o.View(), nil
-	case "create":
-		if o.Create == nil {
-			return "", errors.New("goal create not wired")
-		}
+	// `create` stays accepted: it is the spelling the tool's own grammar and
+	// the docs use, and a user who read them should not hit a usage error.
+	case "create", "new", "set":
 		if rest == "" {
-			return "", errors.New("usage: /goal create <objective>")
+			return "", errors.New("usage: /goal <objective>")
 		}
-		return o.Create(rest)
-	case "resume":
-		if o.Resume == nil {
-			return "", errors.New("goal resume not wired")
+		return o.set(rest)
+	// `resume` carries an objective only when one follows it: a bare
+	// `/goal resume` re-activates the goal already in this session.
+	case "resume", "continue":
+		if o.Continue == nil {
+			return "", errors.New("goal not wired")
 		}
-		if rest == "" {
-			return "", errors.New("usage: /goal resume <objective>")
-		}
-		return o.Resume(rest)
-	case "evidence":
-		if o.Evidence == nil {
-			return "", errors.New("goal evidence not wired")
-		}
-		if rest == "" {
-			return "", errors.New("usage: /goal evidence <what was verified>")
-		}
-		return o.Evidence(rest)
+		return o.Continue(rest)
 	case "complete":
 		if o.Complete == nil {
-			return "", errors.New("goal complete not wired")
+			return "", errors.New("goal not wired")
 		}
 		return o.Complete(splitGoalNotes(rest))
 	case "drop":
 		if o.Drop == nil {
-			return "", errors.New("goal drop not wired")
+			return "", errors.New("goal not wired")
 		}
 		return o.Drop()
 	default:
-		return "", fmt.Errorf("unknown /goal verb %q (view | create <objective> | resume <objective> | evidence <note> | complete [notes] | drop)", verb)
+		// Anything else IS the objective: the target is the argument, so
+		// "/goal fix the goal error" starts a goal instead of erroring.
+		return o.set(trimmed)
 	}
+}
+
+// set routes an objective through the Set seam, reporting an unwired op the
+// same way every other verb does.
+func (o *GoalOps) set(objective string) (string, error) {
+	if o.Set == nil {
+		return "", errors.New("goal not wired")
+	}
+	return o.Set(objective)
 }
 
 // splitGoalNotes turns "a; b" or "a, b" into separate completion notes; a
@@ -450,7 +453,7 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
-		{Name: "goal", Description: "session objective + token budget: /goal view|create <objective>|resume|evidence <note>|complete [notes]|drop",
+		{Name: "goal", Description: "session objective: /goal <objective> starts it (and resumes on the first turn); /goal shows it, /goal complete|drop closes it",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
 		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},

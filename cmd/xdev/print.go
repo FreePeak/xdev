@@ -518,10 +518,12 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}()
 	wireTaskParent(reg, store)
 	// Auto-activate goal mode: every session runs until its goal is
-	// completed or explicitly dropped — no 200-turn stop (#387).
+	// completed or explicitly dropped — no 200-turn stop (#387). The row is
+	// the same one the TUI's /goal <objective> replaces, so the objective
+	// text lives in the agent package, not in each run mode.
 	gs := agent.NewGoalState(store)
 	if v, ok := gs.View(); !ok || v.Status == agent.GoalDropped {
-		if _, err := gs.Create("session goal", 0); err != nil {
+		if _, err := gs.Create(agent.SessionGoalObjective, 0); err != nil {
 			logx.Errorf("goal: auto-create: %v", err)
 		}
 	}
@@ -1889,9 +1891,10 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	if stopInbox == nil {
 		stopInbox = startInboxPoller(mailbox)
 	}
-	// M11 #40: goal mode — one session-scoped objective with an optional
-	// token budget. The agent loop reads the same state for the per-turn
-	// reminder and budget accounting; wireTaskParent binds the store.
+	// M11 #40: goal mode — the tool itself is registered per run mode (runPrint
+	// above, the TUI next to its own store), because the state it carries must
+	// be the one wireTaskParent bound to the live session; a shared builder
+	// cannot know that session.
 	// M13 #51: checkpoint/rewind — named session-tree bookmarks. rewind
 	// re-points the leaf at a checkpoint and records the caller's report as
 	// a branch summary; wireTaskParent binds the live session.
