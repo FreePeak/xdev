@@ -1399,13 +1399,13 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 			res = tool.Result{Text: "propose: " + rerr.Error(), IsError: true}
 		}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
-		return toolResultMsg(call, res)
+		return toolResultMsg(call, res, time.Since(started))
 	}
 	t, ok := a.Tools.Get(call.Name)
 	if !ok {
 		res := tool.Result{Text: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
-		return toolResultMsg(call, res)
+		return toolResultMsg(call, res, time.Since(started))
 	}
 	var args json.RawMessage
 	if len(call.Arguments) > 0 {
@@ -1423,7 +1423,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	// a read-only run must never reach an approval prompt for a mutation.
 	if denied, blocked := applyPlanMode(a.PlanMode, call); blocked {
 		a.Hooks.OnToolEnd(call, denied, time.Since(started))
-		return toolResultMsg(call, denied)
+		return toolResultMsg(call, denied, time.Since(started))
 	}
 	// bash.interceptor (M13 #56): a settings-declared external review of the
 	// proposed command, run at the same seam as the pattern rules. It is
@@ -1437,12 +1437,12 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if verr != nil {
 			res := tool.Result{Text: "tool call denied: " + verr.Error(), IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		if verdict.Action == tool.ActionDeny {
 			res := tool.Result{Text: "tool call denied: " + verdict.Reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		if verdict.Action == tool.ActionPrompt {
 			interceptReason = verdict.Reason
@@ -1467,7 +1467,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if dec.Action == tool.ActionDeny {
 			res := tool.Result{Text: "tool call denied: " + dec.Reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		reason := dec.Reason
 		if reason == "" {
@@ -1476,7 +1476,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if a.Approve == nil || !a.Approve(call, reason) {
 			res := tool.Result{Text: "tool call refused by user: " + reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 	}
 	if a.Intercept != nil {
@@ -1486,7 +1486,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if berr != nil {
 			res := tool.Result{Text: "tool call blocked: " + berr.Error(), IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		if len(revised) > 0 {
 			args = revised
@@ -1504,7 +1504,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	if cerr := ctx.Err(); cerr != nil {
 		res := tool.Result{Text: fmt.Sprintf("tool %q canceled before execution: %v", call.Name, cerr), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
-		return toolResultMsg(call, res)
+		return toolResultMsg(call, res, time.Since(started))
 	}
 	res, err := a.executeTool(ctx, t, args)
 	dur := time.Since(started)
@@ -1547,7 +1547,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		}
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
-	return toolResultMsg(call, res)
+	return toolResultMsg(call, res, dur)
 }
 
 // toolResultMsg builds the toolResult message for one finished call. Every
@@ -1557,8 +1557,8 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 // the upstream answered the whole turn with HTTP 400 [invalid_request_error]
 // "`input[185]` missing required field `output`" — a bad request the retry
 // ladder does not retry, so the run ended (ai.Message.EnsureToolOutput).
-func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
-	return ai.Message{
+func toolResultMsg(call ai.ToolCallBlock, res tool.Result, dur time.Duration) ai.Message {
+	m := ai.Message{
 		Role:       ai.RoleToolResult,
 		Content:    []ai.Block{ai.TextBlock{Text: res.Text}},
 		ToolCallID: call.ID,
@@ -1566,6 +1566,12 @@ func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
 		IsError:    res.IsError,
 		Details:    res.Details,
 	}.EnsureToolOutput()
+	// Wall time from OnToolStart→end, so /trajectory and resume can show the
+	// same latency the live tool box already painted. Zero stays omitted.
+	if ms := dur.Milliseconds(); ms > 0 {
+		m.DurationMS = ms
+	}
+	return m
 }
 
 // Redactor hides configured secrets in provider-visible text and restores

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -35,12 +36,15 @@ func TestToolResultMsgNeverCarriesEmptyText(t *testing.T) {
 		{"details only", tool.Result{Details: map[string]any{"exitCode": 0}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := toolResultMsg(ai.ToolCallBlock{ID: "call_1", Name: "glob"}, tc.res)
+			m := toolResultMsg(ai.ToolCallBlock{ID: "call_1", Name: "glob"}, tc.res, 0)
 			if strings.TrimSpace(m.Text()) != ai.ToolOutputPlaceholder {
 				t.Fatalf("text = %q, want the placeholder", m.Text())
 			}
 			if m.ToolCallID != "call_1" || m.ToolName != "glob" {
 				t.Fatalf("call identity lost: %#v", m)
+			}
+			if m.DurationMS != 0 {
+				t.Fatalf("zero duration leaked onto the message: %d", m.DurationMS)
 			}
 		})
 	}
@@ -48,14 +52,20 @@ func TestToolResultMsgNeverCarriesEmptyText(t *testing.T) {
 
 // TestToolResultMsgKeepsRealText guards the other direction: the placeholder
 // must not overwrite an ordinary result, and error/details survive the guard.
+// DurationMS is stamped from the call's wall time so /trajectory and resume
+// can show the same latency the live tool box already painted.
 func TestToolResultMsgKeepsRealText(t *testing.T) {
 	m := toolResultMsg(ai.ToolCallBlock{ID: "call_2", Name: "bash"},
-		tool.Result{Text: "hello", IsError: true, Details: map[string]any{"exitCode": 1}})
+		tool.Result{Text: "hello", IsError: true, Details: map[string]any{"exitCode": 1}},
+		70*time.Millisecond)
 	if m.Text() != "hello" || !m.IsError || m.ToolCallID != "call_2" || m.ToolName != "bash" {
 		t.Fatalf("toolResult mutated: %#v", m)
 	}
 	if m.Details == nil {
 		t.Fatal("details lost")
+	}
+	if m.DurationMS != 70 {
+		t.Fatalf("DurationMS = %d, want 70 (persisted for /trajectory + resume)", m.DurationMS)
 	}
 }
 
