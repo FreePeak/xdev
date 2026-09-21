@@ -349,6 +349,7 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		}
 	}
 
+	syntaxNote := ""
 	if lineOps > 0 {
 		if nb != nil {
 			out, serr := nb.serializeVirtualText(lines)
@@ -392,6 +393,18 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 	if recovered != "" {
 		text = recovered + "\n" + text
 	}
+	// A Go file that no longer parses is a turn lost: the model finds out
+	// one turn later (or never) when its next build fails. go/parser is in
+	// the standard library, so the cheapest possible answer is available
+	// here — no subprocess, no language server to start, microseconds.
+	// The read is of the file that actually holds the result (an MV moved
+	// it), and it is skipped entirely when the edit changed no bytes.
+	// verify.go owns the wording; this only wires it in.
+	if lineOps > 0 || finalPath != resolved {
+		if data, rerr := os.ReadFile(finalPath); rerr == nil {
+			syntaxNote = verifyGoSyntax(finalPath, data)
+		}
+	}
 	// Record the post-edit state so a following edit against this path is
 	// anchored on what the model just saw. An MV moves the record.
 	full := make(map[int]string, len(lines))
@@ -408,6 +421,10 @@ func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		"linesBefore":  linesBefore,
 		"linesAfter":   len(lines),
 		"diffSummary":  summary,
+	}
+	if syntaxNote != "" {
+		text += "\n" + syntaxNote
+		details["syntaxWarning"] = syntaxNote
 	}
 	// The renderer gets the actual change, not just the op tally: the text
 	// above stays what the model was shown, while the frame paints these
