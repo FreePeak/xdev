@@ -99,7 +99,7 @@ func TestTrajectorySmoke(t *testing.T) {
 			return []TrajectoryRecord{
 				{Index: 1, Kind: "user", Text: "make a file", Detail: "make a file\ncreate foo.txt", Meta: "0 tokens · 1.2s"},
 				{Index: 2, Kind: "tool", Text: "edit foo.txt", Detail: "--- a/foo.txt\n+++ b/foo.txt\n+hello", Meta: "12 tokens · 0.4s · exit 0"},
-				{Index: 3, Kind: "message", Text: "done", Detail: "all good", Meta: "3 tokens · 0.1s"},
+				{Index: 3, Kind: "message", Text: "done", Detail: "all good", Meta: "↑1.2k new · ⇢30k cache · ↓80 · total 31.3k · 0.1s"},
 			}
 		},
 	})
@@ -118,20 +118,21 @@ func TestTrajectorySmoke(t *testing.T) {
 	// The ledger's newest record is selected by default; its one-line
 	// preview must be on screen, and the other records' previews must
 	// be too — a row that did not make it into the ledger is a broken seam.
-	if text := screenText(scr); !strings.Contains(text, "done") || !strings.Contains(text, "edit foo.txt") || !strings.Contains(text, "make a file") {
-		t.Fatalf("ledger previews missing: %q", text)
+	// Meta also rides the row when it fits (latency/tokens without Enter).
+	text := screenText(scr)
+	for _, want := range []string{"make a file", "edit foo.txt", "done", "↑1.2k new", "⇢30k cache"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("ledger previews missing: %q in %q", want, text)
+		}
 	}
 
-	// Enter opens the inspector on the selected (newest) record. Its Detail
-	// text reaches the screen — the smallest thing that fails if the
-	// row→inspector mapping breaks.
 	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 	app.draw()
-	text := screenText(scr)
+	text = screenText(scr)
 	if !strings.Contains(text, "TRAJECTORY — record") {
 		t.Fatalf("ledger did not switch to inspector: %q", text)
 	}
-	for _, want := range []string{"all good", "3 tokens · 0.1s"} {
+	for _, want := range []string{"all good", "↑1.2k new · ⇢30k cache · ↓80 · total 31.3k · 0.1s"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("inspector body did not reach the screen: missing %q in %q", want, text)
 		}

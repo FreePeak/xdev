@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/FreePeak/xdev/internal/memory"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -24,6 +24,7 @@ import (
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dist"
 	"github.com/FreePeak/xdev/internal/logx"
+	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -2654,6 +2655,9 @@ func trajectoryRow(e session.Entry, i int) tui.TrajectoryRecord {
 	case *session.MessageEntry:
 		m := &t.Message
 		rec.Kind = string(m.Role)
+		if m.Role == ai.RoleToolResult {
+			rec.Kind = "tool"
+		}
 		rec.Text = clipSummary(ai.MessageLabel(m), 80)
 		rec.Detail = trajectoryDetail(m)
 		rec.Meta = trajectoryMeta(m)
@@ -2691,18 +2695,51 @@ func trajectoryRow(e session.Entry, i int) tui.TrajectoryRecord {
 	return rec
 }
 
-// trajectoryDetail is the inspector body: the message's own text, with streamed
-// reasoning under it when it produced any. The row's preview is one line, so the
-// pane is where a full prompt, tool payload or reasoning actually gets read.
+// trajectoryDetail is the inspector body: full prompt text, tool-call payloads
+// (pretty JSON), tool-result body, and streamed reasoning. The row preview is
+// one line; this pane is where the full record is actually read.
 func trajectoryDetail(m *ai.Message) string {
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 4)
 	if txt := strings.TrimRight(m.Text(), "\n"); strings.TrimSpace(txt) != "" {
 		parts = append(parts, txt)
+	}
+	if calls := m.ToolCalls(); len(calls) > 0 {
+		parts = append(parts, trajectoryToolPayloads(calls))
 	}
 	if think := trajectoryThinking(m); think != "" {
 		parts = append(parts, "reasoning:\n"+think)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// trajectoryToolPayloads pretty-prints every tool call the assistant issued so
+// the inspector shows full args (opencode/dsh payload tab), not just the name.
+func trajectoryToolPayloads(calls []ai.ToolCallBlock) string {
+	var b strings.Builder
+	b.WriteString("tool calls:")
+	for _, c := range calls {
+		b.WriteString("\n")
+		b.WriteString(c.Name)
+		args := c.Arguments
+		if len(args) == 0 && c.PartialArgs != "" {
+			args = json.RawMessage(c.PartialArgs)
+		}
+		if len(args) == 0 {
+			b.WriteString("()")
+			continue
+		}
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, args, "  ", "  ") == nil {
+			b.WriteString("(\n  ")
+			b.Write(pretty.Bytes())
+			b.WriteString("\n)")
+		} else {
+			b.WriteString("(")
+			b.Write(args)
+			b.WriteString(")")
+		}
+	}
+	return b.String()
 }
 
 // trajectoryThinking joins the message's reasoning blocks for the inspector;
@@ -2722,21 +2759,39 @@ func trajectoryThinking(m *ai.Message) string {
 	return b.String()
 }
 
-// trajectoryMeta is the machine-fact line the inspector shows beneath the body:
-// what the provider billed, how long the request took, and how a tool ended.
-// Empty for an entry that carries none, so the pane shows no blank footer.
+// trajectoryMeta is the machine-fact line the inspector (and ledger row tail)
+// show: token split like opencode/dsh (new / cache / out / think / total),
+// cost, wall duration, TTFT, and tool exit. Empty when the entry carries none.
 func trajectoryMeta(m *ai.Message) string {
 	var parts []string
-	if m.Usage != nil {
-		if m.Usage.TotalTokens > 0 {
-			parts = append(parts, tui.HumanTokens(m.Usage.TotalTokens)+" tokens")
+	if u := m.Usage; u != nil {
+		if u.Input > 0 {
+			parts = append(parts, "↑"+tui.HumanTokens(u.Input)+" new")
 		}
-		if m.Usage.Cost != nil && m.Usage.Cost.Total > 0 {
-			parts = append(parts, fmt.Sprintf("$%.4f", m.Usage.Cost.Total))
+		if u.CacheRead > 0 {
+			parts = append(parts, "⇢"+tui.HumanTokens(u.CacheRead)+" cache")
+		}
+		if u.CacheWrite > 0 {
+			parts = append(parts, "⇢"+tui.HumanTokens(u.CacheWrite)+" cache+")
+		}
+		if u.Output > 0 {
+			parts = append(parts, "↓"+tui.HumanTokens(u.Output))
+		}
+		if u.ReasoningTokens > 0 {
+			parts = append(parts, "think "+tui.HumanTokens(u.ReasoningTokens))
+		}
+		if u.TotalTokens > 0 {
+			parts = append(parts, "total "+tui.HumanTokens(u.TotalTokens))
+		}
+		if u.Cost != nil && u.Cost.Total > 0 {
+			parts = append(parts, fmt.Sprintf("$%.4f", u.Cost.Total))
 		}
 	}
 	if m.DurationMS > 0 {
 		parts = append(parts, (time.Duration(m.DurationMS) * time.Millisecond).Round(time.Millisecond).String())
+	}
+	if m.TTFTMS > 0 {
+		parts = append(parts, "ttft "+(time.Duration(m.TTFTMS)*time.Millisecond).Round(time.Millisecond).String())
 	}
 	if m.Role == ai.RoleToolResult {
 		if out := tool.OutcomeOf(m.Details); out.HasExit {
@@ -2746,8 +2801,6 @@ func trajectoryMeta(m *ai.Message) string {
 			parts = append(parts, "error")
 		}
 	}
-	// The model that answered is worth a slot on the fact line only when the
-	// session has switched models: the ledger's /model rows already say so.
 	return strings.Join(parts, " · ")
 }
 

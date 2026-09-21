@@ -377,7 +377,23 @@ func (ui *trajectoryUI) inspectorLines() []string {
 		if r.Turn {
 			rule = "─"
 		}
-		out = append(out, fmt.Sprintf("%s%s #%-4d %-9s %s", rule, mark, r.Index, r.Kind, r.Text))
+		// Kind+index take a fixed left column; Meta rides the right edge when
+		// it fits so the ledger shows latency/tokens without opening every row.
+		left := fmt.Sprintf("%s%s #%-4d %-9s ", rule, mark, r.Index, r.Kind)
+		text := r.Text
+		if r.Meta != "" {
+			// Budget assumes a ~96-cell panel interior (panelW 100 − chrome).
+			const budget = 90
+			meta := "  " + r.Meta
+			room := budget - width(left) - width(meta)
+			if room > 8 {
+				text = truncateCells(text, room, "…")
+				text = fitWidth(text, room)
+				out = append(out, left+text+meta)
+				continue
+			}
+		}
+		out = append(out, left+text)
 	}
 	if hidden := len(ui.rows) - len(out); hidden > 0 {
 		out = append(out, fmt.Sprintf("  … %d more", hidden))
