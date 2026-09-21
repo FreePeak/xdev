@@ -53,9 +53,10 @@ func (p RetryPolicy) withDefaults() RetryPolicy {
 	if p.MaxRetries == 0 && p.BaseDelay == 0 {
 		d := DefaultRetryPolicy()
 		// No production build site sets the ladder timings, so the copy
-		// must carry Infinite across — otherwise wireAgentMode's one-line
-		// settings copy is silently dropped on the floor.
+		// must carry Infinite and RetryAllErrors across — otherwise
+		// wireAgentMode's one-line settings copy is silently dropped.
 		d.Infinite = p.Infinite
+		d.RetryAllErrors = p.RetryAllErrors
 		p = d
 	}
 	return p
@@ -80,9 +81,28 @@ func (e *AllTargetsDownError) Error() string {
 
 func (e *AllTargetsDownError) Unwrap() error { return e.LastErr }
 
+// EmptyTurnRetryError is the voice of an unbounded empty-turn wait
+// (retry.retryAllErrors): once the nudge budget is spent, the loop keeps
+// rebuilding context and re-running. Raised through TurnHooks.OnEvent so
+// a run that keeps trying reads as waiting, not as hung.
+type EmptyTurnRetryError struct {
+	Round int           // 1-based empty-turn recovery round
+	Delay time.Duration // backoff before the next attempt
+}
+
+func (e *EmptyTurnRetryError) Error() string {
+	return fmt.Sprintf("empty turn — retrying in %s (round %d)",
+		e.Delay.Round(time.Second), e.Round)
+}
+
 // delay computes the backoff for attempt n (1-based): base·2^(n−1) capped,
 // with 25% downward jitter so simultaneous failures don't retry in lockstep.
+// n < 1 is treated as 1: callers that reset attempt to 0 before sleeping
+// (escalation / auth rebuild) must still wait, not busy-spin.
 func (p RetryPolicy) delay(n int) time.Duration {
+	if n < 1 {
+		n = 1
+	}
 	base := p.BaseDelay
 	if base <= 0 {
 		base = 500 * time.Millisecond

@@ -2531,12 +2531,17 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 	case ai.EventToolcallStart:
 		fmt.Fprintf(os.Stderr, "\n⟨%s⟩\n", ev.ToolName)
 	case ai.EventError:
-		// The rounds of an unbounded wait (retry.infinite) are the one
-		// transient worth printing verbatim: once per round, not once per
-		// attempt, and it is the message that says "still waiting" rather
-		// than "hung".
+		// The rounds of an unbounded wait (retry.infinite /
+		// retry.retryAllErrors) are the one transient worth printing
+		// verbatim: once per round, not once per attempt, and it is the
+		// message that says "still waiting" rather than "hung".
 		var down *agent.AllTargetsDownError
 		if errors.As(ev.Err, &down) {
+			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
+			break
+		}
+		var empty *agent.EmptyTurnRetryError
+		if errors.As(ev.Err, &empty) {
 			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
 			break
 		}
