@@ -41,7 +41,12 @@ const goalReminderObjectiveCap = 240
 // typed it, so the transcript skips it on replay.
 const GoalContinuationAttribution = "goal-continuation"
 
-// capObjective trims an objective to the reminder cap.
+// SessionGoalObjective is the placeholder objective every session opens with
+// (the goal that keeps a long run going, #387). cmd registers the tool, so it
+// owns the text; this is the one spelling of it, next to the state every
+// caller reaches through GoalStateOf.
+const SessionGoalObjective = "session goal"
+
 func capObjective(obj string) string {
 	if r := []rune(obj); len(r) > goalReminderObjectiveCap {
 		return string(r[:goalReminderObjectiveCap]) + "…"
@@ -210,7 +215,7 @@ func (g *GoalState) ContinuationPrompt() string {
 func (g *GoalState) Describe() string {
 	v, ok := g.View()
 	if !ok {
-		return "goal: none — start one with /goal create <objective> (or the goal tool, op create)"
+		return "goal: none — start one with /goal <objective> (the model can also use the goal tool, op create)"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "goal: %s\nobjective: %s", v.Status, v.Objective)

@@ -1273,13 +1273,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	// goalKick runs the goal's first turn. Setting a goal must actually start
 	// it: the goal state on its own only decorates the next user-driven turn,
-	// so `/goal create …` printed "goal created" and then nothing ran. The
+	// so `/goal <objective>` printed "goal created" and then nothing ran. The
 	// run continues from there (agent.Agent.GoalContinuation), and the
 	// objective becomes the session title and the first prompt the user sees.
 	// Safe before SetHandlers: SendPrompt is a no-op while onSend is unwired.
 	goalKick := func(objective string) { app.SendPrompt(objective) }
 
-	// /goal drives the same GoalState the goal tool owns: the verbs mutate
+	// /goal drives the same GoalState the goal tool owns: the ops mutate
 	// through the tool's own seam (so the session entry + the per-turn
 	// reminder stay consistent) and echo the resulting state.
 	app.SetGoalOps(&tui.GoalOps{
@@ -1290,18 +1290,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			return gs.Describe()
 		},
-		Create: func(objective string) (string, error) {
+		Set: func(objective string) (string, error) {
 			gs := agent.GoalStateOf(reg)
 			if gs == nil {
 				return "", fmt.Errorf("goal not wired")
 			}
+			// One active goal at a time: a goal the model already created
+			// (or one the user is still working) is not silently replaced —
+			// Drop closes it, and /goal drop is the command for that.
 			if _, err := gs.Create(objective, 0); err != nil {
 				return "", err
 			}
 			goalKick(objective)
 			return "goal created\n" + gs.Describe(), nil
 		},
-		Resume: func(objective string) (string, error) {
+		Continue: func(objective string) (string, error) {
 			gs := agent.GoalStateOf(reg)
 			if gs == nil {
 				return "", fmt.Errorf("goal not wired")
@@ -1312,16 +1315,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			goalKick(g.Objective)
 			return "goal resumed\n" + gs.Describe(), nil
-		},
-		Evidence: func(note string) (string, error) {
-			gs := agent.GoalStateOf(reg)
-			if gs == nil {
-				return "", fmt.Errorf("goal not wired")
-			}
-			if _, err := gs.AddEvidence(note); err != nil {
-				return "", err
-			}
-			return "evidence recorded\n" + gs.Describe(), nil
 		},
 		Complete: func(notes []string) (string, error) {
 			gs := agent.GoalStateOf(reg)
@@ -1344,6 +1337,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return "goal dropped\n" + gs.Describe(), nil
 		},
 	})
+	// The goal tool, registered HERE rather than in newToolRegistry: /goal and
+	// the loop both reach it through the registry (agent.GoalStateOf), and a
+	// builder-shared registration made every registry in the tree carry a
+	// goal while the TUI — which registers its own agent — had none, so /goal
+	// answered "goal not wired" in every session. It goes in before
+	// wireTaskParent binds it, so an early call cannot read unbound state.
+	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
+	wireTaskParent(reg, store)
+	// No auto-created goal here, unlike print mode (#387): an active goal is
+	// what /vibe reads as a conflict, so a placeholder would refuse to enter
+	// director mode in every fresh session. The objective is the user's to
+	// name — `/goal <objective>` — and the state stays empty until then.
 	// applyTheme runs every resolved palette through the color-blind remap
 	// (settings colorBlindMode) so startup, /theme and live reload agree.
 	applyTheme := func(t *theme.Theme) *theme.Theme {

@@ -204,7 +204,7 @@ reprints the document in the transcript.
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
 | `/model [ref]` `/connect [name]` `/theme <name>` `/settings` `/hotkeys` | model, provider catalog, theme and display control (`/settings sidebarMode auto\|show\|hide` pins the dock) |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
-| `/goal` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: objective + token budget, read-only research, model handoff, background reviewer, director mode |
+| `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |
 

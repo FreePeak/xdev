@@ -8,31 +8,36 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// /goal verb dispatch (user-reported: `/goal create …` did nothing). The
-// command used to drop its arguments and only ever render the view, so a
-// user following the goal tool's grammar got "goal: none" back.
+// /goal: the argument IS the objective — `/goal <target goal>` sets it and
+// starts the run. It used to require a verb (`/goal create …`), so the
+// obvious spelling either did nothing or errored; the read verbs, the two
+// closers and the old `create <objective>` spelling stay accepted.
 
-func TestGoalDispatchVerbs(t *testing.T) {
-	var created, dropped string
+func TestGoalDispatchTargetIsTheArgument(t *testing.T) {
+	var set []string
+	var dropped string
 	ops := &GoalOps{
 		View: func() string { return "goal: active" },
-		Create: func(obj string) (string, error) {
-			created = obj
-			return "created:" + obj, nil
+		Set: func(objective string) (string, error) {
+			set = append(set, objective)
+			return "created:" + objective, nil
 		},
 		Drop: func() (string, error) {
 			dropped = "yes"
 			return "dropped", nil
 		},
 	}
+	// The target: a plain multi-word objective, no verb.
+	if got, err := ops.Dispatch("fix the goal error"); err != nil || got != "created:fix the goal error" {
+		t.Fatalf("target objective: %q %v (set=%q)", got, err, set)
+	}
+	// `create` is the spelling the docs and the tool's grammar use; it still
+	// takes the objective.
+	if _, err := ops.Dispatch("create finish the audit"); err != nil || set[len(set)-1] != "finish the audit" {
+		t.Fatalf("create must pass the objective: %v (set=%q)", err, set)
+	}
 	if got, err := ops.Dispatch(""); err != nil || got != "goal: active" {
 		t.Fatalf("bare /goal must view: %q %v", got, err)
-	}
-	if got, err := ops.Dispatch("create finish the audit"); err != nil || created != "finish the audit" {
-		t.Fatalf("create must pass the objective: %q %v (created=%q)", got, err, created)
-	}
-	if _, err := ops.Dispatch("drop"); err != nil || dropped != "yes" {
-		t.Fatalf("drop must reach the op: %v", err)
 	}
 	// Read intent: every synonym for "show me the goal" views instead of
 	// erroring. `/goal check` used to be an unknown-verb error while no help
@@ -42,9 +47,11 @@ func TestGoalDispatchVerbs(t *testing.T) {
 			t.Fatalf("%q must view: %q %v", verb, got, err)
 		}
 	}
-	// An unknown verb is a usage error, not a silent view.
-	if _, err := ops.Dispatch("frobnicate x"); err == nil || !strings.Contains(err.Error(), "unknown /goal verb") {
-		t.Fatalf("unknown verb must report the grammar, got %v", err)
+	if len(set) != 2 {
+		t.Fatalf("a read verb started a goal: %q", set)
+	}
+	if _, err := ops.Dispatch("drop"); err != nil || dropped != "yes" {
+		t.Fatalf("drop must reach the op: %v", err)
 	}
 	// A verb with no objective is a usage error naming the shape.
 	if _, err := ops.Dispatch("create"); err == nil || !strings.Contains(err.Error(), "usage:") {
@@ -52,12 +59,14 @@ func TestGoalDispatchVerbs(t *testing.T) {
 	}
 }
 
-// A verb whose op is not wired says so — never a silent no-op (the failure
-// mode this command shipped with).
+// A verb whose op is not wired says so — never a silent no-op. The failure
+// mode that matters is `error: goal not wired` on a working command.
 func TestGoalDispatchUnwiredVerb(t *testing.T) {
 	ops := &GoalOps{View: func() string { return "v" }}
-	if _, err := ops.Dispatch("create x"); err == nil || !strings.Contains(err.Error(), "not wired") {
-		t.Fatalf("unwired create must report it, got %v", err)
+	for _, arg := range []string{"create x", "just land the thing", "complete", "drop"} {
+		if _, err := ops.Dispatch(arg); err == nil || !strings.Contains(err.Error(), "not wired") {
+			t.Fatalf("unwired %q must report it, got %v", arg, err)
+		}
 	}
 	if _, err := (&GoalOps{}).Dispatch("view"); err == nil {
 		t.Fatal("a nil view seam must error")
@@ -86,6 +95,33 @@ func TestGoalCompleteNotesSplit(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "one plain sentence" {
 		t.Fatalf("a plain sentence must stay one note: %q", got)
+	}
+}
+
+// /goal <objective> starts the goal's first turn: the objective is what the
+// model gets. Answering the command and running nothing was the defect.
+func TestGoalTargetStartsTheTurn(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	var sent []string
+	app.SetHandlers(func(text string) { sent = append(sent, text) }, func() {}, func() {})
+	app.SetGoalOps(&GoalOps{
+		View: func() string { return "goal: active" },
+		Set: func(objective string) (string, error) {
+			app.SendPrompt(objective)
+			return "goal created", nil
+		},
+	})
+	typeRunes(app, "/goal land the exporter")
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+
+	if len(sent) != 1 || sent[0] != "land the exporter" {
+		t.Fatalf("the objective must start the turn: sent=%q", sent)
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	last := app.blocks[len(app.blocks)-1]
+	if !strings.Contains(last.Text, "goal created") {
+		t.Fatalf("created block = %+v", last)
 	}
 }
 
