@@ -951,6 +951,12 @@ type diffOverlay struct {
 
 // openDiffOverlay renders the diff for the newest finished tool block
 // that touches path and stores it as the active overlay.
+//
+// A click reaches here with a.mu already held: handleMouse's non-wheel
+// branch in app.go takes it around the whole gesture, and has since the
+// dock's first clickable row (#371, #373). So this takes no lock of its
+// own — every caller holds it — and a second Lock here would wedge the
+// UI thread on the first dock FILES click.
 func (a *App) openDiffOverlay(path string) bool {
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
@@ -975,12 +981,22 @@ func (a *App) openDiffOverlay(path string) bool {
 	return false
 }
 
-// closeDiffOverlay dismisses the overlay on the next frame.
+// closeDiffOverlay dismisses the overlay on the next frame. It takes a.mu
+// itself, so it is for callers that do not hold it; a caller inside the
+// lock calls closeDiffOverlayLocked instead. Locking twice in one
+// goroutine is not a deadlock this program recovers from — it is the UI
+// thread, and the freeze it produces is the whole session.
 func (a *App) closeDiffOverlay() {
 	a.mu.Lock()
-	a.diffOv = nil
+	a.closeDiffOverlayLocked()
 	a.mu.Unlock()
 	a.poke()
+}
+
+// closeDiffOverlayLocked clears the overlay. Callers hold a.mu, so they also
+// poke for the frame themselves.
+func (a *App) closeDiffOverlayLocked() {
+	a.diffOv = nil
 }
 
 // drawDiffOverlay renders the full-width diff surface above the composer.
@@ -1074,7 +1090,7 @@ func (a *App) closeDiffOverlayOnClick(x, y int) {
 			return
 		}
 	}
-	a.closeDiffOverlay()
+	a.closeDiffOverlayLocked()
 }
 
 // diffBodyScroll advances the overlay viewport by n lines (down=true)
@@ -1148,7 +1164,7 @@ func (a *App) dockToggleDiff() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.diffOv != nil {
-		a.closeDiffOverlay()
+		a.closeDiffOverlayLocked()
 		return true
 	}
 	for i := len(a.dock.lines) - 1; i >= 0; i-- {
