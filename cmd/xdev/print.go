@@ -1285,6 +1285,29 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 		return nil
 	}
 	mgr := mcpclient.NewManager()
+	// Auto-start any server that ships as a binary rather than an
+	// always-on daemon (leankg): xdev launches it on demand when the
+	// health probe fails, then waits for it to answer before connecting.
+	for name, sc := range cfg.Servers {
+		if sc.AutoStart == nil {
+			continue
+		}
+		healthy, err := sc.IsHealthy()
+		if err != nil {
+			logx.Errorf("mcp: %s health check: %v", name, err)
+			continue
+		}
+		if healthy {
+			continue
+		}
+		logx.Infof("mcp: %s not running, starting...", name)
+		cmd, err := sc.StartAuto()
+		if err != nil {
+			logx.Errorf("mcp: %s auto-start: %v", name, err)
+			continue
+		}
+		logx.Infof("mcp: %s started (pid %d)", name, cmd.Process.Pid)
+	}
 	if wait {
 		// One-shot modes (print) must have the tools before the first
 		// turn: connect inline, bounded by the per-server init timeout.
