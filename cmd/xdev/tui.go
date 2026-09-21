@@ -1695,6 +1695,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if err != nil {
 				if ctx.Err() != nil {
 					app.AddSystemBlock("· turn canceled")
+				} else if errors.Is(err, agent.ErrEmptyTurn) {
+					// The model answered nothing after every nudge was spent
+					// (a thinking-mode upstream leaving only a reasoning block,
+					// or nothing at all). Rebuild context from the persisted
+					// history and re-run the agent so the session auto-resumes
+					// instead of dying with a dead-end error (#331). Same
+					// recovery print and rpc modes already had — the TUI is
+					// the daily driver and was the one gap.
+					app.AddSystemBlock("· the model answered with nothing — retrying from history")
+					ctxRes, rerr := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+					if rerr == nil {
+						finalMsg, err = ag.Run(ctx, hookBus.Context(ctx, sys), ctxRes.Messages)
+					}
+					if err != nil {
+						app.AddSystemBlock("error: " + err.Error())
+					}
 				} else {
 					app.AddSystemBlock("error: " + err.Error())
 				}
