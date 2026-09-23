@@ -183,9 +183,10 @@ type App struct {
 	// nil degrades the chord to a notice.
 	onRetry func()
 
-	keyq   chan tcell.Event
-	dirty  chan struct{}
-	quitCh chan struct{}
+	keyq     chan tcell.Event
+	dirty    chan struct{}
+	quitCh   chan struct{}
+	quitOnce sync.Once
 
 	// UI-loop stall detection (stall.go). loopBeat is written from the loop
 	// and read by the watchdog, so it is atomic rather than mutex-guarded: a
@@ -888,8 +889,11 @@ func (a *App) activeWork() time.Duration {
 // FinishRun closes the run, folding its span into the active-time total.
 func (a *App) FinishRun() { a.SetRunning(false) }
 
-// Quit terminates the UI loop.
-func (a *App) Quit() { close(a.quitCh) }
+// Quit terminates the UI loop. It is idempotent: a terminal can deliver the
+// quit chord more than once in one burst, and the UI loop drains those events
+// before it returns to its select. Closing the channel a second time would
+// panic the process instead of exiting it.
+func (a *App) Quit() { a.quitOnce.Do(func() { close(a.quitCh) }) }
 
 // ForkSession implements CommandAPI by delegating to wired SessionOps.Fork.
 func (a *App) ForkSession() error {
