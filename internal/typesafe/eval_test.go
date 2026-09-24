@@ -7,8 +7,64 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestEvaluateLocalSidecarWithoutAPIKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/systemone" {
+			t.Fatalf("path: want /v1/systemone, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("auth: local sidecar should not need bearer, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "english",
+			"answers": map[string]any{
+				"is_urgent": map[string]any{"type": "noul", "noul": 0.92},
+			},
+			"usage": map[string]any{"local_ms": 12.3},
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	t.Setenv("TYPESAFE_API_KEY", "hosted-secret")
+	t.Setenv("LAYA_API_KEY", "")
+	tl := NewTool(Settings{BaseURL: srv.URL, Model: "english"})
+	result, err := tl.Execute(context.Background(), json.RawMessage(`{"state":{"text":"refund now"},"questions":{"is_urgent":{"type":"noul","instructions":"urgent?"}}}`))
+	if err != nil {
+		t.Fatalf("execute local sidecar: %v", err)
+	}
+	if result.IsError || !strings.Contains(result.Text, "is_urgent") {
+		t.Fatalf("local sidecar result = %+v", result)
+	}
+}
+
+func TestResolveBaseURL(t *testing.T) {
+	t.Setenv("TYPESAFE_BASE_URL", "http://env.example")
+	if got := resolveBaseURL("http://config.example/"); got != "http://config.example/" {
+		t.Fatalf("configured base URL: got %q", got)
+	}
+	if got := resolveBaseURL(""); got != "http://env.example" {
+		t.Fatalf("env base URL: got %q", got)
+	}
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	if got := resolveBaseURL(""); got != baseURL {
+		t.Fatalf("default base URL: got %q", got)
+	}
+}
+
+func TestConfigDoesNotForwardHostedKeyToLocalEndpoint(t *testing.T) {
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	t.Setenv("TYPESAFE_API_KEY", "hosted-secret")
+	t.Setenv("LAYA_API_KEY", "")
+	c := Settings{BaseURL: "http://127.0.0.1:8000", Model: "english"}.Config()
+	if c.APIKey != "" {
+		t.Fatalf("hosted key forwarded to local endpoint: %q", c.APIKey)
+	}
+}
 
 func TestEvaluateOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

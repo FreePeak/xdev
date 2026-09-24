@@ -19,8 +19,8 @@ import (
 	"github.com/FreePeak/xdev/internal/tts"
 	"gopkg.in/yaml.v3"
 
-	"github.com/FreePeak/xdev/internal/websearch"
 	"github.com/FreePeak/xdev/internal/typesafe"
+	"github.com/FreePeak/xdev/internal/websearch"
 )
 
 // Settings layering (M9 #10, research parity-session-ux §10): schema
@@ -496,9 +496,9 @@ type Settings struct {
 	// WebSearch configures the web_search provider chain (M13 #48):
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
-	// TypeSafe configures the typesafe tool (M15): the System One model
-	// and request timeout. The API key comes from TYPESAFE_API_KEY at
-	// request time, never from the settings file.
+	// TypeSafe configures the typesafe tool (M15): the System One model,
+	// API root, optional bearer key, and request timeout. The endpoint and
+	// key may also come from TYPESAFE_BASE_URL/TYPESAFE_API_KEY.
 	TypeSafe TypeSafeSettings `yaml:"typesafe"`
 	// Browser configures the browser tool (M13 #50): the CDP discovery
 	// endpoint of a Chrome, and whether xdev may start one on it when
@@ -786,11 +786,11 @@ type WebSearchSettings = websearch.Settings
 // BrowserSettings is the browser: config block (M13 #50). Same alias rule as
 // WebSearchSettings: the engine (internal/browser) owns the struct.
 type BrowserSettings = browser.Settings
-// TypeSafeSettings is the typesafe config block: the System One model
-// and request timeout (M15). The API key is never a config field — it
-// comes from TYPESAFE_API_KEY at request time, so a leaked settings
-// file never carries a credential. Aliased (not redeclared) for the
-// same import-cycle reason as WebSearchSettings.
+
+// TypeSafeSettings is the typesafe config block: the System One model,
+// API root, optional bearer key, and request timeout (M15). A local Laya
+// server can omit the key; hosted TypeSafe resolves it from the environment.
+// Aliased (not redeclared) for the same import-cycle reason as WebSearchSettings.
 type TypeSafeSettings = typesafe.Settings
 
 // defaultSettings is the schema-defaults layer.
@@ -1011,15 +1011,16 @@ func (s *Settings) ImageGenConfig() imagegen.Settings {
 	}
 	return cfg
 }
-// TypeSafeConfig returns the typesafe block with ${VAR} references in
-// Settings.ApiKey expanded and model/timeout defaulted. Nil-safe: the
-// zero value is a keyless block, which the tool reports as a missing
-// TYPESAFE_API_KEY instead of making a request.
+
+// TypeSafeConfig returns the typesafe block with ${VAR} references expanded
+// and model/timeout defaulted. An empty APIKey remains valid for a local
+// server that does not require bearer authentication.
 func (s *Settings) TypeSafeConfig() typesafe.Settings {
 	if s == nil {
 		return typesafe.Settings{}
 	}
 	cfg := s.TypeSafe
+	cfg.BaseURL = Resolve(cfg.BaseURL)
 	cfg.APIKey = Resolve(cfg.APIKey)
 	return cfg.Config()
 }
@@ -1530,6 +1531,26 @@ func (s *Settings) merge(layer *Settings) error {
 			s.WebSearch.APIKeys = map[string]string{}
 		}
 		s.WebSearch.APIKeys[k] = v
+	}
+	// typesafe: endpoint and credentials are deliberately not repo-safe;
+	// retain trusted-layer values and resolve ${VAR} references later.
+	if layer.TypeSafe.BaseURL != "" {
+		s.TypeSafe.BaseURL = layer.TypeSafe.BaseURL
+		// A later endpoint override must not silently carry the previous
+		// layer's credential. Empty means the new environment/local lookup.
+		s.TypeSafe.APIKey = ""
+	}
+	if layer.TypeSafe.APIKey != "" {
+		s.TypeSafe.APIKey = layer.TypeSafe.APIKey
+	}
+	if layer.TypeSafe.Model != "" {
+		s.TypeSafe.Model = layer.TypeSafe.Model
+	}
+	if layer.TypeSafe.Timeout != 0 {
+		if layer.TypeSafe.Timeout < 0 {
+			return fmt.Errorf("typesafe.timeout must be positive, got %s", layer.TypeSafe.Timeout)
+		}
+		s.TypeSafe.Timeout = layer.TypeSafe.Timeout
 	}
 	// imageProviders: the provider list is replaced wholesale (the same rule
 	// as webSearch — an overlay that names one provider means exactly that

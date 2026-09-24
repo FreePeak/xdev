@@ -1828,8 +1828,8 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M15 #67: security_scan — merges the scanners the host has (go vet,
 	// govulncheck, semgrep, gitleaks); a missing binary is reported, not fatal.
 	reg.Register(tool.NewSecurityScanTool(cwd))
-	// M15: typesafe — System One evaluation (Jev); missing
-	// TYPESAFE_API_KEY lands as an error, not a request.
+	// M15: typesafe — System One evaluation (hosted Jev or local Laya);
+	// TYPESAFE_BASE_URL selects the endpoint and auth is optional.
 	reg.Register(typesafe.NewTool(settings.TypeSafeConfig()))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()

@@ -10,17 +10,17 @@ import (
 // ToolName is the name the model calls.
 const ToolName = "typesafe"
 
-// Tool evaluates text/state against typed questions using
-// TypeSafe's System One models (Jev). It returns calibrated
-// probabilities and typed answers the code can combine.
+// Tool evaluates text/state against typed questions using TypeSafe's
+// hosted System One API or a self-hosted Laya-compatible endpoint. It
+// returns calibrated probabilities and typed answers the code can combine.
 //
 // Arguments:
 //   - state: the content to evaluate (string, object, or array)
 //   - questions: map of typed questions (noul/choice/score)
-//   - model (optional): model id; defaults to "jev-latest"
+//   - model (optional): model id; hosted defaults to "jev-latest"; Laya accepts its checkpoint names
 //
-// Requires TYPESAFE_API_KEY in the environment or
-// typesafe.apiKey in ~/.xdev/agent/config.yml.
+// TYPESAFE_BASE_URL or typesafe.baseUrl selects the endpoint.
+// TYPESAFE_API_KEY or typesafe.apiKey is optional for keyless local servers.
 type Tool struct {
 	Settings Settings
 }
@@ -33,7 +33,7 @@ func NewTool(s Settings) *Tool {
 func (t *Tool) Name() string { return ToolName }
 
 func (t *Tool) Description() string {
-	return "evaluate text/state against typed questions using TypeSafe System One models (Jev); returns calibrated probabilities and typed answers"
+	return "evaluate text/state against typed questions using TypeSafe System One or a self-hosted Laya endpoint; returns calibrated probabilities and typed answers"
 }
 
 func (t *Tool) Parameters() json.RawMessage {
@@ -50,7 +50,7 @@ func (t *Tool) Parameters() json.RawMessage {
     },
     "model": {
       "type": "string",
-      "description": "model that handles the request (default: jev-latest)"
+      "description": "model that handles the request (hosted default: jev-latest; Laya auto-routes when omitted)"
     }
   },
   "required": ["state", "questions"]

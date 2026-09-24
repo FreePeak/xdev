@@ -9,24 +9,34 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
-// baseURL is the API root; systemOnePath is appended to it. It
-// is a var so tests can override it (point at an httptest server)
-// and so TYPESAFE_BASE_URL lets operators redirect the client
-// (e.g. staging) without recompiling.
-var baseURL = func() string {
-	if v := os.Getenv("TYPESAFE_BASE_URL"); v != "" {
+// defaultBaseURL is the hosted API root. baseURL remains a test seam
+// for tests that construct Evaluator directly.
+const defaultBaseURL = "https://api.typesafe.ai"
+
+var baseURL = defaultBaseURL
+
+// resolveBaseURL applies endpoint precedence after config.LoadEnv runs:
+// explicit settings, then TYPESAFE_BASE_URL, then the hosted API.
+func resolveBaseURL(configured string) string {
+	if v := strings.TrimSpace(configured); v != "" {
 		return v
 	}
-	return "https://api.typesafe.ai"
-}()
+	if v := strings.TrimSpace(os.Getenv("TYPESAFE_BASE_URL")); v != "" {
+		return v
+	}
+	return baseURL
+}
 
 // systemOnePath is the System One evaluation endpoint.
 const systemOnePath = "/v1/systemone"
 
 // DefaultModel is the model the tool sends when the caller omits one.
+// Local Laya servers accept "english", "multilingual", or
+// "typed-decisions"; the hosted Jev API accepts "jev-latest".
 const DefaultModel = "jev-latest"
 
 // DefaultTimeout bounds a single request to the API.
@@ -50,6 +60,7 @@ type EvalResponse struct {
 // Evaluator talks to the TypeSafe System One endpoint.
 type Evaluator struct {
 	client     *http.Client
+	baseURL    string
 	model      string
 	key        string
 	httpClient *http.Client // override for tests; nil means use client
@@ -59,6 +70,7 @@ type Evaluator struct {
 func NewEvaluator(s Settings) *Evaluator {
 	return &Evaluator{
 		client:     &http.Client{Timeout: s.Timeout},
+		baseURL:    resolveBaseURL(s.BaseURL),
 		model:      s.Model,
 		key:        s.APIKey,
 		httpClient: nil,
@@ -82,7 +94,11 @@ func (e *Evaluator) Evaluate(ctx context.Context, state map[string]any, question
 		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
 	}
 
-	endpoint, err := url.JoinPath(baseURL, systemOnePath)
+	root := e.baseURL
+	if strings.TrimSpace(root) == "" {
+		root = baseURL
+	}
+	endpoint, err := url.JoinPath(root, systemOnePath)
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: build URL: %w", err)
 	}
@@ -90,7 +106,9 @@ func (e *Evaluator) Evaluate(ctx context.Context, state map[string]any, question
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+e.key)
+	if e.key != "" {
+		req.Header.Set("Authorization", "Bearer "+e.key)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := e.client
