@@ -67,6 +67,9 @@ const (
 	// omp does not model it; foreign readers keep the line as an opaque
 	// chain node.
 	TypeCheckpoint = "checkpoint"
+	// TypeScheduleChange is a session-local reminder snapshot. Its active
+	// list is bounded by the agent scheduler, not by a speculative wire DSL.
+	TypeScheduleChange = "schedule_change"
 
 	// TypeBranch is xdev's persisted branch marker (a CustomEntry whose
 	// CustomType is "branch" with data {"to":entryID}); it is how Open
@@ -142,6 +145,68 @@ type CustomEntry struct {
 }
 
 func (e *CustomEntry) Envelope() Envelope { return e.Env }
+
+// SchedulePayload is one complete reminder record.
+type SchedulePayload struct {
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"`
+	Prompt       string    `json:"prompt"`
+	AfterSeconds int64     `json:"afterSeconds,omitempty"`
+	EverySeconds int64     `json:"everySeconds,omitempty"`
+	ScheduledAt  time.Time `json:"scheduledAt"`
+}
+
+// MarshalJSON keeps schedule timestamps canonical like the rest of the
+// session wire format (UTC RFC3339 with exactly three fractional digits).
+func (p SchedulePayload) MarshalJSON() ([]byte, error) {
+	type wirePayload struct {
+		ID           string   `json:"id"`
+		Kind         string   `json:"kind"`
+		Prompt       string   `json:"prompt"`
+		AfterSeconds int64    `json:"afterSeconds,omitempty"`
+		EverySeconds int64    `json:"everySeconds,omitempty"`
+		ScheduledAt  wireTime `json:"scheduledAt"`
+	}
+	return json.Marshal(wirePayload{
+		ID: p.ID, Kind: p.Kind, Prompt: p.Prompt,
+		AfterSeconds: p.AfterSeconds, EverySeconds: p.EverySeconds,
+		ScheduledAt: wireTime(p.ScheduledAt),
+	})
+}
+
+func (p *SchedulePayload) UnmarshalJSON(b []byte) error {
+	type wirePayload struct {
+		ID           string   `json:"id"`
+		Kind         string   `json:"kind"`
+		Prompt       string   `json:"prompt"`
+		AfterSeconds int64    `json:"afterSeconds,omitempty"`
+		EverySeconds int64    `json:"everySeconds,omitempty"`
+		ScheduledAt  wireTime `json:"scheduledAt"`
+	}
+	var w wirePayload
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	*p = SchedulePayload{
+		ID: w.ID, Kind: w.Kind, Prompt: w.Prompt,
+		AfterSeconds: w.AfterSeconds, EverySeconds: w.EverySeconds,
+		ScheduledAt: time.Time(w.ScheduledAt),
+	}
+	return nil
+}
+
+// ScheduleChangedEntry is a bounded snapshot of active reminders. One entry
+// replaces the previous active snapshot, so long sessions retain O(active),
+// not O(mutations). Sequence is monotonic within the session and NextID avoids
+// ID reuse after delete/branch/window pruning.
+type ScheduleChangedEntry struct {
+	Env      Envelope          `json:"-"`
+	Sequence int64             `json:"sequence,omitempty"`
+	NextID   int               `json:"nextId,omitempty"`
+	Active   []SchedulePayload `json:"active,omitempty"`
+}
+
+func (e *ScheduleChangedEntry) Envelope() Envelope { return e.Env }
 
 // GoalPayload is the goal snapshot carried by GoalUpdatedEntry (agent.Goal's
 // persisted shape; the session package must not import agent, so the fields
@@ -255,17 +320,18 @@ type entryWire struct {
 	ParentID  *string  `json:"parentId"`
 	Timestamp wireTime `json:"timestamp"`
 
-	Message          json.RawMessage    `json:"message,omitempty"`
-	Model            *string            `json:"model,omitempty"`
-	ResolvedFallback *bool              `json:"resolvedModelIsFallback,omitempty"`
-	Summary          json.RawMessage    `json:"summary,omitempty"`
-	FirstKeptEntryID *string            `json:"firstKeptEntryId,omitempty"`
-	TokensBefore     *int64             `json:"tokensBefore,omitempty"`
-	Method           *string            `json:"method,omitempty"`
-	CustomType       string             `json:"customType,omitempty"`
-	Data             map[string]any     `json:"data,omitempty"`
-	Goal             *GoalPayload       `json:"goal,omitempty"`
-	Checkpoint       *CheckpointPayload `json:"checkpoint,omitempty"`
+	Message          json.RawMessage       `json:"message,omitempty"`
+	Model            *string               `json:"model,omitempty"`
+	ResolvedFallback *bool                 `json:"resolvedModelIsFallback,omitempty"`
+	Summary          json.RawMessage       `json:"summary,omitempty"`
+	FirstKeptEntryID *string               `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     *int64                `json:"tokensBefore,omitempty"`
+	Method           *string               `json:"method,omitempty"`
+	CustomType       string                `json:"customType,omitempty"`
+	Data             map[string]any        `json:"data,omitempty"`
+	Goal             *GoalPayload          `json:"goal,omitempty"`
+	Checkpoint       *CheckpointPayload    `json:"checkpoint,omitempty"`
+	Schedule         *ScheduleChangedEntry `json:"schedule,omitempty"`
 }
 
 func (w entryWire) envelope() Envelope {
@@ -312,6 +378,9 @@ func MarshalEntry(e Entry) ([]byte, error) {
 	case *CheckpointEntry:
 		w.Type = TypeCheckpoint
 		w.Checkpoint = &t.Checkpoint
+	case *ScheduleChangedEntry:
+		w.Type = TypeScheduleChange
+		w.Schedule = t
 	default:
 		return nil, fmt.Errorf("%w: cannot marshal %T", ErrUnknownEntryType, e)
 	}
@@ -381,6 +450,13 @@ func ParseEntry(line []byte) (Entry, error) {
 			e.Checkpoint = *w.Checkpoint
 		}
 		return e, nil
+	case TypeScheduleChange:
+		if w.Schedule == nil {
+			return nil, errors.New("session: schedule change missing snapshot")
+		}
+		e := *w.Schedule
+		e.Env = env
+		return &e, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownEntryType, w.Type)
 	}

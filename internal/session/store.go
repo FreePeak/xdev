@@ -68,16 +68,16 @@ type Store struct {
 	autoPath string // when set, the first assistant message persists here
 	autoOpts Options
 
-	// Windowed materialization (M8): a long session's pre-boundary history
-	// is already summarized into a compaction entry, so retaining its
-	// entries costs memory the context will never read. During load the
-	// store drops everything before the latest boundary once the boundary
-	// is known. The FILE is untouched — reopening after a boundary-free
-	// append still sees the full history — only the in-memory view is
-	// bounded, which is the §IV.1 budget promise.
+	// Windowed materialization (M8) keeps only the post-boundary tail in
+	// memory; the file remains the complete record. Schedule facts are
+	// retained independently below, so compaction cannot erase a reminder.
 	windowCut   int  // index into entries of the oldest retained entry
 	windowed    bool // a boundary has been applied
 	entriesSeen int  // total entries parsed (diagnostics)
+	// schedulePath is the effective schedule projection for each retained
+	// path node; scheduleSnapshot is the latest chronological snapshot.
+	schedulePath     map[string]*ScheduleChangedEntry
+	scheduleSnapshot *ScheduleChangedEntry
 }
 
 // WindowStats reports the load-windowing outcome (diagnostics + the M8
@@ -100,14 +100,14 @@ type Options struct {
 }
 
 // OpenMem creates a brand-new memory-only session. Nothing touches the file
-// system until EnsureOnDisk or EnableAutoPersist fires.
 func OpenMem(cwd, title string) *Store {
 	return &Store{
-		id:       newUUID(),
-		cwd:      cwd,
-		title:    title,
-		byID:     map[string]Entry{},
-		children: map[string][]string{},
+		id:           newUUID(),
+		cwd:          cwd,
+		title:        title,
+		byID:         map[string]Entry{},
+		children:     map[string][]string{},
+		schedulePath: map[string]*ScheduleChangedEntry{},
 	}
 }
 
@@ -131,8 +131,7 @@ func Open(path string) (*Store, error) {
 	if err := checkSessionLinks(path); err != nil {
 		return nil, err
 	}
-
-	s := &Store{file: path, byID: map[string]Entry{}, children: map[string][]string{}}
+	s := &Store{file: path, byID: map[string]Entry{}, children: map[string][]string{}, schedulePath: map[string]*ScheduleChangedEntry{}}
 	r := bufio.NewReaderSize(f, 64*1024)
 	lineNo := 0
 	for {
@@ -228,10 +227,23 @@ func (s *Store) loadLine(line []byte, no int) error {
 	if env.ParentID != "" {
 		s.children[env.ParentID] = append(s.children[env.ParentID], env.ID)
 	}
+	// A schedule snapshot is a session fact, not a model-visible message.
+	// Keep its effective value for this node even when context windowing
+	// later removes the entry itself. Keep private copies: Entry exposes the
+	// concrete entry and callers must not be able to mutate the projection.
+	if c, ok := e.(*ScheduleChangedEntry); ok {
+		s.schedulePath[env.ID] = cloneSchedule(c)
+		s.scheduleSnapshot = cloneSchedule(c)
+	} else if _, ok := e.(*ResetBoundaryEntry); ok {
+		s.schedulePath[env.ID] = nil
+	} else if parentSnapshot, ok := s.schedulePath[env.ParentID]; ok {
+		s.schedulePath[env.ID] = parentSnapshot
+	}
 	// Forward leaf replay: a branch marker re-points the leaf at its target;
 	// every other entry becomes the leaf itself.
 	if c, ok := e.(*CustomEntry); ok && c.CustomType == TypeBranch {
 		if to, _ := c.Data["to"].(string); to != "" && s.byID[to] != nil {
+			s.schedulePath[env.ID] = s.schedulePath[to]
 			s.leaf = to
 			return nil
 		}
@@ -243,8 +255,8 @@ func (s *Store) loadLine(line []byte, no int) error {
 
 // maybeWindow drops entries the next context build can never read: those
 // strictly before the latest reset boundary / compaction window. It runs
-// after every append but only rebuilds indexes when it actually cuts, so
-// the amortized cost is one rebuild per boundary.
+// after every load but only rebuilds indexes when it actually cuts, so the
+// amortized cost is one rebuild per boundary.
 func (s *Store) maybeWindow() {
 	cut := -1
 	for i := len(s.entries) - 1; i >= 0; i-- {
@@ -273,6 +285,14 @@ func (s *Store) maybeWindow() {
 	// the last entry is the chronological tail, so it stays the leaf.
 	if len(s.entries) > 0 {
 		s.leaf = s.entries[len(s.entries)-1].Envelope().ID
+	}
+	// Ordinary path nodes are projections, not durable facts. Keep only the
+	// latest schedule snapshot and any branch/reset facts needed to walk the
+	// retained tail; never let this auxiliary map grow with the whole log.
+	for id := range s.schedulePath {
+		if s.byID[id] == nil {
+			delete(s.schedulePath, id)
+		}
 	}
 }
 
@@ -319,6 +339,16 @@ func (s *Store) AutoPath() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.autoPath
+}
+
+// Options returns the auto-persistence options recorded for this store. It
+// is used by a session-local state that must materialize the session before
+// writing its first durable fact, without silently dropping strict-fsync or
+// parent-session metadata.
+func (s *Store) Options() Options {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.autoOpts
 }
 
 // ID returns the session UUID.
@@ -443,6 +473,56 @@ func (s *Store) Children(id string) []string {
 	copy(out, s.children[id])
 	return out
 }
+func cloneSchedule(c *ScheduleChangedEntry) *ScheduleChangedEntry {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.Active = append([]SchedulePayload(nil), c.Active...)
+	return &out
+}
+
+// LatestScheduleOnPath returns the newest schedule snapshot reachable from
+// the current leaf. It is the projection source for branch/rewind semantics.
+func (s *Store) LatestScheduleOnPath() *ScheduleChangedEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.schedulePath != nil {
+		if snapshot, ok := s.schedulePath[s.leaf]; ok {
+			return cloneSchedule(snapshot)
+		}
+	}
+	// Defensive fallback for stores built before the retained projection is
+	// populated (and for tests that hand-build a Store literal).
+	byID := make(map[string]Entry, len(s.entries))
+	for _, e := range s.entries {
+		byID[e.Envelope().ID] = e
+	}
+	seen := map[string]bool{}
+	for cur := byID[s.leaf]; cur != nil; {
+		env := cur.Envelope()
+		if env.ID == "" || seen[env.ID] {
+			break
+		}
+		seen[env.ID] = true
+		switch c := cur.(type) {
+		case *ResetBoundaryEntry:
+			return nil
+		case *ScheduleChangedEntry:
+			return cloneSchedule(c)
+		}
+		cur = byID[env.ParentID]
+	}
+	return nil
+}
+
+// LatestSchedule returns the newest loaded schedule snapshot, independent of
+// context-window pruning. Schedule state is session-local, not model history.
+func (s *Store) LatestSchedule() *ScheduleChangedEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneSchedule(s.scheduleSnapshot)
+}
 
 // Entry returns the entry with the given id, or nil.
 func (s *Store) Entry(id string) Entry {
@@ -477,7 +557,45 @@ func (s *Store) appendLocked(e Entry) error {
 		}
 	}
 
-	env := e.Envelope()
+	oldEntryValue := e.Envelope()
+	oldLeaf := s.leaf
+	oldLen := len(s.entries)
+	oldEntriesSeen := s.entriesSeen
+	oldWindowCut := s.windowCut
+	oldWindowed := s.windowed
+	oldScheduleSnapshot := s.scheduleSnapshot
+	if s.schedulePath == nil {
+		s.schedulePath = map[string]*ScheduleChangedEntry{}
+	}
+	oldScheduleByID := make(map[string]*ScheduleChangedEntry, len(s.schedulePath))
+	for id, snapshot := range s.schedulePath {
+		oldScheduleByID[id] = snapshot
+	}
+	rollback := func(env Envelope) {
+		s.entries = s.entries[:oldLen]
+		s.entriesSeen = oldEntriesSeen
+		s.windowCut = oldWindowCut
+		s.windowed = oldWindowed
+		if env.ID != "" {
+			if old, ok := s.byID[env.ID]; ok && old != e {
+				s.byID[env.ID] = old
+			} else {
+				delete(s.byID, env.ID)
+			}
+		}
+		if env.ParentID != "" {
+			ids := s.children[env.ParentID]
+			if len(ids) > 0 {
+				s.children[env.ParentID] = ids[:len(ids)-1]
+			}
+		}
+		s.leaf = oldLeaf
+		s.schedulePath = oldScheduleByID
+		s.scheduleSnapshot = oldScheduleSnapshot
+		setEnvelope(e, oldEntryValue)
+	}
+
+	env := oldEntryValue
 	if env.ID == "" {
 		env.ID = NewID()
 	}
@@ -493,17 +611,33 @@ func (s *Store) appendLocked(e Entry) error {
 	if env.ParentID != "" {
 		s.children[env.ParentID] = append(s.children[env.ParentID], env.ID)
 	}
+	// A schedule snapshot is a session fact, not a model-visible message.
+	// Keep its effective value for this node even when context windowing
+	// later removes the entry itself.
+	if c, ok := e.(*ScheduleChangedEntry); ok {
+		s.schedulePath[env.ID] = cloneSchedule(c)
+		s.scheduleSnapshot = cloneSchedule(c)
+	} else if _, ok := e.(*ResetBoundaryEntry); ok {
+		s.schedulePath[env.ID] = nil
+	} else if parentSnapshot, ok := s.schedulePath[env.ParentID]; ok {
+		s.schedulePath[env.ID] = parentSnapshot
+	}
 	s.leaf = env.ID
 
 	if s.w == nil {
 		if err := s.openWriterLocked(); err != nil {
+			rollback(env)
 			return err
 		}
 	}
 	if s.w == nil {
 		return nil // still memory-only
 	}
-	return s.appendLineLocked(e, env.ID)
+	if err := s.appendLineLocked(e, env.ID); err != nil {
+		rollback(env)
+		return err
+	}
+	return nil
 }
 
 // entryTypeOf reports the canonical wire "type" for a concrete entry.
@@ -527,6 +661,8 @@ func entryTypeOf(e Entry) string {
 		return TypeGoalUpdated
 	case *CheckpointEntry:
 		return TypeCheckpoint
+	case *ScheduleChangedEntry:
+		return TypeScheduleChange
 	default:
 		return ""
 	}
@@ -552,6 +688,8 @@ func setEnvelope(e Entry, env Envelope) {
 	case *GoalUpdatedEntry:
 		t.Env = env
 	case *CheckpointEntry:
+		t.Env = env
+	case *ScheduleChangedEntry:
 		t.Env = env
 	}
 }

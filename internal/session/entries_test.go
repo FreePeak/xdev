@@ -305,3 +305,42 @@ func TestHeaderParentSessionRoundTrip(t *testing.T) {
 		t.Fatal("root header must omit parentSession")
 	}
 }
+
+func TestScheduleChangedEntryRoundTrip(t *testing.T) {
+	change := &ScheduleChangedEntry{
+		Env:      env(TypeScheduleChange, "schedule-entry", "", ts0),
+		Sequence: 7,
+		NextID:   2,
+		Active: []SchedulePayload{{
+			ID: "schedule-1", Kind: "after", Prompt: "check deploy",
+			AfterSeconds: 60, ScheduledAt: ts0.Add(time.Minute),
+		}},
+	}
+	line, err := MarshalEntry(change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"schedule_change","id":"schedule-entry","parentId":null,"timestamp":"2026-09-07T03:20:45.220Z","schedule":{"sequence":7,"nextId":2,"active":[{"id":"schedule-1","kind":"after","prompt":"check deploy","afterSeconds":60,"scheduledAt":"2026-09-07T03:21:45.220Z"}]}}`
+	if string(line) != want {
+		t.Fatalf("wire mismatch:\n got %s\nwant %s", line, want)
+	}
+	got, err := ParseEntry(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := got.(*ScheduleChangedEntry)
+	if parsed.Sequence != 7 || parsed.NextID != 2 || len(parsed.Active) != 1 || parsed.Active[0] != change.Active[0] {
+		t.Fatalf("schedule round trip = %+v", parsed)
+	}
+	again, err := MarshalEntry(parsed)
+	if err != nil || string(again) != want {
+		t.Fatalf("re-marshal = %s/%v", again, err)
+	}
+}
+
+func TestScheduleChangedEntryMissingPayloadRejected(t *testing.T) {
+	line := []byte(`{"type":"schedule_change","id":"schedule-entry","timestamp":"2026-09-07T03:20:45.220Z"}`)
+	if _, err := ParseEntry(line); err == nil {
+		t.Fatal("schedule change without snapshot was accepted")
+	}
+}

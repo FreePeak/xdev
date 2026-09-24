@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	"github.com/FreePeak/xdev/internal/acp"
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
@@ -124,7 +125,6 @@ func (h *acpHandler) NewSession(_ context.Context, cwd string) (string, error) {
 	if cwd == "" {
 		cwd = h.cwd
 	}
-
 	now := time.Now().UTC()
 	if cwd != h.cwd {
 		// read/write/grep resolve against the process working directory, so a
@@ -133,9 +133,11 @@ func (h *acpHandler) NewSession(_ context.Context, cwd string) (string, error) {
 	}
 	store := session.OpenMem(cwd, "acp "+now.Format("2006-01-02 15:04"))
 	store.EnableAutoPersist(session.SessionFilePath(config.DataDir(), cwd, now, store.ID()), session.Options{})
-	wireTaskParent(h.reg, store)
-
-	s := &acpSession{store: store, allowed: map[string]bool{}}
+	schedules := agent.NewScheduleState(store)
+	// The registry is shared by all ACP sessions. Do not rebind its
+	// single-session schedule state here; the per-session context seam owns it.
+	wireTaskParentWithoutSchedule(h.reg, store)
+	s := &acpSession{store: store, schedules: schedules, allowed: map[string]bool{}}
 	s.ag = h.newAgent(s)
 	h.mu.Lock()
 	h.sessions[store.ID()] = s
@@ -155,6 +157,7 @@ func (h *acpHandler) Prompt(ctx context.Context, sessionID string, blocks []acp.
 	if strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("prompt carries no text content")
 	}
+	ctx = agent.WithScheduleState(ctx, s.schedules)
 	s.setTurn(ctx, emit)
 	defer s.setTurn(nil, nil)
 
@@ -189,11 +192,20 @@ func (h *acpHandler) Prompt(ctx context.Context, sessionID string, blocks []acp.
 	return stopReason(msg), nil
 }
 
-// close releases every session store.
 func (h *acpHandler) close() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	sessions := make([]*acpSession, 0, len(h.sessions))
 	for _, s := range h.sessions {
+		sessions = append(sessions, s)
+	}
+	h.mu.Unlock()
+	for _, s := range sessions {
+		s.mu.Lock()
+		ctx := s.ctx
+		s.mu.Unlock()
+		if ctx != nil {
+			<-ctx.Done()
+		}
 		if err := s.store.Close(); err != nil {
 			logx.Errorf("acp: session close: %v", err)
 		}
@@ -254,8 +266,9 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 // acpSession is one ACP session: its store, its agent and the turn currently
 // streaming (the emitter the hooks write to).
 type acpSession struct {
-	store *session.Store
-	ag    *agent.Agent
+	store     *session.Store
+	ag        *agent.Agent
+	schedules *agent.ScheduleState
 
 	mu      sync.Mutex
 	ctx     context.Context
