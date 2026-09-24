@@ -12,12 +12,22 @@ import (
 )
 
 func TestEvaluateLocalSidecarWithoutAPIKey(t *testing.T) {
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	t.Setenv("TYPESAFE_API_KEY", "hosted-secret")
+	t.Setenv("LAYA_API_KEY", "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/systemone" {
-			t.Fatalf("path: want /v1/systemone, got %s", r.URL.Path)
+			t.Errorf("path: want /v1/systemone, got %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "" {
-			t.Fatalf("auth: local sidecar should not need bearer, got %q", got)
+			t.Errorf("auth: local sidecar should not need bearer, got %q", got)
+		}
+		var req EvalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if req.Model != "" {
+			t.Errorf("model: want omitted for Laya auto-routing, got %q", req.Model)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model": "english",
@@ -29,10 +39,7 @@ func TestEvaluateLocalSidecarWithoutAPIKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("TYPESAFE_BASE_URL", "")
-	t.Setenv("TYPESAFE_API_KEY", "hosted-secret")
-	t.Setenv("LAYA_API_KEY", "")
-	tl := NewTool(Settings{BaseURL: srv.URL, Model: "english"})
+	tl := NewTool(Settings{BaseURL: srv.URL})
 	result, err := tl.Execute(context.Background(), json.RawMessage(`{"state":{"text":"refund now"},"questions":{"is_urgent":{"type":"noul","instructions":"urgent?"}}}`))
 	if err != nil {
 		t.Fatalf("execute local sidecar: %v", err)

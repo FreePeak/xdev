@@ -43,11 +43,12 @@ func TestConfigEnvironmentFallbacks(t *testing.T) {
 		t.Fatalf("explicit timeout changed: %s", got)
 	}
 
-	// A non-loopback custom TypeSafe staging endpoint keeps the existing
-	// TYPESAFE_API_KEY fallback; it is not automatically classified as Laya.
+	// A custom non-hosted endpoint is treated as a local/Laya-compatible
+	// router: it uses LAYA_API_KEY and leaves the model unset for routing.
 	t.Setenv("TYPESAFE_BASE_URL", "https://typesafe-staging.example")
+	t.Setenv("LAYA_API_KEY", "")
 	c = Settings{}.Config()
-	if c.APIKey != "hosted-key" || c.Model != DefaultModel {
-		t.Fatalf("custom TypeSafe fallback: %+v", c)
+	if c.APIKey != "" || c.Model != "" {
+		t.Fatalf("custom endpoint fallback: %+v", c)
 	}
 }
