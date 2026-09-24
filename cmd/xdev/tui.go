@@ -576,6 +576,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// live hooks/agent point at the new store (single source of truth: the
 	// captured `store` variable, which all closures re-read).
 	swapStore := func(drop bool) error {
+		sessMu.Lock()
+		defer sessMu.Unlock()
 		// Vibe mode is session-scoped: a new session would orphan the
 		// director's workers, so the switch is refused until it is off
 		// (omp rejects start/fork while the mode is active).
@@ -615,6 +617,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// swapStoreTo adopts an already-open store (fork/resume): replays its
 	// transcript and points hooks/agent at it.
 	swapStoreTo = func(ns *session.Store) error {
+		sessMu.Lock()
+		defer sessMu.Unlock()
 		if vibeActive() {
 			return fmt.Errorf("vibe mode is active — /vibe off first")
 		}
@@ -687,6 +691,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if id == "" {
 			return
 		}
+		if !running.CompareAndSwap(false, true) {
+			app.AddSystemBlock("resume: a turn is running — Esc cancels it first")
+			return
+		}
+		defer running.Store(false)
 		path, err := resolveResumeID(cwd, id)
 		if err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
@@ -764,6 +773,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		} else if err := store.Branch(target); err != nil {
 			return "", err
 		}
+		if st := agent.ScheduleStateOf(reg); st != nil {
+			st.RefoldActive()
+		}
 		branchReplay()
 		return draft, nil
 	}
@@ -775,9 +787,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		branchReplay()
 		app.AddSystemBlock("· branched to " + entryID[:min(8, len(entryID))] + " — replayed")
+		if st := agent.ScheduleStateOf(reg); st != nil {
+			st.RefoldActive()
+		}
 		return nil
 	}
 	app.SetSessionBranch(func(args string) error {
+		if !running.CompareAndSwap(false, true) {
+			return fmt.Errorf("a turn is running — Esc cancels it first")
+		}
+		defer running.Store(false)
 		query := strings.TrimSpace(args)
 		if query == "" {
 			return fmt.Errorf("branch: entry-id prefix required (ids are listed by /tree)")
@@ -1000,6 +1019,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if running.Load() {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
+			claimed := running.CompareAndSwap(false, true)
+			defer func() {
+				if claimed {
+					running.Store(false)
+				}
+			}()
 			if query == "" {
 				// Interactive picker (omp/Claude Code /resume): rows
 				// span all projects (Tab toggles scope; the picker
@@ -1055,7 +1080,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			return swapStoreTo(resumed)
 		},
-		NavigateTree: navigateTree,
+		NavigateTree: func(entryID string, summarize bool) (string, error) {
+			if !running.CompareAndSwap(false, true) {
+				return "", fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			defer running.Store(false)
+			return navigateTree(entryID, summarize)
+		},
 		New: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
@@ -1085,6 +1116,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			defer running.Store(false)
 			if err := store.ResetLeaf(); err != nil {
 				return err
+			}
+			if st := agent.ScheduleStateOf(reg); st != nil {
+				st.RefoldActive()
 			}
 			app.Reset()
 			// The transcript must not go fully blank: draw() renders the
@@ -1407,6 +1441,49 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// wireTaskParent binds it, so an early call cannot read unbound state.
 	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
 	wireTaskParent(reg, store)
+	app.SetScheduleOps(&tui.ScheduleOps{
+		List: func() string {
+			st := agent.ScheduleStateOf(reg)
+			if st == nil {
+				return "schedule: not wired"
+			}
+			rows := st.List()
+			if len(rows) == 0 {
+				return "no schedules"
+			}
+			return agent.FormatScheduleList(rows, time.Now().UTC())
+		},
+		Create: func(prompt, selector string) (string, error) {
+			st := agent.ScheduleStateOf(reg)
+			if st == nil {
+				return "", fmt.Errorf("schedule not wired")
+			}
+			kind, seconds, at, err := tui.ScheduleSelector(selector)
+			if err != nil {
+				return "", err
+			}
+			in := agent.ScheduleInput{Prompt: prompt, At: at}
+			switch kind {
+			case "after":
+				in.AfterSeconds = seconds
+			case "every":
+				in.EverySeconds = seconds
+			}
+			rec, err := st.Create(in)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("scheduled %s for %s", rec.ID, rec.ScheduledAt.Format(time.RFC3339)), nil
+		},
+		Delete: func(id string) error {
+			st := agent.ScheduleStateOf(reg)
+			if st == nil {
+				return fmt.Errorf("schedule not wired")
+			}
+			return st.Delete(id)
+		},
+	})
+
 	// No auto-created goal here, unlike print mode (#387): an active goal is
 	// what /vibe reads as a conflict, so a placeholder would refuse to enter
 	// director mode in every fresh session. The objective is the user's to
@@ -1831,6 +1908,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// A pasted image is a block, not a word in the text: the chip the
 		// composer showed has already been stripped (tui.App.expandPastes),
 		// and what is left of the draft goes out beside the payloads in the
+
 		// order they sit in the prompt.
 		if text != "" {
 			msg.Content = append(msg.Content, ai.TextBlock{Text: text})
@@ -1856,9 +1934,49 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		startTurn()
 		return true
 	}
-	// The composer holds the two send paths apart: a plain prompt cannot ask
-	// for images it has none of, and a draft that has them must not be
-	// silently demoted to text.
+	// Schedule delivery is an ordinary later turn, never steering. It waits
+	// for an idle interactive session, persists the reminder, then uses the
+	// same startTurn path as a user prompt.
+	scheduleCtx, scheduleCancel := context.WithCancel(baseCtx)
+	scheduleDone := make(chan struct{})
+	go func() {
+		defer close(scheduleDone)
+		agent.StartScheduleDelivery(scheduleCtx, agent.ScheduleStateOf(reg),
+			func([]agent.Schedule) bool { return !collabGuestJoined() && !running.Load() },
+			func(batch []agent.Schedule) error {
+				claimed := agent.ScheduleStateOf(reg)
+				if claimed == nil {
+					return agent.ErrScheduleDelivery
+				}
+				// The state is delivery-locked for this callback, so its
+				// bound store is stable; a swap waits for BindDelivery.
+				storeForDelivery := claimed.CurrentStore()
+				if storeForDelivery == nil || !running.CompareAndSwap(false, true) {
+					return agent.ErrScheduleDelivery
+				}
+				msg := ai.Message{
+					Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: agent.SchedulePrompt(batch)}},
+					Attribution: "schedule", UserTS: time.Now().UnixMilli(),
+				}
+				if err := storeForDelivery.Append(&session.MessageEntry{Message: msg}); err != nil {
+					running.Store(false)
+					return fmt.Errorf("%w: %v", agent.ErrScheduleDelivery, err)
+				}
+				return nil
+			},
+			func(_ []agent.Schedule, claimErr error) {
+				if claimErr != nil {
+					app.AddSystemBlock("· scheduled reminder dispatch deferred; running the due turn")
+				} else {
+					app.AddSystemBlock("· scheduled reminder due")
+				}
+				startTurn()
+			})
+	}()
+	defer func() {
+		scheduleCancel()
+		<-scheduleDone
+	}()
 	app.SetHandlers(
 		func(text string) { runTurn(text, nil) },
 		// Esc / Ctrl+C aborts the live turn only; see liveTurn. This handler

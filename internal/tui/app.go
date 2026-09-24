@@ -144,6 +144,7 @@ type App struct {
 	connectOps         *ConnectOps                            // /connect, wired by cmd (nil → notices)
 	prewalkOps         *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
 	goalOps            *GoalOps                               // /goal, wired by cmd (nil → notices)
+	scheduleOps        *ScheduleOps                           // /schedule, wired by cmd
 	vibeOps            *VibeOps                               // /vibe, wired by cmd (nil → notices)
 	spick              *sessionPicker                         // /resume selector (nil = closed)
 	onPickerResume     func(id string)                        // wired by cmd: performs the resume
@@ -996,16 +997,28 @@ func (a *App) SetGoalOps(ops *GoalOps) { a.goalOps = ops }
 
 // Goal implements CommandAPI /goal: `/goal <objective>` names the session's
 // objective and starts working on it; a bare /goal shows the current goal and
-// budget, and complete/drop close it. The ops drive the same state the goal
-// tool owns, so an interactive session steers its own objective without a
-// model turn. The argument used to be a required verb, which made the obvious
-// spelling — `/goal <what I want>` — a usage error.
+// budget, and complete/drop close it.
 func (a *App) Goal(args string) error {
 	block, err := a.goalOps.Dispatch(args)
 	if err != nil {
 		return err
 	}
 	a.AddSystemBlock(block)
+	return nil
+}
+
+// SetScheduleOps wires /schedule to the session-local reminder state.
+func (a *App) SetScheduleOps(ops *ScheduleOps) { a.scheduleOps = ops }
+
+// Schedule implements CommandAPI /schedule.
+func (a *App) Schedule(args string) error {
+	out, err := a.scheduleOps.Dispatch(args)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		a.AddSystemBlock(out)
+	}
 	return nil
 }
 

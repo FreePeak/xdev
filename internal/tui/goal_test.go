@@ -11,6 +11,35 @@ func (f *fakeAPI) Goal(args string) error {
 	return nil
 }
 
+// Schedule implements CommandAPI for the dispatch fake.
+func (f *fakeAPI) Schedule(args string) error {
+	f.blocks = append(f.blocks, "schedule "+args)
+	return nil
+}
+
+// TestScheduleCommandDispatch pins the built-in /schedule route and the
+// unwired seam's visible error block.
+func TestScheduleCommandDispatch(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	if !dispatch(app, "/schedule list") {
+		t.Fatal("/schedule not consumed")
+	}
+	blocks := app.Blocks()
+	last := blocks[len(blocks)-1]
+	if last.Kind != KindSystem || !strings.Contains(last.Text, "not wired") {
+		t.Fatalf("nil schedule seam block = %+v", last)
+	}
+	app.SetScheduleOps(&ScheduleOps{List: func() string { return "schedule-1\tafter" }})
+	if !dispatch(app, "/schedule") {
+		t.Fatal("wired /schedule not consumed")
+	}
+	blocks = app.Blocks()
+	last = blocks[len(blocks)-1]
+	if last.Kind != KindSystem || !strings.Contains(last.Text, "schedule-1") {
+		t.Fatalf("wired schedule block = %+v", last)
+	}
+}
+
 // TestGoalCommandView pins /goal: the GoalOps seam renders the live goal and
 // budget into the transcript; a nil seam degrades to a notice, never a panic.
 func TestGoalCommandView(t *testing.T) {

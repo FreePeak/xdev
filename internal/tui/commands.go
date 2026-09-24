@@ -383,6 +383,7 @@ type CommandAPI interface {
 	// modal list where a row's inspector shows the record's full body.
 	Trajectory() error
 	Goal(args string) error
+	Schedule(args string) error
 	Advisor(args string) error
 	Memory(args string) error
 	Theme(args string) error
@@ -462,6 +463,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "goal", Description: "session objective: /goal <objective> starts it (and resumes on the first turn); /goal shows it, /goal complete|drop closes it",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
+		{Name: "schedule", Description: "session-local reminders: /schedule [list|create <seconds|RFC3339> <prompt>|delete <id>]",
+			Fn: func(app CommandAPI, args string) error { return app.Schedule(args) }},
 		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},
 		{Name: "connect", Description: "connect a provider from the catalog: /connect [name]",

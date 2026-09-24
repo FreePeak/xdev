@@ -1900,6 +1900,12 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// a branch summary; wireTaskParent binds the live session.
 	reg.Register(&tool.CheckpointTool{})
 	reg.Register(&tool.RewindTool{})
+	// Durable session-local reminders. Single-session modes bind this shared
+	// state to the live store; ACP injects a state per exact session instead.
+	schedules := agent.NewScheduleState(nil)
+	reg.Register(&agent.ScheduleCreateTool{Schedules: schedules})
+	reg.Register(&agent.ScheduleListTool{Schedules: schedules})
+	reg.Register(&agent.ScheduleDeleteTool{Schedules: schedules})
 	registerMemoryTools(reg, buildMemory(settings), settings, cwd)
 	// M13 #52: language-server queries. Servers launch lazily on the first
 	// lsp call (lsp.lazy: false opts into eager warmup).
@@ -2243,7 +2249,30 @@ func taskAgentsAtStartup(cwd string) (notice string, warnings []string, count in
 // tool once the store exists (lineage for post-hoc inspection), and gives
 // the todo tool its session sink (every state change lands as a
 // user_todo_edit entry). Called by print, TUI, and RPC entrypoints.
+
+// bindScheduleState follows the live session on startup, /new, /fork, and
+// /resume. ACP must not call this on its shared registry.
+func bindScheduleState(reg *tool.Registry, store *session.Store) {
+	var state *agent.ScheduleState
+	if t, ok := reg.Get(agent.ScheduleCreateToolName); ok {
+		if st, ok := t.(*agent.ScheduleCreateTool); ok {
+			state = st.Schedules
+		}
+	}
+	if state != nil {
+		state.BindDelivery(store)
+	}
+}
+
+func wireTaskParentWithoutSchedule(reg *tool.Registry, store *session.Store) {
+	wireTaskParentState(reg, store, false)
+}
+
 func wireTaskParent(reg *tool.Registry, store *session.Store) {
+	wireTaskParentState(reg, store, true)
+}
+
+func wireTaskParentState(reg *tool.Registry, store *session.Store, schedule bool) {
 	if t, ok := reg.Get(agent.TaskToolName); ok {
 		if tt, ok := t.(*agent.TaskTool); ok {
 			tt.ParentSessionID = store.ID()
@@ -2269,6 +2298,9 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 			}
 		}
 	}
+	if schedule {
+		bindScheduleState(reg, store)
+	}
 	// M11 #40: bind the goal state to the active session (again on /resume
 	// and session switches — the new session starts with its own goal).
 	if t, ok := reg.Get(agent.GoalToolName); ok {
@@ -2281,6 +2313,13 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 	if t, ok := reg.Get(agent.ContextNotesToolName); ok {
 		if nt, ok := t.(*agent.NotesTool); ok {
 			nt.Notes.Bind(store)
+		}
+	}
+	if t, ok := reg.Get(tool.RewindToolName); ok {
+		if rt, ok := t.(*tool.RewindTool); ok {
+			if st := agent.ScheduleStateOf(reg); st != nil {
+				rt.OnLeafChange = st.RefoldActive
+			}
 		}
 	}
 	// M13 #51: bind checkpoint/rewind to the active session (again on
