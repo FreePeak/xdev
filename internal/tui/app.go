@@ -289,6 +289,17 @@ type App struct {
 	// the transcript rows painted underneath. nil when the dock
 	// is off. Callers hold a.mu.
 	selDockRows []selRow
+	// linkHits is the clickable region of the last painted frame. It follows
+	// resize, scroll, and dock geometry because paint rebuilds it from the exact
+	// run positions it draws.
+	linkHits []linkHit
+	// linkOpen is the platform browser opener; tests inject a recorder. The
+	// default is nil so the function stays a small seam rather than a new
+	// subsystem.
+	linkOpen func(string) error
+	// linkClick is the target under the press that began the current primary
+	// gesture. A release opens it only when the pointer never moved.
+	linkClick string
 	// dockSetMode persists a display policy the human changed with Alt+s
 	// (settings `sidebarMode`); nil = this session cannot persist it.
 	dockSetMode func(mode string)
@@ -3032,7 +3043,7 @@ func (a *App) paint() {
 	// no longer on screen.
 	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
 	// draws no bar must not leave last frame's grab live on the last column.
-	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows = "", nil, false, nil
+	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -3101,6 +3112,7 @@ func (a *App) paint() {
 		bandLim = edge - 1
 	}
 	selRows := make([]selRow, 0, end-start)
+	linkHits := make([]linkHit, 0)
 	for row, r := range a.viewRows(int32(start), int32(end)) {
 		y := row + top
 		// A banded row (user prompt / code fence) carries one background
@@ -3134,6 +3146,7 @@ func (a *App) paint() {
 		// copied. A row that is chrome end to end (a bare rule) records no
 		// text and copies as the blank line it looks like.
 		startX, content := -1, strings.Builder{}
+		rowLinkHits := make([]linkHit, 0)
 		for _, run := range r.ln.runs {
 			st := run.style
 			if banded {
@@ -3142,13 +3155,16 @@ func (a *App) paint() {
 				st = st.Background(r.ln.bg)
 			}
 			drawText(s, x, y, run.text, st)
+			if run.link != "" {
+				rowLinkHits = append(rowLinkHits, linkHit{x0: x, x1: x + paintedWidth(run.text) - 1, y: y, target: run.link})
+			}
 			if !run.chrome {
 				if startX < 0 {
 					startX = x
 				}
 				content.WriteString(run.text)
 			}
-			x += width(run.text)
+			x += paintedWidth(run.text)
 		}
 		if startX < 0 {
 			startX = 0
@@ -3156,6 +3172,19 @@ func (a *App) paint() {
 		// Selection hit-testing works off this text (the streaming
 		// cursor is decoration, not content).
 		selRows = append(selRows, selRow{text: strings.TrimSuffix(content.String(), "▍"), x0: startX})
+		// The timestamp is painted over the runs after them, so its columns are
+		// not clickable even where an earlier URL run extended underneath it.
+		if r.ts != "" {
+			last := edge - width(r.ts) - 3
+			for i := range rowLinkHits {
+				rowLinkHits[i].x1 = min(rowLinkHits[i].x1, last)
+			}
+		}
+		for _, hit := range rowLinkHits {
+			if hit.x0 <= hit.x1 {
+				linkHits = append(linkHits, hit)
+			}
+		}
 		// Right-aligned dim timestamp (grok draws these on first rows).
 		if r.ts != "" {
 			tsSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
@@ -3190,7 +3219,7 @@ func (a *App) paint() {
 	if sbOk {
 		a.selBarX = edge - 1
 	}
-	a.selRows, a.selTop = selRows, start
+	a.selRows, a.selTop, a.linkHits = selRows, start, linkHits
 	if a.selDown {
 		a.selCacheRows(start) // keep the text a held drag has already passed
 	}
@@ -4012,6 +4041,17 @@ func drawText(s tcell.Screen, x, y int, text string, st tcell.Style) {
 		s.SetContent(x, y, r, nil, st)
 		x += width(string(r))
 	}
+}
+
+// paintedWidth is the number of terminal cells drawText advances through.
+// runewidth.StringWidth can disagree for a multi-rune grapheme, while the
+// painter advances once per rune; hit rectangles must follow the painter.
+func paintedWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		n += width(string(r))
+	}
+	return n
 }
 
 func (a *App) cellColor(c theme.Color) tcell.Color {

@@ -246,12 +246,14 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.selCache = nil
 			a.poke()
 		}
+		a.linkClick = ""
 		return
 	}
 	x, y := m.Position()
 	btn := m.Buttons()
 	switch {
 	case btn&tcell.Button1 != 0 && (press || (!a.selDown && !a.selThumbDrag)): // press
+		a.linkClick = ""
 		// The rising edge names the press, because a held drag reports Button1
 		// like a press does. A report with no gesture in flight counts too: the
 		// release of a drag whose terminal never reported the button up
@@ -318,6 +320,7 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		if a.handleClick(x, y) {
 			break
 		}
+		a.linkClick = a.linkAt(x, y)
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false
@@ -329,6 +332,7 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		a.selThumbTo(y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selDown: // drag
+		a.linkClick = ""
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
@@ -349,6 +353,13 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			// No motion: a click. Clear the highlight and leave the
 			// clipboard alone, exactly like every terminal does.
 			a.selShown = false
+			target := a.linkClick
+			a.linkClick = ""
+			if target != "" && a.linkAt(x, y) == target {
+				if err := a.openLink(target); err != nil {
+					a.setNotice("link: " + err.Error())
+				}
+			}
 		} else {
 			// Resolved while the cache is still alive: the rows an edge
 			// auto-scroll pushed out of the viewport exist nowhere else.

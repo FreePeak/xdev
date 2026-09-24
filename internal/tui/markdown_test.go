@@ -122,3 +122,162 @@ func TestMarkdownTableCJKWidth(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownLinkTargetsAndBareURLs(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown("## See [PR #24775](https://github.com/pulumi/pull/24775) and https://example.com/a?x=1.", 100)
+	if got := runsString(lines[0].runs); got != "See PR #24775 and https://example.com/a?x=1." {
+		t.Fatalf("rendered heading = %q", got)
+	}
+	var got []string
+	for _, run := range lines[0].runs {
+		if run.link != "" {
+			got = append(got, run.link)
+		}
+	}
+	want := []string{"https://github.com/pulumi/pull/24775", "https://example.com/a?x=1"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("heading link targets = %q, want %q", got, want)
+	}
+}
+
+func TestMarkdownHeadingKeepsLiteralAsterisks(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	for _, src := range []string{"# Compare foo*bar*baz", "# Keep a * b * c"} {
+		lines := app.renderMarkdown(src, 100)
+		want := strings.TrimSpace(strings.TrimPrefix(src, "#"))
+		if got := runsString(lines[0].runs); got != want {
+			t.Errorf("%q rendered %q, want %q", src, got, want)
+		}
+	}
+}
+
+func TestMarkdownFormattedLinkKeepsTarget(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown("**[PR #24775](https://example.com/a)**", 100)
+	for _, run := range lines[0].runs {
+		if run.text == "PR #24775" {
+			if run.link != "https://example.com/a" {
+				t.Fatalf("formatted link = %+v", run)
+			}
+			return
+		}
+	}
+	t.Fatalf("formatted label missing from %q", runsString(lines[0].runs))
+}
+
+func TestMarkdownLinkDestinationKeepsBalancedParentheses(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown("[docs](https://example.com/a_(b))", 100)
+	if got := runsString(lines[0].runs); got != "docs" {
+		t.Fatalf("rendered text = %q", got)
+	}
+	if got := lines[0].runs[0].link; got != "https://example.com/a_(b)" {
+		t.Fatalf("link = %q", got)
+	}
+}
+
+func TestMarkdownLinkDestinationIgnoresOptionalTitle(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown(`[docs](https://example.com/docs "Docs")`, 100)
+	if got := lines[0].runs[0].link; got != "https://example.com/docs" {
+		t.Fatalf("link = %q", got)
+	}
+}
+
+func TestMarkdownLinkDestinationUnescapesTarget(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown(`[docs](https://example.com/a\(b\))`, 100)
+	if got := lines[0].runs[0].link; got != "https://example.com/a(b)" {
+		t.Fatalf("link = %q", got)
+	}
+}
+
+func TestMarkdownNonWebLinkStillHidesDestination(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown("[security](mailto:security@example.com)", 100)
+	if got := runsString(lines[0].runs); got != "security" {
+		t.Fatalf("rendered text = %q", got)
+	}
+	for _, run := range lines[0].runs {
+		if run.link != "" {
+			t.Fatalf("non-web target became clickable: %+v", run)
+		}
+	}
+}
+func TestMarkdownLinkDestinationStopsBeforeTitleParen(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown(`[docs](https://example.com "API v1)")`, 100)
+	if got := runsString(lines[0].runs); got != "docs" {
+		t.Fatalf("rendered text = %q", got)
+	}
+	if got := lines[0].runs[0].link; got != "https://example.com" {
+		t.Fatalf("link = %q", got)
+	}
+}
+
+func TestMarkdownLinkDestinationAcceptsSingleQuotedTitle(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown(`[docs](https://example.com 'Docs')`, 100)
+	if got := lines[0].runs[0].link; got != "https://example.com" {
+		t.Fatalf("link = %q", got)
+	}
+}
+
+func TestMarkdownAngleDestinationRequiresClosingParen(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lines := app.renderMarkdown(`[label](<https://example.com> trailing)`, 100)
+	for _, run := range lines[0].runs {
+		if run.link != "" && run.text == "label" {
+			t.Fatalf("malformed angle destination became clickable: %+v", run)
+		}
+	}
+}
+
+func TestMarkdownLinkTargetSurvivesWrapping(t *testing.T) {
+	app, _ := newTestApp(t, 24, 24)
+	lines := wrapLine(line{runs: app.inlineRuns("[a very long linked label](https://example.com/path)", app.mdStyle())}, 24)
+	found := false
+	for _, ln := range lines {
+		for _, run := range ln.runs {
+			if strings.Contains(run.text, "linked") {
+				if run.link != "https://example.com/path" {
+					t.Fatalf("wrapped link = %+v", run)
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("wrapped link missing from %q", joinedLines(lines))
+	}
+}
+
+func TestMarkdownRejectsNonWebLinkTarget(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	lines := app.renderMarkdown("[local](file:///tmp/x)", 80)
+	for _, run := range lines[0].runs {
+		if run.link != "" {
+			t.Fatalf("non-web target became clickable: %+v", run)
+		}
+	}
+}
+
+func TestMarkdownLinkTargetSurvivesTableCell(t *testing.T) {
+	app, _ := newTestApp(t, 40, 24)
+	lines := app.renderMarkdown("| Ref |\n| --- |\n| [docs](https://example.com/very/long/path) |", 40)
+	found := false
+	for _, ln := range lines {
+		for _, run := range ln.runs {
+			if run.text == "docs" {
+				found = true
+				if run.link != "https://example.com/very/long/path" {
+					t.Fatalf("table link = %+v", run)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("table link missing from %q", joinedLines(lines))
+	}
+}
