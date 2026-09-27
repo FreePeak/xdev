@@ -293,6 +293,12 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// is exactly the "aim back at the transcript" value.
 		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
+		// Arm the user-message menu on the user row under this press, but do
+		// not open it yet: the open waits for a no-motion release below, so a
+		// drag that starts on a prompt still selects text. A double/triple
+		// click (handleClick consuming the press) disarms it — those are word
+		// and line selections, not a menu.
+		a.msgArmed = false
 		// handleClick tracks click count from the previous
 		// release and starts a word/line selection on double/triple
 		// click, or a normal drag otherwise.
@@ -318,6 +324,9 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		if a.handleClick(x, y) {
 			break
 		}
+		if _, bi := a.userRowAt(y); bi >= 0 {
+			a.msgArmed = true
+		}
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false
@@ -329,6 +338,8 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		a.selThumbTo(y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selDown: // drag
+		// Motion cancels the armed menu: this gesture is a text selection.
+		a.msgArmed = false
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
@@ -349,6 +360,20 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			// No motion: a click. Clear the highlight and leave the
 			// clipboard alone, exactly like every terminal does.
 			a.selShown = false
+			// A click that landed on a user prompt opens its menu. The
+			// highlight is already off and the drag cache is dropped, so
+			// nothing is selected and nothing is copied — the click spent
+			// itself on the menu. The row is resolved again here rather than
+			// reusing the press's index: the ordinal the session seam needs
+			// comes from the same lookup, and a transcript that re-laid-out
+			// in between must not hand the menu a stale block.
+			if a.msgArmed {
+				a.msgArmed = false
+				if ord, bi := a.userRowAt(a.selAnchor.y); bi >= 0 {
+					a.selCache = nil
+					a.openMsgMenu(ord, bi, a.selAnchor.x, a.selAnchor.y)
+				}
+			}
 		} else {
 			// Resolved while the cache is still alive: the rows an edge
 			// auto-scroll pushed out of the viewport exist nowhere else.

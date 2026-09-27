@@ -779,6 +779,32 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		branchReplay()
 		return draft, nil
 	}
+	// userEntryID maps the i-th ❯ row of the live transcript back to the store
+	// entry that holds it. ContextResult.EntryIDs runs parallel to Messages,
+	// and harnessUserAttribution is the same filter replayTranscript counted
+	// the rows with, so the ordinal the TUI sends is the ordinal this answers
+	// for. A row with no entry (a compaction summary, a turn the store refused)
+	// reads as "", and the menu says so rather than rewinding somewhere random.
+	userEntryID := func(i int) string {
+		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		if err != nil {
+			return ""
+		}
+		n := 0
+		for j, m := range res.Messages {
+			if m.Role != ai.RoleUser || harnessUserAttribution(m) || m.Text() == "" {
+				continue
+			}
+			if n == i {
+				if j < len(res.EntryIDs) {
+					return res.EntryIDs[j]
+				}
+				return ""
+			}
+			n++
+		}
+		return ""
+	}
 	// branchToEntry moves the live leaf to an entry and replays the new
 	// branch's transcript into the TUI (/branch <id-prefix>).
 	branchToEntry := func(entryID string) error {
@@ -1087,6 +1113,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			defer running.Store(false)
 			return navigateTree(entryID, summarize)
 		},
+		UserEntryID: userEntryID,
 		New: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
@@ -2406,37 +2433,47 @@ func setCursorReset() {
 // Thinking blocks ride along (BeginThinking is a no-op while showThinking
 // is off), so resumed, forked, and branched sessions show past reasoning
 // the same way fresh turns do instead of silently dropping it.
+// harnessUserAttribution reports whether a user-role message is harness text
+// the person never typed. Those never become ❯ rows: replaying one would
+// invent a turn that never happened.
+//
+// This predicate is deliberately shared with userEntryID, which maps a ❯ row's
+// ordinal back to its store entry. The two must agree exactly — a row counted
+// differently on the way in and on the way out would point the message menu's
+// revert at the wrong message, silently.
+func harnessUserAttribution(m ai.Message) bool {
+	switch m.Attribution {
+	case agent.ContinuationAttribution,
+		agent.GoalContinuationAttribution,
+		agent.PromptContinuationAttribution,
+		agent.TurnBudgetAttribution,
+		agent.EmptyTurnAttribution:
+		return true
+	}
+	return false
+}
+
 func replayTranscript(app *tui.App, msgs []ai.Message) {
 	for _, m := range msgs {
 		switch m.Role {
 		case ai.RoleUser:
-			// Goal-continuation prompts are harness text the user never
-			// typed: replaying them as ❯ blocks would invent turns that
-			// never happened. A provider cut-off recovery is the same
-			// kind of harness turn, but it is worth seeing — it marks
-			// the episode where the stream died — so it replays as a
-			// system event instead of a user prompt (#283).
+			// Two of the harness turns are narrated as system events rather
+			// than dropped: a provider cut-off recovery marks the episode
+			// where the stream died (#283), and the turn-budget wrap-up is
+			// the only thing on screen explaining why the transcript stops
+			// mid-task.
 			if m.Attribution == agent.ContinuationAttribution {
 				app.AddSystemBlock("· recovered provider cut-off — continuation injected")
 				continue
 			}
-			if m.Attribution == agent.GoalContinuationAttribution {
-				continue
-			}
-			if m.Attribution == agent.PromptContinuationAttribution {
-				continue
-			}
-			// The turn-budget wrap-up is harness text too, but it explains
-			// why the transcript stops mid-task — so it replays as the
-			// system event that ends the episode, not as a ❯ block.
 			if m.Attribution == agent.TurnBudgetAttribution {
 				app.AddSystemBlock("· turn wrapped up — the session keeps going instead of asking you to say \"continue\"")
 				continue
 			}
-			// The empty-turn nudge is harness text, but a resumed session
-			// must still show why the model spoke twice in a row (#331).
-			if m.Attribution == agent.EmptyTurnAttribution {
-				app.AddSystemBlock("· the model answered with nothing — asked again")
+			// The rest (goal continuations, prompt continuations, the
+			// empty-turn nudge) are text nobody typed: replaying one as a ❯
+			// block would invent a turn that never happened.
+			if harnessUserAttribution(m) {
 				continue
 			}
 			if txt := m.Text(); txt != "" {
