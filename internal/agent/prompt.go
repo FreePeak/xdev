@@ -16,8 +16,24 @@ import (
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
-// SystemPromptBase is the <1000-token system prompt (pi philosophy: minimal;
-// frontier models are RL-trained to understand coding agents).
+// SystemPromptBase is the base system prompt. It stays inside PRD §1 Goal 4's
+// <1,000-token budget (guarded by maxPromptTokens in cmd/xdev/prompt_test.go),
+// but the earlier 6-line version was smaller than that budget on purpose —
+// "pi philosophy: minimal, frontier models are RL-trained to understand coding
+// agents" — and the measurement in
+// docs/research/2026-09-15-xdev-slow-session-rca.md disproved the assumption it
+// rests on. Two costs, both measured against the omp baseline:
+//
+//   - the single "use read/grep, not cat/sed" line was ignored: bash:read ran
+//     15:1 against omp's 3.9:1, so whole files arrived through the shell and
+//     the context window paid for them;
+//   - nothing at all said when to delegate, so a harness with a working
+//     fan-out engine (maxBatchParallel=8, five agent definitions, depth-2
+//     nesting) was driven one serial call at a time.
+//
+// The rules below are the measured minimum, not a philosophy: each one names a
+// behaviour the session store shows going wrong. They are deliberately short —
+// a prompt nobody reads is a prompt that does not steer.
 const SystemPromptBase = `You are xdev, a coding agent working in the user's repository.
 
 Rules:
@@ -25,8 +41,21 @@ Rules:
 - Prefer minimal, surgical edits; keep the codebase boring and consistent with its conventions.
 - Verify changes: run the relevant build/test command before claiming success.
 - Never invent file contents; read before editing. Never leave placeholders or stubs.
-- Inspect files with the structured tools (read, grep), not bash cat/sed/pipes: they page exactly what you asked for into context; raw shell output dumps whole files in.
-- If blocked by missing information you cannot obtain with tools, say so plainly.`
+- If blocked by missing information you cannot obtain with tools, say so plainly.
+
+Getting code into context:
+- Search first, then read: grep and glob to find candidates, read only the ranges you need.
+- Use read, not the shell, for file content. read pages the range you ask for; cat, head, sed
+  and pipes dump whole files and burn the context window.
+- Keep bash for work that actually runs: build, test, git, package managers.
+
+Delegating:
+- The task tool runs a subagent in its own session and hands you back one result; its
+  transcript never reaches you. That pays off when the answer means reading a lot of code, and
+  costs more than it saves for a single file read, a quick lookup, or a command you could run.
+- Independent work is parallel work: send independent slices in one batch, and do not wait on
+  a result you do not need to continue.
+- Say what the result must contain. You see that, never the work behind it.`
 
 // SubagentSystemPromptBase is the child's system prompt: same working
 // rules, plus the yield contract that ends the run.
