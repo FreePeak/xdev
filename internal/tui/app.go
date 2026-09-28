@@ -105,11 +105,11 @@ type App struct {
 	keyMap         *KeyMap // remappable keybinding layer
 	st             Status
 	// The decode window of the message being streamed: the first and last
-	// delta, and the runes between them. AddUsage closes the window and
-	// turns it into st.Rate; starting a run discards an unfinished one.
-	// Guarded by mu.
+	// delta. AddUsage closes the window and turns it into st.Rate;
+	// BeginMessage (one EventStart) discards one a dead turn left open, so
+	// the next message's rate is never divided by the previous one's elapsed
+	// time. Guarded by mu.
 	deltaFirst, deltaLast time.Time
-	deltaRunes            int64
 
 	// cmd is the active tool call the session is running (set by
 	// the agent loop via BeginActiveCommand, displayed left of the
@@ -619,26 +619,49 @@ func (a *App) AppendThinking(delta string) {
 }
 
 // noteDelta extends the decode window with one streamed delta. Callers hold
-// a.mu. Runes are counted for the live estimate only; the settled rate is the
-// provider's own token count over the same window.
+// a.mu.
 func (a *App) noteDelta(delta string) {
+	a.extendWindow()
+}
+
+// noteToolDelta extends the window for a tool call's argument stream, which
+// the provider counts in output_tokens even though the transcript never
+// renders it. Callers hold a.mu.
+func (a *App) noteToolDelta() {
+	a.extendWindow()
+}
+
+// extendWindow stamps the decode window with now: the first delta opens it,
+// every delta extends it. Callers hold a.mu.
+func (a *App) extendWindow() {
 	now := time.Now()
 	if a.deltaFirst.IsZero() {
 		a.deltaFirst = now
 	}
 	a.deltaLast = now
-	a.deltaRunes += int64(len([]rune(delta)))
 }
 
-// liveRate estimates the rate while a message is still streaming: the runes
-// received so far, at four to a token, over the window they arrived in. It is
-// replaced by the measured st.Rate the moment usage lands. Callers hold a.mu.
-func (a *App) liveRate() float64 {
-	window := a.deltaLast.Sub(a.deltaFirst)
-	if window < 100*time.Millisecond || a.deltaRunes == 0 {
-		return 0
-	}
-	return float64(a.deltaRunes/4) / window.Seconds()
+// BeginMessage closes the decode window the previous message left open. Every
+// provider opens a message with exactly one EventStart (anthropic.go:365 and
+// its three siblings), which is the only message boundary the hook layer can
+// rely on: a turn that died into the retry ladder never emits EventDone, so
+// without this its window stays open and becomes the next turn's denominator
+// — a rate several times too low that never corrects itself.
+func (a *App) BeginMessage() {
+	a.mu.Lock()
+	a.closeWindow()
+	a.mu.Unlock()
+}
+
+// NoteToolDelta extends the decode window for a tool call's argument stream.
+// The exported twin of noteDelta, for a hook layer: output_tokens counts
+// tool-argument JSON that the transcript never renders, so the window has to
+// span it or the rate divides every token the provider billed by a window
+// that stopped at the last text delta.
+func (a *App) NoteToolDelta() {
+	a.mu.Lock()
+	a.noteToolDelta()
+	a.mu.Unlock()
 }
 
 // EndThinking closes the last streaming thinking block, freezing its
@@ -773,10 +796,15 @@ func (a *App) ToggleBoxExpand() bool {
 
 // AddUsage folds token usage into the status line and measures the decode
 // rate the HUD's rate segment shows: the provider's own output-token count
-// over the window in which deltas actually arrived (omp's per-message math,
-// the same rule internal/dist/bench.go measures with). A message with no
-// usable window — nothing streamed, or a sub-100ms burst — keeps the previous
-// rate rather than inventing one.
+// over the window in which deltas actually arrived (omp's per-message math).
+// The window is per message, not per run: the first delta of a message opens
+// it and EVERY delta extends it — text, thinking, and the tool-call argument
+// deltas that output_tokens counts but the transcript never renders. A window
+// that no EventDone closed (a turn that died into the retry ladder) is
+// discarded by the next message's first delta rather than inherited as its
+// denominator. A message with no usable window — nothing streamed, or a
+// sub-100ms burst — measures no rate at all, and the segment hides rather
+// than carry a previous turn's number as if it were this one's.
 // It also refreshes CtxUsed, the live occupancy behind the HUD's context
 // segment, with total: the provider's token count for this request, cached
 // input included. ctx is what sits in the window, not only what the window had
@@ -794,9 +822,17 @@ func (a *App) AddUsage(in, out, total int64) {
 	a.st.CtxUsed = total
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
 		a.st.Rate = float64(out) / window.Seconds()
+	} else {
+		a.st.Rate = 0 // an unmeasurable message measures nothing, and says so
 	}
-	a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
+	a.closeWindow()
 	a.mu.Unlock()
+}
+
+// closeWindow drops the decode window so the next message's first delta
+// opens a fresh one instead of extending this message's. Callers hold a.mu.
+func (a *App) closeWindow() {
+	a.deltaFirst, a.deltaLast = time.Time{}, time.Time{}
 }
 
 // AddCost folds provider-reported spend (USD) into the HUD cost segment.
@@ -882,12 +918,13 @@ func (a *App) SetStatusSegments(segs []string) {
 // SetRunning toggles the spinner state and opens/closes the work span the
 // HUD's time segment measures. Starting a run also discards a decode window
 // the last one never closed — an aborted stream would otherwise make the next
-// rate divide new tokens by old elapsed time.
+// rate divide new tokens by old elapsed time. Per message, BeginMessage is
+// what does that; this is the coarser run-level backstop.
 func (a *App) SetRunning(r bool) {
 	a.mu.Lock()
 	a.markRun(r)
 	if r {
-		a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
+		a.closeWindow()
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1261,18 +1298,29 @@ func (a *App) ResumeSession(query string) error {
 // leaving the previous session's measurement on the row would lie. The time
 // segment follows the same rule: the work on a blanked history is 0 until a
 // replayed session banks its path's spans back in with SetWork. A replay also
-// measures the history back in with SetContextReplay. Streaming state is
-// untouched — callers must not be running a turn when they call this.
+// measures the history back in with SetContextReplay.
+//
+// The ↑ ↓ counters, the spend, the decode rate and the ttft are per-session
+// too, and Reset is where that boundary is: without clearing them, /resume
+// and /fork drew the previous session's numbers beside the freshly replayed
+// transcript, and a new session opened showing a ⚡ it had never measured.
+// Streaming state is otherwise untouched — callers must not be running a
+// turn when they call this.
 func (a *App) Reset() {
 	a.mu.Lock()
 	a.st.Work = 0
+	a.st.TokensIn, a.st.TokensOut = 0, 0
+	a.st.Cost = 0
+	a.st.Rate = 0
+	a.st.TTFT = 0
+	a.st.CtxUsed = 0
+	a.closeWindow()
 	a.blocks = nil
 	a.thinkFocus = -1  // the focused box went with them
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
 	a.msgv = nil       // likewise the read-only surface naming one
 	a.sm = newScrollModel()
-	a.st.CtxUsed = 0
 	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
@@ -3950,19 +3998,16 @@ func (a *App) hudSegment(name string) (text, token string) {
 		// session. "0s" is a reading, so the segment never hides.
 		return humanDur(a.activeWork()), theme.StatusLineSpend
 	case "rate":
-		// omp's ⚡ tok/s: the decode speed of the last completed message, or a
-		// live estimate from the deltas arriving right now. Never measured is
-		// never displayed — the segment hides rather than show a fake zero.
-		rate := a.st.Rate
-		if a.st.Running {
-			if live := a.liveRate(); live > 0 {
-				rate = live
-			}
-		}
-		if rate <= 0 {
+		// omp's ⚡ tok/s: the decode speed of the last message the provider
+		// gave a token count for. ONE formula, one source — a live estimate
+		// from rune counts reads up to 5x off the measured value, and swapping
+		// between the two mid-turn is what made the number look like it was
+		// drifting. Unmeasured hides; a message too short to measure clears
+		// the rate (AddUsage), so a stale reading never stands in for one.
+		if a.st.Rate <= 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("⚡ %.1f t/s", rate), theme.StatusLineSpend
+		return fmt.Sprintf("⚡ %.1f t/s", a.st.Rate), theme.StatusLineSpend
 	case "ttft":
 		// ⌚ ttft: per-turn time-to-first-token. SetTTFT writes it;
 		// the segment stays hidden until a turn has actually finished.
