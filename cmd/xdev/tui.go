@@ -2316,18 +2316,17 @@ func shortSessionID(id string) string {
 }
 
 // bangToolName names the transcript rows shell mode writes. A name of its own
-// is load-bearing: FinishTool pairs a result with the newest still-running
-// block carrying the same name, so a bang run must never match — or close —
-// the box of an agent bash call that is in flight.
+// is load-bearing: a bang run must never match — or close — the box of an
+// agent bash call that is in flight, and the name is what says so.
 const bangToolName = "!bash"
 
 // newBangRunner builds the executor behind composer shell mode (#163): it
 // runs one command through the bash tool in the session cwd and writes the
 // result as a tool box, with no model call anywhere on the path.
 //
-// Runs are serialized. FinishTool matches by tool name, so two overlapping
-// runs could mark each other's row; the lock also makes a burst of typed
-// commands execute in the order they were sent.
+// Runs are serialized. Each run gets its own call id, so the result pairs
+// with the row that opened it even if a later run starts first; the lock is
+// what makes a burst of typed commands execute in the order they were sent.
 //
 // ponytail: display-only, i.e. the transcript is the sole sink — the output
 // is not persisted to the session and never enters the model's context, which
@@ -2335,6 +2334,7 @@ const bangToolName = "!bash"
 // session.CustomEntry here and replaying it as a user-role note next turn.
 func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) error {
 	var mu sync.Mutex
+	var seq atomic.Int64
 	return func(command string) error {
 		args, err := json.Marshal(map[string]string{"command": command})
 		if err != nil {
@@ -2344,7 +2344,8 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 			mu.Lock()
 			defer mu.Unlock()
 			started := time.Now()
-			app.AddToolBlock(bangToolName, string(args))
+			id := fmt.Sprintf("bang-%d", seq.Add(1))
+			app.AddToolBlock(id, bangToolName, string(args))
 			res, execErr := tool.NewBashTool(cwd).Execute(ctx, args)
 			if execErr != nil {
 				// The transcript can only show a Result; a hard error (a bad
@@ -2353,7 +2354,7 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 				res = tool.Result{Text: execErr.Error(), IsError: true}
 			}
 			out := tool.OutcomeOf(res.Details)
-			app.FinishTool(bangToolName, res.IsError, res.Text, tui.ToolOutcome{
+			app.FinishTool(id, bangToolName, res.IsError, res.Text, tui.ToolOutcome{
 				Dur:       time.Since(started).Round(time.Millisecond).String(),
 				Exit:      out.Exit,
 				HasExit:   out.HasExit,
@@ -2369,8 +2370,8 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 // reads the naming field out of them (omp's `name · detail` row), so nothing
 // here pre-flattens the JSON into a preview the terminal then has to unpick.
 func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
-	h.ts.app.SetActiveCommand(call.Name, true)
-	h.ts.app.AddToolBlock(call.Name, string(call.Arguments))
+	h.ts.app.BeginActiveCommand(call.Name)
+	h.ts.app.AddToolBlock(call.ID, call.Name, string(call.Arguments))
 }
 
 // OnToolEnd passes the outcome facts the status footer shows — exit code,
@@ -2378,14 +2379,14 @@ func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
 // tool's own structured details.
 func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Duration) {
 	out := tool.OutcomeOf(res.Details)
-	h.ts.app.FinishTool(call.Name, res.IsError, res.Text, tui.ToolOutcome{
+	h.ts.app.FinishTool(call.ID, call.Name, res.IsError, res.Text, tui.ToolOutcome{
 		Dur:       dur.Round(time.Millisecond).String(),
 		Exit:      out.Exit,
 		HasExit:   out.HasExit,
 		Truncated: out.Truncated,
 		Diff:      out.Diff,
 	})
-	h.ts.app.SetActiveCommand(call.Name, false)
+	h.ts.app.EndActiveCommand()
 	// The dock's Files section is read from the transcript's diff blocks, and the
 	// task list from the todo tool's state: both move here, and nowhere else in a
 	// quiet session. One bump per finished call, no per-frame source read.
@@ -2557,8 +2558,8 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			if m.DurationMS > 0 {
 				dur = (time.Duration(m.DurationMS) * time.Millisecond).Round(time.Millisecond).String()
 			}
-			app.AddToolBlock(m.ToolName, "")
-			app.FinishTool(m.ToolName, m.IsError, m.Text(), tui.ToolOutcome{
+			app.AddToolBlock(m.ToolCallID, m.ToolName, "")
+			app.FinishTool(m.ToolCallID, m.ToolName, m.IsError, m.Text(), tui.ToolOutcome{
 				Dur:       dur,
 				Exit:      out.Exit,
 				HasExit:   out.HasExit,

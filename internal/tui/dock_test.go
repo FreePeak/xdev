@@ -412,8 +412,8 @@ func TestDockPaintsThePanel(t *testing.T) {
 func TestDockAnatomyIsOpencode(t *testing.T) {
 	app, scr, _ := dockTestApp(t, 160, 40)
 	app.SetDockMode(DockShow)
-	app.AddToolBlock("edit", `{"path":"internal/tui/dock.go"}`)
-	app.FinishTool("edit", false, "edited",
+	app.AddToolBlock("", "edit", `{"path":"internal/tui/dock.go"}`)
+	app.FinishTool("", "edit", false, "edited",
 		ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1,2 +1,3 @@\n ctx\n+added\n-removed\n"})
 	app.draw()
 
@@ -565,10 +565,10 @@ func TestDockFilesReadsTheTranscriptDiffs(t *testing.T) {
 	app, _ := newTestApp(t, 200, 40)
 	app.AddSystemBlock("go")
 	diff := "--- a/internal/tui/app.go\n+++ b/internal/tui/app.go\n@@ -1,2 +1,3 @@\n context\n+added\n-removed\n"
-	app.AddToolBlock("edit", `{"path":"internal/tui/app.go"}`)
-	app.FinishTool("edit", false, "edited", ToolOutcome{Diff: diff})
-	app.AddToolBlock("edit", `{"path":"internal/tui/dock.go"}`)
-	app.FinishTool("edit", false, "edited", ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1 +1 @@\n-old\n+new line\n"})
+	app.AddToolBlock("", "edit", `{"path":"internal/tui/app.go"}`)
+	app.FinishTool("", "edit", false, "edited", ToolOutcome{Diff: diff})
+	app.AddToolBlock("", "edit", `{"path":"internal/tui/dock.go"}`)
+	app.FinishTool("", "edit", false, "edited", ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1 +1 @@\n-old\n+new line\n"})
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	f, ok := app.dockChanges()

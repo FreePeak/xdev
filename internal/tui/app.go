@@ -112,11 +112,15 @@ type App struct {
 	deltaRunes            int64
 
 	// cmd is the active tool call the session is running (set by
-	// the agent loop via SetActiveCommand, displayed left of the
-	// path). cmdMu guards cmd/cmdActive separately from st so the
-	// drawer never reads a half-written command.
+	// the agent loop via BeginActiveCommand, displayed left of the
+	// path). cmdMu guards cmd/cmdActive/cmdDepth separately from st
+	// so the drawer never reads a half-written command. cmdDepth is
+	// a COUNT, not a flag: same-batch calls run concurrently, so the
+	// first of two to finish must not clear the indicator while the
+	// other is still in flight.
 	cmd       string
 	cmdActive bool
+	cmdDepth  int
 	cmdMu     sync.Mutex
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
@@ -368,13 +372,29 @@ func (a *App) SetLocation(cwd string) {
 	a.mu.Unlock()
 }
 
-// SetActiveCommand sets the running tool call shown on the status
-// row's left side (the cwd is its right neighbor). Empty name and
-// active=false clear it (a run ending, or a prompt-only turn).
-func (a *App) SetActiveCommand(name string, active bool) {
+// BeginActiveCommand notes that a tool call started, so the status row's left
+// side ("● name") shows the work. Nested calls are counted, not replaced: two
+// concurrent calls to the same tool must not clear the indicator when the
+// first one finishes.
+func (a *App) BeginActiveCommand(name string) {
 	a.cmdMu.Lock()
-	a.cmd = name
-	a.cmdActive = active
+	a.cmd, a.cmdActive = name, true
+	a.cmdDepth++
+	a.cmdMu.Unlock()
+	a.poke()
+}
+
+// EndActiveCommand notes that a started call finished. The indicator clears
+// only when the last one does.
+func (a *App) EndActiveCommand() {
+	a.cmdMu.Lock()
+	if a.cmdDepth > 0 {
+		a.cmdDepth--
+	}
+	if a.cmdDepth == 0 {
+		a.cmdActive = false
+		a.cmd = ""
+	}
 	a.cmdMu.Unlock()
 	a.poke()
 }
@@ -660,31 +680,51 @@ type ToolOutcome struct {
 
 // AddToolBlock appends one tool-call row in the running state, carrying the
 // call's raw JSON arguments: the renderer reads the naming argument out of
-// them (omp's `name · detail`), so no flattened preview is baked in here.
-func (a *App) AddToolBlock(name, rawArgs string) {
+// them (omp's `name · detail` row), so no flattened preview is baked in here.
+// callID is the provider's id for this call — the half that says WHICH call a
+// result belongs to when two calls share a name. Empty is fine for a caller
+// that pairs add and finish back to back (replay, bang mode).
+func (a *App) AddToolBlock(callID, name, rawArgs string) {
 	a.mu.Lock()
 	a.blocks = append(a.blocks, &Block{
-		Kind: KindTool, ToolName: name, Text: rawArgs,
+		Kind: KindTool, CallID: callID, ToolName: name, Text: rawArgs,
 		Status: "running", Ts: time.Now(),
 	})
 	a.mu.Unlock()
 	a.poke()
 }
 
-// FinishTool marks the last running tool block done (ok/error) and appends
-// the tool-result block carrying the full (sink-windowed) output.
-func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome) {
+// FinishTool closes the running row for THIS call (ok/error) and appends the
+// tool-result block carrying the full (sink-windowed) output.
+//
+// The row is matched by call id. Name-only matching was the bug: same-batch
+// calls run concurrently (agent MaxToolWorkers) and finish in whatever order
+// the shells do, so "the newest running row with this name" was a guess — with
+// two `bash` calls it closed the wrong row, so one command's output painted
+// under the other command's name and the pairing read as "the command never
+// ran". An id also means a replayed history (no ids) cannot steal a live row.
+// A nameless call id still falls back to the name, so a caller that only knows
+// the name keeps working.
+func (a *App) FinishTool(callID, name string, isErr bool, output string, out ToolOutcome) {
 	a.mu.Lock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
-		if b.Kind == KindTool && b.ToolName == name && b.Status == "running" {
-			if isErr {
-				b.Status = "error"
-			} else {
-				b.Status = "ok"
-			}
-			break
+		if b.Kind != KindTool || b.ToolName != name || b.Status != "running" {
+			continue
 		}
+		// An id that is known on both sides must match: a row carrying a
+		// different id belongs to another call and is not ours to close. A
+		// row with no id (replayTranscript) is still eligible, which keeps a
+		// resumed history pairing while a live call is in flight.
+		if callID != "" && b.CallID != "" && b.CallID != callID {
+			continue
+		}
+		if isErr {
+			b.Status = "error"
+		} else {
+			b.Status = "ok"
+		}
+		break
 	}
 	text := output
 	if !isErr && len(a.renderers) > 0 {
@@ -701,7 +741,7 @@ func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome
 		text = strings.TrimSuffix(text, fmt.Sprintf("\n[exit code %d]", out.Exit))
 	}
 	a.blocks = append(a.blocks, &Block{
-		Kind: KindToolDone, ToolName: name, Text: text,
+		Kind: KindToolDone, CallID: callID, ToolName: name, Text: text,
 		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
 		Truncated: out.Truncated, Diff: out.Diff,
 	})

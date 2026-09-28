@@ -35,6 +35,30 @@ func TestBasePromptCarriesToolDiscipline(t *testing.T) {
 	}
 }
 
+// TestBasePromptCarriesConfirmFirst locks the "confirm before implementing"
+// rule. Field report: a request that read like a question ("find the root
+// causes and fix why the decisions are held at gates") was answered with 12
+// turns of read/grep/curl against the wrong repo before anyone checked what
+// was actually being asked, and the run was still mid-investigation when the
+// user stopped it. The prompt is where that is fixed: the agent has to say
+// what it read the request to mean, and ask when two readings survive.
+func TestBasePromptCarriesConfirmFirst(t *testing.T) {
+	p := strings.ToLower(SystemPromptBase)
+	for _, want := range []struct {
+		needle string
+		why    string
+	}{
+		{"confirm", "nothing in the prompt asks the agent to confirm the requirement"},
+		{"ask", "the ask tool is never named as the way to resolve an ambiguous request"},
+		{"ambiguous", "there is no trigger describing WHEN asking is right"},
+		{"explicit", "nothing excuses asking when the instruction was already explicit"},
+	} {
+		if !strings.Contains(p, want.needle) {
+			t.Errorf("SystemPromptBase is missing %q — %s", want.needle, want.why)
+		}
+	}
+}
+
 // TestBasePromptKeepsItsOriginalRules guards the other direction: the
 // behavioural additions must not quietly drop a rule that was already there.
 func TestBasePromptKeepsItsOriginalRules(t *testing.T) {

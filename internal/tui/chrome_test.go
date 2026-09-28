@@ -434,8 +434,8 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 // the outline, and the ascii preset degenerates it to +-| (BRO-614).
 func TestBoxStyleFromTheme(t *testing.T) {
 	app, scr := drawnApp(t, 60, 20)
-	app.AddToolBlock("bash", `{"command":"echo hi"}`)
-	app.FinishTool("bash", false, "done", ToolOutcome{Dur: "1ms"})
+	app.AddToolBlock("", "bash", `{"command":"echo hi"}`)
+	app.FinishTool("", "bash", false, "done", ToolOutcome{Dur: "1ms"})
 	app.draw()
 	if text := screenText(scr); !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
 		t.Fatalf("default round tool box missing:\n%s", text)
