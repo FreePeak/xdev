@@ -1289,16 +1289,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	planMode.SetPropose(agent.NewProposeTool(planMode, func(context.Context, string) (bool, string) {
 		return false, "awaiting user review — the user will /plan off to approve or send revision feedback"
 	}))
-	// ask (#36): surface the question in the transcript. The blocking card
-	// that lets the user pick an option is #46's scope, so this sink is
-	// deliberately one-way — it shows the question and lets the headless
+	// ask (#36): the option card is the answer path, so its wait is the
+	// policy's wait: with ask.autoAnswer off there is no timeout, the card
+	// waits for the human until they answer, skip, or the turn ends.
 	if at, ok := reg.Get(tool.AskToolName); ok {
 		if at2, isAsk := at.(*tool.AskTool); isAsk {
-			// The overlay is the answer path; the headless policy is the
-			// skip/timeout fallback.
+			auto := lastSettings().AskAutoAnswerOn()
+			cardTimeout := lastSettings().AskTimeout()
+			if !auto {
+				cardTimeout = 0
+			}
 			at2.Sink = &askCardSink{
-				ops:      app.NewAskOps(lastSettings().AskTimeout()),
-				fallback: tool.NewHeadlessAskSink(lastSettings().AskTimeout()),
+				ops:        app.NewAskOps(cardTimeout),
+				autoAnswer: auto,
+				fallback:   tool.NewHeadlessAskSink(lastSettings().AskTimeout(), auto),
 			}
 		}
 	}
@@ -3241,14 +3245,15 @@ func dockAgentsLabel(rows []agent.RosterEntry) string {
 
 // askCardSink is the ask tool's TUI answer path (#36 → #106): the interactive
 // option card answers when the user picks one. When nobody picks, the card has
-// already waited out ask.timeout and put the question in the transcript, so
-// the sink answers with the recommended labels itself — falling through to the
-// headless sink here would wait ask.timeout a second time and then report
-// "no answer within" a wait the user never saw. The headless sink stays the
-// fallback only when no card can be shown at all.
+// already spent the policy's one wait and put the question in the transcript,
+// so the sink answers now — with the recommendation only when ask.autoAnswer
+// asked for it. Falling through to the headless sink would wait a second time
+// and then report "no answer within" a wait the user never saw; the headless
+// sink stays the fallback only when no card can be shown at all.
 type askCardSink struct {
-	ops      *tui.AskOps
-	fallback tool.AskSink
+	ops        *tui.AskOps
+	autoAnswer bool
+	fallback   tool.AskSink
 }
 
 func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskResponse, error) {
@@ -3263,7 +3268,7 @@ func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskRes
 	// whatever it says is the answer, including "nothing" (which the tool
 	// turns into its best-judgment text). Falling to the fallback here would
 	// wait ask.timeout a second time for a human who already declined.
-	resp, _ := askCardAnswer(req, ans, ok)
+	resp, _ := s.verdict(req, ans, ok)
 	return resp, nil
 }
 
@@ -3308,7 +3313,7 @@ func (s *askCardSink) AskBatch(ctx context.Context, reqs []tool.AskRequest) ([]t
 		if ok {
 			ans = answers[i]
 		}
-		out[i], _ = askCardAnswer(req, ans, ok) // one wait, same rule as Ask
+		out[i], _ = s.verdict(req, ans, ok) // one wait, same rule as Ask
 	}
 	return out, nil
 }
@@ -3321,19 +3326,21 @@ func askCardRequest(req tool.AskRequest) tui.AskRequest {
 	}
 }
 
-// askCardAnswer is one card answer's verdict. answered=false means the question
-// is unanswered even after the card (skipped or timed out with no recommended
+// verdict is one card answer's verdict. answered=false means the question is
+// unanswered even after the card (skipped, or timed out with no recommended
 // option), which the tool reports as its best-judgment text. Picking the chat
 // escape hatch IS an answer — it carries no labels on purpose — so it must not
 // be mistaken for a skip.
-func askCardAnswer(req tool.AskRequest, ans tui.AskAnswer, ok bool) (tool.AskResponse, bool) {
+func (s *askCardSink) verdict(req tool.AskRequest, ans tui.AskAnswer, ok bool) (tool.AskResponse, bool) {
 	note := strings.TrimSpace(ans.Note)
 	if ok && (len(ans.Labels) > 0 || note != "") {
 		return tool.AskResponse{Labels: ans.Labels, Note: note}, true
 	}
-	// Skip or timeout, after the card's own wait: the tool's policy is the
+	// Skip, or a timeout with auto-answer on: the tool's policy is the
 	// recommended option(s), so take them instead of waiting a second time.
-	if len(req.Recommended) > 0 {
+	// With auto-answer off nobody asked for that — the human skipped, and
+	// skipping is not permission to decide.
+	if s.autoAnswer && len(req.Recommended) > 0 {
 		return tool.AskResponse{Labels: append([]string(nil), req.Recommended...)}, true
 	}
 	return tool.AskResponse{}, false

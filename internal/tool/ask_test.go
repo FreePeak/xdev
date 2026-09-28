@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// Headless default policy: after ask.timeout the recommended options
-// answer, and without a recommendation the model is told to proceed.
+// Auto-answer on (ask.autoAnswer): after ask.timeout the recommended
+// options answer, and without a recommendation the model is told to proceed.
 func TestAskHeadlessTimeoutFallsBackToRecommended(t *testing.T) {
-	at := NewAskTool(5 * time.Millisecond)
+	at := NewAskTool(5*time.Millisecond, true)
 	args := `{"question":"which db?","options":[{"label":"sqlite"},{"label":"postgres"}],"recommended":"sqlite"}`
 	res, err := at.Execute(context.Background(), json.RawMessage(args))
 	if err != nil {
@@ -43,7 +43,7 @@ func TestAskHeadlessTimeoutFallsBackToRecommended(t *testing.T) {
 // that asks three questions must not stall CI for three minutes.
 func TestAskHeadlessBatchWaitsOnce(t *testing.T) {
 	const wait = 100 * time.Millisecond
-	at := NewAskTool(wait)
+	at := NewAskTool(wait, true)
 	args := `{"questions":[{"question":"q1","options":[{"label":"a"}],"recommended":"a"},{"question":"q2","options":[{"label":"b"}],"recommended":"b"}]}`
 	start := time.Now()
 	res, err := at.Execute(context.Background(), json.RawMessage(args))
@@ -111,14 +111,14 @@ func TestAskValidatesArguments(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			res, _ := NewAskTool(time.Millisecond).Execute(context.Background(), json.RawMessage(tc.args))
+			res, _ := NewAskTool(time.Millisecond, true).Execute(context.Background(), json.RawMessage(tc.args))
 			if !res.IsError || !strings.Contains(res.Text, tc.want) {
 				t.Fatalf("got %q (IsError=%v), want %q", res.Text, res.IsError, tc.want)
 			}
 		})
 	}
 	// A single string recommended is accepted and normalized to a list.
-	res, err := NewAskTool(time.Millisecond).Execute(context.Background(),
+	res, err := NewAskTool(time.Millisecond, true).Execute(context.Background(),
 		json.RawMessage(`{"question":"q","options":[{"label":"a"}],"recommended":"a"}`))
 	if err != nil || res.IsError {
 		t.Fatalf("string recommended rejected: %q %v", res.Text, err)
@@ -129,10 +129,69 @@ func TestAskValidatesArguments(t *testing.T) {
 func TestAskHeadlessRespectsContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	at := NewAskTool(time.Hour)
+	at := NewAskTool(time.Hour, true)
 	res, _ := at.Execute(ctx, json.RawMessage(`{"question":"q","options":[{"label":"a"}],"recommended":"a"}`))
 	if !res.IsError || !strings.Contains(res.Text, "canceled") {
 		t.Fatalf("canceled ask = %q (IsError=%v)", res.Text, res.IsError)
+	}
+}
+
+// The default (auto-answer off): an unattended question WAITS for the human
+// — no timer, no recommended answer — and only the turn ending releases it.
+// The bug this pins: the tool used to answer from the recommendation after
+// ask.timeout, so a question the user never saw silently became a decision.
+func TestAskHeadlessWaitsForTheHumanByDefault(t *testing.T) {
+	at := NewAskTool(5*time.Millisecond, false) // a wait that would have expired long ago
+	args := `{"question":"which db?","options":[{"label":"sqlite"},{"label":"postgres"}],"recommended":"sqlite"}`
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan Result, 1)
+	go func() {
+		res, err := at.Execute(ctx, json.RawMessage(args))
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		t.Fatalf("ask answered nobody: %q", res.Text)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case res := <-done:
+		if !res.IsError || !strings.Contains(res.Text, "canceled") {
+			t.Fatalf("released ask = %q (IsError=%v), want the canceled path", res.Text, res.IsError)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceling the turn must release the waiting question")
+	}
+}
+
+// A waiting batch must also wait ONCE and end on the turn, not per question
+// and not on a timer.
+func TestAskHeadlessBatchWaitsForTheHuman(t *testing.T) {
+	at := NewAskTool(5*time.Millisecond, false)
+	args := `{"questions":[{"question":"q1","options":[{"label":"a"}],"recommended":"a"},{"question":"q2","options":[{"label":"b"}],"recommended":"b"}]}`
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan Result, 1)
+	go func() {
+		res, err := at.Execute(ctx, json.RawMessage(args))
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		t.Fatalf("batch answered nobody: %q", res.Text)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceling the turn must release the waiting batch")
 	}
 }
 

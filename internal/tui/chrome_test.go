@@ -901,6 +901,58 @@ func TestAskOpsSeam(t *testing.T) {
 	}
 }
 
+// TestAskOpsSeamWithoutTimeout: with ask.autoAnswer off cmd hands the seam a
+// zero timeout, and the card must WAIT for the human — no timer resolves it
+// and answers for them. Only a pick or a canceled turn may end it.
+func TestAskOpsSeamWithoutTimeout(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	ops := app.NewAskOps(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct {
+		ans AskAnswer
+		ok  bool
+	}, 1)
+	go func() {
+		ans, ok := ops.Show(ctx, askOptions(), 0)
+		done <- struct {
+			ans AskAnswer
+			ok  bool
+		}{ans, ok}
+	}()
+	waitAsk(t, app, true)
+	pressRune(app, '2')
+	select {
+	case got := <-done:
+		if !got.ok || len(got.ans.Labels) != 1 || got.ans.Labels[0] != "postgres" {
+			t.Fatalf("waiting card answer = %+v ok=%v", got.ans, got.ok)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a zero-timeout card must still resolve on a pick")
+	}
+
+	// Left alone it must not resolve on its own.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	pending := make(chan struct{}, 1)
+	go func() {
+		ops.Show(ctx2, askOptions(), 0)
+		pending <- struct{}{}
+	}()
+	waitAsk(t, app, true)
+	select {
+	case <-pending:
+		t.Fatal("a card with no timeout must not answer by itself")
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel2()
+	select {
+	case <-pending:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a canceled turn must release the waiting card")
+	}
+}
+
 // TestAskCardNarrowWindowNotice: with no room to draw the card the question
 // still surfaces as a transcript notice, and the call resolves as a skip so
 // the tool's headless policy answers instead of the question vanishing.

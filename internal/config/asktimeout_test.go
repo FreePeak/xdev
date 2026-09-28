@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,5 +33,52 @@ func TestAskTimeoutLayersAndDecodes(t *testing.T) {
 	}
 	if got := s.AskTimeout(); got.Seconds() != 5 {
 		t.Fatalf("overlay ask timeout = %v, want 5s", got)
+	}
+}
+
+// ask.autoAnswer is the opt-in for the old behavior: off, an unanswered
+// question waits for a human instead of being answered from its
+// recommendation. ask.timeout alone must never turn it on — a user who
+// raised the wait did not ask to be auto-answered.
+func TestAskAutoAnswerDefaultsOffAndLayersOn(t *testing.T) {
+	cwd := t.TempDir()
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AskAutoAnswerOn() {
+		t.Fatal("auto-answer must be off by default")
+	}
+	var nilSettings *Settings
+	if nilSettings.AskAutoAnswerOn() {
+		t.Fatal("nil settings must report auto-answer off")
+	}
+
+	// timeout without autoAnswer: the wait is configured, the policy is not.
+	only := filepath.Join(t.TempDir(), "ask.yml")
+	if err := os.WriteFile(only, []byte("ask:\n  timeout: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err = LoadSettings(cwd, []string{only})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AskAutoAnswerOn() {
+		t.Fatal("ask.timeout must not enable auto-answer")
+	}
+
+	on := filepath.Join(t.TempDir(), "ask.yml")
+	if err := os.WriteFile(on, []byte("ask:\n  autoAnswer: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err = LoadSettings(cwd, []string{on})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.AskAutoAnswerOn() {
+		t.Fatal("ask.autoAnswer: true did not layer on")
+	}
+	if !strings.Contains(strings.Join(List(s, "x"), "\n"), "ask.autoAnswer true") {
+		t.Fatal("config list must show the opt-in")
 	}
 }
