@@ -3446,7 +3446,10 @@ func (a *App) paint() {
 	if vp < 1 {
 		vp = 1
 	}
-	a.drawTopBar(s, w, true)
+	// The top bar belongs to the main pane: its prompts get the pane's width,
+	// and a bar running the terminal's full width would print them under the
+	// panel's own surface.
+	a.drawTopBar(s, a.rightEdge(), true)
 	// The panel is built before the transcript's width is computed: with it open
 	// the lines wrap at its left edge, and a frame that painted the transcript
 	// first would have to redo every render cache entry it drew.
@@ -3898,9 +3901,12 @@ func clip(s string, maxCells int) string {
 }
 
 // composerAvail is the editor's text width in cells inside the prompt box
-// (border+pad+prefix+right pad+border).
+// (border+pad+prefix+right pad+border). It is measured against rightEdge, not
+// the terminal: with the sidebar open the box sits inside the main pane, so a
+// draft must wrap where the box ends — text the box cannot show is a wrap the
+// editor has to know about, or the prompt grows rows the box will not paint.
 func (a *App) composerAvail() int {
-	avail := a.width - 7
+	avail := a.rightEdge() - 7
 	if avail < 4 {
 		avail = 4
 	}
@@ -3955,9 +3961,12 @@ func (a *App) composerRows() int {
 
 // drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
 // editor text, blinking block cursor; the model + running spinner ride the
-// info divider, tinted with the statusLine tokens.
+// info divider, tinted with the statusLine tokens. The box is as wide as the
+// main pane, so the sidebar's columns are its right edge — the prompt is a
+// window of its own now, not a row that runs the terminal's full width under
+// the panel.
 func (a *App) drawComposer(yTop int) {
-	w := a.width
+	w := a.rightEdge()
 	if w < 6 || yTop < 1 {
 		return
 	}
@@ -4122,40 +4131,45 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 // the configured HUD segments (settings statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
-// on a small terminal.
+// on a small terminal. The row belongs to the main pane: its budget and its
+// right edge are the pane's, not the terminal's, so the metrics never paint
+// into the sidebar's columns.
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
+	w := a.rightEdge()
 	// The running tool call leads the row: "● <name> · cd <cwd>" on
 	// the left, the configured segments right-aligned.
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		pathLbl := pathDisplay(a.cwd, a.width-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
+		pathLbl := pathDisplay(a.cwd, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
 		if pathLbl != "" {
 			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			drawText(a.scr, 2, y, pathLbl, pathSt)
 		}
-		a.drawHUD(y, 2+width(cmdLabel)+width(pathLbl)+2, parts)
+		a.drawHUD(y, w, 2+width(cmdLabel)+width(pathLbl)+2, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the path is what shrinks.
-	budget := a.width - 2 - hudEssentialWidth(parts) - 1
+	budget := w - 2 - hudEssentialWidth(parts) - 1
 	lbl := pathDisplay(a.cwd, budget-2)
 	if lbl != "" {
 		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		drawText(a.scr, 2, y, lbl, pathSt)
 	}
-	a.drawHUD(y, 2+width(lbl), parts)
+	a.drawHUD(y, w, 2+width(lbl), parts)
 }
 
 // drawHUD renders the configured status segments right-aligned on the
-// status row (caller holds a.mu). Segment colors come from the
-// statusLine* tokens, the separators from statusLineSep, and statusLineBg
-// fills the row when the theme sets one. The metrics win a narrow row:
-// the path is drawn first against the space the essential segments need,
-// and any segment that still does not fit is dropped by keep-rank (theme
-// and model first, the work timer and the rate last).
-func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
+// status row (caller holds a.mu), within the main pane's own width — w is the
+// pane's right edge, not the terminal's, so the metrics stop at the sidebar
+// instead of running under it. Segment colors come from the statusLine*
+// tokens, the separators from statusLineSep, and statusLineBg fills the row
+// when the theme sets one. The metrics win a narrow row: the path is drawn
+// first against the space the essential segments need, and any segment that
+// still does not fit is dropped by keep-rank (theme and model first, the work
+// timer and the rate last).
+func (a *App) drawHUD(y, w, leftEnd int, parts []hudPart) {
 	if len(parts) == 0 {
 		return
 	}
@@ -4170,7 +4184,7 @@ func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
 		}
 		return n
 	}
-	end := a.width - 2
+	end := w - 2
 	for len(parts) > 0 && end-widthOf(parts) < leftEnd+1 {
 		drop := 0
 		for i, p := range parts {
