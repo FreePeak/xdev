@@ -206,6 +206,16 @@ const maxPostContentContinuations = 3
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
 
+// DefaultToolTimeout bounds one tool call that declares no bound of its own
+// (bash's schema timeout and ask's configured wait are theirs). A wedged
+// non-bash call used to hold a worker, and through it the turn and the
+// session, until the user gave up and restarted.
+//
+// ponytail: one flat ceiling, not per-tool tuning — it bounds the worst case,
+// it does not claim what each tool needs. Upgrade path if it ever shows up in
+// practice: a per-tool `timeout` field defaulted from here.
+const DefaultToolTimeout = 10 * time.Minute
+
 // ApprovalFunc asks the user to approve one tool call. It returns the
 // verdict; an implementation with no user available (print mode, a child
 // agent) must return false, which is the safe answer.
@@ -279,6 +289,10 @@ type Agent struct {
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
+	// ToolTimeout bounds one tool call that carries no bound of its own
+	// (bash's schema timeout, ask's configured wait); 0 means
+	// DefaultToolTimeout.
+	ToolTimeout time.Duration
 	// Offload is the artifact-offload seam for oversized tool results
 	// (#283 RCA §4, backend owned by #115); nil keeps results verbatim.
 	Offload ArtifactOffloader
@@ -352,6 +366,13 @@ type Agent struct {
 
 	// prewalk is the live state machine; Run is single-goroutine, no lock.
 	prewalk prewalkState
+
+	// repeats is the run's consecutive-repeat chain (repeat.go): the last
+	// tool call's identity key and how many times it has run in a row, used
+	// to notice a model that is paying a full round trip to re-ask the same
+	// question. Single-goroutine Run like the rest of this struct — the chain
+	// is advanced on the loop's own goroutine, never from a tool worker.
+	repeats repeatChain
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -506,7 +527,14 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		emit("turn_start", map[string]any{"turn": turn})
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
-		for _, s := range a.drainSteering() {
+		// A steering message is a human changing the instruction, so it ends
+		// the repeat chain: the same call twice around a new instruction is
+		// compliance, not a loop (repeat.go).
+		steering := a.drainSteering()
+		if len(steering) > 0 {
+			a.repeats = repeatChain{}
+		}
+		for _, s := range steering {
 			m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
 			history = append(history, m)
 			a.persist(m)
@@ -1385,6 +1413,13 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 		}(i)
 	}
 	wg.Wait()
+	// The repeat chain counts in MODEL order, not worker-finish order: the
+	// loop the guard exists to catch is a sequence of ISSUED calls, and a
+	// batch whose workers finished out of order must still count as the
+	// model wrote it. Single-goroutine here, after the join, so no lock.
+	for i := range out {
+		a.repeatNotice(&out[i], calls[i])
+	}
 	return out
 }
 
@@ -1410,19 +1445,37 @@ func (o toolOutcome) unwrap() (tool.Result, error) {
 	return o.res, o.err
 }
 
-// executeTool runs one tool call, bounding how long a cancelled turn waits for
-// it. The loop already refuses to *start* a tool once cancelled; that answers
-// the question for every tool, including the ones with no entry check of their
-// own (grep, glob) and the third-party ext_*/mcp_* tools whose code we cannot
-// assume checks anything. It cannot un-start a call that was already running
-// when the cancel landed, and waiting on it forever means a stopped turn is not
-// stopped — the user pressed cancel and the harness is still blocked on
-// someone else's loop. So: wait for the tool, and if cancellation arrives first,
-// give it the grace period to notice, then stop waiting and say so. The
-// abandoned call keeps running (Go cannot kill a goroutine); its result is
-// dropped and any side effect it makes after this point is named as untracked
-// rather than reported as cancelled-clean.
+// executeTool runs one tool call under two bounds.
+//
+// The cancel bound: the loop already refuses to *start* a tool once cancelled;
+// that answers the question for every tool, including the ones with no entry
+// check of their own (grep, glob) and the third-party ext_*/mcp_* tools whose
+// code we cannot assume checks anything. It cannot un-start a call that was
+// already running when the cancel landed, and waiting on it forever means a
+// stopped turn is not stopped — the user pressed cancel and the harness is
+// still blocked on someone else's loop. So: wait for the tool, and if
+// cancellation arrives first, give it the grace period to notice, then stop
+// waiting and say so.
+//
+// The deadline bound covers the other direction: a tool that simply never
+// returns — no cancel, no error, a wedged read or an MCP server that stopped
+// answering — holds its worker, and through it the turn and the session,
+// with nothing on screen to explain why. bash and ask carry their own bounds
+// (the schema `timeout`, the configured wait); everything else inherits
+// ToolTimeout. The deadline lives on a per-call context, not the turn's, so a
+// tool that honours it returns a real error through the normal path and the
+// grace is never spent.
+//
+// Either way the abandoned call keeps running (Go cannot kill a goroutine);
+// its result is dropped and any side effect it makes after this point is named
+// as untracked rather than reported as cancelled-clean.
 func (a *Agent) executeTool(ctx context.Context, t tool.Tool, args json.RawMessage) (tool.Result, error) {
+	timeout := a.ToolTimeout
+	if timeout <= 0 {
+		timeout = DefaultToolTimeout
+	}
+	tctx, endCall := context.WithTimeout(ctx, timeout)
+	defer endCall()
 	done := make(chan toolOutcome, 1) // buffered: an abandoned tool never parks on the send
 	go func() {
 		out := toolOutcome{}
@@ -1432,12 +1485,24 @@ func (a *Agent) executeTool(ctx context.Context, t tool.Tool, args json.RawMessa
 			}
 			done <- out
 		}()
-		out.res, out.err = t.Execute(ctx, args)
+		out.res, out.err = t.Execute(tctx, args)
 	}()
 	select {
 	case o := <-done:
 		return o.unwrap()
 	case <-ctx.Done():
+	case <-tctx.Done():
+		// The deadline, not the user. Naming it a cancellation would tell the
+		// model someone stopped it, and invite a re-run of a call whose side
+		// effects are unknown — the same words the cancel path below uses,
+		// for the same reason.
+		if ctx.Err() == nil {
+			return tool.Result{
+				Text: fmt.Sprintf("tool %q did not finish within %s and was abandoned: its result is unknown, and any side effect it still makes is not reported by this turn",
+					t.Name(), timeout),
+				IsError: true,
+			}, nil
+		}
 	}
 	grace := a.CancelGrace
 	if grace <= 0 {

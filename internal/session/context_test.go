@@ -360,3 +360,55 @@ func TestBuildContextHealsEmptyToolOutput(t *testing.T) {
 		t.Fatalf("call id lost: %q", last.ToolCallID)
 	}
 }
+
+// TestBuildContextAnswersAnUnansweredToolCall covers the interrupted session:
+// a turn whose only content was tool calls, none of which ever produced a
+// result. Neutralizing strips the calls and leaves a zero-block assistant
+// message, which on the openai-completions wire is `"content": ""` — a
+// request upstreams reject or silently drop. The rebuild must instead say
+// the call never came back, and say it in a way that tells the model to run
+// it again rather than assume it succeeded.
+func TestBuildContextAnswersAnUnansweredToolCall(t *testing.T) {
+	entries := []Entry{
+		userMsg("11111111", "", "read the config"),
+		asstMsg("22222222", "11111111", "", ai.ToolCallBlock{ID: "call_1", Name: "read", Arguments: []byte(`{}`)}),
+	}
+	r := ctx(t, entries, "22222222")
+	if len(r.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2 (user + the answered assistant turn)", len(r.Messages))
+	}
+	last := r.Messages[1]
+	if last.Role != ai.RoleAssistant {
+		t.Fatalf("last role = %s, want the assistant turn kept", last.Role)
+	}
+	if len(last.Content) == 0 {
+		t.Fatal("assistant turn replayed with zero content blocks: the wire gets an empty message")
+	}
+	if len(last.ToolCalls()) != 0 {
+		t.Fatalf("dangling call survived neutralization: %d", len(last.ToolCalls()))
+	}
+	if got := last.Text(); got != UnansweredToolCallNotice {
+		t.Fatalf("notice = %q, want %q", got, UnansweredToolCallNotice)
+	}
+}
+
+// TestBuildContextKeepsTextAlongsideAnUnansweredCall: only a turn that lost
+// EVERY block needs the notice. One that still has text keeps it — the notice
+// would be noise the model has to read past.
+func TestBuildContextKeepsTextAlongsideAnUnansweredCall(t *testing.T) {
+	entries := []Entry{
+		userMsg("11111111", "", "read the config"),
+		&MessageEntry{
+			Env:     Envelope{Type: TypeMessage, ID: "22222222", ParentID: "11111111"},
+			Message: ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "checking now"}, ai.ToolCallBlock{ID: "call_1", Name: "read", Arguments: []byte(`{}`)}}},
+		},
+	}
+	r := ctx(t, entries, "22222222")
+	last := r.Messages[1]
+	if last.Text() != "checking now" {
+		t.Fatalf("text = %q, want it kept", last.Text())
+	}
+	if strings.Contains(last.Text(), UnansweredToolCallNotice) {
+		t.Fatal("notice injected into a turn that kept its text")
+	}
+}

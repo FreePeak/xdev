@@ -414,3 +414,54 @@ func TestTaskToolResolvesAgentsPerSpawn(t *testing.T) {
 		t.Fatalf("description cached past the file change")
 	}
 }
+
+// maxBatchParallel bounds how many items run at once; nothing bounded how many
+// the model could ASK for. A 500-item batch was admitted whole: 500 child
+// loops, each with a session and a provider stream, then a 500-section report
+// handed back to the parent. The refusal must name both the limit and the fix.
+func TestTaskToolRefusesAnOversizeBatch(t *testing.T) {
+	p := &fakeProvider{}
+	items := make([]string, maxBatchItems+1)
+	for i := range items {
+		items[i] = `{"task":"do it"}`
+	}
+	res, err := taskTool(p).Execute(context.Background(),
+		json.RawMessage(`{"tasks":[`+strings.Join(items, ",")+`]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatalf("a %d-item batch was admitted:\n%s", maxBatchItems+1, res.Text)
+	}
+	for _, want := range []string{"exceeds", "separate batches"} {
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("refusal missing %q:\n%s", want, res.Text)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.gotReqs) != 0 {
+		t.Fatalf("a refused batch spawned %d children", len(p.gotReqs))
+	}
+}
+
+// The ceiling must not reject a batch the tool advertises as fine.
+func TestTaskToolAcceptsABatchAtTheLimit(t *testing.T) {
+	scripts := make([]fakeScript, maxBatchItems)
+	for i := range scripts {
+		scripts[i] = fakeScript{events: yieldEvents(`{"result":"OK"}`)}
+	}
+	p := &fakeProvider{calls: scripts}
+	items := make([]string, maxBatchItems)
+	for i := range items {
+		items[i] = `{"task":"do it"}`
+	}
+	res, err := taskTool(p).Execute(context.Background(),
+		json.RawMessage(`{"tasks":[`+strings.Join(items, ",")+`]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("a %d-item batch (the limit) was refused: %s", maxBatchItems, res.Text)
+	}
+}
