@@ -451,7 +451,7 @@ func (st *FallbackState) onSwitch(prev, reason string, now time.Time) {
 // fallbackReasons are the switch reasons that install a fallback. A prewalk
 // or plan-yolo handoff is a deliberate model change, not a fallback, and
 // must never be auto-reverted.
-var fallbackReasons = map[string]bool{"recovery": true, "usage-limit": true, "reserve": true}
+var fallbackReasons = map[string]bool{"recovery": true, "usage-limit": true, "reserve": true, "health-check": true}
 
 // suppressed reports whether a selector is inside a cooldown window or its
 // provider has a banked reset pending: the ladder must not select a target

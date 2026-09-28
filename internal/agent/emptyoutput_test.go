@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -100,18 +101,52 @@ func TestBadRequestMissingOutputRetriesInsteadOfEndingTheRun(t *testing.T) {
 		t.Fatalf("stream calls = %d, want 2 (the 400 then the retry)", len(p.gotReqs))
 	}
 
-	// The other direction: a plain 400 (ClassBadRequest) is now retried
-	// from the current context window, bounded by escalation rounds.
-	// After the bound is spent the error surfaces instead of looping.
+	// The other direction: a plain 400 (ClassBadRequest) is retried only
+	// within the bounded escalation ladder; retry.infinite does not turn a
+	// provider-rejected request into an outage replay.
 	plain := &ai.HTTPError{API: "openai-completions", Status: 400, Body: `{"error":{"message":"bad model"}}`}
 	p2 := &fakeProvider{calls: []fakeScript{{err: plain}, {err: plain}, {err: plain}}}
 	a2, _, p2 := storeAgent(t, p2, CompactionConfig{})
 	a2.Retry = fastRetry()
-	if _, err := a2.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err == nil {
-		t.Fatal("a plain 400 must still end the run after retries")
+	_, err = a2.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("a plain 400 must surface after bounded retries")
 	}
 	want := 1 + maxEscalationRounds
 	if len(p2.gotReqs) != want {
 		t.Fatalf("stream calls = %d, want %d (initial + escalation retries)", len(p2.gotReqs), want)
+	}
+}
+
+// TestOpaqueBadRequestDoesNotUseAllTargetsDownNotice pins the incident from
+// 2026-09-24: onegw returned a gateway-shaped 400 with no field detail, so
+// ClassBadRequest fell into the default recovery branch and infinite retry
+// kept replaying it. A bad request must surface, not masquerade as an outage.
+func TestOpaqueBadRequestDoesNotUseAllTargetsDownNotice(t *testing.T) {
+	bad := &ai.HTTPError{API: "openai-completions", Status: 400,
+		Body: `{"error":{"code":"400","message":"Upstream request failed: [invalid_request_error] invalid request","type":"invalid_request_error"}}`}
+	p := &fakeProvider{calls: []fakeScript{{err: bad}, {err: bad}, {err: bad}}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+	var notices []error
+	a.Hooks = TurnHooksFunc{OnEventF: func(ev ai.Event) {
+		if ev.Type == ai.EventError && strings.Contains(ev.Err.Error(), "all targets down") {
+			notices = append(notices, ev.Err)
+		}
+	}}
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	var httpErr *ai.HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %v, want the provider HTTP error", err)
+	}
+	if httpErr.Status != 400 || !strings.Contains(httpErr.Body, "invalid request") {
+		t.Fatalf("HTTP error = %+v, want the opaque 400", httpErr)
+	}
+	want := 1 + maxEscalationRounds
+	if len(p.gotReqs) != want {
+		t.Fatalf("stream calls = %d, want %d bounded retries", len(p.gotReqs), want)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("all-targets-down notices = %v, want none for a bad request", notices)
 	}
 }

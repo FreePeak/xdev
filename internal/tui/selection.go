@@ -295,6 +295,12 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// is exactly the "aim back at the transcript" value.
 		a.thinkFocus = a.thinkBoxAt(y)
 		a.selThumbDrag = false
+		// Arm the user-message menu on the user row under this press, but do
+		// not open it yet: the open waits for a no-motion release below, so a
+		// drag that starts on a prompt still selects text. A double/triple
+		// click (handleClick consuming the press) disarms it — those are word
+		// and line selections, not a menu.
+		a.msgArmed = false
 		// handleClick tracks click count from the previous
 		// release and starts a word/line selection on double/triple
 		// click, or a normal drag otherwise.
@@ -320,7 +326,14 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		if a.handleClick(x, y) {
 			break
 		}
+		// Both click affordances arm from the same press and are cancelled
+		// by the same motion, so they coexist: a link is hit-tested against
+		// the exact painted run, a menu against the user row. Whichever the
+		// release finds decides the click.
 		a.linkClick = a.linkAt(x, y)
+		if _, bi := a.userRowAt(y); bi >= 0 {
+			a.msgArmed = true
+		}
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false
@@ -332,7 +345,10 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		a.selThumbTo(y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selDown: // drag
+		// Motion cancels both armed affordances: this gesture is a text
+		// selection, not a click that should open anything.
 		a.linkClick = ""
+		a.msgArmed = false
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
@@ -355,9 +371,35 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.selShown = false
 			target := a.linkClick
 			a.linkClick = ""
+			// A link outranks the user-prompt menu when both are armed: the
+			// target was revalidated against the very pixels released on, so
+			// the click names a URL, whereas the menu is a row-level fallback
+			// for the prompt as a whole. The two cannot collide today — a
+			// user block is painted as a banded "❯ " prefix plus wrapped plain
+			// text and never goes through the Markdown renderer, so it carries
+			// no link hit — but the arming is shared, and if a user row ever
+			// does gain one, the link is the more specific claim on the click.
+			opened := false
 			if target != "" && a.linkAt(x, y) == target {
 				if err := a.openLink(target); err != nil {
 					a.setNotice("link: " + err.Error())
+				}
+				opened = true
+			}
+			// A click that landed on a user prompt opens its menu. The
+			// highlight is already off and the drag cache is dropped, so
+			// nothing is selected and nothing is copied — the click spent
+			// itself on the menu. The row is resolved again here rather than
+			// reusing the press's index: the ordinal the session seam needs
+			// comes from the same lookup, and a transcript that re-laid-out
+			// in between must not hand the menu a stale block.
+			if a.msgArmed {
+				a.msgArmed = false
+				if !opened {
+					if ord, bi := a.userRowAt(a.selAnchor.y); bi >= 0 {
+						a.selCache = nil
+						a.openMsgMenu(ord, bi, a.selAnchor.x, a.selAnchor.y)
+					}
 				}
 			}
 		} else {

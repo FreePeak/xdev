@@ -72,6 +72,253 @@ func (echoTool) Execute(_ context.Context, args json.RawMessage) (tool.Result, e
 	return tool.Result{Text: a.Text, Details: map[string]any{"echoed": a.Text}}, nil
 }
 
+// scriptedHealthProvider controls the pre-turn liveness probe independently
+// from Stream so a test can keep the API down for several probes and then
+// let the same turn continue.
+type scriptedHealthProvider struct {
+	*fakeProvider
+	healthMu  sync.Mutex
+	health    []error
+	healthPos int
+}
+
+func (p *scriptedHealthProvider) HealthCheck(context.Context) error {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.healthPos >= len(p.health) {
+		return nil
+	}
+	err := p.health[p.healthPos]
+	p.healthPos++
+	return err
+}
+
+func (p *scriptedHealthProvider) healthCalls() int {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.healthPos
+}
+
+// TestInfiniteHealthCheckAnnouncesWait pins the visible-wait contract: each
+// health-check retry raises one AllTargetsDownError notice on the event stream,
+// with the provider failure as its cause.
+func TestInfiniteHealthCheckAnnouncesWait(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{
+			{events: []ai.Event{textEvent("ok"), doneEvent("ok")}},
+		}},
+		health: []error{errors.New("connection refused"), nil},
+	}
+	a, s, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	var mu sync.Mutex
+	var notices []error
+	a.Hooks = TurnHooksFunc{
+		OnEventF: func(ev ai.Event) {
+			if ev.Type == ai.EventError {
+				mu.Lock()
+				notices = append(notices, ev.Err)
+				mu.Unlock()
+			}
+		},
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a.Provider = p
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notices) != 1 {
+		t.Fatalf("health-check notices = %d, want 1", len(notices))
+	}
+	var down *AllTargetsDownError
+	if !errors.As(notices[0], &down) || down.Round != 1 || down.Delay <= 0 || down.LastErr == nil {
+		t.Fatalf("health-check notice = %v, want round/delay/provider failure", notices[0])
+	}
+}
+
+func TestInfiniteHealthCheckWaitsForProviderRecovery(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{
+			{events: []ai.Event{textEvent("back up"), doneEvent("back up")}},
+		}},
+		health: []error{
+			errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"),
+			errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"),
+			nil,
+		},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("health-check recovery must resume the turn: %v", err)
+	}
+	if final.Text() != "back up" {
+		t.Fatalf("final = %q, want recovered response", final.Text())
+	}
+	if got := p.healthCalls(); got != 3 {
+		t.Fatalf("health checks = %d, want 3 (two failures then success)", got)
+	}
+}
+
+func TestHealthCheckBoundedPolicyStillSurfaces(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{},
+		health: []error{
+			errors.New("connection refused"),
+			errors.New("connection refused"),
+			errors.New("connection refused"),
+		},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = oneShotRetry()
+
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("bounded health-check policy must surface the outage")
+	}
+	if !strings.Contains(err.Error(), "health check failed and all targets drained") {
+		t.Fatalf("error = %v, want health-check exhaustion", err)
+	}
+	if len(p.fakeProvider.gotReqs) != 0 {
+		t.Fatalf("stream calls = %d, want none while the provider is down", len(p.fakeProvider.gotReqs))
+	}
+}
+
+func TestHealthCheckEscalationIsSeparateFromStreamEscalation(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{
+			{err: errors.New("transient stream failure")},
+			{err: errors.New("transient stream failure")},
+			{events: []ai.Event{textEvent("ok"), doneEvent("ok")}},
+		}},
+		health: []error{
+			errors.New("connection refused"),
+			errors.New("connection refused"),
+			nil,
+		},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = oneShotRetry()
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("health retries must not consume stream escalation rounds: %v", err)
+	}
+	if final.Text() != "ok" {
+		t.Fatalf("final = %q, want recovered response", final.Text())
+	}
+}
+
+func TestInfiniteHealthCheckRetryIsCancellable(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{},
+		health:       []error{errors.New("connection refused")},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Hour, MaxDelay: time.Hour, Infinite: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Run(ctx, "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled health-check retry did not stop")
+	}
+}
+
+func TestHealthCheckRevertsPrimaryAfterFallbackCooldown(t *testing.T) {
+	primary := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{okScript("primary")}},
+		health:       []error{nil},
+	}
+	var a *Agent
+	fallback := &healthCheckFuncProvider{
+		fakeProvider: &fakeProvider{},
+		check: func(context.Context) error {
+			// Simulate the cooldown expiring while the fallback probe is in flight.
+			a.Fallback.revertAt = time.Now().Add(-time.Second)
+			return errors.New("connection refused")
+		},
+	}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	a = &Agent{
+		Provider:   fallback,
+		Model:      "dev",
+		Tools:      reg,
+		Compaction: CompactionConfig{ContextWindow: 64000},
+		Failovers:  []FailoverTarget{{Provider: fallback, Model: "dev"}},
+		Retry:      oneShotRetry(),
+		Fallback:   &FallbackState{Cooldown: time.Hour},
+	}
+	a.Fallback.primary, a.Fallback.primaryModel, a.Fallback.primaryWindow = primary, "free", 200000
+	a.curTarget = 1
+	a.Fallback.switched, a.Fallback.revertAt = true, time.Now().Add(time.Hour)
+	a.Fallback.cooldowns = map[string]time.Time{}
+
+	msg, err := a.Run(context.Background(), "sys", userHistory())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if msg.Text() != "primary" || a.curTarget != 0 {
+		t.Fatalf("final = %q, curTarget = %d; want the restored primary", msg.Text(), a.curTarget)
+	}
+}
+
+type healthCheckFuncProvider struct {
+	*fakeProvider
+	check func(context.Context) error
+}
+
+func (p *healthCheckFuncProvider) HealthCheck(ctx context.Context) error { return p.check(ctx) }
+
+type canceledHealthProvider struct {
+	*fakeProvider
+	cancel context.CancelFunc
+}
+
+func (p *canceledHealthProvider) HealthCheck(ctx context.Context) error {
+	p.cancel()
+	return ctx.Err()
+}
+
+func TestCanceledHealthCheckDoesNotFailOver(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	primary := &canceledHealthProvider{fakeProvider: &fakeProvider{}, cancel: cancel}
+	fallback := named("fallback", &fakeProvider{calls: []fakeScript{okScript("fallback")}})
+	a := &Agent{
+		Provider:  primary,
+		Model:     "m",
+		Failovers: []FailoverTarget{{Provider: fallback, Model: "m"}},
+		Retry:     RetryPolicy{MaxRetries: 1, BaseDelay: time.Hour, MaxDelay: time.Hour, Infinite: true},
+	}
+
+	_, err := a.Run(ctx, "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
+	}
+	if a.Provider != primary {
+		t.Fatal("cancelled health check must not switch provider")
+	}
+}
+
 func runAgent(t *testing.T, p *fakeProvider) (*Agent, *[]*ai.Message, *[]*ai.Message) {
 	t.Helper()
 	reg := tool.NewRegistry()
@@ -342,6 +589,7 @@ func TestEmptyTurnStallSurfacesAsAnError(t *testing.T) {
 		t.Fatalf("stream requests = %d, want %d", n, maxEmptyTurnNudges+1)
 	}
 }
+
 // TestEmptyTurnRetryAllErrors pins the retry-all-errors path: with
 // RetryAllErrors on, a model that answers nothing after the nudges
 // are spent keeps going — the loop rebuilds context, waits a
@@ -371,6 +619,7 @@ func TestEmptyTurnRetryAllErrors(t *testing.T) {
 		t.Fatalf("stream requests = %d, want 3", n)
 	}
 }
+
 // TestEmptyTurnRetryAllErrorsStillStalls pins the other side: with
 // RetryAllErrors on but no store to rebuild from, the flag has no
 // recovery path and the run still ends with an error — it burns

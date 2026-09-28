@@ -533,3 +533,126 @@ func TestBranchesFindsForkPoints(t *testing.T) {
 		t.Fatalf("branches = %v, want [r] (r has two children b1,b2)", bs)
 	}
 }
+
+func TestLatestScheduleSurvivesWindowing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "window-schedule.jsonl")
+	s := OpenMem("/tmp/x", "window schedule")
+	change := &ScheduleChangedEntry{
+		Env:      Envelope{Type: TypeScheduleChange, ID: "schedule", Timestamp: ts0},
+		Sequence: 1,
+		Active:   []SchedulePayload{{ID: "schedule-1", Kind: "every", Prompt: "keep", EverySeconds: 300, ScheduledAt: ts0}},
+	}
+	if err := s.Append(change); err != nil {
+		t.Fatal(err)
+	}
+	// Cross the batching threshold before the boundary so the historical
+	// schedule entry is actually dropped from context materialization.
+	for i := 0; i < loadWindowBatch; i++ {
+		if err := s.Append(userMsg("", "", "noise")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Append(&CompactionEntry{Env: Envelope{Type: TypeCompaction, ID: "compact", Timestamp: ts0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureOnDisk(path, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if got := reopened.LatestSchedule(); got == nil || got.Active[0].ID != "schedule-1" {
+		t.Fatalf("latest schedule after window = %+v", got)
+	}
+	if reopened.Entries()[0].Envelope().ID == "schedule" {
+		t.Fatal("windowing did not prune old schedule entry")
+	}
+}
+
+func TestScheduleProjectionFollowsBranchesAndReset(t *testing.T) {
+	s := OpenMem("/tmp/x", "schedule branches")
+	appendSchedule := func(id, prompt string) {
+		t.Helper()
+		if err := s.Append(&ScheduleChangedEntry{Env: Envelope{ID: id, Timestamp: ts0}, Active: []SchedulePayload{{ID: prompt}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendSchedule("one", "one")
+	root := s.LeafID()
+	if err := s.Append(userMsg("side", "", "side")); err != nil {
+		t.Fatal(err)
+	}
+	appendSchedule("two", "two")
+	if err := s.Branch(root); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.LatestScheduleOnPath(); got == nil || got.Active[0].ID != "one" {
+		t.Fatalf("branch projection = %+v", got)
+	}
+	if got := s.LatestSchedule(); got == nil || got.Active[0].ID != "two" {
+		t.Fatalf("chronological projection = %+v", got)
+	}
+	if err := s.ResetLeaf(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.LatestScheduleOnPath(); got != nil {
+		t.Fatalf("reset projection = %+v", got)
+	}
+	if got := s.LatestSchedule(); got == nil || got.Active[0].ID != "two" {
+		t.Fatalf("chronological projection after reset = %+v", got)
+	}
+}
+
+func TestScheduleSnapshotsAreCopies(t *testing.T) {
+	s := OpenMem("/tmp/x", "schedule copies")
+	entry := &ScheduleChangedEntry{Env: Envelope{ID: "one", Timestamp: ts0}, Active: []SchedulePayload{{ID: "one"}}}
+	if err := s.Append(entry); err != nil {
+		t.Fatal(err)
+	}
+	entry.Active[0].ID = "mutated"
+	got := s.LatestSchedule()
+	got.Active[0].ID = "also-mutated"
+	if again := s.LatestSchedule(); again == nil || again.Active[0].ID != "one" {
+		t.Fatalf("stored snapshot mutated: %+v", again)
+	}
+}
+
+func TestAppendRollbackRestoresScheduleProjection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollback.jsonl")
+	s := OpenMem("/tmp/x", "schedule rollback")
+	if _, err := s.EnsureOnDisk(path, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(&ScheduleChangedEntry{Env: Envelope{ID: "one", Timestamp: ts0}, Active: []SchedulePayload{{ID: "one"}}}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entry := &ScheduleChangedEntry{Env: Envelope{ID: "two", Timestamp: ts0}, Active: []SchedulePayload{{ID: "two"}}}
+	if err := s.Append(entry); err == nil {
+		t.Fatal("append over foreign record succeeded")
+	}
+	if s.Entry("two") != nil || s.LeafID() != "one" {
+		t.Fatal("tree mutation survived failed append")
+	}
+	if got := s.LatestSchedule(); got == nil || got.Active[0].ID != "one" {
+		t.Fatalf("schedule projection survived failed append: %+v", got)
+	}
+	if entry.Envelope().ID != "two" {
+		t.Fatal("failed append did not restore entry envelope")
+	}
+}

@@ -783,10 +783,11 @@ func turnContentEmitted(err error) bool {
 // content transient errors retain the partial message and continue once
 // (replaying would double-emit the visible content); context overflow
 // promotes to a bigger window first and compacts only at the top of the
-// ladder. Auth / bad-request / unknown failures are retried from the
-// current context window (bounded by maxEscalationRounds; retry.infinite
-// lifts the bound) so a transient upstream verdict does not end the
-// session. The returned history carries everything recovery appended
+// ladder. Auth / bad-request / unknown failures are handled by their own
+// bounded or terminal paths; retry.infinite only lifts transient recovery
+// bounds, never a provider-rejected request shape. The returned history
+// carries everything recovery appended (partials, continuation prompts,
+// compacted rebuilds) so the caller's loop stays consistent.
 // (partials, continuation prompts, compacted rebuilds) so the caller's
 // loop stays consistent.
 func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history []ai.Message) (*ai.Message, []ai.Message, error) {
@@ -799,7 +800,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	a.fallbackPreTurn()
 	policy := a.Retry.withDefaults()
 	attempt, continued, compacted := 0, false, false
-	escalation := 0
+	escalation, healthEscalation := 0, 0
 	interrupted := 0
 	for {
 		// Health-check the active provider before spending a turn: a dead
@@ -807,13 +808,51 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		// its attempts on an endpoint that cannot serve. Fail over
 		// before the ladder drains so a restart reads as waiting.
 		if hcErr := a.healthCheckProvider(ctx); hcErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, history, ctxErr
+			}
 			if nxt := a.nextFailoverTarget(); nxt > 0 {
 				a.switchTarget(nxt, "health-check")
 				attempt = 0
+				healthEscalation = 0
+				continue
+			}
+			// A failed probe can outlast a fallback cooldown. If the
+			// pre-turn pass restores the primary, probe it next rather than
+			// immediately selecting the same failed fallback again.
+			beforeTarget := a.curTarget
+			a.fallbackPreTurn()
+			if a.curTarget != beforeTarget {
+				healthEscalation = 0
+				continue
+			}
+			if nxt := a.nextFailoverTarget(); nxt > 0 {
+				a.switchTarget(nxt, "health-check")
+				attempt = 0
+				healthEscalation = 0
+				continue
+			}
+			// A refused or unreachable model host is the same outage the
+			// stream ladder handles. With retry.infinite, keep probing after
+			// capped backoff until the host answers or the run is cancelled;
+			// an explicitly bounded policy still gets its own finite
+			// escalation rounds as a stream failure.
+			if healthEscalation < maxEscalationRounds || policy.Infinite {
+				healthEscalation++
+				attempt = 0
+				d := policy.delay(healthEscalation)
+				logx.Errorf("recovery: health check failed, retrying probe in %s (round %d): %v", d, healthEscalation, hcErr)
+				if policy.Infinite {
+					a.noticeAllTargetsDown(healthEscalation, d, hcErr)
+				}
+				if serr := sleepBackoff(ctx, d); serr != nil {
+					return nil, history, serr
+				}
 				continue
 			}
 			return nil, history, fmt.Errorf("agent: health check failed and all targets drained: %w", hcErr)
 		}
+		healthEscalation = 0
 		msg, err := a.oneTurn(ctx, system, history)
 		if err == nil {
 			return msg, history, nil
@@ -923,6 +962,24 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, err
 			}
 			attempt++
+		case ai.ClassBadRequest:
+			// A provider-rejected request can be retried only for the
+			// bounded escalation rounds. Never let retry.infinite turn
+			// the same rejected body into an outage-style replay loop.
+			if escalation < maxEscalationRounds {
+				escalation++
+				attempt = 0
+				if a.Store != nil {
+					if res, buildErr := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{}); buildErr == nil {
+						history = res.Messages
+					}
+				}
+				if serr := sleepBackoff(ctx, policy.delay(escalation)); serr != nil {
+					return nil, history, serr
+				}
+				continue
+			}
+			return nil, history, err
 		case ai.ClassContextOverflow:
 			// Promotion before compaction (M5 tail): a bigger window may
 			// just fit; each overflow climbs one ladder step. At the top
@@ -965,13 +1022,11 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			}
 			continue
 		default:
-			// Retry everything else (auth, bad request, unknown):
-			// rebuild history from the persisted session when one
-			// is attached and re-send the same request on the
-			// current context window. Escalation is bounded by
-			// maxEscalationRounds; retry.infinite lifts it so an
-			// outage of any length is survived. The last provider
-			// error is returned as-is once the bound is spent.
+			// Auth / unknown failures rebuild history from the persisted
+			// session and re-send on the current context. ClassBadRequest
+			// returned above: replaying a provider-rejected shape cannot
+			// repair it. Bounded rounds stop hard failures; infinite retry
+			// is reserved for transport/transient outages.
 			if escalation < maxEscalationRounds || policy.Infinite {
 				escalation++
 				attempt = 0

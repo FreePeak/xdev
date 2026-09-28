@@ -26,6 +26,71 @@ func TestClickVisibleLinkOpensTarget(t *testing.T) {
 	}
 }
 
+// TestUserRowAndLinkStayIndependent pins that the two click affordances sharing
+// a primary-button press do not interfere. A user prompt opens its menu; a
+// rendered link opens its target. They look like one gesture, so each half
+// asserts that its own surface opens and the other's does not.
+//
+// They cannot in fact collide: user blocks are painted from `blockLines` as a
+// banded "❯ " prefix plus wrapped plain text and never go through the Markdown
+// renderer, so a user row never carries a link hit. A URL typed into a prompt is
+// therefore text, and clicking it opens the menu. The release path keeps a
+// link-over-menu precedence for the day that changes, and this test is what
+// would notice.
+//
+// Each half gets its own App: handleClick treats a second press within
+// clickWordTol of the first as a double-click and consumes it for word
+// selection, so driving both gestures at one transcript would measure the
+// click counter rather than the two affordances.
+func TestUserRowAndLinkStayIndependent(t *testing.T) {
+	t.Run("link opens the target and no menu", func(t *testing.T) {
+		app, scr := newTestApp(t, 100, 30)
+		defer scr.Fini()
+		app.AddUserBlock("first prompt")
+		app.AddAssistantBlock("see https://example.com/issue for details")
+		app.draw()
+
+		var opened []string
+		app.linkOpen = func(raw string) error { opened = append(opened, raw); return nil }
+
+		ly, lx := rowWith(t, scr, "https://example.com/issue")
+		app.mu.Lock()
+		press(app, lx, ly)
+		release(app, lx, ly)
+		menuOpen := app.msgm != nil
+		app.mu.Unlock()
+		if len(opened) != 1 || opened[0] != "https://example.com/issue" {
+			t.Fatalf("clicking the link: opened = %q, want the target", opened)
+		}
+		if menuOpen {
+			t.Fatal("a link click opened the message menu")
+		}
+	})
+
+	t.Run("user row opens the menu and no link", func(t *testing.T) {
+		app, scr := newTestApp(t, 100, 30)
+		defer scr.Fini()
+		app.AddUserBlock("first prompt")
+		app.draw()
+
+		var opened []string
+		app.linkOpen = func(raw string) error { opened = append(opened, raw); return nil }
+
+		y := userRow(t, app, 0)
+		app.mu.Lock()
+		press(app, 6, y)
+		release(app, 6, y)
+		menuOpen := app.msgm != nil
+		app.mu.Unlock()
+		if !menuOpen {
+			t.Fatal("clicking a user row did not open the message menu")
+		}
+		if len(opened) != 0 {
+			t.Fatalf("a user-row click opened a link: %q", opened)
+		}
+	})
+}
+
 func TestDragFromLinkSelectsText(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.BeginAssistant()

@@ -391,9 +391,90 @@ func renderContent(res *mcp.CallToolResult) string {
 	return out
 }
 
+// DeferThreshold is the number of remote tools above which Register puts them
+// behind the deferred catalog.
+//
+// MCP is the widest part of a session's tool surface: one server can ship 40+
+// tool schemas, and every schema in the eager set is re-sent on every request.
+// The measured cost is in
+// docs/research/2026-09-15-xdev-slow-session-rca.md (per-step uncached input
+// p50 2,094 tok against omp's 983) — so a wide surface is a tax paid per turn.
+//
+// The gate rather than an unconditional defer is deliberate: a session with
+// three servers and six tools is better served by direct schemas, and hiding
+// them would be a pure usability regression for no measurable gain. Above the
+// threshold the model gets one index line per tool plus tool_search, which is
+// the same trade the bundled long tail already makes (see the defer table in
+// cmd/xdev/print.go).
+const DeferThreshold = 12
+
+// deferredIndexChars caps a remote description reduced to an index line. MCP
+// descriptions are server-authored and unbounded — a single one ran past 900
+// chars — and the index is one line per tool, not a documentation slot.
+const deferredIndexChars = 200
+
 // Register adds every remote tool to a registry under its namespaced name.
+//
+// Past DeferThreshold the tools are also moved behind the deferred catalog, so
+// they leave the eager schema and the prompt's tool recap and become reachable
+// through tool_search / tool_describe / tool_call. The catalog is a discovery
+// seam, not a boundary: a catalogued tool is still in the registry, so the
+// approval policy, the interceptor chain and a direct call all keep seeing it
+// under its real namespaced name.
+//
+// Register must run after the bundled defer table (which allocates the
+// catalog), which holds in every run mode: newToolRegistry builds the catalog
+// before attachMCP is ever called.
 func Register(reg *tool.Registry, tools []tool.Tool) {
+	if reg == nil {
+		return
+	}
+	deferring := len(tools) > DeferThreshold
 	for _, t := range tools {
 		reg.Register(t)
+		if !deferring {
+			continue
+		}
+		index := indexLine(t.Description())
+		if index == "" {
+			// Defer panics on an empty index. remoteTool.Description never
+			// returns "", but Register takes tool.Tool, so a foreign
+			// implementation could.
+			continue
+		}
+		reg.Defer(t.Name(), index, searchTags(t)...)
 	}
+}
+
+// searchTags gives tool_search something to match a server or namespace name
+// against; without them a query like "leankg" cannot reach leankg_query.
+func searchTags(t tool.Tool) []string {
+	tags := []string{"mcp"}
+	type serverNamed interface{ ServerName() string }
+	if s, ok := t.(serverNamed); ok {
+		if n := s.ServerName(); n != "" {
+			tags = append(tags, n)
+		}
+	}
+	// The bare tool name, so a query for "query" or "status" also lands.
+	if i := strings.IndexByte(t.Name(), '_'); i > 0 {
+		tags = append(tags, t.Name()[i+1:])
+	}
+	return tags
+}
+
+// ServerName reports which MCP server owns this tool. Exported so the
+// deferred index can carry it as a search tag without a package cycle.
+func (t *remoteTool) ServerName() string { return t.server }
+
+// indexLine flattens a description to a single capped line.
+func indexLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	if len(s) > deferredIndexChars {
+		s = s[:deferredIndexChars] + "…"
+	}
+	return s
 }
