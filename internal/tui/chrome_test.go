@@ -52,7 +52,7 @@ func lastRow(text string) string {
 // where the window is still unknown.
 func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(1200, 340, 1540)
+	app.AddUsage(1200, 340, 0, 0, 1540)
 	app.draw()
 
 	text := screenText(scr)
@@ -83,11 +83,14 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 // of prompt and answered with 362 tokens, so the whole request costs 101.8k
 // even though only 8272 input tokens were billed at the full rate. The ctx
 // number is the provider's request total — an input+output sum of 8.6k read 90%
-// low, the bug this segment had. The ↑/↓ counters keep tracking billed
-// input+output, which is what the session paid for, not what it occupies.
+// low, the bug this segment had. The counters show the split they hold: ↑ the
+// fresh 8.3k, ⇢ the 93k the cache supplied, ↓ the output with its reasoning
+// broken out. The test drives the wire's own numbers (prompt 101818, cached
+// 93546, completion 362, reasoning 118), so the row is checked against the
+// payload rather than against the arithmetic the old code happened to do.
 func TestHUDContextCountsCachedInput(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(8272, 362, 101818)
+	app.AddUsage(101818-93546, 362, 93546, 118, 101818)
 	app.SetContextWindow(200000)
 	app.draw()
 
@@ -98,8 +101,8 @@ func TestHUDContextCountsCachedInput(t *testing.T) {
 	if strings.Contains(row, "ctx 8.6k") {
 		t.Fatalf("the context total must not be the uncached input+output sum: %q", row)
 	}
-	if !strings.Contains(row, "↑8.3k │ ↓362") {
-		t.Fatalf("token counters must keep counting billed input+output: %q", row)
+	if !strings.Contains(row, "↑8.3k ⇢93.5k │ ↓362 ˟118") {
+		t.Fatalf("the counters must show the whole billed split, not input+output alone: %q", row)
 	}
 }
 
@@ -110,7 +113,7 @@ func TestHUDContextCountsCachedInput(t *testing.T) {
 // with the agent's own context count.
 func TestHUDContextTracksTheSession(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(50000, 50000, 100000)
+	app.AddUsage(50000, 50000, 0, 0, 100000)
 	app.SetContextWindow(200000)
 	app.draw()
 	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 100k/200k") {
@@ -133,7 +136,7 @@ func TestHUDContextTracksTheSession(t *testing.T) {
 	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 40k/200k") {
 		t.Fatalf("replayed history must report its context: %q", row)
 	}
-	app.AddUsage(30000, 30000, 60000)
+	app.AddUsage(30000, 30000, 0, 0, 60000)
 	app.SetContextReplay(40000)
 	app.draw()
 	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 60k/200k") {
@@ -148,7 +151,7 @@ func TestHUDContextTracksTheSession(t *testing.T) {
 // TestStatusRowShowsPathAndMetrics).
 func TestHUDConfiguredSegments(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
-	app.AddUsage(50000, 50000, 100000)
+	app.AddUsage(50000, 50000, 0, 0, 100000)
 	app.AddCost(0.0123)
 	app.SetContextWindow(200000)
 	app.SetStatusSegments([]string{"theme", "model", "context", "tokens", "cost"})
@@ -174,7 +177,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	// The meter reads the LAST request, not the session total: a second turn
 	// costing 2k re-bases it to 2k/200k, while the cumulative token counters
 	// keep counting up.
-	app.AddUsage(1500, 500, 2000)
+	app.AddUsage(1500, 500, 0, 0, 2000)
 	app.draw()
 	row = lastRow(screenText(scr))
 	if !strings.Contains(row, "ctx 2k/200k") {
@@ -215,7 +218,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 func TestHUDTimeSegment(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	app.SetStatusSegments([]string{"time", "tokens"})
-	app.AddUsage(1200, 340, 1540)
+	app.AddUsage(1200, 340, 0, 0, 1540)
 
 	// Fresh app, nothing has run: the honest reading is 0s, not a clock
 	// inherited from process start. "0s" is a reading, so it renders.
@@ -298,7 +301,7 @@ func statusCell(scr tcell.SimulationScreen, x int) tcell.SimCell {
 // row, and that a theme leaving it at the terminal default does not.
 func TestHUDStatusLineBackground(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(10, 20, 30)
+	app.AddUsage(10, 20, 0, 0, 30)
 	app.draw()
 	if _, bg, _ := statusCell(scr, 96).Style.Decompose(); bg != tcell.ColorDefault {
 		t.Fatalf("default theme must leave the status row transparent, got %v", bg)
@@ -355,7 +358,7 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	seededStatusRow := func(t *testing.T, w int) string {
 		app, scr := drawnApp(t, w, 20)
 		app.AddSystemBlock("ready")
-		app.AddUsage(50000, 50000, 100000)
+		app.AddUsage(50000, 50000, 0, 0, 100000)
 		app.SetWork(2*time.Hour + 5*time.Minute)
 		app.SetLocation(deep)
 		app.mu.Lock()

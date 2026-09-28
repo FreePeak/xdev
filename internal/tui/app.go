@@ -24,8 +24,21 @@ import (
 type Status struct {
 	Model     string
 	SessionID string
+	// TokensIn is the session's FRESH input — the provider's input
+	// exclusive of cache reads, which is the split every provider
+	// normalizes onto (input + output + cacheRead = totalTokens) and
+	// the split compaction prices against. It is NOT the prompt the
+	// model saw: on a cached conversation that is TokensCache too, and
+	// the "tokens" segment shows both.
 	TokensIn  int64
 	TokensOut int64
+	// TokensCache is the prompt-cache reads billed across the session,
+	// and TokensThink the reasoning already counted inside TokensOut
+	// (completion_tokens is inclusive of reasoning_tokens on every
+	// wire xdev speaks). Both are tracked so the status row can show
+	// the split the glyphs claim instead of one half of it.
+	TokensCache int64
+	TokensThink int64
 	// Cost is the session spend in USD (0 when the provider reports none),
 	// CtxWindow the model's context window (0 = unknown) and Rate the last
 	// measured decode speed in output tokens/second (0 = never measured).
@@ -987,13 +1000,22 @@ func (a *App) ToggleBoxExpand() bool {
 // to re-read — a prompt-cache hit still occupies those tokens, and an
 // input+output sum reads 90 % low on a cached conversation (the same total
 // agent.ContextTokens and compaction trigger on). total <= 0 (a provider that
-// reports none) falls back to in+out.
-func (a *App) AddUsage(in, out, total int64) {
+// reports none) falls back to in+out+cache.
+//
+// cache and thinking arrive as their own arguments because the split is the
+// point: in is the fresh input only and out already CONTAINS the reasoning, so
+// a row that printed just those two claimed a smaller prompt and a larger
+// answer than the provider billed. On a cached turn the ↑ glyph read 479 for a
+// 65054-token prompt (99 % of it invisible, cacheRead 64575) and the ↓ glyph
+// read 1770 for 506 tokens of visible text (71 % of it thinking).
+func (a *App) AddUsage(in, out, cache, thinking, total int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
+	a.st.TokensCache += cache
+	a.st.TokensThink += thinking
 	if total <= 0 {
-		total = in + out // a provider that reports no total gets the floor
+		total = in + out + cache // a provider that reports no total gets the floor
 	}
 	a.st.CtxUsed = total
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
@@ -1525,7 +1547,12 @@ func (a *App) ResumeSession(query string) error {
 // replayed session banks its path's spans back in with SetWork. A replay also
 // measures the history back in with SetContextReplay.
 //
-// The ↑ ↓ counters, the spend, the decode rate and the ttft are per-session
+// The ↑ ↓ ⇢ ˟ counters, the spend, the decode rate and the ttft are
+// per-session too, and Reset is where that boundary is: without clearing
+// them, /resume and /fork drew the previous session's numbers beside the
+// freshly replayed transcript, and a new session opened showing a ⚡ it had
+// never measured. Streaming state is otherwise untouched — callers must
+// not be running a turn when they call this.
 // too, and Reset is where that boundary is: without clearing them, /resume
 // and /fork drew the previous session's numbers beside the freshly replayed
 // transcript, and a new session opened showing a ⚡ it had never measured.
@@ -1535,6 +1562,7 @@ func (a *App) Reset() {
 	a.mu.Lock()
 	a.st.Work = 0
 	a.st.TokensIn, a.st.TokensOut = 0, 0
+	a.st.TokensCache, a.st.TokensThink = 0, 0
 	a.st.Cost = 0
 	a.st.Rate = 0
 	a.st.TTFT = 0
@@ -4252,10 +4280,25 @@ func (a *App) hudSegment(name string) (text, token string) {
 	case "model":
 		return a.st.Model, theme.StatusLineModel
 	case "tokens":
+		// The two glyphs each claim one half of a split the provider
+		// reports three ways, so the row shows the split: ↑ is fresh
+		// input, ⇢ the cache read beside it, and ↓ output with the
+		// reasoning already inside it broken out. cache and think hide
+		// when the provider reports none, so a provider that bills no
+		// cache and reasons for nothing keeps the plain two-glyph row.
 		if a.st.TokensIn == 0 && a.st.TokensOut == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("↑%s │ ↓%s", HumanTokens(a.st.TokensIn), HumanTokens(a.st.TokensOut)), theme.StatusLineSpend
+		var b strings.Builder
+		fmt.Fprintf(&b, "↑%s", HumanTokens(a.st.TokensIn))
+		if a.st.TokensCache > 0 {
+			fmt.Fprintf(&b, " ⇢%s", HumanTokens(a.st.TokensCache))
+		}
+		fmt.Fprintf(&b, " │ ↓%s", HumanTokens(a.st.TokensOut))
+		if a.st.TokensThink > 0 {
+			fmt.Fprintf(&b, " ˟%s", HumanTokens(a.st.TokensThink))
+		}
+		return b.String(), theme.StatusLineSpend
 	case "context":
 		// used/total of the LIVE context: what the next request costs against
 		// the model's window. Hidden until both halves are known — an
