@@ -1961,6 +1961,54 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		startTurn()
 		return true
 	}
+	// Background subagent completion notice (#296). A job started with
+	// background:true used to end silently: the model asked for work in
+	// parallel, then had to guess when it was done, because a result it never
+	// learns about is one it never reads. The same three-phase shape as the
+	// schedule reminder below, and for the same reason it cannot be an in-turn
+	// injection: Run takes history by value, and an idle session has no Agent
+	// and no turn goroutine to drain a queue. So — gate on idle, claim the
+	// turn, persist into the store the next run rebuilds from, start the turn.
+	if sessionHub != nil {
+		hubCtx, hubCancel := context.WithCancel(baseCtx)
+		hubDone := make(chan struct{})
+		go func() {
+			defer close(hubDone)
+			agent.StartHubNoticeDelivery(hubCtx, sessionHub,
+				func() bool { return !collabGuestJoined() && !running.Load() },
+				func(notice string) error {
+					// swapStore re-points `store` under sessMu; read it
+					// there rather than capturing a stale one.
+					sessMu.Lock()
+					target := store
+					sessMu.Unlock()
+					if target == nil || !running.CompareAndSwap(false, true) {
+						return agent.ErrHubNoticeDelivery
+					}
+					msg := ai.Message{
+						Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: notice}},
+						Attribution: agent.HubNoticeAttribution, UserTS: time.Now().UnixMilli(),
+					}
+					if err := target.Append(&session.MessageEntry{Message: msg}); err != nil {
+						running.Store(false)
+						return fmt.Errorf("%w: %v", agent.ErrHubNoticeDelivery, err)
+					}
+					return nil
+				},
+				func(noticeErr error) {
+					if noticeErr != nil {
+						// Not lost: the job is on the roster and
+						// `hub result` still answers.
+						app.AddSystemBlock("· background subagent finished; its notice could not be delivered, read it with hub result")
+					}
+					startTurn()
+				})
+		}()
+		defer func() {
+			hubCancel()
+			<-hubDone
+		}()
+	}
 	// Schedule delivery is an ordinary later turn, never steering. It waits
 	// for an idle interactive session, persists the reminder, then uses the
 	// same startTurn path as a user prompt.
@@ -2447,7 +2495,8 @@ func harnessUserAttribution(m ai.Message) bool {
 		agent.GoalContinuationAttribution,
 		agent.PromptContinuationAttribution,
 		agent.TurnBudgetAttribution,
-		agent.EmptyTurnAttribution:
+		agent.EmptyTurnAttribution,
+		agent.HubNoticeAttribution:
 		return true
 	}
 	return false

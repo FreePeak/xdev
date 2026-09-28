@@ -27,6 +27,9 @@ type Hub struct {
 	procs *ProcTable            // named long-running child processes (lazy)
 	// notify fires when a job settles; see SetNotify.
 	notify func()
+	// settleListeners fire on the same edge with the job snapshot resolved;
+	// see AddSettleListener.
+	settleListeners []func(JobInfo, *SubagentResult)
 }
 
 type hubJob struct {
@@ -149,6 +152,7 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 			job.Result = res
 		}
 		notify := h.notify
+		listeners := append([]func(JobInfo, *SubagentResult){}, h.settleListeners...)
 		h.mu.Unlock()
 		// Close the settle edge before anyone is told about it: Roster() reads
 		// `done` to decide whether a row still runs, so a bump that fired first
@@ -160,6 +164,21 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 		// repaints a roster nobody is looking at.
 		if notify != nil {
 			notify()
+		}
+		// Settle listeners get the snapshot rather than being told to go and
+		// fetch it: SetNotify's contract forbids re-entering the Hub from the
+		// callback, and building the notice needs the terminal status, which
+		// statusLocked only reports once `done` is closed. One extra
+		// uncontended lock acquisition on a path that just ran a whole
+		// subagent is not worth a second contract carve-out.
+		if len(listeners) > 0 {
+			h.mu.Lock()
+			info, _ := h.statusLocked(job.ID)
+			result := job.Result
+			h.mu.Unlock()
+			for _, fn := range listeners {
+				fn(info, result)
+			}
 		}
 	}()
 }
@@ -179,6 +198,29 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 func (h *Hub) SetNotify(fn func()) {
 	h.mu.Lock()
 	h.notify = fn
+	h.mu.Unlock()
+}
+
+// AddSettleListener registers a callback that fires when a job settles, with
+// that job's parent-visible snapshot and handoff already resolved. It is
+// additive where SetNotify is a slot, so a host can have both a repaint (the
+// dock) and a delivery (the model notice) without one replacing the other —
+// the same additive shape launchLocked already uses for spec.OnRun.
+//
+// Listeners fire in registration order from the settling job's goroutine with
+// no lock held, and inherit SetNotify's contract: do not call back into the
+// Hub, and keep the callback cheap and non-blocking. A listener that blocks
+// delays only its own job's goroutine, but a panic in one takes the process
+// down, so keep the body to bookkeeping plus a hand-off.
+//
+// Because Revive and Send-to-parked re-enter launchLocked, a listener will see
+// the same job id more than once; dedupe on JobInfo.ID.
+func (h *Hub) AddSettleListener(fn func(JobInfo, *SubagentResult)) {
+	if fn == nil {
+		return
+	}
+	h.mu.Lock()
+	h.settleListeners = append(h.settleListeners, fn)
 	h.mu.Unlock()
 }
 
