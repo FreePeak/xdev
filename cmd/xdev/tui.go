@@ -274,6 +274,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		defer stopSignals()
 	}
 
+	// A panic on a background goroutine runs no defer, so the two Fini
+	// defers above never fire and the shell comes back to a raw-mode alt
+	// screen — the panic-path twin of what the signal guard above just fixed.
+	// Armed here because this is where tcell starts owning the tty
+	// (tui_panic.go).
+	prevRestore := terminalRestore
+	terminalRestore = scr.Fini
+	defer func() { terminalRestore = prevRestore }()
+
 	app := tui.New(scr, th, modelRef, store.ID())
 	// --log: write a TUI screen transcript to <path> after each
 	// paint frame (off by default). Relative paths resolve under
@@ -1788,7 +1797,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	startTurn := func() {
 		ctx, cancel := context.WithCancel(baseCtx)
 		turn.set(cancel)
-		go func() {
+		goGuarded(func() {
 			// LIFO: clear runs FIRST so this turn can never nil a slot
 			// that a newer turn already claimed (running=false admits the
 			// next submit before cancel() unwinds).
@@ -1888,11 +1897,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// The bump after the title lands is what repaints the panel's
 				// title slot: the cascade rewrites the store's title on a
 				// goroutine long after this frame, so nothing else would.
-				go func() {
+				goGuarded(func() {
 					generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
 						append(append([]ai.Message(nil), hist...), *finalMsg))
 					app.DockBump()
-				}()
+				})
 			}
 			if err != nil {
 				if ctx.Err() != nil {
@@ -1917,7 +1926,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					app.AddSystemBlock("error: " + err.Error())
 				}
 			}
-		}()
+		})
 	}
 
 	// runTurn owns one submit: persist the user message, then drive the agent.
@@ -2002,7 +2011,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if sessionHub != nil {
 		hubCtx, hubCancel := context.WithCancel(baseCtx)
 		hubDone := make(chan struct{})
-		go func() {
+		goGuarded(func() {
 			defer close(hubDone)
 			agent.StartHubNoticeDelivery(hubCtx, sessionHub,
 				func() bool { return !collabGuestJoined() && !running.Load() },
@@ -2033,7 +2042,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					}
 					startTurn()
 				})
-		}()
+		})
 		defer func() {
 			hubCancel()
 			<-hubDone
@@ -2044,7 +2053,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// same startTurn path as a user prompt.
 	scheduleCtx, scheduleCancel := context.WithCancel(baseCtx)
 	scheduleDone := make(chan struct{})
-	go func() {
+	goGuarded(func() {
 		defer close(scheduleDone)
 		agent.StartScheduleDelivery(scheduleCtx, agent.ScheduleStateOf(reg),
 			func([]agent.Schedule) bool { return !collabGuestJoined() && !running.Load() },
@@ -2077,7 +2086,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				}
 				startTurn()
 			})
-	}()
+	})
 	defer func() {
 		scheduleCancel()
 		<-scheduleDone
@@ -2430,7 +2439,7 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 		if err != nil {
 			return err
 		}
-		go func() {
+		goGuarded(func() {
 			mu.Lock()
 			defer mu.Unlock()
 			started := time.Now()
@@ -2451,7 +2460,7 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 				Truncated: out.Truncated,
 				Diff:      out.Diff,
 			})
-		}()
+		})
 		return nil
 	}
 }
