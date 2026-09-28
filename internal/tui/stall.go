@@ -38,6 +38,15 @@ const (
 	// megabyte on a busy session; the head is where the stuck loop is, and a
 	// truncated tail is still worth more than no file.
 	stallStackCap = 1 << 20
+	// pollSkip is how far the wall clock may run between two watchdog polls
+	// before the gap is read as the machine having slept rather than the loop
+	// being stuck. A suspended Mac advances the wall clock but not the UI loop,
+	// and the loop cannot be blamed for time it never had: of the 165 dumps
+	// xdev wrote on 2026-09-28, 16 were exactly this — every one of them inside
+	// a `pmset -g log` sleep interval, the day's false alarms running 5s to
+	// 17m43s. A poll merely late by seconds is scheduling, not sleep, so the
+	// bound is generous.
+	pollSkip = 30 * time.Second
 )
 
 // SetStallDumpDir enables the UI-loop stall dump. dir is where
@@ -74,8 +83,11 @@ func (a *App) beat() { a.loopBeat.Store(time.Now().UnixNano()) }
 // writes the goroutine stacks that explain why. The thresholds and the stop
 // channel are arguments rather than package state, so the goroutine reads
 // nothing mutable — a test (and a future caller) can run one at a different
-// cadence without racing another. It exits when stop closes.
-func (a *App) watchStall(after, check time.Duration, stop <-chan struct{}) {
+// cadence without racing another. It exits when stop closes. now is time.Now in
+// production and a jumpable clock in a test: the one silence that is not a
+// stall can only be told from a stall by how the clock itself behaved across
+// the gap.
+func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop <-chan struct{}) {
 	if a.stallDir == "" {
 		return
 	}
@@ -87,13 +99,32 @@ func (a *App) watchStall(after, check time.Duration, stop <-chan struct{}) {
 	// first one). A NEW episode is a beat that has advanced past it, i.e. the
 	// loop did recover and hung again.
 	dumpedForBeat := int64(-1)
+	// Grace after a wake, so the loop gets to draw its first frame back before
+	// a beat that predates the sleep is condemned a second time. DarkWake brings
+	// the machine back without the user, and the beat it wakes into is stale by
+	// construction. Two stall windows is the whole allowance: past that the
+	// beat is a real stall, sleep or not, and it is reported.
+	graceUntil := time.Time{}
+	// prev is the previous poll's wall time; a skip shows up as one gap far
+	// wider than the poll interval.
+	prev := now()
 	for {
 		select {
 		case <-stop:
 			return
-		case now := <-tick.C:
+		case <-tick.C:
+			at := now()
+			// A skip arms the grace; it does not disarm the watchdog. A loop
+			// still stuck after a wake must still be reported.
+			if at.Sub(prev) > pollSkip {
+				graceUntil = at.Add(2 * after)
+			}
+			prev = at
+			if at.Before(graceUntil) {
+				continue
+			}
 			beat := a.loopBeat.Load()
-			if now.Sub(time.Unix(0, beat)) < after {
+			if at.Sub(time.Unix(0, beat)) < after {
 				continue
 			}
 			if beat == dumpedForBeat {
@@ -103,8 +134,8 @@ func (a *App) watchStall(after, check time.Duration, stop <-chan struct{}) {
 			// stderr, never the screen: the loop is stuck so nothing can be
 			// drawn, and raw-mode output still lands where it can be read.
 			fmt.Fprintf(os.Stderr, "\nxdev: UI loop stalled for %s (pid %d)\n",
-				now.Sub(time.Unix(0, beat)).Truncate(time.Second), os.Getpid())
-			if path, err := a.dumpStall(now, beat); err != nil {
+				at.Sub(time.Unix(0, beat)).Truncate(time.Second), os.Getpid())
+			if path, err := a.dumpStall(at, beat); err != nil {
 				fmt.Fprintf(os.Stderr, "xdev: stall dump failed: %v\n", err)
 			} else {
 				fmt.Fprintf(os.Stderr, "xdev: stall dump written to %s\n", path)
@@ -151,4 +182,4 @@ func (a *App) dumpStall(at time.Time, beat int64) (string, error) {
 }
 
 // startStallWatchdog arms the watchdog with the shipped thresholds.
-func (a *App) startStallWatchdog() { go a.watchStall(stallAfter, stallCheck, a.quitCh) }
+func (a *App) startStallWatchdog() { go a.watchStall(stallAfter, stallCheck, time.Now, a.quitCh) }
