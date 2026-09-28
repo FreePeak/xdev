@@ -1118,3 +1118,56 @@ Also settled in this wave, from checking the reference directly: **dsh does no l
 6. **Gemini reported usage in a different shape from the other three providers** (`internal/ai/google_genai.go`). `promptTokenCount` *includes* `cachedContentTokenCount` ("this is still the total effective prompt size meaning this includes the number of tokens in the cached content") and the field was never decoded, so `↑` counted a 30k cached prefix as fresh input while `/usage` and the `⇢cache` label always read 0; `candidatesTokenCount` excludes `thoughtsTokenCount` while `totalTokenCount` is prompt+thoughts+candidates, so `↓` omitted the thinking and the rate divided a numerator that had none of it. `googleUsage.toUsage` normalizes onto the contract Anthropic and OpenAI already keep.
 
 **Not changed, deliberately:** `anthropic.go:538` (`TotalTokens = Input + Output + CacheRead + CacheWrite`) looks like a double-count and is not — Anthropic's `input_tokens` is non-cached input, and the docs' own formula is `total_input_tokens = cache_read + cache_creation + input_tokens` (worked example: 100,000 read + 50 input = 100,050). Tests: `internal/tui/metric_measure_test.go` (5 cases, one per defect above) and `internal/ai/google_usage_test.go` (4 normalization cases). The two `cmd/xdev` failures (`TestConnectPickerItems`, `TestSkillPromptBlockEmptyWithoutSkills`) reproduce on a clean `origin/main` checkout — a credential-picker ordering and an ambient skills directory, both unrelated.
+
+---
+
+## 7. Issue triage (2026-09-29)
+
+A full pass over every open issue at `origin/main` @ `3c44ec5` — 186 open issues, each one traced
+to a real implementation site (or proven absent) by reading the code, not the PRD. Verdicts:
+**4 done** (closed), **40 partial**, **142 open**. Every open issue now carries exactly one
+priority label, assigned impact-first rather than by milestone: P0 = live data loss, a
+security/privacy hole, or a wedge; P1 = a gap in the core daily driver (agent loop, TUI
+correctness, context/compaction, permissions, provider/auth); P2 = parity, UX or packaging
+breadth a daily user rarely hits. The `m*`/`parity`/`enhancement` milestone labels are untouched.
+
+### 7.1 Closed as done
+
+| Issue | What proved it |
+|---|---|
+| [#83](https://github.com/FreePeak/xdev/issues/83) | `cmd/xdev/sessionops.go:477-529` `branchSummarizer()` resolves the session model into a callable; `internal/config/settings.go:373-376,818-835` ships the `branchSummary.{enabled,reserveTokens}` block; `internal/agent/compact_snap.go:38-47` vision-gates snapcompact onto `snapcompactText`; `internal/agent/compact_ladder.go:176-187` records the remote rung as a logged no-op. |
+| [#102](https://github.com/FreePeak/xdev/issues/102) | `cmd/xdev/main.go:275-276` attaches `config.InstallID()`; `internal/ai/anthropic.go:114-120,157-159` sends `metadata.user_id`; `internal/ai/codex_responses.go:29-31` + `openai_responses.go:53,127` send `installation_id`; `internal/serve/broker.go:486-493` no longer mints a second id. |
+| [#315](https://github.com/FreePeak/xdev/issues/315) | `internal/tui/app.go:3395-3397` paints `drawSelection()` last, and :3196-3199 paints it on the welcome branch too; regression test `internal/tui/selection_test.go:172`. |
+| [#374](https://github.com/FreePeak/xdev/issues/374) | `internal/tui/app.go:3378-3382` publishes `selDockRows`, `internal/tui/dock.go:799-814` maps panel rows to screen coordinates, `internal/tui/selection.go:784-791` routes them into the shared selection path. |
+
+### 7.2 P0 — data loss, security, wedges
+
+- **#161 — no non-approvable floors.** `internal/tool/approval.go:70-79,82` ships yolo as the default, so `rm -rf ~` needs no prompt, `internal/tool/policy.go:265-296` keeps a quoted `$( )` opaque (so deny rules miss it), and `internal/tool/integrity.go:96-121` protects harness state only — no critical-path, no rc/config, no out-of-workspace read floor.
+- **#81 — injected content is never scanned.** `internal/agent/prompt.go` reads `AGENTS.md`-class files and web/browser/MCP output into the prompt verbatim; no scanner, no `<untrusted_tool_result>` wrapping, despite §5 recording the stance.
+
+### 7.3 P1 — core daily driver (42, one line each)
+
+**Agent loop / context:** #84, #115, #116, #137, #141, #168, #178, #216, #243, #284, #299, #421, #422, #424, #430.
+**Permissions / approvals / secrets:** #94, #129, #145, #160, #180, #218, #295, #298, #426, #427.
+**Providers / MCP / auth:** #150, #153, #262, #263.
+**TUI / session UX:** #86, #131, #133, #138, #157, #158, #199, #231, #232, #271, #296.
+
+Three P1s are worth naming because a fix is already half-landed and the remainder is the load-bearing half: **#298** (children are still refused by a nil approver — `cmd/xdev/print.go:1844-1888` registers `TaskTool` with a `Policy` and no `Approve`), **#427** (plan mode denies by default via `internal/tool/caps.go:86-97`, but the model is still handed the full mutating toolset and a reviewer-less host still auto-accepts), **#295** (`AGENTS.md` now reaches children, yet `internal/agent/subagent.go:216-227` gives them no redactor, no compaction, no derived plan mode).
+
+### 7.4 P2 — parity and breadth (142)
+
+Everything else: parity sweeps, LSP/plugin/ACP depth, slash-command and chrome breadth, docs and
+CI contracts, and the M14/M15 tail. Prioritised inside P2 by the triage evidence, not by milestone.
+
+### 7.5 Partial (40) — keep open, fix the named half
+
+#78 #84 #86 #91 #92 #93 #94 #95 #96 #104 #106 #108 #133 #140 #144 #148 #155 #158 #162 #165 #168 #190 #192 #193 #194 #197 #199 #205 #234 #235 #236 #242 #284 #287 #288 #295 #296 #369 #426 #427
+
+Each `partial` verdict carries a triage comment on the issue naming what landed and what is
+still missing, so the next pass does not re-derive it. Two of the 40 are not partials at all and
+deserve a slot before anything else: **#422** (compaction that buys no space keeps compacting at
+full cost, forever, with no signal) and **#424** (a wedged provider cannot be cancelled —
+`internal/ai/watchdog.go:53-112` has no `ctx.Done()` arm, so a `Stop` waits out the full 90 s idle
+timeout).
+
+*Last updated: 2026-09-29 (issue triage): every open issue traced to code at `origin/main` @ `3c44ec5`; #83/#102/#315/#374 closed as done, 182 issues labelled P0/P1/P2 by impact rather than milestone, and the P0/P1 sets recorded in §7.*
