@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -22,7 +23,7 @@ func TestStallWatchdogWritesDumpWhenLoopHangs(t *testing.T) {
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
 	// Tight thresholds so the stall is observed in a fraction of a second.
-	go app.watchStall(100*time.Millisecond, 20*time.Millisecond, stop)
+	go app.watchStall(100*time.Millisecond, 20*time.Millisecond, time.Now, stop)
 
 	// The hang itself, and the hard case: the loop is stuck WHILE HOLDING
 	// App.mu, which is the situation a mutex-based watchdog could never
@@ -75,7 +76,7 @@ func TestStallWatchdogDumpsOncePerEpisode(t *testing.T) {
 	app.beat()
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
-	go app.watchStall(50*time.Millisecond, 20*time.Millisecond, stop)
+	go app.watchStall(50*time.Millisecond, 20*time.Millisecond, time.Now, stop)
 
 	app.mu.Lock()
 	time.Sleep(900 * time.Millisecond) // ~40 overdue polls
@@ -99,7 +100,7 @@ func TestStallWatchdogSilentWhenLoopHealthy(t *testing.T) {
 	app.beat()
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
-	go app.watchStall(200*time.Millisecond, 20*time.Millisecond, stop)
+	go app.watchStall(200*time.Millisecond, 20*time.Millisecond, time.Now, stop)
 
 	for range 40 {
 		app.beat()
@@ -122,6 +123,102 @@ func TestStallWatchdogSilentWhenLoopHealthy(t *testing.T) {
 	}
 }
 
+// A machine that was asleep is not a loop that hung. The 2026-09-28 dumps made
+// the point expensively: of 165 written that day, 16 were silence a `pmset -g
+// log` sleep interval accounted for exactly, reported as stalls of 5s to
+// 17m43s while goroutine 1 sat in the same idle select it always sits in. The
+// watchdog can tell a sleep from a hang only by the clock: it polls once a
+// second, and a sleep is one poll that is suddenly fifteen minutes wide.
+func TestStallWatchdogIgnoresSilenceThatIsOnlyASleep(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dumps")
+	app, _ := loopApp(80, 24)
+	app.SetStallDumpDir(dir)
+	app.beat()
+
+	// A clock the test can suspend, exactly as the machine's is: the wall
+	// reading jumps a long way while the beat stands still.
+	clock := &jumpClock{now: time.Now()}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go app.watchStall(50*time.Millisecond, 20*time.Millisecond, clock.Now, stop)
+
+	// Poll normally: healthy, so nothing is written.
+	time.Sleep(80 * time.Millisecond)
+	// The lid closes. The next poll sees fifteen minutes of wall clock go by in
+	// one step, and the loop beat is to the watchdog fifteen minutes old.
+	clock.jump(15 * time.Minute)
+	time.Sleep(200 * time.Millisecond)
+
+	if entries, err := readDirNames(dir); err == nil && len(entries) != 0 {
+		t.Fatalf("a suspended machine produced stall dumps: %v", entries)
+	}
+
+	// The loop beats again once awake. Nothing stale is left to condemn.
+	app.beat()
+	time.Sleep(200 * time.Millisecond)
+	if entries, err := readDirNames(dir); err == nil && len(entries) != 0 {
+		t.Fatalf("a loop that beat after waking produced stall dumps: %v", entries)
+	}
+}
+
+// The grace is a pause, not a pardon: a loop still stuck once the allowance
+// runs out is a real stall and must still be reported, asleep or not. Otherwise
+// the fix is a way to lose the report this whole mechanism exists for.
+func TestStallWatchdogStillReportsAStallAfterASleep(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dumps")
+	app, _ := loopApp(80, 24)
+	app.SetStallDumpDir(dir)
+	app.beat()
+
+	clock := &jumpClock{now: time.Now()}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go app.watchStall(50*time.Millisecond, 20*time.Millisecond, clock.Now, stop)
+
+	// The loop is stuck: no beat after this one, through the sleep and past it.
+	clock.jump(15 * time.Minute)
+	// The grace is two stall windows; let several of them elapse.
+	for range 12 {
+		clock.jump(50 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	entries, err := readDirNames(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("a loop stuck across a sleep produced %d dumps, want 1: %v", len(entries), entries)
+	}
+}
+
+// jumpClock is a wall clock the test can suspend, standing in for a machine
+// that stopped: every jump is one "asleep, and now awake".
+type jumpClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *jumpClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *jumpClock) jump(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func readDirNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	return names(entries), nil
+}
+
 // No dump dir means no watchdog and no surprise files.
 func TestStallWatchdogDisabledWithoutDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "never")
@@ -130,7 +227,7 @@ func TestStallWatchdogDisabledWithoutDir(t *testing.T) {
 	app.beat()
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
-	go app.watchStall(20*time.Millisecond, 10*time.Millisecond, stop)
+	go app.watchStall(20*time.Millisecond, 10*time.Millisecond, time.Now, stop)
 	time.Sleep(400 * time.Millisecond)
 	if _, err := os.Stat(dir); err == nil {
 		t.Fatal("disabled watchdog created a dumps dir")
