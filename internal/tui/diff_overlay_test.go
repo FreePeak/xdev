@@ -125,10 +125,11 @@ func TestDiffOverlayInsideIsTheTerminalBackground(t *testing.T) {
 	}
 }
 
-// TestDiffOverlayHonoursANamedBackground is the other half: a theme that names
-// bg_base still gets its own surface, so the fix is not "the overlay never
-// paints a background".
-func TestDiffOverlayHonoursANamedBackground(t *testing.T) {
+// TestDiffOverlayIgnoresANamedBackground is the other half: the panel's field
+// is the terminal's, whatever bg_base names. A themed fill painted the blank
+// interior one colour and left every text cell on the terminal's own, so a
+// viewer that named bg_base came up striped — black text bars on a grey band.
+func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
 	app, scr := newTestApp(t, 120, 30)
 	defer scr.Fini()
 
@@ -150,9 +151,11 @@ func TestDiffOverlayHonoursANamedBackground(t *testing.T) {
 	}
 	app.draw()
 
-	want := app.cellColor(c)
-	r, _, st, _ := scr.GetContent(100, 6)
-	if _, bg, _ := st.Decompose(); bg != want {
-		t.Fatalf("overlay interior cell %q has background %v, want the theme's bg_base %v", r, bg, want)
+	// A blank interior cell and a cell the diff text painted: one background.
+	for _, x := range []int{100, 8} {
+		r, _, st, _ := scr.GetContent(x, 6)
+		if _, bg, _ := st.Decompose(); bg != tcell.ColorDefault {
+			t.Fatalf("overlay cell %d %q has background %v, want the terminal default (bg_base is %v)", x, r, bg, app.cellColor(c))
+		}
 	}
 }
