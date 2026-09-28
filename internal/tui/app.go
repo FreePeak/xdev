@@ -772,6 +772,162 @@ func (a *App) FinishTool(callID, name string, isErr bool, output string, out Too
 	a.poke()
 }
 
+// taskToolName is the one tool whose children the transcript shows. The
+// name lives in the agent package, which the TUI deliberately does not
+// import, so the host passes the rows in and the TUI only has to know which
+// call row they belong to.
+const taskToolName = "task"
+
+// AddTaskChild records that a `task` call started a child. The child is
+// attached to the newest running `task` row — the same call a result would
+// close — and a child that arrives after the call settled is dropped: the
+// row it belonged to is gone, and inventing one would paint a child under
+// whatever call came next.
+func (a *App) AddTaskChild(callID, label, agent, model string) {
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b != nil {
+		b.Sub = append(b.Sub, &SubActivity{
+			Label: label, Agent: agent, Model: model, Status: "running", Ts: time.Now(),
+		})
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// UpdateTaskChild records what a child just did. Unknown children (a host
+// that only forwards tool events) are adopted rather than dropped, so the
+// row still says something is running.
+func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b != nil {
+		c := findSubLocked(b, label)
+		if c == nil {
+			c = &SubActivity{Label: label, Ts: time.Now()}
+			b.Sub = append(b.Sub, c)
+		}
+		c.Tool, c.Args, c.Status = toolName, rawArgs, status
+		c.Calls++
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// FinishTaskChild settles one child with its terminal status and wall time.
+func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b != nil {
+		if c := findSubLocked(b, label); c != nil {
+			c.Status, c.Dur = status, d
+		}
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// runningToolLocked is the running call row for callID/name, newest first.
+// Callers hold a.mu.
+func (a *App) runningToolLocked(callID, name string) *Block {
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != name || b.Status != "running" {
+			continue
+		}
+		if callID != "" && b.CallID != "" && b.CallID != callID {
+			continue
+		}
+		return b
+	}
+	return nil
+}
+
+// findSubLocked is the child with this label, or nil. Labels are unique
+// per batch: a batch that named two children the same way already reports
+// two indistinguishable sections, and merging their rows would be a lie.
+func findSubLocked(b *Block, label string) *SubActivity {
+	for _, c := range b.Sub {
+		if c.Label == label {
+			return c
+		}
+	}
+	return nil
+}
+
+// subVisible splits a call's children into the rows the transcript paints
+// and the count it reports for the rest. A batch runs up to 8 children and
+// the block keeps them all (a handful of small structs, and dropping them
+// would make a late settle land on the wrong child); the CAP is a paint
+// decision, so it belongs here, not in the state.
+func (b *Block) subVisible() (rows []*SubActivity, more int) {
+	if len(b.Sub) > subRowsMax {
+		return b.Sub[:subRowsMax], len(b.Sub) - subRowsMax
+	}
+	return b.Sub, 0
+}
+
+// RunningTaskCallID is the call id of the newest running `task` row, or ""
+// when none is in flight. A host that receives a child event with no call
+// id of its own asks this to place it: the spawn that is blocking the turn
+// is the one whose row is still spinning.
+func (a *App) RunningTaskCallID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if b := a.runningToolLocked("", taskToolName); b != nil {
+		return b.CallID
+	}
+	return ""
+}
+
+// subLines renders a `task` call's children as continuation rows under the
+// call row. Each row is `⎿ <label> · <what it last did>`, dim: it is
+// narration inside someone else's call, not a call of its own, and it must
+// not compete with the parent row for attention.
+//
+// The naming argument comes from toolDetail — the SAME precedence the
+// parent's own call rows use — so a child row and a call row read alike and
+// the rules live in one place.
+func (a *App) subLines(b *Block, w int) []line {
+	rows, more := b.subVisible()
+	if len(rows) == 0 && more == 0 {
+		return nil
+	}
+	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))).Bold(true)
+	var out []line
+	emit := func(text string) {
+		ln := textline("  ⎿ ", dim)
+		ln.runs = append(ln.runs, cell{text: text, style: nameSt})
+		out = append(out, ln)
+	}
+	for _, c := range rows {
+		phrase := c.Tool
+		if detail := toolDetail(c.Args); detail != "" {
+			if phrase == "" {
+				phrase = detail
+			} else {
+				phrase += " · " + detail
+			}
+		}
+		if phrase == "" {
+			phrase = "starting"
+		}
+		row := c.Label + " · " + phrase
+		// No per-child elapsed while the call is in flight: the call row
+		// right above already counts the wall time, and two clocks on one
+		// row is noise. The settled summary carries the child's own time.
+		if budget := subRow(w); width(row) > budget {
+			row = truncateCells(row, budget, "…")
+		}
+		emit(row)
+	}
+	if more > 0 {
+		emit(fmt.Sprintf("+%d more running", more))
+	}
+	return out
+}
+
 // ToggleBoxExpand flips the Ctrl+O state of the newest boxed block — a finished
 // tool result or a reasoning box — the one the user is looking at on a
 // tail-following transcript. It reports whether there was a box to toggle, so
@@ -2703,6 +2859,12 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			})
 		}
 		lines = append(lines, ln)
+		// A `task` call's children, one dim row each. They read as
+		// continuations of the row above (a `⎿` tick and an indent), not
+		// as sibling tool calls, and they are the only place a user can
+		// see what a subagent is doing while its call blocks — the model
+		// sees only the yield (TestSubagentYieldOnlyIsolation).
+		lines = append(lines, a.subLines(b, w)...)
 	case KindToolDone:
 		lines = append(lines, a.toolBoxLines(i, b, w)...)
 	case KindSystem:

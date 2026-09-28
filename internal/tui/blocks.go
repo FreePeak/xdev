@@ -54,7 +54,42 @@ type Block struct {
 	stream   bool      // assistant still receiving deltas (dim cursor at tail)
 	Ts       time.Time // block timestamp (user/assistant rows, tool start)
 	thinkDur time.Duration
+	// Sub holds the live activity of a `task` tool's children, in start
+	// order. Only the `task` tool ever writes them, so every other block
+	// is untouched.
+	//
+	// These are LINES of the call row, not blocks of their own: a child
+	// has no lifecycle the transcript manages (no trim tier, no box, no
+	// dock section, no /trajectory record), and a new BlockKind would drag
+	// it through all of those for no gain. How many of them PAINT is
+	// subVisible's answer; the block keeps them all, so a late settle
+	// still lands on the child it belongs to.
+	Sub []*SubActivity
 }
+
+// SubActivity is one child of a `task` call, as the user sees it: which
+// child, what it last did, and whether it is still working. Raw by design
+// — the row's wording is the render's job, and the naming argument is
+// extracted by toolDetail, the same helper the parent's own call rows use.
+type SubActivity struct {
+	Label  string        // the child's name (`name`, else agent, else "task #N")
+	Agent  string        // resolved agent type, when one was named
+	Model  string        // the child runs on the session's model
+	Tool   string        // the tool it last called ("" before its first call)
+	Args   string        // that call's raw JSON arguments
+	Status string        // "running" | "ok" | "error"
+	Calls  int           // finished tool calls, for the settled summary
+	Dur    time.Duration // terminal wall time, set when Status settles
+	Ts     time.Time     // when the child started, for its live elapsed
+}
+
+// subRowsMax is how many children a batch keeps on screen. ponytail: 3 + a
+// "+N more" line. A batch of 8 all expanded would push the parent row off a
+// normal terminal, and the report box below already names all 8.
+const subRowsMax = 3
+
+// subRow is the width a child row has left after its own glyph and indent.
+func subRow(w int) int { return max(8, w-6) }
 
 // Width returns the display width of s in cells.
 func width(s string) int { return runewidth.StringWidth(s) }

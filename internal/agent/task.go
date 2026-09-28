@@ -79,6 +79,12 @@ type TaskTool struct {
 	// model, an explicit value is a model reference. Additive: nil leaves
 	// the spawn path exactly as it was.
 	ChildAdvisor func() *Advisor
+	// OnEvent receives every foreground child's progress (start, one per
+	// tool call, end), so a host can show a user what the children are
+	// doing while the call blocks. Set by the TUI (cmd/xdev/tui.go);
+	// nil in print/rpc/acp leaves the path exactly as it was. Display
+	// only: the parent's context is unaffected.
+	OnEvent func(SubagentEvent)
 }
 
 // TaskToolName is the tool name the model calls.
@@ -280,7 +286,12 @@ func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, e
 			prompt = a.Context + "\n\n" + prompt
 		}
 		sub, err := json.Marshal(taskArgs{
-			Prompt: prompt, Agent: item.Agent, Name: item.Name,
+			Prompt: prompt, Agent: item.Agent,
+			// A batch item with no `name` is still a child a user is
+			// watching, so it is labelled the way its own report
+			// section already is (`batchItemLabel`) instead of
+			// arriving nameless.
+			Name:   childLabel(item.Name, item.Agent, i),
 			Schema: item.Schema, Strict: item.Strict, MaxTurns: item.MaxTurns,
 			Background: a.Background,
 		})
@@ -316,16 +327,23 @@ func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, e
 	return tool.Result{Text: head + "\n\n" + strings.TrimRight(sb.String(), "\n") + "\n"}, nil
 }
 
+// childLabel names one batch child — the label a user sees on its live row.
+// It is batchItemLabel without the report's `· ` bullet: the bullet belongs
+// to the report section, not to a child's name.
+func childLabel(name, agent string, i int) string {
+	switch {
+	case name != "":
+		return name
+	case agent != "":
+		return agent
+	default:
+		return fmt.Sprintf("task #%d", i+1)
+	}
+}
+
 // batchItemLabel names one batch section for the parent's report.
 func batchItemLabel(i int, item taskItem) string {
-	switch {
-	case item.Name != "":
-		return "· " + item.Name
-	case item.Agent != "":
-		return "· " + item.Agent
-	default:
-		return fmt.Sprintf("· task #%d", i+1)
-	}
+	return "· " + childLabel(item.Name, item.Agent, i)
 }
 
 // taskArgs is one spawn request. Tasks/Context carry omp's batch shape
@@ -516,6 +534,14 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		Policy:          t.Policy,
 		Approve:         t.Approve,
 		Thinking:        agentThinking,
+	}
+
+	// A foreground spawn is the one a user is watching: the TUI learns what
+	// the child is doing through this callback. The hub composes its own
+	// OnEvent additively (launchLocked, the way it does for OnRun), and
+	// neither is the parent's context — that still sees only the yield.
+	if t.OnEvent != nil {
+		spec.OnEvent = t.OnEvent
 	}
 
 	// task.agentAdvisor (M11 #39): give the child its own reviewer, wired
