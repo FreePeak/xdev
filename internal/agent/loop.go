@@ -367,6 +367,13 @@ type Agent struct {
 	// prewalk is the live state machine; Run is single-goroutine, no lock.
 	prewalk prewalkState
 
+	// repeats is the run's consecutive-repeat chain (repeat.go): the last
+	// tool call's identity key and how many times it has run in a row, used
+	// to notice a model that is paying a full round trip to re-ask the same
+	// question. Single-goroutine Run like the rest of this struct — the chain
+	// is advanced on the loop's own goroutine, never from a tool worker.
+	repeats repeatChain
+
 	steerMu  sync.Mutex
 	steering []Steering
 	// requestStart is the wall clock oneTurn stamps at the start of
@@ -520,7 +527,14 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		emit("turn_start", map[string]any{"turn": turn})
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
-		for _, s := range a.drainSteering() {
+		// A steering message is a human changing the instruction, so it ends
+		// the repeat chain: the same call twice around a new instruction is
+		// compliance, not a loop (repeat.go).
+		steering := a.drainSteering()
+		if len(steering) > 0 {
+			a.repeats = repeatChain{}
+		}
+		for _, s := range steering {
 			m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
 			history = append(history, m)
 			a.persist(m)
@@ -1399,6 +1413,13 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 		}(i)
 	}
 	wg.Wait()
+	// The repeat chain counts in MODEL order, not worker-finish order: the
+	// loop the guard exists to catch is a sequence of ISSUED calls, and a
+	// batch whose workers finished out of order must still count as the
+	// model wrote it. Single-goroutine here, after the join, so no lock.
+	for i := range out {
+		a.repeatNotice(&out[i], calls[i])
+	}
 	return out
 }
 
