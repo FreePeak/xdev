@@ -62,6 +62,13 @@ type SessionOps struct {
 	// the new branch). The transcript is restored from the new leaf
 	// before the draft is returned. nil degrades to a notice.
 	NavigateTree func(entryID string, summarize bool) (draft string, err error)
+	// UserEntryID maps the i-th user prompt row of the live transcript to the
+	// store entry that holds it, or "" when the row has no backing entry (a
+	// harness turn, or a session that rewound under the caller). i is the
+	// ordinal the transcript was built with, so cmd and the TUI agree on which
+	// row is which by construction rather than by matching text. It backs the
+	// user-message menu's jump / revert / fork. nil degrades those to notices.
+	UserEntryID func(i int) string
 	// Handoff replaces the live context with a handoff document (M5 #23):
 	// the host generates the document through a side request, commits it as
 	// a compaction entry on this session, and returns the document text.
@@ -383,6 +390,7 @@ type CommandAPI interface {
 	// modal list where a row's inspector shows the record's full body.
 	Trajectory() error
 	Goal(args string) error
+	Schedule(args string) error
 	Advisor(args string) error
 	Memory(args string) error
 	Theme(args string) error
@@ -462,6 +470,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "goal", Description: "session objective: /goal <objective> starts it (and resumes on the first turn); /goal shows it, /goal complete|drop closes it",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
+		{Name: "schedule", Description: "session-local reminders: /schedule [list|create <seconds|RFC3339> <prompt>|delete <id>]",
+			Fn: func(app CommandAPI, args string) error { return app.Schedule(args) }},
 		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},
 		{Name: "connect", Description: "connect a provider from the catalog: /connect [name]",

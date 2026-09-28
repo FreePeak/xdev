@@ -128,6 +128,18 @@ type App struct {
 	// clicks a changed file in the dock; nil when closed.
 	diffOv *diffOverlay
 
+	// msgm is the user-message menu a click on a ❯ row opens; nil = closed.
+	msgm *msgMenu
+	// msgv is the read-only message surface behind the menu's "jump" row.
+	msgv *msgView
+	// msgArmed records that a press landed on a user prompt. The menu opens on
+	// the no-motion RELEASE of that press, not on the press itself, so a drag
+	// that starts on a prompt still selects text (see msgmenu.go).
+	msgArmed bool
+	// msgFire is a menu action built under a.mu and run after unlocking — the
+	// session rewind replays the transcript and must not run locked.
+	msgFire func()
+
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
@@ -144,6 +156,7 @@ type App struct {
 	connectOps         *ConnectOps                            // /connect, wired by cmd (nil → notices)
 	prewalkOps         *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
 	goalOps            *GoalOps                               // /goal, wired by cmd (nil → notices)
+	scheduleOps        *ScheduleOps                           // /schedule, wired by cmd
 	vibeOps            *VibeOps                               // /vibe, wired by cmd (nil → notices)
 	spick              *sessionPicker                         // /resume selector (nil = closed)
 	onPickerResume     func(id string)                        // wired by cmd: performs the resume
@@ -996,16 +1009,28 @@ func (a *App) SetGoalOps(ops *GoalOps) { a.goalOps = ops }
 
 // Goal implements CommandAPI /goal: `/goal <objective>` names the session's
 // objective and starts working on it; a bare /goal shows the current goal and
-// budget, and complete/drop close it. The ops drive the same state the goal
-// tool owns, so an interactive session steers its own objective without a
-// model turn. The argument used to be a required verb, which made the obvious
-// spelling — `/goal <what I want>` — a usage error.
+// budget, and complete/drop close it.
 func (a *App) Goal(args string) error {
 	block, err := a.goalOps.Dispatch(args)
 	if err != nil {
 		return err
 	}
 	a.AddSystemBlock(block)
+	return nil
+}
+
+// SetScheduleOps wires /schedule to the session-local reminder state.
+func (a *App) SetScheduleOps(ops *ScheduleOps) { a.scheduleOps = ops }
+
+// Schedule implements CommandAPI /schedule.
+func (a *App) Schedule(args string) error {
+	out, err := a.scheduleOps.Dispatch(args)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		a.AddSystemBlock(out)
+	}
 	return nil
 }
 
@@ -1191,7 +1216,10 @@ func (a *App) Reset() {
 	a.mu.Lock()
 	a.st.Work = 0
 	a.blocks = nil
-	a.thinkFocus = -1 // the focused box went with them
+	a.thinkFocus = -1  // the focused box went with them
+	a.msgArmed = false // so did the armed menu row: its block is gone
+	a.msgm = nil       // a menu over replayed-away blocks is not a menu
+	a.msgv = nil       // likewise the read-only surface naming one
 	a.sm = newScrollModel()
 	a.st.CtxUsed = 0
 	a.clearRenderCache()
@@ -1873,7 +1901,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// outranks the rest — while it is up it takes the wheel and the
 			// click, or the human scrolls the transcript underneath a question
 			// they were trying to answer.
-			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleSettingsOverlayMouse(m, press) || a.handleTrajectoryMouse(m, press) {
+			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleSettingsOverlayMouse(m, press) || a.handleTrajectoryMouse(m, press) || a.handleMsgMenuMouse(m, press) {
+				// A menu row picked by click arms its action under the lock;
+				// it runs here, unlocked.
+				a.runPendingMsgAction()
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
@@ -1882,12 +1913,16 @@ func (a *App) handleKey(ev tcell.Event) {
 				// otherwise the notch scrolls the transcript underneath it.
 				if a.diffOverlayOpen() {
 					a.dockOverlayScroll(3, false)
+				} else if a.MsgViewOpen() {
+					a.msgViewScroll(3, false)
 				} else if !a.scrollThinkBox(m, false) {
 					a.scroll(3, false)
 				}
 			case tcell.WheelDown:
 				if a.diffOverlayOpen() {
 					a.dockOverlayScroll(3, true)
+				} else if a.MsgViewOpen() {
+					a.msgViewScroll(3, true)
 				} else if !a.scrollThinkBox(m, true) {
 					a.scroll(3, true)
 				}
@@ -1895,6 +1930,7 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.mu.Lock()
 				a.handleMouse(m, press)
 				a.mu.Unlock()
+				a.runPendingMsgAction()
 			}
 		}
 		return
@@ -1938,6 +1974,14 @@ func (a *App) handleKey(ev tcell.Event) {
 	// selector and trajectory ledger use, so the double-Esc rewind block
 	// below never sees an Esc while the overlay is up.
 	if a.handleDiffOverlayKey(key) {
+		return
+	}
+	// The user-message menu and its read-only surface are modal on the same
+	// terms, and they sit ABOVE the diff overlay: the message view is what
+	// "jump" opens, and a menu can be opened from a click that closed nothing
+	// else. Their Esc case matters for the same reason the diff overlay's does
+	// — without it, Esc falls through to the double-Esc rewind block below.
+	if a.handleMsgMenuKey(key) {
 		return
 	}
 
@@ -3234,6 +3278,13 @@ func (a *App) paint() {
 	// Last, so it paints over every surface the frame just drew: see the note
 	// where the selection geometry is published above.
 	a.drawSelection()
+	// The user-message surfaces paint after even the selection: they are
+	// transient popups anchored to a click, and a highlight left over from an
+	// earlier drag must not shine through the menu. The menu's own geometry
+	// clamps it above the composer, so painting last cannot cover the prompt
+	// the user is about to type into.
+	a.drawMsgView(composerTop)
+	a.drawMsgMenu()
 }
 
 // drawSlashDropdown renders the "/" autocomplete popup above the composer

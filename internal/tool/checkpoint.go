@@ -52,6 +52,8 @@ type RewindTool struct {
 	// in-flight history is rebuilt from the store. Nil means no probe is
 	// wired and rewind proceeds — see WireCheckpoint for the wiring point.
 	Running func() bool
+	// OnLeafChange is called after a successful rewind moves the leaf.
+	OnLeafChange func()
 }
 
 var (
@@ -255,6 +257,9 @@ func (t *RewindTool) Execute(ctx context.Context, args json.RawMessage) (Result,
 	}}}
 	if err := t.Store.Append(&session.BranchSummaryEntry{Summary: summary}); err != nil {
 		return Result{IsError: true, Text: "rewind: leaf moved to the checkpoint but the report entry failed: " + err.Error()}, nil
+	}
+	if t.OnLeafChange != nil {
+		t.OnLeafChange()
 	}
 
 	dropped := abandonedCount(t.Store.Entries(), prevLeaf, target.EntryID)

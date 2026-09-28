@@ -576,6 +576,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// live hooks/agent point at the new store (single source of truth: the
 	// captured `store` variable, which all closures re-read).
 	swapStore := func(drop bool) error {
+		sessMu.Lock()
+		defer sessMu.Unlock()
 		// Vibe mode is session-scoped: a new session would orphan the
 		// director's workers, so the switch is refused until it is off
 		// (omp rejects start/fork while the mode is active).
@@ -615,6 +617,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// swapStoreTo adopts an already-open store (fork/resume): replays its
 	// transcript and points hooks/agent at it.
 	swapStoreTo = func(ns *session.Store) error {
+		sessMu.Lock()
+		defer sessMu.Unlock()
 		if vibeActive() {
 			return fmt.Errorf("vibe mode is active — /vibe off first")
 		}
@@ -687,6 +691,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if id == "" {
 			return
 		}
+		if !running.CompareAndSwap(false, true) {
+			app.AddSystemBlock("resume: a turn is running — Esc cancels it first")
+			return
+		}
+		defer running.Store(false)
 		path, err := resolveResumeID(cwd, id)
 		if err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
@@ -764,8 +773,37 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		} else if err := store.Branch(target); err != nil {
 			return "", err
 		}
+		if st := agent.ScheduleStateOf(reg); st != nil {
+			st.RefoldActive()
+		}
 		branchReplay()
 		return draft, nil
+	}
+	// userEntryID maps the i-th ❯ row of the live transcript back to the store
+	// entry that holds it. ContextResult.EntryIDs runs parallel to Messages,
+	// and harnessUserAttribution is the same filter replayTranscript counted
+	// the rows with, so the ordinal the TUI sends is the ordinal this answers
+	// for. A row with no entry (a compaction summary, a turn the store refused)
+	// reads as "", and the menu says so rather than rewinding somewhere random.
+	userEntryID := func(i int) string {
+		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		if err != nil {
+			return ""
+		}
+		n := 0
+		for j, m := range res.Messages {
+			if m.Role != ai.RoleUser || harnessUserAttribution(m) || m.Text() == "" {
+				continue
+			}
+			if n == i {
+				if j < len(res.EntryIDs) {
+					return res.EntryIDs[j]
+				}
+				return ""
+			}
+			n++
+		}
+		return ""
 	}
 	// branchToEntry moves the live leaf to an entry and replays the new
 	// branch's transcript into the TUI (/branch <id-prefix>).
@@ -775,9 +813,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		branchReplay()
 		app.AddSystemBlock("· branched to " + entryID[:min(8, len(entryID))] + " — replayed")
+		if st := agent.ScheduleStateOf(reg); st != nil {
+			st.RefoldActive()
+		}
 		return nil
 	}
 	app.SetSessionBranch(func(args string) error {
+		if !running.CompareAndSwap(false, true) {
+			return fmt.Errorf("a turn is running — Esc cancels it first")
+		}
+		defer running.Store(false)
 		query := strings.TrimSpace(args)
 		if query == "" {
 			return fmt.Errorf("branch: entry-id prefix required (ids are listed by /tree)")
@@ -1000,6 +1045,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if running.Load() {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
+			claimed := running.CompareAndSwap(false, true)
+			defer func() {
+				if claimed {
+					running.Store(false)
+				}
+			}()
 			if query == "" {
 				// Interactive picker (omp/Claude Code /resume): rows
 				// span all projects (Tab toggles scope; the picker
@@ -1055,7 +1106,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			return swapStoreTo(resumed)
 		},
-		NavigateTree: navigateTree,
+		NavigateTree: func(entryID string, summarize bool) (string, error) {
+			if !running.CompareAndSwap(false, true) {
+				return "", fmt.Errorf("a turn is running — Esc cancels it first")
+			}
+			defer running.Store(false)
+			return navigateTree(entryID, summarize)
+		},
+		UserEntryID: userEntryID,
 		New: func() error {
 			if !running.CompareAndSwap(false, true) {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
@@ -1085,6 +1143,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			defer running.Store(false)
 			if err := store.ResetLeaf(); err != nil {
 				return err
+			}
+			if st := agent.ScheduleStateOf(reg); st != nil {
+				st.RefoldActive()
 			}
 			app.Reset()
 			// The transcript must not go fully blank: draw() renders the
@@ -1407,6 +1468,49 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// wireTaskParent binds it, so an early call cannot read unbound state.
 	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
 	wireTaskParent(reg, store)
+	app.SetScheduleOps(&tui.ScheduleOps{
+		List: func() string {
+			st := agent.ScheduleStateOf(reg)
+			if st == nil {
+				return "schedule: not wired"
+			}
+			rows := st.List()
+			if len(rows) == 0 {
+				return "no schedules"
+			}
+			return agent.FormatScheduleList(rows, time.Now().UTC())
+		},
+		Create: func(prompt, selector string) (string, error) {
+			st := agent.ScheduleStateOf(reg)
+			if st == nil {
+				return "", fmt.Errorf("schedule not wired")
+			}
+			kind, seconds, at, err := tui.ScheduleSelector(selector)
+			if err != nil {
+				return "", err
+			}
+			in := agent.ScheduleInput{Prompt: prompt, At: at}
+			switch kind {
+			case "after":
+				in.AfterSeconds = seconds
+			case "every":
+				in.EverySeconds = seconds
+			}
+			rec, err := st.Create(in)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("scheduled %s for %s", rec.ID, rec.ScheduledAt.Format(time.RFC3339)), nil
+		},
+		Delete: func(id string) error {
+			st := agent.ScheduleStateOf(reg)
+			if st == nil {
+				return fmt.Errorf("schedule not wired")
+			}
+			return st.Delete(id)
+		},
+	})
+
 	// No auto-created goal here, unlike print mode (#387): an active goal is
 	// what /vibe reads as a conflict, so a placeholder would refuse to enter
 	// director mode in every fresh session. The objective is the user's to
@@ -1831,6 +1935,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// A pasted image is a block, not a word in the text: the chip the
 		// composer showed has already been stripped (tui.App.expandPastes),
 		// and what is left of the draft goes out beside the payloads in the
+
 		// order they sit in the prompt.
 		if text != "" {
 			msg.Content = append(msg.Content, ai.TextBlock{Text: text})
@@ -1856,9 +1961,97 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		startTurn()
 		return true
 	}
-	// The composer holds the two send paths apart: a plain prompt cannot ask
-	// for images it has none of, and a draft that has them must not be
-	// silently demoted to text.
+	// Background subagent completion notice (#296). A job started with
+	// background:true used to end silently: the model asked for work in
+	// parallel, then had to guess when it was done, because a result it never
+	// learns about is one it never reads. The same three-phase shape as the
+	// schedule reminder below, and for the same reason it cannot be an in-turn
+	// injection: Run takes history by value, and an idle session has no Agent
+	// and no turn goroutine to drain a queue. So — gate on idle, claim the
+	// turn, persist into the store the next run rebuilds from, start the turn.
+	if sessionHub != nil {
+		hubCtx, hubCancel := context.WithCancel(baseCtx)
+		hubDone := make(chan struct{})
+		go func() {
+			defer close(hubDone)
+			agent.StartHubNoticeDelivery(hubCtx, sessionHub,
+				func() bool { return !collabGuestJoined() && !running.Load() },
+				func(notice string) error {
+					// swapStore re-points `store` under sessMu; read it
+					// there rather than capturing a stale one.
+					sessMu.Lock()
+					target := store
+					sessMu.Unlock()
+					if target == nil || !running.CompareAndSwap(false, true) {
+						return agent.ErrHubNoticeDelivery
+					}
+					msg := ai.Message{
+						Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: notice}},
+						Attribution: agent.HubNoticeAttribution, UserTS: time.Now().UnixMilli(),
+					}
+					if err := target.Append(&session.MessageEntry{Message: msg}); err != nil {
+						running.Store(false)
+						return fmt.Errorf("%w: %v", agent.ErrHubNoticeDelivery, err)
+					}
+					return nil
+				},
+				func(noticeErr error) {
+					if noticeErr != nil {
+						// Not lost: the job is on the roster and
+						// `hub result` still answers.
+						app.AddSystemBlock("· background subagent finished; its notice could not be delivered, read it with hub result")
+					}
+					startTurn()
+				})
+		}()
+		defer func() {
+			hubCancel()
+			<-hubDone
+		}()
+	}
+	// Schedule delivery is an ordinary later turn, never steering. It waits
+	// for an idle interactive session, persists the reminder, then uses the
+	// same startTurn path as a user prompt.
+	scheduleCtx, scheduleCancel := context.WithCancel(baseCtx)
+	scheduleDone := make(chan struct{})
+	go func() {
+		defer close(scheduleDone)
+		agent.StartScheduleDelivery(scheduleCtx, agent.ScheduleStateOf(reg),
+			func([]agent.Schedule) bool { return !collabGuestJoined() && !running.Load() },
+			func(batch []agent.Schedule) error {
+				claimed := agent.ScheduleStateOf(reg)
+				if claimed == nil {
+					return agent.ErrScheduleDelivery
+				}
+				// The state is delivery-locked for this callback, so its
+				// bound store is stable; a swap waits for BindDelivery.
+				storeForDelivery := claimed.CurrentStore()
+				if storeForDelivery == nil || !running.CompareAndSwap(false, true) {
+					return agent.ErrScheduleDelivery
+				}
+				msg := ai.Message{
+					Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: agent.SchedulePrompt(batch)}},
+					Attribution: "schedule", UserTS: time.Now().UnixMilli(),
+				}
+				if err := storeForDelivery.Append(&session.MessageEntry{Message: msg}); err != nil {
+					running.Store(false)
+					return fmt.Errorf("%w: %v", agent.ErrScheduleDelivery, err)
+				}
+				return nil
+			},
+			func(_ []agent.Schedule, claimErr error) {
+				if claimErr != nil {
+					app.AddSystemBlock("· scheduled reminder dispatch deferred; running the due turn")
+				} else {
+					app.AddSystemBlock("· scheduled reminder due")
+				}
+				startTurn()
+			})
+	}()
+	defer func() {
+		scheduleCancel()
+		<-scheduleDone
+	}()
 	app.SetHandlers(
 		func(text string) { runTurn(text, nil) },
 		// Esc / Ctrl+C aborts the live turn only; see liveTurn. This handler
@@ -2288,37 +2481,48 @@ func setCursorReset() {
 // Thinking blocks ride along (BeginThinking is a no-op while showThinking
 // is off), so resumed, forked, and branched sessions show past reasoning
 // the same way fresh turns do instead of silently dropping it.
+// harnessUserAttribution reports whether a user-role message is harness text
+// the person never typed. Those never become ❯ rows: replaying one would
+// invent a turn that never happened.
+//
+// This predicate is deliberately shared with userEntryID, which maps a ❯ row's
+// ordinal back to its store entry. The two must agree exactly — a row counted
+// differently on the way in and on the way out would point the message menu's
+// revert at the wrong message, silently.
+func harnessUserAttribution(m ai.Message) bool {
+	switch m.Attribution {
+	case agent.ContinuationAttribution,
+		agent.GoalContinuationAttribution,
+		agent.PromptContinuationAttribution,
+		agent.TurnBudgetAttribution,
+		agent.EmptyTurnAttribution,
+		agent.HubNoticeAttribution:
+		return true
+	}
+	return false
+}
+
 func replayTranscript(app *tui.App, msgs []ai.Message) {
 	for _, m := range msgs {
 		switch m.Role {
 		case ai.RoleUser:
-			// Goal-continuation prompts are harness text the user never
-			// typed: replaying them as ❯ blocks would invent turns that
-			// never happened. A provider cut-off recovery is the same
-			// kind of harness turn, but it is worth seeing — it marks
-			// the episode where the stream died — so it replays as a
-			// system event instead of a user prompt (#283).
+			// Two of the harness turns are narrated as system events rather
+			// than dropped: a provider cut-off recovery marks the episode
+			// where the stream died (#283), and the turn-budget wrap-up is
+			// the only thing on screen explaining why the transcript stops
+			// mid-task.
 			if m.Attribution == agent.ContinuationAttribution {
 				app.AddSystemBlock("· recovered provider cut-off — continuation injected")
 				continue
 			}
-			if m.Attribution == agent.GoalContinuationAttribution {
-				continue
-			}
-			if m.Attribution == agent.PromptContinuationAttribution {
-				continue
-			}
-			// The turn-budget wrap-up is harness text too, but it explains
-			// why the transcript stops mid-task — so it replays as the
-			// system event that ends the episode, not as a ❯ block.
 			if m.Attribution == agent.TurnBudgetAttribution {
 				app.AddSystemBlock("· turn wrapped up — the session keeps going instead of asking you to say \"continue\"")
 				continue
 			}
-			// The empty-turn nudge is harness text, but a resumed session
-			// must still show why the model spoke twice in a row (#331).
-			if m.Attribution == agent.EmptyTurnAttribution {
-				app.AddSystemBlock("· the model answered with nothing — asked again")
+			// The rest (goal continuations, prompt continuations, the
+			// empty-turn nudge) are text nobody typed: replaying one as a ❯
+			// block would invent a turn that never happened.
+			if harnessUserAttribution(m) {
 				continue
 			}
 			if txt := m.Text(); txt != "" {
