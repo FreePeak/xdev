@@ -1163,10 +1163,11 @@ CI contracts, and the M14/M15 tail. Prioritised inside P2 by the triage evidence
 
 #78 #84 #86 #91 #92 #93 #94 #95 #96 #104 #106 #108 #133 #140 #144 #148 #155 #158 #162 #165 #168 #190 #192 #193 #194 #197 #199 #205 #234 #235 #236 #242 #284 #287 #288 #295 #296 #369 #426 #427
 
-Each `partial` verdict in the audit names the exact missing deliverables in the issue itself, so
-the next pass does not re-derive them. Two deserve a slot before anything else: **#422**
-(compaction that buys no space keeps compacting at full cost, forever, with no signal) and
-**#424** (a wedged provider cannot be cancelled — `internal/ai/watchdog.go:53-112` has no
-`ctx.Done()` arm, so a `Stop` waits out the full 90 s idle timeout).
+Each `partial` verdict carries a triage comment on the issue naming what landed and what is
+still missing, so the next pass does not re-derive it. Two of the 40 are not partials at all and
+deserve a slot before anything else: **#422** (compaction that buys no space keeps compacting at
+full cost, forever, with no signal) and **#424** (a wedged provider cannot be cancelled —
+`internal/ai/watchdog.go:53-112` has no `ctx.Done()` arm, so a `Stop` waits out the full 90 s idle
+timeout).
 
 *Last updated: 2026-09-29 (issue triage): every open issue traced to code at `origin/main` @ `3c44ec5`; #83/#102/#315/#374 closed as done, 182 issues labelled P0/P1/P2 by impact rather than milestone, and the P0/P1 sets recorded in §7.*
