@@ -228,7 +228,7 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		// No room for the card: say the questions in the transcript and take
 		// the skip path, so the tool's headless policy answers instead of the
 		// questions vanishing.
-		a.askNotice(keep, "window too narrow for the option card — using the recommended path")
+		a.askNotice(keep, "window too narrow for the option card — answer in chat")
 		return nil, false
 	}
 
@@ -272,8 +272,8 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		}
 		return res.answers, true
 	case <-deadline:
-		// The wait the headless policy would have run is already spent, so
-		// record the question and let the caller answer from it alone.
+		// The card's wait is the policy's wait, so record the question and
+		// let the caller answer from it alone.
 		a.askNotice(keep, fmt.Sprintf("no answer within %s — using the recommended path", timeout))
 		return nil, false
 	case <-ctx.Done():
@@ -888,7 +888,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 		a.ask = nil
 		select {
 		case st.ch <- askResult{notice: askNotice(st.reqs,
-			"no room above the composer for the option card — using the recommended path")}:
+			"no room above the composer for the option card — answer in chat")}:
 		default:
 		}
 		return

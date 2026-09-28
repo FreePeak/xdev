@@ -1811,7 +1811,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		ghTool,
 		// ask is the parent's channel to the user; children (ChildTools
 		// below) deliberately omit it — a scoped subagent has no user.
-		tool.NewAskTool(settings.AskTimeout()),
+		tool.NewAskTool(settings.AskTimeout(), settings.AskAutoAnswerOn()),
 	} {
 		reg.Register(t)
 	}

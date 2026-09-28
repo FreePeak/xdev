@@ -60,7 +60,7 @@ xdev-broken vs xdev-intentional.
 | 29 | plan mode | exit tool named `propose` (+ `xd://propose`/`xd://resolve` devices) vs omp `resolve` | divergence | xdev-intentional (naming) |
 | 30 | ask | schema diverges: xdev `{question, options[label,description], multi, recommended: labels}` vs omp `{questions:[{id, question, options[label,description,preview], multi, recommended: index}]}`. An omp-shaped call fails `ask: question is required` (verified) | bug | xdev-broken |
 | 31 | ask | registered and **blocking in headless runs** (omp registers ask only when `hasUI`): a model ask stalls the run for the full timeout — default 120s at `48459fe` (measured: run did not finish in 120s), 30s in an in-flight sibling edit | bug | xdev-broken |
-| 32 | ask | verified good: `ask.timeout` → recommended auto-select (`[ok, 2.001s] → {"selected":["B"]}`); no recommendation → `no answer within 3s — proceed with your best judgment and state the assumption` | ok | — |
+| 32 | ask | **superseded 2026-09-29** (`fix/ask-wait-for-human`): auto-select is now opt-in. Measured here: `ask.timeout` → recommended auto-select (`[ok, 2.001s] → {"selected":["B"]}`); no recommendation → `no answer within 3s — proceed with your best judgment and state the assumption`. That is now `ask.autoAnswer: true`; the default waits for the human with no timer, and `ask.timeout` alone no longer enables it (so rows 31/32's "blocking until timeout" behavior is now indefinite by default — a headless run waits for its human, and only a canceled turn releases it) | changed | — |
 | 33 | goal | budget accounting lags one turn: request N's reminder/budget shows spend as of request N-1 (mock usages 1/10: rem(1)=100000 then rem(2)=99990; tool views 0→10 in the same turns). A 1-token budget flips to `budget_exhausted` a turn late | bug | xdev-broken |
 | 34 | goal | ops `create\|get\|resume\|evidence\|complete\|drop`; no `remind`, no `pause`/`budget`; statuses `active/completed/dropped/budget_exhausted`; no goal-mode toggle (tool always present, session-scoped). Continuation landed 2026-09-14: a yield with no tool calls re-enters the run with the hidden `goal-continuation` prompt and `/goal create\|resume` starts the first turn — TUI-only, matching omp's `goal.continuationModes: [interactive]` default, so print/RPC/ACP still end at the yield | divergence | xdev-intentional |
 | 35 | goal | verified good: create → evidence-gated completion (no-evidence complete refused), `goal_updated` persistence, per-turn reminder injection (observed in the system prompt of the next request), and the goal continuation (live 2026-09-14: a plan-only assistant message with no tool calls is followed by `message user attribution=goal-continuation` in the session JSONL, the next turn continues the work, and the run ends at `goal_updated completed`) | ok | — |
@@ -120,8 +120,8 @@ xdev -plan -max-turns 3 "headless plan"  # propose → "plan accepted (no review
 
 # 30/31 ask headless (config: {} → default timeout)
 #    script.json: tool call ask {"questions":[…]} → "ask: question is required" (omp shape)
-#    valid shape, no ask.timeout: run does not finish within 120s (default 2-minute wait)
-# 32 config ask.timeout: 2 → [ok, 2.001s] {"selected":["B"]}
+#    valid shape, no ask.autoAnswer: the run waits for a human (no timer) until canceled
+# 32 config ask.autoAnswer: true + ask.timeout: 2 → [ok, 2.001s] {"selected":["B"]}
 
 # 33 goal accounting lag (mock usage 1 then 10 tokens, budget 100000)
 xdev -max-turns 3 "probe goal" ; analyze requests
@@ -159,9 +159,10 @@ xdev -max-turns 3 "probe goal" ; analyze requests
    `agent.NewTTSR` bucketing or drop the field from the parser.
 6. **#33 goal budget off-by-one** — the reminder/budget view trails a turn;
    with small budgets `budget_exhausted` fires late.
-7. **#31 headless ask stall** — deeper fix beyond the in-flight 2min→30s
-   change: omp never registers `ask` without a UI; xdev should either do the
-   same in print mode or default `ask.timeout` to a small value.
+7. **#31 headless ask stall** — omp never registers `ask` without a UI;
+   xdev should either do the same in print mode or drop `ask.autoAnswer`
+   (recommended) / set a small `ask.timeout` (2026-09-29: auto-answer is
+   opt-in, so the default no longer stalls on a timer — it waits).
 8. **#1 task batch shape** — accept omp's default `{context, tasks[]}` shape
    (or at least reject with a model-actionable message).
 9. **#14 hooks payload names** — rename `tool`→`toolName`, add `toolCallId`,

@@ -3,8 +3,9 @@ package tool
 // AskTool: structured mid-task clarification (M11 #36, omp `ask`). The
 // model asks a question with labelled options; a host-provided AskSink
 // answers it (the TUI overlay card is #46's scope). Without a sink —
-// headless print runs — nobody answers, so the default policy waits out
-// ask.timeout and lets the recommended option(s) proceed.
+// headless print runs — nobody answers, so the default policy WAITS for the
+// human. Answering from the recommendation is opt-in (ask.autoAnswer): a
+// question the user never sees must not be answered for them.
 
 import (
 	"bytes"
@@ -19,10 +20,10 @@ import (
 
 var _ Tool = (*AskTool)(nil)
 
-// DefaultAskTimeout is the headless wait when ask.timeout is unset. Sixty
+// DefaultAskTimeout is the wait before the recommendation answers a
+// question when ask.autoAnswer is on and ask.timeout is unset. Sixty
 // seconds, not minutes: a one-shot run that hits an ask must not stall CI
-// for minutes per question — the wait exists so a late human can still
-// answer, and ask.timeout raises (or lowers) it deliberately.
+// for minutes per question. With auto-answer off there is no timer at all.
 const DefaultAskTimeout = 60 * time.Second
 
 // AskToolName is the registry name of the ask tool.
@@ -77,21 +78,27 @@ type AskBatchSink interface {
 
 // AskTool asks the model's question through the configured sink.
 type AskTool struct {
-	// Sink answers the question; nil selects the headless default
-	// (wait out Timeout, then the recommended options).
+	// Sink answers the question; nil selects the headless default, which
+	// waits for the human unless AutoAnswer is set.
 	Sink AskSink
-	// Timeout caps the headless wait; <=0 means DefaultAskTimeout.
+	// Timeout bounds the auto-answer wait; <=0 means DefaultAskTimeout.
 	// The ask.timeout setting feeds this from cmd.
 	Timeout time.Duration
+	// AutoAnswer answers an unanswered question from its recommended option
+	// after Timeout instead of waiting (the ask.autoAnswer setting, off by
+	// default).
+	AutoAnswer bool
 }
 
 // NewAskTool returns an ask tool with the headless default policy.
-func NewAskTool(timeout time.Duration) *AskTool { return &AskTool{Timeout: timeout} }
+func NewAskTool(timeout time.Duration, autoAnswer bool) *AskTool {
+	return &AskTool{Timeout: timeout, AutoAnswer: autoAnswer}
+}
 
 func (t *AskTool) Name() string { return AskToolName }
 
 func (t *AskTool) Description() string {
-	return "ask the user a clarifying question with labelled options; unattended runs use the recommended option after a timeout. Several questions in one call are ONE interruption (a tabbed card), not a card each — ask them together"
+	return "ask the user a clarifying question with labelled options; it waits for their answer. Several questions in one call are ONE interruption (a tabbed card), not a card each — ask them together"
 }
 
 func (t *AskTool) Parameters() json.RawMessage {
@@ -112,7 +119,7 @@ func (t *AskTool) Parameters() json.RawMessage {
       }
     },
     "multi": {"type": "boolean", "description": "true = several options may be selected"},
-    "recommended": {"description": "option(s) to use when nobody answers within the headless wait: a label, a 0-based option index, or a list of either"},
+    "recommended": {"description": "option(s) to use when nobody answers and ask.autoAnswer is on: a label, a 0-based option index, or a list of either"},
     "questions": {
       "type": "array",
       "description": "batch form (omp): ask several questions in one call; each entry carries id/question/options/multi/recommended",
@@ -128,7 +135,7 @@ func (t *AskTool) Parameters() json.RawMessage {
         "required": ["question", "options"]
       }
     },
-    "_note": {"description": "unattended (print/rpc) runs wait ask.timeout (default 60s) then take the recommended option — in a one-shot run, prefer deciding over asking"}
+    "_note": {"description": "unattended (print/rpc) runs wait for a human until canceled; ask.autoAnswer answers from the recommendation after ask.timeout — in a one-shot run, prefer deciding over asking"}
   },
   "anyOf": [
     {"type": "object", "required": ["question", "options"]},
@@ -183,7 +190,7 @@ func (t *AskTool) Execute(ctx context.Context, args json.RawMessage) (Result, er
 	// a batch: the wait behind a question is the expensive part, not the card.
 	sink := t.Sink
 	if sink == nil {
-		sink = headlessAskSink{timeout: t.timeout()}
+		sink = headlessAskSink{timeout: t.timeout(), autoAnswer: t.AutoAnswer}
 	}
 	resps, err := askAll(ctx, sink, reqs)
 	if ctx.Err() != nil {
@@ -194,7 +201,10 @@ func (t *AskTool) Execute(ctx context.Context, args json.RawMessage) (Result, er
 		Selected []string `json:"selected,omitempty"`
 		Note     string   `json:"note,omitempty"`
 	}
-	guidance := fmt.Sprintf("no answer within %s — proceed with your best judgment and state the assumption", t.timeout().Round(time.Second))
+	guidance := "no answer — proceed with your best judgment and state the assumption"
+	if t.AutoAnswer {
+		guidance = fmt.Sprintf("no answer within %s — proceed with your best judgment and state the assumption", t.timeout().Round(time.Second))
+	}
 	if err != nil || len(resps) != len(reqs) {
 		// A sink that broke the one-answer-per-question contract gets reported
 		// as no answer at all rather than half an answer mapped to the wrong id.
@@ -392,17 +402,28 @@ func intFromJSON(raw json.RawMessage) int {
 }
 
 // headlessAskSink is the default policy: an unattended run has nobody to
-// answer, so it waits out the timeout and returns the recommended
-// option(s) — or nothing, when none were recommended.
-type headlessAskSink struct{ timeout time.Duration }
-
-// NewHeadlessAskSink returns the timeout→recommended policy sink; the
-// TUI fallback sink delegates to it after surfacing the question.
-func NewHeadlessAskSink(timeout time.Duration) AskSink {
-	return headlessAskSink{timeout: timeout}
+// answer, so it waits — for the human, or (autoAnswer) out the timeout, in
+// which case the recommended option(s) answer, or nothing when none were
+// recommended.
+type headlessAskSink struct {
+	timeout    time.Duration
+	autoAnswer bool
 }
 
-func (s headlessAskSink) Ask(ctx context.Context, req AskRequest) (AskResponse, error) {
+// NewHeadlessAskSink returns the wait→recommended policy sink; the
+// TUI fallback sink delegates to it after surfacing the question.
+func NewHeadlessAskSink(timeout time.Duration, autoAnswer bool) AskSink {
+	return headlessAskSink{timeout: timeout, autoAnswer: autoAnswer}
+}
+
+// wait is the whole headless policy in one place, because Ask and AskBatch
+// must never disagree on how long they waited: with auto-answer off there is
+// no timer, so the only thing that ends the wait is the turn itself.
+func (s headlessAskSink) wait(ctx context.Context) error {
+	if !s.autoAnswer {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	t := s.timeout
 	if t <= 0 {
 		t = DefaultAskTimeout
@@ -411,8 +432,15 @@ func (s headlessAskSink) Ask(ctx context.Context, req AskRequest) (AskResponse, 
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return AskResponse{}, ctx.Err()
+		return ctx.Err()
 	case <-timer.C:
+	}
+	return nil
+}
+
+func (s headlessAskSink) Ask(ctx context.Context, req AskRequest) (AskResponse, error) {
+	if err := s.wait(ctx); err != nil {
+		return AskResponse{}, err
 	}
 	return AskResponse{Labels: append([]string(nil), req.Recommended...)}, nil
 }
@@ -420,16 +448,8 @@ func (s headlessAskSink) Ask(ctx context.Context, req AskRequest) (AskResponse, 
 // AskBatch waits ONCE for the whole batch: nobody is answering any of these
 // questions, so N sequential waits would only make a one-shot run slower.
 func (s headlessAskSink) AskBatch(ctx context.Context, reqs []AskRequest) ([]AskResponse, error) {
-	t := s.timeout
-	if t <= 0 {
-		t = DefaultAskTimeout
-	}
-	timer := time.NewTimer(t)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-timer.C:
+	if err := s.wait(ctx); err != nil {
+		return nil, err
 	}
 	out := make([]AskResponse, 0, len(reqs))
 	for _, req := range reqs {
