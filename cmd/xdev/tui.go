@@ -2232,6 +2232,12 @@ func (h *tuiHooks) OnStart(req ai.StreamRequest) {
 
 func (h *tuiHooks) OnEvent(ev ai.Event) {
 	switch ev.Type {
+	case ai.EventStart:
+		// One message, one decode window: a turn that died into the retry
+		// ladder never reached EventDone, so its window would otherwise be
+		// inherited as the next turn's denominator (a t/s reading several
+		// times too low, for the rest of the session).
+		h.ts.app.BeginMessage()
 	case ai.EventTextStart:
 		h.ts.app.BeginAssistant()
 	case ai.EventTextDelta:
@@ -2244,6 +2250,11 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		h.ts.app.AppendThinking(ev.Delta)
 	case ai.EventThinkingEnd:
 		h.ts.app.EndThinking()
+	case ai.EventToolcallDelta:
+		// output_tokens counts tool-argument JSON, so the decode window has
+		// to span it — the numerator and the denominator must measure the
+		// same message.
+		h.ts.app.NoteToolDelta()
 	case ai.EventDone:
 		h.ts.app.EndAssistant()
 		if ev.Usage != nil {
