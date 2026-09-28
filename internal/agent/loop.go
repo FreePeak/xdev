@@ -800,7 +800,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	a.fallbackPreTurn()
 	policy := a.Retry.withDefaults()
 	attempt, continued, compacted := 0, false, false
-	escalation := 0
+	escalation, healthEscalation := 0, 0
 	interrupted := 0
 	for {
 		// Health-check the active provider before spending a turn: a dead
@@ -808,13 +808,51 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		// its attempts on an endpoint that cannot serve. Fail over
 		// before the ladder drains so a restart reads as waiting.
 		if hcErr := a.healthCheckProvider(ctx); hcErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, history, ctxErr
+			}
 			if nxt := a.nextFailoverTarget(); nxt > 0 {
 				a.switchTarget(nxt, "health-check")
 				attempt = 0
+				healthEscalation = 0
+				continue
+			}
+			// A failed probe can outlast a fallback cooldown. If the
+			// pre-turn pass restores the primary, probe it next rather than
+			// immediately selecting the same failed fallback again.
+			beforeTarget := a.curTarget
+			a.fallbackPreTurn()
+			if a.curTarget != beforeTarget {
+				healthEscalation = 0
+				continue
+			}
+			if nxt := a.nextFailoverTarget(); nxt > 0 {
+				a.switchTarget(nxt, "health-check")
+				attempt = 0
+				healthEscalation = 0
+				continue
+			}
+			// A refused or unreachable model host is the same outage the
+			// stream ladder handles. With retry.infinite, keep probing after
+			// capped backoff until the host answers or the run is cancelled;
+			// an explicitly bounded policy still gets its own finite
+			// escalation rounds as a stream failure.
+			if healthEscalation < maxEscalationRounds || policy.Infinite {
+				healthEscalation++
+				attempt = 0
+				d := policy.delay(healthEscalation)
+				logx.Errorf("recovery: health check failed, retrying probe in %s (round %d): %v", d, healthEscalation, hcErr)
+				if policy.Infinite {
+					a.noticeAllTargetsDown(healthEscalation, d, hcErr)
+				}
+				if serr := sleepBackoff(ctx, d); serr != nil {
+					return nil, history, serr
+				}
 				continue
 			}
 			return nil, history, fmt.Errorf("agent: health check failed and all targets drained: %w", hcErr)
 		}
+		healthEscalation = 0
 		msg, err := a.oneTurn(ctx, system, history)
 		if err == nil {
 			return msg, history, nil
