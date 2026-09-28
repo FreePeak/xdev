@@ -19,6 +19,18 @@ the dispositioned cross-check is
 | **Claude Code** | A thin layer over the model wrapped in a large product surface: approval modes, Agent Teams, OTel export, enterprise policy tiers | Plan mode with an explicit gate, `ask` (a batch is one card, not N interruptions), checkpoint/rewind, hooks exit-2 blocking, prompt-cache markers on the request prefix | Telemetry (xdev ships none), managed-policy tiers, in-process permission UI…[+27b] |
 | **OpenCode** | SQLite as the source of truth — WAL, migrations, todos as a table — plus an LSP manager that is unconditional on the write path | Its diagnostic, not its code: a bad edit should surface in the same turn. That is #263, still open | Making a database the transcript. JSONL stays the replayable record, and SQLite appears only where a query engine is the point (mnemopi's FTS5 m…[+48b] |
 | **DeepSeek Harness** | "Everything is a plugin": ~57 renameable model-facing tools, none privileged — even the loop and the adapters are plugins; a *linear* event log with a monotonic `seq` | The tree stays, so `/fork`, `/branch` and `rewind` exist at all; a logged request envelope and ignorable-entry forward-compat are ticketed (#265) | The in-process VM: foreign code must not be able to kill…[+44b] |
+<!-- 2026-09-28 re-read (docs/research/deepseek-harness-deepdive.md, dsh at 21638c5631): the row
+     above is from the 2026-09-14 pass and its dsh column needs four corrections. (a) Tool count is
+     now 63 distinct model-facing names across 66 schema sections (docs/tool-catalog.md), not ~57.
+     (b) The linear log is at SESSION_FORMAT_VERSION = 4 with a published v0→v4 migration ladder
+     (packages/core/session/src/types.ts:89) and carries typed turn/step lifecycle events
+     (types.ts:201-232, 288-301) — a turn/step boundary xdev has none of. (c) dsh ships NO terminal
+     UI: its interactive surfaces are a React SPA (apps/web) and an Electron shell (apps/desktop),
+     with no ink/@opentui/react-reconciler dependency in any package.json and no *tui* package, so
+     xdev's tcell TUI has no counterpart. (d) Its security boundary is OS-level — Seatbelt,
+     Landlock, bwrap and Windows ACL/restricted token behind one canonical writable-root derivation
+     (packages/sandbox/sandbox/src/roots.ts:52-55) — which is the one dimension where xdev is
+     behind rather than differently shaped. -->
 | **fx** (Vercel Labs, Zig) | A tiny native binary that publishes enforceable budgets: 6.17 MiB, a 2 ms boot gate, a 7.800 MiB ceiling, compaction ratios as exact integers | The enforce-the-promise discipline (see the open tickets below), plus the durable-write set and use-time credential verification (#122, #123, closed) and a repo-safe config allowlist stricter than fx's three keys | A linear lo…[+158b] |
 | **hermes** (Nous Research) | A self-improving loop in a `uv` venv: 45+ tools, a 61,810-char three-tier cache, skills grown from experience, one process serving six chat platforms | Progressive disclosure: the deferred catalog — `tool_search` → `tool_describe` → `tool_call` — is the seam that keeps a wide surface off a small prompt | The venv (one static binary instead), the chat gat…[+40b] |
 

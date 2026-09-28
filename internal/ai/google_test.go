@@ -87,7 +87,11 @@ func TestGoogleGenAIStream(t *testing.T) {
 		t.Fatalf("stream must terminate with done: %s", joined)
 	}
 	last := evs[len(evs)-1]
-	if last.Usage == nil || last.Usage.TotalTokens != 31 || last.Usage.ReasoningTokens != 4 {
+	// The unified shape: prompt 11 (all fresh), 20 candidate + 4 thought
+	// output tokens, 0 cached, and the sum — Gemini's own totalTokenCount
+	// (31) is prompt + thoughts + candidates, which is the same number.
+	if last.Usage == nil || last.Usage.Input != 11 || last.Usage.Output != 24 ||
+		last.Usage.CacheRead != 0 || last.Usage.ReasoningTokens != 4 || last.Usage.TotalTokens != 35 {
 		t.Fatalf("usage = %+v", last.Usage)
 	}
 	if last.Message == nil {
