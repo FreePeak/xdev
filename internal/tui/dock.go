@@ -885,9 +885,15 @@ func (a *App) dockClick(x, y int) string {
 
 // dockRowAt resolves a screen cell to the row's own action: the file path a
 // FILES row opens, or the act a button row carries ("" on everything else).
+// The column test is here, not at the call sites: a press in the TRANSCRIPT
+// columns that happens to land on a row the panel also paints must stay the
+// transcript's (dockAt's whole job), and both callers — the press branch in
+// selection.go and closeDiffOverlayOnClick — want a cell IN the panel.
 // Callers hold a.mu.
 func (a *App) dockRowAt(x, y int) (path, act string) {
-	if !a.dockOn() {
+	// dockAt also answers the column: a cell outside the panel's columns is
+	// the transcript's, whatever row it shares with the panel.
+	if !a.dockAt(x, y) {
 		return "", ""
 	}
 	d := a.dock

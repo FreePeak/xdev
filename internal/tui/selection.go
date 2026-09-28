@@ -327,6 +327,8 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// rows has to reach the surface it names. (Jumping to the block without
 		// opening the overlay left the click doing nothing the eye could see —
 		// the file diff view was unreachable.)
+		// dockRowAt does the column test itself, so a press in the transcript
+		// columns on a row the panel also paints stays the transcript's.
 		if path, act := a.dockRowAt(x, y); path != "" {
 			a.openDiffOverlay(path)
 			a.poke()

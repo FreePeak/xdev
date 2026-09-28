@@ -40,9 +40,12 @@ a unit test through `handleKey`: `C-r` recalled `""`, `Up` recalled `"third"`.
 `history-next` is worse in the table sense: it is listed as `—` (correctly
 unbound), so the table is honest there, but the paired `C-r` is not.
 
-**Fix:** one `case "history-prev": a.ed.HistoryPrev(); a.poke(); return` in the
-action switch. `Editor.HistoryPrev()` already exists (editor.go:215) and is
-currently called by nothing.
+**Fixed** (`internal/tui/app.go`, one case in the second action switch):
+`case "history-prev"` now calls `a.ed.HistoryPrev()` — the method that already
+existed (editor.go:215) and was called by nothing. Pinned by
+`TestHistoryPrevChordRecalls` and `TestHistoryPrevChordMatchesUpArrow`, both of
+which fail on the unfixed tree. Verified live: `C-r` walks `charlie → bravo →
+alpha`.
 
 ### 2. A click in the transcript columns fires the sidebar's action
 
@@ -67,8 +70,14 @@ Note the same guard is *present* on the two lines above (`thinkBoxAt`,
 `msgArmed`) and missing on this one — the diff-overlay leg of #454 rewrote the
 branch and left it out.
 
-**Fix:** wrap it — `if a.dockAt(x, y) { if path, act := a.dockRowAt(x, y); ... }`.
-`closeDiffOverlayOnClick` (dock.go:1087) has the same shape and the same hole.
+**Fixed** at the seam, not at each caller: `dockRowAt` now starts with
+`if !a.dockAt(x, y) { return "", "" }`, so the column test lives with the
+function that answers for the panel and both call sites get it. Both that guard
+and `dockOn` are one line; the `d == nil` check that followed is now redundant
+(`dockAt` already requires the panel) and was dropped. Pinned by
+`TestDockRowAtAnswersOnlyInsideThePanel` (fails on the unfixed tree), and
+verified live on the rebuilt binary: a click at col 99 opens the diff, the same
+screen row clicked at col 59 does not.
 
 ### 3. A held drag parked on the bottom edge at the tail is a dead gesture
 
@@ -92,7 +101,24 @@ gap, not a broken mechanism.
 `appearance` does nothing — verified live, and as a test (`activeCat` unchanged
 after a click on the painted tab strip). Every other overlay in the app
 (picker, ask card, ledger, hub) answers the mouse on its tabs or rows; the
-settings panel is the one that does not.
+settings panel was the one that did not.
+
+**Fixed.** The painter now builds the strip's layout **once** and publishes it:
+`settingsOverlayState.tabCells` carries each category's label columns, filled by
+the same walk that builds the string, and the hit-test reads those columns
+instead of re-deriving them. The two used to compute the layout independently —
+the painter by concatenation, the hit-test by arithmetic — and disagreed about
+the leading space and the separator width, which is why an early arithmetic
+hit-test put every click one tab to the left. Pinned by
+`TestSettingsOverlayTabClickSwitchesCategory` and
+`TestSettingsTabColumnsMatchThePaint` (the latter asserts each published span
+contains its own label in the painted row). Verified live: clicking `reasoning`,
+`ui`, `appearance`, `tools`, `model` each switches the active category, and the
+selection resets to the top of the new list.
+
+One caveat for a re-run: the active label paints UPPERCASED, so a category's
+columns move by one when it becomes active. A live test must re-read the
+strip's geometry after each click rather than computing it once.
 
 ### 5. A click on a read-only settings row is a silent no-op
 
@@ -100,7 +126,14 @@ settings panel is the one that does not.
 `Editable: false` (`Theme`, `Approval mode`, `Model`, `Memory`, `Advisor`,
 `Color-blind mode`) that is nothing, and the app says nothing either. A user
 clicking `Theme` gets no feedback at all — no notice, no shake, no reason.
-A one-line "not editable here" system block would close it.
+
+**Fixed.** `settingsOverlayAction` now answers a read-only row with the
+composer's notice slot rather than silence: `Theme is read-only — `xdev config
+set theme <value>`` naming the key that CAN change it. A notice, not a system
+block, because this is a gesture's answer and a transcript block would scroll
+the user out of the panel they are standing in. Pinned by
+`TestSettingsOverlayReadOnlyClickExplainsItself`; verified live — the notice
+appears on the composer's info divider the moment the row is clicked.
 
 ### 6. `NO_COLOR` degrades the entire TUI to reverse video
 
@@ -138,6 +171,16 @@ unreadable and there is no `resize` guard like the one `drawPicker` has
 (`w < 24` closes the modal rather than leaving it invisible while owning the
 keyboard).
 
+### Status
+
+Fixed in this branch, each with a test that fails without the change: **1**
+(`C-r`), **2** (the sidebar column), **4** (the settings tabs), **5** (the
+read-only row). Still open, with the evidence above: **3** (bottom-edge drag at
+the tail — a one-sided gap in a mechanism that works at the top), **6**
+(`NO_COLOR` — needs a decision on whether the TUI honours it or overrides it),
+**7** (`C-c` on an unsent draft), **8** (the sub-3-row terminal).
+
+---
 ---
 
 ## Verified working (no action)
@@ -166,4 +209,4 @@ keyboard).
 
 ---
 
-*Last updated: 2026-09-28 (initial interactive audit; nothing committed — the worktree `.worktrees/tui-qa` is clean and matches origin/main).*
+*Last updated: 2026-09-28 (interactive audit + the four fixes it produced: `C-r` recall, the sidebar's column guard, the settings tab strip's click hit-test, and the read-only row's notice. Every fix is pinned by a test that fails on `fa37024`, and the binary was rebuilt and re-driven through the same pty harness for each one. Still open: the bottom-edge drag at the tail, `NO_COLOR`, quitting on an unsent draft, and sub-3-row terminals.)*
