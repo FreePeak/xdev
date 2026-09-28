@@ -147,14 +147,15 @@ func (a *App) selStartWordSelect(x, y int) {
 }
 
 // selStartLineSelect begins a line-selection gesture at (x, y):
-// selects the full width of the screen row under the pointer.
+// selects the full width of the main pane's row under the pointer — the
+// pane's right edge, so a triple-click does not swallow the sidebar's rows.
 func (a *App) selStartLineSelect(x, y int) {
 	a.selDown = true
 	a.selShown = true
 	a.selCache = map[int]selRow{}
 	a.selDocMode = false
 	a.selAnchor = selCorner{x: 0, y: y, doc: -1}
-	a.selEnd = selCorner{x: a.width - 1, y: y, doc: -1}
+	a.selEnd = selCorner{x: a.rightEdge() - 1, y: y, doc: -1}
 	a.poke()
 }
 
