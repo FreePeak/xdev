@@ -18,6 +18,7 @@ type cell struct {
 	text   string
 	style  tcell.Style
 	chrome bool
+	link   string // visible HTTP(S) target; empty for ordinary text
 }
 
 // line is a rendered visual line: styled runs plus a full-row background
@@ -100,7 +101,8 @@ func (a *App) renderMarkdown(src string, w int) []line {
 			continue
 		}
 
-		// Headings: strip #s, color by level.
+		// Headings: strip #s, color by level, and recognize links while
+		// preserving the historical literal text for ordinary markers.
 		if lvl, rest, ok := splitHeading(trimmed); ok {
 			var st tcell.Style
 			switch {
@@ -117,7 +119,13 @@ func (a *App) renderMarkdown(src string, w int) []line {
 			default:
 				st = ms.h6
 			}
-			out = append(out, textline(rest, st))
+			runs := a.inlineHeadingRuns(rest, ms)
+			for i := range runs {
+				if runs[i].link == "" {
+					runs[i].style = st
+				}
+			}
+			out = append(out, line{runs: runs})
 			continue
 		}
 
@@ -161,23 +169,18 @@ func (a *App) renderMarkdown(src string, w int) []line {
 	return out
 }
 
-// inlineRuns styles inline markdown: **bold** *italic* `code` [text](url)
-// (url hidden, text underlined). Nested markers are not re-parsed; content
-// inside markers renders with the marker style.
+// inlineRuns styles inline markdown: **bold** *italic* `code` [text](url).
+// Markdown hides a link's target, but the target is retained on the rendered
+// run for the TUI's mouse hit table; bare HTTP(S) URLs are styled as links too.
 func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 	var runs []cell
 	var buf strings.Builder
 	flush := func() {
 		if buf.Len() > 0 {
-			runs = append(runs, cell{text: buf.String(), style: ms.body})
+			runs = appendWebURLRuns(runs, buf.String(), ms.body, ms.link)
 			buf.Reset()
 		}
 	}
-	// The scan is linear in the source: jump to the next marker byte and copy
-	// the plain run in one go. Walking rune-at-a-time with
-	// `rest = string([]rune(rest)[1:])` re-decodes the whole remainder on every
-	// character — O(n²) per line, which measured 100 ms to re-render one
-	// 6000-rune streaming paragraph and is how a long session pins a core.
 	for len(s) > 0 {
 		i := strings.IndexAny(s, "`*[")
 		if i < 0 {
@@ -187,9 +190,9 @@ func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 		buf.WriteString(s[:i])
 		s = s[i:]
 		var (
-			content, rest string
-			st            tcell.Style
-			closed        bool
+			content, rest, target string
+			st                    tcell.Style
+			closed, formatted     bool
 		)
 		switch {
 		case strings.HasPrefix(s, "`"):
@@ -199,37 +202,131 @@ func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 		case strings.HasPrefix(s, "**"):
 			after, _ := cutMarker(s, "**")
 			content, rest, closed = cutClosing(after, "**")
-			st = ms.bold
+			st, formatted = ms.bold, true
 		case strings.HasPrefix(s, "["):
-			// [text](url): the url is dropped, the text carries the link style.
 			after, _ := cutMarker(s, "[")
 			if text, mid, ok := cutClosing(after, "]"); ok && strings.HasPrefix(mid, "(") {
-				if _, tail, ok2 := cutClosing(mid[1:], ")"); ok2 {
-					content, rest, closed = text, tail, true
-					st = ms.link
+				var tail string
+				var ok bool
+				target, tail, ok = cutLinkDestination(mid[1:])
+				if ok {
+					content, rest, closed, st = text, tail, true, ms.link
+					if !isWebURL(target) {
+						target = "" // rendered, but never clickable
+					}
 				}
 			}
 		case strings.HasPrefix(s, "*"):
 			after, _ := cutMarker(s, "*")
-			if !strings.HasPrefix(after, "*") { // "**" was bold's turn above
+			if !strings.HasPrefix(after, "*") {
 				content, rest, closed = cutClosing(after, "*")
-				st = ms.italic
+				st, formatted = ms.italic, true
 			}
 		}
 		if !closed {
-			// An unclosed marker is literal text: a lone * in prose must not
-			// swallow the rest of the line. The marker byte is ASCII, so
-			// advancing one byte cannot split a rune.
 			buf.WriteByte(s[0])
 			s = s[1:]
 			continue
 		}
 		flush()
-		runs = append(runs, cell{text: content, style: st})
+		if formatted {
+			nested := a.inlineRuns(content, ms)
+			if hasLink(nested) {
+				for i := range nested {
+					nested[i].style = withEmphasis(nested[i].style, st)
+				}
+				runs = append(runs, nested...)
+				s = rest
+				continue
+			}
+		}
+		runs = append(runs, cell{text: content, style: st, link: target})
 		s = rest
 	}
 	flush()
 	return runs
+}
+
+// inlineHeadingRuns recognizes explicit links and bare URLs while leaving
+// every other heading character literal, including backticks and asterisks.
+func (a *App) inlineHeadingRuns(s string, ms mdStyle) []cell {
+	var runs []cell
+	for len(s) > 0 {
+		if i := strings.Index(s, "["); i >= 0 {
+			after, _ := cutMarker(s[i:], "[")
+			if text, mid, ok := cutClosing(after, "]"); ok && strings.HasPrefix(mid, "(") {
+				if target, tail, ok := cutLinkDestination(mid[1:]); ok && isWebURL(target) {
+					runs = append(runs, cell{text: s[:i], style: ms.body}, cell{text: text, style: ms.link, link: target})
+					s = tail
+					continue
+				}
+			}
+		}
+		start := webURLStart(s)
+		if start < 0 {
+			return append(runs, cell{text: s, style: ms.body})
+		}
+		end := webURLEnd(s[start:])
+		for end > 0 && strings.ContainsRune("`*", rune(s[start+end-1])) {
+			end--
+		}
+		if end <= 0 || !isWebURL(s[start:start+end]) {
+			return append(runs, cell{text: s, style: ms.body})
+		}
+		target := s[start : start+end]
+		runs = append(runs, cell{text: s[:start], style: ms.body}, cell{text: target, style: ms.link, link: target})
+		s = s[start+end:]
+	}
+	return runs
+}
+
+func hasLink(runs []cell) bool {
+	for _, run := range runs {
+		if run.link != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// appendWebURLRuns splits plain prose into ordinary and HTTP(S) URL runs. Code
+// fences and inline-code runs do not use this helper, so URLs in code remain
+// ordinary text.
+func appendWebURLRuns(dst []cell, text string, style, linkStyle tcell.Style) []cell {
+	for len(text) > 0 {
+		start := webURLStart(text)
+		if start < 0 {
+			return append(dst, cell{text: text, style: style})
+		}
+		if start > 0 {
+			dst = append(dst, cell{text: text[:start], style: style})
+		}
+		end := webURLEnd(text[start:])
+		if end <= 0 {
+			return append(dst, cell{text: text[start:], style: style})
+		}
+		target := text[start : start+end]
+		if isWebURL(target) {
+			dst = append(dst, cell{text: target, style: linkStyle, link: target})
+		} else {
+			dst = append(dst, cell{text: target, style: style})
+		}
+		text = text[start+end:]
+	}
+	return dst
+}
+
+// withEmphasis adds an outer bold/italic mark without replacing an inner
+// style's existing attributes.
+func withEmphasis(style, outer tcell.Style) tcell.Style {
+	_, _, attrs := outer.Decompose()
+	if attrs&tcell.AttrBold != 0 {
+		style = style.Bold(true)
+	}
+	if attrs&tcell.AttrItalic != 0 {
+		style = style.Italic(true)
+	}
+	return style
 }
 
 // appendRuns appends wrapped runs, breaking at width w (greedy word wrap).
@@ -312,6 +409,98 @@ func cutClosing(s, closer string) (content, after string, ok bool) {
 	return s[:i], s[i+len(closer):], true
 }
 
+// cutLinkDestination parses a CommonMark inline link destination, including
+// balanced parentheses, backslash escapes, and an optional quoted title.
+func cutLinkDestination(s string) (target, rest string, ok bool) {
+	s = strings.TrimLeft(s, " \t\n")
+	if s == "" {
+		return "", "", false
+	}
+	if s[0] == '<' {
+		var b strings.Builder
+		for i := 1; i < len(s); i++ {
+			switch s[i] {
+			case '\\':
+				if i+1 >= len(s) || !isASCIIPunct(s[i+1]) {
+					return "", "", false
+				}
+				b.WriteByte(s[i+1])
+				i++
+			case '\n':
+				return "", "", false
+			case '>':
+				return finishLinkDestination(b.String(), strings.TrimLeft(s[i+1:], " \t\n"))
+			default:
+				b.WriteByte(s[i])
+			}
+		}
+		return "", "", false
+	}
+	depth := 0
+	var b strings.Builder
+	i := 0
+loop:
+	for ; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			if i+1 >= len(s) || !isASCIIPunct(s[i+1]) {
+				return "", "", false
+			}
+			b.WriteByte(s[i+1])
+			i++
+		case '(':
+			depth++
+			b.WriteByte(s[i])
+		case ')':
+			if depth == 0 {
+				break loop
+			}
+			depth--
+			b.WriteByte(s[i])
+		case ' ', '\t', '\n':
+			break loop
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	if depth != 0 {
+		return "", "", false
+	}
+	return finishLinkDestination(b.String(), s[i:])
+}
+
+func finishLinkDestination(target, rest string) (string, string, bool) {
+	rest = strings.TrimLeft(rest, " \t\n")
+	if rest == "" {
+		return "", "", false
+	}
+	if rest[0] == ')' {
+		return target, rest[1:], true
+	}
+	if rest[0] != '"' && rest[0] != '\'' {
+		return "", "", false
+	}
+	quote := rest[0]
+	for i := 1; i < len(rest); i++ {
+		if rest[i] == '\\' {
+			i++
+			continue
+		}
+		if rest[i] == quote {
+			i++
+			if i >= len(rest) || rest[i] != ')' {
+				return "", "", false
+			}
+			return target, rest[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
+func isASCIIPunct(c byte) bool {
+	return strings.ContainsRune("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", rune(c))
+}
+
 // wrapLine wraps one rendered line to width w, returning extra visual lines.
 // Continuation lines repeat their indent (2 spaces per quote level; the
 // bullet indent for lists is approximated by continuing flush).
@@ -356,12 +545,12 @@ func wrapLine(ln line, w int) []line {
 				if cut == 0 {
 					cut = 1
 				}
-				out = append(out, line{runs: []cell{{text: string(runes[:cut]), style: r.style}}, bg: ln.bg})
+				out = append(out, line{runs: []cell{{text: string(runes[:cut]), style: r.style, chrome: r.chrome, link: r.link}}, bg: ln.bg})
 				wd = string(runes[cut:])
 				ww = width(wd)
 			}
 			if ww > 0 {
-				cur = append(cur, cell{text: wd, style: r.style})
+				cur = append(cur, cell{text: wd, style: r.style, chrome: r.chrome, link: r.link})
 				curW += ww
 			}
 		}
