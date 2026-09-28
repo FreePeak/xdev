@@ -239,8 +239,8 @@ func TestStreamingBlocksAndTools(t *testing.T) {
 	app.BeginThinking()
 	app.AppendThinking("pondering")
 	app.EndThinking()
-	app.AddToolBlock("read", `{"path":"a.txt"}`)
-	app.FinishTool("read", false, "1:hi\n2:there", ToolOutcome{Dur: "3ms"})
+	app.AddToolBlock("", "read", `{"path":"a.txt"}`)
+	app.FinishTool("", "read", false, "1:hi\n2:there", ToolOutcome{Dur: "3ms"})
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -338,7 +338,7 @@ func lineText(ln line) string {
 // the naming argument as a phrase, never the raw JSON the model sent.
 func TestToolCallRowShowsNamedArgument(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.AddToolBlock("bash", `{"command":"seq 1 400","timeout":120}`)
+	app.AddToolBlock("", "bash", `{"command":"seq 1 400","timeout":120}`)
 	app.mu.Lock()
 	lines := app.blockLines(0, app.blocks[0], 80)
 	app.mu.Unlock()
@@ -361,7 +361,7 @@ func TestToolCallRowShowsNamedArgument(t *testing.T) {
 // rather than in the border.
 func TestToolResultRendersBox(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.FinishTool("bash", false, "line-one\nline-two\nline-three", ToolOutcome{Dur: "5ms"})
+	app.FinishTool("", "bash", false, "line-one\nline-two\nline-three", ToolOutcome{Dur: "5ms"})
 	app.mu.Lock()
 	i := len(app.blocks) - 1
 	lines := app.blockLines(i, app.blocks[i], 80)
@@ -403,7 +403,7 @@ func TestToolResultRendersBox(t *testing.T) {
 func TestToolResultBoxAlignsTabbedOutput(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	out := "\tmsg := ai.Message{\n\t\tRole: ai.RoleUser,\n\t}\r\n\x1b[31mred\x1b[0m"
-	app.FinishTool("bash", false, out, ToolOutcome{Dur: "5ms"})
+	app.FinishTool("", "bash", false, out, ToolOutcome{Dur: "5ms"})
 	app.mu.Lock()
 	i := len(app.blocks) - 1
 	lines := app.blockLines(i, app.blocks[i], 80)
@@ -429,8 +429,8 @@ func TestToolResultBoxAlignsTabbedOutput(t *testing.T) {
 // once — as a status, not as prose inside the result.
 func TestToolResultExitCodeSitsInTheFooter(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.AddToolBlock("bash", `{"command":"sh -c 'exit 9'"}`)
-	app.FinishTool("bash", true, "boom\n[exit code 9]", ToolOutcome{Dur: "80ms", Exit: 9, HasExit: true})
+	app.AddToolBlock("", "bash", `{"command":"sh -c 'exit 9'"}`)
+	app.FinishTool("", "bash", true, "boom\n[exit code 9]", ToolOutcome{Dur: "80ms", Exit: 9, HasExit: true})
 	app.mu.Lock()
 	i := len(app.blocks) - 1
 	lines := app.blockLines(i, app.blocks[i], 80)
@@ -463,7 +463,7 @@ func TestToolResultRowWindow(t *testing.T) {
 	for i := 1; i <= 400; i++ {
 		fmt.Fprintf(&b, "row-%03d\n", i)
 	}
-	app.FinishTool("bash", false, strings.TrimSuffix(b.String(), "\n"), ToolOutcome{Dur: "9ms"})
+	app.FinishTool("", "bash", false, strings.TrimSuffix(b.String(), "\n"), ToolOutcome{Dur: "9ms"})
 	render := func() []line {
 		app.mu.Lock()
 		defer app.mu.Unlock()
@@ -563,8 +563,8 @@ func TestToolBoxPaintsDiff(t *testing.T) {
 	app := idxApp(100, 40)
 	w := app.contentWidth()
 	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
-	app.AddToolBlock("edit", `{"path":"f.go"}`)
-	app.FinishTool("edit", false, "[f.go#abc]\n1:a\n2:b := 2\n3:c", ToolOutcome{Dur: "12ms", Diff: diff})
+	app.AddToolBlock("", "edit", `{"path":"f.go"}`)
+	app.FinishTool("", "edit", false, "[f.go#abc]\n1:a\n2:b := 2\n3:c", ToolOutcome{Dur: "12ms", Diff: diff})
 	idx := len(app.blocks) - 1
 	lines := app.blockLines(idx, app.blocks[idx], w)
 	joined := joinedLines(lines)
@@ -651,8 +651,8 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 
 	app := idxApp(100, 40)
 	w := app.contentWidth()
-	app.AddToolBlock("bash", `{"command":"git diff"}`)
-	app.FinishTool("bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
+	app.AddToolBlock("", "bash", `{"command":"git diff"}`)
+	app.FinishTool("", "bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
 	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], w)
 	var addedInk bool
 	for _, ln := range lines {
@@ -667,8 +667,8 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 
 	// The same tool's ordinary output keeps the plain body colour.
 	app2 := idxApp(100, 40)
-	app2.AddToolBlock("bash", `{"command":"ls"}`)
-	app2.FinishTool("bash", false, "- item one\n- item two\n", ToolOutcome{Dur: "1ms"})
+	app2.AddToolBlock("", "bash", `{"command":"ls"}`)
+	app2.FinishTool("", "bash", false, "- item one\n- item two\n", ToolOutcome{Dur: "1ms"})
 	ln2 := app2.blockLines(len(app2.blocks)-1, app2.blocks[len(app2.blocks)-1], app2.contentWidth())
 	for _, ln := range ln2 {
 		if txt := runsText(ln.runs); strings.Contains(txt, "item one") {
@@ -689,8 +689,8 @@ func TestToolBoxDiffHonoursThemeInk(t *testing.T) {
 	app.th = theme.ApplyColorBlindMode(theme.Load("groknight"))
 	w := app.contentWidth()
 	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
-	app.AddToolBlock("edit", `{"path":"f.go"}`)
-	app.FinishTool("edit", false, "[f.go#abc]", ToolOutcome{Dur: "12ms", Diff: diff})
+	app.AddToolBlock("", "edit", `{"path":"f.go"}`)
+	app.FinishTool("", "edit", false, "[f.go#abc]", ToolOutcome{Dur: "12ms", Diff: diff})
 	idx := len(app.blocks) - 1
 	lines := app.blockLines(idx, app.blocks[idx], w)
 	joined := joinedLines(lines)

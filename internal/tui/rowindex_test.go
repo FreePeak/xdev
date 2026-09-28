@@ -28,8 +28,8 @@ func idxFill(app *App, turns int, outLines int) {
 		app.AddUserBlock("summarize the failing tests " + strings.Repeat("word ", 30))
 		app.AddAssistantBlock("Here is what I found. " + strings.Repeat("explanation sentence. ", 10))
 		app.AddSystemBlock("error: something went wrong")
-		app.AddToolBlock("bash", `{"command":"go test ./..."}`)
-		app.FinishTool("bash", false, body, ToolOutcome{Dur: "70ms"})
+		app.AddToolBlock("", "bash", `{"command":"go test ./..."}`)
+		app.FinishTool("", "bash", false, body, ToolOutcome{Dur: "70ms"})
 	}
 }
 
