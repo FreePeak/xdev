@@ -164,3 +164,52 @@ func TestCancelledTurnKeepsAToolResultThatArrivedInTime(t *testing.T) {
 		t.Fatalf("a result that arrived within the grace must be kept, got %q", got)
 	}
 }
+
+// TestWedgeTimeoutStopsATurnWithoutACancel: the cancel bound above answers
+// "the user stopped this"; this one answers "nothing ever came back". A tool
+// that never returns, with no cancel and no error, used to hold its worker,
+// the turn and the session until the user restarted. The deadline must end
+// the turn, and must say the outcome is unknown rather than that the call
+// failed — a tool that may still be writing is not a tool that may be re-run
+// on a shrug.
+func TestWedgeTimeoutStopsATurnWithoutACancel(t *testing.T) {
+	stub := &stubbornTool{entered: make(chan struct{}), release: make(chan struct{}), ran: make(chan struct{})}
+	var results []*ai.Message
+	a := stubbornAgent(stub, &fakeProvider{calls: []fakeScript{stubbornScript("c1"), quietScript("never reached")}}, 5*time.Second, &results)
+	a.ToolTimeout = 100 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Run(context.Background(), "sys", userTurn())
+		done <- err
+	}()
+	waitChan(t, "the wedged tool to start", stub.entered)
+	// The deadline releases the CALL, not the run: the model still gets to see
+	// the result and decide, which is why the run ends normally on the next
+	// turn rather than erroring.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run err = %v, want nil: the deadline is not a run failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn is still waiting on a tool that never returns")
+	}
+	if len(results) != 1 {
+		t.Fatalf("tool result messages = %d, want one", len(results))
+	}
+	text := results[0].Text()
+	if !strings.Contains(text, "did not finish within") || !strings.Contains(text, "unknown") {
+		t.Fatalf("a deadline must report the outcome as unknown, got %q", text)
+	}
+	if strings.Contains(text, "cancel") {
+		t.Fatalf("a deadline is not a cancellation, got %q", text)
+	}
+	// The wedged tool is still running and may still write; releasing it must
+	// not put its late result on the transcript.
+	close(stub.release)
+	waitChan(t, "the abandoned tool to finish", stub.ran)
+	if len(results) != 1 {
+		t.Fatalf("a timed-out tool's late result leaked into the turn: %d messages", len(results))
+	}
+}

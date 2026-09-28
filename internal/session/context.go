@@ -36,11 +36,22 @@ type ContextResult struct {
 //   - Dangling tool calls are neutralized: assistant toolCall blocks whose
 //     results are not in the path are dropped from the assistant message
 //     (text/thinking kept); toolResult messages referencing unseen call ids
-//     are dropped.
+//     are dropped. An assistant turn left with no content at all carries
+//     UnansweredToolCallNotice instead of an empty shell.
 //   - branch_summary entries convert to a user message carrying their summary
 //     text so the model knows what was abandoned.
 //
 // Pure function; no I/O.
+
+// UnansweredToolCallNotice is the rebuild-time stand-in for a tool call that
+// never came back (crash, cancel, or a stream that died mid-decode). It says
+// so in the model's own terms, because the alternative — replaying the
+// neutralized assistant shell — reaches the provider as an empty content list
+// or, on openai-completions, `"content": ""`, which upstreams reject or
+// silently drop. It is deliberately retry-guiding: the model is told to re-run
+// the call rather than assume it succeeded.
+const UnansweredToolCallNotice = "the previous turn ended before this tool call returned; its result is unknown, so run it again if you still need it"
+
 func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextResult, error) {
 	byID := make(map[string]Entry, len(entries))
 	for _, e := range entries {
@@ -155,6 +166,20 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 					if answered[b.ID] {
 						seenCalls[b.ID] = true
 					}
+				}
+				// A turn whose only content was tool calls, none of which ever
+				// produced a result, neutralizes to an assistant message with
+				// zero blocks. Replaying that shell is what an interrupted session
+				// used to hand the provider: openai-completions encoded it as
+				// `{"role":"assistant","content":""}` (a request many upstreams
+				// reject) and every other wire dropped it, so the model saw the
+				// turn silently disappear. The call still happened and its result
+				// is unknowable, so the honest record is the crash-repair text —
+				// the same shape ai.EnsureToolOutput already guarantees for a
+				// silent tool (#386 lineage), applied here at rebuild time
+				// instead of once per run.
+				if len(m.Content) == 0 {
+					m.Content = []ai.Block{ai.TextBlock{Text: UnansweredToolCallNotice}}
 				}
 				out = append(out, m)
 				entryIDs = append(entryIDs, e.Envelope().ID)
