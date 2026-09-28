@@ -702,3 +702,33 @@ func TestDockSettingsCommand(t *testing.T) {
 		t.Fatal("an unknown setting must be refused")
 	}
 }
+
+// The version rides the footer: the one section never folded away, so
+// "which build is this" always has an answer on screen. A host that never set
+// one (a test harness, an embedder) must paint no row at all rather than an
+// "xdev" with nothing after it.
+func TestDockFooterCarriesTheVersion(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	app.SetLocation("/tmp/somewhere")
+	app.SetVersion("0.4.127")
+	app.mu.Lock()
+	f, ok := app.dockFooter()
+	rows := dockLines(f.rows)
+	app.mu.Unlock()
+	if !ok || !strings.Contains(rows, "xdev 0.4.127") {
+		t.Fatalf("footer rows = %q ok=%v", rows, ok)
+	}
+	// The version is the last row: it names the build under everything else.
+	if f.rows[len(f.rows)-1].text != "xdev 0.4.127" {
+		t.Fatalf("version is not the footer's last row: %+v", f.rows)
+	}
+	// No version, no row — never a bare "xdev".
+	app.SetVersion("")
+	app.mu.Lock()
+	f, _ = app.dockFooter()
+	rows = dockLines(f.rows)
+	app.mu.Unlock()
+	if strings.Contains(rows, "xdev") {
+		t.Fatalf("an unset version must paint nothing: %q", rows)
+	}
+}

@@ -83,16 +83,21 @@ type AskOps struct {
 }
 
 // NewAskOps returns the seam value for the ask tool: Show is AskCard,
-// ShowBatch is AskCardBatch. The timeout is captured here and the per-call
-// argument is ignored, so a sink cannot wait a second, different length of time
-// than the card actually gave.
-func (a *App) NewAskOps(timeout time.Duration) *AskOps {
+// ShowBatch is AskCardBatch. The wait is READ per call, not captured, so a
+// policy the human flips mid-session (/auto-answer) applies to the next card
+// rather than to the next process. The per-call argument is still ignored, so
+// a sink cannot wait a second, different length of time than the card gave; a
+// nil wait means "no timer" — the card waits for the human.
+func (a *App) NewAskOps(wait func() time.Duration) *AskOps {
+	if wait == nil {
+		wait = func() time.Duration { return 0 }
+	}
 	return &AskOps{
 		Show: func(ctx context.Context, req AskRequest, _ time.Duration) (AskAnswer, bool) {
-			return a.AskCard(ctx, req, timeout)
+			return a.AskCard(ctx, req, wait())
 		},
 		ShowBatch: func(ctx context.Context, reqs []AskRequest, _ time.Duration) ([]AskAnswer, bool) {
-			return a.AskCardBatch(ctx, reqs, timeout)
+			return a.AskCardBatch(ctx, reqs, wait())
 		},
 	}
 }

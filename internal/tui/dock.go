@@ -545,17 +545,26 @@ func dockPath(p string, room int) string {
 // dockFooter is the panel's last section: the session's identity, from state the
 // App already holds. Its heading carries the id that the title slot above shows
 // only while the session has no name yet.
+//
+// The version rides here, under the branch it came from, and not in the title
+// slot: this fold is the one section that is never folded away, and the first
+// question about a session that behaves strangely is "which build is this".
+// A host that never called SetVersion (a test harness, an embedder) paints
+// nothing rather than a bare "xdev" — an empty promise is worse than no row.
 func (a *App) dockFooter() (dockFold, bool) {
 	id := a.dock.sid
 	if id == "" {
 		id = shortID(a.st.SessionID)
 	}
-	f := dockFold{id: "footer", title: dockClip("SESSION · " + id), max: 3}
+	f := dockFold{id: "footer", title: dockClip("SESSION · " + id), max: 4}
 	if a.cwd != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip(pathDisplay(a.cwd, dockInner))})
 	}
 	if a.branch != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
+	}
+	if a.version != "" {
+		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version)})
 	}
 	if len(f.rows) == 0 {
 		return dockFold{}, false

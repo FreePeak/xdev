@@ -877,7 +877,7 @@ func TestAskCardNilSafe(t *testing.T) {
 // card with the timeout the host configured.
 func TestAskOpsSeam(t *testing.T) {
 	app, _ := drawnApp(t, 100, 30)
-	ops := app.NewAskOps(30 * time.Millisecond)
+	ops := app.NewAskOps(func() time.Duration { return 30 * time.Millisecond })
 	if ops == nil || ops.Show == nil {
 		t.Fatal("seam must carry Show")
 	}
@@ -906,7 +906,7 @@ func TestAskOpsSeam(t *testing.T) {
 // and answers for them. Only a pick or a canceled turn may end it.
 func TestAskOpsSeamWithoutTimeout(t *testing.T) {
 	app, _ := drawnApp(t, 100, 30)
-	ops := app.NewAskOps(0)
+	ops := app.NewAskOps(func() time.Duration { return 0 })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct {

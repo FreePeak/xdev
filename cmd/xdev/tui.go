@@ -346,6 +346,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		lastSettings().SidebarMode = mode
 	})
+	// The build this process is, in the dock's footer: the first question
+	// about a session that behaves strangely is which build it was.
+	app.SetVersion(version)
 	// /settings lists the resolved config; toggles persist to the global
 	// layer (the same file `xdev config set` edits) and update the
 	// in-memory settings so a later /settings sees them.
@@ -1317,18 +1320,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}))
 	// ask (#36): the option card is the answer path, so its wait is the
 	// policy's wait: with ask.autoAnswer off there is no timeout, the card
-	// waits for the human until they answer, skip, or the turn ends.
+	// waits for the human until they answer, skip, or the turn ends. Both
+	// halves read the policy PER CALL rather than capturing it, because
+	// /auto-answer flips it mid-session and the next card must already obey
+	// the new answer.
 	if at, ok := reg.Get(tool.AskToolName); ok {
 		if at2, isAsk := at.(*tool.AskTool); isAsk {
-			auto := lastSettings().AskAutoAnswerOn()
-			cardTimeout := lastSettings().AskTimeout()
-			if !auto {
-				cardTimeout = 0
-			}
+			askAuto := func() bool { return lastSettings().AskAutoAnswerOn() }
 			at2.Sink = &askCardSink{
-				ops:        app.NewAskOps(cardTimeout),
-				autoAnswer: auto,
-				fallback:   tool.NewHeadlessAskSink(lastSettings().AskTimeout(), auto),
+				ops: app.NewAskOps(func() time.Duration {
+					if !askAuto() {
+						return 0 // no timer: only a pick or a canceled turn ends the wait
+					}
+					return lastSettings().AskTimeout()
+				}),
+				auto:     askAuto,
+				fallback: func() tool.AskSink { return tool.NewHeadlessAskSink(lastSettings().AskTimeout(), askAuto()) },
 			}
 		}
 	}
@@ -1341,6 +1348,29 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			taskTool.OnEvent = (&taskChildSink{app: app}).onEvent
 		}
 	}
+	// /auto-answer: the ask card's answer policy, flipped live and persisted
+	// to the same global layer `xdev config set ask.autoAnswer` edits. The
+	// in-memory fold is what the sink above reads, so the very next question
+	// obeys the flip — one write covers the file and this session.
+	app.SetAutoAnswerOps(&tui.AutoAnswerOps{
+		Path:    config.GlobalSettingsPath(),
+		Current: func() bool { return lastSettings().AskAutoAnswerOn() },
+		Set: func(on bool) error {
+			if err := config.Set(config.GlobalSettingsPath(), "ask.autoAnswer", fmt.Sprint(on)); err != nil {
+				return err
+			}
+			lastSettings().Ask.AutoAnswer = on
+			if at, ok := reg.Get(tool.AskToolName); ok {
+				if askTool, isAsk := at.(*tool.AskTool); isAsk {
+					// The tool reads AutoAnswer for the result text it hands the
+					// model ("no answer within …"), so it must move with the
+					// policy or the model is told a wait that is not happening.
+					askTool.AutoAnswer = on
+				}
+			}
+			return nil
+		},
+	})
 	app.SetMemoryOps(memoryOps(sessionMemory))
 	app.SetAdvisorOps(&tui.AdvisorOps{
 		Enabled: func() bool { return adv != nil },
@@ -3346,15 +3376,24 @@ func dockAgentsLabel(rows []agent.RosterEntry) string {
 // asked for it. Falling through to the headless sink would wait a second time
 // and then report "no answer within" a wait the user never saw; the headless
 // sink stays the fallback only when no card can be shown at all.
+//
+// The policy is READ per call, not captured, for the same reason the card's
+// wait is: /auto-answer changes it mid-session, and the next question must
+// obey the answer the human gave one turn earlier. Two sources of truth here
+// (a bool that was captured plus a settings file that moved) is how a card
+// ends up answering a question the human was told it would not.
 type askCardSink struct {
-	ops        *tui.AskOps
-	autoAnswer bool
-	fallback   tool.AskSink
+	ops      *tui.AskOps
+	auto     func() bool         // the live ask.autoAnswer policy; nil = off
+	fallback func() tool.AskSink // the headless path, built with the same policy
 }
+
+// autoAnswer reports the live policy; an unwired sink answers nobody.
+func (s *askCardSink) autoAnswer() bool { return s.auto != nil && s.auto() }
 
 func (s *askCardSink) Ask(ctx context.Context, req tool.AskRequest) (tool.AskResponse, error) {
 	if s.ops == nil || s.ops.Show == nil {
-		return s.fallback.Ask(ctx, req)
+		return s.fallback().Ask(ctx, req)
 	}
 	ans, ok := s.ops.Show(ctx, askCardRequest(req), 0)
 	if err := ctx.Err(); err != nil {
@@ -3436,7 +3475,7 @@ func (s *askCardSink) verdict(req tool.AskRequest, ans tui.AskAnswer, ok bool) (
 	// recommended option(s), so take them instead of waiting a second time.
 	// With auto-answer off nobody asked for that — the human skipped, and
 	// skipping is not permission to decide.
-	if s.autoAnswer && len(req.Recommended) > 0 {
+	if s.autoAnswer() && len(req.Recommended) > 0 {
 		return tool.AskResponse{Labels: append([]string(nil), req.Recommended...)}, true
 	}
 	return tool.AskResponse{}, false

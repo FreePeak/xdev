@@ -494,11 +494,12 @@ func TestHelpTextAligned(t *testing.T) {
 		t.Fatalf("first line = %q", lines[0])
 	}
 	// Every entry line: two-space indent, command column padded to the widest
-	// name-plus-alias entry (now "/trajectory, /traj") before the description.
+	// name-plus-alias entry (now "/auto-answer, /autoanswer") before the
+	// description.
 	want := []string{
-		"  /new               start a new session",
-		"  /fresh             rotate provider state; keep this session",
-		"  /quit, /q          quit xdev",
+		"  /new                      start a new session",
+		"  /fresh                    rotate provider state; keep this session",
+		"  /quit, /q                 quit xdev",
 	}
 	for _, w := range want {
 		if !strings.Contains(got, "\n"+w) {

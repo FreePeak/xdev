@@ -152,9 +152,13 @@ type App struct {
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops                *SessionOps
-	modelOps           *ModelOps                              // session lifecycle, wired by cmd (nil → notices)
-	planOps            *PlanOps                               // /plan, wired by cmd (nil → notices)
+	ops           *SessionOps
+	modelOps      *ModelOps      // session lifecycle, wired by cmd (nil → notices)
+	planOps       *PlanOps       // /plan, wired by cmd (nil → notices)
+	autoAnswerOps *AutoAnswerOps // /auto-answer, wired by cmd (nil → notices)
+	// version is the build this process is (`xdev version`), painted in the
+	// context dock's footer; empty (a dev build) paints nothing.
+	version            string
 	advisorOps         *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
 	memoryOps          *MemoryOps                             // /memory, wired by cmd (nil → notices)
 	themeOps           *ThemeOps                              // /theme, wired by cmd (nil → notices)
@@ -376,6 +380,16 @@ func (a *App) SetLocation(cwd string) {
 	a.cwd = cwd
 	a.branch = gitBranch(cwd)
 	a.mu.Unlock()
+}
+
+// SetVersion records the build this process is (`xdev version`): the context
+// dock's footer row, so "which build is this" has an answer on screen. Empty
+// is a dev build and paints nothing.
+func (a *App) SetVersion(v string) {
+	a.mu.Lock()
+	a.version = strings.TrimSpace(v)
+	a.mu.Unlock()
+	a.DockBump()
 }
 
 // BeginActiveCommand notes that a tool call started, so the status row's left
@@ -1332,8 +1346,57 @@ func (a *App) Memory(args string) error {
 	return nil
 }
 
+// SetAutoAnswerOps wires the /auto-answer command (the ask policy lives in cmd).
+func (a *App) SetAutoAnswerOps(ops *AutoAnswerOps) { a.autoAnswerOps = ops }
+
 // SetAdvisorOps wires the /advisor command (advisor state lives in cmd).
 func (a *App) SetAdvisorOps(ops *AdvisorOps) { a.advisorOps = ops }
+
+// AutoAnswer implements CommandAPI /auto-answer: "yes" turns the policy on,
+// "no" turns it off, and no argument toggles. A bare toggle is the whole
+// reason this is a command rather than a settings row — a human deciding
+// mid-session to stop answering their own questions must not have to leave
+// the transcript to say so.
+//
+// The vocabulary is yes|no AND on|off: `yes` is what was asked for, and
+// `on`/`off` is what every other toggle here (/plan, /advisor, /prewalk)
+// already accepts. Anything else is a usage error, never a silent toggle — a
+// typo must not be the thing that answers a question for them.
+func (a *App) AutoAnswer(args string) error {
+	if a.autoAnswerOps == nil || a.autoAnswerOps.Current == nil || a.autoAnswerOps.Set == nil {
+		return fmt.Errorf("auto-answer not wired")
+	}
+	cur := a.autoAnswerOps.Current()
+	var on bool
+	fields := strings.Fields(strings.TrimSpace(args))
+	switch {
+	case len(fields) == 0:
+		on = !cur
+	case len(fields) == 1:
+		switch fields[0] {
+		case "yes", "on", "true":
+			on = true
+		case "no", "off", "false":
+			on = false
+		default:
+			return fmt.Errorf("usage: /auto-answer yes|no")
+		}
+	default:
+		return fmt.Errorf("usage: /auto-answer yes|no")
+	}
+	if err := a.autoAnswerOps.Set(on); err != nil {
+		return err
+	}
+	confirm := "auto-answer no — an unanswered question waits for you"
+	if on {
+		confirm = "auto-answer yes — an unanswered question takes the recommended option"
+	}
+	if a.autoAnswerOps.Path != "" {
+		confirm += " (saved to " + a.autoAnswerOps.Path + ")"
+	}
+	a.AddSystemBlock(confirm)
+	return nil
+}
 
 // Advisor implements CommandAPI /advisor: on|off|status|dump.
 func (a *App) Advisor(args string) error {
