@@ -229,6 +229,16 @@ func (t *TaskTool) Parameters() json.RawMessage {
 // RSS) is what an unbounded batch would actually break.
 const maxBatchParallel = 8
 
+// maxBatchItems bounds the SIZE of one batch, where maxBatchParallel bounds
+// how many of its items run at once. Both are needed: the semaphore alone
+// admits a batch of any length, and a length unbounded batch is the one
+// fan-out that can break the process rather than merely slow it down.
+//
+// ponytail: a fixed ceiling rather than a per-model token/cost budget. It
+// bounds the worst case, not the spend. Upgrade path if it shows up: refuse
+// on the batch's own `max_turns` sum instead of a constant.
+const maxBatchItems = 32
+
 // executeBatch runs omp's `{context, tasks[]}` shape. Each item is dispatched
 // through the single-spawn path (so agent resolution, the spawn policy, the
 // depth guard and the child advisor are identical between the two shapes) and
@@ -236,6 +246,16 @@ const maxBatchParallel = 8
 func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, error) {
 	if t.Provider == nil {
 		return tool.Result{Text: "task: no provider configured for subagents", IsError: true}, nil
+	}
+	// The semaphore below bounds how many run at once, not how many the model
+	// asked for: a 200-item batch spawns 200 child loops that each hold a
+	// session, a provider stream and their share of the <100 MB RSS budget,
+	// then hands the parent 200 results to read. maxBatchItems refuses the
+	// oversize request instead, naming the fix — split it and run the halves.
+	if n := len(a.Tasks); n > maxBatchItems {
+		return tool.Result{Text: fmt.Sprintf(
+			"task: batch of %d exceeds the %d-item limit (up to %d run at once) — send it as separate batches",
+			n, maxBatchItems, maxBatchParallel), IsError: true}, nil
 	}
 	type slot struct {
 		text string
