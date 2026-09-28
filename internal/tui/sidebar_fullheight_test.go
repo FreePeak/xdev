@@ -28,7 +28,7 @@ func twoWindowApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen) {
 	})
 	app.AddUserBlock("the prompt box is still full width")
 	setDraft(&app.ed, "draft in the main pane", 0)
-	app.AddUsage(1200, 340, 1540)
+	app.AddUsage(1200, 340, 0, 0, 1540)
 	app.draw()
 	return app, scr
 }
@@ -135,7 +135,7 @@ func TestTwoWindowShapeUnchangedWhenClosed(t *testing.T) {
 	app.SetDockMode(DockHide)
 	app.AddUserBlock("the prompt box")
 	setDraft(&app.ed, "draft", 0)
-	app.AddUsage(1200, 340, 1540)
+	app.AddUsage(1200, 340, 0, 0, 1540)
 	app.draw()
 	app.mu.Lock()
 	edge, avail := app.rightEdge(), app.composerAvail()
