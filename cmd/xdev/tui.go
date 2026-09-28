@@ -904,10 +904,19 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// panel pinned to the session the process started with would show the
 		// old title — and the old id — for the rest of the run.
 		Session: func() (string, string) { return store.Title(), shortSessionID(store.ID()) },
-		// MCP is connected by attachMCP into reg; read from
-		// reg.MCPNames for the dock section. A nil manager
-		// means MCP is off and the section renders nothing.
-		MCP: func() string { return reg.MCPNames() },
+		// MCP is connected by attachMCP into reg; read from reg.MCPNames for
+		// the dock section. A nil manager means MCP is off and the section
+		// renders nothing — which also means MCPNames was never assigned, so
+		// the closure has to check it before calling. It did not: the panel is
+		// built on the first paint, so every run without MCP servers
+		// configured (the common case) took the whole TUI down with a
+		// nil-pointer panic before the first frame.
+		MCP: func() string {
+			if reg.MCPNames == nil {
+				return ""
+			}
+			return reg.MCPNames()
+		},
 		// The panel's one button row: the heading is the ledger's own count,
 		// read through `store` so /new, /resume and /fork move it with the
 		// session. The click opens the same ledger /trajectory opens.

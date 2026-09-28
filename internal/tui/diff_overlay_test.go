@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // TestDiffOverlayDoesNotAutoShow pins the reported regression: the diff
@@ -82,5 +84,75 @@ func TestDiffOverlayClosesOnClickOutside(t *testing.T) {
 	app.mu.Unlock()
 	if ov != nil {
 		t.Fatal("click outside overlay did not close it")
+	}
+}
+
+// TestDiffOverlayInsideIsTheTerminalBackground pins that the diff viewer's
+// inside bar is the terminal's own background, not a colour the app picked.
+// The overlay resolved it with Get, which cannot say "the terminal decides": a
+// theme that leaves bg_base to the terminal answers with an explicit black, so
+// the overlay painted #000000 over whatever scheme the human was running.
+func TestDiffOverlayInsideIsTheTerminalBackground(t *testing.T) {
+	app, scr := newTestApp(t, 120, 30)
+	defer scr.Fini()
+
+	// A theme that hands bg_base to the terminal — the one case Get reads as
+	// black. Load builds a fresh map per call, so marking the slot here stays
+	// local to this test.
+	th := theme.Load("groknight")
+	th.Slots[theme.BgBase] = theme.Color{}
+	th.Defaults[theme.BgBase] = true
+	app.SetTheme(th)
+
+	app.mu.Lock()
+	_, _, path := withDockRows(app)
+	app.mu.Unlock()
+	if path == "" {
+		t.Skip("dock layout doesn't expose a clickable row")
+	}
+	app.mu.Lock()
+	opened := app.openDiffOverlay(path)
+	app.mu.Unlock()
+	if !opened {
+		t.Fatal("no diff overlay for the changed file")
+	}
+	app.draw()
+
+	// A blank interior cell: inside the border, well clear of the diff text.
+	r, _, st, _ := scr.GetContent(100, 6)
+	if _, bg, _ := st.Decompose(); bg != tcell.ColorDefault {
+		t.Fatalf("overlay interior cell %q has background %v, want the terminal default", r, bg)
+	}
+}
+
+// TestDiffOverlayHonoursANamedBackground is the other half: a theme that names
+// bg_base still gets its own surface, so the fix is not "the overlay never
+// paints a background".
+func TestDiffOverlayHonoursANamedBackground(t *testing.T) {
+	app, scr := newTestApp(t, 120, 30)
+	defer scr.Fini()
+
+	app.mu.Lock()
+	_, _, path := withDockRows(app)
+	app.mu.Unlock()
+	if path == "" {
+		t.Skip("dock layout doesn't expose a clickable row")
+	}
+	app.mu.Lock()
+	opened := app.openDiffOverlay(path)
+	c, ok := app.th.Slot(theme.BgBase)
+	app.mu.Unlock()
+	if !ok {
+		t.Fatal("the built-in theme must name bg_base")
+	}
+	if !opened {
+		t.Fatal("no diff overlay for the changed file")
+	}
+	app.draw()
+
+	want := app.cellColor(c)
+	r, _, st, _ := scr.GetContent(100, 6)
+	if _, bg, _ := st.Decompose(); bg != want {
+		t.Fatalf("overlay interior cell %q has background %v, want the theme's bg_base %v", r, bg, want)
 	}
 }

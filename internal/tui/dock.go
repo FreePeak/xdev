@@ -906,6 +906,21 @@ func (a *App) dockRowAt(x, y int) (path, act string) {
 	return d.lines[i].path, d.lines[i].act
 }
 
+// dockAt reports whether a screen cell is inside the panel's own columns — the
+// window the human clicked into. The panel is chrome, but it is a window: a
+// click on it belongs to it, so the transcript's hit-tests (the user-message
+// menu, the think-box aim, a link) must not reach across and claim a cell the
+// panel painted. A drag still crosses freely — selection reads whatever rows
+// the release covers, and the panel's rows are in that table (selDockRows).
+// Callers hold a.mu.
+func (a *App) dockAt(x, y int) bool {
+	if !a.dockOn() {
+		return false
+	}
+	top, h := a.dockGrid()
+	return x >= a.width-dockCols && y >= top && y < top+h
+}
+
 // dockJumpToBlock walks the transcript for the most recent finished
 // tool result that changed path, marks it expanded so its diff paints,
 // and pushes the viewport to its first row; returns whether one was
@@ -1016,7 +1031,18 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
 	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-	bg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+	// The panel's background is the terminal's own, not a colour this program
+	// picked. Get cannot express that: a theme that leaves bg_base to the
+	// terminal ("") answers with an explicit black, so the overlay painted
+	// #000000 over whatever scheme the human is running. Slot makes the
+	// distinction Get cannot — ok=false means "the terminal decides" — and
+	// ColorDefault (SGR 49) is that answer. Same resolution drawDock uses, so
+	// the overlay's inside matches the sidebar's surface.
+	bgColor := tcell.ColorDefault
+	if c, ok := a.th.Slot(theme.BgBase); ok {
+		bgColor = a.cellColor(c)
+	}
+	bg := tcell.StyleDefault.Background(bgColor)
 	box := a.th.Box()
 	fillPanelRows(s, y0, y0+panelH-1, x, w-x, bg)
 	top := boxTop(box, brdSt, "", w-2*x)
