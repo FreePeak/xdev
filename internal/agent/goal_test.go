@@ -403,3 +403,89 @@ func TestPromptContinuationOffWithoutTools(t *testing.T) {
 		t.Fatalf("plain greeting continued: %d requests", len(p.gotReqs))
 	}
 }
+
+// A resumed session whose file ends on a persisted nudge must not be silenced
+// by it. The guard that refuses a second nudge asks "did THIS run already
+// nudge?"; reading the whole history answered for a run that never happened,
+// so on every resume the trailing nudge latched the flag, continuation was
+// refused, and the turn ended with no assistant reply — the TUI exiting 0 with
+// nothing on screen (session 6917d52f, records 407-410, the 2026-09-28 report).
+func TestPromptContinuationSurvivesAResumedTrailingNudge(t *testing.T) {
+	yield := func(text string) fakeScript {
+		return fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+			Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: text}},
+		})}}
+	}
+	// The resumed history: a turn that used tools, then a nudge persisted as
+	// the file's last message, and nothing after it — the exact shape of a
+	// session that was killed mid-nudge.
+	prior := []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do it"}}},
+		{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop, Content: []ai.Block{
+			ai.TextBlock{Text: "working"},
+			ai.ToolCallBlock{ID: "e0", Name: "echo", Arguments: json.RawMessage(`{"v":"y"}`)},
+		}},
+		{Role: ai.RoleToolResult, ToolCallID: "e0", ToolName: "echo", Content: []ai.Block{ai.TextBlock{Text: "y"}}},
+		{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop, Content: []ai.Block{ai.TextBlock{Text: "summary"}}},
+		{Role: ai.RoleUser, Attribution: PromptContinuationAttribution,
+			Content: []ai.Block{ai.TextBlock{Text: PromptContinuationPrompt}}},
+	}
+	// This run: the model's first turn yields text with no tool call, which is
+	// the shape that must earn a nudge rather than end the session.
+	p := &fakeProvider{calls: []fakeScript{yield("still going"), yield("done")}}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, PromptContinuation: true}
+	if _, err := a.Run(context.Background(), "sys", prior); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream requests = %d, want 2: a resumed trailing nudge must not silence this run", len(p.gotReqs))
+	}
+	last := p.gotReqs[1].Messages[len(p.gotReqs[1].Messages)-1]
+	if last.Role != ai.RoleUser || last.Attribution != PromptContinuationAttribution {
+		t.Fatalf("the resumed session got no continuation nudge: %+v", last)
+	}
+}
+
+// The per-run guard still works: a nudge THIS run sent and answered with a
+// second yield must not be nudged a third time, or the run loops forever.
+func TestPromptContinuationDoesNotDoubleNudgeWithinARun(t *testing.T) {
+	yield := func(text string) fakeScript {
+		return fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+			Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: text}},
+		})}}
+	}
+	withTools := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{
+			ai.TextBlock{Text: "working"},
+			ai.ToolCallBlock{ID: "e1", Name: "echo", Arguments: json.RawMessage(`{"v":"x"}`)},
+		},
+	})}}
+	p := &fakeProvider{calls: []fakeScript{withTools, yield("one"), yield("two"), yield("three")}}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, PromptContinuation: true}
+	hist := []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do it"}}}}
+	if _, err := a.Run(context.Background(), "sys", hist); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// tools, then exactly ONE nudged re-ask; the second yield after it ends the
+	// run, so the guard is not a no-op.
+	if len(p.gotReqs) != 3 {
+		t.Fatalf("stream requests = %d, want 3 (tools, nudged yield, second yield ends it)", len(p.gotReqs))
+	}
+	nudges := 0
+	for _, r := range p.gotReqs {
+		last := r.Messages[len(r.Messages)-1]
+		if last.Role == ai.RoleUser && last.Attribution == PromptContinuationAttribution {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("prompt-continuation nudges sent = %d, want exactly 1", nudges)
+	}
+}
