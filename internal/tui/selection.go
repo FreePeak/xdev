@@ -270,6 +270,19 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.closeDiffOverlayOnClick(x, y)
 			break
 		}
+		// The jump-to-latest chip owns its own pixels: a press on it is the
+		// jump, never a selection anchor, so the gesture spends itself on
+		// the button the way it does on the scrollbar. The rect is the one
+		// the painter published, so a chip that is not on screen cannot be
+		// clicked (drawJumpChip clears it every frame).
+		if a.jump.contains(x, y) {
+			a.sm.Bottom()
+			a.selDown, a.selShown, a.selCache = false, false, nil
+			a.linkClick, a.msgArmed = "", false
+			a.clearClick() // this press was not the start of a click sequence
+			a.poke()
+			break
+		}
 		// A press on the scrollbar grabs the bar, not the text: the drag that
 		// follows moves the viewport, and the gesture owns no selection at all
 		// — the rows the painter recorded belong to the frame the bar was hit
