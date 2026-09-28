@@ -5,6 +5,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -284,6 +285,11 @@ type App struct {
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
+	// jump is the "↓ n new" chip the painter draws over the transcript
+	// whenever rows are hidden below the viewport — cleared every frame, so
+	// a click is tested against the chip that is actually on screen
+	// (selection.go press).
+	jump panelRect
 	// Pasted images (paste.go): the payloads the chips in the composer name,
 	// the bracketed-paste window, and the clipboard reader. All three are
 	// UI-thread-owned exactly like the editor beside them — no lock covers
@@ -3527,11 +3533,16 @@ func (a *App) paint() {
 	// to the top row (a long thinking line, or the last prompt) and any
 	// right-aligned timestamp there, so the first line showed a hint glued to
 	// the text that never scrolled away. The divider is chrome: never content.
-	if up, down := a.sm.Indicator(total, vp); up > 0 || down > 0 {
+	up, down := a.sm.Indicator(total, vp)
+	if up > 0 || down > 0 {
 		a.scrollHint = fmt.Sprintf("▲ %d ▼ %d", up, down)
 	} else {
 		a.scrollHint = ""
 	}
+	// "↓ n new": the scroll hint says a jump is possible, this is the jump.
+	// Painted over the transcript's own rows, before the dock and every
+	// overlay, so a panel that covers the chip wins the click.
+	a.drawJumpChip(s, edge, top, vp, down)
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
 	composerTop := h - 1 - cRows
@@ -4000,6 +4011,41 @@ func draftHint(above, below int) string {
 		return fmt.Sprintf("draft ▼%d", below)
 	}
 	return ""
+}
+
+// drawJumpChip paints the "↓ n new" jump-to-latest button over the
+// transcript's own bottom-right corner while rows are hidden below the
+// viewport, and publishes the rectangle it drew so the mouse can hit it
+// (App.jump). The scroll hint on the composer divider says a jump is
+// possible; this is the jump. Caller holds a.mu.
+//
+// It takes the transcript's edge, not the terminal's, so the chip stays with
+// the content when the context dock is open. down is the hidden-row count
+// from the scroll model: zero means the tail is on screen and the button has
+// nothing to say.
+func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
+	a.jump = panelRect{}
+	if down <= 0 || vp < 2 {
+		return
+	}
+	// A pill, not a bare line of text: the row behind it is transcript
+	// content, so the button needs its own background (and a cell of padding
+	// on each side) to read as a control rather than as a scrolled line.
+	label := "↓ " + strconv.Itoa(down) + " new"
+	w := width(label) + 2
+	if w > edge-6 {
+		label, w = "↓", 3
+	}
+	// Two rows above the bottom edge, and clear of the scrollbar's column: the
+	// bar reports position continuously and must stay readable behind the
+	// chip, and a chip on the last row would sit on the newest line.
+	x, y := edge-1-w, top+vp-2
+	bg := tcell.StyleDefault.
+		Background(a.cellColor(a.th.Get(theme.BgHighlight))).
+		Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+	fillPanelRows(s, y, y, x, edge-1, bg)
+	drawText(s, x+1, y, label, bg)
+	a.jump = panelRect{x: x, y: y, w: w, h: 1}
 }
 
 // drawStatusRow renders the bottom row: the working directory on the left,
