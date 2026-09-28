@@ -24,8 +24,21 @@ import (
 type Status struct {
 	Model     string
 	SessionID string
+	// TokensIn is the session's FRESH input — the provider's input
+	// exclusive of cache reads, which is the split every provider
+	// normalizes onto (input + output + cacheRead = totalTokens) and
+	// the split compaction prices against. It is NOT the prompt the
+	// model saw: on a cached conversation that is TokensCache too, and
+	// the "tokens" segment shows both.
 	TokensIn  int64
 	TokensOut int64
+	// TokensCache is the prompt-cache reads billed across the session,
+	// and TokensThink the reasoning already counted inside TokensOut
+	// (completion_tokens is inclusive of reasoning_tokens on every
+	// wire xdev speaks). Both are tracked so the status row can show
+	// the split the glyphs claim instead of one half of it.
+	TokensCache int64
+	TokensThink int64
 	// Cost is the session spend in USD (0 when the provider reports none),
 	// CtxWindow the model's context window (0 = unknown) and Rate the last
 	// measured decode speed in output tokens/second (0 = never measured).
@@ -987,13 +1000,22 @@ func (a *App) ToggleBoxExpand() bool {
 // to re-read — a prompt-cache hit still occupies those tokens, and an
 // input+output sum reads 90 % low on a cached conversation (the same total
 // agent.ContextTokens and compaction trigger on). total <= 0 (a provider that
-// reports none) falls back to in+out.
-func (a *App) AddUsage(in, out, total int64) {
+// reports none) falls back to in+out+cache.
+//
+// cache and thinking arrive as their own arguments because the split is the
+// point: in is the fresh input only and out already CONTAINS the reasoning, so
+// a row that printed just those two claimed a smaller prompt and a larger
+// answer than the provider billed. On a cached turn the ↑ glyph read 479 for a
+// 65054-token prompt (99 % of it invisible, cacheRead 64575) and the ↓ glyph
+// read 1770 for 506 tokens of visible text (71 % of it thinking).
+func (a *App) AddUsage(in, out, cache, thinking, total int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
+	a.st.TokensCache += cache
+	a.st.TokensThink += thinking
 	if total <= 0 {
-		total = in + out // a provider that reports no total gets the floor
+		total = in + out + cache // a provider that reports no total gets the floor
 	}
 	a.st.CtxUsed = total
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
@@ -1525,7 +1547,12 @@ func (a *App) ResumeSession(query string) error {
 // replayed session banks its path's spans back in with SetWork. A replay also
 // measures the history back in with SetContextReplay.
 //
-// The ↑ ↓ counters, the spend, the decode rate and the ttft are per-session
+// The ↑ ↓ ⇢ ˟ counters, the spend, the decode rate and the ttft are
+// per-session too, and Reset is where that boundary is: without clearing
+// them, /resume and /fork drew the previous session's numbers beside the
+// freshly replayed transcript, and a new session opened showing a ⚡ it had
+// never measured. Streaming state is otherwise untouched — callers must
+// not be running a turn when they call this.
 // too, and Reset is where that boundary is: without clearing them, /resume
 // and /fork drew the previous session's numbers beside the freshly replayed
 // transcript, and a new session opened showing a ⚡ it had never measured.
@@ -1535,6 +1562,7 @@ func (a *App) Reset() {
 	a.mu.Lock()
 	a.st.Work = 0
 	a.st.TokensIn, a.st.TokensOut = 0, 0
+	a.st.TokensCache, a.st.TokensThink = 0, 0
 	a.st.Cost = 0
 	a.st.Rate = 0
 	a.st.TTFT = 0
@@ -3446,7 +3474,10 @@ func (a *App) paint() {
 	if vp < 1 {
 		vp = 1
 	}
-	a.drawTopBar(s, w, true)
+	// The top bar belongs to the main pane: its prompts get the pane's width,
+	// and a bar running the terminal's full width would print them under the
+	// panel's own surface.
+	a.drawTopBar(s, a.rightEdge(), true)
 	// The panel is built before the transcript's width is computed: with it open
 	// the lines wrap at its left edge, and a frame that painted the transcript
 	// first would have to redo every render cache entry it drew.
@@ -3898,9 +3929,12 @@ func clip(s string, maxCells int) string {
 }
 
 // composerAvail is the editor's text width in cells inside the prompt box
-// (border+pad+prefix+right pad+border).
+// (border+pad+prefix+right pad+border). It is measured against rightEdge, not
+// the terminal: with the sidebar open the box sits inside the main pane, so a
+// draft must wrap where the box ends — text the box cannot show is a wrap the
+// editor has to know about, or the prompt grows rows the box will not paint.
 func (a *App) composerAvail() int {
-	avail := a.width - 7
+	avail := a.rightEdge() - 7
 	if avail < 4 {
 		avail = 4
 	}
@@ -3955,9 +3989,12 @@ func (a *App) composerRows() int {
 
 // drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
 // editor text, blinking block cursor; the model + running spinner ride the
-// info divider, tinted with the statusLine tokens.
+// info divider, tinted with the statusLine tokens. The box is as wide as the
+// main pane, so the sidebar's columns are its right edge — the prompt is a
+// window of its own now, not a row that runs the terminal's full width under
+// the panel.
 func (a *App) drawComposer(yTop int) {
-	w := a.width
+	w := a.rightEdge()
 	if w < 6 || yTop < 1 {
 		return
 	}
@@ -4122,40 +4159,45 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 // the configured HUD segments (settings statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
-// on a small terminal.
+// on a small terminal. The row belongs to the main pane: its budget and its
+// right edge are the pane's, not the terminal's, so the metrics never paint
+// into the sidebar's columns.
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
+	w := a.rightEdge()
 	// The running tool call leads the row: "● <name> · cd <cwd>" on
 	// the left, the configured segments right-aligned.
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		pathLbl := pathDisplay(a.cwd, a.width-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
+		pathLbl := pathDisplay(a.cwd, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
 		if pathLbl != "" {
 			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			drawText(a.scr, 2, y, pathLbl, pathSt)
 		}
-		a.drawHUD(y, 2+width(cmdLabel)+width(pathLbl)+2, parts)
+		a.drawHUD(y, w, 2+width(cmdLabel)+width(pathLbl)+2, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the path is what shrinks.
-	budget := a.width - 2 - hudEssentialWidth(parts) - 1
+	budget := w - 2 - hudEssentialWidth(parts) - 1
 	lbl := pathDisplay(a.cwd, budget-2)
 	if lbl != "" {
 		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		drawText(a.scr, 2, y, lbl, pathSt)
 	}
-	a.drawHUD(y, 2+width(lbl), parts)
+	a.drawHUD(y, w, 2+width(lbl), parts)
 }
 
 // drawHUD renders the configured status segments right-aligned on the
-// status row (caller holds a.mu). Segment colors come from the
-// statusLine* tokens, the separators from statusLineSep, and statusLineBg
-// fills the row when the theme sets one. The metrics win a narrow row:
-// the path is drawn first against the space the essential segments need,
-// and any segment that still does not fit is dropped by keep-rank (theme
-// and model first, the work timer and the rate last).
-func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
+// status row (caller holds a.mu), within the main pane's own width — w is the
+// pane's right edge, not the terminal's, so the metrics stop at the sidebar
+// instead of running under it. Segment colors come from the statusLine*
+// tokens, the separators from statusLineSep, and statusLineBg fills the row
+// when the theme sets one. The metrics win a narrow row: the path is drawn
+// first against the space the essential segments need, and any segment that
+// still does not fit is dropped by keep-rank (theme and model first, the work
+// timer and the rate last).
+func (a *App) drawHUD(y, w, leftEnd int, parts []hudPart) {
 	if len(parts) == 0 {
 		return
 	}
@@ -4170,7 +4212,7 @@ func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
 		}
 		return n
 	}
-	end := a.width - 2
+	end := w - 2
 	for len(parts) > 0 && end-widthOf(parts) < leftEnd+1 {
 		drop := 0
 		for i, p := range parts {
@@ -4252,10 +4294,25 @@ func (a *App) hudSegment(name string) (text, token string) {
 	case "model":
 		return a.st.Model, theme.StatusLineModel
 	case "tokens":
+		// The two glyphs each claim one half of a split the provider
+		// reports three ways, so the row shows the split: ↑ is fresh
+		// input, ⇢ the cache read beside it, and ↓ output with the
+		// reasoning already inside it broken out. cache and think hide
+		// when the provider reports none, so a provider that bills no
+		// cache and reasons for nothing keeps the plain two-glyph row.
 		if a.st.TokensIn == 0 && a.st.TokensOut == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("↑%s │ ↓%s", HumanTokens(a.st.TokensIn), HumanTokens(a.st.TokensOut)), theme.StatusLineSpend
+		var b strings.Builder
+		fmt.Fprintf(&b, "↑%s", HumanTokens(a.st.TokensIn))
+		if a.st.TokensCache > 0 {
+			fmt.Fprintf(&b, " ⇢%s", HumanTokens(a.st.TokensCache))
+		}
+		fmt.Fprintf(&b, " │ ↓%s", HumanTokens(a.st.TokensOut))
+		if a.st.TokensThink > 0 {
+			fmt.Fprintf(&b, " ˟%s", HumanTokens(a.st.TokensThink))
+		}
+		return b.String(), theme.StatusLineSpend
 	case "context":
 		// used/total of the LIVE context: what the next request costs against
 		// the model's window. Hidden until both halves are known — an

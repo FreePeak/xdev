@@ -184,12 +184,15 @@ back to the model role's `:effort` (`@slow:high`, or the persisted `thinking`
 key). `/thinking low` pins one rung for the rest of the session and writes it to
 the global layer.
 
-The **context dock** (`Alt+S`) is a fixed 42-column panel right of the
-transcript, opencode's sidebar shape: no box, just a surface of its own carrying
-the session's title in the top slot, then the pending plan, the task list, the
-files this session changed (their `+N`/`-N` counts flush right) and the session
-footer — the working set, kept beside the stream instead of scrolling behind it.
-Section headings are a bold name with the dim count appended. It auto-closes
+The **context dock** (`Alt+S`) is a fixed 42-column window right of the
+transcript, opencode's sidebar shape: it owns every row of the terminal, so the
+screen is two windows — the main pane (top bar, transcript, prompt box, status
+row) and the sidebar — and neither runs under the other. No box, just a surface
+of its own carrying the session's title in the top slot, then the pending plan,
+the task list, the files this session changed (their `+N`/`-N` counts flush
+right) and the session footer — the working set, kept beside the stream instead
+of scrolling behind it. Section headings are a bold name with the dim count
+appended. It auto-closes
 below 120 columns, never takes focus from a picker or a question card, and
 rebuilds only on events (plan published, tool finished, agent settled), never
 per frame. A pending plan is resolved where plans have always been resolved —

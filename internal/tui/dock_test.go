@@ -539,22 +539,39 @@ func TestDockPinnedCannotEatThePrompt(t *testing.T) {
 	}
 }
 
-// TestDockShortTerminalKeepsItsRows: the panel trades rows for its box only when
-// there are rows to trade. At a height where the band cannot hold anything, the
-// columns stay the transcript's — the reserve is not a fee charged for nothing.
+// TestDockShortTerminalKeepsItsRows: the panel owns the whole column, so the
+// rows it can no longer trade for the transcript's are none of them — an
+// 8-row terminal still has an 8-row sidebar, which is the whole point of the
+// window. Only a terminal too short to hold a title and a section at all
+// refuses to open it, and then it keeps the whole width.
 func TestDockShortTerminalKeepsItsRows(t *testing.T) {
 	app, _ := newTestApp(t, 200, 8)
 	app.AddSystemBlock("hello")
 	app.SetDockMode(DockShow)
 	app.mu.Lock()
-	defer app.mu.Unlock()
-	if _, h := app.dockGrid(); h > 0 {
-		t.Fatalf("an 8-row terminal has a %d-row band?", h)
+	top, h := app.dockGrid()
+	on, edge := app.dockOn(), app.rightEdge()
+	app.mu.Unlock()
+	if top != 0 || h != 8 {
+		t.Fatalf("the sidebar is not full height: top=%d h=%d, want 0/8", top, h)
 	}
-	if app.dockOn() {
+	if !on || edge != 200-dockCols {
+		t.Fatalf("an 8-row terminal: open=%v edge=%d", on, edge)
+	}
+
+	// Shorter than the panel can say anything in, it stays shut.
+	short, _ := newTestApp(t, 200, 3)
+	short.AddSystemBlock("hello")
+	short.SetDockMode(DockShow)
+	short.mu.Lock()
+	defer short.mu.Unlock()
+	if _, h := short.dockGrid(); h > 0 {
+		t.Fatalf("a 3-row terminal has a %d-row band?", h)
+	}
+	if short.dockOn() {
 		t.Fatal("the panel opened with no band to paint into")
 	}
-	if got := app.rightEdge(); got != 200 {
+	if got := short.rightEdge(); got != 200 {
 		t.Fatalf("rightEdge = %d, want the whole terminal", got)
 	}
 }

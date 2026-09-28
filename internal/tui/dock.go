@@ -51,6 +51,7 @@ const (
 	dockInner   = dockCols - 2*dockPad // paintable cells between the pads
 	dockMinCols = 120                  // below this, auto mode closes the panel
 	dockMin     = 20                   // the transcript's own floor, shared with rightEdge
+	dockMinRows = 5                    // a terminal shorter than this has no band to fill
 	dockListMax = 6                    // rows one list shows before "+N more"
 	dockPlanMax = 18                   // rows the plan document may take: the section is
 	// the reason the panel exists, so it gets the bigger half of the budget.
@@ -718,12 +719,14 @@ func (a *App) dockReserve() int {
 	return dockCols
 }
 
-// rightEdge is the last screen column the transcript band may paint in — its
-// fills, its timestamps, its scrollbar, and the width its rows are wrapped at.
-// The composer, the info divider and the status row deliberately keep the full
-// terminal: the panel lives inside the transcript's rows and nothing else, so
-// opening it never squeezes the surface a human types into. A terminal too narrow
-// to give up the columns keeps its full width — the panel loses that argument.
+// rightEdge is the width the main pane lays out against: the last screen
+// column the transcript band may paint in — its fills, its timestamps, its
+// scrollbar, and the width its rows are wrapped at — and, since the panel
+// became a window of its own, the width the top bar, the composer box and the
+// status row stop at too. The panel used to live inside the transcript's rows
+// and nothing else, which is why the surface a human types into kept the whole
+// terminal; a two-window layout has no such exception. A terminal too narrow to
+// give up the columns keeps its full width — the panel loses that argument.
 func (a *App) rightEdge() int {
 	r := a.width - a.dockReserve()
 	if r < 20 {
@@ -732,15 +735,20 @@ func (a *App) rightEdge() int {
 	return r
 }
 
-// dockGrid returns the band the panel paints into: the transcript's rows, so it
-// starts under the top bar and stops above the composer's box.
+// dockGrid returns the band the panel paints into: every row of the terminal,
+// top to bottom, because the panel is a window beside the stream rather than a
+// band inside it (opencode's sidebar). Nothing is reserved above or below it —
+// the main pane's top bar, composer and status row are what it sits beside. A
+// terminal too short to hold a title and a section reserves nothing. The height
+// is a plain a.height, so a resize that changes the pane's proportions changes
+// the row budget for free — the bandH the build cached is compared against it
+// exactly as the old transcript-shaped band was.
 func (a *App) dockGrid() (top, h int) {
-	top = a.transcriptTop()
-	h = a.height - 2 - a.composerRows() - top
-	if h < 5 {
-		return top, 0
+	h = a.height
+	if h < dockMinRows {
+		return 0, 0
 	}
-	return top, h
+	return 0, h
 }
 
 // --- paint ---

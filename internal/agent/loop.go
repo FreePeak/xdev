@@ -507,6 +507,11 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// same shape as the TTSR interrupt budget and maxEscalationRounds).
 	nudges := 0
 	promptConts := 0
+	// resumeFloor is where this run's own history begins: everything before it
+	// was rebuilt from the store by a resume or a compaction. The prompt
+	// continuation guard below needs the boundary because the two questions it
+	// asks have different scopes (see there). len(history) at Run entry.
+	resumeFloor := len(history)
 	// emptyRetries counts RetryAllErrors empty-turn recoveries after the
 	// nudge budget is spent. Used for escalating backoff and the
 	// "still waiting" notice so the run never looks frozen.
@@ -612,12 +617,33 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				}
 			}
 			if cont == "" && len(queued) == 0 && a.PromptContinuation && promptConts < maxPromptContinuations {
-				lastWasPromptCont := false
+				// Two questions, two scopes. The single loop below gave both
+				// the wrong one.
+				//
+				// "Has this conversation used tools?" — usedTools — reads ALL of
+				// history: a run that resumed a session which used tools is
+				// still a run whose work owes a summary.
+				//
+				// "Did THIS run already nudge and get a second yield?" —
+				// lastWasPromptCont — reads only from resumeFloor. It used to
+				// read all of history, which answered for a run that never
+				// happened: after a resume the last user message IS a persisted
+				// nudge, the flag latched true, continuation was refused, the
+				// turn ended with no assistant reply, and the TUI exited 0 —
+				// every resume of a nudged session. That is the 2026-09-28
+				// report, session 6917d52f, records 407-410: text-only yield,
+				// nudge, model_change, session_exit, and no assistant message
+				// after the nudge at all. A nudge in the persisted tail is a
+				// previous run's unfinished business, not an answer this run
+				// received, so it must not count as one.
 				usedTools := false
 				for _, h := range history {
 					if h.Role == ai.RoleAssistant && len(h.ToolCalls()) > 0 {
 						usedTools = true
 					}
+				}
+				lastWasPromptCont := false
+				for _, h := range history[min(len(history), resumeFloor):] {
 					if h.Role == ai.RoleUser && h.Attribution == PromptContinuationAttribution {
 						lastWasPromptCont = true
 					} else if h.Role == ai.RoleUser {

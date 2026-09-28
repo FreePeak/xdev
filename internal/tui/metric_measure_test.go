@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,7 +55,7 @@ func TestRateWindowIsPerMessage(t *testing.T) {
 	// window is 400ms and its true rate is 1000/0.4 = 2500 t/s.
 	app.BeginMessage()
 	deltas(app, 5, 100*time.Millisecond, "answer ")
-	app.AddUsage(10, 1000, 1010)
+	app.AddUsage(10, 1000, 0, 0, 1010)
 
 	got := measuredRate(t, app)
 	if got < 1500 || got > 4000 {
@@ -74,7 +75,7 @@ func TestRateWindowSpansToolDeltas(t *testing.T) {
 		time.Sleep(20 * time.Millisecond) // ~20ms of argument streaming
 		app.NoteToolDelta()
 	}
-	app.AddUsage(20, 1000, 1020)
+	app.AddUsage(20, 1000, 0, 0, 1020)
 
 	got := measuredRate(t, app)
 	// 1000 tokens over ~400ms is 2500 t/s. Without tool deltas in the window
@@ -91,7 +92,7 @@ func TestRateSegmentHidesWhenUnmeasured(t *testing.T) {
 	app, _ := newTestApp(t, 100, 24)
 	app.BeginMessage()
 	deltas(app, 3, 100*time.Millisecond, "ok")
-	app.AddUsage(1, 100, 101)
+	app.AddUsage(1, 100, 0, 0, 101)
 	if rateSegment(t, app) == "" {
 		t.Fatal("a measured rate must render")
 	}
@@ -99,7 +100,7 @@ func TestRateSegmentHidesWhenUnmeasured(t *testing.T) {
 	// A 2-token burst inside 100ms: nothing to measure.
 	app.BeginMessage()
 	app.AppendAssistant("x")
-	app.AddUsage(1, 2, 3)
+	app.AddUsage(1, 2, 0, 0, 3)
 	if show := rateSegment(t, app); show != "" {
 		t.Fatalf("unmeasured message left %q on the status row, want the segment hidden", show)
 	}
@@ -120,7 +121,7 @@ func TestRateIsOneMeasuredNumber(t *testing.T) {
 		t.Fatalf("mid-stream the segment drew %q from a rune estimate; want it hidden until usage lands", show)
 	}
 
-	app.AddUsage(5, 120, 125)
+	app.AddUsage(5, 120, 0, 0, 125)
 	settled := measuredRate(t, app)
 	show := rateSegment(t, app)
 	if want := fmt.Sprintf("⚡ %.1f t/s", settled); show != want {
@@ -138,13 +139,13 @@ func TestRateIsOneMeasuredNumber(t *testing.T) {
 // is the previous session's number drawn next to the new transcript.
 func TestResetClearsSessionCounters(t *testing.T) {
 	app, _ := newTestApp(t, 100, 24)
-	app.AddUsage(50_000, 50_000, 100_000)
+	app.AddUsage(50_000, 50_000, 90_000, 40_000, 100_000)
 	app.AddCost(1.23)
 	app.SetTTFT(450)
 	app.SetWork(2 * time.Hour)
 	app.BeginMessage()
 	deltas(app, 3, 100*time.Millisecond, "hi")
-	app.AddUsage(1, 100, 101)
+	app.AddUsage(1, 100, 0, 0, 101)
 	if rateSegment(t, app) == "" {
 		t.Fatal("setup: the rate must be measured first")
 	}
@@ -152,10 +153,14 @@ func TestResetClearsSessionCounters(t *testing.T) {
 	app.Reset()
 
 	app.mu.Lock()
-	in, out, rate, ttft, cost, work, ctx := app.st.TokensIn, app.st.TokensOut, app.st.Rate, app.st.TTFT, app.st.Cost, app.st.Work, app.st.CtxUsed
+	in, out, cache, think := app.st.TokensIn, app.st.TokensOut, app.st.TokensCache, app.st.TokensThink
+	rate, ttft, cost, work, ctx := app.st.Rate, app.st.TTFT, app.st.Cost, app.st.Work, app.st.CtxUsed
 	app.mu.Unlock()
-	if in != 0 || out != 0 {
-		t.Fatalf("↑%d ↓%d survived Reset — the HUD would show the previous session's token counters", in, out)
+	if in != 0 || out != 0 || cache != 0 || think != 0 {
+		t.Fatalf("↑%d ↓%d ⇢%d ˟%d survived Reset — the HUD would show the previous session's token counters", in, out, cache, think)
+	}
+	if rate != 0 {
+		t.Fatalf("rate %.1f survived Reset — a new session opens showing a ⚡ it never measured", rate)
 	}
 	if rate != 0 {
 		t.Fatalf("rate %.1f survived Reset — a new session opens showing a ⚡ it never measured", rate)
@@ -175,5 +180,48 @@ func TestResetClearsSessionCounters(t *testing.T) {
 	}
 	if show := rateSegment(t, app); show != "" {
 		t.Fatalf("the rate segment still draws %q after Reset", show)
+	}
+}
+
+// TestTokenSplitMatchesTheWire pins the ↑ ↓ ⇢ ˟ row to what the provider
+// actually billed. The bug: Usage.Input is the FRESH input only (every
+// provider normalizes input + output + cacheRead = totalTokens) and
+// Usage.Output already CONTAINS the reasoning, so printing those two under
+// "input"/"output" glyphs claimed a 479-token prompt for a real 65,054-token
+// one and 1,770 tokens of answer for 506 tokens of visible text. Measured off
+// a real onegw turn, off the row a user reads.
+func TestTokenSplitMatchesTheWire(t *testing.T) {
+	app, scr := drawnApp(t, 110, 24)
+	// prompt_tokens 65054, cached 64575, completion 1770, reasoning 1264.
+	app.AddUsage(65054-64575, 1770, 64575, 1264, 66824)
+	app.draw()
+
+	row := lastRow(screenText(scr))
+	// HumanTokens rounds: 1770 reads 1.8k, 1264 reads 1.3k.
+	for _, want := range []string{"↑479", "⇢64.6k", "↓1.8k", "˟1.3k"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("token split missing %s: %q", want, row)
+		}
+	}
+	// the defect this pins, so the prompt total must be readable off it.
+	if !strings.Contains(row, "↑479 ⇢64.6k") {
+		t.Fatalf("the cache read must sit beside the fresh input: %q", row)
+	}
+}
+
+// TestTokenSplitHidesWhatTheProviderDoesNotReport: a provider that reports
+// no cache read and reasons for nothing keeps the plain two-glyph row — the
+// split is a correction, not new decoration on every row.
+func TestTokenSplitHidesWhatTheProviderDoesNotReport(t *testing.T) {
+	app, scr := drawnApp(t, 110, 24)
+	app.AddUsage(1200, 340, 0, 0, 1540)
+	app.draw()
+
+	row := lastRow(screenText(scr))
+	if !strings.Contains(row, "↑1.2k │ ↓340") {
+		t.Fatalf("the plain row must be unchanged for a provider with no cache: %q", row)
+	}
+	if strings.Contains(row, "⇢") || strings.Contains(row, "˟") {
+		t.Fatalf("an unreported split must not draw a glyph: %q", row)
 	}
 }

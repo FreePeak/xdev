@@ -2372,10 +2372,15 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 	case ai.EventDone:
 		h.ts.app.EndAssistant()
 		if ev.Usage != nil {
-			// The HUD's ctx number is the whole request — cached input included
-			// (Claude Code's used_tokens), which is Usage.TotalTokens, not the
-			// uncached Input+Output the ↑/↓ counters accumulate.
-			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output, ev.Usage.TotalTokens)
+			// The ctx number is the whole request — cached input included
+			// (Claude Code's used_tokens), which is Usage.TotalTokens, not
+			// the sum the counters accumulate. The counters need the
+			// split: Input is fresh-only, Output already contains the
+			// reasoning, so without CacheRead and ReasoningTokens the row
+			// claimed a 479-token prompt for a 65k one and 1770 tokens of
+			// answer for 506.
+			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output,
+				ev.Usage.CacheRead, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens)
 			if ev.Usage.Cost != nil {
 				h.ts.app.AddCost(ev.Usage.Cost.Total)
 			}
