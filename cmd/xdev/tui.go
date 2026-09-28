@@ -266,6 +266,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer scr.Fini()
 	defer setCursorReset()
 
+	// A stop, a hangup or a SIGTERM must not leave the shell in a raw-mode
+	// alt screen: the two defers above only run when runTUI returns. The
+	// guard restores first, then dies on the signal it was sent
+	// (tui_signal.go).
+	if stopSignals := watchTerminalRoutes(scr.Fini); stopSignals != nil {
+		defer stopSignals()
+	}
+
 	app := tui.New(scr, th, modelRef, store.ID())
 	// --log: write a TUI screen transcript to <path> after each
 	// paint frame (off by default). Relative paths resolve under
