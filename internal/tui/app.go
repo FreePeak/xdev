@@ -2567,6 +2567,13 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.ed.Reset()
 			a.poke()
 			return
+		case "history-prev":
+			// The chord /hotkeys advertises. Editor.HandleKey has no
+			// KeyCtrlR case, so without this the key resolved to an action
+			// nothing dispatched and recall was Up-only.
+			a.ed.HistoryPrev()
+			a.poke()
+			return
 		case "cancel":
 			if running {
 				a.onCancel()

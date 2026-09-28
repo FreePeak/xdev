@@ -38,7 +38,17 @@ type SettingsRow struct {
 	Options  []string // select: the values Enter cycles through, in order
 }
 
+// settingsTabCell is one category label on the settings overlay's tab strip,
+// with the screen columns it occupies relative to the strip's left edge. The
+// painter fills these; the click hit-test reads them, so a label can never be
+// clickable somewhere other than where it was drawn.
+type settingsTabCell struct {
+	category string
+	x0, x1   int
+}
+
 // settingsOverlayState is the live overlay state (mu-guarded).
+
 type settingsOverlayState struct {
 	open       bool
 	rows       []SettingsRow
@@ -57,6 +67,11 @@ type settingsOverlayState struct {
 	// clamps against this rather than the cap, so on a short screen (where the
 	// panel is squeezed) the highlight cannot scroll below the visible rows.
 	bodyRows int
+	// tabX/tabY are the painted tab strip's origin and tabCells the columns each
+	// category label occupies, both published every frame for the same reason
+	// bodyStart is: a click resolves against the frame the user saw.
+	tabX, tabY int
+	tabCells   []settingsTabCell
 }
 
 var (
@@ -262,6 +277,13 @@ func (a *App) settingsOverlayAction(st *settingsOverlayState) {
 	}
 	row := visible[st.sel]
 	if !row.Editable {
+		// Read-only rows are shown so a user can see what is in effect. Enter
+		// says nothing about them, and a click saying nothing either left a
+		// dead row that looks like every other — so the click answers, naming
+		// the key that CAN change it. It rides the composer's notice slot
+		// rather than the transcript: this is a gesture's answer, not output,
+		// and a notice cannot scroll the user out of the panel they are in.
+		a.setNotice(row.Label + " is read-only — `xdev config set " + row.Key + " <value>`")
 		return
 	}
 	ops := a.settingsOverlayOps
@@ -340,7 +362,25 @@ func (a *App) handleSettingsOverlayMouse(m *tcell.EventMouse, press bool) bool {
 		a.poke()
 		return true
 	}
-	_, y := m.Position()
+	x, y := m.Position()
+	// A click on a category label shows that category. The columns come from
+	// the painter's own walk (settingsOverlayState.tabCells), so the hit-test
+	// cannot drift from what was painted. It used to re-derive the layout by
+	// arithmetic and disagreed with the painter about the leading space and the
+	// separator width, so every click landed one category to the left of the one
+	// under the finger.
+	if y == st.tabY {
+		for i, c := range st.tabCells {
+			if x >= st.tabX+c.x0 && x <= st.tabX+c.x1 {
+				st.activeCat = i
+				st.sel, st.top = 0, 0
+				clampSettingsSel(st)
+				a.poke()
+				return true
+			}
+		}
+		return true // the strip itself, or its padding: the panel keeps the click
+	}
 	// A click on a body row selects it and runs the same action Enter does, so
 	// the mouse is a real path to a setting rather than a highlighter.
 	if y >= st.bodyStart && y < st.bodyStart+(st.bodyEnd-st.bodyTop) {
@@ -543,23 +583,39 @@ func (a *App) drawSettingsOverlay(yComposerTop int) {
 	title := "⚙ SETTINGS"
 	drawText(s, x0+1, y+1, rosterSnippet(title, titleW), textSt.Bold(true))
 
-	// category tabs
+	// Category tabs. The painter and the click hit-test must agree on where each
+	// label lands, so the layout is built ONCE here: the string to paint and the
+	// columns each label occupies, from the same walk. They used to compute it
+	// independently — the painter by concatenation, the hit-test by arithmetic —
+	// and disagreed about the leading space and the separator width, which put
+	// every click one category to the left of the one under the finger.
 	tabY := y + 2
-	tabText := " "
+	tabCells := make([]settingsTabCell, len(cats))
+	var tabText strings.Builder
+	tabText.WriteString(" ")
+	col := 1 // columns are relative to the strip's own left edge (x0+1)
 	for i, cat := range cats {
 		if i > 0 {
-			tabText += " │ "
+			tabText.WriteString(" │ ")
+			col += 3
 		}
+		label := cat
 		if i == activeCat {
-			tabText += "▸" + strings.ToUpper(cat)
+			tabText.WriteString("▸")
+			label = strings.ToUpper(cat)
+			col++
 		} else {
-			tabText += " " + cat
+			tabText.WriteString(" ")
+			col++
 		}
+		tabText.WriteString(label)
+		tabCells[i] = settingsTabCell{category: cat, x0: col, x1: col + len([]rune(cat)) - 1}
+		col += len([]rune(cat))
 	}
-	drawText(s, x0+1, tabY, rosterSnippet(tabText, titleW), dimSt)
-
-	// separator
-	drawText(s, x0+1, tabY+1, strings.Repeat(box.Horizontal, panelW-2), borderSt)
+	tabX := x0 + 1
+	st.tabX, st.tabY, st.tabCells = tabX, tabY, tabCells
+	drawText(s, tabX, tabY, rosterSnippet(tabText.String(), titleW), dimSt)
+	drawText(s, tabX, tabY+1, strings.Repeat(box.Horizontal, panelW-2), borderSt)
 
 	// settings rows
 	bodyStart := tabY + 2
