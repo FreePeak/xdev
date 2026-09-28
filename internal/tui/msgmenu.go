@@ -1,8 +1,17 @@
 package tui
 
-// The user-message menu: clicking a ❯ row in the transcript offers the four
-// things a person wants to do with a message they have already read —
-// look at it in the session, undo it, copy it, or pick it up and edit it.
+// The user-message menu: clicking a ❯ row in the transcript offers the three
+// things a person wants to do with a message they have already read — look at
+// it in the session, undo it, or copy it.
+//
+// "revert" is the tree selector's user-row rewind, not a private dialect of it
+// (user-reported: "click-to-user-message must work like the history tree").
+// /tree's Enter on a user row moves the leaf to that message's PARENT and hands
+// the prompt back as the composer draft; this menu's revert does the same, so
+// the two ways of reaching a point in the conversation agree. That is also why
+// the standalone "fork" row is gone: fork WAS that behaviour under a second
+// name, and two rows that rewind the same way is one row too many. What a
+// revert still cannot do is put files back, and the hint says so.
 //
 // Two design rules keep this honest:
 //
@@ -37,20 +46,19 @@ const (
 	msgActJump
 	msgActRevert
 	msgActCopy
-	msgActFork
 )
 
-// msgMenuRows is the menu, in paint order. The hint under the list spells out
-// the one thing a person cannot guess: revert does NOT put files back.
+// msgMenuRows is the menu, in paint order. The hints spell out the two things a
+// person cannot guess: a revert re-lands the prompt in the composer (it is the
+// tree selector's rewind, not a discard), and it does NOT put files back.
 var msgMenuRows = []struct {
 	act   msgMenuAction
 	label string
 	hint  string
 }{
 	{msgActJump, "jump", "view this message in the session"},
-	{msgActRevert, "revert", "undo the message — files are NOT put back"},
+	{msgActRevert, "revert", "rewind here — the prompt comes back to edit"},
 	{msgActCopy, "copy", "copy the message to the clipboard"},
-	{msgActFork, "fork", "rewind here and edit it as a new message"},
 }
 
 // msgMenu is the open menu. x/y are the screen cell it was opened from (the
@@ -191,9 +199,7 @@ func (a *App) runMsgAction(act msgMenuAction, ord, block int, entryID, text stri
 	case msgActCopy:
 		a.copyMessage(text)
 	case msgActRevert:
-		a.revertMessage(ord, entryID)
-	case msgActFork:
-		a.forkMessage(ord, entryID, text)
+		a.revertMessage(entryID, text)
 	}
 }
 
@@ -232,38 +238,31 @@ func (a *App) copyMessage(text string) {
 	a.poke()
 }
 
-// revertMessage undoes the message: the session leaf moves to the message's
-// parent and the transcript is replayed from there.
+// revertMessage undoes the message, and it is the tree selector's rewind rather
+// than a private dialect of it: the leaf moves to the message's PARENT, the
+// transcript is replayed from there, and the prompt comes back as the composer
+// draft, so the next send continues from that point as a NEW message. That is
+// exactly what /tree's Enter does on a user row, and the two must not disagree —
+// a click that looked like the tree and rewound somewhere else is worse than
+// either alone. (The menu's old "fork" row was this same rewind under a second
+// name, so it folded in here; "revert" is the name a person would try first.)
 //
 // It does NOT put files back. There is no file-revert machinery in xdev — no
 // working-tree snapshot, no recorded baseline commit — so anything the turn
 // wrote to disk stays written. The notice says so in the same breath as the
-// rewind, because "revert" that silently leaves half the turn's effects in
+// rewind, because a "revert" that silently leaves half the turn's effects in
 // place is worse than no rewind at all.
 //
 // summarize is false on purpose: a summary costs a model round trip (up to
 // branchSummaryBudget) and would freeze the UI thread this runs on. /tree's
 // Shift+Enter is still the way to get one.
-func (a *App) revertMessage(ord int, entryID string) {
+//
+// text is the row's own text, the fallback for a seam that resolved the entry
+// id but handed back no draft (a harness-attributed row, a store that cannot
+// rebuild the message). Caller: runMsgAction, unlocked.
+func (a *App) revertMessage(entryID, text string) {
 	if entryID == "" {
 		a.AddSystemBlock("revert: this message is not in the session store")
-		return
-	}
-	if !a.navigateTo(entryID, false) {
-		return
-	}
-	a.AddSystemBlock("· reverted the message — session rewound, composer untouched")
-	a.AddSystemBlock("· files were NOT restored: xdev keeps no snapshot of the working tree, so anything that turn wrote to disk is still there")
-	a.poke()
-}
-
-// forkMessage rewinds to the message's parent and hands the prompt back as a
-// composer draft, so the next send continues from that point as a NEW message.
-// This is the tree selector's user-row rewind (Claude-Code resume-and-edit)
-// exposed as one click.
-func (a *App) forkMessage(ord int, entryID, text string) {
-	if entryID == "" {
-		a.AddSystemBlock("fork: this message is not in the session store")
 		return
 	}
 	draft, ok := a.navigateDraft(entryID)
@@ -282,36 +281,27 @@ func (a *App) forkMessage(ord int, entryID, text string) {
 	if empty {
 		a.escDraft, a.escUsed = nil, false
 		a.ed.SetBuffer(draft)
-		a.AddSystemBlock("· forked — the message is back in the composer, edit and send")
+		a.AddSystemBlock("· reverted — the session rewound and the message is back in the composer, edit and send")
 	} else {
-		a.AddSystemBlock("· forked to this point — composer was not empty, so the draft was left alone")
+		a.AddSystemBlock("· reverted — the session rewound; the composer was not empty, so the prompt was not restored")
 	}
+	a.AddSystemBlock("· files were NOT restored: xdev keeps no snapshot of the working tree, so anything that turn wrote to disk is still there")
 	a.poke()
 }
 
-// navigateTo moves the session leaf and replays the transcript. It reports
-// whether the move happened; a failure has already been surfaced as a notice.
-func (a *App) navigateTo(entryID string, summarize bool) bool {
-	if a.ops == nil || a.ops.NavigateTree == nil {
-		a.AddSystemBlock("session branch not wired")
-		return false
-	}
-	if _, err := a.ops.NavigateTree(entryID, summarize); err != nil {
-		a.AddSystemBlock("revert: " + err.Error())
-		return false
-	}
-	return true
-}
-
-// navigateDraft is navigateTo plus the prompt the rewind hands back.
+// navigateDraft moves the session leaf to entryID and reports the prompt the
+// rewind hands back. The rewind is the one operation this menu performs, and the
+// tree selector performs the same one through the same seam, so both surfaces
+// land in the same place (summarize is deliberately off: a branch summary costs
+// a model round trip and this runs on the UI thread).
 func (a *App) navigateDraft(entryID string) (string, bool) {
 	if a.ops == nil || a.ops.NavigateTree == nil {
-		a.AddSystemBlock("session branch not wired")
+		a.AddSystemBlock("revert: session branch not wired")
 		return "", false
 	}
 	draft, err := a.ops.NavigateTree(entryID, false)
 	if err != nil {
-		a.AddSystemBlock("fork: " + err.Error())
+		a.AddSystemBlock("revert: " + err.Error())
 		return "", false
 	}
 	return draft, true

@@ -307,10 +307,13 @@ func TestMenuCopyPutsMessageOnClipboard(t *testing.T) {
 	}
 }
 
-// TestMenuRevertWarnsFilesAreNotRestored pins the honesty rule: xdev has no
-// working-tree snapshot, so a revert that silently left half the turn on disk
-// would be worse than no revert. The rewind happens AND the warning is shown.
-func TestMenuRevertWarnsFilesAreNotRestored(t *testing.T) {
+// TestMenuRevertIsTheTreeRewind pins the contract the user reported missing —
+// "click-to-user-message must work like the history tree": revert moves the leaf
+// to the message's entry and the prompt comes back as the composer draft, which
+// is exactly what /tree's Enter does on a user row. It asks for no branch
+// summary (that costs a model round trip on the UI thread), and it says the
+// one thing a person cannot guess: files are NOT put back.
+func TestMenuRevertIsTheTreeRewind(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	defer scr.Fini()
 	threeTurns(app)
@@ -320,7 +323,7 @@ func TestMenuRevertWarnsFilesAreNotRestored(t *testing.T) {
 	app.SetSessionOps(&SessionOps{
 		NavigateTree: func(entryID string, s bool) (string, error) {
 			rewound, summarize = entryID, s
-			return "", nil
+			return "the prompt, handed back", nil
 		},
 		UserEntryID: func(i int) string { return "entry" + string(rune('A'+i)) },
 	})
@@ -357,14 +360,49 @@ func TestMenuRevertWarnsFilesAreNotRestored(t *testing.T) {
 	if !strings.Contains(joined, "files were NOT restored") {
 		t.Fatalf("revert did not warn that files are not restored; notices were:\n%s", joined)
 	}
-	if draft != "" {
-		t.Fatalf("revert primed the composer with %q; revert must leave the composer alone", draft)
+	if draft != "the prompt, handed back" {
+		t.Fatalf("composer = %q, want the rewound prompt back for editing", draft)
 	}
 }
 
-// TestMenuForkPrimesComposer pins the difference between revert and fork: fork
-// rewinds to the same point but hands the prompt back to be edited and resent.
-func TestMenuForkPrimesComposer(t *testing.T) {
+// TestMenuRevertFallsBackToTheRowText: a seam that resolves the entry id but
+// hands back no draft (a harness-attributed row, a store that cannot rebuild
+// the message) must not leave the human with a silent rewind and an empty
+// composer — the row's own text is what they clicked.
+func TestMenuRevertFallsBackToTheRowText(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	defer scr.Fini()
+	threeTurns(app)
+
+	app.SetSessionOps(&SessionOps{
+		NavigateTree: func(string, bool) (string, error) { return "", nil },
+		UserEntryID:  func(i int) string { return "entry" + string(rune('A'+i)) },
+	})
+	app.draw()
+
+	y := userRow(t, app, 0)
+	app.mu.Lock()
+	clickAt(app, 6, y)
+	fire := pickRow(app, msgActRevert)
+	app.mu.Unlock()
+	if fire == nil {
+		t.Fatal("no action armed for the revert row")
+	}
+	fire()
+
+	app.mu.Lock()
+	got := app.ed.Text()
+	app.mu.Unlock()
+	if got != "first prompt" {
+		t.Fatalf("composer = %q, want the clicked row's own text back", got)
+	}
+}
+
+// TestMenuRevertKeepsATypedDraft: the draft is primed only over an EMPTY
+// composer — a parked or typed draft is somebody's unfinished thought, and a
+// revert must not overwrite it. The rewind still happens either way, and the
+// notice says why the prompt was not restored.
+func TestMenuRevertKeepsATypedDraft(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	defer scr.Fini()
 	threeTurns(app)
@@ -373,35 +411,62 @@ func TestMenuForkPrimesComposer(t *testing.T) {
 	app.SetSessionOps(&SessionOps{
 		NavigateTree: func(entryID string, _ bool) (string, error) {
 			rewound = entryID
-			return "edited prompt", nil
+			return "the prompt, handed back", nil
 		},
 		UserEntryID: func(i int) string { return "entry" + string(rune('A'+i)) },
 	})
+	app.SetHandlers(func(string) {}, func() {}, func() {})
 	app.draw()
+	for _, r := range "half-typed thought" {
+		app.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	if app.ed.Text() == "" {
+		t.Fatal("precondition: the composer is not empty")
+	}
 
 	y := userRow(t, app, 0)
 	app.mu.Lock()
 	clickAt(app, 6, y)
-	fire := pickRow(app, msgActFork)
+	fire := pickRow(app, msgActRevert)
 	app.mu.Unlock()
 	if fire == nil {
-		t.Fatal("no action armed for the fork row")
+		t.Fatal("no action armed for the revert row")
 	}
 	fire()
 
 	if rewound != "entryA" {
-		t.Fatalf("forked entry = %q, want %q", rewound, "entryA")
+		t.Fatalf("rewound entry = %q, want %q", rewound, "entryA")
 	}
 	app.mu.Lock()
 	got := app.ed.Text()
+	notices := ""
+	for _, b := range app.blocks {
+		if b.Kind == KindSystem {
+			notices += b.Text + "\n"
+		}
+	}
 	app.mu.Unlock()
-	if got != "edited prompt" {
-		t.Fatalf("composer = %q, want %q", got, "edited prompt")
+	if got != "half-typed thought" {
+		t.Fatalf("composer = %q, want the typed draft left alone", got)
+	}
+	if !strings.Contains(notices, "composer was not empty") {
+		t.Fatalf("revert did not say why the prompt was not restored:\n%s", notices)
+	}
+}
+
+// TestMenuHasNoForkRow pins the fold: fork WAS the tree rewind under a second
+// name, so leaving both rows would offer the same rewind twice under two
+// labels — and "revert" is the name a person tries first.
+func TestMenuHasNoForkRow(t *testing.T) {
+	if len(msgMenuRows) != 3 {
+		t.Fatalf("the menu has %d rows, want the 3 that survive the fork fold", len(msgMenuRows))
+	}
+	if r := msgMenuRows[1]; r.act != msgActRevert || !strings.Contains(r.hint, "comes back") {
+		t.Fatalf("row 1 = %+v, want the revert row whose hint says the prompt comes back", r)
 	}
 }
 
 // TestMenuActionsDegradeWithoutSessionOps pins that an unwired session seam
-// produces a notice, never a panic and never a rewind somewhere random.
 func TestMenuActionsDegradeWithoutSessionOps(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	defer scr.Fini()
@@ -430,7 +495,7 @@ func TestMenuActionsDegradeWithoutSessionOps(t *testing.T) {
 	}
 }
 
-// TestMenuDigitPicksRow pins the keyboard path: a four-item menu is small
+// TestMenuDigitPicksRow pins the keyboard path: a three-item menu is small
 // enough that "3" beats three arrow presses, and the digit must run the same
 // action the click on that row would.
 func TestMenuDigitPicksRow(t *testing.T) {

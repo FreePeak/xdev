@@ -293,7 +293,17 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// which is what stops a box from stealing the wheel merely by sliding
 		// under a stationary pointer. thinkBoxAt returns -1 for "no box", which
 		// is exactly the "aim back at the transcript" value.
-		a.thinkFocus = a.thinkBoxAt(y)
+		//
+		// Except inside the dock: that column is a window of its own, so a press
+		// there aims at the panel and never at a row the panel covers — no
+		// think box is focused behind it, and the wheel stays aimed at the
+		// transcript. The press still anchors a selection: the panel's rows are
+		// in the copy table (selDockRows), which is what makes a drag over the
+		// sidebar copy the sidebar's own text.
+		a.thinkFocus = -1
+		if !a.dockAt(x, y) {
+			a.thinkFocus = a.thinkBoxAt(y)
+		}
 		a.selThumbDrag = false
 		// Arm the user-message menu on the user row under this press, but do
 		// not open it yet: the open waits for a no-motion release below, so a
@@ -311,15 +321,17 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// raw click point would collapse the word/line selection back into a
 		// no-motion click and copy nothing. A single click falls through and
 		// anchors here so a following drag can expand it.
-		// A click on a FILES row opens the full-width diff
-		// for that file: the panel is chrome, so it takes no
-		// keyboard, but a click on a changed file has to
-		// reach the diff surface. (Jumping to the block
-		// without opening the overlay left the click doing
-		// nothing the eye could see — the file diff view
-		// was unreachable.)
-		if path := a.dockClick(x, y); path != "" {
+		// A click on a FILES row opens the full-width diff for that file, and a
+		// button row (the trajectory ledger) runs the action it carries: the
+		// panel is chrome, so it takes no keyboard, but a click on one of its
+		// rows has to reach the surface it names. (Jumping to the block without
+		// opening the overlay left the click doing nothing the eye could see —
+		// the file diff view was unreachable.)
+		if path, act := a.dockRowAt(x, y); path != "" {
 			a.openDiffOverlay(path)
+			a.poke()
+			break
+		} else if act != "" && a.dockAct(act) {
 			a.poke()
 			break
 		}
@@ -329,16 +341,28 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// Both click affordances arm from the same press and are cancelled
 		// by the same motion, so they coexist: a link is hit-tested against
 		// the exact painted run, a menu against the user row. Whichever the
-		// release finds decides the click.
-		a.linkClick = a.linkAt(x, y)
-		if _, bi := a.userRowAt(y); bi >= 0 {
-			a.msgArmed = true
+		// release finds decides the click. Neither arms inside the dock: the
+		// panel painted those cells, so it owns the click.
+		if !a.dockAt(x, y) {
+			a.linkClick = a.linkAt(x, y)
+			if _, bi := a.userRowAt(y); bi >= 0 {
+				a.msgArmed = true
+			}
 		}
+		// A press inside the dock anchors on SCREEN rows even when the screen
+		// row is also a transcript row: the panel is painted over the band, so
+		// the cell the finger took holds the panel's text, not the transcript's.
+		// Anchoring on document rows would follow the transcript underneath the
+		// panel and copy the wrong thing the moment the viewport moved.
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false
-		a.selAnchor = a.selCornerAt(x, y)
-		a.selDocMode = a.selAnchor.doc >= 0
+		if !a.dockAt(x, y) {
+			a.selAnchor = a.selCornerAt(x, y)
+			a.selDocMode = a.selAnchor.doc >= 0
+		} else {
+			a.selAnchor = selCorner{x: x, y: a.clampScreen(y), doc: -1}
+		}
 		a.selEnd = a.selCornerAt(x, y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selThumbDrag: // thumb drag on the scrollbar
