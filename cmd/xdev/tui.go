@@ -1315,6 +1315,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 	}
+	// A foreground `task` spawn is invisible by default: the call blocks on
+	// the child, and the child speaks only to the model. These events are
+	// the human's half — the transcript shows what each child is doing —
+	// and they never reach the parent's context.
+	if tt, ok := reg.Get(agent.TaskToolName); ok {
+		if taskTool, isTask := tt.(*agent.TaskTool); isTask {
+			taskTool.OnEvent = (&taskChildSink{app: app}).onEvent
+		}
+	}
 	app.SetMemoryOps(memoryOps(sessionMemory))
 	app.SetAdvisorOps(&tui.AdvisorOps{
 		Enabled: func() bool { return adv != nil },
@@ -2231,6 +2240,55 @@ type tuiHooks struct {
 	// goroutine — mu serializes the two writers.
 	mu          sync.Mutex
 	ttftRequest time.Time
+}
+
+// taskChildSink wires a `task` call's children into the transcript: the
+// call row is the parent, the child rows hang under it, and the model's
+// context is not involved (the parent still sees only the yield).
+//
+// The agent's child events carry no call id, and two `task` calls can be in
+// flight in the same turn (MaxToolWorkers), so the call a child belongs to
+// is the newest running `task` row at the moment the child STARTS — which
+// is exactly when the spawn is the one that is blocking. Children are
+// keyed by their label, which a batch makes unique (childLabel).
+type taskChildSink struct {
+	app *tui.App
+	mu  sync.Mutex
+	ids map[string]string // child label -> the `task` call id it belongs to
+}
+
+// onEvent is the TaskTool.OnEvent callback: one child moment, straight to
+// the transcript.
+func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
+	callID := s.callID(ev.Label)
+	switch ev.Kind {
+	case agent.SubagentStart:
+		s.mu.Lock()
+		if callID == "" {
+			callID = s.app.RunningTaskCallID()
+			if callID != "" {
+				if s.ids == nil {
+					s.ids = map[string]string{}
+				}
+				s.ids[ev.Label] = callID
+			}
+		}
+		s.mu.Unlock()
+		s.app.AddTaskChild(callID, ev.Label, ev.Agent, ev.Model)
+	case agent.SubagentTool:
+		s.app.UpdateTaskChild(callID, ev.Label, ev.Tool, string(ev.Args), ev.Status)
+	case agent.SubagentEnd:
+		s.app.FinishTaskChild(callID, ev.Label, ev.Status, ev.Dur)
+	}
+}
+
+// callID is the `task` call this child was started under ("" = unknown, and
+// the transcript then keeps the event off the transcript rather than
+// guessing which call it belonged to).
+func (s *taskChildSink) callID(label string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ids[label]
 }
 
 func (h *tuiHooks) OnStart(req ai.StreamRequest) {
