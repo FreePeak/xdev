@@ -119,7 +119,7 @@ func validateKey(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("memory must be off|local|mnemopi|hindsight|sharpshooter, got %q", value)
-	case "showThinking", "advisor":
+	case "showThinking", "advisor", "ask.autoAnswer":
 		switch value {
 		case "true", "false":
 			return nil
@@ -154,6 +154,8 @@ func fallbackValue(s *config.Settings, key string) string {
 		return s.ThinkingLevel()
 	case "advisor":
 		return fmt.Sprint(s.Advisor)
+	case "ask.autoAnswer":
+		return fmt.Sprint(s.AskAutoAnswerOn())
 	case "memory":
 		if s.Memory == "" {
 			return "off"

@@ -505,11 +505,12 @@ type Settings struct {
 	// nothing answers. An empty block means "attach to 127.0.0.1:9222,
 	// launching a private-profile Chrome there if nothing is listening".
 	Browser BrowserSettings `yaml:"browser"`
-	// Ask configures the ask tool (M11 #36): ask.timeout bounds how long
-	// a headless run waits for an answer before the recommended option
-	// proceeds.
+	// Ask configures the ask tool (M11 #36): ask.autoAnswer (off by
+	// default) lets an unanswered question be answered by its recommended
+	// option after ask.timeout, instead of waiting for a human.
 	Ask struct {
-		Timeout int `yaml:"timeout"`
+		Timeout    int  `yaml:"timeout"`
+		AutoAnswer bool `yaml:"autoAnswer"`
 	} `yaml:"ask"`
 	// Skills configures SKILL.md discovery (M12 F2): customDirectories
 	// are extra roots scanned after native/user/managed, so an authored
@@ -1045,13 +1046,20 @@ func (s *Settings) BrowserConfig() browser.Settings {
 	return cfg
 }
 
-// AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
-// or the tool's schema default when unset.
+// AskTimeout returns how long the ask tool waits before the recommended
+// answer proceeds: ask.timeout seconds, or the tool's default when unset.
+// It only bounds the auto-answer path — ask.autoAnswer must be on.
 func (s *Settings) AskTimeout() time.Duration {
 	if s == nil || s.Ask.Timeout <= 0 {
 		return tool.DefaultAskTimeout
 	}
 	return time.Duration(s.Ask.Timeout) * time.Second
+}
+
+// AskAutoAnswerOn reports whether an unanswered question may be answered by
+// its recommended option (nil-safe: off unless a layer opts in).
+func (s *Settings) AskAutoAnswerOn() bool {
+	return s != nil && s.Ask.AutoAnswer
 }
 
 // ComputerOn reports whether the computer tool is enabled (nil-safe:
@@ -1611,6 +1619,11 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
 	}
+	// Same plain-bool rule as Advisor: the shipped default is off, so only a
+	// layer that turns it ON contributes.
+	if layer.Ask.AutoAnswer {
+		s.Ask.AutoAnswer = true
+	}
 	// computer: desktop control is opt-in (a layer that sets enabled wins,
 	// including an explicit no), and the timeout is validated here so a
 	// negative value is reported instead of silently meaning "default".
@@ -1990,6 +2003,9 @@ func List(s *Settings, globalPath string) []string {
 	}
 	if s.Ask.Timeout > 0 {
 		out = append(out, "ask.timeout "+fmt.Sprint(s.Ask.Timeout))
+	}
+	if s.AskAutoAnswerOn() {
+		out = append(out, "ask.autoAnswer true")
 	}
 	if s.TTS.Voice != "" {
 		out = append(out, "tts.voice "+s.TTS.Voice)

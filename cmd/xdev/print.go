@@ -1276,10 +1276,12 @@ func mcpConfigPath() string {
 // subagents run with restricted tool sets). Individual server failures are
 // reported to report (nil = stderr) and skipped, never fatal.
 //
-// Async by design: a server that starts but never answers `initialize`
-// would otherwise stall startup for its whole timeout budget. Registration
-// happens whenever it lands; the registry is mutex-guarded, and a prompt
-// sent before then simply carries fewer tools (the next turn has them).
+// Async by design: a server that starts but never answers `initialize`,
+// and a local server that has to be launched and polled for up to
+// healthTimeoutSec before it answers at all, would otherwise stall startup
+// for their whole timeout budgets. Registration happens whenever it lands;
+// the registry is mutex-guarded, and a prompt sent before then simply
+// carries fewer tools (the next turn has them).
 func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(string)) *mcpclient.Manager {
 	cfg, err := mcpclient.LoadConfig(mcpConfigPath())
 	if err != nil {
@@ -1290,9 +1292,44 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 		return nil
 	}
 	mgr := mcpclient.NewManager()
-	// Auto-start any server that ships as a binary rather than an
-	// always-on daemon (leankg): xdev launches it on demand when the
-	// health probe fails, then waits for it to answer before connecting.
+	if wait {
+		// One-shot modes (print) must have the tools before the first
+		// turn: connect inline, bounded by the per-server init timeout.
+		finishMCP(mgr, reg, ctx, cfg, report)
+		return mgr
+	}
+	go finishMCP(mgr, reg, ctx, cfg, report)
+	return mgr
+}
+
+// finishMCP connects and registers, reporting failures non-fatally. report
+// (optional) is where a mode with a UI of its own — the TUI's composer
+// divider — takes the failure; nil keeps stderr, which is the interface for
+// print, rpc and acp.
+func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config, report func(string)) {
+	autostartMCP(cfg)
+	connected, errs := mgr.Connect(ctx, cfg)
+	for _, e := range errs {
+		if report != nil {
+			report(mcpUnavailable(e))
+			continue
+		}
+		fmt.Fprintln(os.Stderr, "xdev: mcp server unavailable —", e)
+	}
+	if connected == 0 {
+		mgr.Close()
+		return
+	}
+	mcpclient.Register(reg, mgr.Tools())
+	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
+	reg.MCPNames = func() string { return mcpNameList(mgr) }
+}
+
+// autostartMCP launches any server that ships as a binary rather than an
+// always-on daemon (leankg) when its health probe says it is down, and waits
+// for it to answer. It lives inside finishMCP so a mode with a UI pays the
+// probe and the launch wait off the critical path, not before the screen.
+func autostartMCP(cfg *mcpclient.Config) {
 	for name, sc := range cfg.Servers {
 		if sc.AutoStart == nil {
 			continue
@@ -1313,36 +1350,6 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 		}
 		logx.Infof("mcp: %s started (pid %d)", name, cmd.Process.Pid)
 	}
-	if wait {
-		// One-shot modes (print) must have the tools before the first
-		// turn: connect inline, bounded by the per-server init timeout.
-		finishMCP(mgr, reg, ctx, cfg, report)
-		return mgr
-	}
-	go finishMCP(mgr, reg, ctx, cfg, report)
-	return mgr
-}
-
-// finishMCP connects and registers, reporting failures non-fatally. report
-// (optional) is where a mode with a UI of its own — the TUI's composer
-// divider — takes the failure; nil keeps stderr, which is the interface for
-// print, rpc and acp.
-func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config, report func(string)) {
-	connected, errs := mgr.Connect(ctx, cfg)
-	for _, e := range errs {
-		if report != nil {
-			report(mcpUnavailable(e))
-			continue
-		}
-		fmt.Fprintln(os.Stderr, "xdev: mcp server unavailable —", e)
-	}
-	if connected == 0 {
-		mgr.Close()
-		return
-	}
-	mcpclient.Register(reg, mgr.Tools())
-	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
-	reg.MCPNames = func() string { return mcpNameList(mgr) }
 }
 
 // mcpNameList returns a "1 server" / "3 servers" label from
@@ -1811,7 +1818,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		ghTool,
 		// ask is the parent's channel to the user; children (ChildTools
 		// below) deliberately omit it — a scoped subagent has no user.
-		tool.NewAskTool(settings.AskTimeout()),
+		tool.NewAskTool(settings.AskTimeout(), settings.AskAutoAnswerOn()),
 	} {
 		reg.Register(t)
 	}
