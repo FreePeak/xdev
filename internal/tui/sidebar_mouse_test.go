@@ -132,6 +132,79 @@ func TestSidebarDragCopiesThePanelText(t *testing.T) {
 	}
 }
 
+// sidebarTitleCell is two cells into the panel's title slot, and the row's
+// text: the copy is measured in screen cells, so the expectation is the slice
+// of the title between the two drag corners rather than the whole string.
+func sidebarTitleCell(t *testing.T, app *App, want string) (x, y int, row selRow, ok bool) {
+	t.Helper()
+	app.mu.Lock()
+	rows := append([]selRow(nil), app.selDockRows...)
+	app.mu.Unlock()
+	for _, r := range rows {
+		if strings.Contains(r.text, want) {
+			return r.x0 + 2, r.y, r, true
+		}
+	}
+	return 0, 0, selRow{}, false
+}
+
+// TestSidebarDragCopiesTheTitleSlot pins the one panel row the copy table used
+// to leave out. The title slot — the session's name, or its first prompt when
+// the session has no title of its own — is the string a human reaches the panel
+// to copy, and it sits above the built rows. Not being in selDockRows meant a
+// drag across it fell through to the transcript row behind the panel and, worse,
+// clipped the cell range to nothing (spanRow against an empty row), so the
+// copy came out blank.
+func TestSidebarDragCopiesTheTitleSlot(t *testing.T) {
+	app, scr := sidebarApp(t)
+	x, y, row, ok := sidebarTitleCell(t, app, "sidebar window")
+	if !ok {
+		t.Skip("panel layout exposed no title row")
+	}
+	want := cellSlice(row.text, 2, 9)
+
+	app.mu.Lock()
+	drag(app, x, y, x+6, y)
+	app.mu.Unlock()
+
+	if got := string(scr.GetClipboardData()); got != want {
+		t.Fatalf("clipboard = %q, want the panel's title slot text %q", got, want)
+	}
+}
+
+// The same slot with no session title of its own: the panel falls back to the
+// session's first prompt, and that string must be copyable too — it is the task
+// name, and it is usually too long for the slot, so it wraps onto a second row
+// that has to be in the table as well.
+func TestSidebarTitleSlotCopiesTheFirstPrompt(t *testing.T) {
+	app, scr := newTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.SetDockOps(DockOps{
+		Session: func() (string, string) { return "", "sess1234" },
+		Tasks:   func() string { return "TASKS · 0/0 done" },
+	})
+	for i := 0; i < 6; i++ {
+		app.AddSystemBlock("transcript row " + string(rune('A'+i)))
+	}
+	app.AddUserBlock("port the first prompt to the sidebar title slot")
+	app.AddSystemBlock("more transcript below the panel")
+	app.draw()
+
+	x, y, row, ok := sidebarTitleCell(t, app, "port the first prompt")
+	if !ok {
+		t.Skip("panel layout exposed no title row")
+	}
+	want := cellSlice(row.text, 2, 10)
+
+	app.mu.Lock()
+	drag(app, x, y, x+7, y)
+	app.mu.Unlock()
+
+	if got := string(scr.GetClipboardData()); got != want {
+		t.Fatalf("clipboard = %q, want the wrapped first prompt's first row %q", got, want)
+	}
+}
+
 // TestSidebarTrajectoryRowOpensTheLedger pins the click that was dead: the
 // panel's TRAJECTORY row is a button whose action dockRowAt reported and nothing
 // ran, so clicking the only panel row that names a surface did nothing the eye

@@ -794,15 +794,26 @@ func (a *App) dockTitleLines(bandH int) []string {
 	return lines
 }
 
-// selDockRowsForPaint returns the dock's rows as selectable
-// rows with their screen y positions. Callers hold a.mu.
+// selDockRowsForPaint returns the dock's rows as selectable rows with their
+// screen y positions: the title slot's lines first, then the rows the build
+// made below it. The title slot belongs in the table for the same reason the
+// rest does — it holds the one string a human reaches for to copy (the
+// session's name, or its first prompt when the session has no title of its
+// own), and a drag across it used to fall through to the transcript rows
+// painted behind the panel, which clipped the cell range to nothing.
+// Callers hold a.mu.
 func (a *App) selDockRowsForPaint() []selRow {
-	if !a.dockOn() || a.dock.lines == nil {
+	if !a.dockOn() {
 		return nil
 	}
 	x0 := a.width - dockCols + dockPad
-	rows := make([]selRow, 0, len(a.dock.lines))
+	rows := make([]selRow, 0, len(a.dock.lines)+a.dock.titleRows())
 	dg := a.dockGridY()
+	for i, line := range a.dock.titleLines {
+		if line != "" {
+			rows = append(rows, selRow{text: line, x0: x0, y: dg + i})
+		}
+	}
 	for i, r := range a.dock.lines {
 		t := r.dockRowText()
 		if t == "" {
