@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// AutoAnswer implements CommandAPI for the fake used by the dispatch tests.
+func (f *fakeAPI) AutoAnswer(args string) error {
+	f.blocks = append(f.blocks, "auto-answer "+args)
+	return nil
+}
+
 // Goal implements CommandAPI for the fake used by the dispatch tests.
 func (f *fakeAPI) Goal(args string) error {
 	f.blocks = append(f.blocks, "goal "+args)

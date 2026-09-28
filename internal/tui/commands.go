@@ -334,6 +334,17 @@ type AdvisorOps struct {
 	Dump    func() string
 }
 
+// AutoAnswerOps wires /auto-answer: the ask card's answer policy
+// (ask.autoAnswer). Current reports the live policy, Set applies it to the
+// running session and persists it. nil ops degrade the command to a notice.
+type AutoAnswerOps struct {
+	Current func() bool
+	Set     func(on bool) error
+	// Path names the settings file a flip was saved to, for the confirmation
+	// line; empty means the session could not persist it.
+	Path string
+}
+
 // CollabOps wires /collab and /join to the live session sharing (the relay
 // lives in cmd). Start begins hosting and returns the join instructions
 // (mode.View publishes a view-only link, mode.Remote binds beyond loopback);
@@ -389,6 +400,9 @@ type CommandAPI interface {
 	// Trajectory is /trajectory: the session's event ledger, opened as a
 	// modal list where a row's inspector shows the record's full body.
 	Trajectory() error
+	// AutoAnswer is /auto-answer [yes|no]: the ask card's answer policy,
+	// off by default (an unanswered question waits for the human).
+	AutoAnswer(args string) error
 	Goal(args string) error
 	Schedule(args string) error
 	Advisor(args string) error
@@ -462,6 +476,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Handoff(args) }},
 		{Name: "theme", Description: "show or switch the theme: /theme <name>",
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
+		{Name: "auto-answer", Aliases: []string{"autoanswer"}, Description: "ask card policy: /auto-answer yes|no (bare toggles; off = an unanswered question waits for you)",
+			Fn: func(app CommandAPI, args string) error { return app.AutoAnswer(args) }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear, plus queue|sync|enqueue (mnemopi) and diagnose|enqueue (hindsight)",
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
