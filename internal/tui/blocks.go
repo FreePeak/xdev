@@ -29,10 +29,15 @@ type Block struct {
 	Text     string // tool call blocks: the raw JSON arguments
 	ToolName string // tool blocks: the tool the model called
 	Status   string // tool blocks: "running", "ok", "error"
-	Dur      string // tool result blocks: formatted wall time
-	Err      bool   // tool result blocks: error result
-	Exit     int    // tool result blocks: process exit code, when HasExit
-	HasExit  bool   // tool result blocks: Exit is a real exit status
+	// CallID is the provider's id for the call this row belongs to. Same-name
+	// calls run CONCURRENTLY (agent.MaxToolWorkers), and they finish in any
+	// order, so the name alone cannot say which row a result belongs to —
+	// the id can. Empty on a replayed row, which pairs back-to-back.
+	CallID  string
+	Dur     string // tool result blocks: formatted wall time
+	Err     bool   // tool result blocks: error result
+	Exit    int    // tool result blocks: process exit code, when HasExit
+	HasExit bool   // tool result blocks: Exit is a real exit status
 	// Truncated marks a result whose tool dropped output the model never saw.
 	Truncated bool
 	// Diff carries the unified diff of the file change a tool made, when
