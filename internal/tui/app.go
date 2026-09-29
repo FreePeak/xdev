@@ -198,6 +198,7 @@ type App struct {
 	commandDir         string                   // markdown command discovery root
 	pathRoot           string                   // @-completion root (empty disables the menu)
 	pathList           func(string) []PathEntry // one directory's entries (the only source)
+	pathIdx            pathIndex                // background whole-cwd file index (pathindex.go)
 	extCommands        map[string]string        // "/server:cmd" -> description
 	extRun             ExtensionCommand
 	renderers          map[string]RenderSpec   // tool name -> declarative render spec
@@ -2180,6 +2181,15 @@ func (a *App) Run() {
 				animate = true
 			}
 			a.mu.Unlock()
+			// The whole-cwd file index landing (pathindex.go): re-query an
+			// OPEN @-dropdown so the recursive hits appear without another
+			// keystroke. takeBuilt is a CAS, so this fires once per build.
+			if a.pathList != nil && a.pathIdx.takeBuilt() {
+				if _, _, ok := pathToken(a.ed.Text()); ok {
+					a.syncSlashMenu()
+					animate = true
+				}
+			}
 			// Nothing repaints for the HUD: a running draw keeps the time
 			// segment live, and idle, the number is a frozen total that needs
 			// no tick to stay correct.

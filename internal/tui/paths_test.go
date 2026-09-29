@@ -187,6 +187,57 @@ func TestPathCandidatesNeverWalksOnBareAt(t *testing.T) {
 	}
 }
 
+// TestPathCandidatesFindsNestedFileByName is the reported bug: a bare prefix
+// named no directory, so the menu could only list the cwd's own entries and a
+// user had to type the full path of a nested file. The background index
+// answers it from memory instead — no keystroke touches the filesystem.
+func TestPathCandidatesFindsNestedFileByName(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"": {{Name: "main.go"}, {Name: "README.md"}},
+	})
+	storeIndex(&a.pathIdx,
+		"internal/tui/paths.go", "internal/tui/app.go", "docs/parser.md", "main.go")
+	got := suggNames(a.pathCandidates("pa"))
+	want := []string{"docs/parser.md", "internal/tui/paths.go"} // base-name order
+	if len(got) != len(want) {
+		t.Fatalf("@pa = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("@pa = %v, want %v", got, want)
+		}
+	}
+	// A root-level file is already offered by the readdir, so it must not be
+	// listed twice.
+	if dup := suggNames(a.pathCandidates("mai")); len(dup) != 1 || dup[0] != "main.go" {
+		t.Fatalf("@mai = %v, want [main.go] exactly once", dup)
+	}
+}
+
+// TestPathCandidatesIndexStaysOutOfADrill: `@internal/` is a deliberate
+// directory drill, where one readdir is the whole answer — the index only
+// answers the token a readdir cannot.
+func TestPathCandidatesIndexStaysOutOfADrill(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{
+		"":         {{Name: "internal", IsDir: true}},
+		"internal": {{Name: "tui", IsDir: true}},
+	})
+	storeIndex(&a.pathIdx, "internal/tui/paths.go")
+	if got := suggNames(a.pathCandidates("internal/t")); len(got) != 1 || got[0] != "tui/" {
+		t.Fatalf("@internal/t = %v, want [tui/]", got)
+	}
+}
+
+// TestPathCandidatesEmptyIndexChangesNothing: before the walk lands the
+// dropdown is exactly what it was — the readdir alone.
+func TestPathCandidatesEmptyIndexChangesNothing(t *testing.T) {
+	a := appWithTree(map[string][]PathEntry{"": {{Name: "cmd", IsDir: true}}})
+	got := suggNames(a.pathCandidates("c"))
+	if len(got) != 1 || got[0] != "cmd/" {
+		t.Fatalf("@c with no index = %v, want [cmd/]", got)
+	}
+}
+
 // TestPathCandidatesTrailingSlashListsDir: accepting a directory adds "/" and
 // reopens the menu inside it, so the next keystroke must list that directory.
 func TestPathCandidatesTrailingSlashListsDir(t *testing.T) {
@@ -284,5 +335,30 @@ func TestAppAtCompletionDrivesKeyPath(t *testing.T) {
 	app.mu.Unlock()
 	if open {
 		t.Fatal("menu must close when the named directory has no matches")
+	}
+}
+
+// TestAppAtCompletionFindsNestedFile is the reported bug through the real key
+// path: with the index built, typing a bare prefix offers a nested file, and
+// Tab inserts its full cwd-relative path — no directory has to be typed.
+func TestAppAtCompletionFindsNestedFile(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.SetPathCompletion("/proj", func(dir string) []PathEntry {
+		return map[string][]PathEntry{
+			"":         {{Name: "internal", IsDir: true}},
+			"internal": {{Name: "tui", IsDir: true}},
+		}[dir]
+	})
+	storeIndex(&app.pathIdx, "internal/tui/paths.go", "internal/tui/app.go")
+	typeRunes(app, "read @paths")
+	app.mu.Lock()
+	got := suggNames(app.smenu.rows())
+	app.mu.Unlock()
+	if len(got) != 1 || got[0] != "internal/tui/paths.go" {
+		t.Fatalf("menu after @paths = %v, want [internal/tui/paths.go]", got)
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
+	if want := "read @internal/tui/paths.go "; app.ed.Text() != want {
+		t.Fatalf("after accepting = %q, want %q", app.ed.Text(), want)
 	}
 }
