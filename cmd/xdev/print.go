@@ -1322,9 +1322,9 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 }
 
 // finishMCP connects and registers, reporting failures non-fatally. report
-// (optional) is where a mode with a UI of its own — the TUI's composer
-// divider — takes the failure; nil keeps stderr, which is the interface for
-// print, rpc and acp.
+// (optional) is where a mode with a UI of its own — the TUI's toast stack —
+// takes the failure; nil keeps stderr, which is the interface for print, rpc
+// and acp.
 func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config, report func(string)) {
 	autostartMCP(cfg)
 	connected, errs := mgr.Connect(ctx, cfg)

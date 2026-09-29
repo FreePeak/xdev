@@ -299,9 +299,10 @@ type App struct {
 	selBarTotal int // transcript rows at paint time
 	selBarPos   int // thumb's first half row on the track at paint time
 	selBarEnd   int // thumb's half-row end at paint time (exclusive)
-	// selNotice is the copy confirmation (omp's showStatus for a copy); it
-	// rides the composer divider until selNoticeUntil.
-	selNotice            string
+	// toasts is the live notice stack (toast.go): the copy confirmation, a
+	// failed chord, a failed MCP server — everything transient, painted in
+	// the top-right corner and dropped on its own deadline.
+	toasts               []toast
 	selClickTime         time.Time
 	selClickCount        int
 	selClickX, selClickY int
@@ -312,7 +313,6 @@ type App struct {
 	// triple-click selects the whole line. Window and tolerance are pinned
 	// constants (clickWordWindow, clickWordTol), not settings.
 	// Guarded by mu; reset by clearClick.
-	selNoticeUntil time.Time
 	// thinkFocus is the reasoning box a click has aimed the wheel at: clicking a
 	// box focuses it and a click anywhere else lets it go, so the wheel scrolls
 	// the transcript by default instead of whatever box happens to sit under the
@@ -591,20 +591,14 @@ func (a *App) SetStartupNotice(text string) {
 	a.poke()
 }
 
-// SetNotice shows text on the composer divider for d and then drops it, the
-// channel a failed chord already answers on (paste.go setNotice). For a caller
-// off the UI thread — the MCP connect that lands mid-session — so it takes the
-// lock, unlike the UI-thread setNotice it shares the slot with.
+// SetNotice shows text as a toast for d and then drops it — the older name of
+// Toast, kept because a caller off the UI thread (the MCP connect) reads
+// better as a notice. A new producer calls Toast directly.
 //
-// ponytail: one slot, so a copy confirmation inside d overwrites this notice
-// (and vice versa). Fixing that means a second row of chrome on the divider;
-// worth it only if a real report of a lost notice shows up.
+// ponytail: one door. SetNotice is Toast(ToastError, …): every caller so far
+// is a failure, so the level is not a decision this call site has to make.
 func (a *App) SetNotice(text string, d time.Duration) {
-	a.mu.Lock()
-	a.selNotice = text
-	a.selNoticeUntil = time.Now().Add(d)
-	a.mu.Unlock()
-	a.poke()
+	a.Toast(ToastError, text, d)
 }
 
 // BeginAssistant starts (or continues into) the streaming assistant block. A
@@ -2258,9 +2252,9 @@ func (a *App) Run() {
 				a.sheenPhase++
 				animate = true
 			}
-			// A copy confirmation is timed, and an idle UI does not repaint:
-			// the tick that finds it expired asks for the draw that drops it.
-			if a.selNotice != "" && a.copyHint() == "" {
+			// A toast is timed, and an idle UI does not repaint: the tick that
+			// finds one expired asks for the draw that drops it.
+			if a.toastsExpiring() {
 				animate = true
 			}
 			// A held drag parked on the transcript's edge is the one mouse
@@ -2883,7 +2877,7 @@ func (a *App) returnDraft(draft string, imgs []PasteImage) {
 	case a.onSendImages != nil:
 		why = "the send declined the attachment (a guest room forwards text only)"
 	}
-	a.setNotice(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
+	a.setError(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
 	a.poke()
 }
 
@@ -3565,6 +3559,10 @@ func (a *App) paint() {
 		// only selectable surface there — is highlighted here too; the branch
 		// returns, so it never reaches the call at the end of paint().
 		a.drawSelection()
+		// The welcome screen has no transcript to sit over, but a toast
+		// arriving before the first turn is exactly when one shows up (the
+		// MCP connect finishes last), so the corner is taken here too.
+		a.drawToasts(s)
 		return
 	}
 
@@ -3780,6 +3778,11 @@ func (a *App) paint() {
 	a.drawSettingsOverlay(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
+	// The toasts paint last, over everything, so the corner is theirs: a
+	// notice that scrolled under a selection highlight or a picker frame is
+	// a notice the user never saw. They live in the transcript's rows, above
+	// the composer, so nothing here can cover the draft.
+	a.drawToasts(s)
 	// Last, so it paints over every surface the frame just drew: see the note
 	// where the selection geometry is published above.
 	a.drawSelection()
@@ -4190,18 +4193,14 @@ func (a *App) drawComposer(yTop int) {
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
-	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name. Three hints want the
-	// slot, in this order: a fresh copy confirmation (the only proof the mouse
-	// gesture did anything, since the app holds the mouse and the terminal
-	// stays quiet), then the draft's own hidden rows — text the user is
+	// takes the pixels instead; when the divider is too narrow for the hint,
+	// the hint is dropped rather than eating the model name. The copy
+	// confirmation that used to lead the queue is a toast now (toast.go), so
+	// two hints want the slot: the draft's own hidden rows — text the user is
 	// composing right now beats scrollback they already read — then the
 	// transcript's ▲n▼n.
-	hint := a.copyHint()
-	if hint == "" {
-		hint = draftHint(above, below)
-	}
-	if hint == "" {
+	var hint string
+	if hint = draftHint(above, below); hint == "" {
 		hint = a.scrollHint
 	}
 	if hint != "" {

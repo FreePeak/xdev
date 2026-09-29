@@ -291,12 +291,12 @@ func (a *App) pasteClipboard() {
 	data, mime, err := a.clipImage()
 	if err != nil {
 		// A chord that fails must say so, or it looks dead.
-		a.setNotice(err.Error())
+		a.setError(err.Error())
 		a.poke()
 		return
 	}
 	if len(data) > maxPasteImageBytes {
-		a.setNotice(fmt.Sprintf("clipboard image is %.1f MB — over the %d MB paste limit",
+		a.setError(fmt.Sprintf("clipboard image is %.1f MB — over the %d MB paste limit",
 			float64(len(data))/(1<<20), maxPasteImageBytes>>20))
 		a.poke()
 		return
@@ -304,14 +304,6 @@ func (a *App) pasteClipboard() {
 	p := PasteImage{MediaType: mime, Data: data}
 	p.Width, p.Height = imageBounds(data)
 	a.insertImage(p)
-}
-
-// setNotice shows one line on the composer divider: the channel the selection
-// copy confirmation already uses, so a failed chord rides the same row instead
-// of adding chrome. Caller: UI thread.
-func (a *App) setNotice(s string) {
-	a.selNotice = s
-	a.selNoticeUntil = time.Now().Add(selGrace)
 }
 
 // flushStuckPaste closes a paste window whose end marker never arrived, so the

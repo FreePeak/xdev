@@ -241,10 +241,13 @@ func TestClickWithoutDragKeepsClipboard(t *testing.T) {
 	}
 }
 
-// TestCopyConfirmationRidesTheDivider pins the feedback omp gives for every
-// copy path (showStatus "… copied to clipboard"): a gesture that copies says
-// so on the composer's info divider, and the message expires on its own.
-func TestCopyConfirmationRidesTheDivider(t *testing.T) {
+// TestCopyConfirmationIsAToast pins the feedback omp gives for every copy
+// path (showStatus "… copied to clipboard"): a gesture that copies says so,
+// in the top-right corner, and the message expires on its own. It must not
+// ride the composer's divider — that slot shares its right end with the
+// model name, so a long message there is cut or dropped outright, and it is
+// the row the user is typing over.
+func TestCopyConfirmationIsAToast(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
 	app.AddSystemBlock("copy me please")
 	app.draw()
@@ -255,23 +258,18 @@ func TestCopyConfirmationRidesTheDivider(t *testing.T) {
 	app.mu.Unlock()
 	app.draw()
 
-	line := rowContaining(scr, "Copied 7 chars")
-	if line == "" {
-		t.Fatal("no row carried the copy confirmation")
+	ty, _ := rowWith(t, scr, "Copied 7 chars")
+	if ty == 0 {
+		t.Fatal("the copy confirmation is not in the corner; it painted somewhere else")
 	}
-	if !strings.Contains(line, "test/free") {
-		t.Fatalf("confirmation row = %q, want it on the model's divider", line)
+	if line := rowContaining(scr, "Copied 7 chars"); strings.Contains(line, "test/free") {
+		t.Fatalf("confirmation row = %q, want it off the model's divider", line)
 	}
 
-	// Past its deadline the notice is gone, and the viewport hint takes the
-	// slot back.
+	// Past its deadline the toast is gone.
 	app.mu.Lock()
-	app.selNoticeUntil = time.Now().Add(-time.Millisecond)
-	expired := app.copyHint()
+	app.expireToasts()
 	app.mu.Unlock()
-	if expired != "" {
-		t.Fatalf("copyHint = %q after the deadline", expired)
-	}
 	app.draw()
 	if line := rowContaining(scr, "Copied"); line != "" {
 		t.Fatalf("confirmation row = %q, want the expired notice gone", line)
@@ -403,11 +401,11 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	}
 }
 
-// SetNotice is the off-UI-thread door to the same divider slot (a failed MCP
-// server reports from the goroutine that connected it, long after startup). It
-// must render without the caller holding a.mu, and expire on its own like the
-// copy confirmation it shares the row with.
-func TestSetNoticeRidesTheDividerAndExpires(t *testing.T) {
+// SetNotice is the off-UI-thread door to the same toast slot (a failed MCP
+// server reports from the goroutine that connected it, long after startup).
+// It must render without the caller holding a.mu, in the corner and not on
+// the composer's row, and expire on its own.
+func TestSetNoticeIsAToastAndExpires(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
 	app.AddSystemBlock("hello")
 	app.draw()
@@ -416,17 +414,13 @@ func TestSetNoticeRidesTheDividerAndExpires(t *testing.T) {
 	app.SetNotice(msg, 2*time.Minute)
 	app.draw()
 
-	line := rowContaining(scr, msg)
-	if line == "" {
-		t.Fatal("no row carried the notice")
-	}
-	if !strings.Contains(line, "test/free") {
-		t.Fatalf("notice row = %q, want it on the model's divider", line)
+	if line := rowContaining(scr, msg); line == "" || strings.Contains(line, "test/free") {
+		t.Fatalf("notice row = %q, want it in the top-right corner, not on the divider", line)
 	}
 
 	// Past its deadline the tick's redraw is what drops it (app.go Run).
 	app.mu.Lock()
-	app.selNoticeUntil = time.Now().Add(-time.Millisecond)
+	app.expireToasts()
 	app.mu.Unlock()
 	app.draw()
 	if line := rowContaining(scr, msg); line != "" {
@@ -434,7 +428,6 @@ func TestSetNoticeRidesTheDividerAndExpires(t *testing.T) {
 	}
 }
 
-// TestDoubleClickSelectsWord pins the double-click contract: a second
 // primary-button press within clickWordWindow of the first, at the same
 // screen position, selects the whole word under the pointer. The
 // selection is highlighted and the text is copied to the clipboard on

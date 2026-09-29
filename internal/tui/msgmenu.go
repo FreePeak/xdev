@@ -232,8 +232,7 @@ func (a *App) copyMessage(text string) {
 		return
 	}
 	a.mu.Lock()
-	a.selNotice = "Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars"
-	a.selNoticeUntil = time.Now().Add(selGrace)
+	a.setNotice("Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars")
 	a.mu.Unlock()
 	a.poke()
 }
