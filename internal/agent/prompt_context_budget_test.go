@@ -42,8 +42,15 @@ func TestLoadContextFilesNeverStarvesTheClosestFile(t *testing.T) {
 		t.Fatalf("the cwd's own AGENTS.md was starved out of the prompt by the global file:\n%s",
 			got[:min(len(got), 600)])
 	}
+	// The global file does not have to SURVIVE to be accounted for: with a
+	// rulebook 3x the pool, the right outcome is that it is dropped and named
+	// in the budget marker, so the agent can go read it. What must never
+	// happen is it being dropped silently — that is the pre-fix failure.
 	if !strings.Contains(got, "Global conventions") {
-		t.Error("global file is missing entirely — the fix must be a share, not an exclusion")
+		if !strings.Contains(got, "Rules budget reached") || !strings.Contains(got, agentDir) {
+			t.Errorf("the global file is gone and nothing says so — the model cannot know to read it\n%s",
+				got[:min(len(got), 600)])
+		}
 	}
 }
 
@@ -62,41 +69,40 @@ func TestLoadContextFilesAnnouncesTruncation(t *testing.T) {
 	}
 
 	got := LoadContextFiles(repo)
-	if !strings.Contains(got, "truncated") {
+	if !strings.Contains(got, "left out") {
 		t.Fatal("a truncated file rendered with no marker — the omitted rules are now invisible")
-	}
-	if !strings.Contains(got, "not shown") {
-		t.Error("the marker does not say that content was withheld")
 	}
 	// The path belongs in the marker: the agent has to be able to go read it.
 	if !strings.Contains(got, filepath.Join(repo, "AGENTS.md")) {
 		t.Error("the marker does not name the file, so the agent cannot act on it")
 	}
-	// The per-file cap is the bound. This is the cwd's own file, so the bound
-	// is the reserved floor, not the generic share.
-	bound := MaxContextFileKB + MinClosestFileBytes + 512
+	// The per-file cap is the bound on a file's own content; the block adds
+	// its own heading and marker on top. This is the cwd's file, so the
+	// pool is what bounds it.
+	bound := MaxContextBytes + 2048
 	if n := len([]rune(got)); n > bound {
-		t.Errorf("rendered %d runes, past the %d closest-file share + marker", n, bound)
+		t.Errorf("rendered %d runes, past the %d pool plus framing", n, bound)
 	}
 	if strings.Contains(got, "A line of convention text\nA line of") {
 		t.Error("the cut landed mid-line")
 	}
 }
 
-// TestContextBytesForFile pins the allocation itself, including the two cases
-// that were wrong in the first implementation: a small file must never be
+// TestContextBytesForFile pins the allocation itself, including the case
+// that was wrong in the first implementation: a small file must never be
 // dropped just because the outer budget is spent, and the closest file must
-// get more than a generic file.
+// get more than an ancestor's share.
 func TestContextBytesForFile(t *testing.T) {
 	t.Run("generic file", func(t *testing.T) {
 		if got := contextBytesForFile(0, 1<<20, false); got != MaxContextFileKB {
 			t.Errorf("share = %d, want %d", got, MaxContextFileKB)
 		}
 	})
-	t.Run("closest file keeps a floor", func(t *testing.T) {
-		got := contextBytesForFile(0, 1<<20, true)
-		if got != MaxContextFileKB+MinClosestFileBytes {
-			t.Errorf("share = %d, want %d", got, MaxContextFileKB+MinClosestFileBytes)
+	t.Run("closest file may claim the whole pool", func(t *testing.T) {
+		// The cwd's rules are the ones a session cannot afford to lose, so
+		// they are bounded by the chain budget, not by an ancestor's share.
+		if got := contextBytesForFile(0, 1<<20, true); got != MaxContextBytes {
+			t.Errorf("share = %d, want the full %d pool", got, MaxContextBytes)
 		}
 	})
 	t.Run("never more than the file has", func(t *testing.T) {

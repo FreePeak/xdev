@@ -184,22 +184,25 @@ func (o *SystemPromptOverrides) ApplyPersonalityPreset(preset string) error {
 // instead of competing for one pool, so no single file can consume the chain
 // budget that the other files were counting on.
 const (
-	MaxContextBytes  = 32 << 10 // whole chain, unchanged as the outer bound
-	MaxContextFileKB = 8 << 10  // any single file, global or repository
-	// MinClosestFileBytes is the extra the cwd's own AGENTS.md may claim on
-	// top of the generic share: the rules nearest the work are the ones a
-	// session can least afford to lose, and they are also the one file the
-	// agent cannot cheaply re-read mid-task without a round trip.
-	MinClosestFileBytes = 4 << 10
+	MaxContextBytes = 32 << 10 // whole chain, unchanged as the outer bound
+	// MaxContextFileKB bounds one ANCESTOR file. The chain is loaded
+	// root→cwd, so an uncapped ancestor can consume the whole pool and the
+	// closest file is never even read — the load pass below stops early, and
+	// the file that carries the rules saying which ancestor rules do not
+	// apply is simply absent. Bounding every ancestor is what guarantees the
+	// closest file is always loaded; the closest file itself is bounded by
+	// the pool (#477's floor), not by a share, so a large project ruleset
+	// still reaches the model.
+	MaxContextFileKB = 8 << 10
 )
 
 // contextBytesForFile returns the slice of the chain budget one file may
-// render, given how much of the budget earlier files already took and whether
-// this file is the cwd's own.
+// render, given how much earlier files already took and whether this is the
+// cwd's own file.
 func contextBytesForFile(used, fileSize int, closest bool) int {
 	share := MaxContextFileKB
 	if closest {
-		share = MaxContextFileKB + MinClosestFileBytes // 12 KiB floor
+		share = MaxContextBytes
 	}
 	// Never render more of a file than it actually contains.
 	if fileSize < share {
@@ -386,64 +389,185 @@ func LoadContextFiles(cwd string) string {
 	}
 	files = append(files, chain...)
 
-	var b strings.Builder
-	total := 0
+	// Two passes, because the chain runs root→cwd and precedence runs the
+	// other way: the CWD's own rules override its ancestors, so when the byte
+	// budget cannot hold everything it must cost the broadest file, not the
+	// closest one. The pre-fix loop walked in order and `break`ed when the
+	// budget ran out, which dropped the tail — the most specific rules — and
+	// kept every generic rule above them, so an overflowing chain injected
+	// the least relevant content it had.
+	loaded := make([]contextFile, 0, len(files))
+	used := 0
 	seen := map[string]bool{}
 	for _, p := range files {
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		remaining := MaxContextBytes - total
-		content := expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen)
-		content = strings.TrimSpace(content)
+		// Every file in the chain is read, however full the pool already is.
+		// The pre-merge loop stopped as soon as MaxContextBytes was spent, so
+		// an ancestor that filled the budget meant the CWD's own file was
+		// never read at all — and the fit pass below, whose whole job is to
+		// prefer the most specific rules, had nothing to prefer. Measured on
+		// #477 alone: a 31 KB global file rendered 32,823 bytes with the
+		// repository's rule absent and the budget marker NOT rendered, so the
+		// loss was silent. The budget is spent by the fit pass, which knows
+		// the cost of each file, not by the order files happen to be read in.
+		//
+		// The per-file cap here is only a load guard — it stops one huge file
+		// from being held whole in memory. It is deliberately the whole pool,
+		// because ancestors are never *rendered* truncated: the fit pass keeps
+		// an ancestor whole or drops it entirely, and a half-present broad
+		// rulebook would quietly contradict the specific file that overrides
+		// it.
+		remaining := MaxContextBytes
+		content := strings.TrimSpace(expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen))
 		if content == "" {
 			continue
 		}
-		if remaining < 256 {
-			break // no useful budget left; skip further files entirely
-		}
-		// Per-file slice: the file nearest the work keeps a reserved floor, so
-		// a large global rulebook cannot render the repository's own AGENTS.md
-		// out of existence. Bytes left out are announced rather than silently
-		// absent — an invisible rule is the failure this change exists to
-		// prevent (see TestLoadContextFilesNeverStarvesTheClosestFile).
-		r := []rune(content)
-		share := contextBytesForFile(total, len(r), p == filepath.Join(cwd, "AGENTS.md"))
-		// A file that fits its share is always included in full: the outer
-		// budget may be spent, but a small file is never what gets dropped.
-		if share < 256 && len(r) > share {
-			continue
-		}
-		dropped := 0
-		if len(r) > share {
-			dropped = len(r) - share
-			cut := share
-			// Trim back to a line boundary so the cut never leaves half a
-			// sentence or half a markdown construct in the prompt.
-			if nl := strings.LastIndex(string(r[:cut]), "\n"); nl > 0 {
-				cut = len([]rune(string(r[:cut])[:nl]))
-			}
-			content = strings.TrimRight(string(r[:cut]), "\n")
-		}
-		if content == "" {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n---\n\n")
-		}
-		if !strings.HasPrefix(p, cwd) {
-			fmt.Fprintf(&b, "## Global conventions (%s)\n\n", p)
-		} else {
-			fmt.Fprintf(&b, "## %s\n\n", p)
-		}
-		if dropped > 0 {
-			fmt.Fprintf(&b, "[truncated: %d characters of this file are not shown, read %s if this part matters]\n\n", dropped, p)
-		}
-		b.WriteString(content)
-		total += len(content)
+		loaded = append(loaded, contextFile{path: p, content: content})
+		used += len(content)
 	}
-	return b.String()
+
+	// Fit pass, most specific first: keep a file only if it still fits what
+	// the more specific files already claimed. A skipped ancestor does not
+	// end the walk — a small root file that fits is worth more than nothing.
+	keep := make([]bool, len(loaded))
+	kept := 0
+	for i := len(loaded) - 1; i >= 0; i-- {
+		if kept+len(loaded[i].content) > MaxContextBytes {
+			continue
+		}
+		keep[i] = true
+		kept += len(loaded[i].content)
+	}
+	// The closest file is the floor: if it alone overruns the budget it is
+	// still injected, truncated, because dropping it would leave the session
+	// holding only the ancestors' rules — the same inversion one level down.
+	// How much it keeps is settled after rendering, because the budget covers
+	// the whole block (marker, headings and separators included) and those
+	// are not known until the marker text is.
+	truncated := false
+	if n := len(loaded); n > 0 && !keep[n-1] {
+		keep[n-1] = true
+		truncated = true
+	}
+
+	render := func() string {
+		var b strings.Builder
+		// The marker is the contract. The block is headed as the
+		// repository's binding rules, and a silently-shortened list would
+		// make that a lie the model cannot detect; naming the dropped paths
+		// turns an invisible gap into a `read` it can close.
+		var omitted []string
+		for i, f := range loaded {
+			if !keep[i] {
+				omitted = append(omitted, f.path)
+			}
+		}
+		if len(omitted) > 0 || truncated {
+			b.WriteString("## Rules budget reached\n\n")
+			if truncated {
+				fmt.Fprintf(&b, "The closest rules file is over the %d-byte budget and is truncated below. ", MaxContextBytes)
+			}
+			if len(omitted) > 0 {
+				fmt.Fprintf(&b, "%d of %d rules files were dropped to stay within it: %s. ",
+					len(omitted), len(loaded), strings.Join(omitted, ", "))
+			}
+			b.WriteString("The most specific rules present are kept in full and broader ancestors were dropped first, so this list is incomplete — read an omitted path before relying on rules it may carry.\n\n")
+		}
+		// A file cut by the per-file cap is a partial list, and the block is
+		// headed as binding rules: a silent shortening under that heading is
+		// the lie the marker exists to prevent. Name the file and the size of
+		// the cut so the agent can go read what it was not shown.
+		for i, f := range loaded {
+			if keep[i] && f.dropped > 0 {
+				fmt.Fprintf(&b, "[%s: %d characters were left out by the %d KiB per-file cap — read the file if this part matters]\n\n", f.path, f.dropped, MaxContextFileKB>>10)
+			}
+		}
+		rendered := false
+		for i, f := range loaded {
+			if !keep[i] {
+				continue
+			}
+			if rendered {
+				b.WriteString("\n\n---\n\n")
+			}
+			if !strings.HasPrefix(f.path, cwd) {
+				fmt.Fprintf(&b, "## Global conventions (%s)\n\n", f.path)
+			} else {
+				fmt.Fprintf(&b, "## %s\n\n", f.path)
+			}
+			b.WriteString(f.content)
+			rendered = true
+		}
+		return b.String()
+	}
+	out := render()
+	// One correction pass, whenever the block carries a per-file cut: the
+	// per-file cap bounds one file, not the block, so a chain of large files
+	// can still overrun the whole budget. Trim the closest file until it fits
+	// — a rules block that ignores its own budget is worse than no budget.
+	// The cut is recorded on the file, so the marker re-renders with the
+	// final withheld count instead of going stale.
+	if over := len(out) - MaxContextBytes; over > 0 && len(loaded) > 0 {
+		last := &loaded[len(loaded)-1]
+		if !keep[len(loaded)-1] {
+			// #477's floor: the closest file is injected truncated, never
+			// dropped, so a chain that overflows the pool still delivers it.
+			keep[len(loaded)-1] = true
+			truncated = true
+		}
+		last.content = trimToBytes(last.content, len(last.content)-over)
+		last.dropped = over
+		out = render()
+	}
+	return out
+}
+
+// MinContextFileBytes is the budget below which expanding another rules file
+// is pointless: a sliver of a file carries no instruction the model can act
+// on, and a half-sentence rule is worse than a missing one.
+const MinContextFileBytes = 256
+
+// contextFile is one rules file rendered into the prompt. dropped is the
+// number of runes the per-file cap withheld; it is what makes the cut
+// visible in the render pass instead of silent.
+type contextFile struct {
+	path    string
+	content string
+	dropped int
+}
+
+// trimToBytes cuts s to at most n bytes without splitting a rune.
+func trimToBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimRight(s[:cut], " \t\n") + "\n… [truncated]"
+}
+
+// trimToLineBoundary cuts s to about n runes without splitting a rune, then
+// backs up to the last newline so the rendered rule is never a half sentence
+// or a half markdown construct. Unlike trimToBytes it appends nothing: the
+// per-file marker in the render pass is what declares the cut.
+func trimToLineBoundary(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := string(r[:n])
+	if nl := strings.LastIndex(cut, "\n"); nl > 0 {
+		cut = cut[:nl]
+	}
+	return strings.TrimRight(cut, " \t\n")
 }
 
 // Per-rule and total prompt caps for injected rules (issue #31): a
