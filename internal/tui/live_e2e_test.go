@@ -230,7 +230,7 @@ func TestLiveAskCardIsAModalInTheMainPane(t *testing.T) {
 	}
 	top := -1
 	for y, ln := range painted {
-		if strings.Contains(ln, "? ask") {
+		if strings.Contains(ln, "◆ ask") {
 			top = y
 			break
 		}
