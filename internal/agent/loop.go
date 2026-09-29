@@ -221,6 +221,20 @@ const maxEmptyTurnRecoveries = 3
 // budget, because a turn that does holds the session's single turn claim
 // (cmd/xdev/tui.go's `running`) and every later submit is refused with
 // "a turn is already running" — the wedged session in the same report.
+//
+// 12, and not the 90 minutes the live measurement below implies. One round
+// is not one attempt: it is a full bounded ladder (MaxRetries+1 calls) and
+// each call now waits out the stream watchdog's FirstProgressTimeout when
+// the host accepts and then goes silent. 12 rounds x 5 calls x 90s is ~90
+// minutes of a wedged TUI before the turn gives up — measured live on
+// 2026-09-29 against a gateway that accepts the connection and never
+// answers, where the first round alone outlived a 128-second observation
+// window. The bound is honest but the unit is wrong: a ROUND count cannot
+// express a wall clock, and the session's real cost is a wedged TUI rather
+// than a slow one. ponytail: the upgrade path is a per-turn wall-clock
+// budget on oneTurnWithRecovery's context — there is still no WithTimeout
+// anywhere on the interactive turn path — not a smaller constant, which
+// would only shrink the outage an unattended run can survive.
 const maxSilentRecoveryRounds = 12
 
 // continuationBudget is how many retain-and-continue rounds a ladder may
