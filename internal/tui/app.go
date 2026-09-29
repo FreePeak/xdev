@@ -273,13 +273,16 @@ type App struct {
 	// selBar* is the scrollbar's geometry as the painter last drew it, published
 	// every frame like the picker's hit table: a press is tested against the bar
 	// that is on screen rather than a re-derivation that could disagree with it.
+	// The thumb is measured in HALF ROWS (opencode's slider unit, scroll.go
+	// Scrollbar): selBarPos/selBarEnd are its span on a 2*selBarVP-tall track, so
+	// a grab can land on the half row the finger is really over.
 	// (UI thread; mu-guarded.)
 	selBarOn    bool
 	selBarX     int // the screen column the bar was painted in (the transcript's last column, or 0)
 	selBarVP    int // visible transcript rows the bar spans
 	selBarTotal int // transcript rows at paint time
-	selBarThumb int // thumb rows at paint time
-	selBarPos   int // thumb's first track row at paint time
+	selBarPos   int // thumb's first half row on the track at paint time
+	selBarEnd   int // thumb's half-row end at paint time (exclusive)
 	// selNotice is the copy confirmation (omp's showStatus for a copy); it
 	// rides the composer divider until selNoticeUntil.
 	selNotice            string
@@ -3608,16 +3611,26 @@ func (a *App) paint() {
 		}
 	}
 	// Paint the scrollbar over the reserved column, spanning the visible
-	// rows: the thumb marks the current window, the track fills the rest.
+	// rows: a filled groove with the thumb riding it (opencode's ScrollBar —
+	// a track background rather than a hairline glyph, and a thumb that can
+	// land between two rows). The half-row span says which cells are thumb: a
+	// full block, the upper or lower half block, or the bare groove.
 	if sbOk {
-		trackSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-		thumbSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		// The groove is the page's own raised surface (bg_highlight), one step
+		// off the background: enough to read as a rail, quiet enough not to
+		// compete with the transcript. The thumb is the palette's own bright
+		// gray — Get's documented fallback chain resolves it for a custom
+		// theme (gray_bright → gray → muted) without a new slot.
+		groove := a.cellColor(a.th.Get(theme.BgHighlight))
+		grooveSt := tcell.StyleDefault.Background(groove)
+		thumbSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayBright))).Background(groove)
 		for y := range end - start {
-			ch, st := "│", trackSt
-			if y >= sbStart && y < sbEnd {
-				ch, st = "█", thumbSt
+			ch := sbGlyph(y, sbStart, sbEnd)
+			st := grooveSt
+			if ch != ' ' {
+				st = thumbSt
 			}
-			drawText(s, edge-1, y+top, ch, st)
+			s.SetContent(edge-1, y+top, ch, nil, st)
 		}
 	}
 	// Publish the bar's geometry for the mouse hit-test (selection.go): the
@@ -3626,9 +3639,10 @@ func (a *App) paint() {
 	// sbOk false is what keeps grab off a column that carries content. The
 	// column travels with it: with the context dock open the transcript's last
 	// column is not the terminal's last, and a grab keyed to width-1 answers a
-	// press on the panel's border instead of the bar under the pointer.
-	a.selBarOn, a.selBarVP, a.selBarPos = sbOk, vp, sbStart
-	a.selBarX, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
+	// press on the panel's border instead of the bar under the pointer. The
+	// thumb is published in half rows, the unit the bar was drawn in.
+	a.selBarOn, a.selBarVP, a.selBarPos, a.selBarEnd = sbOk, vp, sbStart, sbEnd
+	a.selBarX, a.selBarTotal = 0, total
 	if sbOk {
 		a.selBarX = edge - 1
 	}

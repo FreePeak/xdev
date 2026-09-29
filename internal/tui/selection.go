@@ -612,6 +612,10 @@ func (a *App) selEdgeTick() bool {
 // the finger (grip 0, top under the pointer) instead of ignoring the click —
 // what every modern overlay bar does, and the one gesture that reaches a row
 // further away in a single press. Callers hold a.mu.
+//
+// The grip comes back in HALF ROWS, the unit the bar is drawn in: a press is a
+// whole terminal row, so it lands on that row's upper half — the same cell
+// opencode's slider resolves a row-resolution click to.
 func (a *App) selBarAt(x, y int) (int, bool) {
 	// The column is the painter's, not a.width-1: with the context dock open the
 	// transcript's last column sits a panel's width in from the terminal's edge,
@@ -624,7 +628,7 @@ func (a *App) selBarAt(x, y int) (int, bool) {
 	if fy < 0 || fy >= a.selBarVP {
 		return 0, false
 	}
-	if grip := fy - a.selBarPos; grip >= 0 && grip < a.selBarThumb {
+	if grip := 2*fy - a.selBarPos; grip >= 0 && grip < a.selBarEnd-a.selBarPos {
 		return grip, true // grabbed the thumb where it was held
 	}
 	return -1, true // the track: the caller brings the thumb to the finger now
@@ -633,14 +637,16 @@ func (a *App) selBarAt(x, y int) (int, bool) {
 // selThumbTo maps a pointer row on the bar to a viewport offset: the thumb's top
 // sits under the finger minus the grip taken at press, so grabbing the middle of
 // a long thumb and pulling keeps the middle under the pointer. The mapping
-// linearly inverts the painter's placement (scroll.go Scrollbar): row `pos` of
-// the bar's travel is offset maxOff-pos*maxOff/travel.
+// linearly inverts the painter's placement (scroll.go Scrollbar): half row `pos`
+// of the bar's travel is offset maxOff-pos*maxOff/travel.
 func (a *App) selThumbTo(y int) {
-	travel := a.selBarVP - a.selBarThumb
+	track := 2 * a.selBarVP
+	thumb := a.selBarEnd - a.selBarPos
+	travel := track - thumb
 	if travel <= 0 {
 		return
 	}
-	pos := max(0, min(y-a.transcriptTop()-a.selGrab, travel))
+	pos := max(0, min(2*(y-a.transcriptTop())-a.selGrab, travel))
 	maxOff := max(0, a.selBarTotal-a.selBarVP)
 	// Rounded, not truncated: the painter floors pos out of the offset, so a
 	// truncated inverse puts the thumb a row away from the finger after every

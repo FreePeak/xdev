@@ -248,13 +248,14 @@ func TestScrollbarPressKeepsItsGrip(t *testing.T) {
 	app.draw()
 
 	app.mu.Lock()
-	pos, thumb := app.selBarPos, app.selBarThumb
-	if thumb < 3 {
+	pos := app.selBarPos                   // half rows
+	thumb := app.selBarEnd - app.selBarPos // half rows
+	if thumb < 6 {
 		app.mu.Unlock()
-		t.Skipf("thumb of %d rows cannot show a grip", thumb)
+		t.Skipf("thumb of %d half rows cannot show a grip", thumb)
 	}
-	grip := thumb / 2
-	y0 := hdr + pos + grip
+	grip := thumb / 2 // half rows into the thumb
+	y0 := hdr + (pos+grip)/2
 	off0 := app.sm.offset
 	press(app, 79, y0)
 	if app.sm.offset != off0 {
@@ -267,8 +268,13 @@ func TestScrollbarPressKeepsItsGrip(t *testing.T) {
 	app.mu.Lock()
 	off1, pos1 := app.sm.offset, app.selBarPos
 	app.mu.Unlock()
-	if pos1 != pos-1 {
-		t.Fatalf("one-row pull moved the thumb to track row %d, want %d (a gripless grab would jump it to %d)", pos1, pos-1, pos-grip-1)
+	// One row of pull is two half rows of travel. The painter floors the
+	// position out of the offset, so the drawn thumb may land a half row
+	// either side of the exact half-row position — what it must not do is sit
+	// still, which is what a whole-row track did for a one-row pull.
+	if pos1 < pos-3 || pos1 > pos-1 {
+		t.Fatalf("one-row pull moved the thumb to half row %d, want one row (two half rows) up from %d (a gripless grab would have jumped it to %d)",
+			pos1, pos, pos-grip)
 	}
 	if off1 <= off0 {
 		t.Fatalf("offset %d -> %d: pulling the thumb up did not reveal older rows", off0, off1)
@@ -287,6 +293,66 @@ func TestScrollbarPressKeepsItsGrip(t *testing.T) {
 	if want := total - vp; off != want {
 		t.Fatalf("track press at the top: offset %d, want %d (the oldest row)", off, want)
 	}
+}
+
+// TestScrollbarPaintsTheOpencodeGroove pins the look, not just the arithmetic:
+// the reserved column is a filled groove (a blank cell on the band's raised
+// background) with a solid thumb riding it, not a hairline │ track with a
+// brighter │ thumb — that is opencode's ScrollBar, whose track is a background
+// fill and whose thumb is █, with ▀/▄ where the thumb lands between two rows.
+func TestScrollbarPaintsTheOpencodeGroove(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	longTranscript(t, app, 60)
+	app.mu.Lock()
+	vp, pos, end := app.viewportLinesLocked(), app.selBarPos, app.selBarEnd
+	app.mu.Unlock()
+
+	bar := make([]rune, vp)
+	groove, thumb := 0, 0
+	for y := range vp {
+		r := cellRune(scr, 79, app.transcriptTop()+y)
+		bar[y] = r
+		switch r {
+		case ' ':
+			groove++
+		case '█', '▀', '▄':
+			thumb++
+		default:
+			t.Fatalf("track row %d = %q, want the groove (a space) or a thumb block, not a hairline glyph", y, r)
+		}
+	}
+	if groove == 0 {
+		t.Fatalf("no bare groove in %d track rows: the bar is a solid line, not a track with a thumb on it", vp)
+	}
+	if thumb == 0 {
+		t.Fatalf("no thumb in %d track rows", vp)
+	}
+	// The thumb the model published is the one on screen: the rows it covers
+	// carry a thumb cell, the rows it does not are bare.
+	for y := range vp {
+		lo, hi := 2*y, 2*y+2
+		if hi <= pos || lo >= end {
+			if bar[y] != ' ' {
+				t.Fatalf("track row %d = %q but the thumb is [%d,%d): the paint disagrees with the model", y, bar[y], pos, end)
+			}
+			continue
+		}
+		if bar[y] == ' ' {
+			t.Fatalf("track row %d is bare but the thumb [%d,%d) covers it", y, pos, end)
+		}
+	}
+}
+
+// cellRune is the character painted at (x,y) on a simulation screen.
+func cellRune(scr tcell.SimulationScreen, x, y int) rune {
+	w, _ := scr.Size()
+	prim, _, _ := scr.GetContents()
+	if i := y*w + x; i >= 0 && i < len(prim) {
+		if rs := prim[i].Runes; len(rs) > 0 {
+			return rs[0]
+		}
+	}
+	return ' '
 }
 
 // TestWheelDuringAHeldDragDoesNotRestartIt pins the press edge against the one

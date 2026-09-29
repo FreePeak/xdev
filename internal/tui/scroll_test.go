@@ -113,18 +113,20 @@ func TestScrollbar(t *testing.T) {
 	if _, _, ok := m.Scrollbar(15, 20); ok {
 		t.Fatal("scrollbar shown when content fits the viewport")
 	}
-	// total=100 vp=20 → thumb = vp*vp/total = 4 rows, maxOff = 80.
+	// total=100 vp=20 → the track is 2*vp=40 half rows and the thumb is
+	// 2*vp*vp/total = 8 half rows (4 rows), maxOff = 80. Geometry is in half
+	// rows — the unit opencode's slider works in.
 	m = newScrollModel()
 	start, end, ok := m.Scrollbar(100, 20) // offset 0 = tail
-	if !ok || end != 20 || end-start != 4 {
-		t.Fatalf("at tail: got [%d,%d) ok=%v, want a 4-row thumb ending at 20", start, end, ok)
+	if !ok || end != 40 || end-start != 8 {
+		t.Fatalf("at tail: got [%d,%d) ok=%v, want an 8-half-row thumb ending at 40", start, end, ok)
 	}
 	m.Top(100, 20) // offset = maxOff
 	start, end, _ = m.Scrollbar(100, 20)
-	if start != 0 || end != 4 {
-		t.Fatalf("at top: got [%d,%d), want [0,4)", start, end)
+	if start != 0 || end != 8 {
+		t.Fatalf("at top: got [%d,%d), want [0,8)", start, end)
 	}
-	// Monotonic: scrolling up from the tail walks the thumb toward row 0.
+	// Monotonic: scrolling up from the tail walks the thumb toward half row 0.
 	m = newScrollModel()
 	prev := 1 << 30
 	for off := 0; off <= 80; off += 20 {
@@ -136,13 +138,50 @@ func TestScrollbar(t *testing.T) {
 		if s > prev {
 			t.Fatalf("thumb moved down while scrolling up at offset %d (%d>%d)", off, s, prev)
 		}
-		if e-s != 4 {
-			t.Fatalf("thumb length = %d at offset %d, want 4", e-s, off)
+		if e-s != 8 {
+			t.Fatalf("thumb length = %d half rows at offset %d, want 8", e-s, off)
 		}
 		prev = s
 	}
-	// A taller viewport than the thumb budget still shows at least one row.
+	// Half-row resolution: the thumb's position comes out of the offset by
+	// flooring, so a whole-row track could only ever show vp-thumb distinct
+	// spots while the scrollback was swept — every row of a long transcript
+	// moved the bar the same single step. The half-row track shows twice as
+	// many, which is the resolution opencode's slider works in.
+	m = newScrollModel()
+	seen := map[int]bool{}
+	for off := 0; off <= 200-20; off++ {
+		m.offset = off
+		s, _, _ := m.Scrollbar(200, 20)
+		seen[s] = true
+	}
+	if len(seen) <= 20-(2*20*20/200) {
+		t.Fatalf("a sweep of the scrollback visited %d thumb positions, want more than the %d a whole-row track can show",
+			len(seen), 20-(2*20*20/200))
+	}
+	// A taller viewport than the thumb budget still shows at least one half row.
 	if s, e, ok := m.Scrollbar(1000, 30); !ok || e-s < 1 {
 		t.Fatalf("degenerate thumb [%d,%d) ok=%v", s, e, ok)
+	}
+}
+
+// TestSBGlyph pins the three cells a scrollbar column can hold: the full block
+// where the thumb covers the row, the half block where it covers one half, and
+// the bare groove where it does not touch. opencode's slider draws exactly
+// these three states, which is what lets its thumb land between rows.
+func TestSBGlyph(t *testing.T) {
+	if got := sbGlyph(3, 6, 8); got != '█' {
+		t.Fatalf("row 3 of thumb [6,8) = %q, want a full block", got)
+	}
+	if got := sbGlyph(3, 6, 7); got != '▀' {
+		t.Fatalf("row 3 of thumb [6,7) = %q, want the upper half block", got)
+	}
+	if got := sbGlyph(3, 7, 8); got != '▄' {
+		t.Fatalf("row 3 of thumb [7,8) = %q, want the lower half block", got)
+	}
+	for row := range 5 {
+		if got := sbGlyph(row, 9, 9); got != ' ' {
+			t.Fatalf("row %d outside the thumb = %q, want the bare groove", row, got)
+		}
 	}
 }
