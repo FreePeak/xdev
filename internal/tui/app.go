@@ -1260,6 +1260,27 @@ func (a *App) FinishRun() { a.SetRunning(false) }
 // panic the process instead of exiting it.
 func (a *App) Quit() { a.quitOnce.Do(func() { close(a.quitCh) }) }
 
+// quitOrCancel is what the quit chord (Ctrl+C, Ctrl+D) does: exit, and take
+// the live turn down with it. It used to cancel a running turn and stop, which
+// reads as "the exit key is dead" whenever the turn is slow to unwind — the
+// turn's own recovery ladder, an in-flight tool, an MCP call still draining.
+// The second press landed in the same branch, so the chord had no way out at
+// all: session 2750b48c, where C-c and C-d did nothing for the whole of an
+// unbroken turn.
+//
+// Cancelling is not dropped: onQuit's own teardown stops the agent, and the
+// turn goroutine is abandoned if it outlives the loop. A turn that keeps
+// running after the UI is gone is the same leak every /quit had, and it never
+// outlives the process. Esc keeps cancel-only semantics for "stop and stay".
+func (a *App) quitOrCancel(running bool) {
+	if running && a.onCancel != nil {
+		a.onCancel()
+	}
+	if a.onQuit != nil {
+		a.onQuit()
+	}
+}
+
 // ForkSession implements CommandAPI by delegating to wired SessionOps.Fork.
 func (a *App) ForkSession() error {
 	if a.ops == nil || a.ops.Fork == nil {
@@ -2573,11 +2594,7 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.cycleModel()
 		return
 	case "quit":
-		if running {
-			a.onCancel()
-			return
-		}
-		a.onQuit()
+		a.quitOrCancel(running)
 		return
 	case "scroll-up":
 		if a.diffOverlayOpen() {
@@ -2768,11 +2785,7 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.OpenTreeSelector()
 			return
 		case "quit":
-			if running {
-				a.onCancel()
-				return
-			}
-			a.onQuit()
+			a.quitOrCancel(running)
 			return
 		}
 	}
