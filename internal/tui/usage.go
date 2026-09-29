@@ -109,7 +109,16 @@ func (a *App) UsageReport() string {
 		if r.errors > 0 {
 			fmt.Fprintf(&b, " (%d failed)", r.errors)
 		}
-		if r.toolWork > 0 && work > 0 {
+		// The share is a ratio of two differently-measured spans, so it is
+		// only shown when it is a ratio: the active-work total banks
+		// provider request spans, while tool time also counts calls made
+		// outside a run (bang mode), which can push the share past 100% and
+		// claim more than the total it divides. Omitted rather than clamped —
+		// a clamped 100% would be a lie about a denominator that is wrong.
+		// ponytail: ceiling is that a bang-mode call is invisible to the
+		// active-work total; the fix is to bank bang spans into Work, which
+		// needs the run-span seam to know about out-of-run work.
+		if r.toolWork > 0 && work > 0 && r.toolWork <= work {
 			fmt.Fprintf(&b, " · %d%% of active time", int(100*r.toolWork/work))
 		}
 		b.WriteString("\n")

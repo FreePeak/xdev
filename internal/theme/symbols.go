@@ -42,6 +42,52 @@ var defaultSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 // asciiSpinnerFrames is the preset default for terminals without braille.
 var asciiSpinnerFrames = []string{"|", "/", "-", "\\"}
 
+// HUD icon families, borrowed from the deepseek harness's composer pills
+// (deepseek-harness StatsPills.tsx): IconGaugeOutline leads the timing
+// readings, IconDatabaseOutline the token ones, and dsh's tool rows carry
+// the wrench a tool call is drawn with. dsh draws them as 16px SVG; a
+// terminal draws one cell, so these are the closest monospace stand-ins —
+// ⏱ for a gauge, ▤ for stacked database strata, ✳ for the tool wheel. Themes
+// override them under symbols.overrides as "hud.<key>", and the ascii preset
+// substitutes a letter tag, because a terminal that cannot draw the glyph
+// would rather read "hit 96%" than paint a tofu box.
+const (
+	HUDIconGauge    = "gauge"    // timing: work timer, decode rate, ttft
+	HUDIconDatabase = "database" // tokens: the token split, the cache hit rate
+	HUDIconTool     = "tool"     // the session's tool-call count
+)
+
+var (
+	hudUnicodeIcons = map[string]string{
+		HUDIconGauge:    "⏱",
+		HUDIconDatabase: "▤",
+		HUDIconTool:     "✳",
+	}
+	hudAsciiIcons = map[string]string{
+		HUDIconGauge:    "t",
+		HUDIconDatabase: "k",
+		HUDIconTool:     "*",
+	}
+)
+
+// HUDIcon returns the one-cell icon a HUD segment leads with, for the
+// metric family it names. A theme that overrides an unknown key is ignored
+// (the same rule box/spinner overrides follow); the ascii preset substitutes
+// a letter tag rather than a glyph its terminal cannot draw.
+func (t *Theme) HUDIcon(key string) string {
+	if t != nil {
+		if v, ok := t.Symbols.Overrides["hud."+key]; ok && v != "" {
+			return v
+		}
+		if t.SymbolPreset() == "ascii" {
+			if v, ok := hudAsciiIcons[key]; ok {
+				return v
+			}
+		}
+	}
+	return hudUnicodeIcons[key]
+}
+
 // Box returns the outline glyphs for outlined chrome under the theme's box
 // style (symbols.box: round — the default and today's glyphs — or sharp).
 // Per-glyph overrides live under "box.round.<key>"/"box.sharp.<key>" with

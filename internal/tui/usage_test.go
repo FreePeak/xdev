@@ -105,3 +105,79 @@ func TestGroupTokens(t *testing.T) {
 		}
 	}
 }
+
+// TestStatusRowCarriesTheUsageMetrics pins the two dsh readings on the row
+// itself, not only in /usage: the hit rate and the call count are the two
+// figures the one-glance row exists for, and a report the user has to type
+// to read is not where a glance goes.
+func TestStatusRowCarriesTheUsageMetrics(t *testing.T) {
+	app, scr := drawnApp(t, 200, 24)
+	// 479 fresh + 64575 cached + 1770 out, two calls of which one failed.
+	app.AddUsage(479, 1770, 64575, 0, 66824)
+	app.AddToolBlock("1", "bash", "")
+	app.FinishTool("1", "bash", false, "ok", ToolOutcome{Elapsed: 2 * time.Second})
+	app.AddToolBlock("2", "edit", "")
+	app.FinishTool("2", "edit", true, "boom", ToolOutcome{Elapsed: time.Second})
+	app.SetContextWindow(200000)
+	app.draw()
+
+	row := lastRow(screenText(scr))
+	for _, want := range []string{
+		"▤66.8k · cache 99%", // total with dsh's hit rate beside it
+		"ctx 66.8k/200k",
+		"✳2 calls (1 failed)",
+	} {
+		if !strings.Contains(row, want) {
+			t.Errorf("status row missing %q: %q", want, row)
+		}
+	}
+}
+
+// TestStatusRowHidesUnmeasuredUsageMetrics: a zero line is a claim about a
+// measurement. A provider that bills no cache, and a session that has
+// called no tool, must keep the plain row — 0% cache and "0 calls" are
+// readings nobody made.
+func TestStatusRowHidesUnmeasuredUsageMetrics(t *testing.T) {
+	app, scr := drawnApp(t, 200, 24)
+	app.AddUsage(1200, 340, 0, 0, 1540)
+	app.draw()
+
+	row := lastRow(screenText(scr))
+	if strings.Contains(row, "cache") || strings.Contains(row, "calls") {
+		t.Fatalf("an unmeasured metric drew a glyph: %q", row)
+	}
+	if !strings.Contains(row, "▤↑1.2k │ ↓340") {
+		t.Fatalf("the token split changed: %q", row)
+	}
+}
+
+// TestUsageReportOmitsAnImpossibleShare: tool time and active time are two
+// differently-measured spans (a bang-mode call is tool time with no run span
+// to bank it into), so their ratio can exceed 100%. Drawing "113% of active
+// time" is a claim about a denominator that is wrong; the line is omitted
+// instead of clamped, because a clamped 100% is the same lie in nicer clothes.
+func TestUsageReportOmitsAnImpossibleShare(t *testing.T) {
+	app, _ := drawnApp(t, 200, 24)
+	app.AddUsage(10, 10, 0, 0, 20)
+	app.AddToolBlock("1", "bash", "")
+	app.FinishTool("1", "bash", false, "ok", ToolOutcome{Elapsed: 2 * time.Second})
+	// No SetWork: an out-of-run call leaves the active total at zero, and even
+	// a tiny banked span leaves the share over 100%.
+	app.SetWork(time.Second)
+
+	report := app.UsageReport()
+	if strings.Contains(report, "of active time") {
+		t.Fatalf("an impossible share was drawn:\n%s", report)
+	}
+	if !strings.Contains(report, "tool calls 1") {
+		t.Fatalf("the call count must survive the omitted share:\n%s", report)
+	}
+	// A sane ratio is still shown: the guard is on the ratio, not on zero.
+	app.Reset()
+	app.AddToolBlock("1", "bash", "")
+	app.FinishTool("1", "bash", false, "ok", ToolOutcome{Elapsed: time.Second})
+	app.SetWork(time.Minute)
+	if !strings.Contains(app.UsageReport(), "of active time") {
+		t.Fatalf("a sane share must still be drawn:\n%s", app.UsageReport())
+	}
+}
