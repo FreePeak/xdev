@@ -2857,7 +2857,7 @@ func (a *App) handleKey(ev tcell.Event) {
 }
 
 // returnDraft puts a draft that could not be sent back in the composer and
-// says why on the divider. It exists because an attached image has no text
+// says why in a toast. It exists because an attached image has no text
 // fallback: the alternative is a cleared box, a lost screenshot, and a user who
 // does not know either happened. The chips and the payloads go back together,
 // so one Enter retries.

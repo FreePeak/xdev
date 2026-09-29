@@ -1417,10 +1417,10 @@ func mcpMark(on bool) string {
 }
 
 // mcpUnavailable names the failed server without the launch error's
-// detail. A caller with a one-line slot gets what it can render:
-// mcpclient already logged the full error, and the divider drops a
-// hint wider than the space beside the model name, so a whole
-// fork/exec path would render as nothing.
+// detail. A caller with a one-row slot gets what it can render:
+// mcpclient already logged the full error, and the TUI's toast cuts a
+// row wider than the pane, so a whole fork/exec path would render as
+// an ellipsis and a server name.
 func mcpUnavailable(e string) string {
 	name, rest, _ := strings.Cut(e, ": ")
 	if rest == "" {
