@@ -749,6 +749,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 						history = rebuilt.Messages
 					}
 					a.noticeEmptyTurnRetry(emptyRetries, d)
+					a.persistEmptyTurnRetry(emptyRetries, d)
 					if serr := sleepBackoff(ctx, d); serr != nil {
 						return lastAssistant, serr
 					}
@@ -942,6 +943,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				d := policy.delay(healthEscalation)
 				logx.Errorf("recovery: health check failed, retrying probe in %s (round %d): %v", d, healthEscalation, hcErr)
 				if policy.Infinite {
+					a.persistAllTargetsDown(healthEscalation, d, hcErr)
 					a.noticeAllTargetsDown(healthEscalation, d, hcErr)
 				}
 				if serr := sleepBackoff(ctx, d); serr != nil {
@@ -997,6 +999,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					a.Hooks.OnContinuation(ContinuationPrompt)
 					logx.Errorf("recovery: post-content failure %d of %d", continued, maxPostContentContinuations)
 					d := policy.delay(1)
+					a.persistContinuationRetry(continued, d)
 					a.noticeContinuationRetry(d)
 					if serr := sleepBackoff(ctx, d); serr != nil {
 						return nil, history, serr
@@ -1024,6 +1027,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					escalation++
 					attempt = 0
 					d := policy.delay(policy.MaxRetries + 1)
+					a.persistAllTargetsDown(escalation, d, err)
 					logx.Errorf("recovery: all targets drained, escalation round %d after backoff", escalation)
 					if policy.Infinite {
 						a.noticeAllTargetsDown(escalation, d, err)
@@ -1095,6 +1099,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			history = rebuilt
 			escalation++
 			d := policy.delay(escalation)
+			a.persistEmptyTurnRetry(escalation, d)
 			a.noticeEmptyTurnRetry(escalation, d)
 			if serr := sleepBackoff(ctx, d); serr != nil {
 				return nil, history, serr
@@ -1122,6 +1127,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// a hard-failing upstream from hammering the wire.
 				d := policy.delay(escalation)
 				if policy.Infinite {
+					a.persistAllTargetsDown(escalation, d, err)
 					a.noticeAllTargetsDown(escalation, d, err)
 				}
 				if serr := sleepBackoff(ctx, d); serr != nil {
@@ -1163,6 +1169,61 @@ func (a *Agent) noticeAllTargetsDown(round int, d time.Duration, last error) {
 	a.Hooks.OnEvent(ai.Errorf(&AllTargetsDownError{Round: round, Delay: d, LastErr: last}))
 }
 
+// maxNoticeStride throttles the persisted recovery notice: the first round
+// and then every Nth, so a loop bounded at maxSilentRecoveryRounds writes
+// five records rather than twelve. The screen still gets every round (the
+// notice* funcs are untouched) — this is only about the session file.
+const maxNoticeStride = 3
+
+// persistRecoveryNotice writes one unbounded-wait round into the session
+// file as a CustomEntry.
+//
+// Every recovery announcement used to be an AddSystemBlock — display-only —
+// so a turn that spent 53 minutes inside one of these loops left a session
+// file whose last record was a toolResult from before the loop started, and
+// the transcript said nothing at all. On the reporting machine 0 of 132
+// session files contained a persisted retry notice, which is why a7e17741
+// (2026-09-28) took an afternoon to diagnose from the file alone.
+//
+// A CustomEntry is the right shape because session.buildContext switches
+// only on MessageEntry, CompactionEntry and BranchSummaryEntry: this is
+// readable by `xdev` and by a human with jq, and it never reaches the model
+// as a turn. A nil store or a failed append is a no-op — a notice that
+// cannot be written must never break the recovery it describes.
+func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duration, last error) {
+	if a == nil || a.Store == nil {
+		return
+	}
+	if round != 1 && round%maxNoticeStride != 0 {
+		return
+	}
+	data := map[string]any{
+		"round":           round,
+		"delaySeconds":    int(delay.Round(time.Second) / time.Second),
+		"remainingRounds": max(0, boundRounds(kind)-round),
+	}
+	if last != nil {
+		data["error"] = last.Error()
+	}
+	if err := a.Store.Append(&session.CustomEntry{CustomType: kind, Data: data}); err != nil {
+		logx.Errorf("persist recovery notice: %v", err)
+	}
+}
+
+// boundRounds is the ceiling that produced a given notice kind. Naming it
+// per kind is what lets the record say "3 rounds left" instead of making a
+// reader of the file guess.
+func boundRounds(kind string) int {
+	switch kind {
+	case "recovery_empty_turn":
+		return maxEmptyTurnRecoveries
+	case "recovery_continuation":
+		return maxPostContentContinuations
+	default: // recovery_all_targets_down
+		return maxSilentRecoveryRounds
+	}
+}
+
 // noticeEmptyTurnRetry raises one empty-turn recovery round on the event
 // stream (retry.retryAllErrors). Same contract as noticeAllTargetsDown:
 // a long stall must read as waiting, not as hung.
@@ -1171,6 +1232,23 @@ func (a *Agent) noticeEmptyTurnRetry(round int, d time.Duration) {
 		return
 	}
 	a.Hooks.OnEvent(ai.Errorf(&EmptyTurnRetryError{Round: round, Delay: d}))
+}
+
+// The three notice* funcs above are the SCREEN voice of a recovery round and
+// fire every round. The three persist* calls below are the FILE voice of the
+// same round: one CustomEntry, throttled, so a session that spent an hour in
+// a recovery loop says so in its own transcript instead of looking like a
+// process that simply stopped mid-tool.
+func (a *Agent) persistAllTargetsDown(round int, d time.Duration, last error) {
+	a.persistRecoveryNotice("recovery_all_targets_down", round, d, last)
+}
+
+func (a *Agent) persistEmptyTurnRetry(round int, d time.Duration) {
+	a.persistRecoveryNotice("recovery_empty_turn", round, d, nil)
+}
+
+func (a *Agent) persistContinuationRetry(round int, d time.Duration) {
+	a.persistRecoveryNotice("recovery_continuation", round, d, nil)
 }
 
 // noticeContinuationRetry raises one retain-and-continue round on the event
