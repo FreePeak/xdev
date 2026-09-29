@@ -170,7 +170,46 @@ func (o *SystemPromptOverrides) ApplyPersonalityPreset(preset string) error {
 }
 
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.
-const MaxContextBytes = 32 << 10
+//
+// The cap was written as a single number, but the budget it actually has to
+// protect is the *system prompt*, and the two are not the same thing. Measured
+// on a real repository (PRD entry 2026-09-30): the injected chain, the
+// discovered rulebook and the skills block together run ~6.8k tokens against
+// PRD §1 Goal 4's 1,000, so a 32 KiB chain alone is most of the blowout.
+//
+// The per-file split exists because a single shared budget silently starves
+// the file that matters most. With one 98 KB global file the chain rendered
+// 32,871 bytes and the repository's own AGENTS.md never appeared at all — no
+// error, no marker, just missing rules. Every file now gets a bounded share
+// instead of competing for one pool, so no single file can consume the chain
+// budget that the other files were counting on.
+const (
+	MaxContextBytes  = 32 << 10 // whole chain, unchanged as the outer bound
+	MaxContextFileKB = 8 << 10  // any single file, global or repository
+	// MinClosestFileBytes is the extra the cwd's own AGENTS.md may claim on
+	// top of the generic share: the rules nearest the work are the ones a
+	// session can least afford to lose, and they are also the one file the
+	// agent cannot cheaply re-read mid-task without a round trip.
+	MinClosestFileBytes = 4 << 10
+)
+
+// contextBytesForFile returns the slice of the chain budget one file may
+// render, given how much of the budget earlier files already took and whether
+// this file is the cwd's own.
+func contextBytesForFile(used, fileSize int, closest bool) int {
+	share := MaxContextFileKB
+	if closest {
+		share = MaxContextFileKB + MinClosestFileBytes // 12 KiB floor
+	}
+	// Never render more of a file than it actually contains.
+	if fileSize < share {
+		share = fileSize
+	}
+	if left := MaxContextBytes - used; share > left {
+		share = left
+	}
+	return share
+}
 
 // maxImportDepth bounds recursive @path expansion (omp parity: <=5).
 const maxImportDepth = 5
@@ -340,6 +379,7 @@ func LoadContextFiles(cwd string) string {
 		}
 		dir = parent
 	}
+
 	// chain is cwd→root; reverse for root→cwd ordering.
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
@@ -360,12 +400,34 @@ func LoadContextFiles(cwd string) string {
 		if content == "" {
 			continue
 		}
-		remaining = MaxContextBytes - total
 		if remaining < 256 {
 			break // no useful budget left; skip further files entirely
 		}
-		if len(content) > remaining {
-			content = string([]rune(content)[:len([]rune(strings.TrimSpace(content[:remaining])))]) + "\n… [truncated]"
+		// Per-file slice: the file nearest the work keeps a reserved floor, so
+		// a large global rulebook cannot render the repository's own AGENTS.md
+		// out of existence. Bytes left out are announced rather than silently
+		// absent — an invisible rule is the failure this change exists to
+		// prevent (see TestLoadContextFilesNeverStarvesTheClosestFile).
+		r := []rune(content)
+		share := contextBytesForFile(total, len(r), p == filepath.Join(cwd, "AGENTS.md"))
+		// A file that fits its share is always included in full: the outer
+		// budget may be spent, but a small file is never what gets dropped.
+		if share < 256 && len(r) > share {
+			continue
+		}
+		dropped := 0
+		if len(r) > share {
+			dropped = len(r) - share
+			cut := share
+			// Trim back to a line boundary so the cut never leaves half a
+			// sentence or half a markdown construct in the prompt.
+			if nl := strings.LastIndex(string(r[:cut]), "\n"); nl > 0 {
+				cut = len([]rune(string(r[:cut])[:nl]))
+			}
+			content = strings.TrimRight(string(r[:cut]), "\n")
+		}
+		if content == "" {
+			continue
 		}
 		if b.Len() > 0 {
 			b.WriteString("\n\n---\n\n")
@@ -374,6 +436,9 @@ func LoadContextFiles(cwd string) string {
 			fmt.Fprintf(&b, "## Global conventions (%s)\n\n", p)
 		} else {
 			fmt.Fprintf(&b, "## %s\n\n", p)
+		}
+		if dropped > 0 {
+			fmt.Fprintf(&b, "[truncated: %d characters of this file are not shown, read %s if this part matters]\n\n", dropped, p)
 		}
 		b.WriteString(content)
 		total += len(content)
