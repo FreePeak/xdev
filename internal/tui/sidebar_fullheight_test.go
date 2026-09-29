@@ -49,18 +49,20 @@ func TestSidebarIsFullHeight(t *testing.T) {
 	if edge != 160-dockCols {
 		t.Fatalf("the panel starts at column %d, want %d", edge, 160-dockCols)
 	}
-	// The surface, not a box: every cell of the panel's columns carries the
-	// panel's background on every row, with no chrome drawn over it.
+	// The surface, not a box: no cell of the panel's columns carries box chrome,
+	// and row 0 — the row the top bar shares with the panel's title slot — is
+	// the panel's, which its own title is the witness for. (Its background can
+	// no longer witness it: the panel's field is the terminal's own.)
 	for y := range 40 {
 		for x := edge; x < 160; x++ {
-			ch, _, style, _ := scr.GetContent(x, y)
+			ch, _, _, _ := scr.GetContent(x, y)
 			if ch == '│' || ch == '─' {
 				t.Fatalf("the panel drew box chrome at x=%d y=%d", x, y)
 			}
-			if _, bg, _ := style.Decompose(); x == edge && y == 0 && bg == tcell.ColorDefault {
-				t.Fatalf("row 0 column %d has no panel background: the band stops short", x)
-			}
 		}
+	}
+	if row := dockRowText(scr, 0, edge); !strings.Contains(row, "two windows") {
+		t.Fatalf("row 0 column %d carries no panel content: %q, the band stops short", edge, row)
 	}
 	// And the last row of the terminal is inside it: the status row's cells
 	// under the panel are the panel's, not the status row's.

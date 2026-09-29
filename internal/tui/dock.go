@@ -840,26 +840,30 @@ func (a *App) selDockRowsForPaint() []selRow {
 // and the rows the build made for the band they were budgeted for. Caller holds
 // a.mu and has run dockBuild for this frame.
 //
-// There is no box, deliberately. The panel is a surface of its own on the theme's
-// panel background with a two-cell gutter — the shape opencode's sidebar has. A
-// border drawn around a column that already fills its own background is one line
-// of chrome too many, and it costs the interior two columns.
+// There is no box, deliberately. The panel is a surface of its own on the
+// terminal's own background with a two-cell gutter — the shape opencode's
+// sidebar has. A border drawn around a column that already fills its own
+// background is one line of chrome too many, and it costs the interior two
+// columns.
 func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	if h <= 0 {
 		return
 	}
 	d := a.dock
-	bg := tcell.ColorDefault
-	if c, ok := a.th.Slot(theme.BgBase); ok {
-		bg = a.cellColor(c)
-	}
-	body := tcell.StyleDefault.Background(bg)
+	// The panel's field is the terminal's own background, never a colour this
+	// program picked — the same call drawDiffOverlay makes (#466). A themed fill
+	// here (bg_base, #141414) put a grey band beside a black transcript; SGR 49
+	// resolves the panel to whatever the terminal is, which also keeps a light
+	// theme from stranding its dark ink on a black surface.
+	body := tcell.StyleDefault
 	ink := body.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	// The change counts wear the diff's own inks, on the panel's background: a
-	// file's "+N" is the green its diff block already paints with.
+	// file's "+N" is the green its diff block already paints with. Those inks
+	// are built from StyleDefault, so they already carry the terminal's
+	// background and only their foreground is the diff's own.
 	ds := a.diffStyle()
-	added, removed := ds.added.Background(bg), ds.removed.Background(bg)
+	added, removed := ds.added, ds.removed
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
 			s.SetContent(cx, y, ' ', nil, body)
