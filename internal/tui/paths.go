@@ -7,14 +7,19 @@ import (
 // @path completion (M7 #8, PRD §IV.6): typing `@` in the composer suggests
 // project files, and Tab replaces the token.
 //
-// Completion is directory-scoped, the way omp's is: the typed token names ONE
-// directory plus a prefix inside it, so a keystroke costs one readdir of that
-// directory — never a walk of the repo. That is what makes offering hidden and
-// gitignored paths affordable, and it answers a bare `@` too: with no directory
-// named there is nothing to scope to, so the menu lists the completion root,
-// exactly as omp's does. Nothing on this path walks, so no keystroke can stall
-// the UI thread: the whole-repo scan this used to fall back to cost 5.7s on a
-// 226k-file polyrepo, once per bare `@`, for a menu that showed 200 rows.
+// Completion is directory-scoped: the typed token names ONE directory plus a
+// prefix inside it, so a keystroke costs one readdir of that directory — the
+// readdir is what lists a directory, and it is always live. That is what makes
+// offering hidden and gitignored paths affordable, and it answers a bare `@`
+// too: with no directory named there is nothing to scope to, so the menu
+// lists the completion root, exactly as omp's does. Nothing on this path
+// walks, so no keystroke can stall the UI thread.
+//
+// A bare prefix (`@pa`) is the one token a single readdir cannot answer, and
+// it is the common one: the user knows the name, not where it lives. So a
+// background index of every file under the root (pathindex.go) answers it
+// from memory — the walk #329 removed from the keystroke path, moved off it
+// rather than given up.
 //
 // Sources are injected so this package stays free of tool/cache imports.
 
@@ -72,6 +77,15 @@ func (a *App) SetPathCompletion(root string, list func(dir string) []PathEntry) 
 	a.pathRoot, a.pathList = root, list
 }
 
+// StartPathIndex builds the whole-cwd file index in the background, which is
+// what makes a bare prefix (`@pa`) offer a nested file instead of only the
+// cwd's own entries. It returns immediately; the dropdown is usable before
+// the walk lands and re-queries itself when it does.
+//
+// The walk exists OFF the keystroke path on purpose (#329): run inline it
+// cost 5.7s per keystroke on a 226k-file polyrepo, on the UI thread.
+func (a *App) StartPathIndex(root string) { a.pathIdx.start(root) }
+
 // pathCandidates returns the menu items for the path dropdown as typed so far.
 // An empty token (`@` with nothing after it) names no directory, so it lists
 // the completion root — one readdir, which is omp's answer to the same token
@@ -79,6 +93,13 @@ func (a *App) SetPathCompletion(root string, list func(dir string) []PathEntry) 
 // only runs once a prefix exists). `@/` also resolves to the root, since
 // splitPathQuery strips the slash to ("",""), so the empty token needs no
 // special case: both land on the root directory read.
+//
+// A token that names no directory ALSO gets the index's recursive hits
+// (`@pa` -> internal/tui/paths.go), after that directory's own entries and
+// only for files — the readdir stays the live, ordered source for what it can
+// see, and the index covers what it cannot. A token that DOES name a
+// directory is a deliberate drill (`@internal/`), where the answer is one
+// readdir of exactly that directory and the index would only add noise.
 func (a *App) pathCandidates(query string) []suggestion {
 	if a.pathList == nil {
 		return nil
@@ -101,6 +122,9 @@ func (a *App) pathCandidates(query string) []suggestion {
 		} else {
 			files = append(files, e.Name)
 		}
+	}
+	if dir == "" {
+		files = append(files, a.pathIdx.match(lower)...)
 	}
 	// omp order: directories first, then files, each already sorted by the
 	// reader (os.ReadDir sorts).

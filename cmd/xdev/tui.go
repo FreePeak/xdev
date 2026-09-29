@@ -678,14 +678,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh.
 	//
-	// @-file completion (M7 #8, PRD §IV.6) is wired to ONE readdir of the
-	// directory the typed token names — which is what makes hidden and gitignored
-	// paths affordable to offer: walking the repo to filter them out was the
-	// whole cost, and there is no walk here. A bare `@` names no directory, so it
-	// lists this same root (the cwd) instead of falling back to a whole-repo
-	// scan: that scan cost ~5.7s per keystroke on a 226k-file polyrepo to fill a
-	// 200-row menu, and it ran on the UI thread. Deeper paths are reached by
-	// drilling (`@internal/tui/`).
+	// @-file completion (M7 #8, PRD §IV.6) has two sources, and they answer
+	// different tokens. The typed token names ONE directory plus a prefix, so
+	// a keystroke costs one readdir of that directory — which is what makes
+	// hidden and gitignored paths affordable to offer: walking the repo to
+	// filter them out was the whole cost, and there is no walk here. A bare
+	// `@` names no directory, so it lists this same root (the cwd).
+	//
+	// A bare PREFIX (`@pa`) is the token one readdir cannot answer, and it is
+	// the common one: you know the name, not where it lives. So a background
+	// index of every file under the cwd answers it from memory — the walk
+	// #329 took off the keystroke path (5.7s per keystroke on a 226k-file
+	// polyrepo) run ONCE, off-thread, while the welcome screen is still up.
+	// The dropdown is usable before the walk lands (it shows the readdir) and
+	// fills in when it does; no keystroke ever waits on the filesystem.
 	listDir := func(dir string) []tui.PathEntry {
 		full := filepath.Join(cwd, filepath.FromSlash(dir))
 		ents, err := os.ReadDir(full)
@@ -707,6 +713,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return out // os.ReadDir sorts lexically, which the menu shows as-is
 	}
 	app.SetPathCompletion(cwd, listDir)
+	app.StartPathIndex(cwd)
 	app.SetPickerResume(func(id string) {
 		if id == "" {
 			return
