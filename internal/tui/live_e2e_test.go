@@ -19,8 +19,10 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -198,5 +200,84 @@ func TestLiveUserMessageRevertIsTheTreeRewind(t *testing.T) {
 	}
 	if !strings.Contains(notices, "files were NOT restored") {
 		t.Fatalf("revert did not warn about files:\n%s", notices)
+	}
+}
+
+// TestLiveAskCardIsAModalInTheMainPane drives the blocking ask card through the
+// event loop: the click goes through handleKey — the UI loop's own entry point,
+// with the modal ordering and the lock discipline app.go imposes — not the
+// card's own mouse handler, so a wrapping bug fails here even when the unit
+// tests pass. It is also the pane assertion on a live frame: the card ends at
+// the panel's left edge, which is the report this card was restyled for.
+func TestLiveAskCardIsAModalInTheMainPane(t *testing.T) {
+	app, scr := liveTurns(t)
+	defer scr.Fini()
+
+	answered := make(chan AskAnswer, 1)
+	go func() {
+		ans, _ := app.AskCard(context.Background(), askOptions(), 20*time.Second)
+		answered <- ans
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+
+	painted := strings.Split(screenText(scr), "\n")
+	app.mu.Lock()
+	edge := app.rightEdge()
+	app.mu.Unlock()
+	if edge >= app.width {
+		t.Fatalf("the panel is not reserving columns (rightEdge=%d), nothing to prove", edge)
+	}
+	top := -1
+	for y, ln := range painted {
+		if strings.Contains(ln, "? ask") {
+			top = y
+			break
+		}
+	}
+	if top < 0 {
+		t.Fatalf("the card is not on screen:\n%s", strings.Join(painted, "\n"))
+	}
+	// The card's own rows only: screenText flattens every row of the terminal
+	// and a row past the height is one zero rune long, not a painted cell.
+	bottom := top
+	for y := top; y < app.height; y++ {
+		for x := edge; x < app.width; x++ {
+			if ch, _, _, _ := scr.GetContent(x, y); ch != ' ' {
+				t.Fatalf("the card painted %q at x=%d y=%d, inside the panel:\n%s",
+					string(ch), x, y, painted[y])
+			}
+		}
+		if ch, _, _, _ := scr.GetContent(1, y); ch == '┃' {
+			bottom = y
+		}
+	}
+	if bottom <= top {
+		t.Fatalf("the rail spans one row only (top=%d bottom=%d):\n%s",
+			top, bottom, strings.Join(painted, "\n"))
+	}
+	// A modal owns every key: the click has to reach the card, and nothing may
+	// leak into the composer behind it.
+	x, y := 0, -1
+	for row, ln := range painted {
+		if at := strings.Index(ln, "mysql"); at > 0 {
+			x, y = width(ln[:at]), row
+			break
+		}
+	}
+	if y < 0 {
+		t.Fatalf("no mysql row on screen:\n%s", strings.Join(painted, "\n"))
+	}
+	liveClick(app, x, y)
+	select {
+	case ans := <-answered:
+		if len(ans.Labels) != 1 || ans.Labels[0] != "mysql" {
+			t.Fatalf("the click answered %+v, want mysql", ans)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("a click through the UI loop did not answer the card:\n%s", screenText(scr))
+	}
+	if app.AskPending() {
+		t.Fatal("the card must close once the click answered it")
 	}
 }
