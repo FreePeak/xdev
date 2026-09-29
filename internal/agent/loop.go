@@ -221,6 +221,20 @@ const maxEmptyTurnRecoveries = 3
 // budget, because a turn that does holds the session's single turn claim
 // (cmd/xdev/tui.go's `running`) and every later submit is refused with
 // "a turn is already running" — the wedged session in the same report.
+//
+// 12, and not the 90 minutes the live measurement below implies. One round
+// is not one attempt: it is a full bounded ladder (MaxRetries+1 calls) and
+// each call now waits out the stream watchdog's FirstProgressTimeout when
+// the host accepts and then goes silent. 12 rounds x 5 calls x 90s is ~90
+// minutes of a wedged TUI before the turn gives up — measured live on
+// 2026-09-29 against a gateway that accepts the connection and never
+// answers, where the first round alone outlived a 128-second observation
+// window. The bound is honest but the unit is wrong: a ROUND count cannot
+// express a wall clock, and the session's real cost is a wedged TUI rather
+// than a slow one. ponytail: the upgrade path is a per-turn wall-clock
+// budget on oneTurnWithRecovery's context — there is still no WithTimeout
+// anywhere on the interactive turn path — not a smaller constant, which
+// would only shrink the outage an unattended run can survive.
 const maxSilentRecoveryRounds = 12
 
 // continuationBudget is how many retain-and-continue rounds a ladder may
@@ -1196,6 +1210,19 @@ func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duratio
 	}
 	if round != 1 && round%maxNoticeStride != 0 {
 		return
+	}
+	// A store with auto-persist enabled materializes on the first ASSISTANT
+	// message (internal/session/store.go's appendLocked) — so a run that
+	// never gets one, which is exactly the run this notice describes, wrote
+	// its notice into memory and lost it. That is the whole point of the
+	// record: it is the only thing a recovery loop leaves behind when there
+	// is no answer, and it has to be on disk. This is the same materialise-
+	// before-the-first-durable-fact move schedule.go:317 already makes.
+	if a.Store.Path() == "" && a.Store.AutoPath() != "" {
+		if _, err := a.Store.EnsureOnDisk(a.Store.AutoPath(), a.Store.Options()); err != nil {
+			logx.Errorf("persist recovery notice: materialize session: %v", err)
+			return
+		}
 	}
 	data := map[string]any{
 		"round":           round,
