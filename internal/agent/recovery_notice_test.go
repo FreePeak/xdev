@@ -252,3 +252,45 @@ func TestRecoveryNoticeSurvivesReopen(t *testing.T) {
 		t.Fatal("the recovery notice did not survive a reopen — the record is unreadable from the file")
 	}
 }
+
+// The live reproduction on 2026-09-29 caught the case every other test
+// missed: a run whose only writes ARE recovery notices produced NO session
+// file at all. internal/session's store materialises on disk at the first
+// ASSISTANT message (appendLocked), and a run that never gets one — which is
+// exactly the run this notice describes — appended into memory and lost
+// everything. So the notice has to materialise the session itself, the same
+// move schedule.go:317 makes before its first durable fact.
+//
+// This test uses OpenMem + EnableAutoPersist, which is what print mode does
+// (cmd/xdev/print.go), so it reproduces the live shape rather than a
+// pre-materialised store.
+func TestRecoveryNoticeMaterialisesAnUnstartedSession(t *testing.T) {
+	down := fakeScript{err: errors.New("connection refused")}
+	calls := make([]fakeScript, 8)
+	for i := range calls {
+		calls[i] = down
+	}
+	st := session.OpenMem("/proj", "unstarted")
+	st.EnableAutoPersist(filepath.Join(t.TempDir(), "auto.jsonl"), session.Options{})
+	if st.Path() != "" {
+		t.Fatal("precondition: the store must not be on disk yet")
+	}
+	p := &fakeProvider{calls: calls}
+	hooks := TurnHooksFunc{
+		OnMessageEndF:    func(m *ai.Message) { _ = st.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = st.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Hooks: hooks, Store: st}
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}},
+	}); err == nil {
+		t.Fatal("a host that never answers must end the turn with an error")
+	}
+	if st.Path() == "" {
+		t.Fatal("a run that only wrote recovery notices left NO session file: the record the whole feature exists for was in memory only")
+	}
+	if n := len(customNotices(t, st, "recovery_all_targets_down")); n == 0 {
+		t.Fatal("the notice is not readable from the materialised store")
+	}
+}
