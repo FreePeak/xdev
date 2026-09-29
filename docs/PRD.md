@@ -1325,3 +1325,59 @@ The fix is one change: **the load pass reads every file in the chain and lets th
 Mutation-verified against the pre-merge load loop: restoring the `break` fails `TestLoadContextFilesNeverStarvesTheClosestFile`. With the fix, a 98 KB global rulebook plus a small repo file renders **402 bytes carrying the repository's rules plus a marker naming the dropped global path**; previously 32,871 bytes with the rule absent and nothing said. All five #477 cases still pass, and the rendered block is byte-identical to #477 for any chain that fits the budget.
 
 Measured, and deliberately not fixed here: this repo's assembled prompt is ~7,748 tokens against PRD §1 Goal 4's 1,000 — chain ~3,655, rulebook ~1,677, skills ~1,436, base ~476, tools ~500. Three separate budgets; the chain is one of them and this change makes it *correct*, not smaller. Getting the total under goal is a deliberate PRD decision rather than a follow-up bug, because the alternative is deleting rules a developer wrote — and the marker makes today's behaviour honest instead of silent.
+
+---
+
+## 8. Issue re-verification (2026-09-30)
+
+§7 triaged at `3c44ec5`. This pass re-triages every issue still open against
+`origin/main` @ `014e759` (#480, #482, #483 merged since) — 182 open issues, each read against
+the code, not the PRD and not the commit that claims to fix it. Verdicts: **0 done**, **60
+partial**, **122 open**. Nothing was closed, and the reason is the finding, not a failure to
+look: **the 25 PRs merged since §7 landed TUI and agent-loop work, and the seams those 25 PRs
+touched have open issues filed against them — but no PR's own scope came close to satisfying
+one issue's acceptance list.**
+
+### 8.1 The evidence rule that produced the zero
+
+An issue closes when its stated acceptance criteria are met. Every one of the 60 partials has
+at least one criterion with a repo-wide zero-hit search behind it, and the four closest calls
+were re-adjudicated by a second pass instructed to argue for `done`:
+
+- **#369** (the smallest gap: drop a mutable package-level `var`). The injection seam landed
+  (`internal/typesafe/eval.go:63-78`), but `var baseURL = defaultBaseURL` (`:20`) and its
+  fallback (`:99`) are still there and tests still swap the global (`eval_test.go:102-104`).
+  The issue's ask was to *remove* it.
+- **#96** (lsp ops). `rename` and `code_actions` landed report-only, which is a deliberate
+  no-write contract (`internal/lsp/tool.go:93-98`), but `rename_file`/`reload`/`status` —
+  named in the scope line — do not exist (`:63` lists 8 ops).
+- **#221** (print-mode flags). All four acceptance criteria are keyed to `--session-id`,
+  `--disable-slash-commands` and `--no-session-persistence`; none of the three exists.
+- **#287** (per-result timestamps). `DurationMS` is stamped per result
+  (`internal/agent/loop.go:1754`, `toolResultMsg` at `:1923`), but the store still stamps the envelope at append time
+  (`internal/session/store.go:603`), so the issue's own acceptance
+  (`toolResult.ts − assistant.ts >= bubble duration`) still fails.
+
+### 8.2 The 21 that §7 called `open` and are actually `partial`
+
+Work landed without the issue being re-read: #116 #134 #138 #145 #151 #152 #153 #161 #172
+#175 #180 #181 #186 #221 #226 #228 #233 #261 #263 #318 #424. The two that matter most are
+**#161** (P0 — the protected-path floor now refuses Edit/Write to harness state, `internal/tool/integrity.go:102`,
+wired at `write.go:81` and `edit.go:227`, with `TestHarnessWritersAreUnaffected` proving the
+harness's own writers still round-trip; it is still `partial` because the floor is *not* on
+`read` or `bash`, and a quoted `$( )` stays opaque to the matcher) and **#263** (post-edit
+diagnostics — PR #432 shipped parse-error reporting, not the `lsp.onEdit` setting the issue
+names, so the write-path feedback loop is still model-pull only).
+
+### 8.3 Two superseded facts worth recording
+
+- **#242** moves from `partial` to `open`: CI does not exist at all. `ci.yml` was deleted in
+  `d3c8856` (2026-09-15, billing — "a red X that means billing is worse than no X"), so
+  there is no `ubuntu-latest` leg to add a macOS leg to. The issue's second resolution arm is
+  the live one, and it is now factually satisfied: a sweep of all 182 open issues finds **zero**
+  that still claims two-host gate coverage.
+- The §7 P0 pair (#81 prompt-injection scanning, #161) both survive re-verification intact:
+  `grep -rn untrusted_tool_result internal/ cmd/ --include=*.go` → 0 hits, `LoadContextFiles`
+  still injects verbatim (`internal/agent/prompt.go:429-433`).
+
+*Last updated: 2026-09-30 (issue re-verification): all 182 open issues re-read against `origin/main` @ `014e759`; 0 closable, 60 partial (21 of them newly identified), 122 open, and CI's absence recorded against #242.*
