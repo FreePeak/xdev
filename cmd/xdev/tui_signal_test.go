@@ -52,6 +52,13 @@ func TestGuardRestoresThenDiesOnSignal(t *testing.T) {
 		{name: "hangup", sig: syscall.SIGHUP},
 		{name: "terminate", sig: syscall.SIGTERM},
 		{name: "after-stop", sig: syscall.SIGTERM, never: true, mode: "stopped"},
+		// Job control, not the SUSP character. A TUI started as a background
+		// job takes SIGTTOU from the kernel inside tcell's Init (its
+		// tcsetattr), and the stop lands before the guard is armed — the
+		// session 6917d52f shape, where the terminal was left raw with the
+		// alt screen up and the process in state T.
+		{name: "tty-output", sig: syscall.SIGTTOU, stop: true},
+		{name: "tty-input", sig: syscall.SIGTTIN, stop: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mark := filepath.Join(t.TempDir(), "restored")
