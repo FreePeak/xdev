@@ -400,6 +400,10 @@ type CommandAPI interface {
 	// Trajectory is /trajectory: the session's event ledger, opened as a
 	// modal list where a row's inspector shows the record's full body.
 	Trajectory() error
+	// Usage is /usage: the session's token, time and tool-call report, in
+	// the long form the status row has no width for (cache hit rate, an
+	// average TTFT, the tool-call count).
+	Usage() error
 	// AutoAnswer is /auto-answer [yes|no]: the ask card's answer policy,
 	// off by default (an unanswered question waits for the human).
 	AutoAnswer(args string) error
@@ -478,6 +482,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
 		{Name: "auto-answer", Aliases: []string{"autoanswer"}, Description: "ask card policy: /auto-answer yes|no (bare toggles; off = an unanswered question waits for you)",
 			Fn: func(app CommandAPI, args string) error { return app.AutoAnswer(args) }},
+		{Name: "usage", Description: "session token, time and tool-call report",
+			Fn: func(app CommandAPI, args string) error { return app.Usage() }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear, plus queue|sync|enqueue (mnemopi) and diagnose|enqueue (hindsight)",
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",

@@ -39,6 +39,21 @@ type Status struct {
 	// the split the glyphs claim instead of one half of it.
 	TokensCache int64
 	TokensThink int64
+	// ToolCalls counts the tool calls this session opened, ToolErrors the
+	// ones that came back failed, and ToolWork the wall time they took.
+	// AddToolBlock counts a call, FinishTool settles it. These are the
+	// /usage panel's third block: the status row answers "how much", the
+	// panel answers "spent how long and on what".
+	ToolCalls  int
+	ToolErrors int
+	ToolWork   time.Duration
+	// LLMWork is the wall time the provider's own messages took
+	// (msg.DurationMS — request to last token, queue included), and
+	// TTFTCount/TTFTSum the turns' time-to-first-token so /usage can report
+	// an average instead of the last reading the status row shows.
+	LLMWork   time.Duration
+	TTFTSum   int64
+	TTFTCount int64
 	// Cost is the session spend in USD (0 when the provider reports none),
 	// CtxWindow the model's context window (0 = unknown) and Rate the last
 	// measured decode speed in output tokens/second (0 = never measured).
@@ -727,8 +742,12 @@ func (a *App) AddAssistantBlock(text string) {
 // saw. cmd flattens tool-specific Details into it so the transcript never has
 // to type-switch over another package's payload.
 type ToolOutcome struct {
-	Dur       string // formatted wall time, e.g. "70ms" ("" = unknown)
-	Exit      int    // process exit code; read only when HasExit
+	Dur string // formatted wall time, e.g. "70ms" ("" = unknown)
+	// Elapsed is Dur's raw value, for the /usage tool-time total: the string
+	// is one row's footer, and summing formatted strings is how a report ends
+	// up minutes off. 0 = the caller did not measure.
+	Elapsed   time.Duration
+	Exit      int // process exit code; read only when HasExit
 	HasExit   bool
 	Truncated bool
 	Diff      string // unified diff of the file change, when the tool made one
@@ -742,6 +761,10 @@ type ToolOutcome struct {
 // that pairs add and finish back to back (replay, bang mode).
 func (a *App) AddToolBlock(callID, name, rawArgs string) {
 	a.mu.Lock()
+	// The /usage report's "tool calls" line. A replayed history replays the
+	// same call, so this counts what the user watched, not what the
+	// provider billed (billing is the ↑⇢↓ counters' business).
+	a.st.ToolCalls++
 	a.blocks = append(a.blocks, &Block{
 		Kind: KindTool, CallID: callID, ToolName: name, Text: rawArgs,
 		Status: "running", Ts: time.Now(),
@@ -801,6 +824,12 @@ func (a *App) FinishTool(callID, name string, isErr bool, output string, out Too
 		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
 		Truncated: out.Truncated, Diff: out.Diff,
 	})
+	// /usage's "tool time": the calls' own wall time, one sample per
+	// finished call, counted whether the call succeeded or not.
+	if isErr {
+		a.st.ToolErrors++
+	}
+	a.st.ToolWork += out.Elapsed
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1078,10 +1107,43 @@ func (a *App) SetContextWindow(tokens int64) {
 // SetWork re-bases the HUD time segment with the work a session has already
 // banked. Wired by cmd when a store is adopted (/new, /drop, /resume, fork):
 // the turns already on disk were active time even though this process never
-// watched them happen.
+// watched them happen. It also re-bases /usage's own re-based counters, since
+// a replayed history is the only source of them.
 func (a *App) SetWork(d time.Duration) {
 	a.mu.Lock()
 	a.st.Work = max(d, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetLLMTime re-bases /usage's LLM time and average-TTFT from a rebuilt
+// history (/resume, /fork, tree navigation) the way SetWork re-bases the
+// timer. It REPLACES rather than adds: the replayed path measures the whole
+// adopted history in one call, and adding would double-count it.
+func (a *App) SetLLMTime(d time.Duration, ttftSum int64, ttftCount int64) {
+	a.mu.Lock()
+	a.st.LLMWork = max(d, 0)
+	a.st.TTFTSum = max(ttftSum, 0)
+	a.st.TTFTCount = max(ttftCount, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddLLMTime banks one finished provider request's wall time (msg.DurationMS
+// — request sent to last token, gateway queue included) and, when the turn
+// carried one, its time-to-first-token. /usage reports LLM time and the
+// average TTFT; the status row's ⚡ and ⌚ stay last-turn readings.
+//
+// 0 durations are ignored rather than added: a message persisted before
+// durations were recorded contributes nothing, which is what the replay path
+// already assumes when it banks work.
+func (a *App) AddLLMTime(dur time.Duration, ttftMS int64) {
+	a.mu.Lock()
+	a.st.LLMWork += max(dur, 0)
+	if ttftMS > 0 {
+		a.st.TTFTSum += ttftMS
+		a.st.TTFTCount++
+	}
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1567,6 +1629,9 @@ func (a *App) Reset() {
 	a.st.Rate = 0
 	a.st.TTFT = 0
 	a.st.CtxUsed = 0
+	a.st.ToolCalls, a.st.ToolErrors = 0, 0
+	a.st.ToolWork, a.st.LLMWork = 0, 0
+	a.st.TTFTSum, a.st.TTFTCount = 0, 0
 	a.closeWindow()
 	a.blocks = nil
 	a.thinkFocus = -1  // the focused box went with them
