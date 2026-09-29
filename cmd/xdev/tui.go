@@ -312,12 +312,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// the app exists, because a failed server is a startup fact the user has
 	// to read — and stderr is not readable under the alt screen (#272). The
 	// composer divider carries it like any other notice, and drops it after
-	// mcpNoticeGrace so a broken server stops shouting.
+	// mcpNoticeGrace so a broken server stops shouting. The last argument is
+	// the dock's: the MCP rows are painted ○ until the connect lands, and
+	// nothing else would repaint them the moment it does.
 	mgr := attachMCP(context.Background(), reg, false, func(msg string) {
 		app.SetNotice(msg, mcpNoticeGrace)
-	})
+	}, app.DockBump)
 	if mgr != nil {
-		reg.MCPNames = func() string { return mcpNameList(mgr) }
 		defer mgr.Close()
 	}
 	// showThinking drives the reasoning display (issue #20): the layered
@@ -931,18 +932,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// panel pinned to the session the process started with would show the
 		// old title — and the old id — for the rest of the run.
 		Session: func() (string, string) { return store.Title(), shortSessionID(store.ID()) },
-		// MCP is connected by attachMCP into reg; read from reg.MCPNames for
-		// the dock section. A nil manager means MCP is off and the section
-		// renders nothing — which also means MCPNames was never assigned, so
-		// the closure has to check it before calling. It did not: the panel is
-		// built on the first paint, so every run without MCP servers
-		// configured (the common case) took the whole TUI down with a
-		// nil-pointer panic before the first frame.
+		// MCP: attachMCP assigned reg.MCPBlock from the mcp.yml it loaded
+		// before this closure existed, so the section is the ENABLED server
+		// list — one row per name, ○ on the ones with no live session. The nil
+		// check stays: a registry with no MCP config at all (MCP off) never got
+		// the field, and the panel is built on the first paint.
 		MCP: func() string {
-			if reg.MCPNames == nil {
+			if reg.MCPBlock == nil {
 				return ""
 			}
-			return reg.MCPNames()
+			return reg.MCPBlock()
 		},
 		// The panel's one button row: the heading is the ledger's own count,
 		// read through `store` so /new, /resume and /fork move it with the

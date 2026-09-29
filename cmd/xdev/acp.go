@@ -61,7 +61,7 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	// `xdev acp` in the workspace, which is what session/new also asks for.
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
-	mgr := attachMCP(context.Background(), reg, false, nil)
+	mgr := attachMCP(context.Background(), reg, false, nil, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}

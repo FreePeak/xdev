@@ -30,7 +30,7 @@ func TestFailedMCPServerReportsToTheSinkNotStderr(t *testing.T) {
 		defer cancel()
 		// wait=true runs the connect inline, so the sink has fired by the time
 		// attachMCP returns and the test needs no polling.
-		if mgr := attachMCP(ctx, tool.NewRegistry(), true, func(msg string) { got = append(got, msg) }); mgr != nil {
+		if mgr := attachMCP(ctx, tool.NewRegistry(), true, func(msg string) { got = append(got, msg) }, nil); mgr != nil {
 			defer mgr.Close()
 		}
 	})

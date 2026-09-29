@@ -230,17 +230,6 @@ func (a *App) SetDockOps(ops DockOps) {
 // SetDockModeFunc wires the persistence of a policy the human changed with Alt+s
 // (settings `sidebarMode`). nil = a session that cannot persist it, which is every
 // non-TUI caller and every test.
-// dockMCLabel is the MCP section's body: one row per connected
-// server, "1 server" / "3 servers" in the heading, no rows when
-// nothing is configured.
-func dockMCLabel(raw string) (dockFold, bool) {
-	if raw == "" {
-		return dockFold{}, false
-	}
-	return dockFold{id: dockMCPID, title: dockClip("MCP · " + raw), max: dockListMax,
-			rows: []dockRow{{text: dockClip(raw)}}},
-		true
-}
 
 func (a *App) SetDockModeFunc(set func(mode string)) {
 	a.dockSetMode = set
