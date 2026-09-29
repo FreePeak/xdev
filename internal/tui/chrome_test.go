@@ -726,19 +726,19 @@ func TestAskCardDrawsQuestionAndOptions(t *testing.T) {
 	}
 }
 
-// TestAskCardFramesItselfLikeACardNotATranscriptBlock: the ask card is the one
-// surface that is neither the thinking block nor a tool result, and it has to
-// stop borrowing their look. Four things put it apart on screen, and each is a
-// frame the transcript's content blocks all share:
-// both rails, so the top and bottom rules begin on columns the body frames (the
-// card used to draw a vertical on the right only, which is what a half-scrolled
-// thinking block looks like); the human's accent on the rail rather than the dim
-// border slot the content boxes wear; a top rule with no hole in it, the label
-// set into the edge and the rule resuming the cell after it rather than one
-// further along; and a one-cell pad inside the left rail, because text flush to
-// the frame is what makes a frame look accidental instead of drawn.
-func TestAskCardFramesItselfLikeACardNotATranscriptBlock(t *testing.T) {
+// TestAskCardIsTheMainPaneNotAFullWidthOverlay: "the ask box has the 100%
+// width overlay to the sidebar". The card is a surface of the main pane in
+// opencode's shape, and three things say so at once: it ends at the pane's
+// right edge instead of the terminal's, it carries one ┃ rail down its left
+// edge rather than a ╭─╮ box, and that rail wears the human's accent, not the
+// dim border slot the framed transcript blocks wear. The box frame is the
+// defect: a thinking block and a tool result are exactly that shape, so a
+// boxed card read as one more of them as well as covering the panel.
+func TestAskCardIsTheMainPaneNotAFullWidthOverlay(t *testing.T) {
 	app, scr := drawnApp(t, 100, 30)
+	app.SetDockMode(DockShow)
+	app.SetDockOps(DockOps{Session: func() (string, string) { return "pane", "sess1234" }})
+	app.AddUserBlock("a prompt so the panel is on screen")
 	done := make(chan struct{})
 	go func() {
 		_, _ = app.AskCard(context.Background(), askOptions(), 5*time.Second)
@@ -748,49 +748,51 @@ func TestAskCardFramesItselfLikeACardNotATranscriptBlock(t *testing.T) {
 	app.draw()
 	rows := strings.Split(screenText(scr), "\n")
 	box := app.th.Box()
-	inset := strings.Repeat(" ", 2) // the card sits at x0=2, like every framed block
-	top, bottom := -1, -1
+	app.mu.Lock()
+	edge := app.rightEdge()
+	app.mu.Unlock()
+	if edge >= 100 {
+		t.Fatalf("the panel is not reserving columns (rightEdge=%d), nothing to prove", edge)
+	}
+	// The rail: one ┃ on the pane's gutter column, on every row the card
+	// paints, in the human's accent. Its first row is the identity line and its
+	// last is the key footer.
+	top := -1
 	for y, ln := range rows {
-		if top < 0 && strings.HasPrefix(ln, inset+box.TopLeft) {
+		if strings.Contains(ln, "? ask") {
 			top = y
-		}
-		if top >= 0 && bottom < 0 && strings.HasPrefix(ln, inset+box.BottomLeft) {
-			bottom = y
+			break
 		}
 	}
-	if top < 0 || bottom <= top {
-		t.Fatalf("card frame not found (top=%d bottom=%d):\n%s", top, bottom, screenText(scr))
+	if top < 0 {
+		t.Fatalf("the card is not on screen:\n%s", screenText(scr))
 	}
-	// The label is set into the top rule and the rule carries on unbroken to the
-	// right corner. The rule used to resume a cell past the label, leaving one
-	// blank cell in the middle of the top edge, and a frame with a hole in it
-	// reads as somebody else's block.
-	label := box.Horizontal + " ? ask"
-	topLine := rows[top]
-	at := strings.Index(topLine, label)
-	if at < 0 {
-		t.Fatalf("top rule has no %q label: %q", label, topLine)
-	}
-	// Screen columns, not byte offsets: every glyph in these rows is multi-byte.
-	right := width(topLine[:strings.LastIndex(topLine, box.TopRight)])
-	after := at + len(label)
-	if after > right || strings.Trim(topLine[after:], " "+box.Horizontal+box.TopRight) != "" {
-		t.Fatalf("top rule broken after the label: %q", topLine)
-	}
-	rail := boxRune(box.Vertical)
 	accent := app.cellColor(app.th.Get(theme.AccentUser))
-	for y := top + 1; y < bottom; y++ {
-		if r := []rune(rows[y]); r[3] != ' ' {
-			t.Fatalf("row %d has no pad inside the left rail: %q", y, rows[y])
+	bottom := top
+	for y := top; y < len(rows); y++ {
+		got, _, st, _ := scr.GetContent(1, y)
+		if got != '┃' {
+			break
 		}
-		for _, x := range []int{2, right} {
-			got, _, st, _ := scr.GetContent(x, y)
-			if got != rail {
-				t.Fatalf("row %d column %d is %q, want the card's rail %q:\n%s",
-					y, x, got, rail, screenText(scr))
-			}
-			if fg, _, _ := st.Decompose(); fg != accent {
-				t.Fatalf("row %d column %d rail is %v, want the human's accent %v", y, x, fg, accent)
+		if fg, _, _ := st.Decompose(); fg != accent {
+			t.Fatalf("row %d rail is %v, want the human's accent %v", y, fg, accent)
+		}
+		// No frame anywhere in the card: a ╭ or ╰ in a row is the old box
+		// back, and the rail is the whole of the card's chrome.
+		if strings.ContainsAny(rows[y], box.TopLeft+box.TopRight+box.BottomLeft+box.BottomRight) {
+			t.Fatalf("row %d paints a box corner: %q", y, rows[y])
+		}
+		bottom = y
+	}
+	if bottom <= top {
+		t.Fatalf("the rail spans one row only (top=%d bottom=%d):\n%s", top, bottom, screenText(scr))
+	}
+	// And the card stops at the pane's edge: nothing it paints reaches the
+	// panel's columns, which is the whole of the report.
+	for y := top; y <= bottom; y++ {
+		for x := edge; x < 100; x++ {
+			if ch, _, _, _ := scr.GetContent(x, y); ch != ' ' {
+				t.Fatalf("the card painted %q at x=%d y=%d, inside the panel", string(ch), x, y)
 			}
 		}
 	}
@@ -871,10 +873,10 @@ func TestAskCardWrapsLongOptionText(t *testing.T) {
 	}
 	col := width(row[:at])
 	for _, ln := range []string{cont, desc1, desc2} {
-		// The inset and the left rail are frame, not indentation, so a wrapped
-		// line's start is the first cell after them — trimming spaces alone
-		// would stop at the rail and measure the frame as content.
-		ind := width(ln) - width(strings.TrimLeft(ln, " "+app.th.Box().Vertical))
+		// The rail is frame, not indentation, so a wrapped line's start is the
+		// first cell after it — trimming spaces alone would stop at the rail and
+		// measure the frame as content.
+		ind := width(ln) - width(strings.TrimLeft(ln, " ┃"))
 		if ind != col {
 			t.Fatalf("wrapped line %.40q starts at cell %d, want %d:\n%s", ln, ind, col, text)
 		}

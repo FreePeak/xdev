@@ -227,7 +227,10 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		return nil, false
 	}
 	a.mu.Lock()
-	narrow := a.width < minAskCardWidth
+	// The pane, not the terminal: with the context panel open the card is a
+	// surface of the main pane, and a card the panel's columns cut through is
+	// the last thing still reading as a full-width overlay.
+	narrow := a.rightEdge() < minAskCardWidth
 	a.mu.Unlock()
 	if narrow {
 		// No room for the card: say the questions in the transcript and take
@@ -850,25 +853,30 @@ func clamp(v, lo, hi int) int {
 // composer's first input row). Topmost modal: draw() calls it last among the
 // overlays. Callers hold a.mu (draw does), so it must not re-lock: a card it
 // cannot paint resolves through the channel and the parked caller records why.
+//
+// The card is a surface of the MAIN PANE, in opencode's shape: one ┃ rail down
+// its left edge, no box around it. It used to draw a framed ╭─╮ card the
+// terminal's full width, so the context panel cut straight through the middle
+// of the question the human was answering — and a box frame is the transcript's
+// own look, since thinking blocks and tool results are exactly that. Width comes
+// from rightEdge(), so the card ends where the composer, the top bar and the
+// status row end.
 func (a *App) drawAskCard(yComposerTop int) {
 	st := a.ask
 	if st == nil || st.dead {
 		return
 	}
 	st.hit = askHit{}
-	w := a.width
+	w := a.rightEdge()
 	rows := st.rows()
 	// Publish the clamp the key path uses too, so a resize cannot leave the
 	// cursor and the highlight on different rows.
 	st.cur[st.q] = st.cursor(rows)
 
-	x0, x1 := 2, w-3 // border columns; content is cx..x1-1
-	inner := x1 - x0 - 1
-	// One pad cell in from the left rail, the way every other box in this
-	// house insets its text: a line flush against the frame is what makes a
-	// frame look accidental instead of drawn.
-	cx := x0 + 2
-	// One pad cell on the right too, so the body is inset from both rails.
+	// The rail takes the pane's own gutter column and the body starts two cells
+	// in from it, the same inset the transcript's rows carry, so nothing the
+	// card prints sits flush against its own frame.
+	railX, x1, cx := 1, w-2, 3
 	textW := x1 - cx - 1
 	qLines := askQuestionLines(st.reqs[st.q].Question, w-8)
 	tabs := 0
@@ -885,11 +893,11 @@ func (a *App) drawAskCard(yComposerTop int) {
 	painted := []askRowLine(nil)
 	body := len(st.reqs) + 1 // the answers, plus the line saying what Enter does
 	if !st.review {
-		painted = askRowWindow(st, rows, textW, yComposerTop-5-tabs-len(qLines)-msgRows)
+		painted = askRowWindow(st, rows, textW, yComposerTop-3-tabs-len(qLines)-msgRows)
 		body = len(qLines) + len(painted)
 	}
 	body += msgRows
-	height := 2 + tabs + body + 1 // borders, tabs, body, footer
+	height := 1 + tabs + body + 1 // the identity line, the tabs, the body, the footer
 	yTop := yComposerTop - 1 - height
 	// The card may overlap the composer's own top border row (like the other
 	// cards) but never its input rows. An unpaintable card closes: a modal that
@@ -905,63 +913,57 @@ func (a *App) drawAskCard(yComposerTop int) {
 		return
 	}
 
-	box := a.th.Box()
+	// The surface is the transcript's own canvas colour, so what the card covers
+	// still reads as the scrollback it interrupted. (opencode raises its
+	// background a step; a second plane here would fight the highlight band the
+	// card's own selected row already wears.)
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 	textSt := rowSt.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := textSt.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	selSt := textSt.Background(a.cellColor(a.th.Get(theme.BgHighlight))).Bold(true)
-	// The card's rail is the human's accent — the colour the user's own turn
-	// already wears (user-message prefix, prompt text, the msgmenu popup) — and
-	// not the dim border slot the framed content blocks wear. Thinking is
-	// magenta and a tool result is dark grey, and both sit in the scrollback as
-	// dim boxes: a card painted like one of them read as one more of them.
-	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
-	// Nothing the card prints reaches the right rail: the last cell before it
-	// stays blank, so a long option or footer ends at a column the eye reads
-	// as margin rather than as text jammed against the frame.
+	// The rail is the human's accent — the colour the user's own turn already
+	// wears (user-message prefix, prompt text, the msgmenu popup) — and not the
+	// dim border slot the framed content blocks wear. Thinking is magenta and a
+	// tool result is dark grey, and both sit in the scrollback behind a rail of
+	// their own: a card wearing theirs read as one more transcript block.
+	railSt := rowSt.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
+	// Nothing the card prints reaches the pane's edge: the last cell stays blank,
+	// so a long option or footer ends at a column the eye reads as margin rather
+	// than as text jammed against the frame.
 	paint := func(y, x int, s string, st0 tcell.Style) {
 		drawText(a.scr, x, y, truncateCells(s, x1-x-1, "…"), st0)
 	}
+	// One fill per row: the surface, then the rail on the pane's gutter column.
+	// The fill starts at column 0, so a transcript rail or a user band behind
+	// the card cannot show through beside it — a stray rail one cell left of
+	// the card's own is the doubled line a rail must never sit next to. The
+	// rail is the card's whole frame: no rule above or below it, so the card
+	// reads as a panel the turn stopped in, not a box in the scrollback.
 	fill := func(y int) {
-		for x := x0 + 1; x < x1; x++ {
+		for x := 0; x < x1; x++ {
 			a.scr.SetContent(x, y, ' ', nil, rowSt)
 		}
-	}
-	// Both rails, not just the right one. The card fills x0+1..x1-1 and drew a
-	// vertical only on the right, so the top and bottom rules began on a column
-	// no interior row framed: a box with a side missing is what a half-scrolled
-	// thinking or tool block looks like, which is the one thing this card must
-	// not look like.
-	edge := func(y int) {
-		drawText(a.scr, x0, y, box.Vertical, borderSt)
-		drawText(a.scr, x1, y, box.Vertical, borderSt)
+		drawText(a.scr, railX, y, "┃", railSt)
 	}
 
-	// Top border with the card's identity set into the rule, in the house
-	// boxTop shape: ╭─ ? ask · 1/2 ────…──╮. The question mark is the tell —
-	// no framed block in the transcript leads with one, and this card is the
-	// one surface where the turn is stopped on purpose, waiting for the human.
-	title := box.Horizontal + " ? ask"
+	y := yTop
+	// The card's identity, in opencode's place: a muted line at the top of the
+	// panel rather than a label set into a rule. The ? is the tell — no framed
+	// block in the transcript leads with one, and this is the one surface where
+	// the turn is stopped on purpose, waiting for the human.
+	title := "? ask"
 	if tabs > 0 {
 		title += fmt.Sprintf(" · %d/%d", st.q+1, len(st.reqs))
 	}
-	if st.review {
+	switch {
+	case st.review:
 		title += " · review"
-	} else if st.reqs[st.q].Multi {
+	case st.reqs[st.q].Multi:
 		title += " · multi"
 	}
-	title += " " // the pad boxTop puts between a label and the rule
-	fill(yTop)
-	drawText(a.scr, x0, yTop, box.TopLeft+title, borderSt)
-	// The rule resumes exactly where the label ended. Resuming at
-	// x0+2+width(title) left one blank cell in the middle of the top edge, and
-	// a frame with a hole in it reads as somebody else's block.
-	if pad := x1 - (x0 + 1 + width(title)); pad > 0 {
-		drawText(a.scr, x0+1+width(title), yTop, strings.Repeat(box.Horizontal, pad)+box.TopRight, borderSt)
-	} else {
-		drawText(a.scr, x1, yTop, box.TopRight, borderSt)
-	}
-	y := yTop + 1
+	fill(y)
+	paint(y, cx, title, dimSt)
+	y++
 
 	if tabs > 0 { // the question strip: one chip per tab, ✓ on the answered ones
 		fill(y)
@@ -981,7 +983,6 @@ func (a *App) drawAskCard(yComposerTop int) {
 			paint(y, x, name, style)
 			x += width(name) + 2
 		}
-		edge(y)
 		y++
 	}
 
@@ -1000,7 +1001,6 @@ func (a *App) drawAskCard(yComposerTop int) {
 			}
 			fill(y)
 			paint(y, cx, line, style)
-			edge(y)
 			st.hit.addRow(y, q)
 			y++
 		}
@@ -1010,12 +1010,10 @@ func (a *App) drawAskCard(yComposerTop int) {
 		}
 		fill(y)
 		paint(y, cx, note, dimSt)
-		edge(y)
 	} else {
 		for _, line := range qLines {
 			fill(y)
 			paint(y, cx, line, textSt.Bold(true))
-			edge(y)
 			y++
 		}
 		for _, pl := range painted {
@@ -1030,25 +1028,20 @@ func (a *App) drawAskCard(yComposerTop int) {
 			}
 			fill(y)
 			paint(y, cx, pl.text, style)
-			edge(y)
 			st.hit.addRow(y, pl.row)
 			y++
 		}
 		if st.msg != "" { // the one thing the human just did wrong, in one line
 			fill(y)
 			paint(y, cx, "  "+st.msg, textSt.Foreground(a.cellColor(a.th.Get(theme.AccentError))))
-			edge(y)
 			y++
 		}
 	}
 
-	// Footer: the keys that work on this screen, then the bottom border.
+	// Footer: the keys that work on this screen. No bottom rule — the rail
+	// runs the card's whole height and the footer is the last row of it.
 	fill(y)
 	paint(y, cx, a.askFooter(st, rows), textSt.Foreground(a.cellColor(a.th.Get(theme.Gray))))
-	edge(y)
-	y++
-	fill(y)
-	drawText(a.scr, x0, y, box.BottomLeft+strings.Repeat(box.Horizontal, inner)+box.BottomRight, borderSt)
 }
 
 // askFooter names the keys that work here, and only the ones that fit.
