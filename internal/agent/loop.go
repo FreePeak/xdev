@@ -1197,6 +1197,19 @@ func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duratio
 	if round != 1 && round%maxNoticeStride != 0 {
 		return
 	}
+	// A store with auto-persist enabled materializes on the first ASSISTANT
+	// message (internal/session/store.go's appendLocked) — so a run that
+	// never gets one, which is exactly the run this notice describes, wrote
+	// its notice into memory and lost it. That is the whole point of the
+	// record: it is the only thing a recovery loop leaves behind when there
+	// is no answer, and it has to be on disk. This is the same materialise-
+	// before-the-first-durable-fact move schedule.go:317 already makes.
+	if a.Store.Path() == "" && a.Store.AutoPath() != "" {
+		if _, err := a.Store.EnsureOnDisk(a.Store.AutoPath(), a.Store.Options()); err != nil {
+			logx.Errorf("persist recovery notice: materialize session: %v", err)
+			return
+		}
+	}
 	data := map[string]any{
 		"round":           round,
 		"delaySeconds":    int(delay.Round(time.Second) / time.Second),
