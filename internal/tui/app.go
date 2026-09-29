@@ -3047,7 +3047,19 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// argument as a phrase — never the raw JSON the model sent. While the
 		// call is in flight the bullet spins and the elapsed ticks; the
 		// settled wall time belongs to the result frame's footer.
-		name, detail := toolSummary(b, w)
+		//
+		// A phrase too long for the row WRAPS onto continuation rows instead
+		// of being cut with an ellipsis. It used to be clipped to the width:
+		// the one thing a user opens the transcript to read — the command —
+		// was the one thing it silently shortened, at an ellipsis in the
+		// middle of a long pipeline. The continuations are indented to where
+		// the phrase starts, so the command reads as one block hanging off
+		// the call, and each rendered row is its own selRow, so a drag over
+		// them copies the rows as painted (the same contract the wrapped
+		// user prompt has). Nothing here clips: a tool that names itself with
+		// megabytes of arguments is the model's bug, and it should be
+		// readable rather than quietly shortened.
+		name, detail := toolSummary(b)
 		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
@@ -3058,24 +3070,49 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		case "ok":
 			bullet, fg = "●", theme.AccentSuccess
 		}
-		ln := textline(bullet+" ", tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))))
-		ln.runs = append(ln.runs, cell{
-			text:  name,
-			style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true),
-		})
-		if detail != "" {
-			ln.runs = append(ln.runs, cell{
-				text:  " · " + detail,
-				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))),
-			})
-		}
+		bulletSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
+		nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
+		detailSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		// The phrase starts after the bullet, the name and its " · ", so that
+		// column is both where every continuation row indents to and the
+		// width the phrase is wrapped at. A name longer than the row itself
+		// pushes the indent past what fits — the max(10, …) floor below is
+		// the same idiom every other wrapping row here uses (a user prompt, a
+		// system notice): a terminal that narrow has no layout to keep.
+		indent := width(bullet+" ") + width(name) + width(" · ")
+		// The live elapsed rides the head row, so the wrap budget shrinks by
+		// its width: a row that runs one cell past the content width paints
+		// into the right edge (the dock's border, the scrollbar's track).
+		elapsed := ""
 		if b.Status == "running" && !b.Ts.IsZero() {
+			elapsed = "  " + humanDur(time.Since(b.Ts))
+		}
+		// A call with no arguments at all names nothing, so it renders as the
+		// name alone — segs stays empty and there is no continuation to walk.
+		var segs []string
+		if detail != "" {
+			segs = wrap(detail, max(10, w-indent-width(elapsed)))
+		}
+		ln := textline(bullet+" ", bulletSt)
+		ln.runs = append(ln.runs, cell{text: name, style: nameSt})
+		if len(segs) > 0 {
+			ln.runs = append(ln.runs, cell{text: " · " + segs[0], style: detailSt})
+		}
+		if elapsed != "" {
 			ln.runs = append(ln.runs, cell{
-				text:  "  " + humanDur(time.Since(b.Ts)),
+				text:  elapsed,
 				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))),
 			})
 		}
 		lines = append(lines, ln)
+		for i, seg := range segs {
+			if i == 0 {
+				continue // the head already sits after the name
+			}
+			cont := textline(strings.Repeat(" ", indent), nameSt)
+			cont.runs = append(cont.runs, cell{text: seg, style: detailSt})
+			lines = append(lines, cont)
+		}
 		// A `task` call's children, one dim row each. They read as
 		// continuations of the row above (a `⎿` tick and an indent), not
 		// as sibling tool calls, and they are the only place a user can
