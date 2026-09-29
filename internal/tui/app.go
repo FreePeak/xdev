@@ -2107,6 +2107,18 @@ func (a *App) Run() {
 			if ev == nil {
 				return
 			}
+			// A tty read error is terminal, and only here: tcell's
+			// inputLoop posts one EventError and returns, so nothing will
+			// ever be read from the terminal again (tscreen.go). Polling on
+			// would leave the UI alive and deaf — no key, no resize, no
+			// quit chord, with the tty still in raw mode and the alt
+			// screen up. Leaving the loop instead lets runTUI's defers
+			// restore the terminal; the user relaunches.
+			if e, ok := ev.(*tcell.EventError); ok {
+				logx.Errorf("tui: terminal read failed, leaving the UI loop: %v", e)
+				a.Quit()
+				return
+			}
 			select {
 			case a.keyq <- ev:
 			case <-a.quitCh:

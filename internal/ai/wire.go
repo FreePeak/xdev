@@ -32,9 +32,46 @@ var wireHTTPClient = &http.Client{
 	},
 }
 
-// wirePost builds and sends one streaming POST. It returns the 2xx response,
+// wirePost builds and sends one streaming POST. It returns the 2x response,
 // or a descriptive pre-flight error (status plus up to 4 KiB of body).
+//
+// The header phase is bounded HERE rather than on the transport. Two
+// clients reach this function — the shared one (wireHTTPClient, which
+// carries ResponseHeaderTimeout: 5m) and the one buildProvider constructs
+// per provider (cmd/xdev/print.go), which had no timeout at all — and the
+// live reproduction on 2026-09-29 found the gap: a gateway that accepts
+// the connection and then never answers held a print run open indefinitely
+// (killed at 210s and again at 195s, zero records written), because the
+// 90s stream watchdog only starts AFTER this returns, and the per-provider
+// client had nothing bound above it. One budget here covers both clients
+// and lands the expiry at the stream watchdog's own FirstProgressTimeout,
+// so "the host said nothing" becomes one 90s wait rather than a
+// transport-dependent 90s or 5m or forever.
+//
+// The budget lives in wirePostWithTimeout, one function down, for a reason
+// found the hard way: cancelHeader MUST NOT run once the headers are in,
+// because the adapter reads resp.Body from that same context for the rest
+// of the stream. A `defer cancelHeader()` here — the obvious shape — killed
+// every healthy stream the moment its headers arrived: all the
+// openai_*/google_*/responses_* happy-path tests read `context canceled`.
+// The split is what lets go vet's lostcancel keep checking a function that
+// DOES call its cancel on every path, rather than a per-callsite nolint
+// that would teach the check to ignore a real leak.
+//
+// ponytail: not cancelling on success costs one live timer per long-lived
+// stream, freed when the parent context (which every adapter cancels at
+// stream end) goes away. The upgrade path, if that ever shows up, is a
+// per-provider override rather than a larger constant here.
 func wirePost(ctx context.Context, hc *http.Client, url string, headers map[string]string, body []byte, api string) (*http.Response, error) {
+	return wirePostWithTimeout(ctx, hc, url, headers, body, api, FirstProgressTimeout)
+}
+
+// wirePostWithTimeout is wirePost with an explicit header budget, which is
+// what lets a test shrink it without a 90s sleep. The budget is armed on
+// the request's own context and released on every path this function owns
+// except the success path, where the response body is read from that same
+// context afterwards.
+func wirePostWithTimeout(ctx context.Context, hc *http.Client, url string, headers map[string]string, body []byte, api string, headerBudget time.Duration) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: build request: %w", api, err)
@@ -44,7 +81,37 @@ func wirePost(ctx context.Context, hc *http.Client, url string, headers map[stri
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := hc.Do(req)
+	// The bound goes on a CLONED transport, not on a context, and that is the
+	// only shape that works here. Two earlier attempts failed and both
+	// failures are worth keeping in the record:
+	//
+	//  - `defer cancelHeader()` on a context.WithTimeout: the adapter reads
+	//    resp.Body from that same context for the rest of the stream, so this
+	//    killed every healthy stream the moment its headers arrived. All the
+	//    openai_*/google_*/responses_* happy-path tests read
+	//    `context canceled`.
+	//  - not cancelling on success, to dodge that: go vet's lostcancel then
+	//    fires (and would have to be silenced per-callsite, teaching the
+	//    check to ignore a real leak).
+	//
+	// Transport.ResponseHeaderTimeout is the purpose-built mechanism: it
+	// bounds the header wait and leaves the body unbounded, which is exactly
+	// the split wanted here, with no cancel to own. The headers are set
+	// BEFORE the clone, because arming first made the recorded Authorization
+	// header come back EMPTY on the google/vertex and azure tests — the extra
+	// context wrapper raced the transport's retry-on-a-closed-pooled-
+	// connection path, which re-issues the request and found a header map
+	// that no longer carried the token.
+	budgeted, ok := withHeaderBudget(hc, headerBudget)
+	if !ok {
+		// A custom RoundTripper (tests, and any future caller) cannot be
+		// cloned into a header timeout. The stream watchdog still bounds the
+		// body; the header wait is this transport's own business. ponytail:
+		// the ceiling is unchanged for that case, not a new hazard — upgrade
+		// path is a wrapper RoundTripper if a real caller ever needs it.
+		budgeted = hc
+	}
+	resp, err := budgeted.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", api, err)
 	}
@@ -53,6 +120,30 @@ func wirePost(ctx context.Context, hc *http.Client, url string, headers map[stri
 		return nil, &HTTPError{API: api, Status: resp.StatusCode, Body: wireErrBody(resp.Body)}
 	}
 	return resp, nil
+}
+
+// withHeaderBudget returns a client whose transport bounds the response
+// header wait to d, leaving the body read unbounded. It reports false when
+// the transport is not an *http.Transport and cannot be cloned into that
+// shape — the caller then uses the client unchanged.
+//
+// Clone() rather than mutating hc: the shared wireHTTPClient is package
+// state used by every adapter, and a per-request mutation would be a data
+// race between concurrent streams.
+func withHeaderBudget(hc *http.Client, d time.Duration) (*http.Client, bool) {
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok {
+		if hc.Transport == nil {
+			tr = nil // http.DefaultTransport underneath; clone nil as the zero value
+		} else {
+			return nil, false
+		}
+	}
+	clone := tr.Clone()
+	clone.ResponseHeaderTimeout = d
+	out := *hc
+	out.Transport = clone
+	return &out, true
 }
 
 // wireErrBody reads up to 4 KiB of an error body and flattens it to one line.
@@ -165,7 +256,6 @@ func healthCheckOneGet(ctx context.Context, hc *http.Client, url string, headers
 	defer resp.Body.Close()
 	return nil
 }
-
 
 // cleanUTF8 keeps only valid UTF-8 runes and drops U+FFFD. A vendor that
 // splices invalid bytes into its SSE JSON (or already substitutes U+FFFD

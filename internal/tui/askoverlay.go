@@ -862,8 +862,14 @@ func (a *App) drawAskCard(yComposerTop int) {
 	// cursor and the highlight on different rows.
 	st.cur[st.q] = st.cursor(rows)
 
-	x0, x1 := 2, w-3 // border columns; content is x0+1..x1-1
+	x0, x1 := 2, w-3 // border columns; content is cx..x1-1
 	inner := x1 - x0 - 1
+	// One pad cell in from the left rail, the way every other box in this
+	// house insets its text: a line flush against the frame is what makes a
+	// frame look accidental instead of drawn.
+	cx := x0 + 2
+	// One pad cell on the right too, so the body is inset from both rails.
+	textW := x1 - cx - 1
 	qLines := askQuestionLines(st.reqs[st.q].Question, w-8)
 	tabs := 0
 	if len(st.reqs) > 1 {
@@ -879,7 +885,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 	painted := []askRowLine(nil)
 	body := len(st.reqs) + 1 // the answers, plus the line saying what Enter does
 	if !st.review {
-		painted = askRowWindow(st, rows, inner, yComposerTop-5-tabs-len(qLines)-msgRows)
+		painted = askRowWindow(st, rows, textW, yComposerTop-5-tabs-len(qLines)-msgRows)
 		body = len(qLines) + len(painted)
 	}
 	body += msgRows
@@ -904,19 +910,38 @@ func (a *App) drawAskCard(yComposerTop int) {
 	textSt := rowSt.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := textSt.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	selSt := textSt.Background(a.cellColor(a.th.Get(theme.BgHighlight))).Bold(true)
-	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	// The card's rail is the human's accent — the colour the user's own turn
+	// already wears (user-message prefix, prompt text, the msgmenu popup) — and
+	// not the dim border slot the framed content blocks wear. Thinking is
+	// magenta and a tool result is dark grey, and both sit in the scrollback as
+	// dim boxes: a card painted like one of them read as one more of them.
+	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
+	// Nothing the card prints reaches the right rail: the last cell before it
+	// stays blank, so a long option or footer ends at a column the eye reads
+	// as margin rather than as text jammed against the frame.
 	paint := func(y, x int, s string, st0 tcell.Style) {
-		drawText(a.scr, x, y, truncateCells(s, x1-x, "…"), st0)
+		drawText(a.scr, x, y, truncateCells(s, x1-x-1, "…"), st0)
 	}
 	fill := func(y int) {
 		for x := x0 + 1; x < x1; x++ {
 			a.scr.SetContent(x, y, ' ', nil, rowSt)
 		}
 	}
-	edge := func(y int) { drawText(a.scr, x1, y, box.Vertical, borderSt) }
+	// Both rails, not just the right one. The card fills x0+1..x1-1 and drew a
+	// vertical only on the right, so the top and bottom rules began on a column
+	// no interior row framed: a box with a side missing is what a half-scrolled
+	// thinking or tool block looks like, which is the one thing this card must
+	// not look like.
+	edge := func(y int) {
+		drawText(a.scr, x0, y, box.Vertical, borderSt)
+		drawText(a.scr, x1, y, box.Vertical, borderSt)
+	}
 
-	// Top border with the card's identity embedded: ╭─ ask · 1/2 ────…──╮
-	title := " ask"
+	// Top border with the card's identity set into the rule, in the house
+	// boxTop shape: ╭─ ? ask · 1/2 ────…──╮. The question mark is the tell —
+	// no framed block in the transcript leads with one, and this card is the
+	// one surface where the turn is stopped on purpose, waiting for the human.
+	title := box.Horizontal + " ? ask"
 	if tabs > 0 {
 		title += fmt.Sprintf(" · %d/%d", st.q+1, len(st.reqs))
 	}
@@ -925,10 +950,14 @@ func (a *App) drawAskCard(yComposerTop int) {
 	} else if st.reqs[st.q].Multi {
 		title += " · multi"
 	}
+	title += " " // the pad boxTop puts between a label and the rule
 	fill(yTop)
 	drawText(a.scr, x0, yTop, box.TopLeft+title, borderSt)
-	if pad := inner - width(title); pad > 0 {
-		drawText(a.scr, x0+2+width(title), yTop, strings.Repeat(box.Horizontal, pad)+box.TopRight, borderSt)
+	// The rule resumes exactly where the label ended. Resuming at
+	// x0+2+width(title) left one blank cell in the middle of the top edge, and
+	// a frame with a hole in it reads as somebody else's block.
+	if pad := x1 - (x0 + 1 + width(title)); pad > 0 {
+		drawText(a.scr, x0+1+width(title), yTop, strings.Repeat(box.Horizontal, pad)+box.TopRight, borderSt)
 	} else {
 		drawText(a.scr, x1, yTop, box.TopRight, borderSt)
 	}
@@ -936,7 +965,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 
 	if tabs > 0 { // the question strip: one chip per tab, ✓ on the answered ones
 		fill(y)
-		x := x0 + 2
+		x := cx
 		for q := range st.reqs {
 			name, style := st.name(q), textSt
 			if st.summary(q) != "" {
@@ -970,7 +999,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 				line, style = line+"(no answer)", dimSt
 			}
 			fill(y)
-			paint(y, x0+1, line, style)
+			paint(y, cx, line, style)
 			edge(y)
 			st.hit.addRow(y, q)
 			y++
@@ -980,12 +1009,12 @@ func (a *App) drawAskCard(yComposerTop int) {
 			note = "Enter answers " + st.name(q) + " · ↑/↓ pick · Esc back"
 		}
 		fill(y)
-		paint(y, x0+1, note, dimSt)
+		paint(y, cx, note, dimSt)
 		edge(y)
 	} else {
 		for _, line := range qLines {
 			fill(y)
-			paint(y, x0+1, line, textSt.Bold(true))
+			paint(y, cx, line, textSt.Bold(true))
 			edge(y)
 			y++
 		}
@@ -1000,14 +1029,14 @@ func (a *App) drawAskCard(yComposerTop int) {
 				style = dimSt
 			}
 			fill(y)
-			paint(y, x0+1, pl.text, style)
+			paint(y, cx, pl.text, style)
 			edge(y)
 			st.hit.addRow(y, pl.row)
 			y++
 		}
 		if st.msg != "" { // the one thing the human just did wrong, in one line
 			fill(y)
-			paint(y, x0+1, "  "+st.msg, textSt.Foreground(a.cellColor(a.th.Get(theme.AccentError))))
+			paint(y, cx, "  "+st.msg, textSt.Foreground(a.cellColor(a.th.Get(theme.AccentError))))
 			edge(y)
 			y++
 		}
@@ -1015,7 +1044,7 @@ func (a *App) drawAskCard(yComposerTop int) {
 
 	// Footer: the keys that work on this screen, then the bottom border.
 	fill(y)
-	paint(y, x0+1, a.askFooter(st, rows), textSt.Foreground(a.cellColor(a.th.Get(theme.Gray))))
+	paint(y, cx, a.askFooter(st, rows), textSt.Foreground(a.cellColor(a.th.Get(theme.Gray))))
 	edge(y)
 	y++
 	fill(y)

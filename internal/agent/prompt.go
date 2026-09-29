@@ -375,39 +375,136 @@ func LoadContextFiles(cwd string) string {
 	}
 	files = append(files, chain...)
 
-	var b strings.Builder
-	total := 0
+	// Two passes, because the chain runs root→cwd and precedence runs the
+	// other way: the CWD's own rules override its ancestors, so when the byte
+	// budget cannot hold everything it must cost the broadest file, not the
+	// closest one. The pre-fix loop walked in order and `break`ed when the
+	// budget ran out, which dropped the tail — the most specific rules — and
+	// kept every generic rule above them, so an overflowing chain injected
+	// the least relevant content it had.
+	loaded := make([]contextFile, 0, len(files))
+	used := 0
 	seen := map[string]bool{}
 	for _, p := range files {
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		remaining := MaxContextBytes - total
-		content := expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen)
-		content = strings.TrimSpace(content)
+		remaining := MaxContextBytes - used
+		if remaining < MinContextFileBytes {
+			break // out of budget; the fit pass below decides what survives
+		}
+		content := strings.TrimSpace(expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen))
 		if content == "" {
 			continue
 		}
-		remaining = MaxContextBytes - total
-		if remaining < 256 {
-			break // no useful budget left; skip further files entirely
-		}
-		if len(content) > remaining {
-			content = string([]rune(content)[:len([]rune(strings.TrimSpace(content[:remaining])))]) + "\n… [truncated]"
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n---\n\n")
-		}
-		if !strings.HasPrefix(p, cwd) {
-			fmt.Fprintf(&b, "## Global conventions (%s)\n\n", p)
-		} else {
-			fmt.Fprintf(&b, "## %s\n\n", p)
-		}
-		b.WriteString(content)
-		total += len(content)
+		loaded = append(loaded, contextFile{path: p, content: content})
+		used += len(content)
 	}
-	return b.String()
+
+	// Fit pass, most specific first: keep a file only if it still fits what
+	// the more specific files already claimed. A skipped ancestor does not
+	// end the walk — a small root file that fits is worth more than nothing.
+	keep := make([]bool, len(loaded))
+	kept := 0
+	for i := len(loaded) - 1; i >= 0; i-- {
+		if kept+len(loaded[i].content) > MaxContextBytes {
+			continue
+		}
+		keep[i] = true
+		kept += len(loaded[i].content)
+	}
+	// The closest file is the floor. If it alone overruns the budget it is
+	// still injected, truncated: dropping it would leave the session holding
+	// only the ancestors' rules, which is the same inversion one level down.
+	// How much it can keep is settled after rendering, because the budget
+	// covers the whole block — marker, headings and separators included —
+	// and those are not known until the marker text is.
+	truncated := false
+	if n := len(loaded); n > 0 && !keep[n-1] {
+		keep[n-1] = true
+		truncated = true
+	}
+
+	render := func() string {
+		var b strings.Builder
+		// The marker is the contract. The block is headed as the
+		// repository's binding rules, and a silently-shortened list would
+		// make that a lie the model cannot detect; naming the dropped paths
+		// turns an invisible gap into a `read` it can close.
+		var omitted []string
+		for i, f := range loaded {
+			if !keep[i] {
+				omitted = append(omitted, f.path)
+			}
+		}
+		if len(omitted) > 0 || truncated {
+			b.WriteString("## Rules budget reached\n\n")
+			if truncated {
+				fmt.Fprintf(&b, "The closest rules file is over the %d-byte budget and is truncated below. ", MaxContextBytes)
+			}
+			if len(omitted) > 0 {
+				fmt.Fprintf(&b, "%d of %d rules files were dropped to stay within it: %s. ",
+					len(omitted), len(loaded), strings.Join(omitted, ", "))
+			}
+			b.WriteString("The most specific rules present are kept in full and broader ancestors were dropped first, so this list is incomplete — read an omitted path before relying on rules it may carry.\n\n")
+		}
+		rendered := false
+		for i, f := range loaded {
+			if !keep[i] {
+				continue
+			}
+			if rendered {
+				b.WriteString("\n\n---\n\n")
+			}
+			if !strings.HasPrefix(f.path, cwd) {
+				fmt.Fprintf(&b, "## Global conventions (%s)\n\n", f.path)
+			} else {
+				fmt.Fprintf(&b, "## %s\n\n", f.path)
+			}
+			b.WriteString(f.content)
+			rendered = true
+		}
+		return b.String()
+	}
+	out := render()
+	if truncated {
+		// One correction pass: trimming to the full budget would still
+		// overrun once the marker and heading are counted, and a rules block
+		// that ignores its own budget is worse than no budget at all.
+		if over := len(out) - MaxContextBytes; over > 0 {
+			last := loaded[len(loaded)-1]
+			loaded[len(loaded)-1].content = trimToBytes(last.content, len(last.content)-over)
+			out = render()
+		}
+	}
+	return out
+}
+
+// MinContextFileBytes is the budget below which expanding another rules file
+// is pointless: a sliver of a file carries no instruction the model can act
+// on, and a half-sentence rule is worse than a missing one.
+const MinContextFileBytes = 256
+
+// contextFile is one rules file rendered into the prompt.
+type contextFile struct {
+	path    string
+	content string
+}
+
+// trimToBytes cuts s to at most n bytes without splitting a rune.
+func trimToBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimRight(s[:cut], " \t\n") + "\n… [truncated]"
 }
 
 // Per-rule and total prompt caps for injected rules (issue #31): a

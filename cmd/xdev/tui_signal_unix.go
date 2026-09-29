@@ -21,17 +21,26 @@ import (
 // restore the terminal first, then die on the signal it was sent, so the shell
 // still reports a job-control stop instead of a silent disappearance.
 //
-// SIGTSTP is the one that matters most. tcell clears ISIG, so the TUI owns the
-// only way to stop itself, and Ctrl-Z during a long tool call is exactly when
-// a user reaches for it. SIGWINCH is deliberately absent: tcell installs its
-// own handler for it (tty_unix.go) and a second Notify would starve the screen
-// of resize events.
+// SIGTTOU and SIGTTIN are two more ways out, and the pair a background launch
+// reaches. They are not the SUSP character: a background process group gets
+// SIGTTOU from the kernel the moment it calls tcsetattr, and tcell calls that
+// inside Init() — so a TUI started as a background job (`xdev &`, a stray
+// `&` in a script) is stopped during Init, before this guard is even armed.
+// The default disposition is to STOP, and stopping runs no defer, so the
+// terminal stays raw and the alt screen stays up. SIGTTIN is the read-side
+// twin. Both are handled exactly like SIGTSTP: restore, then die on the
+// signal.
+//
+// SIGWINCH is deliberately absent: tcell installs its own handler for it
+// (tty_unix.go) and a second Notify would starve the screen of resize
+// events.
 func watchTerminalRoutes(fini func()) (stop func()) {
 	sigs := make(chan os.Signal, 4)
 	// On a platform without these (Windows has no SIGTSTP/SIGHUP) Notify
 	// accepts them silently and simply never fires, so the guard degrades to
 	// inert rather than fake: the terminal stays as-is, as it did before.
-	signal.Notify(sigs, syscall.SIGTSTP, syscall.SIGHUP, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGTSTP, syscall.SIGHUP, syscall.SIGTERM,
+		syscall.SIGTTOU, syscall.SIGTTIN)
 	done := make(chan struct{})
 	go func() {
 		for {
