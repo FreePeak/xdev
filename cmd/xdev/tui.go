@@ -2135,7 +2135,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		func(text string) { runTurn(text, nil) },
 		// Esc / Ctrl+C aborts the live turn only; see liveTurn. This handler
 		// used to call baseCancel(), which bricked every future turn after
-		// the first cancel while the TUI still looked alive.
+		// the first cancel while the TUI still looked alive. The quit chord
+		// also lands here (tui.App.quitOrCancel cancels first, then quits),
+		// so a turn that outlives the UI unwinds against this turn's own
+		// cancel — never baseCancel, which the defers below still own.
 		func() { turn.abort() },
 
 		func() { app.Quit() },
