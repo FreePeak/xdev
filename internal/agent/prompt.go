@@ -269,6 +269,35 @@ func expandImports(content, baseDir string, budget *int, seen map[string]bool) s
 	return expand(content, baseDir, 1)
 }
 
+// ProjectContextHeader precedes injected AGENTS.md content in the system
+// prompt. The bare "# Project context" heading made the block read as
+// optional background, so the model discounted it: in a 42-run head-to-head
+// xdev satisfied rules that exist only in AGENTS.md in 2 of 3 runs, and the
+// one run that missed a rule was the one run that never opened the file.
+//
+// The wording states what the block is (this repository's binding rules) and
+// bounds it correctly (a direct user instruction still wins). It does not
+// claim more than the file has: a repository rule and a system rule are
+// different things, and saying so keeps the hierarchy honest instead of
+// merely louder.
+const ProjectContextHeader = `# Project rules and conventions
+
+These are the binding rules for this repository, loaded automatically. They
+apply to the work in this session whether or not the task restates them: a
+task prompt that omits a rule below has not cancelled it. Follow them without
+re-reading this file, and read the file itself when you need detail a summary
+would lose. Direct user instructions for this task still take precedence.`
+
+// ProjectContextBlock frames injected context files with ProjectContextHeader.
+// Both injection sites (the parent prompt and a subagent's) call this, so the
+// framing cannot drift apart between them.
+func ProjectContextBlock(contextFiles string) string {
+	if contextFiles == "" {
+		return ""
+	}
+	return ProjectContextHeader + "\n\n" + contextFiles
+}
+
 // BuildSystemPrompt assembles the system prompt: base + project context
 // files + tool descriptions. Tool descriptions come last (they are part of
 // the <1000-token budget).
@@ -276,8 +305,8 @@ func BuildSystemPrompt(base string, contextFiles string, defs []NamedToolDef) st
 	var b strings.Builder
 	b.WriteString(base)
 	if contextFiles != "" {
-		b.WriteString("\n\n# Project context\n")
-		b.WriteString(contextFiles)
+		b.WriteString("\n\n")
+		b.WriteString(ProjectContextBlock(contextFiles))
 	}
 	if len(defs) > 0 {
 		b.WriteString("\n\n# Tools\n")

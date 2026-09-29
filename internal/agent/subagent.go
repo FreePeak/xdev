@@ -481,11 +481,10 @@ func strictRetry(ctx context.Context, ag *Agent, yt *yieldTool, spec SubagentSpe
 // and a child in a fresh session has none, so the parent's accumulated
 // lessons would arrive in a context they were never about.
 func childSystem(spec SubagentSpec, cwd string) string {
-	files := LoadContextFiles(cwd)
-	if files == "" {
-		return spec.System
+	if files := LoadContextFiles(cwd); files != "" {
+		return spec.System + "\n\n" + ProjectContextBlock(files)
 	}
-	return spec.System + "\n\n# Project context\n" + files
+	return spec.System
 }
 
 // schema returns the configured output schema (nil-safe).
