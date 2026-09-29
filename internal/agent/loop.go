@@ -412,6 +412,14 @@ type Agent struct {
 	// first text-only yield.
 	PromptContinuation bool
 
+	// SteeringDelivered is called with the queued steering texts a run just
+	// injected as user messages, oldest first. The steering drain IS the
+	// delivery point, so this is the one place that knows a queued message
+	// reached the model — a host that shows pending-submit rows (the TUI's
+	// mid-turn queue, #157) retires them here instead of guessing when they
+	// landed. nil is fine: a headless host has no rows to retire.
+	SteeringDelivered func(texts []string)
+
 	// Handoff configures the handoff-document compaction (M5 #23): the
 	// side-request target, the artifact mirror, and the per-branch reset
 	// seam. See handoff.go.
@@ -604,6 +612,16 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			history = append(history, m)
 			a.persist(m)
 		}
+		// The messages are in the conversation now, so a host showing them
+		// as pending can retire the rows. Announced after the persist, so a
+		// row never disappears before its message is durable (#157).
+		if a.SteeringDelivered != nil && len(steering) > 0 {
+			texts := make([]string, 0, len(steering))
+			for _, s := range steering {
+				texts = append(texts, s.Text)
+			}
+			a.SteeringDelivered(texts)
+		}
 
 		// Threshold maintenance: compact before the window overflows.
 		// The handoff method (M5 #23) owns this boundary when the method
@@ -661,6 +679,17 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// Messages queued during the final turn continue the run
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
+			// Same announcement as the step boundary above: a message that
+			// arrives after the model's last tool call continues THIS run
+			// rather than waiting for the next one, and the host's pending
+			// rows must retire when it does.
+			if a.SteeringDelivered != nil && len(queued) > 0 {
+				texts := make([]string, 0, len(queued))
+				for _, s := range queued {
+					texts = append(texts, s.Text)
+				}
+				a.SteeringDelivered(texts)
+			}
 			// Todo reminder (M3/TODO-tracker): an assistant turn that
 			// ends with open todo work gets a developer-role reminder
 			// injected into the history so the model sees it next turn.
