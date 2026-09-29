@@ -46,18 +46,23 @@ func lastRow(text string) string {
 }
 
 // TestHUDDefaultKeepsTokenCounter pins the shipped layout: with no
-// statusLine.segments the HUD renders the active-work timer, the token
-// counters and the context total, right aligned, and nothing else. The context
-// segment rides on the model window, so the case that shows no ctx is the one
-// where the window is still unknown.
+// statusLine.segments the HUD renders the two dsh pills — the work timer and
+// the session token total — right aligned, and nothing else. The token
+// reading is the PILL (dsh's UsagePill: total, with the cache hit rate
+// beside it once anything was actually served from the cache), not the old
+// ↑⇢↓ split: that is one click away, and one settings entry (`split`) away
+// for a session that wants it inline.
 func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
 	app.AddUsage(1200, 340, 0, 0, 1540)
 	app.draw()
 
 	text := screenText(scr)
-	if !strings.Contains(text, "↑1.2k │ ↓340") {
-		t.Fatalf("token counter missing:\n%s", text)
+	if !strings.Contains(text, "▤1.5k") {
+		t.Fatalf("token pill missing:\n%s", text)
+	}
+	if strings.Contains(text, "↑") || strings.Contains(text, "↓") {
+		t.Fatalf("the default row must be the pill, not the glyph split:\n%s", text)
 	}
 	if !strings.Contains(text, "0s") {
 		t.Fatalf("the work timer must read 0s on a session that never ran:\n%s", text)
@@ -69,13 +74,12 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 		t.Fatalf("unconfigured segments must not render:\n%s", text)
 	}
 
-	// The window is the only thing that was missing: with it known, the
-	// default row shows the session's context against it — no settings,
-	// no statusLine.segments.
+	// The context meter is a popup row now, not a segment: the row stays
+	// two pills wide whatever the window turns out to be.
 	app.SetContextWindow(200000)
 	app.draw()
-	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 1.5k/200k") {
-		t.Fatalf("default layout missing the context total: %q", row)
+	if row := lastRow(screenText(scr)); strings.Contains(row, "ctx ") {
+		t.Fatalf("the context meter left the row: %q", row)
 	}
 }
 
@@ -83,13 +87,12 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 // of prompt and answered with 362 tokens, so the whole request costs 101.8k
 // even though only 8272 input tokens were billed at the full rate. The ctx
 // number is the provider's request total — an input+output sum of 8.6k read 90%
-// low, the bug this segment had. The counters show the split they hold: ↑ the
-// fresh 8.3k, ⇢ the 93k the cache supplied, ↓ the output with its reasoning
-// broken out. The test drives the wire's own numbers (prompt 101818, cached
-// 93546, completion 362, reasoning 118), so the row is checked against the
-// payload rather than against the arithmetic the old code happened to do.
+// low, the bug this segment had. Both readings are opt-in segments now (the
+// default row is the two dsh pills), so the case configures them by name; the
+// numbers they compute are what the token pill's popup breaks out.
 func TestHUDContextCountsCachedInput(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
+	app.SetStatusSegments([]string{"context", "split"})
 	app.AddUsage(101818-93546, 362, 93546, 118, 101818)
 	app.SetContextWindow(200000)
 	app.draw()
@@ -113,6 +116,7 @@ func TestHUDContextCountsCachedInput(t *testing.T) {
 // with the agent's own context count.
 func TestHUDContextTracksTheSession(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
+	app.SetStatusSegments([]string{"context"})
 	app.AddUsage(50000, 50000, 0, 0, 100000)
 	app.SetContextWindow(200000)
 	app.draw()
@@ -154,7 +158,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	app.AddUsage(50000, 50000, 0, 0, 100000)
 	app.AddCost(0.0123)
 	app.SetContextWindow(200000)
-	app.SetStatusSegments([]string{"theme", "model", "context", "tokens", "cost"})
+	app.SetStatusSegments([]string{"theme", "model", "context", "split", "cost"})
 	app.draw()
 
 	text := screenText(scr)
@@ -217,7 +221,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 // agent is idle or parked on a question card.
 func TestHUDTimeSegment(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
-	app.SetStatusSegments([]string{"time", "tokens"})
+	app.SetStatusSegments([]string{"time", "split"})
 	app.AddUsage(1200, 340, 0, 0, 1540)
 
 	// Fresh app, nothing has run: the honest reading is 0s, not a clock
@@ -369,7 +373,7 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	}
 
 	wide := seededStatusRow(t, 160)
-	for _, want := range []string{deep, "2h05m", "↑50k │ ↓50k", "42.5 t/s"} {
+	for _, want := range []string{deep, "2h05m", "▤100k", "42.5 t/s"} {
 		if !strings.Contains(wide, want) {
 			t.Fatalf("wide row missing %q: %q", want, wide)
 		}
@@ -379,51 +383,23 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	if !strings.Contains(narrow, "2h05m") || !strings.Contains(narrow, "42.5 t/s") {
 		t.Fatalf("rate and total time must share a narrow row, got %q", narrow)
 	}
-	if strings.Contains(narrow, "↑50k") {
-		t.Fatalf("the token counter must drop before the metrics do: %q", narrow)
+	// Both pills are the headline now, so a narrow row gives way on the PATH
+	// rather than on a pill: the drop loop sheds theme, model and the
+	// opt-in refinements first (see statusKeepRank).
+	if !strings.Contains(narrow, "▤100k") {
+		t.Fatalf("both pills must survive a narrow row: %q", narrow)
 	}
-	// A path too long for the row keeps the components that
-	// identify the project and marks the cut — "…/freepeak/checkout/xdev-feature"
-	// — instead of clipping at the screen edge. The whole deep
-	// path is still what the metrics give way to, so it appears
-	// wider than the row it is reported from.
-	//
-	// deliberate simplification: the path is truncated from the
-	// LEFT when it does not fit the row at all. The wide row (160
-	// columns) keeps the full path because it fits; no truncation
-	// there. The upgrade path, if the absolute directory ever matters
-	// more than the metrics on a 60-column terminal, is truncation
-	// on the OTHER side (keep all components, cut cells off the left).
-	// deliberate simplification: the wide row shows the full path
-	// even at 160 columns because drawStatusRow reserves segments'
-	// space first and the deep path fits the leftover — a regression
-	// here is a path that disappears on a wide row, which the
-	// assertion catches.
-	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
+	// A path too long for the row keeps the components that identify the
+	// project and marks the cut with a leading ellipsis, instead of clipping
+	// at the screen edge. How many components survive is a function of what
+	// the row spent on the metrics — and the two pills are worth more cells
+	// than the old five-segment row, so the 60-column case keeps a shorter
+	// tail. What must not happen is the path disappearing.
+	if !strings.HasPrefix(strings.TrimSpace(narrow), "…/") {
 		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
 	}
-	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
-		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
-	}
-	// A path too long for the row keeps the components that
-	// identify the project and marks the cut — "…/freepeak/checkout/xdev-feature"
-	// — instead of clipping at the screen edge. The whole deep
-	// path is still what the metrics give way to, so it appears
-	// wider than the row it is reported from.
-	//
-	// deliberate simplification: the path is truncated from the
-	// LEFT when it does not fit the row at all. The wide row (160
-	// columns) keeps the full path because it fits; no truncation
-	// there. The upgrade path, if the absolute directory ever matters
-	// more than the metrics on a 60-column terminal, is truncation
-	// on the OTHER side (keep all components, cut cells off the left).
-	// deliberate simplification: the wide row shows the full path
-	// even at 160 columns because drawStatusRow reserves segments'
-	// space first and the deep path fits the leftover — a regression
-	// here is a path that disappears on a wide row, which the
-	// assertion catches.
-	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
-		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
+	if !strings.Contains(narrow, "xdev-feature") {
+		t.Fatalf("60-column row must keep the project name: %q", narrow)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if got := pathDisplay(home+"/work/proj", 40); got != "~/work/proj" {

@@ -47,6 +47,17 @@ type Status struct {
 	ToolCalls  int
 	ToolErrors int
 	ToolWork   time.Duration
+	// TokensCacheWrite is the prompt-cache WRITES billed across the
+	// session, kept beside TokensCache (the reads) because the wire
+	// reports them as separate buckets and the token pill's dialog breaks
+	// out all three. Zero on a provider that reports no cache writes.
+	TokensCacheWrite int64
+	// Turns and Steps count what the session asked for: one turn per
+	// finished run, one step per provider request inside it — dsh's
+	// TimePill "{turns} turns {steps} steps". They are rendered by the
+	// pill alone, which is the only place that has the room.
+	Turns int
+	Steps int
 	// LLMWork is the wall time the provider's own messages took
 	// (msg.DurationMS — request to last token, queue included), and
 	// TTFTCount/TTFTSum the turns' time-to-first-token so /usage can report
@@ -156,6 +167,13 @@ type App struct {
 	statusSegs []string
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
+
+	// statusPop is the detail panel a click on a status-row pill opens,
+	// and statusHits the pills' rectangles the painter published this
+	// frame — the same publish-then-hit-test contract a.jump keeps, so a
+	// pill that is not on screen cannot be clicked (statuspill.go).
+	statusPop  *statusPopup
+	statusHits []statusHit
 
 	// diffOv is the full-width diff overlay shown when the user
 	// clicks a changed file in the dock; nil when closed.
@@ -1073,6 +1091,32 @@ func (a *App) AddCost(usd float64) {
 	a.mu.Unlock()
 }
 
+// AddCacheWrite banks the prompt-cache WRITES one request billed. The wire
+// reports them as their own bucket (Anthropic's cache creation input tokens,
+// the write side of OpenAI's prompt details), and neither /usage's token
+// block nor the token pill's total had anywhere to put them: a session that
+// warms a long prefix bills those tokens and never showed them. A separate
+// setter rather than a sixth AddUsage argument, so the existing AddUsage
+// call sites (every provider, every test) stay as they are and a provider
+// that reports no writes is simply never called.
+func (a *App) AddCacheWrite(n int64) {
+	a.mu.Lock()
+	a.st.TokensCacheWrite += max(n, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddStep counts one provider request — the step a dsh TimePill reports
+// beside its turn count. BeginMessage is the seam: every provider opens a
+// message with exactly one EventStart, so a turn of five tool calls counts
+// six steps, and a turn that died into the retry ladder still counts the
+// steps it actually sent.
+func (a *App) AddStep() {
+	a.mu.Lock()
+	a.st.Steps++
+	a.mu.Unlock()
+}
+
 // SetTTFT stores the last completed turn's time-to-first-token (ms)
 // for the HUD ⌚ ttft segment. Zero clears it.
 func (a *App) SetTTFT(ms int64) {
@@ -1190,6 +1234,30 @@ func (a *App) SetRunning(r bool) {
 	if r {
 		a.closeWindow()
 	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddTurn counts one finished run — the turn a dsh TimePill reports beside
+// its step count. SetRunning's falling edge is the seam: the run that
+// actually ended is the turn, whatever it ended with, and an idle re-render
+// never counts.
+func (a *App) AddTurn() {
+	a.mu.Lock()
+	a.st.Turns++
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetSessionCounts re-bases the pill's turn/step counts from a rebuilt
+// history (/resume, /fork, tree navigation) the way SetWork re-bases the
+// timer: it REPLACES rather than adds, because the replayed path measures the
+// whole adopted history in one call and adding would double-count it. A zero
+// pair (a history with no counted steps) leaves the counts out of the pill
+// rather than claiming a session that ran nothing.
+func (a *App) SetSessionCounts(turns, steps int) {
+	a.mu.Lock()
+	a.st.Turns, a.st.Steps = max(turns, 0), max(steps, 0)
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1650,6 +1718,8 @@ func (a *App) Reset() {
 	a.st.Work = 0
 	a.st.TokensIn, a.st.TokensOut = 0, 0
 	a.st.TokensCache, a.st.TokensThink = 0, 0
+	a.st.TokensCacheWrite = 0
+	a.st.Turns, a.st.Steps = 0, 0
 	a.st.Cost = 0
 	a.st.Rate = 0
 	a.st.TTFT = 0
@@ -1663,6 +1733,7 @@ func (a *App) Reset() {
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
 	a.msgv = nil       // likewise the read-only surface naming one
+	a.statusPop = nil  // a panel over the previous session's transcript
 	a.sm = newScrollModel()
 	a.clearRenderCache()
 	a.mu.Unlock()
@@ -2363,8 +2434,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// them should scroll or start a text selection. The ask card
 			// outranks the rest — while it is up it takes the wheel and the
 			// click, or the human scrolls the transcript underneath a question
-			// they were trying to answer.
-			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleSettingsOverlayMouse(m, press) || a.handleTrajectoryMouse(m, press) || a.handleMsgMenuMouse(m, press) {
+			// they were trying to answer. The status popup is last of the
+			// chain: it is a panel over the transcript, so anything modal
+			// above it must win.
+			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleSettingsOverlayMouse(m, press) || a.handleTrajectoryMouse(m, press) || a.handleMsgMenuMouse(m, press) || a.handleStatusPopupMouse(m, press) {
 				// A menu row picked by click arms its action under the lock;
 				// it runs here, unlocked.
 				a.runPendingMsgAction()
@@ -2445,6 +2518,17 @@ func (a *App) handleKey(ev tcell.Event) {
 	// else. Their Esc case matters for the same reason the diff overlay's does
 	// — without it, Esc falls through to the double-Esc rewind block below.
 	if a.handleMsgMenuKey(key) {
+		return
+	}
+
+	// The pill popup takes Esc before the double-Esc rewind ladder: a panel
+	// over the transcript is dismissed by the same chord every other panel
+	// answers, and Esc must not instead pull the draft out of the composer
+	// while a metrics question is still on screen.
+	if key.Key() == tcell.KeyEsc && a.StatusPopupOpen() {
+		a.mu.Lock()
+		a.closeStatusPopupLocked()
+		a.mu.Unlock()
 		return
 	}
 
@@ -3539,7 +3623,12 @@ func (a *App) paint() {
 	w, h := a.width, a.height
 	s.Clear()
 	// Per-frame facts about the viewport: a frame that draws no transcript
-	// (welcome, /clear) must not keep last frame's scroll hint, nor its
+	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
+	// The pills' hit table is a per-frame fact for the same reason the
+	// scrollbar's is: a frame that drops a pill for width must not leave
+	// last frame's rectangle live, or a click would open a popup for a
+	// reading that is no longer on screen.
+	a.statusHits = nil
 	// selection capture — rows recorded before /clear would copy text that is
 	// no longer on screen.
 	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
@@ -3561,6 +3650,7 @@ func (a *App) paint() {
 		a.drawSettingsOverlay(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
+		a.drawStatusPopup()
 		// A gesture made before the first block exists — the composer is the
 		// only selectable surface there — is highlighted here too; the branch
 		// returns, so it never reaches the call at the end of paint().
@@ -3780,6 +3870,10 @@ func (a *App) paint() {
 	a.drawSettingsOverlay(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
+	// The pill popup paints after the status row (it is anchored to it) and
+	// before the selection highlight, so a drag that ends over the panel does
+	// not shine through it.
+	a.drawStatusPopup()
 	// Last, so it paints over every surface the frame just drew: see the note
 	// where the selection geometry is published above.
 	a.drawSelection()
@@ -4356,12 +4450,24 @@ func (a *App) drawHUD(y, w, leftEnd int, parts []hudPart) {
 			x += width(sep)
 		}
 		drawText(a.scr, x, y, p.text, bgSt.Foreground(a.cellColor(a.th.Get(p.token))))
+		// Publish a pill's rectangle as it is painted, so the click that
+		// opens its popup is tested against the pixels the frame actually
+		// put there. A pill dropped for width never publishes one, so a
+		// reading that is not on screen cannot be clicked.
+		if p.popup {
+			a.statusHits = append(a.statusHits, statusHit{
+				name: p.name,
+				rect: panelRect{x: x, y: y, w: width(p.text), h: 1},
+			})
+		}
 		x += width(p.text)
 	}
 }
 
 // statusSegments is the HUD segment vocabulary (settings
 // statusLine.segments): model, tokens, context, cost, rate, theme, time.
+// `tokens` and `time` are the two dsh PILLS (statuspill.go) — clickable, and
+// carrying the headline reading only.
 var statusSegments = map[string]bool{
 	"model":   true,
 	"tokens":  true,
@@ -4372,6 +4478,11 @@ var statusSegments = map[string]bool{
 	"theme":   true,
 	"time":    true,
 	"command": true,
+	// split is the pre-pill `tokens` reading: the ↑⇢↓ glyph split, kept
+	// reachable under a name of its own so a session that wants the
+	// buckets inline can still ask for them
+	// (`statusLine.segments: time,split,context`).
+	"split": true,
 	// cache is the dsh "Cache hit N%" reading (deepseek-harness
 	// StatsPills.tsx UsagePill): the session's total with the hit rate
 	// beside it, so the one number that says whether the prefix cache is
@@ -4390,21 +4501,18 @@ var statusSegments = map[string]bool{
 	"debugMouse": true,
 }
 
-// defaultStatusSegments is the shipped layout: the work timer, the token
-// counters, the dsh cache pill, the live context total, the decode speed and
-// the tool-call count, right-aligned (the timer reads leftmost so the rate's
-// own " │ " stays the row's right edge). The two dsh segments are here
-// because /usage already reports them in the long form and a report is not
-// where a glance should have to go: the hit rate is what says whether the
-// prefix cache is working, and the call count is the turn size.
-// The context segment is the number: what this session's context costs against
-// the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
-// request's provider-reported total, cached input included, which covers the
-// system prompt, the visible history and the tool schemas. It hides while
-// either half is unknown (an undiscovered window, or a session that has not
-// answered yet), so a fresh run keeps a clean row. The model keeps its
-// composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"command", "time", "tokens", "cache", "context", "rate", "toolcalls"}
+// defaultStatusSegments is the shipped layout: the two dsh composer pills,
+// right-aligned, and nothing else. dsh solved the same problem — a metrics
+// row competing with the rest of the composer dock — by keeping two pills
+// whose dialogs carry the breakdown, and that is the shape here: the time
+// pill reads the work timer, the turn/step counts and the decode speed; the
+// token pill reads the session total and the cache hit rate. Every other
+// figure (the context meter, the spend, the call count, the token split)
+// is one click away, which is where /usage's long form used to be the only
+// place to read it — a report is not where a glance should have to go.
+// The model keeps its composer divider slot, which is chrome rather than a
+// segment.
+var defaultStatusSegments = []string{"command", pillTime, pillToken}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -4422,8 +4530,25 @@ func (a *App) hudSegment(name string) (text, token string) {
 	switch name {
 	case "model":
 		return a.st.Model, theme.StatusLineModel
-	case "tokens":
-		// The two glyphs each claim one half of a split the provider
+	case pillToken:
+		// The token PILL, not the old ↑⇢↓ split: dsh's UsagePill button
+		// reads "{total} · Cache hit N%" and its dialog breaks out the
+		// buckets, which is the same division of labour this row now has
+		// (pillLabel draws the button, drawStatusPopup the dialog). The
+		// split is still one settings entry away (`tokens` keeps the old
+		// meaning below) for a session that wants it inline.
+		//
+		// The total counts the cache write as well as the read: it is a
+		// billed bucket, and dropping it would make the pill's own total
+		// disagree with the popup it opens.
+		if lbl := a.pillLabel(pillToken); lbl == "" {
+			return "", ""
+		} else {
+			return lbl, theme.StatusLineSpend
+		}
+	case "split":
+		// The pre-pill token reading, kept reachable under its own name:
+		// the two glyphs each claim one half of a split the provider
 		// reports three ways, so the row shows the split: ↑ is fresh
 		// input, ⇢ the cache read beside it, and ↓ output with the
 		// reasoning already inside it broken out. cache and think hide
@@ -4488,12 +4613,14 @@ func (a *App) hudSegment(name string) (text, token string) {
 			return "", ""
 		}
 		return fmt.Sprintf("$%.4f", a.st.Cost), theme.StatusLineCost
-	case "time":
-		// Total time spent WORKING: the banked spans plus the live one. An idle
-		// agent — and an agent parked on a question card — shows a frozen
-		// number; the wall clock between turns belongs to the user, not to the
-		// session. "0s" is a reading, so the segment never hides.
-		return a.th.HUDIcon(theme.HUDIconGauge) + humanDur(a.activeWork()), theme.StatusLineSpend
+	case pillTime:
+		// The time PILL (dsh's TimePill): the work timer, then the
+		// turn/step counts, then the decode speed. Total time spent
+		// WORKING — the banked spans plus the live one; an idle agent, and
+		// an agent parked on a question card, shows a frozen number,
+		// because the wall clock between turns belongs to the user. "0s"
+		// is a reading, so the pill never hides.
+		return a.pillLabel(pillTime), theme.StatusLineSpend
 	case "rate":
 		// omp's ⚡ tok/s: the decode speed of the last message the provider
 		// gave a token count for. ONE formula, one source — a live estimate
@@ -4574,9 +4701,12 @@ func mouseDebugLine(m *tcell.EventMouse, press bool) string {
 }
 
 // hudPart is one rendered HUD segment, carrying the segment name the
-// keep-rank drop loop keys on.
+// keep-rank drop loop keys on. popup marks the two segments that are
+// clickable: their text is the dsh pill's own label, and a click on one
+// opens the panel that breaks that label out (statuspill.go).
 type hudPart struct {
 	name, text, token string
+	popup             bool
 }
 
 // hudSep separates HUD segments on the status row.
@@ -4594,21 +4724,24 @@ func (a *App) hudParts() []hudPart {
 	for _, name := range segs {
 		text, token := a.hudSegment(name)
 		if text != "" {
-			parts = append(parts, hudPart{name, text, token})
+			parts = append(parts, hudPart{name, text, token, statusPills[name]})
 		}
 	}
 	return parts
 }
 
 // hudEssentialWidth is the space the metrics that must always survive a
-// narrow row take: the work timer and the decode rate, separated by a
-// HUD separator. The rest of the HUD (and the hotkeys) give way to them.
+// narrow row take: the two dsh pills (and the rate, when it is configured
+// on its own), separated by a HUD separator. The rest of the HUD (and the
+// hotkeys) give way to them.
 //
 // hudEssentialRank is that threshold by name rather than by number: the
 // token split moved rank when the dsh segments landed, and a magic 5 would
 // have silently promoted the wrong segment to "always survives" — which is
-// exactly how the token counter stopped dropping on a narrow row.
-const hudEssentialRank = 7 // statusKeepRank: time and rate only
+// exactly how the token counter stopped dropping on a narrow row. The two
+// pills both sit at or above it now (statusKeepRank: tokens 7, time 8), so
+// the path is what gives way on a narrow row, never a headline.
+const hudEssentialRank = 7 // statusKeepRank: the pills and the rate
 
 func hudEssentialWidth(parts []hudPart) int {
 	essential := make([]hudPart, 0, 2)
@@ -4631,22 +4764,23 @@ func hudEssentialWidth(parts []hudPart) int {
 }
 
 // statusKeepRank orders segments by how essential they are when the row
-// runs out of width — the drop loop sheds the LOWEST rank first. The decode
-// rate and the work timer are what the user reads during a run, so they are
-// dropped last; the theme name and the model label go first. The two dsh
-// readings rank BELOW the token split on purpose: ↑⇢↓ already carries the
-// cache volume, so the hit rate and the call count are the refinements a
-// narrow row gives up before the split it refines.
+// runs out of width — the drop loop sheds the LOWEST rank first. The two dsh
+// pills are what the user reads during a run, so they are dropped last and
+// rank at or above hudEssentialRank; the theme name and the model label go
+// first, and every opt-in refinement (the cache rate, the call count, the
+// context meter, the token split) gives way before the two headlines it
+// refines.
 var statusKeepRank = map[string]int{
 	"theme":     0,
 	"model":     1,
 	"cost":      2,
 	"toolcalls": 3,
 	"cache":     4,
-	"tokens":    5,
+	"split":     5,
 	"context":   6,
-	"time":      7,
-	"rate":      8,
+	"tokens":    7,
+	"time":      8,
+	"rate":      9,
 }
 
 // pathDisplay renders the working directory for the status row: home

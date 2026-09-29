@@ -196,6 +196,9 @@ func TestResetClearsSessionCounters(t *testing.T) {
 // a real onegw turn, off the row a user reads.
 func TestTokenSplitMatchesTheWire(t *testing.T) {
 	app, scr := drawnApp(t, 110, 24)
+	// The split is an opt-in segment now (the default row is the two dsh
+	// pills), so this pins the reading itself, off the wire's own numbers.
+	app.SetStatusSegments([]string{"split"})
 	// prompt_tokens 65054, cached 64575, completion 1770, reasoning 1264.
 	app.AddUsage(65054-64575, 1770, 64575, 1264, 66824)
 	app.draw()
@@ -218,6 +221,7 @@ func TestTokenSplitMatchesTheWire(t *testing.T) {
 // split is a correction, not new decoration on every row.
 func TestTokenSplitHidesWhatTheProviderDoesNotReport(t *testing.T) {
 	app, scr := drawnApp(t, 110, 24)
+	app.SetStatusSegments([]string{"split"})
 	app.AddUsage(1200, 340, 0, 0, 1540)
 	app.draw()
 
