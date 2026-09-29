@@ -4406,20 +4406,24 @@ func (a *App) hudSegment(name string) (text, token string) {
 		}
 		return b.String(), theme.StatusLineSpend
 	case "cache":
-		// dsh's cache-hit pill (deepseek-harness StatsPills.tsx): the
-		// session's token total with the hit rate beside it. The rate is
-		// cacheRead over the BILLED prompt side (fresh + cached) — the
-		// three disjoint buckets dsh's billedInputTokens sums, minus the
-		// cache write xdev does not bill separately here — because output
-		// was never cacheable and counting it would read low for the
-		// wrong reason. Hidden until something was actually served from
-		// the cache: a 0% rate on a provider that reports no cache is a
-		// claim about a measurement nobody made.
+		// dsh's cache-hit RATE (deepseek-harness StatsPills.tsx), and only
+		// the rate. dsh's pill reads "{total} · Cache hit N%" because that
+		// pill is its ONLY token reading; xdev's row already carries the
+		// split, and the total beside it was the same 66.3k drawn twice.
+		//
+		// No leading icon either: the database icon is already on the token
+		// segment this one refines, and a second ▤ three cells later is the
+		// same duplication in another dress. The rate is cacheRead over the
+		// BILLED prompt side (fresh + cached) — dsh's three disjoint
+		// buckets minus the cache write xdev does not bill separately —
+		// because output was never cacheable and counting it would read
+		// low for the wrong reason. Hidden until something was actually
+		// served from the cache: 0% on a provider that reports no cache is
+		// a claim about a measurement nobody made.
 		if a.st.TokensCache <= 0 || a.st.TokensIn+a.st.TokensCache <= 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("%s%s · cache %d%%", a.th.HUDIcon(theme.HUDIconDatabase),
-			HumanTokens(a.st.TokensIn+a.st.TokensOut+a.st.TokensCache),
+		return fmt.Sprintf("cache %d%%",
 			100*a.st.TokensCache/(a.st.TokensIn+a.st.TokensCache)), theme.StatusLineSpend
 	case "toolcalls":
 		// dsh's TimePill counts turns and steps; the one figure xdev has

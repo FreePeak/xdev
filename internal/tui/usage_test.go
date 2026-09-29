@@ -123,7 +123,7 @@ func TestStatusRowCarriesTheUsageMetrics(t *testing.T) {
 
 	row := lastRow(screenText(scr))
 	for _, want := range []string{
-		"▤66.8k · cache 99%", // total with dsh's hit rate beside it
+		"cache 99%", // dsh's hit RATE — the total is the tokens segment's job
 		"ctx 66.8k/200k",
 		"✳2 calls (1 failed)",
 	} {
@@ -179,5 +179,33 @@ func TestUsageReportOmitsAnImpossibleShare(t *testing.T) {
 	app.SetWork(time.Minute)
 	if !strings.Contains(app.UsageReport(), "of active time") {
 		t.Fatalf("a sane share must still be drawn:\n%s", app.UsageReport())
+	}
+}
+
+// TestCacheSegmentCarriesNoSecondTotal: the row drew the session total
+// twice — the tokens segment's ↑⇢↓ split, then "▤66.3k · cache 100%" beside
+// it, a number the split already sums to. dsh can afford that (its pill is
+// its ONLY token reading); a row that already shows the split cannot. The
+// cache segment now reports the RATE alone, with no icon either: the ▤ is
+// already on the segment this one refines. The exact total stays where a
+// grouped figure belongs — /usage.
+func TestCacheSegmentCarriesNoSecondTotal(t *testing.T) {
+	app, scr := drawnApp(t, 200, 24)
+	app.AddUsage(479, 1770, 64575, 0, 66824)
+	app.draw()
+
+	if got, _ := app.hudSegment("cache"); got != "cache 99%" {
+		t.Fatalf("the cache segment = %q, want the rate alone (no total, no second ▤)", got)
+	}
+	row := lastRow(screenText(scr))
+	if strings.Contains(row, "66.8k") {
+		t.Fatalf("the cache segment re-printed the total the split already sums: %q", row)
+	}
+	// One ▤ on the row, not two: the database icon belongs to the split.
+	if n := strings.Count(row, "▤"); n != 1 {
+		t.Fatalf("the database icon is drawn %d times: %q", n, row)
+	}
+	if !strings.Contains(row, "▤↑479 ⇢64.6k │ ↓1.8k") || !strings.Contains(row, "cache 99%") {
+		t.Fatalf("the row lost a reading: %q", row)
 	}
 }
