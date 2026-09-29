@@ -197,11 +197,44 @@ var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call:
 // ended with lastAssistant still nil.
 const maxEmptyTurnNudges = 2
 
-// maxPostContentContinuations bounds retain-and-continue when the ladder is
-// bounded (retry.infinite, default on, lifts it). A mid-stream failure
-// after visible content cannot be replayed — that would double-emit it —
-// so recovery resumes from the retained partial instead.
+// maxPostContentContinuations bounds retain-and-continue. A mid-stream
+// failure after visible content cannot be replayed — that would double-emit
+// it — so recovery resumes from the retained partial instead. The bound used
+// to apply only when the ladder was bounded; retry.infinite (the default)
+// skipped it entirely, so a stream that cut off after text retried every
+// backoff for the life of the process. An outage is what Infinite is for; a
+// message already half on screen is not one.
 const maxPostContentContinuations = 3
+
+// maxEmptyTurnRecoveries bounds the RetryAllErrors empty-turn recovery. The
+// nudge budget asks the model twice; past that, a model answering nothing is
+// a model that has stopped, and re-asking every backoff indefinitely is what
+// left a session's turn goroutine alive for 53 minutes with nothing in the
+// transcript (a7e17741, 2026-09-28). RetryAllErrors keeps a real budget; it
+// is just not an infinite one, so the run ends with the error the TUI
+// already renders and the user can resubmit.
+const maxEmptyTurnRecoveries = 3
+
+// maxSilentRecoveryRounds bounds the ladder's "nothing came back" rounds
+// under retry.infinite — the health-check escalation and the all-targets-down
+// escalation. Same reasoning as the two above: no turn may outlive its
+// budget, because a turn that does holds the session's single turn claim
+// (cmd/xdev/tui.go's `running`) and every later submit is refused with
+// "a turn is already running" — the wedged session in the same report.
+const maxSilentRecoveryRounds = 12
+
+// continuationBudget is how many retain-and-continue rounds a ladder may
+// spend. A bounded policy keeps its historical one-shot budget (the second
+// post-content failure must surface, and TestRetryPostContentSecondFailureSurfaces
+// pins that); retry.infinite gets maxPostContentContinuations. Written as one
+// function because the rule reads off both halves of the policy and the
+// precedence is the whole point.
+func continuationBudget(p RetryPolicy) int {
+	if p.Infinite {
+		return maxPostContentContinuations
+	}
+	return 1
+}
 
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
@@ -687,20 +720,26 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				continue
 			}
 			if isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
-				if a.Retry.RetryAllErrors {
+				if a.Retry.RetryAllErrors && emptyRetries < maxEmptyTurnRecoveries {
 					// Retry-all-errors (#331 follow-up): the model
 					// answered nothing, but we keep going — rebuild
 					// context from the persisted history, wait a
-					// backoff, then re-run the ladder. The nudge
-					// above already asked the model once; with the
-					// flag on we treat "nothing" as transient and
-					// loop until the model actually answers or the
-					// context/turn/token budget fires.
+					// backoff, then re-run the ladder. The nudges above
+					// already asked it maxEmptyTurnNudges times.
 					//
-					// Each round announces on the event stream and
-					// escalates the backoff (same shape as
-					// retry.infinite's all-targets-down notice) so a
-					// long empty-turn stall reads as waiting, not hung.
+					// Bounded at maxEmptyTurnRecoveries. This loop had no
+					// ceiling at all under the shipped default
+					// (RetryAllErrors on, one-way settings merge): a model
+					// that never answers re-asked every 8s forever, holding
+					// the session's single turn claim and refusing every
+					// later submit with "a turn is already running" — the
+					// wedged session a7e17741 (2026-09-28), whose file
+					// shows a toolResult at 22:49:13 and a user "continue"
+					// at 23:42:21 with nothing between them.
+					//
+					// Each round still announces on the event stream and
+					// escalates the backoff, so a long stall reads as
+					// waiting rather than hung.
 					emptyRetries++
 					policy := a.Retry.withDefaults()
 					d := policy.delay(emptyRetries)
@@ -710,6 +749,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 						history = rebuilt.Messages
 					}
 					a.noticeEmptyTurnRetry(emptyRetries, d)
+					a.persistEmptyTurnRetry(emptyRetries, d)
 					if serr := sleepBackoff(ctx, d); serr != nil {
 						return lastAssistant, serr
 					}
@@ -853,7 +893,12 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	// before a turn is spent on a near-quota target.
 	a.fallbackPreTurn()
 	policy := a.Retry.withDefaults()
-	attempt, continued, compacted := 0, false, false
+	attempt, compacted := 0, false
+	// continued counts retain-and-continue rounds, and it counts on the
+	// infinite ladder too. It was a single bool that Infinite deliberately
+	// skipped setting, so the bound above could never fire under the shipped
+	// default.
+	continued := 0
 	escalation, healthEscalation := 0, 0
 	interrupted := 0
 	for {
@@ -887,16 +932,18 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				continue
 			}
 			// A refused or unreachable model host is the same outage the
-			// stream ladder handles. With retry.infinite, keep probing after
-			// capped backoff until the host answers or the run is cancelled;
-			// an explicitly bounded policy still gets its own finite
-			// escalation rounds as a stream failure.
-			if healthEscalation < maxEscalationRounds || policy.Infinite {
+			// stream ladder handles. retry.infinite keeps probing after a
+			// capped backoff — but only for maxSilentRecoveryRounds, so a
+			// host that never comes back cannot hold the turn claim for the
+			// life of the process (a7e17741, 2026-09-28). A bounded policy
+			// keeps its own finite escalation rounds.
+			if healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite) {
 				healthEscalation++
 				attempt = 0
 				d := policy.delay(healthEscalation)
 				logx.Errorf("recovery: health check failed, retrying probe in %s (round %d): %v", d, healthEscalation, hcErr)
 				if policy.Infinite {
+					a.persistAllTargetsDown(healthEscalation, d, hcErr)
 					a.noticeAllTargetsDown(healthEscalation, d, hcErr)
 				}
 				if serr := sleepBackoff(ctx, d); serr != nil {
@@ -934,46 +981,25 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
 			if turnContentEmitted(err) {
-				// Retain-and-continue (M5 tail): persist the partial,
-				// follow with a continuation prompt, resume. On a BOUNDED
-				// ladder (retry.infinite off) the budget is one shot via
-				// continued; retry.infinite (the default) keeps retaining
-				// every partial and never tight-loops without backoff.
-				// Only text/thinking partials qualify — a tool call
-				// without its result is not a request a provider would
-				// accept.
+				// Retain-and-continue (M5 tail): persist the partial, follow
+				// with a continuation prompt, resume. A bounded ladder keeps
+				// its one-shot budget; retry.infinite now gets a real
+				// ceiling too (it used to get none at all). Only
+				// text/thinking partials qualify: a tool call without its
+				// result is not a request a provider would accept.
 				var te *turnError
 				canRetain := errors.As(err, &te) && te.partial != nil
-				if canRetain && (policy.Infinite || !continued) {
+				if canRetain && continued < continuationBudget(policy) {
 					history = append(history, *te.partial)
 					a.persist(*te.partial)
 					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}, Attribution: ContinuationAttribution}
 					history = append(history, cont)
 					a.persist(cont)
-					if !policy.Infinite {
-						continued = true
-					}
+					continued++
 					a.Hooks.OnContinuation(ContinuationPrompt)
-					if policy.Infinite {
-						logx.Errorf("recovery: post-content failure on an infinite ladder (retry.infinite)")
-					} else {
-						logx.Errorf("recovery: post-content failure 1 of %d", maxPostContentContinuations)
-					}
+					logx.Errorf("recovery: post-content failure %d of %d", continued, maxPostContentContinuations)
 					d := policy.delay(1)
-					a.noticeContinuationRetry(d)
-					if serr := sleepBackoff(ctx, d); serr != nil {
-						return nil, history, serr
-					}
-					continue
-				}
-				if continued && !policy.Infinite {
-					return nil, history, err
-				}
-				// Infinite ladder with nothing retainable: still back off
-				// so a stream that dies after content without a partial
-				// never busy-spins the CPU / freezes the TUI.
-				if policy.Infinite {
-					d := policy.delay(1)
+					a.persistContinuationRetry(continued, d)
 					a.noticeContinuationRetry(d)
 					if serr := sleepBackoff(ctx, d); serr != nil {
 						return nil, history, serr
@@ -990,15 +1016,18 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					continue
 				}
 				// Chain drained too: re-run the ladder on the current
-				// target. Rounds are bounded so a hard failure
-				// misclassified as transient still ends the turn (see
-				// maxEscalationRounds); retry.infinite lifts the bound and
-				// announces each round on the event stream, so an outage
-				// of any length reads as waiting rather than hanging.
-				if escalation < maxEscalationRounds || policy.Infinite {
+				// target. Rounds are bounded so a hard failure misclassified
+				// as transient still ends the turn (maxEscalationRounds);
+				// retry.infinite lifts that to maxSilentRecoveryRounds and
+				// announces each round on the event stream, so an outage of
+				// any length reads as waiting rather than hanging — while a
+				// turn still ends rather than pinning the session's single
+				// turn claim forever.
+				if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
 					escalation++
 					attempt = 0
 					d := policy.delay(policy.MaxRetries + 1)
+					a.persistAllTargetsDown(escalation, d, err)
 					logx.Errorf("recovery: all targets drained, escalation round %d after backoff", escalation)
 					if policy.Infinite {
 						a.noticeAllTargetsDown(escalation, d, err)
@@ -1070,6 +1099,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			history = rebuilt
 			escalation++
 			d := policy.delay(escalation)
+			a.persistEmptyTurnRetry(escalation, d)
 			a.noticeEmptyTurnRetry(escalation, d)
 			if serr := sleepBackoff(ctx, d); serr != nil {
 				return nil, history, serr
@@ -1080,8 +1110,10 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// session and re-send on the current context. ClassBadRequest
 			// returned above: replaying a provider-rejected shape cannot
 			// repair it. Bounded rounds stop hard failures; infinite retry
-			// is reserved for transport/transient outages.
-			if escalation < maxEscalationRounds || policy.Infinite {
+			// is reserved for transport/transient outages — and even there
+			// only for maxSilentRecoveryRounds, so no turn pins the
+			// session's single turn claim (a7e17741, 2026-09-28).
+			if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
 				escalation++
 				attempt = 0
 				logx.Errorf("recovery: retrying %v from current context", ai.Classify(err))
@@ -1095,6 +1127,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// a hard-failing upstream from hammering the wire.
 				d := policy.delay(escalation)
 				if policy.Infinite {
+					a.persistAllTargetsDown(escalation, d, err)
 					a.noticeAllTargetsDown(escalation, d, err)
 				}
 				if serr := sleepBackoff(ctx, d); serr != nil {
@@ -1136,6 +1169,61 @@ func (a *Agent) noticeAllTargetsDown(round int, d time.Duration, last error) {
 	a.Hooks.OnEvent(ai.Errorf(&AllTargetsDownError{Round: round, Delay: d, LastErr: last}))
 }
 
+// maxNoticeStride throttles the persisted recovery notice: the first round
+// and then every Nth, so a loop bounded at maxSilentRecoveryRounds writes
+// five records rather than twelve. The screen still gets every round (the
+// notice* funcs are untouched) — this is only about the session file.
+const maxNoticeStride = 3
+
+// persistRecoveryNotice writes one unbounded-wait round into the session
+// file as a CustomEntry.
+//
+// Every recovery announcement used to be an AddSystemBlock — display-only —
+// so a turn that spent 53 minutes inside one of these loops left a session
+// file whose last record was a toolResult from before the loop started, and
+// the transcript said nothing at all. On the reporting machine 0 of 132
+// session files contained a persisted retry notice, which is why a7e17741
+// (2026-09-28) took an afternoon to diagnose from the file alone.
+//
+// A CustomEntry is the right shape because session.buildContext switches
+// only on MessageEntry, CompactionEntry and BranchSummaryEntry: this is
+// readable by `xdev` and by a human with jq, and it never reaches the model
+// as a turn. A nil store or a failed append is a no-op — a notice that
+// cannot be written must never break the recovery it describes.
+func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duration, last error) {
+	if a == nil || a.Store == nil {
+		return
+	}
+	if round != 1 && round%maxNoticeStride != 0 {
+		return
+	}
+	data := map[string]any{
+		"round":           round,
+		"delaySeconds":    int(delay.Round(time.Second) / time.Second),
+		"remainingRounds": max(0, boundRounds(kind)-round),
+	}
+	if last != nil {
+		data["error"] = last.Error()
+	}
+	if err := a.Store.Append(&session.CustomEntry{CustomType: kind, Data: data}); err != nil {
+		logx.Errorf("persist recovery notice: %v", err)
+	}
+}
+
+// boundRounds is the ceiling that produced a given notice kind. Naming it
+// per kind is what lets the record say "3 rounds left" instead of making a
+// reader of the file guess.
+func boundRounds(kind string) int {
+	switch kind {
+	case "recovery_empty_turn":
+		return maxEmptyTurnRecoveries
+	case "recovery_continuation":
+		return maxPostContentContinuations
+	default: // recovery_all_targets_down
+		return maxSilentRecoveryRounds
+	}
+}
+
 // noticeEmptyTurnRetry raises one empty-turn recovery round on the event
 // stream (retry.retryAllErrors). Same contract as noticeAllTargetsDown:
 // a long stall must read as waiting, not as hung.
@@ -1144,6 +1232,23 @@ func (a *Agent) noticeEmptyTurnRetry(round int, d time.Duration) {
 		return
 	}
 	a.Hooks.OnEvent(ai.Errorf(&EmptyTurnRetryError{Round: round, Delay: d}))
+}
+
+// The three notice* funcs above are the SCREEN voice of a recovery round and
+// fire every round. The three persist* calls below are the FILE voice of the
+// same round: one CustomEntry, throttled, so a session that spent an hour in
+// a recovery loop says so in its own transcript instead of looking like a
+// process that simply stopped mid-tool.
+func (a *Agent) persistAllTargetsDown(round int, d time.Duration, last error) {
+	a.persistRecoveryNotice("recovery_all_targets_down", round, d, last)
+}
+
+func (a *Agent) persistEmptyTurnRetry(round int, d time.Duration) {
+	a.persistRecoveryNotice("recovery_empty_turn", round, d, nil)
+}
+
+func (a *Agent) persistContinuationRetry(round int, d time.Duration) {
+	a.persistRecoveryNotice("recovery_continuation", round, d, nil)
 }
 
 // noticeContinuationRetry raises one retain-and-continue round on the event
