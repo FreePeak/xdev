@@ -66,9 +66,6 @@ type selCorner struct {
 	x, y, doc int
 }
 
-// selGrace is how long the copy confirmation stays on the divider.
-const selGrace = 2 * time.Second
-
 // clearClick resets the click-count state after a double/triple-click
 // gesture completes (or when a new gesture begins from a different
 // position). Callers hold a.mu.
@@ -422,7 +419,7 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			opened := false
 			if target != "" && a.linkAt(x, y) == target {
 				if err := a.openLink(target); err != nil {
-					a.setNotice("link: " + err.Error())
+					a.setError("link: " + err.Error())
 				}
 				opened = true
 			}
@@ -450,28 +447,13 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			if strings.TrimSpace(text) == "" {
 				a.selShown = false
 			} else if a.copyToClipboard(text) == nil {
-				a.selNotice = "Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars"
-				a.selNoticeUntil = time.Now().Add(selGrace)
+				a.setNotice("Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars")
 			}
 		}
 		a.poke()
 	}
 	// Remaining buttons (right/middle, bare motion) are ignored; wheel was
 	// already handled by the caller.
-}
-
-// copyHint returns the copy confirmation while it is still fresh. Once its
-// deadline passes the notice is dropped here, so no later draw can resurrect it;
-// the caller falls back to the viewport hint.
-func (a *App) copyHint() string {
-	if a.selNotice == "" {
-		return ""
-	}
-	if !time.Now().Before(a.selNoticeUntil) {
-		a.selNotice = ""
-		return ""
-	}
-	return a.selNotice
 }
 
 // --- anchoring --------------------------------------------------------------

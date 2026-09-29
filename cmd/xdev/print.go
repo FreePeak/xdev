@@ -1322,9 +1322,9 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 }
 
 // finishMCP connects and registers, reporting failures non-fatally. report
-// (optional) is where a mode with a UI of its own — the TUI's composer
-// divider — takes the failure; nil keeps stderr, which is the interface for
-// print, rpc and acp.
+// (optional) is where a mode with a UI of its own — the TUI's toast stack —
+// takes the failure; nil keeps stderr, which is the interface for print, rpc
+// and acp.
 func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config, report func(string)) {
 	autostartMCP(cfg)
 	connected, errs := mgr.Connect(ctx, cfg)
@@ -1417,10 +1417,10 @@ func mcpMark(on bool) string {
 }
 
 // mcpUnavailable names the failed server without the launch error's
-// detail. A caller with a one-line slot gets what it can render:
-// mcpclient already logged the full error, and the divider drops a
-// hint wider than the space beside the model name, so a whole
-// fork/exec path would render as nothing.
+// detail. A caller with a one-row slot gets what it can render:
+// mcpclient already logged the full error, and the TUI's toast cuts a
+// row wider than the pane, so a whole fork/exec path would render as
+// an ellipsis and a server name.
 func mcpUnavailable(e string) string {
 	name, rest, _ := strings.Cut(e, ": ")
 	if rest == "" {
