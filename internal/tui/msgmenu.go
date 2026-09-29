@@ -220,8 +220,10 @@ func (a *App) runPendingMsgAction() {
 	}
 }
 
-// copyMessage puts the message on the clipboard and confirms it on the divider
-// with the same notice a drag-copy uses, so the two copy paths look alike.
+// copyMessage puts the message on the clipboard and confirms it with the same
+// toast a drag-copy uses, so the two copy paths look alike. A failure is a
+// transcript block, not a toast: it says what went wrong, and the block is
+// where a message the user may want to act on belongs.
 func (a *App) copyMessage(text string) {
 	if strings.TrimSpace(text) == "" {
 		a.AddSystemBlock("message is empty — nothing to copy")
