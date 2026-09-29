@@ -32,7 +32,9 @@ func dockTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen, *int) {
 		// The identity the panel's title slot reads. Not counted by runs: the
 		// session's name is not one of the lists whose rebuild this file bounds.
 		Session: func() (string, string) { return "opencode sidebar", "sess1234" },
-		MCP:     func() string { return "MCP · 3 servers" },
+		// The block shape cmd builds: a count heading, then one row per enabled
+		// server, marked ○ when nothing has connected to it yet.
+		MCP: func() string { return "MCP · 3\n○ be-kg\n○ db\n○ leankg" },
 	})
 	return app, scr, runs
 }
@@ -462,6 +464,55 @@ func TestDockAnatomyIsOpencode(t *testing.T) {
 	x := left + dockPad + dockInner - width(file.right())
 	if got := dockRowText(scr, y, x); !strings.HasPrefix(got, "+1 -1") {
 		t.Fatalf("counts are not right-aligned at the panel's edge: %q", got)
+	}
+}
+
+// TestDockPaintsEveryMCPName: the section is a list, not a count. The whole
+// point of the block is that a human can read which server is which — and
+// which one is ○, i.e. the one the session could not reach. A heading with a
+// single row under it (or the count alone) fails both, so assert the painted
+// screen, not the fold: what matters is that every name reaches the panel.
+func TestDockPaintsEveryMCPName(t *testing.T) {
+	app, scr, _ := dockTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.draw()
+
+	app.mu.Lock()
+	top, _ := app.dockGrid()
+	head := app.dock.titleRows()
+	rows := app.dock.lines
+	app.mu.Unlock()
+
+	// The fold the source produced: a heading plus one row per name, never a
+	// single "3 servers" line.
+	seen, names := 0, 0
+	for _, r := range rows {
+		if r.head && strings.HasPrefix(r.text, "MCP") {
+			seen++
+		}
+		if strings.HasPrefix(r.text, "○ ") {
+			names++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("MCP headings = %d, want 1\n%s", seen, dockLines(rows))
+	}
+	if names != 3 {
+		t.Fatalf("MCP rows = %d, want one per enabled server\n%s", names, dockLines(rows))
+	}
+	// And the screen agrees with the fold: the names are where a reader looks.
+	left := 160 - dockCols + dockPad
+	for _, want := range []string{"MCP", "○ be-kg", "○ db", "○ leankg"} {
+		found := false
+		for i := range rows {
+			if got := dockRowText(scr, top+head+i, left); strings.Contains(got, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%q never reached the panel:\n%s", want, dockLines(rows))
+		}
 	}
 }
 

@@ -477,7 +477,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 
 	// MCP servers (optional; absent config = nothing happens).
-	mgr := attachMCP(context.Background(), reg, true, nil)
+	mgr := attachMCP(context.Background(), reg, true, nil, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}
@@ -1274,7 +1274,9 @@ func mcpConfigPath() string {
 // attachMCP connects configured MCP servers and registers their tools on
 // the parent registry only — children never inherit ambient MCP (PRD M6:
 // subagents run with restricted tool sets). Individual server failures are
-// reported to report (nil = stderr) and skipped, never fatal.
+// reported to report (nil = stderr) and skipped, never fatal. done (nil =
+// nothing) runs once the connect has settled, so a mode with a surface to
+// repaint — the dock's MCP rows fill their marks in — hears the end of it.
 //
 // Async by design: a server that starts but never answers `initialize`,
 // and a local server that has to be launched and polled for up to
@@ -1282,9 +1284,11 @@ func mcpConfigPath() string {
 // for their whole timeout budgets. Registration happens whenever it lands;
 // the registry is mutex-guarded, and a prompt sent before then simply
 // carries fewer tools (the next turn has them).
-func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(string)) *mcpclient.Manager {
+func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(string), done func()) *mcpclient.Manager {
 	cfg, err := mcpclient.LoadConfig(mcpConfigPath())
 	if err != nil {
+		// A config that does not parse never reaches the dock — there is no
+		// section to repaint — so done stays uncalled here.
 		logx.Errorf("mcp config: %v", err)
 		return nil
 	}
@@ -1292,13 +1296,28 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 		return nil
 	}
 	mgr := mcpclient.NewManager()
+	// The sidebar's MCP section reads the CONFIG, not the sessions: a server
+	// that failed to connect is exactly the one the human needs to see, and
+	// the manager only knows the ones that answered. The row is marked ○ until
+	// its session lands, so the section shows the enabled list at once and
+	// settles a beat later — and the source is assigned here rather than after
+	// the connect, because the panel reads it on the first paint.
+	reg.MCPBlock = func() string { return mcpDockBlock(cfg, mgr) }
 	if wait {
 		// One-shot modes (print) must have the tools before the first
 		// turn: connect inline, bounded by the per-server init timeout.
 		finishMCP(mgr, reg, ctx, cfg, report)
+		if done != nil {
+			done()
+		}
 		return mgr
 	}
-	go finishMCP(mgr, reg, ctx, cfg, report)
+	go func() {
+		finishMCP(mgr, reg, ctx, cfg, report)
+		if done != nil {
+			done()
+		}
+	}()
 	return mgr
 }
 
@@ -1322,7 +1341,6 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 	}
 	mcpclient.Register(reg, mgr.Tools())
 	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
-	reg.MCPNames = func() string { return mcpNameList(mgr) }
 }
 
 // autostartMCP launches any server that ships as a binary rather than an
@@ -1352,18 +1370,50 @@ func autostartMCP(cfg *mcpclient.Config) {
 	}
 }
 
-// mcpNameList returns a "1 server" / "3 servers" label from
-// the manager's connected sessions, sorted. Empty when no
-// server is configured.
-func mcpNameList(mgr *mcpclient.Manager) string {
-	names := mgr.Servers()
+// mcpDockBlock is the sidebar's MCP section: a heading with the count, then one
+// row per ENABLED server, marked ● when the manager holds a live session for it
+// and ○ when it does not. The config is the source of truth for enablement and
+// the manager for reachability, so a server that is enabled but never answered
+// stays on screen instead of being silently dropped — that row is the whole
+// reason the section exists. Sorted, and "" when nothing is configured (MCP
+// off), so the dock omits the section rather than painting an empty one.
+func mcpDockBlock(cfg *mcpclient.Config, mgr *mcpclient.Manager) string {
+	if cfg == nil {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.Servers))
+	for name, sc := range cfg.Servers {
+		if sc == nil || !sc.IsEnabled() {
+			continue
+		}
+		names = append(names, name)
+	}
 	if len(names) == 0 {
 		return ""
 	}
-	if len(names) == 1 {
-		return names[0]
+	sort.Strings(names)
+	live := map[string]bool{}
+	if mgr != nil {
+		for _, n := range mgr.Servers() {
+			live[n] = true
+		}
 	}
-	return fmt.Sprintf("%d servers", len(names))
+	var b strings.Builder
+	fmt.Fprintf(&b, "MCP · %d", len(names))
+	for _, n := range names {
+		fmt.Fprintf(&b, "\n%s %s", mcpMark(live[n]), n)
+	}
+	return b.String()
+}
+
+// mcpMark is the one glyph that separates a server the session can call from
+// one it cannot. The filled dot is the same marker the status row uses for a
+// running tool, so "●" reads as working everywhere in this UI.
+func mcpMark(on bool) string {
+	if on {
+		return "●"
+	}
+	return "○"
 }
 
 // mcpUnavailable names the failed server without the launch error's
