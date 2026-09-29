@@ -590,6 +590,7 @@ func (f *fakeAPI) OpenTreeSelector()               {}
 func (f *fakeAPI) BranchSession(args string) error { return nil }
 func (f *fakeAPI) HubRoster() error                { return nil }
 func (f *fakeAPI) Trajectory() error               { return nil }
+func (f *fakeAPI) Usage() error                    { f.blocks = append(f.blocks, "usage"); return nil }
 func (f *fakeAPI) KeyMap() *KeyMap                 { return DefaultKeyMap() }
 
 func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {

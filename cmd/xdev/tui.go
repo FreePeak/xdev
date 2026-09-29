@@ -490,6 +490,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
 			app.SetWork(workOf(res.Messages))
+			ttftSum, ttftCount := ttftOf(res.Messages)
+			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -667,6 +669,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
 			app.SetWork(workOf(res.Messages))
+			ttftSum, ttftCount := ttftOf(res.Messages)
+			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
 		}
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
@@ -2391,6 +2395,15 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			if ev.Usage.Cost != nil {
 				h.ts.app.AddCost(ev.Usage.Cost.Total)
 			}
+			// The provider's own wall time and time-to-first-token, for
+			// /usage's LLM-time and average-TTFT lines. Carried on the
+			// message, not the usage: a turn that reported no usage still
+			// spent the time it took.
+			if ev.Message != nil {
+				h.ts.app.AddLLMTime(
+					time.Duration(ev.Message.DurationMS)*time.Millisecond,
+					ev.Message.TTFTMS)
+			}
 		}
 	case ai.EventError:
 		// An unbounded-wait round (retry.infinite / retry.retryAllErrors)
@@ -2447,6 +2460,20 @@ func workOf(msgs []ai.Message) time.Duration {
 	return work
 }
 
+// ttftOf sums a rebuilt history's per-turn time-to-first-token and counts the
+// turns that carried one, so a resumed session's average TTFT is the average
+// it really had rather than a zero. Average is taken at render time (sum /
+// count), never stored pre-divided.
+func ttftOf(msgs []ai.Message) (sum int64, count int64) {
+	for _, m := range msgs {
+		if m.Role == ai.RoleAssistant && m.TTFTMS > 0 {
+			sum += m.TTFTMS
+			count++
+		}
+	}
+	return sum, count
+}
+
 // shortSessionID renders the first 8 chars of a session id (matches the TUI
 // status line convention).
 func shortSessionID(id string) string {
@@ -2495,8 +2522,10 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 				res = tool.Result{Text: execErr.Error(), IsError: true}
 			}
 			out := tool.OutcomeOf(res.Details)
+			elapsed := time.Since(started)
 			app.FinishTool(id, bangToolName, res.IsError, res.Text, tui.ToolOutcome{
-				Dur:       time.Since(started).Round(time.Millisecond).String(),
+				Dur:       elapsed.Round(time.Millisecond).String(),
+				Elapsed:   elapsed,
 				Exit:      out.Exit,
 				HasExit:   out.HasExit,
 				Truncated: out.Truncated,
@@ -2522,6 +2551,7 @@ func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Du
 	out := tool.OutcomeOf(res.Details)
 	h.ts.app.FinishTool(call.ID, call.Name, res.IsError, res.Text, tui.ToolOutcome{
 		Dur:       dur.Round(time.Millisecond).String(),
+		Elapsed:   dur,
 		Exit:      out.Exit,
 		HasExit:   out.HasExit,
 		Truncated: out.Truncated,
@@ -2696,12 +2726,15 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			// replay left the panel half empty on every reopen (#291).
 			out := tool.OutcomeOf(m.Details)
 			dur := ""
+			var elapsed time.Duration
 			if m.DurationMS > 0 {
-				dur = (time.Duration(m.DurationMS) * time.Millisecond).Round(time.Millisecond).String()
+				elapsed = time.Duration(m.DurationMS) * time.Millisecond
+				dur = elapsed.Round(time.Millisecond).String()
 			}
 			app.AddToolBlock(m.ToolCallID, m.ToolName, "")
 			app.FinishTool(m.ToolCallID, m.ToolName, m.IsError, m.Text(), tui.ToolOutcome{
 				Dur:       dur,
+				Elapsed:   elapsed,
 				Exit:      out.Exit,
 				HasExit:   out.HasExit,
 				Truncated: out.Truncated,

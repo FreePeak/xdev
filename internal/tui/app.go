@@ -39,6 +39,21 @@ type Status struct {
 	// the split the glyphs claim instead of one half of it.
 	TokensCache int64
 	TokensThink int64
+	// ToolCalls counts the tool calls this session opened, ToolErrors the
+	// ones that came back failed, and ToolWork the wall time they took.
+	// AddToolBlock counts a call, FinishTool settles it. These are the
+	// /usage panel's third block: the status row answers "how much", the
+	// panel answers "spent how long and on what".
+	ToolCalls  int
+	ToolErrors int
+	ToolWork   time.Duration
+	// LLMWork is the wall time the provider's own messages took
+	// (msg.DurationMS — request to last token, queue included), and
+	// TTFTCount/TTFTSum the turns' time-to-first-token so /usage can report
+	// an average instead of the last reading the status row shows.
+	LLMWork   time.Duration
+	TTFTSum   int64
+	TTFTCount int64
 	// Cost is the session spend in USD (0 when the provider reports none),
 	// CtxWindow the model's context window (0 = unknown) and Rate the last
 	// measured decode speed in output tokens/second (0 = never measured).
@@ -731,8 +746,12 @@ func (a *App) AddAssistantBlock(text string) {
 // saw. cmd flattens tool-specific Details into it so the transcript never has
 // to type-switch over another package's payload.
 type ToolOutcome struct {
-	Dur       string // formatted wall time, e.g. "70ms" ("" = unknown)
-	Exit      int    // process exit code; read only when HasExit
+	Dur string // formatted wall time, e.g. "70ms" ("" = unknown)
+	// Elapsed is Dur's raw value, for the /usage tool-time total: the string
+	// is one row's footer, and summing formatted strings is how a report ends
+	// up minutes off. 0 = the caller did not measure.
+	Elapsed   time.Duration
+	Exit      int // process exit code; read only when HasExit
 	HasExit   bool
 	Truncated bool
 	Diff      string // unified diff of the file change, when the tool made one
@@ -746,6 +765,10 @@ type ToolOutcome struct {
 // that pairs add and finish back to back (replay, bang mode).
 func (a *App) AddToolBlock(callID, name, rawArgs string) {
 	a.mu.Lock()
+	// The /usage report's "tool calls" line. A replayed history replays the
+	// same call, so this counts what the user watched, not what the
+	// provider billed (billing is the ↑⇢↓ counters' business).
+	a.st.ToolCalls++
 	a.blocks = append(a.blocks, &Block{
 		Kind: KindTool, CallID: callID, ToolName: name, Text: rawArgs,
 		Status: "running", Ts: time.Now(),
@@ -805,6 +828,12 @@ func (a *App) FinishTool(callID, name string, isErr bool, output string, out Too
 		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
 		Truncated: out.Truncated, Diff: out.Diff,
 	})
+	// /usage's "tool time": the calls' own wall time, one sample per
+	// finished call, counted whether the call succeeded or not.
+	if isErr {
+		a.st.ToolErrors++
+	}
+	a.st.ToolWork += out.Elapsed
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1082,10 +1111,43 @@ func (a *App) SetContextWindow(tokens int64) {
 // SetWork re-bases the HUD time segment with the work a session has already
 // banked. Wired by cmd when a store is adopted (/new, /drop, /resume, fork):
 // the turns already on disk were active time even though this process never
-// watched them happen.
+// watched them happen. It also re-bases /usage's own re-based counters, since
+// a replayed history is the only source of them.
 func (a *App) SetWork(d time.Duration) {
 	a.mu.Lock()
 	a.st.Work = max(d, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetLLMTime re-bases /usage's LLM time and average-TTFT from a rebuilt
+// history (/resume, /fork, tree navigation) the way SetWork re-bases the
+// timer. It REPLACES rather than adds: the replayed path measures the whole
+// adopted history in one call, and adding would double-count it.
+func (a *App) SetLLMTime(d time.Duration, ttftSum int64, ttftCount int64) {
+	a.mu.Lock()
+	a.st.LLMWork = max(d, 0)
+	a.st.TTFTSum = max(ttftSum, 0)
+	a.st.TTFTCount = max(ttftCount, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddLLMTime banks one finished provider request's wall time (msg.DurationMS
+// — request sent to last token, gateway queue included) and, when the turn
+// carried one, its time-to-first-token. /usage reports LLM time and the
+// average TTFT; the status row's ⚡ and ⌚ stay last-turn readings.
+//
+// 0 durations are ignored rather than added: a message persisted before
+// durations were recorded contributes nothing, which is what the replay path
+// already assumes when it banks work.
+func (a *App) AddLLMTime(dur time.Duration, ttftMS int64) {
+	a.mu.Lock()
+	a.st.LLMWork += max(dur, 0)
+	if ttftMS > 0 {
+		a.st.TTFTSum += ttftMS
+		a.st.TTFTCount++
+	}
 	a.mu.Unlock()
 	a.poke()
 }
@@ -1571,6 +1633,9 @@ func (a *App) Reset() {
 	a.st.Rate = 0
 	a.st.TTFT = 0
 	a.st.CtxUsed = 0
+	a.st.ToolCalls, a.st.ToolErrors = 0, 0
+	a.st.ToolWork, a.st.LLMWork = 0, 0
+	a.st.TTFTSum, a.st.TTFTCount = 0, 0
 	a.closeWindow()
 	a.blocks = nil
 	a.thinkFocus = -1  // the focused box went with them
@@ -4294,6 +4359,17 @@ var statusSegments = map[string]bool{
 	"theme":   true,
 	"time":    true,
 	"command": true,
+	// cache is the dsh "Cache hit N%" reading (deepseek-harness
+	// StatsPills.tsx UsagePill): the session's total with the hit rate
+	// beside it, so the one number that says whether the prefix cache is
+	// working needs no subtraction. dsh is the donor here — the pill is
+	// exactly "total · Cache hit N%", and xdev's tokens segment already
+	// carries the split the pill's dialog breaks out.
+	"cache": true,
+	// toolcalls is dsh's "{turns} turns {steps} steps" TimePill count
+	// reduced to the one figure xdev has no other home for: how many tool
+	// calls this session spent, with failures beside it.
+	"toolcalls": true,
 	// debugMouse renders the last mouse event on the status bar
 	// (settings `tui.debugMouse`, off by default). It always shows
 	// when enabled: the segment never hides, so the log is visible
@@ -4302,8 +4378,12 @@ var statusSegments = map[string]bool{
 }
 
 // defaultStatusSegments is the shipped layout: the work timer, the token
-// counters, the live context total and the decode speed, right-aligned (the
-// timer reads leftmost so the rate's own " │ " stays the row's right edge).
+// counters, the dsh cache pill, the live context total, the decode speed and
+// the tool-call count, right-aligned (the timer reads leftmost so the rate's
+// own " │ " stays the row's right edge). The two dsh segments are here
+// because /usage already reports them in the long form and a report is not
+// where a glance should have to go: the hit rate is what says whether the
+// prefix cache is working, and the call count is the turn size.
 // The context segment is the number: what this session's context costs against
 // the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
 // request's provider-reported total, cached input included, which covers the
@@ -4311,7 +4391,7 @@ var statusSegments = map[string]bool{
 // either half is unknown (an undiscovered window, or a session that has not
 // answered yet), so a fresh run keeps a clean row. The model keeps its
 // composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"command", "time", "tokens", "context", "rate"}
+var defaultStatusSegments = []string{"command", "time", "tokens", "cache", "context", "rate", "toolcalls"}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -4340,7 +4420,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 			return "", ""
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "↑%s", HumanTokens(a.st.TokensIn))
+		fmt.Fprintf(&b, "%s↑%s", a.th.HUDIcon(theme.HUDIconDatabase), HumanTokens(a.st.TokensIn))
 		if a.st.TokensCache > 0 {
 			fmt.Fprintf(&b, " ⇢%s", HumanTokens(a.st.TokensCache))
 		}
@@ -4349,6 +4429,39 @@ func (a *App) hudSegment(name string) (text, token string) {
 			fmt.Fprintf(&b, " ˟%s", HumanTokens(a.st.TokensThink))
 		}
 		return b.String(), theme.StatusLineSpend
+	case "cache":
+		// dsh's cache-hit RATE (deepseek-harness StatsPills.tsx), and only
+		// the rate. dsh's pill reads "{total} · Cache hit N%" because that
+		// pill is its ONLY token reading; xdev's row already carries the
+		// split, and the total beside it was the same 66.3k drawn twice.
+		//
+		// No leading icon either: the database icon is already on the token
+		// segment this one refines, and a second ▤ three cells later is the
+		// same duplication in another dress. The rate is cacheRead over the
+		// BILLED prompt side (fresh + cached) — dsh's three disjoint
+		// buckets minus the cache write xdev does not bill separately —
+		// because output was never cacheable and counting it would read
+		// low for the wrong reason. Hidden until something was actually
+		// served from the cache: 0% on a provider that reports no cache is
+		// a claim about a measurement nobody made.
+		if a.st.TokensCache <= 0 || a.st.TokensIn+a.st.TokensCache <= 0 {
+			return "", ""
+		}
+		return fmt.Sprintf("cache %d%%",
+			100*a.st.TokensCache/(a.st.TokensIn+a.st.TokensCache)), theme.StatusLineSpend
+	case "toolcalls":
+		// dsh's TimePill counts turns and steps; the one figure xdev has
+		// no other home for is the call count, and a failed call is worth
+		// seeing beside the total rather than only in /usage. Hides at
+		// zero so a session that has not called a tool keeps a clean row.
+		if a.st.ToolCalls == 0 {
+			return "", ""
+		}
+		if a.st.ToolErrors > 0 {
+			return fmt.Sprintf("%s%d calls (%d failed)", a.th.HUDIcon(theme.HUDIconTool),
+				a.st.ToolCalls, a.st.ToolErrors), theme.StatusLineSpend
+		}
+		return fmt.Sprintf("%s%d calls", a.th.HUDIcon(theme.HUDIconTool), a.st.ToolCalls), theme.StatusLineSpend
 	case "context":
 		// used/total of the LIVE context: what the next request costs against
 		// the model's window. Hidden until both halves are known — an
@@ -4367,7 +4480,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 		// agent — and an agent parked on a question card — shows a frozen
 		// number; the wall clock between turns belongs to the user, not to the
 		// session. "0s" is a reading, so the segment never hides.
-		return humanDur(a.activeWork()), theme.StatusLineSpend
+		return a.th.HUDIcon(theme.HUDIconGauge) + humanDur(a.activeWork()), theme.StatusLineSpend
 	case "rate":
 		// omp's ⚡ tok/s: the decode speed of the last message the provider
 		// gave a token count for. ONE formula, one source — a live estimate
@@ -4378,14 +4491,14 @@ func (a *App) hudSegment(name string) (text, token string) {
 		if a.st.Rate <= 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("⚡ %.1f t/s", a.st.Rate), theme.StatusLineSpend
+		return fmt.Sprintf("%s %.1f t/s", a.th.HUDIcon(theme.HUDIconGauge), a.st.Rate), theme.StatusLineSpend
 	case "ttft":
 		// ⌚ ttft: per-turn time-to-first-token. SetTTFT writes it;
 		// the segment stays hidden until a turn has actually finished.
 		if a.st.TTFT <= 0 {
 			return "", ""
 		}
-		return "⌚ " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
+		return a.th.HUDIcon(theme.HUDIconGauge) + " " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
 	case "debugMouse":
@@ -4477,10 +4590,17 @@ func (a *App) hudParts() []hudPart {
 // hudEssentialWidth is the space the metrics that must always survive a
 // narrow row take: the work timer and the decode rate, separated by a
 // HUD separator. The rest of the HUD (and the hotkeys) give way to them.
+//
+// hudEssentialRank is that threshold by name rather than by number: the
+// token split moved rank when the dsh segments landed, and a magic 5 would
+// have silently promoted the wrong segment to "always survives" — which is
+// exactly how the token counter stopped dropping on a narrow row.
+const hudEssentialRank = 7 // statusKeepRank: time and rate only
+
 func hudEssentialWidth(parts []hudPart) int {
 	essential := make([]hudPart, 0, 2)
 	for _, p := range parts {
-		if statusKeepRank[p.name] >= 5 {
+		if statusKeepRank[p.name] >= hudEssentialRank {
 			essential = append(essential, p)
 		}
 	}
@@ -4498,16 +4618,22 @@ func hudEssentialWidth(parts []hudPart) int {
 }
 
 // statusKeepRank orders segments by how essential they are when the row
-// runs out of width. The decode rate and the work timer are what the
-// user reads during a run, so they are dropped last.
+// runs out of width — the drop loop sheds the LOWEST rank first. The decode
+// rate and the work timer are what the user reads during a run, so they are
+// dropped last; the theme name and the model label go first. The two dsh
+// readings rank BELOW the token split on purpose: ↑⇢↓ already carries the
+// cache volume, so the hit rate and the call count are the refinements a
+// narrow row gives up before the split it refines.
 var statusKeepRank = map[string]int{
-	"theme":   0,
-	"model":   1,
-	"tokens":  2,
-	"context": 3,
-	"cost":    4,
-	"time":    5,
-	"rate":    6,
+	"theme":     0,
+	"model":     1,
+	"cost":      2,
+	"toolcalls": 3,
+	"cache":     4,
+	"tokens":    5,
+	"context":   6,
+	"time":      7,
+	"rate":      8,
 }
 
 // pathDisplay renders the working directory for the status row: home

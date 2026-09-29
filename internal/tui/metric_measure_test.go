@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
-// The HUD's ⚡ t/s and the ↑ ↓ counters are measurements, so each of these
+// The HUD's gauge t/s and the ↑ ↓ counters are measurements, so each of these
 // pins one way they used to report a number that was simply not what it
 // claimed: a rate divided by a dead turn's elapsed time, tokens the window
 // never timed, a previous session's totals, a stale reading standing in for
@@ -124,7 +126,9 @@ func TestRateIsOneMeasuredNumber(t *testing.T) {
 	app.AddUsage(5, 120, 0, 0, 125)
 	settled := measuredRate(t, app)
 	show := rateSegment(t, app)
-	if want := fmt.Sprintf("⚡ %.1f t/s", settled); show != want {
+	// The gauge glyph is dsh's IconGaugeOutline (theme symbols.hud.gauge),
+	// not the old hardcoded ⚡.
+	if want := fmt.Sprintf("%s %.1f t/s", app.th.HUDIcon(theme.HUDIconGauge), settled); show != want {
 		t.Fatalf("rate segment = %q, want %q (the measured value, not a rune estimate)", show, want)
 	}
 	// Ending the run does not change the number on the row.

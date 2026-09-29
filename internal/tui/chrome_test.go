@@ -224,7 +224,7 @@ func TestHUDTimeSegment(t *testing.T) {
 	// inherited from process start. "0s" is a reading, so it renders.
 	app.draw()
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "0s │ ↑1.2k │ ↓340") {
+	if !strings.Contains(row, "⏱0s │ ▤↑1.2k │ ↓340") {
 		t.Fatalf("zero work must render beside the tokens: %q", row)
 	}
 

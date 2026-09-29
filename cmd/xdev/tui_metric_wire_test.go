@@ -77,19 +77,23 @@ func awaitHUD(t *testing.T, scr tcell.SimulationScreen, want string) string {
 // event, so a negative assertion cannot pass just because nothing repainted.
 func settle() { time.Sleep(120 * time.Millisecond) }
 
-// rateOf pulls the ⚡ figure off the row, or 0 when the segment is hidden.
+// rateOf pulls the decode-rate figure off the row, or 0 when the segment is
+// hidden. It matches on the "t/s" unit rather than a glyph: the leading icon
+// is theme-owned (dsh's gauge, theme.HUDIcon) and a test that pinned a glyph
+// would break the moment a theme overrode it.
 func rateOf(t *testing.T, row string) float64 {
 	t.Helper()
-	i := strings.Index(row, "⚡")
+	i := strings.Index(row, "t/s")
 	if i < 0 {
 		return 0
 	}
-	fields := strings.Fields(row[i:])
-	if len(fields) < 2 {
+	// The number sits in the last space-separated field before the unit.
+	fields := strings.Fields(row[:i])
+	if len(fields) == 0 {
 		return 0
 	}
 	var v float64
-	if _, err := fmt.Sscanf(fields[1], "%f", &v); err != nil {
+	if _, err := fmt.Sscanf(fields[len(fields)-1], "%f", &v); err != nil {
 		t.Fatalf("rate is not a number: %q", row)
 	}
 	return v
