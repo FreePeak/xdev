@@ -170,7 +170,49 @@ func (o *SystemPromptOverrides) ApplyPersonalityPreset(preset string) error {
 }
 
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.
-const MaxContextBytes = 32 << 10
+//
+// The cap was written as a single number, but the budget it actually has to
+// protect is the *system prompt*, and the two are not the same thing. Measured
+// on a real repository (PRD entry 2026-09-30): the injected chain, the
+// discovered rulebook and the skills block together run ~6.8k tokens against
+// PRD §1 Goal 4's 1,000, so a 32 KiB chain alone is most of the blowout.
+//
+// The per-file split exists because a single shared budget silently starves
+// the file that matters most. With one 98 KB global file the chain rendered
+// 32,871 bytes and the repository's own AGENTS.md never appeared at all — no
+// error, no marker, just missing rules. Every file now gets a bounded share
+// instead of competing for one pool, so no single file can consume the chain
+// budget that the other files were counting on.
+const (
+	MaxContextBytes = 32 << 10 // whole chain, unchanged as the outer bound
+	// MaxContextFileKB bounds one ANCESTOR file. The chain is loaded
+	// root→cwd, so an uncapped ancestor can consume the whole pool and the
+	// closest file is never even read — the load pass below stops early, and
+	// the file that carries the rules saying which ancestor rules do not
+	// apply is simply absent. Bounding every ancestor is what guarantees the
+	// closest file is always loaded; the closest file itself is bounded by
+	// the pool (#477's floor), not by a share, so a large project ruleset
+	// still reaches the model.
+	MaxContextFileKB = 8 << 10
+)
+
+// contextBytesForFile returns the slice of the chain budget one file may
+// render, given how much earlier files already took and whether this is the
+// cwd's own file.
+func contextBytesForFile(used, fileSize int, closest bool) int {
+	share := MaxContextFileKB
+	if closest {
+		share = MaxContextBytes
+	}
+	// Never render more of a file than it actually contains.
+	if fileSize < share {
+		share = fileSize
+	}
+	if left := MaxContextBytes - used; share > left {
+		share = left
+	}
+	return share
+}
 
 // maxImportDepth bounds recursive @path expansion (omp parity: <=5).
 const maxImportDepth = 5
@@ -340,6 +382,7 @@ func LoadContextFiles(cwd string) string {
 		}
 		dir = parent
 	}
+
 	// chain is cwd→root; reverse for root→cwd ordering.
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
@@ -361,10 +404,23 @@ func LoadContextFiles(cwd string) string {
 		if err != nil {
 			continue
 		}
-		remaining := MaxContextBytes - used
-		if remaining < MinContextFileBytes {
-			break // out of budget; the fit pass below decides what survives
-		}
+		// Every file in the chain is read, however full the pool already is.
+		// The pre-merge loop stopped as soon as MaxContextBytes was spent, so
+		// an ancestor that filled the budget meant the CWD's own file was
+		// never read at all — and the fit pass below, whose whole job is to
+		// prefer the most specific rules, had nothing to prefer. Measured on
+		// #477 alone: a 31 KB global file rendered 32,823 bytes with the
+		// repository's rule absent and the budget marker NOT rendered, so the
+		// loss was silent. The budget is spent by the fit pass, which knows
+		// the cost of each file, not by the order files happen to be read in.
+		//
+		// The per-file cap here is only a load guard — it stops one huge file
+		// from being held whole in memory. It is deliberately the whole pool,
+		// because ancestors are never *rendered* truncated: the fit pass keeps
+		// an ancestor whole or drops it entirely, and a half-present broad
+		// rulebook would quietly contradict the specific file that overrides
+		// it.
+		remaining := MaxContextBytes
 		content := strings.TrimSpace(expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen))
 		if content == "" {
 			continue
@@ -385,12 +441,12 @@ func LoadContextFiles(cwd string) string {
 		keep[i] = true
 		kept += len(loaded[i].content)
 	}
-	// The closest file is the floor. If it alone overruns the budget it is
-	// still injected, truncated: dropping it would leave the session holding
-	// only the ancestors' rules, which is the same inversion one level down.
-	// How much it can keep is settled after rendering, because the budget
-	// covers the whole block — marker, headings and separators included —
-	// and those are not known until the marker text is.
+	// The closest file is the floor: if it alone overruns the budget it is
+	// still injected, truncated, because dropping it would leave the session
+	// holding only the ancestors' rules — the same inversion one level down.
+	// How much it keeps is settled after rendering, because the budget covers
+	// the whole block (marker, headings and separators included) and those
+	// are not known until the marker text is.
 	truncated := false
 	if n := len(loaded); n > 0 && !keep[n-1] {
 		keep[n-1] = true
@@ -420,6 +476,15 @@ func LoadContextFiles(cwd string) string {
 			}
 			b.WriteString("The most specific rules present are kept in full and broader ancestors were dropped first, so this list is incomplete — read an omitted path before relying on rules it may carry.\n\n")
 		}
+		// A file cut by the per-file cap is a partial list, and the block is
+		// headed as binding rules: a silent shortening under that heading is
+		// the lie the marker exists to prevent. Name the file and the size of
+		// the cut so the agent can go read what it was not shown.
+		for i, f := range loaded {
+			if keep[i] && f.dropped > 0 {
+				fmt.Fprintf(&b, "[%s: %d characters were left out by the %d KiB per-file cap — read the file if this part matters]\n\n", f.path, f.dropped, MaxContextFileKB>>10)
+			}
+		}
 		rendered := false
 		for i, f := range loaded {
 			if !keep[i] {
@@ -439,15 +504,23 @@ func LoadContextFiles(cwd string) string {
 		return b.String()
 	}
 	out := render()
-	if truncated {
-		// One correction pass: trimming to the full budget would still
-		// overrun once the marker and heading are counted, and a rules block
-		// that ignores its own budget is worse than no budget at all.
-		if over := len(out) - MaxContextBytes; over > 0 {
-			last := loaded[len(loaded)-1]
-			loaded[len(loaded)-1].content = trimToBytes(last.content, len(last.content)-over)
-			out = render()
+	// One correction pass, whenever the block carries a per-file cut: the
+	// per-file cap bounds one file, not the block, so a chain of large files
+	// can still overrun the whole budget. Trim the closest file until it fits
+	// — a rules block that ignores its own budget is worse than no budget.
+	// The cut is recorded on the file, so the marker re-renders with the
+	// final withheld count instead of going stale.
+	if over := len(out) - MaxContextBytes; over > 0 && len(loaded) > 0 {
+		last := &loaded[len(loaded)-1]
+		if !keep[len(loaded)-1] {
+			// #477's floor: the closest file is injected truncated, never
+			// dropped, so a chain that overflows the pool still delivers it.
+			keep[len(loaded)-1] = true
+			truncated = true
 		}
+		last.content = trimToBytes(last.content, len(last.content)-over)
+		last.dropped = over
+		out = render()
 	}
 	return out
 }
@@ -457,10 +530,13 @@ func LoadContextFiles(cwd string) string {
 // on, and a half-sentence rule is worse than a missing one.
 const MinContextFileBytes = 256
 
-// contextFile is one rules file rendered into the prompt.
+// contextFile is one rules file rendered into the prompt. dropped is the
+// number of runes the per-file cap withheld; it is what makes the cut
+// visible in the render pass instead of silent.
 type contextFile struct {
 	path    string
 	content string
+	dropped int
 }
 
 // trimToBytes cuts s to at most n bytes without splitting a rune.
@@ -476,6 +552,22 @@ func trimToBytes(s string, n int) string {
 		cut--
 	}
 	return strings.TrimRight(s[:cut], " \t\n") + "\n… [truncated]"
+}
+
+// trimToLineBoundary cuts s to about n runes without splitting a rune, then
+// backs up to the last newline so the rendered rule is never a half sentence
+// or a half markdown construct. Unlike trimToBytes it appends nothing: the
+// per-file marker in the render pass is what declares the cut.
+func trimToLineBoundary(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := string(r[:n])
+	if nl := strings.LastIndex(cut, "\n"); nl > 0 {
+		cut = cut[:nl]
+	}
+	return strings.TrimRight(cut, " \t\n")
 }
 
 // Per-rule and total prompt caps for injected rules (issue #31): a
