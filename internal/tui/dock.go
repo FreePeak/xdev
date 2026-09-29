@@ -1065,18 +1065,14 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
 	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-	// The panel's background is the terminal's own, not a colour this program
-	// picked. Get cannot express that: a theme that leaves bg_base to the
-	// terminal ("") answers with an explicit black, so the overlay painted
-	// #000000 over whatever scheme the human is running. Slot makes the
-	// distinction Get cannot — ok=false means "the terminal decides" — and
-	// ColorDefault (SGR 49) is that answer. Same resolution drawDock uses, so
-	// the overlay's inside matches the sidebar's surface.
-	bgColor := tcell.ColorDefault
-	if c, ok := a.th.Slot(theme.BgBase); ok {
-		bgColor = a.cellColor(c)
-	}
-	bg := tcell.StyleDefault.Background(bgColor)
+	// The panel's field is the terminal's own background, never a colour this
+	// program picked. A themed fill here (bg_base) painted the blank interior
+	// one colour while every text cell kept the default, so the viewer came up
+	// as black bars on a grey band; filling with the default style (SGR 49)
+	// resolves the whole panel alike — the popup is the same black the
+	// transcript and composer already are. It still fills: the transcript is
+	// painted earlier in this frame and must not show through the viewer.
+	bg := tcell.StyleDefault
 	box := a.th.Box()
 	fillPanelRows(s, y0, y0+panelH-1, x, w-x, bg)
 	top := boxTop(box, brdSt, "", w-2*x)
