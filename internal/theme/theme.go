@@ -277,6 +277,26 @@ func groknightSlots() map[string]Color {
 		ToolDiffAdded:   Hex("#9ece6a"),
 		ToolDiffRemoved: Hex("#f7768e"),
 		ToolDiffContext: Hex("#6c6c6c"),
+		// Fenced-code tokens (#501). The launch palettes define all 9 as
+		// REQUIRED theme tokens but never pinned a value, which is why they
+		// had no consumer: the code block was one flat ink. These are the
+		// palette's own accents — the same TokyoNight Night set the rest of
+		// the dark theme draws from — with the comment gray and the two
+		// syntax "quiet" inks reused from the ramp, so a code block reads as
+		// part of this theme rather than a foreign one pasted into it.
+		// Unlike the diff slots these DO paint: an unpainted token class
+		// would leave the model's own code ambiguous, and unlike the diff
+		// slots the risk is a code block that is harder to skim, not a
+		// change rendered in the reader's own green/red.
+		SyntaxComment:     Hex("#565f89"), // Faded (dark) / COMMENT-ish
+		SyntaxKeyword:     Hex("#bb9af7"), // MAGENTA
+		SyntaxString:      Hex("#9ece6a"), // GREEN
+		SyntaxNumber:      Hex("#ff9e64"), // ORANGE
+		SyntaxType:        Hex("#2ac3de"), // CYAN
+		SyntaxVariable:    Hex("#c0caf5"), // TEXT
+		SyntaxFunction:    Hex("#7aa2f7"), // BLUE
+		SyntaxOperator:    Hex("#89ddff"), // CYAN2
+		SyntaxPunctuation: Hex("#a9b1d6"), // FG
 	}
 }
 
@@ -326,6 +346,18 @@ func grokdaySlots() map[string]Color {
 		ToolDiffAdded:   Hex("#378E23"),
 		ToolDiffRemoved: Hex("#cd3048"),
 		ToolDiffContext: Hex("#767676"),
+		// Fenced-code tokens (#501) — see groknightSlots. Same 9 roles, the
+		// day palette's own accents and a darker gray ramp so the inks hold
+		// contrast on the light code band.
+		SyntaxComment:     Hex("#6b7280"),
+		SyntaxKeyword:     Hex("#7D4BC6"), // PURPLE
+		SyntaxString:      Hex("#378E23"), // GREEN
+		SyntaxNumber:      Hex("#b45309"), // ORANGE
+		SyntaxType:        Hex("#0F87A2"), // BLUE1 / CYAN
+		SyntaxVariable:    Hex("#262626"), // TEXT
+		SyntaxFunction:    Hex("#2F64D2"), // BLUE
+		SyntaxOperator:    Hex("#0A8E70"), // TEAL
+		SyntaxPunctuation: Hex("#444444"), // FG_DARK
 	}
 }
 
