@@ -263,6 +263,49 @@ func TestLiveBoxRepaintsOnceTheTailCapFreezesItsLength(t *testing.T) {
 	}
 }
 
+// The rate half of the same feature, on the same screen. The render stamp is
+// what keeps a flooding command at ~10fps, and it is the only thing standing
+// between 20,000 chunks and 20,000 frames: the loop's dirty channel is
+// level-triggered, so a stamp per chunk is a full transcript walk per chunk.
+// The assertion is on the stamp, read after the flood, with a ceiling derived
+// from the time the flood actually took — the coalescing is about frames, and
+// the content still has to be all there when the flood stops.
+func TestLiveBoxCoalescesAFloodIntoFrames(t *testing.T) {
+	app, _ := drawnApp(t, 60, 30)
+	app.AddToolBlock("call-a", "bash", `{"command":"flood"}`)
+
+	const chunks = 20000
+	line := "flood-line-" + strings.Repeat("x", 8) + "\n"
+	start := time.Now()
+	for range chunks {
+		app.AppendToolOutput("call-a", "bash", line)
+	}
+	elapsed := time.Since(start)
+
+	app.mu.Lock()
+	seq := app.liveBoxLocked("call-a", "bash").liveSeq
+	app.mu.Unlock()
+	if seq == 0 {
+		t.Fatalf("the stamp never moved for %d chunks: the box would not repaint at all", chunks)
+	}
+	// 10fps for as long as the flood ran, plus a frame or two of slack for
+	// the first flush and the scheduling jitter around it. A per-chunk stamp
+	// is three orders of magnitude above this.
+	if max := uint64(elapsed/livePaint) + 4; seq > max {
+		t.Fatalf("render stamp moved %d times for %d chunks in %s (max %d at %v): one frame per chunk, not coalesced",
+			seq, chunks, elapsed, max, livePaint)
+	}
+	// Coalescing is about FRAMES: the content is capped, not dropped on the
+	// floor, and the newest bytes are the ones kept.
+	got := app.liveText("call-a", "bash")
+	if len(got) > liveTailBytes {
+		t.Fatalf("live box holds %d bytes, cap is %d", len(got), liveTailBytes)
+	}
+	if !strings.HasSuffix(got, line) {
+		t.Fatalf("the newest line was not kept: ...%q", got[len(got)-40:])
+	}
+}
+
 // A live box paints its newest rows and no footer. A box that grew past the
 // window still shows the last liveRows of them, and never offers Ctrl+O:
 // expanding output that is still arriving has no settled length to expand to.
