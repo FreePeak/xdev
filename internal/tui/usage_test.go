@@ -106,10 +106,10 @@ func TestGroupTokens(t *testing.T) {
 	}
 }
 
-// TestStatusRowCarriesTheUsageMetrics pins the two dsh readings on the row
-// itself, not only in /usage: the hit rate and the call count are the two
-// figures the one-glance row exists for, and a report the user has to type
-// to read is not where a glance goes.
+// TestStatusRowCarriesTheUsageMetrics pins that the figures the row can no
+// longer afford inline are all still reachable: the hit rate rides the token
+// pill (dsh's own label), and the rest — the context meter, the call count —
+// are settings entries a session can put back on the row.
 func TestStatusRowCarriesTheUsageMetrics(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	// 479 fresh + 64575 cached + 1770 out, two calls of which one failed.
@@ -121,33 +121,42 @@ func TestStatusRowCarriesTheUsageMetrics(t *testing.T) {
 	app.SetContextWindow(200000)
 	app.draw()
 
+	// The default row: the hit rate is the pill's own inline reading, and
+	// nothing else rode along.
 	row := lastRow(screenText(scr))
-	for _, want := range []string{
-		"cache 99%", // dsh's hit RATE — the total is the tokens segment's job
-		"ctx 66.8k/200k",
-		"✳2 calls (1 failed)",
-	} {
+	if !strings.Contains(row, "66.8k · 99%") {
+		t.Errorf("the token pill must carry the total and the hit rate: %q", row)
+	}
+	if strings.Contains(row, "ctx ") || strings.Contains(row, "calls") {
+		t.Errorf("the row must stay two pills wide: %q", row)
+	}
+
+	// Every other reading is one settings entry away.
+	app.SetStatusSegments([]string{"tokens", "context", "toolcalls"})
+	app.draw()
+	row = lastRow(screenText(scr))
+	for _, want := range []string{"ctx 66.8k/200k", "✳2 calls (1 failed)"} {
 		if !strings.Contains(row, want) {
-			t.Errorf("status row missing %q: %q", want, row)
+			t.Errorf("configured segment missing %q: %q", want, row)
 		}
 	}
 }
 
 // TestStatusRowHidesUnmeasuredUsageMetrics: a zero line is a claim about a
-// measurement. A provider that bills no cache, and a session that has
-// called no tool, must keep the plain row — 0% cache and "0 calls" are
-// readings nobody made.
+// measurement. A provider that bills no cache must keep the plain pill — a
+// "0%" is a reading nobody made, and 0 calls is the same.
 func TestStatusRowHidesUnmeasuredUsageMetrics(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	app.AddUsage(1200, 340, 0, 0, 1540)
+	app.SetStatusSegments([]string{"tokens", "cache", "toolcalls"})
 	app.draw()
 
 	row := lastRow(screenText(scr))
-	if strings.Contains(row, "cache") || strings.Contains(row, "calls") {
+	if strings.Contains(row, "%") || strings.Contains(row, "calls") {
 		t.Fatalf("an unmeasured metric drew a glyph: %q", row)
 	}
-	if !strings.Contains(row, "▤↑1.2k │ ↓340") {
-		t.Fatalf("the token split changed: %q", row)
+	if !strings.Contains(row, "1.5k") {
+		t.Fatalf("the token pill changed: %q", row)
 	}
 }
 
@@ -182,30 +191,28 @@ func TestUsageReportOmitsAnImpossibleShare(t *testing.T) {
 	}
 }
 
-// TestCacheSegmentCarriesNoSecondTotal: the row drew the session total
-// twice — the tokens segment's ↑⇢↓ split, then "▤66.3k · cache 100%" beside
-// it, a number the split already sums to. dsh can afford that (its pill is
-// its ONLY token reading); a row that already shows the split cannot. The
-// cache segment now reports the RATE alone, with no icon either: the ▤ is
-// already on the segment this one refines. The exact total stays where a
-// grouped figure belongs — /usage.
+// TestCacheSegmentCarriesNoSecondTotal: with the token pill on the row, the
+// separate `cache` segment would print the session total a second time — the
+// pill already IS the total. dsh can afford that duplication (its pill is
+// its only token reading, and `cache` is not a segment there); a row that
+// already shows the total cannot. The `cache` entry therefore reports the
+// RATE alone: the rate is what the pill's own second figure already says, but
+// the pill hides it until anything was actually served from the cache, and a
+// session that asks for the rate inline asked for it by name.
 func TestCacheSegmentCarriesNoSecondTotal(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	app.AddUsage(479, 1770, 64575, 0, 66824)
+	app.SetStatusSegments([]string{"tokens", "cache"})
 	app.draw()
 
 	if got, _ := app.hudSegment("cache"); got != "cache 99%" {
-		t.Fatalf("the cache segment = %q, want the rate alone (no total, no second ▤)", got)
+		t.Fatalf("the cache segment = %q, want the rate alone (no total)", got)
 	}
 	row := lastRow(screenText(scr))
-	if strings.Contains(row, "66.8k") {
-		t.Fatalf("the cache segment re-printed the total the split already sums: %q", row)
+	if strings.Contains(row, "66.8k · cache") {
+		t.Fatalf("the cache segment re-printed the total the pill already shows: %q", row)
 	}
-	// One ▤ on the row, not two: the database icon belongs to the split.
-	if n := strings.Count(row, "▤"); n != 1 {
-		t.Fatalf("the database icon is drawn %d times: %q", n, row)
-	}
-	if !strings.Contains(row, "▤↑479 ⇢64.6k │ ↓1.8k") || !strings.Contains(row, "cache 99%") {
+	if !strings.Contains(row, "66.8k · 99%") || !strings.Contains(row, "cache 99%") {
 		t.Fatalf("the row lost a reading: %q", row)
 	}
 }

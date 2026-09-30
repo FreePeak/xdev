@@ -367,10 +367,19 @@ type Agent struct {
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
-	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model. nil asks for none.
 	Thinking *ai.ThinkingBudget
+	Approve  ApprovalFunc
+	// OnOutput, when set, is handed every chunk a streaming tool produces, so
+	// a UI can paint a running command instead of waiting for its result. It
+	// is called on the tool's copier goroutine, with the id and name of the
+	// call the bytes belong to — calls in a batch run concurrently, so a
+	// stream without its call is a stream nobody can route. nil (print mode,
+	// RPC, tests) is the plain path: tools observe nothing and behave exactly
+	// as before, and tools that do not stream (read, grep, every MCP tool)
+	// simply never call it.
+	OnOutput func(callID, name, chunk string)
 	// Prewalk is the one-shot model handoff (nil = disabled): after the
 	// first successful edit/write, the run switches to the target model
 	// through the failover machinery (see prewalk.go).
@@ -1887,7 +1896,17 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
 		return toolResultMsg(call, res, time.Since(started))
 	}
-	res, err := a.executeTool(ctx, t, args)
+	// A live-output observer rides the call context so a streaming tool can
+	// paint while it runs. It is per-CALL data, not a tool field: one tool
+	// instance serves every concurrent call, so the call id has to travel
+	// with the stream or a viewer cannot tell two `bash` calls' bytes apart.
+	toolCtx := ctx
+	if a.OnOutput != nil {
+		toolCtx = tool.WithOutputObserver(ctx, tool.OutputFunc(func(chunk string) {
+			a.OnOutput(call.ID, call.Name, chunk)
+		}))
+	}
+	res, err := a.executeTool(toolCtx, t, args)
 	// Todo tracker (M3/TODO-tracker): every finished tool result
 	// feeds the mid-run nudge counter. A successful todo call
 	// resets it; a failed todo call flags the next turn. Mutating

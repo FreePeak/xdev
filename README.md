@@ -186,6 +186,12 @@ back to the model role's `:effort` (`@slow:high`, or the persisted `thinking`
 key). `/thinking low` pins one rung for the rest of the session and writes it to
 the global layer.
 
+The level is on screen wherever the model is: `thinking <level>` rides the
+composer's info divider beside the model name, and repeats as a row in the
+sidebar's SESSION footer — the section that is never folded away. Both read the
+live seam, so a `/thinking` flip or a `Shift+Tab` repaints both on the next
+frame; a host that never wired `/thinking` paints neither.
+
 The **context dock** (`Alt+S`) is a fixed 42-column window right of the
 transcript, opencode's sidebar shape: it owns every row of the terminal, so the
 screen is two windows — the main pane (top bar, transcript, prompt box, status
@@ -201,6 +207,10 @@ per frame. A pending plan is resolved where plans have always been resolved —
 `/plan off` approves, any typed prompt is revision feedback — and `/plan show`
 reprints the document in the transcript.
 
+`Alt+S` walks the display policy (shown → hidden → auto); `/sidebar` is the
+plain switch over what is actually on screen, so one keystroke or one command
+hides the sidebar and brings it back.
+
 **Slash commands** dispatch at input-submit and never reach the model:
 
 | Command | Action |
@@ -209,6 +219,7 @@ reprints the document in the transcript.
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
 | `/model [ref]` `/connect [name]` `/theme <name>` `/settings [overlay]` `/hotkeys` | model, provider catalog, theme and display control (`/settings overlay` — or `Alt+,` — opens the settings panel; `/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |

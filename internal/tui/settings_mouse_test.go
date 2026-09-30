@@ -101,10 +101,10 @@ func TestSettingsOverlayReadOnlyClickExplainsItself(t *testing.T) {
 	app.handleSettingsOverlayMouse(tcell.NewEventMouse(60, themeRow, tcell.Button1, tcell.ModNone), true)
 	app.mu.Unlock()
 	app.mu.Lock()
-	notice := app.copyHint()
+	notice := app.toastText()
 	app.mu.Unlock()
 	if strings.Contains(notice, "read-only") && strings.Contains(notice, "theme") {
 		return
 	}
-	t.Errorf("clicking the read-only Theme row produced no read-only notice (copyHint=%q)", notice)
+	t.Errorf("clicking the read-only Theme row produced no read-only notice (toast=%q)", notice)
 }

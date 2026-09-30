@@ -553,6 +553,12 @@ func (a *App) dockFooter() (dockFold, bool) {
 	if a.branch != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
 	}
+	// The reasoning level, in the section that is never folded away: the one
+	// request-side fact that outlives a busy transcript and that the divider
+	// beside the model name repeats.
+	if l := a.thinkingLabel(); l != "" {
+		f.rows = append(f.rows, dockRow{text: dockClip(l)})
+	}
 	if a.version != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version)})
 	}
@@ -786,18 +792,12 @@ func (d *dockState) titleRows() int {
 // clipping it. The name is the one string in the panel a human reads whole, and
 // a "\u2026" at 38 cells turned "showing full title" into a riddle. The rows are
 // not free: layout spends them out of the content budget, and dockTitleMax
-// bounds what the name may take from the work it names. Caller holds a.mu.
+// bounds what the name may take from the work it names — the same
+// wrap-and-cap the session pickers give their titles (wrapCapped). Caller
+// holds a.mu.
 func (a *App) dockTitleLines(bandH int) []string {
-	lines := wrap(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner)
-	if len(lines) == 0 {
-		return []string{""}
-	}
-	if head := min(dockTitleMax, max(1, bandH-4)); len(lines) > head {
-		// A name too long even wrapped keeps the clip's ellipsis on its last
-		// row, so the cut is still admitted and never silent.
-		return append(lines[:head-1:head-1], clip(strings.Join(lines[head-1:], " "), dockInner))
-	}
-	return lines
+	return wrapCapped(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner,
+		min(dockTitleMax, max(1, bandH-4)))
 }
 
 // selDockRowsForPaint returns the dock's rows as selectable rows with their
@@ -834,26 +834,30 @@ func (a *App) selDockRowsForPaint() []selRow {
 // and the rows the build made for the band they were budgeted for. Caller holds
 // a.mu and has run dockBuild for this frame.
 //
-// There is no box, deliberately. The panel is a surface of its own on the theme's
-// panel background with a two-cell gutter — the shape opencode's sidebar has. A
-// border drawn around a column that already fills its own background is one line
-// of chrome too many, and it costs the interior two columns.
+// There is no box, deliberately. The panel is a surface of its own on the
+// terminal's own background with a two-cell gutter — the shape opencode's
+// sidebar has. A border drawn around a column that already fills its own
+// background is one line of chrome too many, and it costs the interior two
+// columns.
 func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	if h <= 0 {
 		return
 	}
 	d := a.dock
-	bg := tcell.ColorDefault
-	if c, ok := a.th.Slot(theme.BgBase); ok {
-		bg = a.cellColor(c)
-	}
-	body := tcell.StyleDefault.Background(bg)
+	// The panel's field is the terminal's own background, never a colour this
+	// program picked — the same call drawDiffOverlay makes (#466). A themed fill
+	// here (bg_base, #141414) put a grey band beside a black transcript; SGR 49
+	// resolves the panel to whatever the terminal is, which also keeps a light
+	// theme from stranding its dark ink on a black surface.
+	body := tcell.StyleDefault
 	ink := body.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	// The change counts wear the diff's own inks, on the panel's background: a
-	// file's "+N" is the green its diff block already paints with.
+	// file's "+N" is the green its diff block already paints with. Those inks
+	// are built from StyleDefault, so they already carry the terminal's
+	// background and only their foreground is the diff's own.
 	ds := a.diffStyle()
-	added, removed := ds.added.Background(bg), ds.removed.Background(bg)
+	added, removed := ds.added, ds.removed
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
 			s.SetContent(cx, y, ' ', nil, body)

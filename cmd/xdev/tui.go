@@ -31,10 +31,10 @@ import (
 	"github.com/FreePeak/xdev/internal/tui"
 )
 
-// mcpNoticeGrace is how long a failed MCP server's notice stays on the
-// composer divider. Longer than a chord's confirmation: the user did not ask
-// for this one, and a missing tool set only becomes visible much later, when
-// the model works around a tool it never had.
+// mcpNoticeGrace is how long a failed MCP server's toast stays up. Longer
+// than a chord's confirmation (tui.toastInfoGrace): the user did not ask for
+// this one, and a missing tool set only becomes visible much later, when the
+// model works around a tool it never had.
 const mcpNoticeGrace = 2 * time.Minute
 
 // runTUI drives the interactive TUI mode (M4).
@@ -311,7 +311,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// MCP servers (optional; absent config = nothing happens). Attached once
 	// the app exists, because a failed server is a startup fact the user has
 	// to read — and stderr is not readable under the alt screen (#272). The
-	// composer divider carries it like any other notice, and drops it after
+	// toast stack carries it like any other notice, and drops it after
 	// mcpNoticeGrace so a broken server stops shouting. The last argument is
 	// the dock's: the MCP rows are painted ○ until the connect lands, and
 	// nothing else would repaint them the moment it does.
@@ -493,6 +493,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.SetWork(workOf(res.Messages))
 			ttftSum, ttftCount := ttftOf(res.Messages)
 			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+			turns, steps := countsOf(res.Messages)
+			app.SetSessionCounts(turns, steps)
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -672,6 +674,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.SetWork(workOf(res.Messages))
 			ttftSum, ttftCount := ttftOf(res.Messages)
 			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+			turns, steps := countsOf(res.Messages)
+			app.SetSessionCounts(turns, steps)
 		}
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
@@ -778,6 +782,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		replayTranscript(app, res.Messages)
 		app.SetContextReplay(agent.ContextTokens(res.Messages))
 		app.SetWork(workOf(res.Messages))
+		ttftSum, ttftCount := ttftOf(res.Messages)
+		app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+		turns, steps := countsOf(res.Messages)
+		app.SetSessionCounts(turns, steps)
 	}
 	// navigateTree is the port of omp's session.navigateTree (the tree
 	// selector's Enter / Shift+Enter / Alt+S): the leaf lands on the
@@ -1880,6 +1888,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// Intercept set below from exts (only when non-nil).
 				Policy:  agentPolicy(),
 				Handoff: handoffSettings(),
+				// Live tool output: a running tool's chunks paint as they
+				// arrive, into the box the first chunk opens under that call's
+				// own row. A tool that streams nothing opens no box.
+				OnOutput: app.AppendToolOutput,
 			}
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
@@ -1949,6 +1961,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
 			app.EndAssistant()
 			app.FinishRun()
+			// One finished run is one turn — the count dsh's TimePill
+			// reads beside its steps, whatever the turn ended with.
+			app.AddTurn()
 			// Ai-title cascade (#107): the TUI sessions are the ones the
 			// picker lists, and they are the ones stuck with "tui
 			// <timestamp>". Async on purpose: the user's next keystroke
@@ -2519,6 +2534,9 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		// inherited as the next turn's denominator (a t/s reading several
 		// times too low, for the rest of the session).
 		h.ts.app.BeginMessage()
+		// One EventStart is one provider request, which is the "step"
+		// dsh's TimePill counts beside its turns.
+		h.ts.app.AddStep()
 	case ai.EventTextStart:
 		h.ts.app.BeginAssistant()
 	case ai.EventTextDelta:
@@ -2548,6 +2566,12 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			// answer for 506.
 			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output,
 				ev.Usage.CacheRead, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens)
+			// The cache WRITE side of the same prompt: a separate bucket
+			// on the wire, and one the token pill's total and /usage
+			// both had nowhere to put.
+			if ev.Usage.CacheWrite > 0 {
+				h.ts.app.AddCacheWrite(ev.Usage.CacheWrite)
+			}
 			if ev.Usage.Cost != nil {
 				h.ts.app.AddCost(ev.Usage.Cost.Total)
 			}
@@ -2628,6 +2652,26 @@ func ttftOf(msgs []ai.Message) (sum int64, count int64) {
 		}
 	}
 	return sum, count
+}
+
+// countsOf counts a rebuilt history's turns and steps for the status pill:
+// a turn is one user prompt the person (or the harness, for a goal or a
+// continuation) actually asked for, and a step is one provider request the
+// session sent. harnessUserAttribution is the same filter replayTranscript
+// used to decide what becomes a ❯ row, so the two agree on what a "turn"
+// is; assistant messages are the steps, tool results the answers inside one.
+func countsOf(msgs []ai.Message) (turns, steps int) {
+	for _, m := range msgs {
+		switch m.Role {
+		case ai.RoleUser:
+			if !harnessUserAttribution(m) && m.Text() != "" {
+				turns++
+			}
+		case ai.RoleAssistant:
+			steps++
+		}
+	}
+	return turns, steps
 }
 
 // shortSessionID renders the first 8 chars of a session id (matches the TUI

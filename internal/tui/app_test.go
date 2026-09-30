@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -352,6 +353,94 @@ func TestToolCallRowShowsNamedArgument(t *testing.T) {
 	}
 	if strings.Contains(got, `"command"`) || strings.Contains(got, "timeout") {
 		t.Fatalf("call row leaked the raw arguments: %q", got)
+	}
+}
+
+// TestToolCallRowWrapsTheCommand is the headline: a command longer than the
+// row is WRAPPED onto continuation rows, not cut with an ellipsis. The row
+// used to fit a phrase at any width, which meant the one thing a user opens
+// the transcript to read — the command — was the one thing it hid, mid
+// pipeline, with no way to read the rest short of copying the arguments out
+// of the session file. The continuations align under the phrase, every row
+// fits the content width, and the whole command is there.
+func TestToolCallRowWrapsTheCommand(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	// One realistic-shaped command well past both the old 400-byte window and
+	// the row width: a pipeline whose every stage must be readable.
+	parts := []string{
+		"find . -name '*.go' -not -path './dist/*' -not -path './.git/*' -not -path './.worktrees/*'",
+		"| xargs gofmt -l",
+		"| xargs -r rg -n --no-heading 'ToolName|KindToolDone' internal/tui",
+		"| sort",
+	}
+	cmd := strings.Join(parts, " ")
+	args, err := json.Marshal(map[string]string{"command": cmd, "timeout": "120"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A settled call: the live elapsed is a run of its own on the head row, so
+	// a RUNNING one would put "0s" into the middle of the command below.
+	app.AddToolBlock("", "bash", string(args))
+	app.FinishTool("", "bash", false, "ok", ToolOutcome{Dur: "3ms"})
+	app.mu.Lock()
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+
+	if len(lines) < 2 {
+		t.Fatalf("call row = %d lines, want the command wrapped over several:\n%s", len(lines), joinLines(lines))
+	}
+	head := lineText(lines[0])
+	_, phrase, ok := strings.Cut(head, " · ")
+	if !ok {
+		t.Fatalf("head row %q carries no phrase", head)
+	}
+	var got strings.Builder
+	got.WriteString(phrase)
+	for i, ln := range lines[1:] {
+		row := lineText(ln)
+		if w := width(row); w > 80 {
+			t.Fatalf("row %d is %d cells wide, past the 80 the block was rendered at: %q", i+1, w, row)
+		}
+		got.WriteString(" " + strings.TrimSpace(row))
+	}
+	// Every character of the command survives, across the rows: wrap cuts at
+	// whitespace or a hard break, so the concatenation of the rows is the
+	// command itself. No "…", no gap.
+	joined := got.String()
+	flat := strings.Join(strings.Fields(joined), " ")
+	want := strings.Join(strings.Fields(cmd), " ")
+	if flat != want {
+		t.Fatalf("the wrapped row lost the command:\n got %q\nwant %q", flat, want)
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("the command was still shortened with an ellipsis:\n%s", joined)
+	}
+	// The continuations hang off the phrase, not the bullet: the column the
+	// phrase starts at is where they indent to. Measured in CELLS, not bytes —
+	// "·" is two bytes and one cell, and the bullet is one cell of glyph.
+	indent := width(strings.SplitN(head, "·", 2)[0]) + width("· ")
+	if indent <= 0 {
+		t.Fatalf("head row %q has no phrase to align to", head)
+	}
+	for i, ln := range lines[1:] {
+		row := lineText(ln)
+		lead := len(row) - len(strings.TrimLeft(row, " "))
+		if got := width(row[:lead]); got != indent {
+			t.Fatalf("continuation %d indents to %d, want the phrase's %d: %q", i+1, got, indent, row)
+		}
+	}
+}
+
+// A command that fits still renders as ONE row: wrapping is not a behaviour
+// every call pays for.
+func TestToolCallRowStaysOneRowWhenItFits(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddToolBlock("", "bash", `{"command":"seq 1 400","timeout":120}`)
+	app.mu.Lock()
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+	if len(lines) != 1 {
+		t.Fatalf("call row = %d lines, want 1:\n%s", len(lines), joinLines(lines))
 	}
 }
 

@@ -49,18 +49,20 @@ func TestSidebarIsFullHeight(t *testing.T) {
 	if edge != 160-dockCols {
 		t.Fatalf("the panel starts at column %d, want %d", edge, 160-dockCols)
 	}
-	// The surface, not a box: every cell of the panel's columns carries the
-	// panel's background on every row, with no chrome drawn over it.
+	// The surface, not a box: no cell of the panel's columns carries box chrome,
+	// and row 0 — the row the top bar shares with the panel's title slot — is
+	// the panel's, which its own title is the witness for. (Its background can
+	// no longer witness it: the panel's field is the terminal's own.)
 	for y := range 40 {
 		for x := edge; x < 160; x++ {
-			ch, _, style, _ := scr.GetContent(x, y)
+			ch, _, _, _ := scr.GetContent(x, y)
 			if ch == '│' || ch == '─' {
 				t.Fatalf("the panel drew box chrome at x=%d y=%d", x, y)
 			}
-			if _, bg, _ := style.Decompose(); x == edge && y == 0 && bg == tcell.ColorDefault {
-				t.Fatalf("row 0 column %d has no panel background: the band stops short", x)
-			}
 		}
+	}
+	if row := dockRowText(scr, 0, edge); !strings.Contains(row, "two windows") {
+		t.Fatalf("row 0 column %d carries no panel content: %q, the band stops short", edge, row)
 	}
 	// And the last row of the terminal is inside it: the status row's cells
 	// under the panel are the panel's, not the status row's.
@@ -107,7 +109,7 @@ func TestStatusRowAndTopBarStayInTheMainPane(t *testing.T) {
 	app, scr := twoWindowApp(t, 160, 40)
 	edge := app.width - dockCols
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "↑1.2k") {
+	if !strings.Contains(row, "1.5k") {
 		t.Fatalf("the metrics vanished from the status row: %q", row)
 	}
 	// Nothing of the status row may reach into the panel's columns: the row is
@@ -143,7 +145,7 @@ func TestTwoWindowShapeUnchangedWhenClosed(t *testing.T) {
 	if edge != 160 || avail != 160-7 {
 		t.Fatalf("closed: rightEdge=%d avail=%d, want the whole terminal", edge, avail)
 	}
-	if !strings.Contains(lastRow(screenText(scr)), "↑1.2k") {
+	if !strings.Contains(lastRow(screenText(scr)), "1.5k") {
 		t.Fatal("the status row lost its metrics with the panel shut")
 	}
 }

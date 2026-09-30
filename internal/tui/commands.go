@@ -420,6 +420,9 @@ type CommandAPI interface {
 	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
+	// Sidebar is /sidebar [show|hide|auto]: the context dock's two-state
+	// toggle, the switch form of the Alt+S cycle.
+	Sidebar(args string) error
 	// SettingsOverlay opens the visual settings panel (grok-style overlay).
 	SettingsOverlay() error
 	// ThinkingLevel is /thinking [level]: bare reports, a level applies and
@@ -472,6 +475,8 @@ func builtinCommands() []Command {
 				}
 				return app.SettingsView(args)
 			}},
+		{Name: "sidebar", Aliases: []string{"dock"}, Description: "show or hide the sidebar: /sidebar [show|hide|auto] (bare toggles; alt+s cycles the policy)",
+			Fn: func(app CommandAPI, args string) error { return app.Sidebar(args) }},
 		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
 			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default: the session model)",
