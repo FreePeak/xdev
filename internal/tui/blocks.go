@@ -222,6 +222,25 @@ func wrap(s string, maxW int) []string {
 	return out
 }
 
+// wrapCapped is wrap with a row budget: a string too long for the surface it
+// lives on is laid out over at most max rows, and whatever did not fit is
+// joined back into the last row and clipped with an ellipsis. The rows are not
+// free — a session title that wraps to forty rows would push every other row
+// off a list — so the cut is still admitted rather than silent.
+func wrapCapped(s string, maxW, maxRows int) []string {
+	lines := wrap(s, maxW)
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if len(lines) > maxRows {
+		return append(lines[:maxRows-1:maxRows-1], clip(strings.Join(lines[maxRows-1:], " "), maxW))
+	}
+	return lines
+}
+
 // toolArgKeys name the argument that says what a call is ABOUT, in omp's
 // precedence (command, path, input) extended with xdev's search and fetch
 // tools. The first one present wins.

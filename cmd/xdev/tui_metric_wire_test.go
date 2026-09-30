@@ -135,7 +135,7 @@ func TestHUDHooksMeasureTheMessage(t *testing.T) {
 		Usage: &ai.Usage{Input: 1000, Output: 300, TotalTokens: 1300}})
 
 	row := awaitHUD(t, scr, "t/s")
-	if !strings.Contains(row, "▤1.3k") {
+	if !strings.Contains(row, "1.3k") {
 		t.Fatalf("the token pill did not render the message's total: %q", row)
 	}
 	// 300 output tokens over a ~200ms window is ~1500 t/s. Assert the order

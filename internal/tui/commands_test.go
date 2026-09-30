@@ -616,6 +616,8 @@ func (f *fakeAPI) ResumeSession(query string) error { return nil }
 func (f *fakeAPI) SettingsView(args string) error { return nil }
 func (f *fakeAPI) SettingsOverlay() error         { return nil }
 
+func (f *fakeAPI) Sidebar(args string) error { return nil }
+
 func (f *fakeAPI) ThinkingLevel(args string) error { return nil }
 
 // TestExtensionCommandDispatch routes "/server:cmd args" to the extension

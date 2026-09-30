@@ -132,6 +132,67 @@ func TestDockCycleWalksPolicy(t *testing.T) {
 	}
 }
 
+// TestSidebarCommandTogglesWhatIsOnScreen: /sidebar is the switch form of the
+// Alt+S cycle. Bare, it hides a panel that is actually painted and opens one
+// that is not — the question is the SCREEN, not the policy, so an auto-closed
+// panel is never the thing the human hid — and every flip lands on the same
+// persisted key the cycle writes. A word outside the vocabulary is a usage
+// error, never a silent toggle.
+func TestSidebarCommandTogglesWhatIsOnScreen(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	var saved []string
+	app.SetSettingsOps(&SettingsOps{Path: "/tmp/settings.yml", SetSidebar: func(m string) error {
+		saved = append(saved, m)
+		return nil
+	}})
+
+	// auto at 200 columns: the panel is on screen, so a bare call hides it.
+	if err := app.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockHide {
+		t.Fatalf("bare toggle from a painted panel = %q, want hide", app.DockMode())
+	}
+	// And back: hidden is not on screen, so the same call shows it.
+	if err := app.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockShow {
+		t.Fatalf("bare toggle from a hidden panel = %q, want show", app.DockMode())
+	}
+	if strings.Join(saved, ",") != "hide,show" {
+		t.Fatalf("persisted %v, want hide,show", saved)
+	}
+
+	// A terminal below the auto floor has no panel to hide: the toggle opens
+	// it rather than persisting a hide for one that was never painted.
+	small, _, _ := dockTestApp(t, 100, 40)
+	small.SetSettingsOps(&SettingsOps{Path: "/tmp/settings.yml", SetSidebar: func(string) error { return nil }})
+	if err := small.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if small.DockMode() != DockShow {
+		t.Fatalf("toggle under the width floor = %q, want show", small.DockMode())
+	}
+
+	// The named forms are the policy itself, and anything else is refused.
+	if err := app.Sidebar("auto"); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockAuto {
+		t.Fatalf("/sidebar auto = %q", app.DockMode())
+	}
+	if err := app.Sidebar("sideways"); err == nil {
+		t.Fatal("an unknown argument must be refused, not toggled")
+	}
+	if err := app.Sidebar("show hide"); err == nil {
+		t.Fatal("two arguments must be refused")
+	}
+	if app.DockMode() != DockAuto {
+		t.Fatalf("a refused call changed the policy to %q", app.DockMode())
+	}
+}
+
 // TestDockFoldKeepsThePlan is Ctrl+T's one promise: the pending document survives
 // every fold state, because folding away the thing the human is being asked to
 // read is worse than no panel at all.

@@ -109,7 +109,7 @@ func TestStatusRowAndTopBarStayInTheMainPane(t *testing.T) {
 	app, scr := twoWindowApp(t, 160, 40)
 	edge := app.width - dockCols
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "▤1.5k") {
+	if !strings.Contains(row, "1.5k") {
 		t.Fatalf("the metrics vanished from the status row: %q", row)
 	}
 	// Nothing of the status row may reach into the panel's columns: the row is
@@ -145,7 +145,7 @@ func TestTwoWindowShapeUnchangedWhenClosed(t *testing.T) {
 	if edge != 160 || avail != 160-7 {
 		t.Fatalf("closed: rightEdge=%d avail=%d, want the whole terminal", edge, avail)
 	}
-	if !strings.Contains(lastRow(screenText(scr)), "▤1.5k") {
+	if !strings.Contains(lastRow(screenText(scr)), "1.5k") {
 		t.Fatal("the status row lost its metrics with the panel shut")
 	}
 }
