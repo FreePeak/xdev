@@ -268,6 +268,9 @@ func TestThinkingDisplayToggle(t *testing.T) {
 	if len(app.blocks) != 1 || app.blocks[0].Kind != KindThinking {
 		t.Fatalf("thinking block missing: blocks=%d", len(app.blocks))
 	}
+	// Collapsed the box is one row, so the whole body is read with a click —
+	// this test is about the toggle, not the height, so it clicks.
+	app.thinkFocus = 0
 	lines := app.blockLines(0, app.blocks[0], 80)
 	app.mu.Unlock()
 	var got []string
@@ -280,6 +283,7 @@ func TestThinkingDisplayToggle(t *testing.T) {
 			t.Fatalf("thinking render missing %q:\n%s", want, joined)
 		}
 	}
+	app.thinkFocus = -1
 	// Turning it off drops existing thinking blocks and suppresses new ones.
 	app.SetShowThinking(false)
 	app.mu.Lock()

@@ -310,13 +310,16 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
-		// Past the bar: this press is on the transcript, and it aims the wheel.
-		// Pressing a reasoning box focuses it, pressing anywhere else takes the
-		// aim back, so the wheel scrolls the transcript until the human asks for
-		// a box by name. The notch never moves focus (app.go scrollThinkBox),
-		// which is what stops a box from stealing the wheel merely by sliding
-		// under a stationary pointer. thinkBoxAt returns -1 for "no box", which
-		// is exactly the "aim back at the transcript" value.
+		// Past the bar: this press is on the transcript, and it names the box
+		// the wheel belongs to. Pressing a reasoning box focuses it — which is
+		// also what grows it from its one collapsed row to the scrollable
+		// window (app.go thinkBoxLines) — and pressing anywhere else takes the
+		// aim back, so the wheel scrolls the transcript and the box shrinks
+		// again until the human asks for a box by name. The notch never moves
+		// focus (app.go scrollThinkBox), which is what stops a box from
+		// stealing the wheel merely by sliding under a stationary pointer.
+		// thinkBoxAt returns -1 for "no box", which is exactly the "aim back at
+		// the transcript" value.
 		//
 		// Except inside the dock: that column is a window of its own, so a press
 		// there aims at the panel and never at a row the panel covers — no

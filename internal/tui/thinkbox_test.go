@@ -30,23 +30,52 @@ func renderBox(app *App, i int, w int) []string {
 	return out
 }
 
-// TestThinkBoxRendersInAFixedWindow pins the reasoning box's shape: the same
-// rounded frame a result gets, a state label in the top border, every row the
-// frame's full width, at most thinkBoxRows body rows, and a hidden-row notice
-// that names the Ctrl+O affordance — until Ctrl+O shows every row.
-func TestThinkBoxRendersInAFixedWindow(t *testing.T) {
+// focusBox aims the wheel at block i — what a click on it does — so a test can
+// check the focused height without driving the whole press/release path.
+func focusBox(app *App, i int) {
+	app.mu.Lock()
+	app.thinkFocus = i
+	app.mu.Unlock()
+}
+
+// TestThinkBoxIsOneRowUntilClicked pins the box's shape across the focus
+// boundary: collapsed it is the frame plus ONE row — the newest thought, no
+// hidden-row notice, so a turn reads as a list of one-liners — and a click grows
+// it to the wheel-scrollable window the frame has always had, notice and all.
+// Ctrl+O still drops the window entirely.
+func TestThinkBoxIsOneRowUntilClicked(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	app.BeginThinking()
 	app.AppendThinking(thinkLines(40))
 	app.EndThinking()
 
 	got := renderBox(app, 0, 80)
-	const body = thinkBoxRows
-	if len(got) != 1+1+body+1 { // top + notice + window + bottom
-		t.Fatalf("box rows = %d, want %d:\n%s", len(got), 2+body+1, strings.Join(got, "\n"))
+	if len(got) != 3 { // top + the one row + bottom
+		t.Fatalf("collapsed box rows = %d, want 3:\n%s", len(got), strings.Join(got, "\n"))
 	}
 	if !strings.Contains(got[0], "Thought for") {
 		t.Fatalf("top border = %q, want the settled state", got[0])
+	}
+	// The one row is the newest thought, not the first: the box follows the
+	// turn the way the transcript does.
+	if !strings.Contains(got[1], "t-040") {
+		t.Fatalf("collapsed row = %q, want the newest thought", got[1])
+	}
+	if strings.Contains(strings.Join(got, "\n"), "hidden") {
+		t.Fatalf("a one-row box still spends a row on the hidden notice:\n%s", strings.Join(got, "\n"))
+	}
+	for i, ln := range got {
+		if w := width(ln); w != 80 {
+			t.Fatalf("row %d is %d cells wide, want 80: %q", i, w, ln)
+		}
+	}
+
+	// Clicked: the window the wheel scrolls, unchanged in every other way.
+	focusBox(app, 0)
+	got = renderBox(app, 0, 80)
+	const body = thinkBoxRows
+	if len(got) != 1+1+body+1 { // top + notice + window + bottom
+		t.Fatalf("focused box rows = %d, want %d:\n%s", len(got), 2+body+1, strings.Join(got, "\n"))
 	}
 	if !strings.Contains(got[1], "28 rows hidden") || !strings.Contains(got[1], "Ctrl+O") {
 		t.Fatalf("hidden notice = %q", got[1])
@@ -55,11 +84,6 @@ func TestThinkBoxRendersInAFixedWindow(t *testing.T) {
 	// following the turn sees.
 	if !strings.Contains(got[2], "t-029") || !strings.Contains(got[1+body], "t-040") {
 		t.Fatalf("window = %q .. %q, want t-029 .. t-040", got[2], got[1+body])
-	}
-	for i, ln := range got {
-		if w := width(ln); w != 80 {
-			t.Fatalf("row %d is %d cells wide, want 80: %q", i, w, ln)
-		}
 	}
 
 	if !app.ToggleBoxExpand() {
@@ -76,26 +100,45 @@ func TestThinkBoxRendersInAFixedWindow(t *testing.T) {
 	if !strings.Contains(got[1], "t-001") || !strings.Contains(got[40], "t-040") {
 		t.Fatalf("expanded window = %q .. %q, want every row", got[1], got[40])
 	}
+
+	// Focus dropped (a click on the box again, or anywhere else): back to the
+	// one row. Ctrl+O's expansion is the one height a focus change does not own.
+	focusBox(app, -1)
+	if got := renderBox(app, 0, 80); len(got) != 1+40+1 {
+		t.Fatalf("Ctrl+O's expanded box rows = %d after the focus dropped, want 42", len(got))
+	}
+	app.ToggleBoxExpand()
+	if got := renderBox(app, 0, 80); len(got) != 3 {
+		t.Fatalf("box rows = %d after the focus dropped, want 3:\n%s", len(got), strings.Join(got, "\n"))
+	}
 }
 
-// TestThinkWindowClampsAtBothEnds pins the window's edges directly: an offset
-// past the oldest reasoning reads as the oldest window the box can show, and a
-// negative one as the newest, so a wheel over-scroll cannot blank the box.
+// TestThinkWindowClampsAtBothEnds pins the window's edges directly, at both
+// heights the box renders at: an offset past the oldest reasoning reads as the
+// oldest window the box can show, and a negative one as the newest, so a wheel
+// over-scroll cannot blank the box — and the collapsed box's one-row window
+// moves by the reasoning, not by its own height.
 func TestThinkWindowClampsAtBothEnds(t *testing.T) {
 	for _, tc := range []struct {
-		n, off, wantStart, wantEnd int
+		n, off, rows, wantStart, wantEnd int
 	}{
-		{0, 0, 0, 0},
-		{5, 0, 0, 5},
-		{30, 0, 18, 30},
-		{30, 5, 13, 25},
-		{30, 100, 0, thinkBoxRows}, // clamped to the head, not blanked
-		{12, 1, 0, 12},             // a box as tall as its content cannot scroll
+		{n: 0, off: 0, rows: thinkBoxCollapsed, wantStart: 0, wantEnd: 0},
+		{n: 5, off: 0, rows: thinkBoxCollapsed, wantStart: 4, wantEnd: 5},
+		{n: 30, off: 0, rows: thinkBoxCollapsed, wantStart: 29, wantEnd: 30},
+		{n: 30, off: 5, rows: thinkBoxCollapsed, wantStart: 24, wantEnd: 25},
+		{n: 30, off: 100, rows: thinkBoxCollapsed, wantStart: 0, wantEnd: 1}, // clamped to the head
+		{n: 1, off: 0, rows: thinkBoxCollapsed, wantStart: 0, wantEnd: 1},    // one row cannot scroll
+		{n: 0, off: 0, rows: thinkBoxRows, wantStart: 0, wantEnd: 0},
+		{n: 5, off: 0, rows: thinkBoxRows, wantStart: 0, wantEnd: 5},
+		{n: 30, off: 0, rows: thinkBoxRows, wantStart: 18, wantEnd: 30},
+		{n: 30, off: 5, rows: thinkBoxRows, wantStart: 13, wantEnd: 25},
+		{n: 30, off: 100, rows: thinkBoxRows, wantStart: 0, wantEnd: 12}, // clamped to the head
+		{n: 12, off: 1, rows: thinkBoxRows, wantStart: 0, wantEnd: 12},   // a box as tall as its content cannot scroll
 	} {
-		start, end := thinkWindow(tc.n, tc.off)
+		start, end := thinkWindow(tc.n, tc.off, tc.rows)
 		if start != tc.wantStart || end != tc.wantEnd {
-			t.Fatalf("thinkWindow(%d, %d) = (%d, %d), want (%d, %d)",
-				tc.n, tc.off, start, end, tc.wantStart, tc.wantEnd)
+			t.Fatalf("thinkWindow(%d, %d, %d) = (%d, %d), want (%d, %d)",
+				tc.n, tc.off, tc.rows, start, end, tc.wantStart, tc.wantEnd)
 		}
 	}
 }
@@ -155,15 +198,18 @@ func TestWheelOnlyScrollsAFocusedThinkBox(t *testing.T) {
 		wheel(y, tcell.ButtonNone)
 	}
 
+	// The pointer rides the box's TOP border row: a wheel notch parked above
+	// moves the tail off the screen, and the collapsed box is three rows, so
+	// the border is the row that stays under the pointer.
 	hdr, vp := chrome()
-	if y := boxY(); y <= hdr || y+thinkBoxRows >= hdr+vp {
-		t.Fatalf("thinking box is not fully on screen: boxY=%d hdr=%d vp=%d", y, hdr, vp)
+	if y := boxY(); y <= hdr || y >= hdr+vp {
+		t.Fatalf("thinking box is not on screen: boxY=%d hdr=%d vp=%d", y, hdr, vp)
 	}
 
 	// Nothing focused: the notch over the box is the transcript's, and the box
 	// does not move. This is the behavior the click gate exists for.
 	before := transcript()
-	wheel(boxY()+1, tcell.WheelUp)
+	wheel(boxY(), tcell.WheelUp)
 	if off := thinkOff(); off != 0 {
 		t.Fatalf("ThinkOff = %d after a notch with nothing focused, want 0", off)
 	}
@@ -171,9 +217,18 @@ func TestWheelOnlyScrollsAFocusedThinkBox(t *testing.T) {
 		t.Fatalf("transcript offset = %d after a notch over the box, want %d", after, before+3)
 	}
 
+	// Back to the tail, where a box waiting to be clicked sits: a tail-following
+	// view moves the box's top border UP the screen as the box grows, so the
+	// pointer stays on it — which is the case the click is made from.
+	app.scrollTo(true)
+	app.draw()
+	if y := boxY(); y <= hdr || y >= hdr+vp {
+		t.Fatalf("thinking box is not on screen at the tail: boxY=%d hdr=%d vp=%d", y, hdr, vp)
+	}
+
 	// The click focuses the box — the last block, and the only reasoning one —
 	// and the frame says so: the focused box draws a bold rule.
-	click(boxY() + 1)
+	click(boxY())
 	app.mu.Lock()
 	box := len(app.blocks) - 1
 	app.mu.Unlock()
@@ -181,6 +236,11 @@ func TestWheelOnlyScrollsAFocusedThinkBox(t *testing.T) {
 		t.Fatalf("thinkFocus = %d after a click on the box, want %d", got, box)
 	}
 	app.draw() // the UI loop repaints after handleKey
+	// The grown box is still under the pointer, which is what makes a second
+	// click on it — or a wheel notch — land where the user is looking.
+	if y := boxY(); y <= hdr || y >= hdr+vp {
+		t.Fatalf("clicked box left the screen when it grew: boxY=%d hdr=%d vp=%d", y, hdr, vp)
+	}
 	// The rule, not the label set into it: the label is bold whether the box is
 	// focused or not (boxTop), so only the rule cells carry the focus mark. The
 	// box starts at x=3 (rail + pad), which is its top-left corner.
@@ -227,13 +287,17 @@ func TestWheelOnlyScrollsAFocusedThinkBox(t *testing.T) {
 	}
 
 	// A click off the box — here the prose above it — takes the focus back, and
-	// the wheel is the transcript's again.
+	// the wheel is the transcript's again. The box returns to one row, with the
+	// window it was scrolled to intact underneath.
 	click(hdr)
 	if got := focus(); got != -1 {
 		t.Fatalf("thinkFocus = %d after a click off the box, want -1", got)
 	}
+	if got := renderBox(app, box, 80); len(got) != 3 {
+		t.Fatalf("box rows = %d after the focus went elsewhere, want 3:\n%s", len(got), strings.Join(got, "\n"))
+	}
 	before = transcript()
-	wheel(boxY()+1, tcell.WheelUp)
+	wheel(boxY(), tcell.WheelUp)
 	if off := thinkOff(); off != head {
 		t.Fatalf("ThinkOff = %d after the focus was dropped, want %d", off, head)
 	}

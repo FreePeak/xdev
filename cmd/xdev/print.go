@@ -434,6 +434,9 @@ func resolveInto(refArg string, cfg *config.Config, settings *config.Settings, l
 }
 
 func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
+	// A --bg child records its exit in status.json so `xdev bg list` stays
+	// honest after the process is gone. Foreground runs no-op (no XDEV_BG_ID).
+	defer func() { finalizeBgStatus(exitCode, err) }()
 	cwd, err := os.Getwd()
 	if err != nil {
 		return 2, err
@@ -510,6 +513,12 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	store, err := openStartupSession(cwd, opts)
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
+	}
+	if id := os.Getenv(bgEnvID); id != "" {
+		if st, rerr := readBgStatus(id); rerr == nil {
+			st.SessionID = store.ID()
+			_ = writeBgStatus(st)
+		}
 	}
 	defer func() {
 		if cerr := store.Close(); cerr != nil {
