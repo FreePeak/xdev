@@ -322,6 +322,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// config is the source of truth, with --hide-thinking / --print-thoughts
 	// overriding it for this run (display only — the model still thinks).
 	app.SetShowThinking(showThinkingOn(lastSettings()))
+	// Mermaid fences render as diagrams (settings renderMermaid, default on).
+	// Same shape as showThinking: display-only, and a diagram the renderer
+	// cannot draw falls back to the code band, so turning it off changes how a
+	// message looks and never what it says.
+	app.SetRenderMermaid(lastSettings().RenderMermaidOn())
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
@@ -368,6 +373,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			lastSettings().SidebarMode = mode
 			return nil
 		},
+		SetMermaid: func(on bool) error {
+			if err := config.Set(config.GlobalSettingsPath(), "renderMermaid", fmt.Sprint(on)); err != nil {
+				return err
+			}
+			v := on
+			lastSettings().RenderMermaid = &v
+			return nil
+		},
 	})
 
 	// Settings overlay (Alt+,): the settings this session already has a live
@@ -384,6 +397,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			s := lastSettings()
 			rows := []tui.SettingsRow{
 				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
+					Editable: true, Kind: "toggle"},
+				{Key: "renderMermaid", Label: "Render mermaid", Value: fmt.Sprint(s.RenderMermaidOn()),
 					Editable: true, Kind: "toggle"},
 				// thinking is a select, not a toggle: the vocabulary is the
 				// level ladder, and it lives behind one door (ThinkingOps.Set)
@@ -421,6 +436,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			case "showThinking":
 				v := value == "true"
 				lastSettings().ShowThinking = &v
+			case "renderMermaid":
+				v := value == "true"
+				lastSettings().RenderMermaid = &v
 			case "thinking":
 				lastSettings().Thinking = value
 			case "sidebarMode":
