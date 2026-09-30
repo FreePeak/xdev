@@ -165,7 +165,7 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 		tool: b.ToolName, status: b.Status, stream: b.stream,
 		expanded: b.Expanded, age: age, trim: a.trimTier(i),
 		dlen: len(b.Diff), thinkOff: b.ThinkOff, focused: i == a.thinkFocus,
-		live: b.liveSeq,
+		live: b.liveSeq, mermaid: a.renderMermaid,
 	}
 }
 

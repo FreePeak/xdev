@@ -150,6 +150,8 @@ func fallbackValue(s *config.Settings, key string) string {
 		return s.DefaultModel
 	case "showThinking":
 		return fmt.Sprint(s.ShowThinkingOn())
+	case "renderMermaid":
+		return fmt.Sprint(s.RenderMermaidOn())
 	case "thinking":
 		return s.ThinkingLevel()
 	case "advisor":

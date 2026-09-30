@@ -118,6 +118,11 @@ type SettingsOps struct {
 	// SetSidebar persists the context dock's display policy (#291 §1), the
 	// sidebarMode key in the same layer Alt+s writes.
 	SetSidebar func(mode string) error
+	// SetMermaid persists the mermaid rendering flag (the renderMermaid key
+	// in the same layer the settings panel writes). Display only: the source
+	// text is untouched, and a diagram the renderer cannot draw falls back to
+	// the code band.
+	SetMermaid func(on bool) error
 }
 
 // PlanOps wires the /plan command to the live plan-mode state (lives in

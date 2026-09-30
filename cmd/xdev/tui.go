@@ -31,12 +31,6 @@ import (
 	"github.com/FreePeak/xdev/internal/tui"
 )
 
-// mcpNoticeGrace is how long a failed MCP server's toast stays up. Longer
-// than a chord's confirmation (tui.toastInfoGrace): the user did not ask for
-// this one, and a missing tool set only becomes visible much later, when the
-// model works around a tool it never had.
-const mcpNoticeGrace = 2 * time.Minute
-
 // runTUI drives the interactive TUI mode (M4).
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	cwd, err := os.Getwd()
@@ -311,12 +305,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// MCP servers (optional; absent config = nothing happens). Attached once
 	// the app exists, because a failed server is a startup fact the user has
 	// to read — and stderr is not readable under the alt screen (#272). The
-	// toast stack carries it like any other notice, and drops it after
-	// mcpNoticeGrace so a broken server stops shouting. The last argument is
-	// the dock's: the MCP rows are painted ○ until the connect lands, and
-	// nothing else would repaint them the moment it does.
+	// toast stack carries it on the error grace every other failure gets: it
+	// had its own two minutes, which is not a toast but a status line, and a
+	// corner that holds its text from launch reads as broken. Nothing is lost
+	// by the shorter life — the dock's MCP section keeps the server listed
+	// with a ○ for as long as it stays down. The last argument is the dock's:
+	// the MCP rows are painted ○ until the connect lands, and nothing else
+	// would repaint them the moment it does.
 	mgr := attachMCP(context.Background(), reg, false, func(msg string) {
-		app.SetNotice(msg, mcpNoticeGrace)
+		app.Toast(tui.ToastError, msg, 0) // 0 = the level's own error grace
 	}, app.DockBump)
 	if mgr != nil {
 		defer mgr.Close()
@@ -325,6 +322,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// config is the source of truth, with --hide-thinking / --print-thoughts
 	// overriding it for this run (display only — the model still thinks).
 	app.SetShowThinking(showThinkingOn(lastSettings()))
+	// Mermaid fences render as diagrams (settings renderMermaid, default on).
+	// Same shape as showThinking: display-only, and a diagram the renderer
+	// cannot draw falls back to the code band, so turning it off changes how a
+	// message looks and never what it says.
+	app.SetRenderMermaid(lastSettings().RenderMermaidOn())
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
@@ -371,6 +373,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			lastSettings().SidebarMode = mode
 			return nil
 		},
+		SetMermaid: func(on bool) error {
+			if err := config.Set(config.GlobalSettingsPath(), "renderMermaid", fmt.Sprint(on)); err != nil {
+				return err
+			}
+			v := on
+			lastSettings().RenderMermaid = &v
+			return nil
+		},
 	})
 
 	// Settings overlay (Alt+,): the settings this session already has a live
@@ -387,6 +397,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			s := lastSettings()
 			rows := []tui.SettingsRow{
 				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
+					Editable: true, Kind: "toggle"},
+				{Key: "renderMermaid", Label: "Render mermaid", Value: fmt.Sprint(s.RenderMermaidOn()),
 					Editable: true, Kind: "toggle"},
 				// thinking is a select, not a toggle: the vocabulary is the
 				// level ladder, and it lives behind one door (ThinkingOps.Set)
@@ -424,6 +436,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			case "showThinking":
 				v := value == "true"
 				lastSettings().ShowThinking = &v
+			case "renderMermaid":
+				v := value == "true"
+				lastSettings().RenderMermaid = &v
 			case "thinking":
 				lastSettings().Thinking = value
 			case "sidebarMode":
@@ -1842,10 +1857,23 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// entry it committed first. runTurn calls it after persisting the user
 	// prompt; the F5 retry calls it directly to resume a session whose stream
 	// dropped mid-turn — the same history drives another turn, no new prompt.
+	//
+	// flushPendingQueue is the mid-turn queue's run-end flush (#157), declared
+	// further down (it needs runTurn) and deferred at the top of the goroutine
+	// so it runs LAST: a pending row the model never saw becomes the next turn
+	// rather than a row that lies about being sent. A turn can only start
+	// after the whole wiring below is in place, so the var is never nil here.
+	var flushPendingQueue = func() {}
 	startTurn := func() {
 		ctx, cancel := context.WithCancel(baseCtx)
 		turn.set(cancel)
 		goGuarded(func() {
+			// The mid-turn queue's run-end flush (#157), registered FIRST so it
+			// runs LAST: the deferred running.Store(false) below releases the turn
+			// claim, and this flush CASes that claim to start the next turn. A
+			// pending row the model never saw becomes an ordinary turn rather than
+			// a row that lies about being sent.
+			defer flushPendingQueue()
 			// LIFO: clear runs FIRST so this turn can never nil a slot
 			// that a newer turn already claimed (running=false admits the
 			// next submit before cancel() unwinds).
@@ -1924,6 +1952,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				ag.Intercept = c
 			}
 			ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
+			// The mid-turn queue's retirement point (#157). The loop's steering
+			// drain is where a queued prompt actually becomes part of the
+			// conversation, so that is where the TUI's pending row retires — not
+			// when the steer call returned, which only says the text is sitting in
+			// a channel. The retirement is a hit, not a swap: two prompts with the
+			// same text are two entries, and the oldest undelivered one is the one
+			// that was sent.
+			ag.SteeringDelivered = app.RetireDelivered
 			agentMu.Unlock()
 			defer func() {
 				agentMu.Lock()
@@ -1989,25 +2025,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// reports whether the turn was taken, so a draft carrying attachments can go
 	// back to the composer instead of being sent without them — see
 	// tui.App.SetImageSend.
-	runTurn := func(text string, imgs []tui.PasteImage) bool {
-		// Joined as a guest: the host owns the turn, so the prompt goes over
-		// the room instead of starting one here. The room carries text only,
-		// so a draft with attachments is neither forwarded nor run: returning
-		// false hands it back to the composer, where the notice says why.
-		// Sending the text alone would let the host answer a screenshot nobody
-		// delivered.
-		if collabGuestJoined() {
-			if imgs != nil {
-				return false
-			}
-			if tui.Collab.Forward(text) {
-				return true
-			}
-		}
-		if !running.CompareAndSwap(false, true) {
-			app.AddSystemBlock("a turn is already running — Esc cancels it")
-			return false
-		}
+	// runTurnNow is runTurn for a caller that ALREADY holds the turn claim.
+	// The send-now path claims the slot itself (cmd/xdev/tui.go), because
+	// between "the interrupted run released" and "the next turn starts" there
+	// is a window another submit could take, and a send-now that lost it must
+	// leave the message queued rather than race. Everything below the claim —
+	// the guest forward, the naming, the persist, the memory/friction notes,
+	// the start — is identical to runTurn by construction: one function.
+	persistAndStart := func(text string, imgs []tui.PasteImage) bool {
 		// Name the session after its first prompt: /resume and the
 		// breadcrumb read the title slot, and "print <timestamp>" hides
 		// everything about the conversation. Called before the first
@@ -2054,6 +2079,57 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
 		startTurn()
 		return true
+	}
+	// runTurn is persistAndStart behind the turn claim: a submit that finds
+	// the slot taken is refused (the composer's draft comes back with the
+	// reason), and one that claims it owns the turn from there on. The guest
+	// forward comes FIRST, before the claim, because a joined room has no
+	// local turn to take — the host runs it.
+	runTurn := func(text string, imgs []tui.PasteImage) bool {
+		if collabGuestJoined() {
+			if imgs != nil {
+				return false
+			}
+			if tui.Collab.Forward(text) {
+				return true
+			}
+		}
+		if !running.CompareAndSwap(false, true) {
+			app.AddSystemBlock("a turn is already running — Esc cancels it")
+			return false
+		}
+		if !persistAndStart(text, imgs) {
+			running.Store(false)
+		}
+		return true
+	}
+	// runTurnNow is persistAndStart for a caller that ALREADY holds the turn
+	// claim: the send-now path claims the slot itself, so it can lose the race
+	// and leave the message queued rather than start a second turn. A false
+	// return means the message was not persisted, so the caller must release
+	// the claim it took.
+	runTurnNow := func(text string) bool { return persistAndStart(text, nil) }
+	// The mid-turn queue's run-end flush (#157), the var startTurn defers.
+	flushPendingQueue = func() {
+		if collabGuestJoined() {
+			return
+		}
+		// Anything still queued when a run ends is a message the model never
+		// saw: typed in the last moments of a turn, or one the run could not
+		// steer. Starting it as an ordinary turn is the honest outcome — a row
+		// that outlives its run is a prompt the user believes was sent and was
+		// not. Drained oldest-first, one per run, so a burst of prompts does
+		// not collapse into a single fused message.
+		text := app.TakeOldestQueued()
+		if text == "" {
+			return
+		}
+		// runTurn takes the claim itself, so the row was taken back if the
+		// claim is gone (a turn that started between the pop and here owns the
+		// slot, and its own flush will drain the rest).
+		if !runTurn(text, nil) {
+			app.QueueAgain(text)
+		}
 	}
 	// Background subagent completion notice (#296). A job started with
 	// background:true used to end silently: the model asked for work in
@@ -2159,6 +2235,99 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		func() { app.Quit() },
 	)
 	app.SetImageSend(func(text string, imgs []tui.PasteImage) bool { return runTurn(text, imgs) })
+	// The mid-turn submit queue (#157). Two paths, both about the live turn:
+	//
+	//   - onQueue: a prompt typed while a turn is running joins that run. The
+	//     agent already accepts a queued message and injects it as a user
+	//     message at its next step boundary (Agent.Steer → the loop's steering
+	//     drain), so delivery is one call and the message is persisted by the
+	//     loop itself. False means "no live agent to steer" — the TUI shows
+	//     the row, cmd says no, and the row is withdrawn rather than left
+	//     promising a delivery.
+	//   - onSendNow: interrupt the live turn and run this message as a fresh
+	//     turn. Interrupting rather than injecting is the honest reading of
+	//     "now": the in-flight provider request cannot be pre-empted, and a
+	//     message the user asked to have sent NOW should not wait behind a
+	//     round trip. The acknowledgement is a system block, so the user can
+	//     see the run was stopped on purpose and not by a network failure.
+	//
+	// The delivery order is the queue's own: the oldest pending message goes
+	// first and the rest keep their place behind it.
+	app.SetQueueHandlers(
+		func(text string) bool {
+			// A guest's prompt belongs to the host session; there is no local
+			// run to steer, so the room answers the question the same way the
+			// forward path always has.
+			if collabGuestJoined() {
+				return tui.Collab.Forward(text)
+			}
+			agentMu.Lock()
+			target := curAgent
+			agentMu.Unlock()
+			if target == nil {
+				return false // no live turn: the submit falls back to a real one
+			}
+			target.Steer(text)
+			return true
+		},
+		func(text string) {
+			if !running.Load() {
+				// Nothing to interrupt: the message is an ordinary submit now.
+				runTurn(text, nil)
+				return
+			}
+			if collabGuestJoined() {
+				app.AddSystemBlock("joined as a guest — the host runs the turn")
+				return
+			}
+			// Cancel first, then wait for the run to release its claim. The
+			// turn goroutine clears `running` on its way out; taking the claim
+			// before it does would either lose the race or steal the turn from
+			// a run that is still unwinding.
+			stopped := turn.abort()
+			if !stopped {
+				app.AddSystemBlock("no turn is running — sending the message now")
+				runTurn(text, nil)
+				return
+			}
+			// The abort is asynchronous by nature: the run is mid-stream and
+			// unwinds on its own goroutine. Wait for the claim to come back
+			// before starting the next turn, bounded so a provider that ignores
+			// the cancel cannot wedge the composer.
+			//
+			// The row leaves the queue ONLY when this actually delivers it, and
+			// a run that is still unwinding at the deadline will flush the queue
+			// at ITS end — so keeping the row here is both safe and necessary.
+			// Dropping it early would lose the message; dropping it after a
+			// successful runTurn is what prevents a double delivery, because
+			// runTurn IS the delivery.
+			app.AddSystemBlock("· interrupted — delivering now")
+			deadline := time.Now().Add(2 * time.Second)
+			for running.Load() && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if running.Load() {
+				app.AddSystemBlock("the interrupted turn has not released yet — this message runs as soon as it does")
+				return
+			}
+			// Claim the slot before runTurn's own CAS, so two racing
+			// send-nows cannot both believe they own it. A failed CAS means
+			// another turn got there first, and the row stays queued for that
+			// turn's flush.
+			if !running.CompareAndSwap(false, true) {
+				app.AddSystemBlock("another turn started first — this message is still queued")
+				return
+			}
+			app.SetRunning(false)
+			// runTurnNow persists the message and starts the turn; the row is
+			// dropped only once that succeeded, because a message persisted
+			// AND left queued would be delivered a second time by the flush.
+			if runTurnNow(text) {
+				app.DropQueued(text)
+				return
+			}
+			running.Store(false)
+		})
 	// Shell mode (M10 #163): "!<command>" in the composer runs locally and
 	// prints to the transcript. Nothing is sent to the model, so the draft
 	// costs no tokens; the block is display-only — it is not persisted to the

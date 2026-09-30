@@ -401,17 +401,20 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	}
 }
 
-// SetNotice is the off-UI-thread door to the same toast slot (a failed MCP
-// server reports from the goroutine that connected it, long after startup).
-// It must render without the caller holding a.mu, in the corner and not on
-// the composer's row, and expire on its own.
-func TestSetNoticeIsAToastAndExpires(t *testing.T) {
+// Toast is the off-UI-thread door (a failed MCP server reports from the
+// goroutine that connected it, long after startup), so it must render without
+// the caller holding a.mu, in the corner and not on the composer's row, and
+// expire on its own. d is 0 here on purpose: the level's own grace is the one
+// lifetime a corner notice should have, and a call site passing its own is
+// what made the MCP notice look permanent (cmd/xdev, mcpNoticeGrace).
+func TestOffThreadToastIsACornerNoticeAndExpires(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
 	app.AddSystemBlock("hello")
 	app.draw()
 
 	const msg = "mcp: broken unavailable"
-	app.SetNotice(msg, 2*time.Minute)
+	app.Toast(ToastError, msg, 0)
+	app.draw()
 	app.draw()
 
 	if line := rowContaining(scr, msg); line == "" || strings.Contains(line, "test/free") {
