@@ -9,7 +9,8 @@ import (
 // the model name sat on the composer's divider alone, and the sidebar's footer
 // named the build alone, so "which thinking mode is this session in" had no
 // answer on screen — only /thinking, which a user has to already suspect.
-// Both readouts come from thinkingLabel, so they cannot disagree.
+// Both readouts carry the bare rung, never the word "thinking": it repeats the
+// command beside its own answer, and it costs width on a 38-column panel.
 
 // thinkWired is the seam /thinking, Shift-Tab and the settings panel share:
 // one mutable level, which is what the chrome must read.
@@ -20,8 +21,8 @@ func thinkWired(level *string) *ThinkingOps {
 	}
 }
 
-// TestThinkingLevelRidesTheComposerDivider pins the divider's half: the level
-// sits beside the model it applies to (one request, one line), follows a
+// TestThinkingLevelRidesTheComposerDivider pins the divider's half: the bare
+// level sits beside the model it applies to (one request, one line), follows a
 // /thinking flip without a rebuild, and stays off the bar entirely when the
 // seam is unwired — an invented "auto" would name a budget nobody chose.
 func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
@@ -30,17 +31,22 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 
 	// Unwired: the divider carries the model and nothing else.
 	app.draw()
-	if d := dividerRow(t, scr); strings.Contains(d, "thinking") {
+	if d := dividerRow(t, scr); strings.Contains(d, "auto") {
 		t.Fatalf("an unwired seam must paint no level: %q", d)
 	}
 
 	level := "auto"
 	app.SetThinkingOps(thinkWired(&level))
-	app.AddSystemBlock("thinking auto")
+	app.AddSystemBlock("level set")
 	app.draw()
 	div := dividerRow(t, scr)
-	if !strings.Contains(div, "test/free · thinking auto") {
+	if !strings.Contains(div, "test/free · auto") {
 		t.Fatalf("divider %q must carry the model and the level together", div)
+	}
+	// The word is the command, not the label: "model · thinking auto" answered
+	// the question by repeating the thing you type to change it.
+	if strings.Contains(div, "thinking") {
+		t.Fatalf("divider %q must not name the command beside its answer", div)
 	}
 
 	// A flip repaints from the live seam: the chrome reads the holder, never a
@@ -49,7 +55,7 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.draw()
-	if div = dividerRow(t, scr); !strings.Contains(div, "thinking high") {
+	if div = dividerRow(t, scr); !strings.Contains(div, "test/free · high") {
 		t.Fatalf("divider %q did not follow the flip", div)
 	}
 	// …and off is a level, not the absence of one.
@@ -57,14 +63,15 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.draw()
-	if div = dividerRow(t, scr); !strings.Contains(div, "thinking off") {
+	if div = dividerRow(t, scr); !strings.Contains(div, "test/free · off") {
 		t.Fatalf("divider %q must show off as a level", div)
 	}
 }
 
-// TestThinkingLevelRidesTheDockFooter pins the sidebar's half: the level is a
+// TestThinkingLevelRidesTheDockFooter pins the sidebar's half: the request is a
 // row in the SESSION section — the one never folded away — so it outlives a
-// transcript that fills the band. Same seam, same text as the divider.
+// transcript that fills the band. The model rides the same row, because a bare
+// "high" under a path and a branch reads as a name of its own.
 func TestThinkingLevelRidesTheDockFooter(t *testing.T) {
 	app, _, _ := dockTestApp(t, 200, 40)
 	app.SetVersion("0.4.127")
@@ -74,7 +81,7 @@ func TestThinkingLevelRidesTheDockFooter(t *testing.T) {
 	app.mu.Lock()
 	f, _ := app.dockFooter()
 	app.mu.Unlock()
-	if strings.Contains(dockLines(f.rows), "thinking") {
+	if strings.Contains(dockLines(f.rows), "high") {
 		t.Fatalf("an unwired seam must paint no row: %q", dockLines(f.rows))
 	}
 	if last := f.rows[len(f.rows)-1].text; last != "xdev 0.4.127" {
@@ -87,7 +94,7 @@ func TestThinkingLevelRidesTheDockFooter(t *testing.T) {
 	f, ok := app.dockFooter()
 	rows := dockLines(f.rows)
 	app.mu.Unlock()
-	if !ok || !strings.Contains(rows, "thinking medium") {
+	if !ok || !strings.Contains(rows, "test/free · medium") {
 		t.Fatalf("footer rows = %q ok=%v", rows, ok)
 	}
 	// Under the branch, over the build: what the session is, then which build.
@@ -104,18 +111,18 @@ func TestDockFooterSeesAFlipOnTheNextFrame(t *testing.T) {
 	level := "auto"
 	app.SetThinkingOps(thinkWired(&level))
 	app.draw()
-	if !strings.Contains(screenText(scr), "thinking auto") {
-		t.Fatal("the drawn panel must already carry the level")
+	if !strings.Contains(screenText(scr), "test/free · auto") {
+		t.Fatal("the drawn panel must already carry the request")
 	}
 
 	if err := app.ThinkingLevel("low"); err != nil {
 		t.Fatal(err)
 	}
 	app.draw()
-	if !strings.Contains(screenText(scr), "thinking low") {
+	if !strings.Contains(screenText(scr), "test/free · low") {
 		t.Fatal("the panel did not repaint with the new level")
 	}
-	if !strings.Contains(dividerRow(t, scr), "thinking low") {
+	if !strings.Contains(dividerRow(t, scr), "test/free · low") {
 		t.Fatal("the divider did not repaint with the new level")
 	}
 }

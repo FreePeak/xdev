@@ -2365,20 +2365,18 @@ func (a *App) ToggleThinking() {
 	}
 }
 
-// thinkingLabel is the request-side level as the chrome shows it: the pinned
-// level named the way /thinking takes it, so the readout doubles as the
-// command that sets it. Empty when the seam is unwired — a host that never
-// wired /thinking has no level to report, and an invented "auto" would name a
-// budget nothing chose (the same rule the dock's version row follows).
-func (a *App) thinkingLabel() string {
+// thinkingLevel is the request-side level as the chrome shows it: the bare
+// rung /thinking takes, so the readout sits beside the model it applies to
+// without naming the mechanism ("model · high" is one request; "model ·
+// thinking high" repeated the command beside the answer). Empty when the
+// seam is unwired — a host that never wired /thinking has no level to report,
+// and an invented "auto" would name a budget nothing chose (the same rule the
+// dock's version row follows).
+func (a *App) thinkingLevel() string {
 	if a.thinkingOps == nil || a.thinkingOps.Current == nil {
 		return ""
 	}
-	level := strings.TrimSpace(a.thinkingOps.Current())
-	if level == "" {
-		return ""
-	}
-	return "thinking " + level
+	return strings.TrimSpace(a.thinkingOps.Current())
 }
 
 func (a *App) currentThinkingLevel() string {
@@ -4802,7 +4800,9 @@ func (a *App) drawComposer(yTop int) {
 	info := " " + a.st.Model
 	// The reasoning level beside the model it applies to: the two are one
 	// request, and "which model" alone left the other half of it invisible.
-	if l := a.thinkingLabel(); l != "" {
+	// The bare rung, not "thinking <level>" — the model it sits beside says
+	// what the pair is, and the word only added width.
+	if l := a.thinkingLevel(); l != "" {
 		info += " · " + l
 	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {

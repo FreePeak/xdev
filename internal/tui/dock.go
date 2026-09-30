@@ -553,11 +553,16 @@ func (a *App) dockFooter() (dockFold, bool) {
 	if a.branch != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
 	}
-	// The reasoning level, in the section that is never folded away: the one
-	// request-side fact that outlives a busy transcript and that the divider
-	// beside the model name repeats.
-	if l := a.thinkingLabel(); l != "" {
-		f.rows = append(f.rows, dockRow{text: dockClip(l)})
+	// The model and the reasoning level are one request, so they are one row:
+	// a bare "high" under a path and a branch reads as a name of its own, and
+	// the divider already shows the pair beside each other. The section is the
+	// one never folded away, so the request outlives a busy transcript.
+	if l := a.thinkingLevel(); l != "" {
+		row := l
+		if a.st.Model != "" {
+			row = a.st.Model + " · " + l
+		}
+		f.rows = append(f.rows, dockRow{text: dockClip(row)})
 	}
 	if a.version != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version)})
