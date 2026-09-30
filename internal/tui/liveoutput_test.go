@@ -229,6 +229,40 @@ func TestLiveBoxStampCoalescesButAlwaysMoves(t *testing.T) {
 	}
 }
 
+// Once the box is AT the tail cap, every further append leaves its length
+// unchanged while the content changes — the box's own bound manufactures the
+// same-length rewrite a progress bar does. Without the live sequence on
+// blockKey the repaint stops exactly there: the box freezes on whatever the
+// last chunk inside the window was, and a flooding command's reader watches
+// stale output while the command runs on.
+func TestLiveBoxRepaintsOnceTheTailCapFreezesItsLength(t *testing.T) {
+	app, scr := drawnApp(t, 60, 30)
+	app.AddToolBlock("call-a", "bash", `{"command":"flood"}`)
+	// Fill past the cap so the box is windowed, and settle its stamp.
+	app.AppendToolOutput("call-a", "bash", strings.Repeat("filler\n", liveTailBytes/7+16))
+	app.mu.Lock()
+	app.liveBoxLocked("call-a", "bash").liveAt = time.Now().Add(-2 * livePaint)
+	app.mu.Unlock()
+	app.draw()
+	first := app.liveText("call-a", "bash")
+	if len(first) != liveTailBytes {
+		t.Fatalf("box length = %d, want the cap %d", len(first), liveTailBytes)
+	}
+
+	// At the cap this append cannot change the length — only the content.
+	app.AppendToolOutput("call-a", "bash", "the-newest-line\n")
+	app.mu.Lock()
+	app.liveBoxLocked("call-a", "bash").liveAt = time.Now().Add(-2 * livePaint)
+	app.mu.Unlock()
+	app.draw()
+	if got := app.liveText("call-a", "bash"); len(got) != len(first) {
+		t.Fatalf("the cap did not hold: %d -> %d bytes", len(first), len(got))
+	}
+	if !strings.Contains(screenText(scr), "the-newest-line") {
+		t.Fatalf("the box stopped repainting once its length froze:\n%s", screenText(scr))
+	}
+}
+
 // A live box paints its newest rows and no footer. A box that grew past the
 // window still shows the last liveRows of them, and never offers Ctrl+O:
 // expanding output that is still arriving has no settled length to expand to.

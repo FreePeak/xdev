@@ -65,3 +65,68 @@ func TestWiredTUIHostPaintsARunningBashCall(t *testing.T) {
 	}
 	t.Fatal("a running bash call never painted its output")
 }
+
+// The same wire, watched on SCREEN rather than in the block list: the
+// feature's promise is pixels ("a running command shows its output"), and
+// every test above reads app state, which a broken frame path (a stamp that
+// never invalidates, a splice the row index does not notice) would leave
+// perfectly green. This runs the app's real paint loop and reads the
+// simulation screen, the way tui_metric_wire_test.go does for the HUD.
+func TestLiveOutputReachesTheScreenWhileTheCallRuns(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(80, 24)
+	app := tui.New(scr, theme.Load("groknight"), "test/free", "sess")
+	app.AddSystemBlock("ready")
+	go app.Run() // the real ~30fps loop: paint, coalesce, show
+	t.Cleanup(app.Quit)
+	hooks := &tuiHooks{ts: &tuiSession{app: app, store: session.OpenMem(t.TempDir(), "live")}}
+
+	reg := tool.NewRegistry()
+	reg.Register(tool.NewBashTool(t.TempDir()))
+	ag := &agent.Agent{
+		Provider: &stubProvider{scripts: [][]ai.Event{{
+			{Type: ai.EventStart, Provider: "stub", Model: "m"},
+			{Type: ai.EventToolcallStart, ToolCallID: "call-1", ToolName: "bash", StreamIndex: 0},
+			{Type: ai.EventToolcallEnd, StreamIndex: 0,
+				PartialJSON: `{"command":"printf on-screen-first\\n; sleep 2; printf on-screen-second\\n"}`},
+			ai.Donef(ai.StopReasonStop, nil, &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop}),
+		}}},
+		Tools: reg, Model: "m", Hooks: hooks,
+		OnOutput: app.AppendToolOutput,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go ag.Run(ctx, "", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
+
+	// The command sleeps 2s after its first line, so the line on screen can
+	// only have been painted by the live box, not by the settled result.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		prim, w, _ := scr.GetContents()
+		if w > 0 && strings.Contains(screenCells(prim, w), "on-screen-first") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the running command's output never reached the screen")
+}
+
+// screenCells flattens a simulation screen buffer into one string.
+func screenCells(prim []tcell.SimCell, w int) string {
+	var b strings.Builder
+	for i, c := range prim {
+		if i%w == 0 {
+			b.WriteByte('\n')
+		}
+		if len(c.Runes) > 0 {
+			b.WriteString(string(c.Runes))
+		} else {
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
+}
