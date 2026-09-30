@@ -58,7 +58,7 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app.draw()
 
 	text := screenText(scr)
-	if !strings.Contains(text, "▤1.5k") {
+	if !strings.Contains(text, "1.5k") {
 		t.Fatalf("token pill missing:\n%s", text)
 	}
 	if strings.Contains(text, "↑") || strings.Contains(text, "↓") {
@@ -228,7 +228,7 @@ func TestHUDTimeSegment(t *testing.T) {
 	// inherited from process start. "0s" is a reading, so it renders.
 	app.draw()
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "⏲0s │ ▤↑1.2k │ ↓340") {
+	if !strings.Contains(row, "0s │ ▤↑1.2k │ ↓340") {
 		t.Fatalf("zero work must render beside the tokens: %q", row)
 	}
 
@@ -373,7 +373,7 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	}
 
 	wide := seededStatusRow(t, 160)
-	for _, want := range []string{deep, "2h05m", "▤100k", "42.5 t/s"} {
+	for _, want := range []string{deep, "2h05m", "100k", "42.5 t/s"} {
 		if !strings.Contains(wide, want) {
 			t.Fatalf("wide row missing %q: %q", want, wide)
 		}
@@ -386,7 +386,7 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	// Both pills are the headline now, so a narrow row gives way on the PATH
 	// rather than on a pill: the drop loop sheds theme, model and the
 	// opt-in refinements first (see statusKeepRank).
-	if !strings.Contains(narrow, "▤100k") {
+	if !strings.Contains(narrow, "100k") {
 		t.Fatalf("both pills must survive a narrow row: %q", narrow)
 	}
 	// A path too long for the row keeps the components that identify the

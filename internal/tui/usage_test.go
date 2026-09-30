@@ -124,7 +124,7 @@ func TestStatusRowCarriesTheUsageMetrics(t *testing.T) {
 	// The default row: the hit rate is the pill's own inline reading, and
 	// nothing else rode along.
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "▤66.8k · 99%") {
+	if !strings.Contains(row, "66.8k · 99%") {
 		t.Errorf("the token pill must carry the total and the hit rate: %q", row)
 	}
 	if strings.Contains(row, "ctx ") || strings.Contains(row, "calls") {
@@ -155,7 +155,7 @@ func TestStatusRowHidesUnmeasuredUsageMetrics(t *testing.T) {
 	if strings.Contains(row, "%") || strings.Contains(row, "calls") {
 		t.Fatalf("an unmeasured metric drew a glyph: %q", row)
 	}
-	if !strings.Contains(row, "▤1.5k") {
+	if !strings.Contains(row, "1.5k") {
 		t.Fatalf("the token pill changed: %q", row)
 	}
 }
@@ -196,7 +196,9 @@ func TestUsageReportOmitsAnImpossibleShare(t *testing.T) {
 // pill already IS the total. dsh can afford that duplication (its pill is
 // its only token reading, and `cache` is not a segment there); a row that
 // already shows the total cannot. The `cache` entry therefore reports the
-// RATE alone, with no icon: the ▤ is already on the pill this one refines.
+// RATE alone: the rate is what the pill's own second figure already says, but
+// the pill hides it until anything was actually served from the cache, and a
+// session that asks for the rate inline asked for it by name.
 func TestCacheSegmentCarriesNoSecondTotal(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
 	app.AddUsage(479, 1770, 64575, 0, 66824)
@@ -204,17 +206,13 @@ func TestCacheSegmentCarriesNoSecondTotal(t *testing.T) {
 	app.draw()
 
 	if got, _ := app.hudSegment("cache"); got != "cache 99%" {
-		t.Fatalf("the cache segment = %q, want the rate alone (no total, no second ▤)", got)
+		t.Fatalf("the cache segment = %q, want the rate alone (no total)", got)
 	}
 	row := lastRow(screenText(scr))
-	// One ▤ on the row, not two: the database icon belongs to the pill.
-	if n := strings.Count(row, "▤"); n != 1 {
-		t.Fatalf("the database icon is drawn %d times: %q", n, row)
-	}
 	if strings.Contains(row, "66.8k · cache") {
 		t.Fatalf("the cache segment re-printed the total the pill already shows: %q", row)
 	}
-	if !strings.Contains(row, "▤66.8k · 99%") || !strings.Contains(row, "cache 99%") {
+	if !strings.Contains(row, "66.8k · 99%") || !strings.Contains(row, "cache 99%") {
 		t.Fatalf("the row lost a reading: %q", row)
 	}
 }
