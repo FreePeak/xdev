@@ -80,3 +80,37 @@ func TestEscCancelsWithoutQuitting(t *testing.T) {
 		t.Fatal("Esc quit the session; cancel and quit are different requests")
 	}
 }
+
+// Detach-on-quit (settings tui.exitDetach, default on): when a turn is
+// running and onQuitRunning returns true, the chord must quit WITHOUT
+// cancelling — the turn is being handed off, not killed.
+func TestQuitChordDetachesWhenConfigured(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var canceled, quit bool
+	app.SetHandlers(func(string) {}, func() { canceled = true }, func() { quit = true })
+	app.SetQuitRunning(func() bool { return true })
+	app.SetRunning(true)
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	if !quit {
+		t.Fatal("detach quit chord did not quit")
+	}
+	if canceled {
+		t.Fatal("detach quit chord cancelled the turn — the handoff owns it")
+	}
+}
+
+// When detach is offered but declines (settings off, or handoff failed),
+// the chord falls through to cancel-then-quit — the old behaviour.
+func TestQuitChordFallsThroughWhenDetachDeclines(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	var canceled, quit bool
+	app.SetHandlers(func(string) {}, func() { canceled = true }, func() { quit = true })
+	app.SetQuitRunning(func() bool { return false })
+	app.SetRunning(true)
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	if !quit || !canceled {
+		t.Fatalf("decline detach: quit=%v canceled=%v", quit, canceled)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -593,4 +594,23 @@ run forever. Stream watchdogs and --max-turns still apply.
 		fmt.Fprintf(errOut, "xdev bg: unknown subcommand %q (list|logs|stop|rm)\n", args[0])
 		return 2
 	}
+}
+
+// lastDetachID holds the bg job id created by a detach-on-quit, so the exit
+// banner can name it. Process-local: one TUI process, one possible detach.
+var (
+	lastDetachMu sync.Mutex
+	lastDetach   string
+)
+
+func setLastDetachID(id string) {
+	lastDetachMu.Lock()
+	lastDetach = id
+	lastDetachMu.Unlock()
+}
+
+func lastDetachID() string {
+	lastDetachMu.Lock()
+	defer lastDetachMu.Unlock()
+	return lastDetach
 }
