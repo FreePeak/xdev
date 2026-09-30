@@ -53,7 +53,7 @@ var appliedLimit int64
 // subcommands are the first-arg names that select a mode instead of a
 // prompt. One entry per subcommand keeps merges (and reviews) trivial.
 var subcommands = map[string]bool{
-	"mcps": true,
+	"mcps":  true,
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
@@ -62,7 +62,7 @@ var subcommands = map[string]bool{
 	// Wave 9 CLI suite (#34).
 	"models": true, "search": true, "commit": true, "compress": true,
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
-	"usage": true, "ps": true, "token": true, "completions": true,
+	"usage": true, "ps": true, "bg": true, "token": true, "completions": true,
 	"connect":  true,
 	"worktree": true, "wt": true,
 	// Repository hook trust (#241): the review and the decision.
@@ -103,6 +103,8 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev                         interactive TUI (bare invocation, TTY)
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
+  xdev --bg [flags] "prompt"   detached print run (survives terminal kill)
+  xdev bg <list|logs|stop|rm>  manage detached jobs
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev rpc                     JSONL-over-stdio RPC server (embedders)
   xdev acp                     ACP server on stdio (editors)
@@ -200,6 +202,7 @@ func main() {
 	// --- omp CLI parity (docs/parity-delta.md): the aliases and flags the
 	// baseline accepts, each with a real consumer below.
 	printModeFlag := fs.Bool("print", false, "force headless print mode (alias: -p)")
+	bgFlag := fs.Bool("bg", false, "run the print job detached (survives terminal close; manage with `xdev bg`)")
 	fs.BoolVar(printModeFlag, "p", false, "alias for --print")
 	fs.BoolVar(continueLast, "c", false, "alias for --continue")
 	fs.StringVar(resumePrefix, "r", "", "alias for --resume (session id prefix)")
@@ -331,7 +334,12 @@ func main() {
 		NoPTY:           *noPTY,
 		Extensions:      extensionPaths,
 		PluginDirs:      pluginDirs,
-		LogFile:       *logFile,
+		LogFile:         *logFile,
+	}
+	// A --bg worker that somehow started without a wall-clock cap still
+	// gets one: unattended runs must not hang forever (issue #131).
+	if isBgWorker() && launch.MaxTime == 0 {
+		launch.MaxTime = bgDefaultMaxAge
 	}
 	// --- launch-flag overrides onto the layered settings. Each one is a
 	// documented flag, so each must win over the file: approval mode and
@@ -620,6 +628,9 @@ func main() {
 	if mode == "ps" {
 		os.Exit(runPS(args))
 	}
+	if mode == "bg" {
+		os.Exit(runBg(args))
+	}
 	if mode == "token" {
 		os.Exit(runToken(args))
 	}
@@ -713,6 +724,33 @@ func main() {
 		if *planYoloInto != "" && !*planYolo {
 			fmt.Fprintln(os.Stderr, "xdev: -plan-yolo-into has no effect without -plan-yolo")
 		}
+		// --bg: detach a print worker and return the job id. The child is the
+		// same binary in print mode with XDEV_BG_ID set; hang caps below keep
+		// an unattended run from living forever.
+		if *bgFlag {
+			if isBgWorker() {
+				fmt.Fprintln(os.Stderr, "xdev: --bg child refusing to re-detach")
+				os.Exit(2)
+			}
+			// Default hang ceiling: 2h wall clock when the user set no --max-time.
+			// Stream watchdogs still bound a stalled provider; --max-turns bounds
+			// a runaway tool loop. An explicit --max-time 0 is not expressible
+			// today (parseMaxTime rejects non-positive), so "unset" is the only
+			// path that gets the default.
+			childArgv := stripBgFlag(os.Args[1:])
+			if launch.MaxTime == 0 {
+				childArgv = append([]string{"--max-time", "2h"}, childArgv...)
+			}
+			id, err := spawnBg(prompt, childArgv)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "xdev:", err)
+				os.Exit(2)
+			}
+			fmt.Printf("%s\n", id)
+			ofmt := "xdev bg logs %s   # tail\nxdev bg stop %s   # cancel\n"
+			fmt.Fprintf(os.Stderr, ofmt, id, id)
+			os.Exit(0)
+		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {
 			logx.Debugf("print failed: %v", err)
@@ -746,4 +784,3 @@ func stdinIsTerminal() bool {
 func startupIsInteractive(prompt string, forcePrint, tty bool) bool {
 	return prompt == "" && !forcePrint && tty
 }
-
