@@ -1424,3 +1424,5 @@ Tests: `internal/tui/mermaid_test.go` — the call-chain fixture (four participa
 
 *Last updated: 2026-09-30 (`fix/welcome-logo`). **Welcome wordmark is Omarchy-style capital XDEV.** Drawn in Delta Corps Priest 1 (the FIGlet face `omarchy-ascii` / `logo.txt` use at github.com/omacom/omarchy) — capital `XDEV` at ~50 cells × 8 rows, monogram capital-X fallback under that fit. Sheen still rides the assistant accent; binary tagline only on the full mark. The lowercase pixel-grid mark is gone: Omarchy's face is uppercase-only and a small `x` lacked the weight. `TestLogoOmarchyFace` pins width, half-block strokes, and monogram = leading X.
 
+*Last updated: 2026-09-30 (`fix/welcome-logo` E legibility). **The condensed E read as noise beside D.** Re-cut as a left stem with three full horizontal bars (top / mid / bottom) so the letter is unmistakable at logo size; X, D and tapering V unchanged on the 41-cell grid.
+
