@@ -16,7 +16,7 @@ import (
 
 // pillCell returns the SCREEN COLUMN of a pill's first glyph. The needle is
 // located in the row as a string and then converted to a column, because
-// strings.Index counts bytes: the ⏱ ahead of the token pill is three bytes
+// strings.Index counts bytes: the ⏲ ahead of the token pill is three bytes
 // wide and a byte offset would click two cells to the right of the pill.
 func pillCell(t *testing.T, scr tcell.SimulationScreen, needle string) int {
 	t.Helper()
@@ -88,7 +88,7 @@ func TestPillsReadDshsOwnLabels(t *testing.T) {
 	row := lastRow(screenText(scr))
 	// The token pill's total counts the cache WRITE as well as the read:
 	// 479 fresh + 1,770 out + 64,575 cached + 1,100 written = 67,924.
-	for _, want := range []string{"⏱4m12s", "12t·34g", "42.5 t/s", "▤67.9k", "99%"} {
+	for _, want := range []string{"⏲4m12s", "12t·34g", "42.5 t/s", "▤67.9k", "99%"} {
 		if !strings.Contains(row, want) {
 			t.Fatalf("pill reading %q missing from the row: %q", want, row)
 		}
@@ -114,7 +114,7 @@ func TestPillsReadDshsOwnLabels(t *testing.T) {
 func TestClickOnPillOpensItsBreakdown(t *testing.T) {
 	app, scr := seededPillApp(t, 200, 30)
 
-	clickPill(t, app, scr, "⏱4m12s")
+	clickPill(t, app, scr, "⏲4m12s")
 	if !app.StatusPopupOpen() {
 		t.Fatalf("a click on the time pill opened no panel")
 	}
@@ -153,17 +153,17 @@ func TestPillClickOutsideAndEscapeDismiss(t *testing.T) {
 	app, scr := seededPillApp(t, 200, 30)
 
 	// A second click on the same pill closes it.
-	clickPill(t, app, scr, "⏱4m12s")
+	clickPill(t, app, scr, "⏲4m12s")
 	if !app.StatusPopupOpen() {
 		t.Fatal("setup: the first click must open the panel")
 	}
-	clickPill(t, app, scr, "⏱4m12s")
+	clickPill(t, app, scr, "⏲4m12s")
 	if app.StatusPopupOpen() {
 		t.Fatal("a click on the open pill must close it")
 	}
 
 	// A click on the transcript, well clear of the panel, dismisses it.
-	clickPill(t, app, scr, "⏱4m12s")
+	clickPill(t, app, scr, "⏲4m12s")
 	if !app.StatusPopupOpen() {
 		t.Fatal("setup: the panel must be open")
 	}
@@ -250,7 +250,7 @@ func TestPillPopupHidesWhatItCannotKnow(t *testing.T) {
 	// The TIME panel is the one that always has a reading: a fresh session
 	// has genuinely worked for zero seconds, which is a fact and not a gap.
 	// The token panel has no such row — the timer lives on the time pill.
-	clickPill(t, app, scr, "⏱0s")
+	clickPill(t, app, scr, "⏲0s")
 	text = screenText(scr)
 	if !strings.Contains(text, "active time") || !strings.Contains(text, "0s") {
 		t.Fatalf("active time must always report in the time panel:\n%s", text)
