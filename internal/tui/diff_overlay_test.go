@@ -159,3 +159,28 @@ func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
 		}
 	}
 }
+
+// TestSidebarIsTheTerminalBackground pins the sidebar's field to the terminal's
+// own background (#466 for the diff popup, the same call for the panel beside
+// it). A themed fill here painted bg_base — #141414 — beside a transcript that
+// is the terminal's black, so the two windows read as two different themes. The
+// panel's text cells resolve to the default whatever the fill says, so a
+// surviving fill is not a cosmetic difference: it is a grey band with black
+// text bars in it, the same striping #454 built into the popup.
+func TestSidebarIsTheTerminalBackground(t *testing.T) {
+	app, scr, _ := dockTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.draw()
+
+	base, ok := app.th.Slot(theme.BgBase)
+	if !ok {
+		t.Fatal("the built-in theme must name bg_base, or this test proves nothing")
+	}
+	edge := app.width - dockCols
+	for _, at := range []struct{ x, y int }{{edge, 0}, {edge + dockPad, 1}, {edge + 1, 39}} {
+		r, _, st, _ := scr.GetContent(at.x, at.y)
+		if _, bg, _ := st.Decompose(); bg != tcell.ColorDefault {
+			t.Fatalf("sidebar cell (%d,%d) %q has background %v, want the terminal default (bg_base is %v)", at.x, at.y, r, bg, app.cellColor(base))
+		}
+	}
+}
