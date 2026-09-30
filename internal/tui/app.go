@@ -396,6 +396,11 @@ type blockKey struct {
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// live stamps a result box whose text is still growing. Length alone is
+	// not enough there: a tool that rewrites the same window of bytes (a
+	// progress bar, a counter) keeps the tail the same size while the text
+	// inside it changes.
+	live uint64
 }
 
 // New creates the App over an initialized screen.
@@ -800,6 +805,10 @@ func (a *App) AddToolBlock(callID, name, rawArgs string) {
 // ran". An id also means a replayed history (no ids) cannot steal a live row.
 // A nameless call id still falls back to the name, so a caller that only knows
 // the name keeps working.
+//
+// A live box opened by the first streamed chunk is REPLACED, not left behind:
+// the settled text is the same output, windowed the same way, and two boxes
+// for one command is the transcript lying about what ran.
 func (a *App) FinishTool(callID, name string, isErr bool, output string, out ToolOutcome) {
 	a.mu.Lock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
@@ -835,6 +844,34 @@ func (a *App) FinishTool(callID, name string, isErr bool, output string, out Too
 	if out.HasExit && out.Exit != 0 {
 		text = strings.TrimSuffix(text, fmt.Sprintf("\n[exit code %d]", out.Exit))
 	}
+	// A live box is REPLACED, not left behind: the settled text is the same
+	// output, windowed the same way, and two boxes for one command is the
+	// transcript lying about what ran. The box's OWN slot is rewritten —
+	// the box sits under its call row, so appending would hoist the result
+	// above every call that started after it.
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindToolDone || !b.Live || b.ToolName != name {
+			continue
+		}
+		if callID != "" && b.CallID != "" && b.CallID != callID {
+			continue
+		}
+		a.blocks[i] = &Block{
+			Kind: KindToolDone, CallID: callID, ToolName: name, Text: text,
+			Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
+			Truncated: out.Truncated, Diff: out.Diff,
+		}
+		// /usage's "tool time": the calls' own wall time, one sample per
+		// finished call, counted whether the call succeeded or not.
+		if isErr {
+			a.st.ToolErrors++
+		}
+		a.st.ToolWork += out.Elapsed
+		a.mu.Unlock()
+		a.poke()
+		return
+	}
 	a.blocks = append(a.blocks, &Block{
 		Kind: KindToolDone, CallID: callID, ToolName: name, Text: text,
 		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
@@ -848,6 +885,89 @@ func (a *App) FinishTool(callID, name string, isErr bool, output string, out Too
 	a.st.ToolWork += out.Elapsed
 	a.mu.Unlock()
 	a.poke()
+}
+
+// livePaint is the fastest a live output box repaints. A command that emits
+// thousands of lines a second is not readable at that rate, and every frame
+// the terminal cannot show is a frame spent walking the transcript: chunks
+// coalesce into the newest bytes and the box repaints ten times a second.
+const livePaint = 100 * time.Millisecond
+
+// liveTailBytes bounds what a live box keeps. A live view is "what is
+// happening now"; the settled result is windowed by the tool's own sink, so
+// nothing is lost here — it is just not kept twice.
+const liveTailBytes = 64 << 10
+
+// liveRows is how many rows a live box paints. It matches toolRecentHead, the
+// window a settled result keeps: a running command is worth the same screen
+// real estate as a finished one, and a box that grows past the viewport is a
+// box the rest of the conversation has scrolled out of.
+const liveRows = toolRecentHead
+
+// liveBoxLocked is this call's live box, opening one if the call is running
+// and has produced its first bytes. A tool that streams nothing (read, grep,
+// every MCP tool) never opens one, so the transcript gains no empty frame it
+// has nothing to put in.
+//
+// The new box is spliced in directly under ITS OWN call row, not appended: a
+// batch's calls run concurrently, so "the end of the transcript" is whatever
+// started last, and a box there would paint one command's bytes under a
+// different call's name.
+func (a *App) liveBoxLocked(callID, name string) *Block {
+	row := -1
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind == KindToolDone && b.Live && b.ToolName == name &&
+			(callID == "" || b.CallID == "" || b.CallID == callID) {
+			return b
+		}
+		if row < 0 && b.Kind == KindTool && b.ToolName == name && b.Status == "running" &&
+			(callID == "" || b.CallID == "" || b.CallID == callID) {
+			row = i
+		}
+	}
+	if row < 0 {
+		return nil
+	}
+	box := &Block{Kind: KindToolDone, CallID: callID, ToolName: name, Live: true}
+	a.blocks = append(a.blocks, nil)
+	copy(a.blocks[row+2:], a.blocks[row+1:])
+	a.blocks[row+1] = box
+	// No markDirty needed: the splice inserts a block whose render key can
+	// not match the render cached at that index (a live result box is never
+	// a call row), so sync re-renders from the insertion point on — which
+	// recomputes the row offsets the shift invalidated.
+	return box
+}
+
+// AppendToolOutput adds one chunk to this call's live box, opening that box
+// on the first chunk. Chunks are the tool's own read boundaries, so they may
+// split a line: the box keeps them as they came, and the renderer windows
+// what it paints. A chunk for a call that never ran, or that has already
+// settled, is dropped rather than opening a box under a command the
+// transcript is done with.
+func (a *App) AppendToolOutput(callID, name, chunk string) {
+	if chunk == "" {
+		return
+	}
+	a.mu.Lock()
+	b := a.liveBoxLocked(callID, name)
+	if b == nil {
+		a.mu.Unlock()
+		return
+	}
+	b.Text += chunk
+	if len(b.Text) > liveTailBytes {
+		b.Text = b.Text[len(b.Text)-liveTailBytes:]
+	}
+	// The stamp ages per livePaint, not per chunk: the box re-renders on the
+	// next frame at most, however fast the tool talks.
+	if now := time.Now(); now.Sub(b.liveAt) >= livePaint {
+		b.liveAt = now
+		b.liveSeq++
+		a.poke()
+	}
+	a.mu.Unlock()
 }
 
 // taskToolName is the one tool whose children the transcript shows. The
@@ -3561,16 +3681,27 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 		}
 	}
 
+	// A live box shows the newest rows and nothing else. Its head is not
+	// history yet — the settled result will print that head in full when the
+	// command exits — and a head window over a command still running is a
+	// window the reader watches scroll away from the line that just arrived.
+	if b.Live && len(rows) > liveRows {
+		rows = rows[len(rows)-liveRows:]
+	}
+
 	var out []line
 	out = append(out, top)
 	if header != "" {
 		out = append(out, boxRow(box, border, bodySt, header, inner))
 	}
 	switch {
-	case len(rows) == 0 && !b.Err:
+	case len(rows) == 0 && !b.Err && !b.Live:
 		out = append(out, boxRow(box, border, mutedSt, "(no output)", inner))
 	case len(rows) == 0:
 		// An error result with nothing to say: the frame and footer carry it.
+		// A live box with nothing yet has not said anything either — no
+		// placeholder, because "(no output)" under a command that is two
+		// seconds old is a verdict the transcript has not earned.
 	case b.Expanded || len(rows) <= headRows+tailRows+1:
 		// Aged results collapse to a head+tail window: the middle of the
 		// output is trimmed before anything else in the transcript is.
@@ -3591,23 +3722,27 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 
 	// Status footer: only the facts this result has. A signalled command
 	// reports no exit code (tool.Outcome says so), so it never shows a signal
-	// dressed up as a status.
-	var notes []string
-	if b.Dur != "" {
-		notes = append(notes, "Wall: "+b.Dur)
-	}
-	if b.HasExit && b.Exit != 0 {
-		notes = append(notes, fmt.Sprintf("Exit: %d", b.Exit))
-	}
-	if b.Truncated {
-		notes = append(notes, "output truncated")
-	}
-	if len(notes) > 0 {
-		notesSt := dimSt
-		if b.Err {
-			notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+	// dressed up as a status. A live box has no facts yet: the running call
+	// row above it is the "still going" statement, and a footer printing
+	// nothing for the next ten seconds is noise.
+	if !b.Live {
+		var notes []string
+		if b.Dur != "" {
+			notes = append(notes, "Wall: "+b.Dur)
 		}
-		out = append(out, boxRow(box, border, notesSt, "⟦"+strings.Join(notes, " | ")+"⟧", inner))
+		if b.HasExit && b.Exit != 0 {
+			notes = append(notes, fmt.Sprintf("Exit: %d", b.Exit))
+		}
+		if b.Truncated {
+			notes = append(notes, "output truncated")
+		}
+		if len(notes) > 0 {
+			notesSt := dimSt
+			if b.Err {
+				notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+			}
+			out = append(out, boxRow(box, border, notesSt, "⟦"+strings.Join(notes, " | ")+"⟧", inner))
+		}
 	}
 
 	out = append(out, boxBottom(box, border, w))

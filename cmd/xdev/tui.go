@@ -1875,6 +1875,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// Intercept set below from exts (only when non-nil).
 				Policy:  agentPolicy(),
 				Handoff: handoffSettings(),
+				// Live tool output: a running tool's chunks paint as they
+				// arrive, into the box the first chunk opens under that call's
+				// own row. A tool that streams nothing opens no box.
+				OnOutput: app.AppendToolOutput,
 			}
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
