@@ -930,12 +930,16 @@ func (a *Agent) goalSystem(system string) string {
 // reached the hooks — replaying such a turn would double-emit it.
 // partial carries the accumulated text/thinking when the stream died
 // mid-content: the retain-and-continue path persists it and resumes the
-// turn instead of replaying (M5 tail). Tool calls are never captured —
-// an unpaired call would make the continuation request invalid.
+// turn instead of replaying (M5 tail). Tool calls are never captured as
+// a partial — an unpaired call would make the continuation request
+// invalid — but they are COUNTED (orphanToolCalls), because a turn that
+// died on a call and rendered nothing is the one post-content failure a
+// whole-turn replay can still repair.
 type turnError struct {
-	err            error
-	contentEmitted bool
-	partial        *ai.Message
+	err             error
+	contentEmitted  bool
+	partial         *ai.Message
+	orphanToolCalls int
 }
 
 func (e *turnError) Error() string { return e.err.Error() }
@@ -948,6 +952,23 @@ func (e *turnError) Unwrap() error { return e.err }
 func turnContentEmitted(err error) bool {
 	var te *turnError
 	return errors.As(err, &te) && te.contentEmitted
+}
+
+// orphanToolCalls reports the tool calls a failed turn left unpaired — a
+// stream that died mid-call, with no text behind it. The adapters emit
+// EventToolcallEnd only on their terminal path, so a call whose stream
+// dies is never persisted and never paired with a tool result; nothing
+// of it reaches the screen. That leaves the turn replayable: a
+// whole-turn re-send regenerates the call from the same history, where a
+// retained partial could not. This is what "stream ended without
+// finish_reason" hits when the cut lands mid-tool-call, and why that
+// failure used to end the session instead of reaching the ladder.
+func orphanToolCalls(err error) int {
+	var te *turnError
+	if errors.As(err, &te) {
+		return te.orphanToolCalls
+	}
+	return 0
 }
 
 // oneTurnWithRecovery wraps oneTurn with the full M5 recovery ladder (omp
@@ -1059,7 +1080,18 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		}
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
-			if turnContentEmitted(err) {
+			// A turn that died on a tool call with no text behind it has no
+			// partial to continue from and an unpaired call nothing can
+			// consume — but nothing was rendered either, so the whole turn
+			// is replayable. It takes the pre-content ladder below instead
+			// of surfacing the error, which is how a "stream ended without
+			// finish_reason" cut mid-tool-call used to end the session
+			// (orphanToolCalls).
+			orphans := orphanToolCalls(err)
+			if orphans > 0 {
+				logx.Errorf("recovery: stream died on %d unpaired tool call(s) — replaying the turn", orphans)
+			}
+			if turnContentEmitted(err) && orphans == 0 {
 				// Retain-and-continue (M5 tail): persist the partial, follow
 				// with a continuation prompt, resume. A bounded ladder keeps
 				// its one-shot budget; retry.infinite now gets a real
@@ -1586,6 +1618,12 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 					partial.Role = ai.RoleAssistant
 				}
 				te.partial = &partial
+			} else if len(order) > 0 {
+				// A tool call with no text behind it: no partial exists to
+				// continue from, and the call is unpaired no matter what —
+				// but nothing of it was rendered, so count the orphans and
+				// let the ladder replay the turn whole.
+				te.orphanToolCalls = len(order)
 			}
 			return nil, te
 		}
