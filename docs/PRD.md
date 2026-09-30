@@ -459,6 +459,30 @@ on a dead terminal. Guarded both ways by `internal/tui/input_error_test.go`:
 `TestTtyReadErrorEndsTheUILoopInsteadOfWedgingIt` fails against the absent
 branch, and `TestOnlyTheReadErrorEndsTheUILoop` (a resize plus two keystrokes
 must still land in the composer) fails if the check ever widens past the error.
+
+**Fixed 2026-09-30 — a wedged UI loop was an un-exitable session (session 00b1c5a0).**
+The stall watchdog above names a stuck loop but leaves the user inside it, and
+the quit chord is no escape: `handleKey` runs ON that loop, so a loop blocked
+inside `scr.Show()` — tcell's synchronous tty write, which parks whenever the
+terminal stops draining it (a frozen or suspended pane) — reads no key at all.
+Thirteen dumps from 2026-09-30 name it, the worst blocking 17m04s in
+`devTty.Write` (`tui-stall-20260930-202555.txt`); the user's report was
+verbatim: Ctrl+C and Ctrl+D did nothing and the process had to be killed. Two
+halves, because the chord and the timeout fail for different reasons. The
+chord: the poll goroutine that feeds `keyq` now serves `quit` itself when the
+watchdog has marked the loop wedged (`app.go`), so the key is honoured by the
+one goroutine that still receives it — the loop comes back, sees `quitCh` closed
+and returns, and `runTUI`'s defers restore the terminal. Every other key is left
+to the loop, and Esc stays cancel-only, so a wedged session cannot turn "stop
+this turn" into "exit". The timeout: a loop still wedged ten minutes after its
+first dump restores the terminal and exits non-zero (`stall.go`,
+`SetStallExitAfter`), because nothing inside the process can — the turn
+goroutine, the MCP servers and the tool workers are all in that pid. The clock
+is per episode, so a loop that recovers is never taken away, and the 0 value
+keeps every other embedder on the old behaviour. Five tests guard it
+(`wedged_quit_test.go`): the chord quits a wedged loop; Esc and a rune do not; a
+healthy loop keeps the chord to itself; a never-recovering loop exits AND
+restores; a recovered one is reported and left alone.
 **Residual wiring debt — re-audited 2026-09-13 (full-tree consumer-proof pass; every row below carries a ticket):**
 
 Reconciliation audit method: 10 domain fan-outs re-verified every closed-sweep claim against the tree @ 4ed9920 with the "landed = has a production caller" bar; 34 follow-up issues filed (#79–#112), correction comments posted on the affected closed issues, and three stale closeout/docs claims corrected (hindsight AutoRecall IS live; TTSR `condition` IS consumed; hub processes ARE reaped — the goal-budget "lag" is only the documented crash-window). The high-severity finds:
@@ -1411,3 +1435,5 @@ Tests: `internal/tui/statuspill_test.go` gains `TestPillStaysUpUntilTheNextClick
 *Last updated: 2026-09-30 (`docs/prd-syntax-highlight`). **A PRD line described a feature that does not exist.** The scrollback block-styling bullet promised "fenced code with syntax highlighting via bundled tmTheme mapping" — `internal/tui/markdown.go` paints every fenced line as one run in the body ink as a single `md_text`-coloured run on the `md_code_bg` band (`md_code` is the INLINE-code ink, not the fenced one), no `.tmTheme` exists anywhere in the repo, and `grep -rn "theme.Syntax" internal/ --include=*.go | grep -v ^internal/theme/` returns nothing, so all 9 `syntax_*` tokens are settable and unread. The line now states what renders and names the theme tokens as unconsumed; the feature itself moves to [#501](https://github.com/FreePeak/xdev/issues/501) rather than being quietly deleted, since the tokens are the intended surface. No code changed.*
 
 *Last updated: 2026-09-30 (`feat/code-highlight`, closing [#501](https://github.com/FreePeak/xdev/issues/501)). **The 9 `syntax_*` tokens finally have a consumer.** A fenced block was one run in the body ink, so comment, string and keyword painted identically; `internal/tui/highlight.go` is a hand-written per-line scanner that maps each token onto one of the 9 existing slots, with the launch palettes pinning all 9 from the same TokyoNight Night accents the rest of groknight uses. No tree-sitter and no tmTheme: the constraint is `go.mod`'s CGO-free guarantee (§3.6), the same one that keeps `ast_grep` shelling out to the `ast-grep` binary. The honest limits, all pinned by tests: it lexes ONE line at a time, so a block comment spanning lines is coloured in pieces; a mis-token paints the wrong colour and never drops or reorders a byte (`runsString(runs)` is byte-identical to the source line, which is what the selection/copy path reads). `NO_COLOR` is gated in the RENDERER rather than left to tcell — tcell drops colour at emission, so an ink chosen here would appear in every cell dump and screenshot while the terminal showed a single colour. `internal/tui/markdown.go` is the only render call site that changed: the fence line now records the info string instead of toggling a bare boolean.*
+
+*Last updated: 2026-09-30 (`fix/stuck-quit`). **A stuck xdev was un-exitable: Ctrl+C, Ctrl+D, nothing.** The stall watchdog wrote a dump and left the user in a raw-mode alt screen with a live process, because the quit chord is applied by the very loop that had wedged — a loop blocked 17m inside tcell's synchronous tty write reads no key at all (session 00b1c5a0; the worst of 13 dumps that day). Now the poll goroutine serves the `quit` chord whenever the watchdog has condemned the loop, and a loop still wedged ten minutes after its first dump restores the terminal and exits non-zero instead of living forever. `go build ./...`, `go vet ./internal/tui/ ./cmd/xdev/`, `go test ./internal/tui/ -race` green for the new tests (the two `cmd/xdev` failures and the `TestBeatDoneNamesASlowIteration` / `TestOnlyTheReadError` races fail identically on `origin/main`).*
