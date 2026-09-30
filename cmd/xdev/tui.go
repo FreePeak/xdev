@@ -32,6 +32,16 @@ import (
 )
 
 // runTUI drives the interactive TUI mode (M4).
+
+func tabInfos(ts *tabset) []tui.TabInfo {
+	snap := ts.snapshot()
+	o := make([]tui.TabInfo, len(snap))
+	for i, t := range snap {
+		o[i] = tui.TabInfo{ID: t.ID, Title: t.Title, Running: t.Running, Unread: t.Unread, Current: t.Current}
+	}
+	return o
+}
+
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -209,13 +219,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
+	// tabs is the live session set. `store` below is a convenience that
+	// always names the CURRENT session: every closure that used to read
+	// the one `store` variable now reads through tabs, so a switch re-
+	// points them without rewriting every call site. A turn claims its
+	// own session id at start and keeps that store even after a switch.
+	tabs := newTabset(store)
+	storeOf := func() *session.Store { return tabs.store() }
 	// The breadcrumb keys --continue for this pane. A fresh session is
 	// memory-only until its first assistant message, so record the
 	// AUTO-PERSIST path: --continue already guards with os.Stat, and a
 	// breadcrumb naming the live session beats silently reopening the
 	// previous one (the /new, /drop defect).
 	saveBreadcrumb(breadcrumbPath(store))
-	wireTaskParent(reg, store)
+	wireTaskParent(reg, storeOf())
 	// The resume line on the way out. Registered BEFORE the defers that flush
 	// and close the store and release the screen, so LIFO order prints it last
 	// of the three: tcell has left the alt screen (anything written before Fini
@@ -230,19 +247,23 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			fmt.Printf("  xdev config set tui.exitDetach false   # kill on quit\n")
 			fmt.Printf("──────────────────────────────────────────────────\n")
 		}
-		if text := exitMenuText(store, cwd); text != "" {
-			fmt.Print(text)
+		if s := storeOf(); s != nil {
+			if text := exitMenuText(s, cwd); text != "" {
+				fmt.Print(text)
+			}
 		}
 	}()
 	defer func() {
+		// Cancel every in-flight turn before the stores close under them.
+		tabs.abortAll()
 		modelMu.Lock()
 		lm := live.provName + "/" + live.model
 		modelMu.Unlock()
-		_ = store.Append(&session.ModelChangeEntry{Model: lm})
-		_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
-		if cerr := store.Close(); cerr != nil {
-			logx.Errorf("session close: %v", cerr)
+		if s := storeOf(); s != nil {
+			_ = s.Append(&session.ModelChangeEntry{Model: lm})
+			_ = s.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
 		}
+		tabs.closeAll()
 	}()
 
 	// Screen.
@@ -531,8 +552,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// blocks replay too, gated by the showThinking display toggle). The
 	// store, not the flag, decides: --continue and --resume both land a
 	// populated store here, a fresh session has none.
-	if len(store.Entries()) > 0 {
-		if res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{}); err == nil {
+	if len(storeOf().Entries()) > 0 {
+		if res, err := session.BuildContext(storeOf().Entries(), storeOf().LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
 			app.SetWork(workOf(res.Messages))
@@ -548,7 +569,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// BuildContext). Seeding from a separate slice went stale and dropped
 	// assistant turns (conversation amnesia).
 	rebuildHistory := func() []ai.Message {
-		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		s := storeOf()
+		if s == nil {
+			return nil
+		}
+		res, err := session.BuildContext(s.Entries(), s.LeafID(), session.SystemPrompt{})
 		if err != nil {
 			return nil
 		}
@@ -561,14 +586,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	baseCtx, baseCancel := withMaxTime(context.Background(), launch.MaxTime)
 	defer baseCancel()
 
-	var running atomic.Bool
-
-	// turn publishes the in-flight turn's cancel to the abort paths (Esc,
-	// Ctrl+C, a full-link guest's interrupt).
-	var turn liveTurn
-	// Serializes conversation accumulation across turns (one run at a time;
-	// guarded for the UI thread that reads nothing here).
+	// Serializes conversation accumulation across turns of ONE session
+	// (the store's own lock covers appends; this is for rebuildHistory
+	// and the rare multi-step mutation that spans two store reads).
 	var sessMu sync.Mutex
+	// running/turn used to be process-wide. They live on the tabset now:
+	// each session claims its own turn slot, and Esc aborts only the
+	// session on screen. See tabset.go.
 
 	// Handoff (M5 #23): /handoff and -handoff replace the live context with
 	// a handoff document committed as a normal compaction entry, so the
@@ -588,7 +612,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return hs
 	}
 	runHandoff := func(instruction string) (string, error) {
-		if running.Load() {
+		s := storeOf()
+		if s == nil {
+			return "", fmt.Errorf("no session")
+		}
+		if tabs.isRunning(s.ID()) {
 			return "", fmt.Errorf("a turn is running — Esc cancels it first")
 		}
 		modelMu.Lock()
@@ -598,7 +626,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Provider:   lp,
 			Tools:      reg,
 			Model:      lm,
-			Store:      store,
+			Store:      s,
 			Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
 			PlanMode:   planMode,
 			Handoff:    handoffSettings(),
@@ -629,7 +657,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	go dist.MaybeCheck(version)
 
 	// -handoff: document the resumed session before the first turn.
-	if handoffMode && len(store.Entries()) > 0 {
+	if handoffMode && len(storeOf().Entries()) > 0 {
 		if doc, err := runHandoff(""); err != nil {
 			logx.Errorf("handoff: %v", err)
 		} else {
@@ -637,55 +665,86 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	}
 
-	ts := &tuiSession{store: store, app: app}
+	ts := &tuiSession{store: store, app: app, tabs: tabs, id: store.ID(), focused: true}
 
 	var swapStoreTo func(*session.Store) error
 
-	// swapStore closes the current session and opens a fresh one (issue #11).
-	// drop=true deletes the old file first. The transcript clears and the
-	// live hooks/agent point at the new store (single source of truth: the
-	// captured `store` variable, which all closures re-read).
+	// focusTab rebuilds the App view around a tab that is already open.
+	// The previous session is PARKED, not closed: its turn keeps running
+	// and its store stays open. The App still owns one transcript, so the
+	// rebuild is a Reset + replay — the same path /resume already took.
+	focusTab := func(t *tab) {
+		if t == nil {
+			return
+		}
+		ts.setFocused(false) // freeze any in-flight paint from the old session
+		ts.store = t.store
+		ts.id = t.id
+		ts.setFocused(true)
+		wireTaskParent(reg, t.store)
+		if vibeScope != nil {
+			workers, on := agent.LoadVibe(t.store.Entries())
+			vibeScope.Restore(workers, on)
+		}
+		app.Reset()
+		app.SetLocation(t.store.CWD())
+		app.SetSessionID(t.store.ID())
+		saveBreadcrumb(breadcrumbPath(t.store))
+		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
+			replayTranscript(app, res.Messages)
+			app.SetContextReplay(agent.ContextTokens(res.Messages))
+			app.SetWork(workOf(res.Messages))
+			ttftSum, ttftCount := ttftOf(res.Messages)
+			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+			turns, steps := countsOf(res.Messages)
+			app.SetSessionCounts(turns, steps)
+		}
+		// The HUD spinner follows the FOREGROUND session only.
+		app.SetRunning(t.running)
+		app.SetTabs(tabInfos(tabs))
+	}
+
+	// swapStore opens a fresh session and parks (or drops) the previous
+	// one. drop=true deletes the previous file — /drop — and aborts its
+	// turn; otherwise the previous session stays open in the tabset so a
+	// Ctrl+] can cycle back to it while its turn finishes.
 	swapStore := func(drop bool) error {
 		sessMu.Lock()
 		defer sessMu.Unlock()
-		// Vibe mode is session-scoped: a new session would orphan the
-		// director's workers, so the switch is refused until it is off
-		// (omp rejects start/fork while the mode is active).
 		if vibeActive() {
 			return fmt.Errorf("vibe mode is active — /vibe off first")
 		}
-		old := store
+		old := storeOf()
 		ns, err := openSession(cwd, false, "")
 		if err != nil {
 			return err
 		}
-		// /new and /drop ARE session switches, so they fire the same hook
-		// events /resume does — they used to emit nothing, and a
-		// session_switch hook (archive, notify) silently never ran on them
-		// (parity finding T3 #16).
-		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
+		bus := buildHookBus(cwd, opts, app.AddSystemBlock)
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
-		if drop && old.Path() != "" {
-			_ = old.Close()
-			if rmErr := os.Remove(old.Path()); rmErr != nil && !os.IsNotExist(rmErr) {
-				logx.Errorf("drop session file: %v", rmErr)
+		if drop && old != nil {
+			path := old.Path()
+			_ = tabs.close(old.ID()) // aborts turn + Close
+			if path != "" {
+				if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+					logx.Errorf("drop session file: %v", rmErr)
+				}
 			}
-		} else {
-			_ = old.Close()
 		}
-		store = ns
-		ts.store = ns
-		wireTaskParent(reg, ns) // children must link to the ACTIVE session
-		app.Reset()
-		// A new session has never worked: Reset already banked 0 for the HUD.
-		saveBreadcrumb(breadcrumbPath(ns))
+		i, err := tabs.open(ns)
+		if err != nil {
+			_ = ns.Close()
+			return err
+		}
+		t := tabs.activate(i)
+		focusTab(t)
 		app.AddSystemBlock("· new session " + shortSessionID(ns.ID()))
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
 		return nil
 	}
 
-	// swapStoreTo adopts an already-open store (fork/resume): replays its
-	// transcript and points hooks/agent at it.
+	// swapStoreTo adopts an already-open store (fork/resume): parks the
+	// previous session and makes this one current. The previous turn keeps
+	// running; only the view moves.
 	swapStoreTo = func(ns *session.Store) error {
 		sessMu.Lock()
 		defer sessMu.Unlock()
@@ -698,34 +757,41 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if n := sessionRepairNotice(ns); n != "" {
 			app.AddSystemBlock(n)
 		}
-		old := store
 		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
-		store = ns
-		ts.store = ns
-		wireTaskParent(reg, ns)
-		// The resumed session carries its own director state: adopt it
-		// (workers rehydrate as idle — nothing runs in a fresh process).
-		if vibeScope != nil {
-			workers, on := agent.LoadVibe(ns.Entries())
-			vibeScope.Restore(workers, on)
+		i, err := tabs.open(ns)
+		if err != nil {
+			return err
 		}
-		app.Reset()
-		app.SetLocation(ns.CWD())
-		saveBreadcrumb(breadcrumbPath(ns))
-		if res, err := session.BuildContext(ns.Entries(), ns.LeafID(), session.SystemPrompt{}); err == nil {
-			replayTranscript(app, res.Messages)
-			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			app.SetWork(workOf(res.Messages))
-			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
-			turns, steps := countsOf(res.Messages)
-			app.SetSessionCounts(turns, steps)
-		}
+		t := tabs.activate(i)
+		focusTab(t)
 		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
-		_ = old
 		return nil
+	}
+
+	// cycleTab is the Alt+] / Alt+[ chord: park the current session and
+	// focus the next (or previous) one. A single open session is a notice,
+	// never a silent no-op.
+	cycleTab := func(dir int, onlyUnread bool) {
+		t := tabs.cycle(dir, onlyUnread)
+		if t == nil {
+			open, _, _ := tabs.summary()
+			if open < 2 {
+				app.AddSystemBlock("· one session open — /new or /resume to open another")
+			} else {
+				app.AddSystemBlock("· no unread sessions")
+			}
+			return
+		}
+		sessMu.Lock()
+		focusTab(t)
+		sessMu.Unlock()
+		label := shortSessionID(t.id)
+		if t.title != "" {
+			label = t.title
+		}
+		app.AddSystemBlock("· session " + label)
 	}
 
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
@@ -772,11 +838,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if id == "" {
 			return
 		}
-		if !running.CompareAndSwap(false, true) {
-			app.AddSystemBlock("resume: a turn is running — Esc cancels it first")
-			return
-		}
-		defer running.Store(false)
 		path, err := resolveResumeID(cwd, id)
 		if err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
@@ -801,7 +862,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	})
 	app.SetPickerDelete(func(id string) error {
-		return deleteSessionByShortID(id, store.Path())
+		return deleteSessionByShortID(id, storeOf().Path())
 	})
 	app.SetResumeList(func(cwd string) error {
 		// The rows here are the session picker's; the closure used to also
@@ -819,7 +880,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// TUI-side twin of the re-render omp performs after every tree
 	// navigation. Silent: callers own their status notice.
 	branchReplay := func() {
-		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		res, err := session.BuildContext(storeOf().Entries(), storeOf().LeafID(), session.SystemPrompt{})
 		if err != nil {
 			return
 		}
@@ -842,7 +903,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// new branch's model actually reads it. The transcript is restored
 	// from the new leaf either way.
 	navigateTree := func(entryID string, summarize bool) (string, error) {
-		e := store.Entry(entryID)
+		e := storeOf().Entry(entryID)
 		if e == nil {
 			return "", fmt.Errorf("no entry %q in this session", entryID)
 		}
@@ -852,10 +913,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return "", err
 			}
 		} else if target == "" {
-			if err := store.ResetLeaf(); err != nil {
+			if err := storeOf().ResetLeaf(); err != nil {
 				return "", err
 			}
-		} else if err := store.Branch(target); err != nil {
+		} else if err := storeOf().Branch(target); err != nil {
 			return "", err
 		}
 		if st := agent.ScheduleStateOf(reg); st != nil {
@@ -871,7 +932,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// for. A row with no entry (a compaction summary, a turn the store refused)
 	// reads as "", and the menu says so rather than rewinding somewhere random.
 	userEntryID := func(i int) string {
-		res, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+		res, err := session.BuildContext(storeOf().Entries(), storeOf().LeafID(), session.SystemPrompt{})
 		if err != nil {
 			return ""
 		}
@@ -893,7 +954,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// branchToEntry moves the live leaf to an entry and replays the new
 	// branch's transcript into the TUI (/branch <id-prefix>).
 	branchToEntry := func(entryID string) error {
-		if err := store.Branch(entryID); err != nil {
+		if err := storeOf().Branch(entryID); err != nil {
 			return fmt.Errorf("branch: %v", err)
 		}
 		branchReplay()
@@ -904,10 +965,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return nil
 	}
 	app.SetSessionBranch(func(args string) error {
-		if !running.CompareAndSwap(false, true) {
+		sid, ok := tabs.claimCurrent()
+		if !ok {
 			return fmt.Errorf("a turn is running — Esc cancels it first")
 		}
-		defer running.Store(false)
+		defer tabs.release(sid)
 		query := strings.TrimSpace(args)
 		if query == "" {
 			return fmt.Errorf("branch: entry-id prefix required (ids are listed by /tree)")
@@ -915,7 +977,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// First prefix match wins (omp addresses entries by full id; the
 		// selector hands Enter the full id — the prefix form is a typed
 		// convenience).
-		for _, e := range store.Entries() {
+		for _, e := range storeOf().Entries() {
 			if env := e.Envelope(); strings.HasPrefix(env.ID, query) {
 				return branchToEntry(env.ID)
 			}
@@ -924,7 +986,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	// /tree selector: entry rows built from the live store, labels from
 	// the dataDir sidecar (UI state — the session package stays label-free).
-	app.SetTreeData(func() []tui.TreeEntry { return treeEntries(store) })
+	app.SetTreeData(func() []tui.TreeEntry { return treeEntries(storeOf()) })
 	app.SetTreeLabels(loadSessionLabels, saveSessionLabel)
 	app.SetLocation(cwd)
 	// Agent Hub roster (/hub, issue #37): the registry owns this session's
@@ -988,7 +1050,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// than capturing one store: /new, /resume and /fork all swap it, and a
 		// panel pinned to the session the process started with would show the
 		// old title — and the old id — for the rest of the run.
-		Session: func() (string, string) { return store.Title(), shortSessionID(store.ID()) },
+		Session: func() (string, string) { return storeOf().Title(), shortSessionID(storeOf().ID()) },
 		// MCP: attachMCP assigned reg.MCPBlock from the mcp.yml it loaded
 		// before this closure existed, so the section is the ENABLED server
 		// list — one row per name, ○ on the ones with no live session. The nil
@@ -1003,12 +1065,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// The panel's one button row: the heading is the ledger's own count,
 		// read through `store` so /new, /resume and /fork move it with the
 		// session. The click opens the same ledger /trajectory opens.
-		Trajectory: func() string { return trajectoryHeading(store) },
+		Trajectory: func() string { return trajectoryHeading(storeOf()) },
 	}
 	// The ledger's records come from the same store, read on open rather than
 	// held: a snapshot kept live would walk the session on every rebuild.
 	app.SetTrajectoryOps(&tui.TrajectoryOps{
-		Records: func() []tui.TrajectoryRecord { return trajectoryRows(store) },
+		Records: func() []tui.TrajectoryRecord { return trajectoryRows(storeOf()) },
 	})
 	if sessionHub != nil {
 		ops.Agents = func() string { return dockAgentsLabel(sessionHub.Roster()) }
@@ -1042,11 +1104,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					return &agent.VibeModel{Provider: lp, Model: lm, Thinking: effortBudget(le)}, nil
 				},
 				Persist: func(customType string, data map[string]any) {
-					if err := store.Append(&session.CustomEntry{CustomType: customType, Data: data}); err != nil {
+					if err := storeOf().Append(&session.CustomEntry{CustomType: customType, Data: data}); err != nil {
 						logx.Errorf("vibe: persist %s: %v", customType, err)
 					}
 				},
-				ParentID: func() string { return store.ID() },
+				ParentID: func() string { return storeOf().ID() },
 				Conflicts: func() []string {
 					var out []string
 					if planMode.Active() {
@@ -1066,7 +1128,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			vibeSys = promptFnWithMemory(basePrompt(opts, cwd), cwd, vibeScope.Registry(),
 				tailSystemPrompt(overrides, opts.AppendSystem)+"\n\n"+agent.VibeDirectorPrompt, sessionMemory)
 			// The startup session may itself be a resume: adopt its mode.
-			workers, on := agent.LoadVibe(store.Entries())
+			workers, on := agent.LoadVibe(storeOf().Entries())
 			vibeScope.Restore(workers, on)
 		}
 	}
@@ -1098,20 +1160,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// turn is in flight.
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
-			if !running.CompareAndSwap(false, true) {
-				return fmt.Errorf("a turn is running — Esc cancels it first")
-			}
-			defer running.Store(false)
+			// Fork parks the source and opens the child as current.
 			// A fresh session lives memory-only until its first
 			// assistant message — materialize it so the fork has a
 			// source file to copy.
-			if store.Path() == "" {
-				if _, err := store.EnsureOnDisk(
-					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), store.ID()), session.Options{}); err != nil {
+			if storeOf().Path() == "" {
+				if _, err := storeOf().EnsureOnDisk(
+					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()), session.Options{}); err != nil {
 					return err
 				}
 			}
-			fork, err := session.ForkSession(store.Path(),
+			fork, err := session.ForkSession(storeOf().Path(),
 				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), session.NewSessionID()), "")
 			if err != nil {
 				return err
@@ -1119,7 +1178,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return swapStoreTo(fork)
 		},
 		Dump: func() (string, error) {
-			return dumpSession(store)
+			return dumpSession(storeOf())
 		},
 		// /export: the system prompt and the active model are read from
 		// the live session here rather than stored, so a mid-session
@@ -1131,18 +1190,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// (key in the fragment) is view-only and lives as long as this
 		// process does.
 		Share: func() (string, error) {
-			return shareLive(store, buildSys(), modelNow())
+			return shareLive(storeOf(), buildSys(), modelNow())
 		},
 		Resume: func(query string) error {
-			if running.Load() {
-				return fmt.Errorf("a turn is running — Esc cancels it first")
-			}
-			claimed := running.CompareAndSwap(false, true)
-			defer func() {
-				if claimed {
-					running.Store(false)
-				}
-			}()
+			// /resume parks the current session and focuses another. A turn
+			// in the parked session keeps running.
 			if query == "" {
 				// Interactive picker (omp/Claude Code /resume): rows
 				// span all projects (Tab toggles scope; the picker
@@ -1199,22 +1251,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return swapStoreTo(resumed)
 		},
 		NavigateTree: func(entryID string, summarize bool) (string, error) {
-			if !running.CompareAndSwap(false, true) {
+			sid, ok := tabs.claimCurrent()
+			if !ok {
 				return "", fmt.Errorf("a turn is running — Esc cancels it first")
 			}
-			defer running.Store(false)
+			defer tabs.release(sid)
 			return navigateTree(entryID, summarize)
 		},
 		UserEntryID: userEntryID,
 		New: func() error {
-			if !running.CompareAndSwap(false, true) {
-				return fmt.Errorf("a turn is running — Esc cancels it first")
-			}
-			defer running.Store(false)
+			// /new parks the current session (turn keeps running) and opens a
+			// fresh one — that is the whole point of the tab set.
 			return swapStore(false)
 		},
 		Fresh: func() error {
-			if running.Load() {
+			if tabs.currentRunning() {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
 			// /fresh (issue #11 §5): rotate PROVIDER-facing state only —
@@ -1226,14 +1277,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// drop today.
 			// ponytail: when provider-session or prompt-cache state lands
 			// (openSession / swapStoreTo), clear it here.
-			return swapStoreTo(store)
+			return swapStoreTo(storeOf())
 		},
 		Clear: func() error {
-			if !running.CompareAndSwap(false, true) {
+			sid, ok := tabs.claimCurrent()
+			if !ok {
 				return fmt.Errorf("a turn is running — Esc cancels it first")
 			}
-			defer running.Store(false)
-			if err := store.ResetLeaf(); err != nil {
+			defer tabs.release(sid)
+			if err := storeOf().ResetLeaf(); err != nil {
 				return err
 			}
 			if st := agent.ScheduleStateOf(reg); st != nil {
@@ -1246,12 +1298,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("· context cleared — history kept on disk")
 			return nil
 		},
-		Recent: func() []tui.ResumeOption { return recentResumeOptions(cwd, store.ID()) },
+		Recent: func() []tui.ResumeOption { return recentResumeOptions(cwd, storeOf().ID()) },
 		Drop: func() error {
-			if !running.CompareAndSwap(false, true) {
-				return fmt.Errorf("a turn is running — Esc cancels it first")
-			}
-			defer running.Store(false)
+			// /drop aborts + deletes the current session; a parked neighbour
+			// becomes current. The tabset.close path cancels the turn.
 			return swapStore(true)
 		},
 		// /handoff (M5 #23): replace the live context with a handoff
@@ -1259,7 +1309,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		Handoff: runHandoff,
 		// /rename: a manual title, written into the fixed-width slot so
 		// /resume and the breadcrumb show it (#107).
-		Rename: func(title string) error { return store.Rename(title, session.TitleSourceManual) },
+		Rename: func(title string) error { return storeOf().Rename(title, session.TitleSourceManual) },
 	})
 
 	// setRef applies a resolved model ref; shared by /model
@@ -1285,7 +1335,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		modelMu.Lock()
 		live.prov, live.model, live.provName = nprov, nmodelName, nprovName
 		modelMu.Unlock()
-		if err := store.Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
+		if err := storeOf().Append(&session.ModelChangeEntry{Model: nprovName + "/" + nmodelName}); err != nil {
 			logx.Errorf("model change entry: %v", err)
 		}
 		// A /model (or role) switch changes the ":effort" the role pins, so
@@ -1599,7 +1649,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// answered "goal not wired" in every session. It goes in before
 	// wireTaskParent binds it, so an early call cannot read unbound state.
 	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
-	wireTaskParent(reg, store)
+	wireTaskParent(reg, storeOf())
 	app.SetScheduleOps(&tui.ScheduleOps{
 		List: func() string {
 			st := agent.ScheduleStateOf(reg)
@@ -1768,15 +1818,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				AllowRemote: mode.Remote || addr != "",
 				Name:        collab.DefaultName(),
 				Backend: collab.Backend{
-					Snapshot: func() []byte { return collabSnapshot(store) },
+					Snapshot: func() []byte { return collabSnapshot(storeOf()) },
 					Prompt: func(name, text string) {
 						app.AddSystemBlock("· collab " + name + ": " + text)
 						app.SendPrompt(text)
 					},
 					// Cancel the live turn, never baseCtx (see liveTurn).
-					Interrupt: func() { turn.abort() },
+					Interrupt: func() { tabs.abortCurrent() },
 				},
-				Entries: func() [][]byte { return collabEntries(store) },
+				Entries: func() [][]byte { return collabEntries(storeOf()) },
 				Logf:    func(f string, a ...any) { logx.Debugf("collab: "+f, a...) },
 			})
 			if err != nil {
@@ -1895,38 +1945,56 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// after the whole wiring below is in place, so the var is never nil here.
 	var flushPendingQueue = func() {}
 	startTurn := func() {
+		// Capture the session this turn belongs to UP FRONT. A switch mid-turn
+		// re-points storeOf(), and the turn must keep writing to the store it
+		// started on — never the newly focused one.
+		turnStore := storeOf()
+		if turnStore == nil {
+			return
+		}
+		sid := turnStore.ID()
 		ctx, cancel := context.WithCancel(baseCtx)
-		turn.set(cancel)
+		tabs.publish(sid, cancel)
 		goGuarded(func() {
 			// The mid-turn queue's run-end flush (#157), registered FIRST so it
-			// runs LAST: the deferred running.Store(false) below releases the turn
-			// claim, and this flush CASes that claim to start the next turn. A
-			// pending row the model never saw becomes an ordinary turn rather than
-			// a row that lies about being sent.
-			defer flushPendingQueue()
-			// LIFO: clear runs FIRST so this turn can never nil a slot
-			// that a newer turn already claimed (running=false admits the
-			// next submit before cancel() unwinds).
+			// runs LAST: the deferred release below frees the turn claim, and
+			// this flush claims again to start the next turn. A pending row the
+			// model never saw becomes an ordinary turn rather than a row that
+			// lies about being sent. Only the FOREGROUND session flushes: a
+			// parked turn finishing must not steal the screen's composer queue.
+			defer func() {
+				if t := tabs.current(); t != nil && t.id == sid {
+					flushPendingQueue()
+				}
+			}()
+			// LIFO: clear runs FIRST so this turn can never nil a slot that a
+			// newer turn already claimed.
 			defer cancel()
-			defer running.Store(false)
-			defer turn.clear()
-			app.SetRunning(true)
+			defer tabs.release(sid)
+			defer tabs.clear(sid)
+			// Spinner follows the foreground session only.
+			if t := tabs.current(); t != nil && t.id == sid {
+				app.SetRunning(true)
+			}
 			feedAdvisor := func() {}
 			modelMu.Lock()
 			lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
 			modelMu.Unlock()
+			// Per-turn hooks pin the store and the focused predicate so a
+			// parked turn keeps persisting and never paints over the live view.
+			turnTS := &tuiSession{store: turnStore, app: app, tabs: tabs, id: sid}
 			ag := &agent.Agent{
 				Provider: lp,
 				Tools:    toolsForTurn(),
 				// feedAdvisor is assigned after the agent exists, so go
 				// through an indirection: a direct field copy would
 				// capture the nil func at literal time.
-				Hooks:      memoryTurnHooks(&tuiHooks{ts: ts, feed: func() { feedAdvisor() }}, lastSettings()),
+				Hooks:      memoryTurnHooks(&tuiHooks{ts: turnTS, feed: func() { feedAdvisor() }}, lastSettings()),
 				TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 				MaxTokens:  opts.MaxTokens,
 				MaxTurns:   opts.MaxTurns,
 				Model:      lm,
-				Store:      store,
+				Store:      turnStore,
 				Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
 				Failovers:  failoverChain(cfg, lastSettings(), lpn, lm),
 				Thinking:   effortBudget(le),
@@ -1935,8 +2003,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Handoff: handoffSettings(),
 				// Live tool output: a running tool's chunks paint as they
 				// arrive, into the box the first chunk opens under that call's
-				// own row. A tool that streams nothing opens no box.
-				OnOutput: app.AppendToolOutput,
+				// own row. A tool that streams nothing opens no box. Gated the
+				// same way every other paint is: a parked turn is silent.
+				OnOutput: func(callID, name, chunk string) {
+					if turnTS.isFocused() {
+						app.AppendToolOutput(callID, name, chunk)
+					}
+				},
 			}
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
@@ -1944,10 +2017,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if st := wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
 				// The TUI has a console: a silent provider swap or a
 				// cooldown revert is otherwise invisible to the user.
-				st.Notify = func(msg string) { app.AddSystemBlock("· " + msg) }
+				st.Notify = func(msg string) {
+					if turnTS.isFocused() {
+						app.AddSystemBlock("· " + msg)
+					} else {
+						tabs.note(sid)
+					}
+				}
 			}
 			// The HUD context segment measures against this window.
-			app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
+			if turnTS.isFocused() {
+				app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
+			}
 			prewalkMu.Lock()
 			pwOn, pwT := prewalkOn, *prewalkTarget
 			prewalkMu.Unlock()
@@ -1993,22 +2074,37 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			agentMu.Unlock()
 			defer func() {
 				agentMu.Lock()
-				curAgent = nil
+				if curAgent == ag {
+					curAgent = nil
+				}
 				agentMu.Unlock()
+				// Spinner off only if we still own the foreground.
+				if t := tabs.current(); t != nil && t.id == sid {
+					app.SetRunning(false)
+				}
+				app.SetTabs(tabInfos(tabs))
 			}()
 			sessMu.Lock()
-			hist := rebuildHistory() // store mirror is authoritative
+			hist, errH := session.BuildContext(turnStore.Entries(), turnStore.LeafID(), session.SystemPrompt{})
+			var history []ai.Message
+			if errH == nil {
+				history = hist.Messages
+			}
 			sessMu.Unlock()
 			sys := buildSys()
 			if vibeActive() {
 				sys = vibeSys() // director prompt for the restricted toolset
 			}
-			finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), hist)
-			app.EndAssistant()
-			app.FinishRun()
-			// One finished run is one turn — the count dsh's TimePill
-			// reads beside its steps, whatever the turn ended with.
-			app.AddTurn()
+			finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), history)
+			if turnTS.isFocused() {
+				app.EndAssistant()
+				app.FinishRun()
+				// One finished run is one turn — the count dsh's TimePill
+				// reads beside its steps, whatever the turn ended with.
+				app.AddTurn()
+			} else {
+				tabs.note(sid)
+			}
 			// Ai-title cascade (#107): the TUI sessions are the ones the
 			// picker lists, and they are the ones stuck with "tui
 			// <timestamp>". Async on purpose: the user's next keystroke
@@ -2019,14 +2115,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// title slot: the cascade rewrites the store's title on a
 				// goroutine long after this frame, so nothing else would.
 				goGuarded(func() {
-					generateTitle(cfg, lastSettings(), cwd, lpn, lm, store,
-						append(append([]ai.Message(nil), hist...), *finalMsg))
-					app.DockBump()
+					generateTitle(cfg, lastSettings(), cwd, lpn, lm, turnStore,
+						append(append([]ai.Message(nil), history...), *finalMsg))
+					tabs.setTitle(sid, turnStore.Title())
+					if turnTS.isFocused() {
+						app.DockBump()
+						app.SetTabs(tabInfos(tabs))
+					}
 				})
 			}
 			if err != nil {
 				if ctx.Err() != nil {
-					app.AddSystemBlock("· turn canceled")
+					if turnTS.isFocused() {
+						app.AddSystemBlock("· turn canceled")
+					}
 				} else if errors.Is(err, agent.ErrEmptyTurn) {
 					// The model answered nothing after every nudge was spent
 					// (a thinking-mode upstream leaving only a reasoning block,
@@ -2035,16 +2137,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					// instead of dying with a dead-end error (#331). Same
 					// recovery print and rpc modes already had — the TUI is
 					// the daily driver and was the one gap.
-					app.AddSystemBlock("· the model answered with nothing — retrying from history")
-					ctxRes, rerr := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+					if turnTS.isFocused() {
+						app.AddSystemBlock("· the model answered with nothing — retrying from history")
+					}
+					ctxRes, rerr := session.BuildContext(turnStore.Entries(), turnStore.LeafID(), session.SystemPrompt{})
 					if rerr == nil {
 						finalMsg, err = ag.Run(ctx, hookBus.Context(ctx, sys), ctxRes.Messages)
 					}
-					if err != nil {
+					if err != nil && turnTS.isFocused() {
 						app.AddSystemBlock("error: " + err.Error())
+					} else if err != nil {
+						tabs.note(sid)
 					}
-				} else {
+				} else if turnTS.isFocused() {
 					app.AddSystemBlock("error: " + err.Error())
+				} else {
+					tabs.note(sid)
 				}
 			}
 		})
@@ -2063,15 +2171,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// the guest forward, the naming, the persist, the memory/friction notes,
 	// the start — is identical to runTurn by construction: one function.
 	persistAndStart := func(text string, imgs []tui.PasteImage) bool {
+		s := storeOf()
+		if s == nil {
+			return false
+		}
 		// Name the session after its first prompt: /resume and the
 		// breadcrumb read the title slot, and "print <timestamp>" hides
 		// everything about the conversation. Called before the first
 		// assistant message materializes the file, so the title lands in
 		// the slot without needing a rewrite pass; later prompts keep
 		// the first one's title (omp's first-prompt cascade).
-		if store.Path() == "" {
+		if s.Path() == "" {
 			if t := titleFromPrompt(text); t != "" {
-				store.SetTitle(t)
+				s.SetTitle(t)
+				tabs.setTitle(s.ID(), t)
 			}
 		}
 		sessMu.Lock()
@@ -2096,7 +2209,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Data:      base64.StdEncoding.EncodeToString(im.Data),
 			}})
 		}
-		if err := store.Append(&session.MessageEntry{Message: msg}); err != nil {
+		if err := s.Append(&session.MessageEntry{Message: msg}); err != nil {
 			logx.Errorf("persist user message: %v", err)
 		}
 		// #86: the memory turn boundary. print mode counted turns for the
@@ -2124,12 +2237,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return true
 			}
 		}
-		if !running.CompareAndSwap(false, true) {
+		sid, ok := tabs.claimCurrent()
+		if !ok {
 			app.AddSystemBlock("a turn is already running — Esc cancels it")
 			return false
 		}
 		if !persistAndStart(text, imgs) {
-			running.Store(false)
+			tabs.release(sid)
 		}
 		return true
 	}
@@ -2175,14 +2289,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		goGuarded(func() {
 			defer close(hubDone)
 			agent.StartHubNoticeDelivery(hubCtx, sessionHub,
-				func() bool { return !collabGuestJoined() && !running.Load() },
+				func() bool { return !collabGuestJoined() && !tabs.currentRunning() },
 				func(notice string) error {
-					// swapStore re-points `store` under sessMu; read it
-					// there rather than capturing a stale one.
-					sessMu.Lock()
-					target := store
-					sessMu.Unlock()
-					if target == nil || !running.CompareAndSwap(false, true) {
+					target := storeOf()
+					sid, ok := tabs.claimCurrent()
+					if target == nil || !ok {
 						return agent.ErrHubNoticeDelivery
 					}
 					msg := ai.Message{
@@ -2190,7 +2301,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 						Attribution: agent.HubNoticeAttribution, UserTS: time.Now().UnixMilli(),
 					}
 					if err := target.Append(&session.MessageEntry{Message: msg}); err != nil {
-						running.Store(false)
+						tabs.release(sid)
 						return fmt.Errorf("%w: %v", agent.ErrHubNoticeDelivery, err)
 					}
 					return nil
@@ -2217,7 +2328,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	goGuarded(func() {
 		defer close(scheduleDone)
 		agent.StartScheduleDelivery(scheduleCtx, agent.ScheduleStateOf(reg),
-			func([]agent.Schedule) bool { return !collabGuestJoined() && !running.Load() },
+			func([]agent.Schedule) bool { return !collabGuestJoined() && !tabs.currentRunning() },
 			func(batch []agent.Schedule) error {
 				claimed := agent.ScheduleStateOf(reg)
 				if claimed == nil {
@@ -2226,7 +2337,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// The state is delivery-locked for this callback, so its
 				// bound store is stable; a swap waits for BindDelivery.
 				storeForDelivery := claimed.CurrentStore()
-				if storeForDelivery == nil || !running.CompareAndSwap(false, true) {
+				sid, ok := tabs.claimCurrent()
+				if storeForDelivery == nil || !ok {
 					return agent.ErrScheduleDelivery
 				}
 				msg := ai.Message{
@@ -2234,7 +2346,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Attribution: "schedule", UserTS: time.Now().UnixMilli(),
 				}
 				if err := storeForDelivery.Append(&session.MessageEntry{Message: msg}); err != nil {
-					running.Store(false)
+					tabs.release(sid)
 					return fmt.Errorf("%w: %v", agent.ErrScheduleDelivery, err)
 				}
 				return nil
@@ -2260,7 +2372,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// also lands here (tui.App.quitOrCancel cancels first, then quits),
 		// so a turn that outlives the UI unwinds against this turn's own
 		// cancel — never baseCancel, which the defers below still own.
-		func() { turn.abort() },
+		func() { tabs.abortCurrent() },
 
 		func() { app.Quit() },
 	)
@@ -2280,13 +2392,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if !lastSettings().TuiExitDetachOn() {
 			return false
 		}
-		if !running.Load() {
+		// The FOREGROUND session is the one the user is looking at, so it is
+		// the one handed off. A parked session mid-turn stays in this
+		// process, and abortAll() cancels it when the TUI actually exits —
+		// detaching only the screen's own session is the honest reading.
+		// ponytail: one hand-off, not one per running tab. A PARKED session
+		// mid-turn is still cancelled by abortAll() on exit, so quitting with
+		// two busy sessions keeps only the foreground one. Upgrade path:
+		// spawn one child per running tab id and print one block per id.
+		s := storeOf()
+		if s == nil || !tabs.isRunning(s.ID()) {
 			return false
 		}
 		// Need a durable session file for the child to resume.
-		if store.Path() == "" {
-			if _, err := store.EnsureOnDisk(
-				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), store.ID()),
+		if s.Path() == "" {
+			if _, err := s.EnsureOnDisk(
+				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), s.ID()),
 				session.Options{},
 			); err != nil {
 				app.AddSystemBlock("· detach failed — session not on disk: " + err.Error())
@@ -2294,15 +2415,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 		// Stop the in-process turn first so the store is quiet for the child.
-		turn.abort()
+		tabs.abort(s.ID())
 		// Wait briefly for the turn to release; do not block quit forever.
 		deadline := time.Now().Add(2 * time.Second)
-		for running.Load() && time.Now().Before(deadline) {
+		for tabs.isRunning(s.ID()) && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		childArgv := []string{
 			"--print",
-			"--resume", store.ID(),
+			"--resume", s.ID(),
 			"--max-time", "2h",
 		}
 		// Carry the live model so the child does not fall back to defaultModel.
@@ -2362,7 +2483,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return true
 		},
 		func(text string) {
-			if !running.Load() {
+			if !tabs.currentRunning() {
 				// Nothing to interrupt: the message is an ordinary submit now.
 				runTurn(text, nil)
 				return
@@ -2372,10 +2493,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				return
 			}
 			// Cancel first, then wait for the run to release its claim. The
-			// turn goroutine clears `running` on its way out; taking the claim
-			// before it does would either lose the race or steal the turn from
-			// a run that is still unwinding.
-			stopped := turn.abort()
+			// turn goroutine clears the tab's running flag on its way out;
+			// taking the claim before it does would either lose the race or
+			// steal the turn from a run that is still unwinding.
+			stopped := tabs.abortCurrent()
 			if !stopped {
 				app.AddSystemBlock("no turn is running — sending the message now")
 				runTurn(text, nil)
@@ -2394,18 +2515,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// runTurn IS the delivery.
 			app.AddSystemBlock("· interrupted — delivering now")
 			deadline := time.Now().Add(2 * time.Second)
-			for running.Load() && time.Now().Before(deadline) {
+			for tabs.currentRunning() && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
-			if running.Load() {
+			if tabs.currentRunning() {
 				app.AddSystemBlock("the interrupted turn has not released yet — this message runs as soon as it does")
 				return
 			}
-			// Claim the slot before runTurn's own CAS, so two racing
-			// send-nows cannot both believe they own it. A failed CAS means
-			// another turn got there first, and the row stays queued for that
-			// turn's flush.
-			if !running.CompareAndSwap(false, true) {
+			// Claim the slot before runTurnNow, so two racing send-nows cannot
+			// both believe they own it. A failed claim means another turn got
+			// there first, and the row stays queued for that turn's flush.
+			sid, ok := tabs.claimCurrent()
+			if !ok {
 				app.AddSystemBlock("another turn started first — this message is still queued")
 				return
 			}
@@ -2417,7 +2538,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				app.DropQueued(text)
 				return
 			}
-			running.Store(false)
+			tabs.release(sid)
 		})
 	// Shell mode (M10 #163): "!<command>" in the composer runs locally and
 	// prints to the transcript. Nothing is sent to the model, so the draft
@@ -2433,12 +2554,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("joined as a guest — the host runs the turn")
 			return
 		}
-		if !running.CompareAndSwap(false, true) {
+		sid, ok := tabs.claimCurrent()
+		if !ok {
 			app.AddSystemBlock("a turn is already running — Esc cancels it")
 			return
 		}
-		if len(store.Entries()) == 0 {
-			running.Store(false)
+		s := storeOf()
+		if s == nil || len(s.Entries()) == 0 {
+			tabs.release(sid)
 			app.AddSystemBlock("nothing to retry yet — send a prompt first")
 			return
 		}
@@ -2446,6 +2569,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	// Vision is the live model's property, not the launch model's: /model
 	// mid-session changes whether an attachment can be read at all.
+	// Session tabs (opencode session.tab.next / .previous). Alt+] / Alt+[
+	// cycle the open set without aborting a parked turn; Alt+Shift+] jumps
+	// to the next unread one. Wired through the keybinding table so
+	// keybindings.yml can move them.
+	app.SetTabCycle(func(dir int, onlyUnread bool) { cycleTab(dir, onlyUnread) })
+	app.SetTabs(tabInfos(tabs))
 	app.SetVision(func() bool {
 		modelMu.Lock()
 		defer modelMu.Unlock()
@@ -2551,12 +2680,59 @@ func breadcrumbPath(s *session.Store) string {
 type tuiSession struct {
 	store *session.Store
 	app   *tui.App
-	// mu guards ttftRequest (tuiHooks writes it on OnStart /
+	tabs  *tabset
+	// id is the session this hooks instance belongs to. A turn captures
+	// it at start so a mid-turn switch cannot re-point its paints.
+	id string
+	// focused is true while this session owns the App transcript. A parked
+	// turn keeps writing to its store and only sets the unread badge.
+	focused bool
+	// mu guards ttftRequest and focused (tuiHooks writes on OnStart /
 	// onTurnEnd, both on different goroutines) — same lock the
 	// hooks use, lives on the session because the hooks reference
 	// ts, not themselves.
 	mu          sync.Mutex
 	ttftRequest time.Time
+}
+
+func (s *tuiSession) setFocused(on bool) {
+	s.mu.Lock()
+	s.focused = on
+	s.mu.Unlock()
+}
+
+// isFocused is true while this session owns the App transcript. A per-turn
+// hooks instance carries the session id it started on and asks the tabset;
+// the process-wide `ts` still uses the focused flag focusTab toggles.
+func (s *tuiSession) isFocused() bool {
+	// A turn pinned to a session id asks the tabset: still current?
+	if s.tabs != nil && s.id != "" {
+		cur := s.tabs.current()
+		return cur != nil && cur.id == s.id
+	}
+	// No tabset (unit tests, single-session harnesses that build a bare
+	// tuiSession{app: app}): always paint. The focused flag is only
+	// meaningful when a tabset is driving focusTab.
+	if s.tabs == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.focused
+}
+
+// paint runs fn against the App only while this session is focused; a parked
+// turn just raises the unread badge so the top bar can show it.
+func (s *tuiSession) paint(fn func()) {
+	if s.isFocused() {
+		fn()
+		return
+	}
+	if s.tabs != nil && s.id != "" {
+		s.tabs.note(s.id)
+		// Bump the tab strip so the badge appears without a keystroke.
+		s.app.SetTabs(tabInfos(s.tabs))
+	}
 }
 
 // tuiHooks implements agent.TurnHooks for the TUI.
@@ -2639,29 +2815,29 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		// ladder never reached EventDone, so its window would otherwise be
 		// inherited as the next turn's denominator (a t/s reading several
 		// times too low, for the rest of the session).
-		h.ts.app.BeginMessage()
+		h.ts.paint(func() { h.ts.app.BeginMessage() })
 		// One EventStart is one provider request, which is the "step"
 		// dsh's TimePill counts beside its turns.
-		h.ts.app.AddStep()
+		h.ts.paint(func() { h.ts.app.AddStep() })
 	case ai.EventTextStart:
-		h.ts.app.BeginAssistant()
+		h.ts.paint(func() { h.ts.app.BeginAssistant() })
 	case ai.EventTextDelta:
-		h.ts.app.AppendAssistant(ev.Delta)
+		h.ts.paint(func() { h.ts.app.AppendAssistant(ev.Delta) })
 	case ai.EventTextEnd:
-		h.ts.app.EndAssistant()
+		h.ts.paint(func() { h.ts.app.EndAssistant() })
 	case ai.EventThinkingStart:
-		h.ts.app.BeginThinking()
+		h.ts.paint(func() { h.ts.app.BeginThinking() })
 	case ai.EventThinkingDelta:
-		h.ts.app.AppendThinking(ev.Delta)
+		h.ts.paint(func() { h.ts.app.AppendThinking(ev.Delta) })
 	case ai.EventThinkingEnd:
-		h.ts.app.EndThinking()
+		h.ts.paint(func() { h.ts.app.EndThinking() })
 	case ai.EventToolcallDelta:
 		// output_tokens counts tool-argument JSON, so the decode window has
 		// to span it — the numerator and the denominator must measure the
 		// same message.
-		h.ts.app.NoteToolDelta()
+		h.ts.paint(func() { h.ts.app.NoteToolDelta() })
 	case ai.EventDone:
-		h.ts.app.EndAssistant()
+		h.ts.paint(func() { h.ts.app.EndAssistant() })
 		if ev.Usage != nil {
 			// The ctx number is the whole request — cached input included
 			// (Claude Code's used_tokens), which is Usage.TotalTokens, not
@@ -2670,25 +2846,29 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			// reasoning, so without CacheRead and ReasoningTokens the row
 			// claimed a 479-token prompt for a 65k one and 1770 tokens of
 			// answer for 506.
-			h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output,
-				ev.Usage.CacheRead, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens)
+			h.ts.paint(func() {
+				h.ts.app.AddUsage(ev.Usage.Input, ev.Usage.Output,
+					ev.Usage.CacheRead, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens)
+			})
 			// The cache WRITE side of the same prompt: a separate bucket
 			// on the wire, and one the token pill's total and /usage
 			// both had nowhere to put.
 			if ev.Usage.CacheWrite > 0 {
-				h.ts.app.AddCacheWrite(ev.Usage.CacheWrite)
+				h.ts.paint(func() { h.ts.app.AddCacheWrite(ev.Usage.CacheWrite) })
 			}
 			if ev.Usage.Cost != nil {
-				h.ts.app.AddCost(ev.Usage.Cost.Total)
+				h.ts.paint(func() { h.ts.app.AddCost(ev.Usage.Cost.Total) })
 			}
 			// The provider's own wall time and time-to-first-token, for
 			// /usage's LLM-time and average-TTFT lines. Carried on the
 			// message, not the usage: a turn that reported no usage still
 			// spent the time it took.
 			if ev.Message != nil {
-				h.ts.app.AddLLMTime(
-					time.Duration(ev.Message.DurationMS)*time.Millisecond,
-					ev.Message.TTFTMS)
+				h.ts.paint(func() {
+					h.ts.app.AddLLMTime(
+						time.Duration(ev.Message.DurationMS)*time.Millisecond,
+						ev.Message.TTFTMS)
+				})
 			}
 		}
 	case ai.EventError:
@@ -2699,17 +2879,17 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		// shows is the collapsed blip below.
 		var down *agent.AllTargetsDownError
 		if errors.As(ev.Err, &down) {
-			h.ts.app.AddSystemBlock(ev.Err.Error())
+			h.ts.paint(func() { h.ts.app.AddSystemBlock(ev.Err.Error()) })
 			break
 		}
 		var cont *agent.ContinuationRetryError
 		if errors.As(ev.Err, &cont) {
-			h.ts.app.AddSystemBlock("· " + ev.Err.Error())
+			h.ts.paint(func() { h.ts.app.AddSystemBlock("· " + ev.Err.Error()) })
 			break
 		}
 		var empty *agent.EmptyTurnRetryError
 		if errors.As(ev.Err, &empty) {
-			h.ts.app.AddSystemBlock(ev.Err.Error())
+			h.ts.paint(func() { h.ts.app.AddSystemBlock(ev.Err.Error()) })
 			break
 		}
 		// A transient blip is being retried by the recovery ladder: the
@@ -2720,13 +2900,13 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		if ai.Classify(ev.Err) == ai.ClassTransient {
 			h.retryCounter++
 			if h.retryCounter == 1 {
-				h.ts.app.AddSystemBlock("· stream error — retrying")
+				h.ts.paint(func() { h.ts.app.AddSystemBlock("· stream error — retrying") })
 			} else {
-				h.ts.app.AddSystemBlock(fmt.Sprintf("· stream error — retrying (x%d)", h.retryCounter))
+				h.ts.paint(func() { h.ts.app.AddSystemBlock(fmt.Sprintf("· stream error — retrying (x%d)", h.retryCounter)) })
 			}
 			break
 		}
-		h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error())
+		h.ts.paint(func() { h.ts.app.AddSystemBlock("stream error: " + ev.Err.Error()) })
 	}
 }
 
@@ -2846,8 +3026,8 @@ func newBangRunner(app *tui.App, cwd string, ctx context.Context) func(string) e
 // reads the naming field out of them (omp's `name · detail` row), so nothing
 // here pre-flattens the JSON into a preview the terminal then has to unpick.
 func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
-	h.ts.app.BeginActiveCommand(call.Name)
-	h.ts.app.AddToolBlock(call.ID, call.Name, string(call.Arguments))
+	h.ts.paint(func() { h.ts.app.BeginActiveCommand(call.Name) })
+	h.ts.paint(func() { h.ts.app.AddToolBlock(call.ID, call.Name, string(call.Arguments)) })
 }
 
 // OnToolEnd passes the outcome facts the status footer shows — exit code,
@@ -2855,19 +3035,21 @@ func (h *tuiHooks) OnToolStart(call ai.ToolCallBlock) {
 // tool's own structured details.
 func (h *tuiHooks) OnToolEnd(call ai.ToolCallBlock, res tool.Result, dur time.Duration) {
 	out := tool.OutcomeOf(res.Details)
-	h.ts.app.FinishTool(call.ID, call.Name, res.IsError, res.Text, tui.ToolOutcome{
-		Dur:       dur.Round(time.Millisecond).String(),
-		Elapsed:   dur,
-		Exit:      out.Exit,
-		HasExit:   out.HasExit,
-		Truncated: out.Truncated,
-		Diff:      out.Diff,
+	h.ts.paint(func() {
+		h.ts.app.FinishTool(call.ID, call.Name, res.IsError, res.Text, tui.ToolOutcome{
+			Dur:       dur.Round(time.Millisecond).String(),
+			Elapsed:   dur,
+			Exit:      out.Exit,
+			HasExit:   out.HasExit,
+			Truncated: out.Truncated,
+			Diff:      out.Diff,
+		})
 	})
-	h.ts.app.EndActiveCommand()
+	h.ts.paint(func() { h.ts.app.EndActiveCommand() })
 	// The dock's Files section is read from the transcript's diff blocks, and the
 	// task list from the todo tool's state: both move here, and nowhere else in a
 	// quiet session. One bump per finished call, no per-frame source read.
-	h.ts.app.DockBump()
+	h.ts.paint(func() { h.ts.app.DockBump() })
 }
 
 // OnMessageEnd persists the assistant message (persistence on message_end).
@@ -2883,7 +3065,7 @@ func (h *tuiHooks) OnMessageEnd(msg *ai.Message) {
 	}
 	// A message's end is the last word on what it said about the plan, and the
 	// transcript gained a block the panel's height budget has to account for.
-	h.ts.app.DockBump()
+	h.ts.paint(func() { h.ts.app.DockBump() })
 	if msg.TTFTMS > 0 {
 		h.ts.mu.Lock()
 		req := h.ts.ttftRequest
@@ -2907,7 +3089,7 @@ func (h *tuiHooks) onTurnEnd(ttft int64) {
 	h.ts.mu.Lock()
 	defer h.ts.mu.Unlock()
 	h.ts.ttftRequest = time.Time{} // consumed: a real OnTurnEnd is coming
-	h.ts.app.SetTTFT(ttft)
+	h.ts.paint(func() { h.ts.app.SetTTFT(ttft) })
 }
 
 func (h *tuiHooks) OnToolResultMessage(msg *ai.Message) {
@@ -2921,24 +3103,26 @@ func (h *tuiHooks) OnTurnEnd(reason ai.StopReason, err error) {}
 // OnContinuation surfaces the injected cut-off recovery turn live: a
 // harness event, not a fake user prompt (#283).
 func (h *tuiHooks) OnContinuation(text string) {
-	h.ts.app.AddSystemBlock("· provider cut off mid-message — partial retained, continuation injected")
+	h.ts.paint(func() {
+		h.ts.app.AddSystemBlock("· provider cut off mid-message — partial retained, continuation injected")
+	})
 }
 
 // OnEmptyTurn names the stall instead of letting the run end on a blank turn:
 // the nudge prompt goes out as a hidden turn, so without this the transcript
 // just stops (#331).
 func (h *tuiHooks) OnEmptyTurn(text string) {
-	h.ts.app.AddSystemBlock("· the model answered with nothing — asked again")
+	h.ts.paint(func() { h.ts.app.AddSystemBlock("· the model answered with nothing — asked again") })
 }
 
 func (h *tuiHooks) OnCompaction(tokensBefore int64) {
-	h.ts.app.AddSystemBlock(fmt.Sprintf("· context compacted (~%d tokens)", tokensBefore))
+	h.ts.paint(func() { h.ts.app.AddSystemBlock(fmt.Sprintf("· context compacted (~%d tokens)", tokensBefore)) })
 }
 
 // OnGoalUpdated implements agent.GoalHook: goal transitions land in the
 // transcript.
 func (h *tuiHooks) OnGoalUpdated(g agent.Goal) {
-	h.ts.app.AddSystemBlock("· goal " + g.Status + " — " + g.Objective)
+	h.ts.paint(func() { h.ts.app.AddSystemBlock("· goal " + g.Status + " — " + g.Objective) })
 }
 
 // config2Load is a tiny alias so tui.go shares print.go's loader.

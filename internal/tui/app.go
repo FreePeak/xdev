@@ -21,6 +21,13 @@ import (
 // Status carries the status-line state. The running indicator's frames come
 // from the theme (Symbols.SpinnerFrames → preset default, see
 // theme.Theme.SpinnerFrames).
+// TabInfo is one open session the status row and tab cycle expose.
+// cmd owns the set; the App only paints what it is given.
+type TabInfo struct {
+	ID, Title                string
+	Running, Unread, Current bool
+}
+
 type Status struct {
 	Model     string
 	SessionID string
@@ -144,6 +151,8 @@ type App struct {
 	logFile        *os.File
 	keyMap         *KeyMap // remappable keybinding layer
 	st             Status
+	tabs           []TabInfo // open sessions (cmd owns the set; App paints)
+	onTabCycle     func(dir int, onlyUnread bool)
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
 	// BeginMessage (one EventStart) discards one a dead turn left open, so
@@ -1410,6 +1419,31 @@ func (a *App) SetStatusSegments(segs []string) {
 // the last one never closed — an aborted stream would otherwise make the next
 // rate divide new tokens by old elapsed time. Per message, BeginMessage is
 // what does that; this is the coarser run-level backstop.
+
+// SetTabs publishes the open-session snapshot for the status row. cmd
+// calls it after every switch and whenever a parked session raises its
+// unread badge.
+func (a *App) SetTabs(tabs []TabInfo) {
+	a.mu.Lock()
+	a.tabs = tabs
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetTabCycle wires Alt+]/Alt+[ (and the unread variants). nil degrades
+// the chords to a notice.
+func (a *App) SetTabCycle(fn func(dir int, onlyUnread bool)) {
+	a.onTabCycle = fn
+}
+
+// SetSessionID updates the status-row / dock identity after a switch.
+func (a *App) SetSessionID(id string) {
+	a.mu.Lock()
+	a.st.SessionID = id
+	a.mu.Unlock()
+	a.DockBump()
+}
+
 func (a *App) SetRunning(r bool) {
 	a.mu.Lock()
 	a.markRun(r)
@@ -3123,6 +3157,34 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		a.AddSystemBlock("send now is not wired in this build")
+		return
+	case "session.tab.next":
+		if a.onTabCycle != nil {
+			a.onTabCycle(1, false)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.tab.previous":
+		if a.onTabCycle != nil {
+			a.onTabCycle(-1, false)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.tab.next_unread":
+		if a.onTabCycle != nil {
+			a.onTabCycle(1, true)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.tab.previous_unread":
+		if a.onTabCycle != nil {
+			a.onTabCycle(-1, true)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
 		return
 	case "thinking-toggle":
 		// Shift-Tab. Like the dock chords this runs after every modal
@@ -4977,6 +5039,9 @@ var statusSegments = map[string]bool{
 	// when enabled: the segment never hides, so the log is visible
 	// the moment it is opted in.
 	"debugMouse": true,
+	// sessions is the open-tab count with busy/unread marks — the whole
+	// signal the multi-session TUI needs without a painted tab strip.
+	"sessions": true,
 }
 
 // defaultStatusSegments is the shipped layout: the two dsh composer pills,
@@ -4990,7 +5055,7 @@ var statusSegments = map[string]bool{
 // place to read it — a report is not where a glance should have to go.
 // The model keeps its composer divider slot, which is chrome rather than a
 // segment.
-var defaultStatusSegments = []string{"command", pillTime, pillToken}
+var defaultStatusSegments = []string{"sessions", "command", pillTime, pillToken}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -5119,6 +5184,38 @@ func (a *App) hudSegment(name string) (text, token string) {
 		return a.th.HUDIcon(theme.HUDIconGauge) + " " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
+	case "sessions":
+		// Open-session summary: "2 tabs" idle, "2 tabs ·1" with one busy,
+		// "2 tabs ·1 ✦1" with unread. Hidden on a single idle session so a
+		// normal one-chat TUI keeps a clean row.
+		n := len(a.tabs)
+		if n == 0 {
+			return "", ""
+		}
+		busy, unread := 0, 0
+		for _, t := range a.tabs {
+			if t.Running {
+				busy++
+			}
+			if t.Unread {
+				unread++
+			}
+		}
+		if n == 1 && busy == 0 && unread == 0 {
+			return "", ""
+		}
+		label := "tabs"
+		if n == 1 {
+			label = "tab"
+		}
+		text := fmt.Sprintf("%d %s", n, label)
+		if busy > 0 {
+			text += fmt.Sprintf(" ·%d", busy)
+		}
+		if unread > 0 {
+			text += fmt.Sprintf(" ✦%d", unread)
+		}
+		return text, theme.StatusLineSep
 	case "debugMouse":
 		return a.debugMouseLine, theme.StatusLineSep
 	}
@@ -5259,6 +5356,7 @@ var statusKeepRank = map[string]int{
 	"tokens":    7,
 	"time":      8,
 	"rate":      9,
+	"sessions":  6,
 }
 
 // pathDisplay renders the working directory for the status row: home
