@@ -195,6 +195,12 @@ type App struct {
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
 
+	// renderMermaid draws a ```mermaid fence as a diagram instead of a code
+	// band (settings key `renderMermaid`, default on). It is display-only and
+	// per-render, so flipping it re-stamps nothing but the render cache: the
+	// next frame redraws the same blocks as source.
+	renderMermaid bool
+
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
@@ -396,6 +402,11 @@ type blockKey struct {
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// mermaid stamps whether a ```mermaid fence in this block drew as a
+	// diagram. Flipping the setting changes every block's rows without any of
+	// them changing length, so the stamp has to say which way it rendered or
+	// a toggled transcript would keep the cache it should have dropped.
+	mermaid bool
 	// live stamps a result box whose text is still growing. Length alone is
 	// not enough there: a tool that rewrites the same window of bytes (a
 	// progress bar, a counter) keeps the tail the same size while the text
@@ -412,12 +423,13 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		km = DefaultKeyMap()
 	}
 	return &App{
-		keyMap:       km,
-		scr:          scr,
-		th:           th,
-		st:           Status{Model: model, SessionID: sessionID},
-		showThinking: true,
-		width:        w, height: h,
+		keyMap:        km,
+		scr:           scr,
+		th:            th,
+		st:            Status{Model: model, SessionID: sessionID},
+		showThinking:  true,
+		renderMermaid: true,
+		width:         w, height: h,
 		keyq:   make(chan tcell.Event, 64),
 		dirty:  make(chan struct{}, 1),
 		quitCh: make(chan struct{}),
@@ -2135,6 +2147,26 @@ func (a *App) SetShowThinking(on bool) {
 	a.poke()
 }
 
+// SetRenderMermaid turns mermaid diagram rendering on or off (settings key
+// `renderMermaid`). It is the one display setting that does not drop content:
+// with it off a ```mermaid fence paints as the code band it was before the
+// feature existed, so the render cache is dropped and the next frame redraws
+// the same blocks from source.
+func (a *App) SetRenderMermaid(on bool) {
+	a.mu.Lock()
+	a.renderMermaid = on
+	a.clearRenderCache()
+	a.mu.Unlock()
+	a.poke()
+}
+
+// Mermaid reports whether mermaid fences render as diagrams.
+func (a *App) Mermaid() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.renderMermaid
+}
+
 // SetDebugMouse enables rendering of every mouse event on the
 // status bar (settings `tui.debugMouse`). Off by default: the log
 // is opt-in so a normal session does not scroll the HUD with
@@ -2295,8 +2327,11 @@ func (a *App) SettingsView(args string) error {
 	if fields[0] == "sidebarMode" {
 		return a.setDockModeSetting("sidebarMode", fields[1:])
 	}
+	if fields[0] == "renderMermaid" {
+		return a.setMermaidSetting(fields[1:])
+	}
 	if fields[0] != "showThinking" {
-		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode)", fields[0])
+		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode|renderMermaid)", fields[0])
 	}
 	on := !a.Thinking()
 	if len(fields) == 2 {
@@ -2360,6 +2395,43 @@ func (a *App) setDockModeSetting(label string, fields []string) error {
 		confirm += " (saved to " + a.settingsOps.Path + ")"
 	}
 	a.SetDockMode(want)
+	a.AddSystemBlock(confirm)
+	return nil
+}
+
+// setMermaidSetting is /settings renderMermaid [on|off]: the same shape as
+// setDockModeSetting — a bare form reports rather than writes, and the value
+// lands on the one persisted key (renderMermaid) through the same seam the
+// settings panel uses, so the two cannot disagree.
+func (a *App) setMermaidSetting(fields []string) error {
+	if len(fields) == 0 {
+		state := "off"
+		if a.Mermaid() {
+			state = "on"
+		}
+		a.AddSystemBlock("renderMermaid " + state + " — ```mermaid fences draw as diagrams; a diagram that will not fit falls back to source")
+		return nil
+	}
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /settings renderMermaid [on|off]")
+	}
+	var on bool
+	switch fields[0] {
+	case "on", "true":
+		on = true
+	case "off", "false":
+		on = false
+	default:
+		return fmt.Errorf("usage: /settings renderMermaid [on|off]")
+	}
+	confirm := "renderMermaid " + fields[0]
+	if a.settingsOps != nil && a.settingsOps.SetMermaid != nil {
+		if err := a.settingsOps.SetMermaid(on); err != nil {
+			return err
+		}
+		confirm += " (saved to " + a.settingsOps.Path + ")"
+	}
+	a.SetRenderMermaid(on)
 	a.AddSystemBlock(confirm)
 	return nil
 }
