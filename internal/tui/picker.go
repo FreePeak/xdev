@@ -58,6 +58,11 @@ type picker struct {
 	hitItem []int
 	tabY    int
 	tabAt   []int
+	// labelW is the name column measured by the painter before it windows the
+	// rows, so lines() wraps a label at the width the row will actually be
+	// painted at. 0 until the first paint; lines() then falls back to a
+	// single-row layout, which is what a unit test of lines() alone sees.
+	labelW int
 }
 
 // pickAt resolves a screen cell to the list row (item index) or tab (view
@@ -214,20 +219,69 @@ func (p *picker) backspace() {
 	p.refresh()
 }
 
-// pickerLine is one rendered line: either a section header or a row.
+// pickerLine is one rendered line: either a section header, a row, or a
+// continuation of a row whose label wrapped.
 type pickerLine struct {
 	header  bool
 	text    string
 	item    PickerItem
-	itemIdx int // index into the view's Items (-1 for a header)
+	itemIdx int  // index into the view's Items (-1 for a header)
+	cont    bool // a wrapped label's continuation: no marker, no detail cell
+}
+
+// pickerTitleMaxRows bounds the display lines one title may take, in either
+// picker. A title is the string that names the conversation and is read
+// whole: a long one WRAPS instead of ending in an ellipsis, because the tail
+// of a title is where the work it describes is named. The rows are not free
+// — this is a list, and one title may not push the other sessions off the
+// panel.
+const pickerTitleMaxRows = 3
+
+// pickerTitleMinCols is the floor a title keeps on a row too narrow to hold
+// it whole, so a narrow terminal wraps words rather than a cell or two of each.
+const pickerTitleMinCols = 12
+
+// widestLabel is the name column the matching rows want, before the terminal's
+// own ceiling. Measured over every match rather than the drawn window, because
+// a label wider than the column takes more than one row and a column sized
+// from the window would re-flow the rows it was measured from.
+func (p *picker) widestLabel() int {
+	v := p.active()
+	if v == nil {
+		return 0
+	}
+	w := 0
+	for _, idx := range p.match {
+		w = max(w, width(v.Items[idx].Label))
+	}
+	return w
 }
 
 // lines expands the filtered matches into display lines. Section headers
-// appear only without a filter: while searching the user wants rows.
+// appear only without a filter: while searching the user wants rows. A label
+// wider than the name column becomes several lines of the same row — every
+// continuation keeps the row's item index, so a click on any of them selects
+// the row they belong to.
 func (p *picker) lines() []pickerLine {
 	v := p.active()
 	if v == nil {
 		return nil
+	}
+	// A label is model- and user-written text painted straight into the
+	// screen, so it is sanitized the way a transcript block is (the dock's
+	// title slot does the same) before it is measured or wrapped. Filtering
+	// still runs on the raw Label: the bytes on screen and the bytes typed
+	// are not the same question.
+	//
+	// Before the first paint — and in a unit test of lines() on its own —
+	// there is no measured column, so the rows' own width is the budget and
+	// every label fits unwrapped.
+	col := p.labelW
+	if col <= 0 {
+		col = p.widestLabel() + 2
+	}
+	segs := func(label string) []string {
+		return wrapCapped(sanitizeOutput(label), max(pickerTitleMinCols, col-1), pickerTitleMaxRows)
 	}
 	out := make([]pickerLine, 0, len(p.match))
 	lastSection := ""
@@ -237,7 +291,10 @@ func (p *picker) lines() []pickerLine {
 			out = append(out, pickerLine{header: true, text: it.Section, itemIdx: -1})
 			lastSection = it.Section
 		}
-		out = append(out, pickerLine{item: it, itemIdx: idx})
+		rows := segs(it.Label)
+		for i := range rows {
+			out = append(out, pickerLine{text: rows[i], item: it, itemIdx: idx, cont: i > 0})
+		}
 	}
 	return out
 }
@@ -248,7 +305,7 @@ func (p *picker) window(rows int) (lines []pickerLine, start, selLine int) {
 	all := p.lines()
 	selLine = -1
 	for i, ln := range all {
-		if !ln.header && p.sel < len(p.match) && ln.itemIdx == p.match[p.sel] {
+		if !ln.header && !ln.cont && p.sel < len(p.match) && ln.itemIdx == p.match[p.sel] {
 			selLine = i
 			break
 		}
@@ -265,6 +322,11 @@ func (p *picker) window(rows int) (lines []pickerLine, start, selLine int) {
 	}
 	if start > len(all)-rows {
 		start = max(0, len(all)-rows)
+	}
+	// A wrapped row is one row to the eye and to the keyboard, so the window
+	// never opens on a continuation whose head is scrolled out of sight.
+	for start > 0 && all[start].cont {
+		start--
 	}
 	end := min(start+rows, len(all))
 	return all[start:end], start, selLine
@@ -332,7 +394,7 @@ const (
 // cmd (SessionMeta exposes bytes, not entry counts, and counting lines per
 // row would stat-read up to a dozen large files per keypress).
 type SessionPickerItem struct {
-	CWD      string // session's working directory — shown in /resume rows
+	CWD    string // session's working directory — shown in /resume rows
 	ID     string // short id (8 hex)
 	Title  string
 	Mtime  string // formatted, e.g. "Jan 02 15:04"
@@ -681,18 +743,74 @@ func (a *App) pickerTogglePin() {
 	a.pickerRefresh() // rebuild from canonical src: pins float, order stays stable
 }
 
-// sessionPickerRowText renders one row: id — title — mtime — size — status.
-// The badge closes the row so a killed session is legible before Enter.
+// sessionPickerRowText renders one row: id, title, mtime, size, cwd and the
+// lifecycle badge, on one line. The badge closes the row so a killed session
+// is legible before Enter. sessionPickerRowLines is the wrapping layout the
+// painter uses and keeps this exact order.
 func sessionPickerRowText(it SessionPickerItem) string {
 	title := it.Title
 	if title == "" {
 		title = "(untitled)"
 	}
-	row := fmt.Sprintf("%s  %s  %s  %s  %s", it.ID, title, it.Mtime, it.Size, it.CWD)
+	return fmt.Sprintf("%s  %s  %s", it.ID, title, sessionPickerMeta(it))
+}
+
+// sessionPickerMeta is a row's tail: mtime, size, cwd, and the lifecycle
+// badge when the caller classified one.
+func sessionPickerMeta(it SessionPickerItem) string {
+	meta := fmt.Sprintf("%s  %s  %s", it.Mtime, it.Size, it.CWD)
 	if it.Status != "" {
-		row += "  " + it.Status
+		meta += "  " + it.Status
 	}
-	return row
+	return meta
+}
+
+// sessionPickerRow is one session laid out over the display lines it needs:
+// the head line carries the marker, the pin, the id, the title and the meta
+// (mtime, size, cwd, status); a title too wide for the row WRAPS onto
+// continuation lines instead of running off the right edge, which is where
+// it used to go — silently, mid-word, with nothing to admit the cut. The
+// meta closes the row so a killed session is legible before Enter.
+type sessionPickerRow struct {
+	head  string   // the one-line row text, for a test that reads the shape
+	lines []string // what is painted, one entry per row
+}
+
+// sessionPickerRowLines lays one item out over the display lines it needs in a
+// panel rowW cells wide. A title that fits is exactly the one line it always
+// was, meta included; a title that does not WRAPS onto continuation lines at
+// the title's column, and the fields take a line of their own rather than
+// being cut at the terminal's edge. Titles are sanitized the way a
+// transcript block is — they are model- and user-written text painted
+// straight into the screen.
+func sessionPickerRowLines(it SessionPickerItem, mark string, rowW int) sessionPickerRow {
+	title := it.Title
+	if title == "" {
+		title = "(untitled)"
+	}
+	head := mark + it.ID + "  "
+	meta := sessionPickerMeta(it)
+	indent := strings.Repeat(" ", width(head))
+	// The id prefix is the row's fixed part; the title gets the rest. The
+	// floor keeps words wrapping on a panel too narrow to hold them, rather
+	// than one cell of each.
+	titleW := max(pickerTitleMinCols, rowW-width(head)-2)
+	segs := wrapCapped(sanitizeOutput(title), titleW, pickerTitleMaxRows)
+	first := head + segs[0]
+	lines := make([]string, 0, len(segs)+1)
+	if width(first)+2+width(meta) <= rowW {
+		lines = append(lines, first+"  "+meta)
+		meta = ""
+	} else {
+		lines = append(lines, first)
+	}
+	for _, seg := range segs[1:] {
+		lines = append(lines, indent+seg)
+	}
+	if meta != "" {
+		lines = append(lines, indent+meta)
+	}
+	return sessionPickerRow{head: sessionPickerRowText(it), lines: lines}
 }
 
 // drawSessionPicker renders the selector above the composer (same chrome
@@ -744,44 +862,56 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
 
-	rowText := func(i int) string {
-		it := rows[i]
-		mark := "  "
-		if i == selIdx {
-			mark = "❯ "
-		}
-		pin := " "
-		if it.Pinned {
-			pin = "★"
-		}
-		return mark + pin + " " + sessionPickerRowText(it)
-	}
+	// The box is as wide as the widest label or footer cell, at least enough
+	// for an id and a readable title, and at most the terminal. A title
+	// WRAPS into what is left of it — instead of running off the right edge,
+	// which is where a long /resume title used to go, silently and mid-word.
+	// The box is then as tall as the rows it paints: a wrapped title is a
+	// second line, not a cut one.
 	inner := width(label)
-	for i := range rows {
-		inner = max(inner, width(rowText(i)))
-	}
 	for _, f := range foot {
 		inner = max(inner, width(f))
 	}
+	mark := func(i int) string {
+		m := "  "
+		if i == selIdx {
+			m = "❯ "
+		}
+		if rows[i].Pinned {
+			m += "★"
+		}
+		return m + " "
+	}
+	for i := range rows {
+		inner = max(inner, width(mark(i)+rows[i].ID+"  ")+pickerTitleMinCols)
+	}
 	inner = min(inner+2, w-6)
+	laid := make([]sessionPickerRow, len(rows))
+	total := 0
+	for i := range rows {
+		laid[i] = sessionPickerRowLines(rows[i], mark(i), inner-2)
+		total += len(laid[i].lines)
+	}
 
-	y := yComposerTop - len(rows) - len(foot) - 2
+	y := yComposerTop - total - len(foot) - 2
 	if y < 1 {
 		return
 	}
 	box := a.th.Box()
 	drawText(s, 2, y, box.TopLeft+label+strings.Repeat(box.Horizontal, max(0, inner-width(label)))+box.TopRight, borderSt)
 	y++
-	for i := range rows {
+	for i := range laid {
 		st := rowSt
 		if i == selIdx {
 			st = selSt
 		}
-		for x := 2; x < w-2; x++ {
-			s.SetContent(x, y, ' ', nil, st)
+		for _, line := range laid[i].lines {
+			for x := 2; x < w-2; x++ {
+				s.SetContent(x, y, ' ', nil, st)
+			}
+			drawText(s, 2, y, line, st.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
+			y++
 		}
-		drawText(s, 2, y, rowText(i), st.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
-		y++
 	}
 	for _, f := range foot {
 		for x := 2; x < w-2; x++ {

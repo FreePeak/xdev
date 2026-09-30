@@ -792,18 +792,12 @@ func (d *dockState) titleRows() int {
 // clipping it. The name is the one string in the panel a human reads whole, and
 // a "\u2026" at 38 cells turned "showing full title" into a riddle. The rows are
 // not free: layout spends them out of the content budget, and dockTitleMax
-// bounds what the name may take from the work it names. Caller holds a.mu.
+// bounds what the name may take from the work it names — the same
+// wrap-and-cap the session pickers give their titles (wrapCapped). Caller
+// holds a.mu.
 func (a *App) dockTitleLines(bandH int) []string {
-	lines := wrap(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner)
-	if len(lines) == 0 {
-		return []string{""}
-	}
-	if head := min(dockTitleMax, max(1, bandH-4)); len(lines) > head {
-		// A name too long even wrapped keeps the clip's ellipsis on its last
-		// row, so the cut is still admitted and never silent.
-		return append(lines[:head-1:head-1], clip(strings.Join(lines[head-1:], " "), dockInner))
-	}
-	return lines
+	return wrapCapped(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner,
+		min(dockTitleMax, max(1, bandH-4)))
 }
 
 // selDockRowsForPaint returns the dock's rows as selectable rows with their
