@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,15 +116,6 @@ func TestTailFile(t *testing.T) {
 	}
 }
 
-func TestBgSysProcAttrSetsID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("setsid is unix")
-	}
-	attr := bgSysProcAttr()
-	if attr == nil || !attr.Setsid {
-		t.Fatalf("Setsid not set: %+v", attr)
-	}
-}
 
 func TestRmBgRefusesRunning(t *testing.T) {
 	dir := t.TempDir()

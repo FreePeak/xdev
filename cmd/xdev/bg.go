@@ -338,11 +338,6 @@ func stripBgFlag(argv []string) []string {
 	return out
 }
 
-// bgSysProcAttr puts the child in a new session so closing the parent's
-// terminal (SIGHUP to the foreground process group) does not kill it.
-func bgSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setsid: true}
-}
 
 // finalizeBgStatus is called by the child on the way out.
 func finalizeBgStatus(code int, runErr error) {
