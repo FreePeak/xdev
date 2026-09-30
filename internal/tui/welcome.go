@@ -31,39 +31,43 @@ func welcomeMenuItems() []welcomeMenu {
 
 // xdevLogo is the welcome wordmark in Delta Corps Priest 1 — the same
 // FIGlet face Omarchy draws its brand in (github.com/omacom/omarchy
-// logo.txt / omarchy-ascii). Capital "XDEV": the face is uppercase-only
-// (lower glyphs are identical), and a lowercase pixel "x" read as a mark
-// without the weight Omarchy's wordmark carries. Rows are the font's own
-// 8 ink lines, left-aligned as emitted so stems never wobble; trailing
-// air is already trimmed. Renders identically at every size that fits;
-// the only size choice is full mark vs monogram vs nothing (see logoArt).
+// logo.txt / omarchy-ascii). Capital XDEV, condensed onto a fixed
+// 41-cell grid (the font's native ~50 needs a 54-column terminal and
+// vanishes in a common ~48-column window — the same problem Omarchy's
+// own about art avoids by shipping a hand-fitted logo.txt).
 //
-// Source of truth: the glyph table embedded in omarchy-ascii (flf2a
-// "Delta Corps Priest 1"). Re-render with `omarchy ascii XDEV` (or the
-// same font) if the face ever changes upstream.
+// Solid block strokes with ▀▄▌▐ half-block joins — no shaded ░ noise —
+// matching Omarchy logo.txt's clean silhouette. Every stem sits on one
+// absolute column across all eight rows so nothing wobbles. The V is a
+// deliberate taper: the stock face draws v like an open o ("XDeu" at
+// logo size); the taper keeps stroke weight and baseline with the
+// other three glyphs.
+//
+// Same art at every size that fits; below the full mark's fit, the
+// capital-X monogram (see logoArt).
 var xdevLogo = []string{
-	"▀████    ▐████▀ ████████▄     ▄████████  ▄█    █▄",
-	"  ███▌   ████▀  ███   ▀███   ███    ███ ███    ███",
-	"   ███  ▐███    ███    ███   ███    █▀  ███    ███",
-	"   ▀███▄███▀    ███    ███  ▄███▄▄▄     ███    ███",
-	"   ████▀██▄     ███    ███ ▀▀███▀▀▀     ███    ███",
-	"  ▐███  ▀███    ███    ███   ███    █▄  ███    ███",
-	" ▄███     ███▄  ███   ▄███   ███    ███ ███    ███",
-	"████       ███▄ ████████▀    ██████████  ▀██████▀",
+	"▀███    ▐███▀ ███████▄   ▄████▄  █▌    ▐█",
+	"  ██▌   ███▀  ██    ▀██ ██    ██ ██    ██",
+	"   ██  ▐██    ██     ██ ██    █▀ ██    ██",
+	"   ▀██▄██▀    ██     ██ ▄██▄▄▄   ██    ██",
+	"   ███▀██▄    ██     ██ ▀▀██▀▀▀   ██  ██",
+	"  ▐██  ▀██    ██     ██ ██    █▄  ██  ██",
+	" ▄██     ██▄  ██    ▄██ ██    ██   ████",
+	"███       ██▄ ███████▀  ████████    ██",
 }
 
-// xdevLogoMono is the capital-X monogram — the narrow-terminal fallback
-// so a pane under the full mark's ~54-cell fit still brands. Same face,
-// same stroke weight as the wordmark's leading X.
+// xdevLogoMono is the capital-X monogram — narrow-pane fallback under
+// the full mark's ~45-cell fit. Same face and stroke weight as the
+// wordmark's leading X.
 var xdevLogoMono = []string{
-	"▀████    ▐████▀",
-	"  ███▌   ████▀",
-	"   ███  ▐███",
-	"   ▀███▄███▀",
-	"   ████▀██▄",
-	"  ▐███  ▀███",
-	" ▄███     ███▄",
-	"████       ███▄",
+	"▀███    ▐███▀",
+	"  ██▌   ███▀",
+	"   ██  ▐██",
+	"   ▀██▄██▀",
+	"   ███▀██▄",
+	"  ▐██  ▀██",
+	" ▄██     ██▄",
+	"███       ██▄",
 }
 
 // artWidth returns the widest art row in cells (runewidth).
@@ -77,13 +81,12 @@ func artWidth(art []string) int {
 	return w
 }
 
-// logoWidth returns the full wordmark width in cells.
+// logoWidth returns the full wordmark width in cells (~41).
 func logoWidth() int { return artWidth(xdevLogo) }
 
 // logoArt returns the xdev logo for the given terminal size, or nil when
 // nothing fits. Prefer the full wordmark; below its fit threshold fall back
-// to the X monogram so a narrow pane still brands. One shape per tier —
-// no resampling — so the artwork never changes proportions mid-session.
+// to the X monogram so a narrow pane still brands.
 func logoArt(w, h int) []string {
 	// 8 art rows + tagline + gap + 4 menu rows.
 	if h < 14 {
@@ -111,8 +114,7 @@ func isFullWordmark(art []string) bool {
 // two columns per row leans the band to ~45° on screen (a cell is
 // about twice as tall as wide), ±2 columns is its half-width, and the
 // rest pauses the sweep between passes. The phase advances one column
-// per 33ms welcome tick (~30fps, see App.Run), so a pass over the
-// full mark takes a few seconds including its rest.
+// per 33ms welcome tick (~30fps, see App.Run) — Omarchy About's cadence.
 const (
 	sheenSlant = 2
 	sheenHalf  = 2

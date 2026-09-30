@@ -325,7 +325,7 @@ func TestWelcomeMenuNarrow(t *testing.T) {
 // TestWelcomeMonogram pins the narrow-pane brand: under the full mark's
 // fit width the x monogram still paints, centred, with a common left edge.
 func TestWelcomeMonogram(t *testing.T) {
-	app, scr := newTestApp(t, 36, 24)
+	app, scr := newTestApp(t, 30, 24)
 	app.draw()
 	prim, w, _ := scr.GetContents()
 	h := len(prim) / w
@@ -369,7 +369,7 @@ func TestWelcomeMonogram(t *testing.T) {
 // fits the full mark gets the identical wordmark; narrower panes that
 // still clear the monogram floor get the X; everything else gets nil.
 func TestLogoOneArtAcrossSizes(t *testing.T) {
-	fitting := [][2]int{{100, 30}, {80, 28}, {60, 30}, {120, 50}}
+	fitting := [][2]int{{100, 30}, {80, 28}, {50, 30}, {120, 50}}
 	for _, sz := range fitting {
 		got := logoArt(sz[0], sz[1]-8)
 		if len(got) != len(xdevLogo) {
@@ -381,10 +381,10 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 			}
 		}
 	}
-	// Below the full mark (~50+4) but above the monogram floor: X only.
-	mono := logoArt(40, 30-8)
+	// Below the full mark (~41+4) but above the monogram floor: X only.
+	mono := logoArt(30, 30-8)
 	if len(mono) != len(xdevLogoMono) {
-		t.Fatalf("logoArt(40,22) = %d rows, want monogram %d", len(mono), len(xdevLogoMono))
+		t.Fatalf("logoArt(30,22) = %d rows, want monogram %d", len(mono), len(xdevLogoMono))
 	}
 	for i := range xdevLogoMono {
 		if mono[i] != xdevLogoMono[i] {
@@ -453,10 +453,10 @@ func TestSheenBandGeometry(t *testing.T) {
 // "XDEV" (Omarchy's face): width, row count, and FIGlet half-block strokes.
 func TestLogoOmarchyFace(t *testing.T) {
 	if len(xdevLogo) != 8 {
-		t.Fatalf("xdevLogo rows = %d, want 8 (Delta Corps Priest 1 ink lines)", len(xdevLogo))
+		t.Fatalf("xdevLogo rows = %d, want 8 (Omarchy-face ink lines)", len(xdevLogo))
 	}
-	if logoWidth() < 48 || logoWidth() > 52 {
-		t.Fatalf("logoWidth() = %d, want ~50 (XDEV in Delta Corps Priest 1)", logoWidth())
+	if logoWidth() < 38 || logoWidth() > 44 {
+		t.Fatalf("logoWidth() = %d, want ~41 (condensed Omarchy-face XDEV)", logoWidth())
 	}
 	for i, mono := range xdevLogoMono {
 		ink := strings.TrimRight(mono, " ")
