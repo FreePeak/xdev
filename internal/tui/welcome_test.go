@@ -1,11 +1,6 @@
 package tui
 
 import (
-	"bytes"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -287,13 +282,10 @@ func TestAppWelcomeLogo(t *testing.T) {
 		return b.String()
 	}
 
-	// Anchor on the third art row — the widest one and the only one that
-	// starts with a pixel, so its leftmost screen match is the mark's
-	// true left edge (rows that are mostly leading space would match
-	// anywhere in the blank margin). Then require every art row, the two
-	// d-ascender rows above the anchor included, at that x on its
-	// consecutive screen row — per-line centering would wobble them.
-	anchor, aIdx := xdevLogo[2], 2
+	// Anchor on the last art row — it starts with a full block at column 0
+	// of the mark, so its leftmost screen match is the true left edge.
+	// Then require every art row at that x on consecutive screen rows.
+	anchor, aIdx := xdevLogo[len(xdevLogo)-1], len(xdevLogo)-1
 	x0, y0 := -1, -1
 	for yy := range h {
 		if xx := strings.Index(rowStr(yy), anchor); xx >= 0 {
@@ -333,7 +325,7 @@ func TestWelcomeMenuNarrow(t *testing.T) {
 // TestWelcomeMonogram pins the narrow-pane brand: under the full mark's
 // fit width the x monogram still paints, centred, with a common left edge.
 func TestWelcomeMonogram(t *testing.T) {
-	app, scr := newTestApp(t, 30, 24)
+	app, scr := newTestApp(t, 36, 24)
 	app.draw()
 	prim, w, _ := scr.GetContents()
 	h := len(prim) / w
@@ -375,9 +367,9 @@ func TestWelcomeMonogram(t *testing.T) {
 
 // TestLogoOneArtAcrossSizes pins the size tiers: every terminal that
 // fits the full mark gets the identical wordmark; narrower panes that
-// still clear the monogram floor get the x; everything else gets nil.
+// still clear the monogram floor get the X; everything else gets nil.
 func TestLogoOneArtAcrossSizes(t *testing.T) {
-	fitting := [][2]int{{100, 30}, {80, 24}, {80, 22}, {60, 30}, {120, 50}}
+	fitting := [][2]int{{100, 30}, {80, 28}, {60, 30}, {120, 50}}
 	for _, sz := range fitting {
 		got := logoArt(sz[0], sz[1]-8)
 		if len(got) != len(xdevLogo) {
@@ -389,10 +381,10 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 			}
 		}
 	}
-	// Below the full mark but above the monogram floor: x only.
-	mono := logoArt(30, 30-8)
+	// Below the full mark (~50+4) but above the monogram floor: X only.
+	mono := logoArt(40, 30-8)
 	if len(mono) != len(xdevLogoMono) {
-		t.Fatalf("logoArt(30,22) = %d rows, want monogram %d", len(mono), len(xdevLogoMono))
+		t.Fatalf("logoArt(40,22) = %d rows, want monogram %d", len(mono), len(xdevLogoMono))
 	}
 	for i := range xdevLogoMono {
 		if mono[i] != xdevLogoMono[i] {
@@ -401,7 +393,7 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 	}
 	// Content shorter than the vertical budget, or narrower than the
 	// monogram plus margins: no art.
-	for _, sz := range [][2]int{{80, 20}, {80, 19}, {10, 30}, {10, 5}} {
+	for _, sz := range [][2]int{{100, 20}, {100, 19}, {10, 30}, {10, 5}} {
 		if got := logoArt(sz[0], sz[1]-8); got != nil {
 			t.Fatalf("logoArt(%d,%d) = art, want nil (doesn't fit)", sz[0], sz[1])
 		}
@@ -436,8 +428,6 @@ func TestSheenBandGeometry(t *testing.T) {
 			}
 		}
 	}
-	// The band leans: cell (r,c) first lights 2 ticks (sheenSlant) after
-	// the cell above it did.
 	for row := 1; row < rows; row++ {
 		for col := range lw {
 			f0, f1 := -1, -1
@@ -454,143 +444,31 @@ func TestSheenBandGeometry(t *testing.T) {
 			}
 		}
 	}
-	// Periodic: a mid-sweep phase and the same phase one period later
-	// light identical cells.
 	if sheenInBand(30, 3, 20, lw, rows) != sheenInBand(30+period, 3, 20, lw, rows) {
 		t.Fatal("phase must be periodic with the declared period")
 	}
 }
 
-// TestLogoPixelParity pins the seam between the terminal art and the SVG
-// brand (assets/brand/xdev-logo.svg): both are drawings of one 22x7 pixel
-// grid at 2 cells per pixel. The grid table is the source of truth; the
-// SVG is re-rasterised here so a hand-edit of either side fails the test.
-func TestLogoPixelParity(t *testing.T) {
-	if logoWidth() != 44 {
-		t.Fatalf("logoWidth() = %d, want 44 (22 grid pixels)", logoWidth())
+// TestLogoOmarchyFace pins the wordmark to Delta Corps Priest 1 capital
+// "XDEV" (Omarchy's face): width, row count, and FIGlet half-block strokes.
+func TestLogoOmarchyFace(t *testing.T) {
+	if len(xdevLogo) != 8 {
+		t.Fatalf("xdevLogo rows = %d, want 8 (Delta Corps Priest 1 ink lines)", len(xdevLogo))
 	}
-	want := logoCells(xdevLogoGrid)
-	if len(xdevLogo) != len(want) {
-		t.Fatalf("xdevLogo rows = %d, want %d from grid", len(xdevLogo), len(want))
+	if logoWidth() < 48 || logoWidth() > 52 {
+		t.Fatalf("logoWidth() = %d, want ~50 (XDEV in Delta Corps Priest 1)", logoWidth())
 	}
-	for i := range want {
-		if xdevLogo[i] != want[i] {
-			t.Fatalf("xdevLogo[%d] = %q, want grid projection %q", i, xdevLogo[i], want[i])
-		}
-		r := []rune(xdevLogo[i])
-		if len(r)%2 != 0 {
-			t.Fatalf("row %d (%q) has %d cells, want a whole number of 2-cell pixels", i, xdevLogo[i], len(r))
-		}
-		for c := 0; c+1 < len(r); c += 2 {
-			if (r[c] == '█') != (r[c+1] == '█') {
-				t.Fatalf("row %d col %d: %q/%q split a pixel — strokes must be whole 2-cell runs", i, c, r[c], r[c+1])
-			}
+	for i, mono := range xdevLogoMono {
+		ink := strings.TrimRight(mono, " ")
+		if !strings.HasPrefix(xdevLogo[i], ink) {
+			t.Fatalf("row %d monogram is not the wordmark's leading X: mono=%q full=%q", i, mono, xdevLogo[i])
 		}
 	}
-	svgGrid := rasterLogoSVG(t)
-	if len(svgGrid) != len(xdevLogoGrid) {
-		t.Fatalf("svg rows = %d, want %d", len(svgGrid), len(xdevLogoGrid))
+	joined := strings.Join(xdevLogo, "\n")
+	if !strings.Contains(joined, "▀") && !strings.Contains(joined, "▄") {
+		t.Fatal("wordmark missing half-block FIGlet strokes — not Delta Corps Priest 1")
 	}
-	for i := range xdevLogoGrid {
-		if svgGrid[i] != xdevLogoGrid[i] {
-			t.Fatalf("svg row %d = %q, grid = %q (brand drift)", i, svgGrid[i], xdevLogoGrid[i])
-		}
+	if !isFullWordmark(xdevLogo) || isFullWordmark(xdevLogoMono) || isFullWordmark(nil) {
+		t.Fatal("isFullWordmark must recognise only xdevLogo")
 	}
-	// Monogram is the wordmark's x glyph (cols 0-4, baseline rows 2-6).
-	if len(xdevLogoMonoGrid) != 5 {
-		t.Fatalf("mono grid rows = %d, want 5", len(xdevLogoMonoGrid))
-	}
-	for i, row := range xdevLogoMonoGrid {
-		if got, want := row, xdevLogoGrid[i+2][:5]; got != want {
-			t.Fatalf("mono row %d = %q, want wordmark x %q", i, got, want)
-		}
-	}
-}
-
-// rasterLogoSVG rebuilds the 22x7 brand grid from assets/brand/xdev-logo.svg
-// by placing every <rect> of the letter groups onto a 20px cell lattice.
-// A mismatch against xdevLogoGrid means the SVG or the table drifted.
-func rasterLogoSVG(t *testing.T) []string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "assets", "brand", "xdev-logo.svg"))
-	if err != nil {
-		raw, err = os.ReadFile(filepath.Join("assets", "brand", "xdev-logo.svg"))
-	}
-	if err != nil {
-		t.Fatalf("read brand svg: %v", err)
-	}
-	const W, H, px = 22, 7, 20
-	grid := make([][]byte, H)
-	for y := range grid {
-		grid[y] = bytes.Repeat([]byte{'.'}, W)
-	}
-	src := string(raw)
-	find := func(id string) string {
-		key := `id="` + id + `"`
-		i := strings.Index(src, key)
-		if i < 0 {
-			t.Fatalf("svg missing %s", id)
-		}
-		g0 := strings.LastIndex(src[:i], "<g")
-		depth, j := 0, g0
-		for j < len(src) {
-			if strings.HasPrefix(src[j:], "<g") {
-				depth++
-				j += 2
-				continue
-			}
-			if strings.HasPrefix(src[j:], "</g>") {
-				depth--
-				j += 4
-				if depth == 0 {
-					return src[g0:j]
-				}
-				continue
-			}
-			j++
-		}
-		t.Fatalf("unclosed group %s", id)
-		return ""
-	}
-	// Letter origins match the SVG transforms: x at (0,40), d at (120,0),
-	// e at (220,40), v at (340,40), inside the group translate(30,30).
-	type letter struct {
-		ox, oy int
-		body   string
-	}
-	letters := []letter{
-		{0, 2, find("letter-x")},
-		{6, 0, find("letter-d")},
-		{11, 2, find("letter-e")},
-		{17, 2, find("letter-v")},
-	}
-	rectRe := regexp.MustCompile(`<rect\s+x="(\d+)"\s+y="(\d+)"\s+width="(\d+)"\s+height="(\d+)"`)
-	for _, L := range letters {
-		for _, m := range rectRe.FindAllStringSubmatch(L.body, -1) {
-			x, y, w, h := atoi(t, m[1]), atoi(t, m[2]), atoi(t, m[3]), atoi(t, m[4])
-			for py := y / px; py < (y+h)/px; py++ {
-				for pxx := x / px; pxx < (x+w)/px; pxx++ {
-					gx, gy := L.ox+pxx, L.oy+py
-					if gy < 0 || gy >= H || gx < 0 || gx >= W {
-						t.Fatalf("svg pixel (%d,%d) outside 22x7 for letter origin (%d,%d)", gx, gy, L.ox, L.oy)
-					}
-					grid[gy][gx] = '#'
-				}
-			}
-		}
-	}
-	out := make([]string, H)
-	for i, row := range grid {
-		out[i] = string(row)
-	}
-	return out
-}
-
-func atoi(t *testing.T, s string) int {
-	t.Helper()
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		t.Fatalf("atoi %q: %v", s, err)
-	}
-	return n
 }

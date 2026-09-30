@@ -29,64 +29,44 @@ func welcomeMenuItems() []welcomeMenu {
 	}
 }
 
-// xdevLogoGrid is the brand bitmap the welcome wordmark is cut from: 22
-// columns × 7 rows, '#' ink and '.' air. assets/brand/xdev-logo.svg draws
-// the same grid at 20px per cell; xdevLogo is the terminal projection at
-// two cells per pixel. One table, two surfaces — edit the grid, not the
-// art strings, when the mark changes (TestLogoPixelParity locks the seam).
+// xdevLogo is the welcome wordmark in Delta Corps Priest 1 — the same
+// FIGlet face Omarchy draws its brand in (github.com/omacom/omarchy
+// logo.txt / omarchy-ascii). Capital "XDEV": the face is uppercase-only
+// (lower glyphs are identical), and a lowercase pixel "x" read as a mark
+// without the weight Omarchy's wordmark carries. Rows are the font's own
+// 8 ink lines, left-aligned as emitted so stems never wobble; trailing
+// air is already trimmed. Renders identically at every size that fits;
+// the only size choice is full mark vs monogram vs nothing (see logoArt).
 //
-// Layout: x (cols 0-4), d (6-9), e (11-15), v (17-21), one column of air
-// between glyphs. The d owns the ascender (rows 0-1); x, e and v sit on
-// the baseline band (rows 2-6).
-var xdevLogoGrid = []string{
-	".........#............",
-	".........#............",
-	"#...#..###..###..#...#",
-	".#.#..#..#.#...#.#...#",
-	"..#...#..#.####...#.#.",
-	".#.#..#..#.#......#.#.",
-	"#...#..###..###....#..",
+// Source of truth: the glyph table embedded in omarchy-ascii (flf2a
+// "Delta Corps Priest 1"). Re-render with `omarchy ascii XDEV` (or the
+// same font) if the face ever changes upstream.
+var xdevLogo = []string{
+	"▀████    ▐████▀ ████████▄     ▄████████  ▄█    █▄",
+	"  ███▌   ████▀  ███   ▀███   ███    ███ ███    ███",
+	"   ███  ▐███    ███    ███   ███    █▀  ███    ███",
+	"   ▀███▄███▀    ███    ███  ▄███▄▄▄     ███    ███",
+	"   ████▀██▄     ███    ███ ▀▀███▀▀▀     ███    ███",
+	"  ▐███  ▀███    ███    ███   ███    █▄  ███    ███",
+	" ▄███     ███▄  ███   ▄███   ███    ███ ███    ███",
+	"████       ███▄ ████████▀    ██████████  ▀██████▀",
 }
 
-// xdevLogoMonoGrid is the x glyph alone — the narrow-terminal fallback so
-// a pane under the full mark's 48-cell fit still brands. Same stroke weight
-// as the wordmark's x; five rows, no empty ascender padding.
-var xdevLogoMonoGrid = []string{
-	"#...#",
-	".#.#.",
-	"..#..",
-	".#.#.",
-	"#...#",
+// xdevLogoMono is the capital-X monogram — the narrow-terminal fallback
+// so a pane under the full mark's ~54-cell fit still brands. Same face,
+// same stroke weight as the wordmark's leading X.
+var xdevLogoMono = []string{
+	"▀████    ▐████▀",
+	"  ███▌   ████▀",
+	"   ███  ▐███",
+	"   ▀███▄███▀",
+	"   ████▀██▄",
+	"  ▐███  ▀███",
+	" ▄███     ███▄",
+	"████       ███▄",
 }
 
-// logoCells projects a '#'/'.' pixel grid into terminal cells: every pixel
-// becomes two cells wide (a cell is about twice as tall as it is wide, so
-// the mark keeps its proportions). Trailing air is trimmed per row; the
-// left edge stays absolute so strokes never wobble under a common x.
-func logoCells(grid []string) []string {
-	out := make([]string, len(grid))
-	for i, row := range grid {
-		var b strings.Builder
-		b.Grow(len(row) * 2)
-		for _, c := range row {
-			if c == '#' {
-				b.WriteString("██")
-			} else {
-				b.WriteString("  ")
-			}
-		}
-		out[i] = strings.TrimRight(b.String(), " ")
-	}
-	return out
-}
-
-// xdevLogo is the full "xdev" wordmark — logoCells(xdevLogoGrid).
-var xdevLogo = logoCells(xdevLogoGrid)
-
-// xdevLogoMono is the narrow-pane monogram — logoCells(xdevLogoMonoGrid).
-var xdevLogoMono = logoCells(xdevLogoMonoGrid)
-
-// artWidth returns the widest art row in cells.
+// artWidth returns the widest art row in cells (runewidth).
 func artWidth(art []string) int {
 	w := 0
 	for _, ln := range art {
@@ -97,17 +77,16 @@ func artWidth(art []string) int {
 	return w
 }
 
-// logoWidth returns the full wordmark width in cells (22 grid pixels × 2).
+// logoWidth returns the full wordmark width in cells.
 func logoWidth() int { return artWidth(xdevLogo) }
 
 // logoArt returns the xdev logo for the given terminal size, or nil when
 // nothing fits. Prefer the full wordmark; below its fit threshold fall back
-// to the x monogram so a narrow pane still brands. One shape per tier —
+// to the X monogram so a narrow pane still brands. One shape per tier —
 // no resampling — so the artwork never changes proportions mid-session.
 func logoArt(w, h int) []string {
-	// 7 art rows + tagline + gap + 4 menu rows (monogram is shorter, but
-	// the menu still needs the same vertical budget).
-	if h < 13 {
+	// 8 art rows + tagline + gap + 4 menu rows.
+	if h < 14 {
 		return nil
 	}
 	if w >= logoWidth()+4 {
@@ -119,6 +98,13 @@ func logoArt(w, h int) []string {
 	return nil
 }
 
+// isFullWordmark reports whether art is the capital-XDEV mark (not the
+// monogram and not empty). Slice identity is enough: logoArt returns the
+// package vars directly.
+func isFullWordmark(art []string) bool {
+	return len(art) > 0 && &art[0] == &xdevLogo[0]
+}
+
 // --- Sheen sweep (welcome-screen logo) ---
 
 // Sheen band geometry, ported from omarchy-branding-about-animation:
@@ -126,7 +112,7 @@ func logoArt(w, h int) []string {
 // about twice as tall as wide), ±2 columns is its half-width, and the
 // rest pauses the sweep between passes. The phase advances one column
 // per 33ms welcome tick (~30fps, see App.Run), so a pass over the
-// full mark takes ~2.5s including its rest.
+// full mark takes a few seconds including its rest.
 const (
 	sheenSlant = 2
 	sheenHalf  = 2
@@ -140,9 +126,6 @@ func sheenInBand(phase, row, col, logoW, rows int) bool {
 	if rows == 0 {
 		return false
 	}
-	// One period: band fully off the left (centre -2*half), across
-	// the art and off the right of the lowest row (+logoW plus the
-	// slant's worth), then the rest.
 	period := logoW + (rows-1)*sheenSlant + 2*sheenHalf + 1 + sheenRest
 	at := phase%period - 2*sheenHalf
 	c := at - row*sheenSlant
@@ -366,7 +349,9 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 	}
 	y += len(logo)
-	if len(logo) == len(xdevLogo) {
+	// Full wordmark only — monogram is the same row count, so identity is
+	// the art itself (logoArt returns the xdevLogo / xdevLogoMono slice).
+	if isFullWordmark(logo) {
 		tag := "01111000 01100100 01100101 01110110" // "xdev" in binary
 		drawText(s, max(2, (w-width(tag))/2), y, tag, st(grayC, false))
 		y++

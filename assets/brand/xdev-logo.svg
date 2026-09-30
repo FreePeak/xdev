@@ -1,55 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 180" width="540" height="180" role="img" aria-label="xdev">
-  <!-- Background -->
-  <rect width="540" height="180" fill="#121212" rx="10" />
-
-  <!-- 22x7 pixel grid, 20px per pixel, one pixel of air between glyphs.
-       Same artwork as xdevLogo in internal/tui/welcome.go. -->
-  <g fill="#FFFFFF" transform="translate(30, 30)">
-    <!-- Letter 'x' (5x5 grid matrix) -->
-    <g id="letter-x" transform="translate(0, 40)">
-      <rect x="0" y="0" width="20" height="20" />
-      <rect x="0" y="80" width="20" height="20" />
-      <rect x="20" y="20" width="20" height="20" />
-      <rect x="20" y="60" width="20" height="20" />
-      <rect x="40" y="40" width="20" height="20" />
-      <rect x="60" y="20" width="20" height="20" />
-      <rect x="60" y="60" width="20" height="20" />
-      <rect x="80" y="0" width="20" height="20" />
-      <rect x="80" y="80" width="20" height="20" />
-    </g>
-
-    <!-- Letter 'd' (7x5 grid matrix) -->
-    <g id="letter-d" transform="translate(120, 0)">
-      <rect x="0" y="60" width="20" height="60" />
-      <rect x="20" y="40" width="20" height="20" />
-      <rect x="20" y="120" width="20" height="20" />
-      <rect x="40" y="40" width="20" height="20" />
-      <rect x="40" y="120" width="20" height="20" />
-      <rect x="60" y="0" width="20" height="140" />
-    </g>
-
-    <!-- Letter 'e' (5x5 grid matrix) -->
-    <g id="letter-e" transform="translate(220, 40)">
-      <rect x="0" y="20" width="20" height="60" />
-      <rect x="20" y="0" width="20" height="20" />
-      <rect x="20" y="40" width="20" height="20" />
-      <rect x="20" y="80" width="20" height="20" />
-      <rect x="40" y="0" width="20" height="20" />
-      <rect x="40" y="40" width="20" height="20" />
-      <rect x="40" y="80" width="20" height="20" />
-      <rect x="60" y="0" width="20" height="20" />
-      <rect x="60" y="40" width="20" height="20" />
-      <rect x="60" y="80" width="20" height="20" />
-      <rect x="80" y="20" width="20" height="20" />
-    </g>
-
-    <!-- Letter 'v' (5x5 grid matrix) -->
-    <g id="letter-v" transform="translate(340, 40)">
-      <rect x="0" y="0" width="20" height="40" />
-      <rect x="20" y="40" width="20" height="40" />
-      <rect x="40" y="80" width="20" height="20" />
-      <rect x="60" y="40" width="20" height="40" />
-      <rect x="80" y="0" width="20" height="40" />
-    </g>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" role="img" aria-label="XDEV">
+  <!-- Welcome wordmark is Delta Corps Priest 1 capital XDEV in internal/tui/welcome.go
+       (same face as github.com/omacom/omarchy logo.txt). This SVG is a simplified
+       lockup for README/social — the TUI renders the FIGlet art directly. -->
+  <rect width="640" height="160" fill="#121212" rx="10"/>
+  <text x="320" y="96" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="72" font-weight="700" fill="#bb9af7" letter-spacing="0.08em">XDEV</text>
 </svg>
