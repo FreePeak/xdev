@@ -282,13 +282,10 @@ func TestAppWelcomeLogo(t *testing.T) {
 		return b.String()
 	}
 
-	// Anchor on the third art row — the widest one and the only one that
-	// starts with a pixel, so its leftmost screen match is the mark's
-	// true left edge (rows that are mostly leading space would match
-	// anywhere in the blank margin). Then require every art row, the two
-	// d-ascender rows above the anchor included, at that x on its
-	// consecutive screen row — per-line centering would wobble them.
-	anchor, aIdx := xdevLogo[2], 2
+	// Anchor on the last art row — it starts with a full block at column 0
+	// of the mark, so its leftmost screen match is the true left edge.
+	// Then require every art row at that x on consecutive screen rows.
+	anchor, aIdx := xdevLogo[len(xdevLogo)-1], len(xdevLogo)-1
 	x0, y0 := -1, -1
 	for yy := range h {
 		if xx := strings.Index(rowStr(yy), anchor); xx >= 0 {
@@ -325,11 +322,54 @@ func TestWelcomeMenuNarrow(t *testing.T) {
 	}
 }
 
-// TestLogoOneArtAcrossSizes pins the size-consistency fix: every
-// terminal size that fits the artwork gets the identical logo —
-// no tier swapping — and sizes that can't fit it get nothing.
+// TestWelcomeMonogram pins the narrow-pane brand: under the full mark's
+// fit width the x monogram still paints, centred, with a common left edge.
+func TestWelcomeMonogram(t *testing.T) {
+	app, scr := newTestApp(t, 30, 24)
+	app.draw()
+	prim, w, _ := scr.GetContents()
+	h := len(prim) / w
+	rowStr := func(y int) string {
+		var b strings.Builder
+		for x := range w {
+			if r := prim[y*w+x].Runes; len(r) > 0 {
+				b.WriteRune(r[0])
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+		return b.String()
+	}
+	anchor, aIdx := xdevLogoMono[0], 0
+	x0, y0 := -1, -1
+	for yy := range h {
+		if xx := strings.Index(rowStr(yy), anchor); xx >= 0 {
+			x0, y0 = xx, yy-aIdx
+			break
+		}
+	}
+	if x0 < 0 {
+		t.Fatalf("monogram row 0 (%q) not on screen", anchor)
+	}
+	for i, art := range xdevLogoMono {
+		rr := []rune(rowStr(y0 + i))
+		if x0+utf8.RuneCountInString(art) > len(rr) {
+			t.Fatalf("monogram row %d runs off edge", i)
+		}
+		if got := string(rr[x0 : x0+utf8.RuneCountInString(art)]); got != art {
+			t.Fatalf("monogram row %d = %q, want %q", i, got, art)
+		}
+	}
+	if gridContains(scr, "01111000") {
+		t.Fatal("binary tagline must stay off the monogram pane")
+	}
+}
+
+// TestLogoOneArtAcrossSizes pins the size tiers: every terminal that
+// fits the full mark gets the identical wordmark; narrower panes that
+// still clear the monogram floor get the X; everything else gets nil.
 func TestLogoOneArtAcrossSizes(t *testing.T) {
-	fitting := [][2]int{{100, 30}, {80, 24}, {80, 22}, {60, 30}, {120, 50}}
+	fitting := [][2]int{{100, 30}, {80, 28}, {50, 30}, {120, 50}}
 	for _, sz := range fitting {
 		got := logoArt(sz[0], sz[1]-8)
 		if len(got) != len(xdevLogo) {
@@ -341,9 +381,19 @@ func TestLogoOneArtAcrossSizes(t *testing.T) {
 			}
 		}
 	}
-	// Content shorter than 7 art rows + tagline + gap + 4 menu rows,
-	// or narrower than the mark plus margins: no art.
-	for _, sz := range [][2]int{{80, 20}, {80, 19}, {30, 30}, {10, 5}} {
+	// Below the full mark (~41+4) but above the monogram floor: X only.
+	mono := logoArt(30, 30-8)
+	if len(mono) != len(xdevLogoMono) {
+		t.Fatalf("logoArt(30,22) = %d rows, want monogram %d", len(mono), len(xdevLogoMono))
+	}
+	for i := range xdevLogoMono {
+		if mono[i] != xdevLogoMono[i] {
+			t.Fatalf("monogram row %d = %q, want %q", i, mono[i], xdevLogoMono[i])
+		}
+	}
+	// Content shorter than the vertical budget, or narrower than the
+	// monogram plus margins: no art.
+	for _, sz := range [][2]int{{100, 20}, {100, 19}, {10, 30}, {10, 5}} {
 		if got := logoArt(sz[0], sz[1]-8); got != nil {
 			t.Fatalf("logoArt(%d,%d) = art, want nil (doesn't fit)", sz[0], sz[1])
 		}
@@ -363,7 +413,7 @@ func TestSheenBandGeometry(t *testing.T) {
 			lit := 0
 			first := -1
 			for ph := range period {
-				if sheenInBand(ph, row, col, lw) {
+				if sheenInBand(ph, row, col, lw, rows) {
 					if first < 0 {
 						first = ph
 					}
@@ -378,16 +428,14 @@ func TestSheenBandGeometry(t *testing.T) {
 			}
 		}
 	}
-	// The band leans: cell (r,c) first lights 2 ticks (sheenSlant) after
-	// the cell above it did.
 	for row := 1; row < rows; row++ {
 		for col := range lw {
 			f0, f1 := -1, -1
 			for ph := range period {
-				if sheenInBand(ph, row-1, col, lw) && f0 < 0 {
+				if sheenInBand(ph, row-1, col, lw, rows) && f0 < 0 {
 					f0 = ph
 				}
-				if sheenInBand(ph, row, col, lw) && f1 < 0 {
+				if sheenInBand(ph, row, col, lw, rows) && f1 < 0 {
 					f1 = ph
 				}
 			}
@@ -396,31 +444,31 @@ func TestSheenBandGeometry(t *testing.T) {
 			}
 		}
 	}
-	// Periodic: a mid-sweep phase and the same phase one period later
-	// light identical cells.
-	if sheenInBand(30, 3, 20, lw) != sheenInBand(30+period, 3, 20, lw) {
+	if sheenInBand(30, 3, 20, lw, rows) != sheenInBand(30+period, 3, 20, lw, rows) {
 		t.Fatal("phase must be periodic with the declared period")
 	}
 }
 
-// TestLogoPixelParity pins the seam between the terminal art and the SVG
-// brand (assets/brand/xdev-logo.svg): both are drawings of one 22x7 pixel
-// grid at 2 cells per pixel, so every stroke must occupy whole pixels — no
-// row may start or end mid-pixel. An odd run here means the art drifted from
-// the grid the brand assets are cut from.
-func TestLogoPixelParity(t *testing.T) {
-	if logoWidth() != 44 {
-		t.Fatalf("logoWidth() = %d, want 44 (22 grid pixels)", logoWidth())
+// TestLogoOmarchyFace pins the wordmark to Delta Corps Priest 1 capital
+// "XDEV" (Omarchy's face): width, row count, and FIGlet half-block strokes.
+func TestLogoOmarchyFace(t *testing.T) {
+	if len(xdevLogo) != 8 {
+		t.Fatalf("xdevLogo rows = %d, want 8 (Omarchy-face ink lines)", len(xdevLogo))
 	}
-	for i, art := range xdevLogo {
-		r := []rune(art)
-		if len(r)%2 != 0 {
-			t.Fatalf("row %d (%q) has %d cells, want a whole number of 2-cell pixels", i, art, len(r))
+	if logoWidth() < 38 || logoWidth() > 44 {
+		t.Fatalf("logoWidth() = %d, want ~41 (condensed Omarchy-face XDEV)", logoWidth())
+	}
+	for i, mono := range xdevLogoMono {
+		ink := strings.TrimRight(mono, " ")
+		if !strings.HasPrefix(xdevLogo[i], ink) {
+			t.Fatalf("row %d monogram is not the wordmark's leading X: mono=%q full=%q", i, mono, xdevLogo[i])
 		}
-		for c := 0; c+1 < len(r); c += 2 {
-			if (r[c] == '█') != (r[c+1] == '█') {
-				t.Fatalf("row %d col %d: %q/%q split a pixel — strokes must be whole 2-cell runs", i, c, r[c], r[c+1])
-			}
-		}
+	}
+	joined := strings.Join(xdevLogo, "\n")
+	if !strings.Contains(joined, "▀") && !strings.Contains(joined, "▄") {
+		t.Fatal("wordmark missing half-block FIGlet strokes — not Delta Corps Priest 1")
+	}
+	if !isFullWordmark(xdevLogo) || isFullWordmark(xdevLogoMono) || isFullWordmark(nil) {
+		t.Fatal("isFullWordmark must recognise only xdevLogo")
 	}
 }

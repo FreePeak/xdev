@@ -195,6 +195,12 @@ type App struct {
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
 
+	// renderMermaid draws a ```mermaid fence as a diagram instead of a code
+	// band (settings key `renderMermaid`, default on). It is display-only and
+	// per-render, so flipping it re-stamps nothing but the render cache: the
+	// next frame redraws the same blocks as source.
+	renderMermaid bool
+
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
@@ -251,6 +257,36 @@ type App struct {
 	// F5 recovery for a stream a dropped connection cut short). Wired by cmd;
 	// nil degrades the chord to a notice.
 	onRetry func()
+	// onQueue is the mid-turn submit: a prompt typed while a turn is running
+	// becomes a pending entry (queue.go) instead of being refused, and this
+	// handler decides what "delivered" means for the host. cmd hands it to the
+	// live agent's Steer channel, so it reaches the model at the next step
+	// boundary of the SAME run rather than after it. A false return means the
+	// host declined it (a guest room cannot forward into a live turn), and the
+	// queued row is withdrawn rather than left promising a delivery that will
+	// never happen. nil (a headless host, a test) means a mid-turn submit is
+	// refused again, which is the pre-queue behavior and never a silent drop:
+	// the draft comes back to the composer.
+	onQueue func(text string) bool
+	// onSendNow is the immediate-delivery path: interrupt the live turn,
+	// acknowledge it, and run this message now (the row's [send now] button
+	// and the F6 chord). It is a separate seam from onQueue because the two
+	// have genuinely different outcomes — one joins the run in flight, the
+	// other replaces it — and a host that wires only the first must still be
+	// able to say "send now is not wired in this build" rather than silently
+	// queueing something the user asked to have sent.
+	onSendNow func(text string)
+	// queue holds the pending mid-turn submits in delivery order and queueSeq
+	// is the append counter (queue.go). queueHits is the last painted frame's
+	// geometry — the mouse hit-tests against what was on screen, not against
+	// geometry recomputed on the spot, the same contract the message menu
+	// uses. queueFire is an armed send-now action, run AFTER a.mu is
+	// released: interrupting a turn and starting another is not something to
+	// do while holding the lock the transcript paints under.
+	queue     []queuedEntry
+	queueSeq  int
+	queueHits []queueHit
+	queueFire func()
 
 	keyq     chan tcell.Event
 	dirty    chan struct{}
@@ -396,6 +432,11 @@ type blockKey struct {
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// mermaid stamps whether a ```mermaid fence in this block drew as a
+	// diagram. Flipping the setting changes every block's rows without any of
+	// them changing length, so the stamp has to say which way it rendered or
+	// a toggled transcript would keep the cache it should have dropped.
+	mermaid bool
 	// live stamps a result box whose text is still growing. Length alone is
 	// not enough there: a tool that rewrites the same window of bytes (a
 	// progress bar, a counter) keeps the tail the same size while the text
@@ -412,12 +453,13 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		km = DefaultKeyMap()
 	}
 	return &App{
-		keyMap:       km,
-		scr:          scr,
-		th:           th,
-		st:           Status{Model: model, SessionID: sessionID},
-		showThinking: true,
-		width:        w, height: h,
+		keyMap:        km,
+		scr:           scr,
+		th:            th,
+		st:            Status{Model: model, SessionID: sessionID},
+		showThinking:  true,
+		renderMermaid: true,
+		width:         w, height: h,
 		keyq:   make(chan tcell.Event, 64),
 		dirty:  make(chan struct{}, 1),
 		quitCh: make(chan struct{}),
@@ -507,6 +549,18 @@ func (a *App) SetHandlers(onSend func(text string), onCancel, onQuit func()) {
 // SetImageSend wires the multimodal send path (see App.onSendImages).
 func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 	a.onSendImages = fn
+}
+
+// SetQueueHandlers wires the mid-turn submit path (issue #157): onQueue for a
+// prompt typed while a turn is running — it joins the run in flight through
+// the host's steer channel — and onSendNow for the immediate-delivery button
+// and its chord, which interrupts the turn and runs the message instead. Both
+// are separate from SetHandlers because they are a different outcome, not a
+// variation on sending. A host that wires only onQueue still gets the queue;
+// a host that wires neither keeps the pre-queue behavior, so the submit is
+// refused with a reason instead of vanishing.
+func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(text string)) {
+	a.onQueue, a.onSendNow = onQueue, onSendNow
 }
 
 // SetVision wires "can the live model take an image?", which cmd answers from
@@ -2125,6 +2179,26 @@ func (a *App) SetShowThinking(on bool) {
 	a.poke()
 }
 
+// SetRenderMermaid turns mermaid diagram rendering on or off (settings key
+// `renderMermaid`). It is the one display setting that does not drop content:
+// with it off a ```mermaid fence paints as the code band it was before the
+// feature existed, so the render cache is dropped and the next frame redraws
+// the same blocks from source.
+func (a *App) SetRenderMermaid(on bool) {
+	a.mu.Lock()
+	a.renderMermaid = on
+	a.clearRenderCache()
+	a.mu.Unlock()
+	a.poke()
+}
+
+// Mermaid reports whether mermaid fences render as diagrams.
+func (a *App) Mermaid() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.renderMermaid
+}
+
 // SetDebugMouse enables rendering of every mouse event on the
 // status bar (settings `tui.debugMouse`). Off by default: the log
 // is opt-in so a normal session does not scroll the HUD with
@@ -2285,8 +2359,11 @@ func (a *App) SettingsView(args string) error {
 	if fields[0] == "sidebarMode" {
 		return a.setDockModeSetting("sidebarMode", fields[1:])
 	}
+	if fields[0] == "renderMermaid" {
+		return a.setMermaidSetting(fields[1:])
+	}
 	if fields[0] != "showThinking" {
-		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode)", fields[0])
+		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode|renderMermaid)", fields[0])
 	}
 	on := !a.Thinking()
 	if len(fields) == 2 {
@@ -2350,6 +2427,43 @@ func (a *App) setDockModeSetting(label string, fields []string) error {
 		confirm += " (saved to " + a.settingsOps.Path + ")"
 	}
 	a.SetDockMode(want)
+	a.AddSystemBlock(confirm)
+	return nil
+}
+
+// setMermaidSetting is /settings renderMermaid [on|off]: the same shape as
+// setDockModeSetting — a bare form reports rather than writes, and the value
+// lands on the one persisted key (renderMermaid) through the same seam the
+// settings panel uses, so the two cannot disagree.
+func (a *App) setMermaidSetting(fields []string) error {
+	if len(fields) == 0 {
+		state := "off"
+		if a.Mermaid() {
+			state = "on"
+		}
+		a.AddSystemBlock("renderMermaid " + state + " — ```mermaid fences draw as diagrams; a diagram that will not fit falls back to source")
+		return nil
+	}
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /settings renderMermaid [on|off]")
+	}
+	var on bool
+	switch fields[0] {
+	case "on", "true":
+		on = true
+	case "off", "false":
+		on = false
+	default:
+		return fmt.Errorf("usage: /settings renderMermaid [on|off]")
+	}
+	confirm := "renderMermaid " + fields[0]
+	if a.settingsOps != nil && a.settingsOps.SetMermaid != nil {
+		if err := a.settingsOps.SetMermaid(on); err != nil {
+			return err
+		}
+		confirm += " (saved to " + a.settingsOps.Path + ")"
+	}
+	a.SetRenderMermaid(on)
 	a.AddSystemBlock(confirm)
 	return nil
 }
@@ -2599,6 +2713,15 @@ func (a *App) handleKey(ev tcell.Event) {
 				// A menu row picked by click arms its action under the lock;
 				// it runs here, unlocked.
 				a.runPendingMsgAction()
+				return // the UI loop repaints after handleKey
+			}
+			// The mid-turn queue (#157) sits above the composer, over the
+			// transcript's tail. It is a surface, not content, so a click on a
+			// row spends itself on the row instead of anchoring a selection
+			// over the transcript text it covers. Checked after the modals,
+			// which are modal and keep first claim on a click.
+			if a.queueMouse(m, press) {
+				a.runPendingQueueAction()
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
@@ -2932,6 +3055,26 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 		a.AddSystemBlock("retry is not wired in this build")
 		return
+	case "send-now":
+		// F6 / the queued row's button (#157). The host owns the turn, so
+		// the chord only names the intent; what "now" means — interrupt the
+		// live run, acknowledge it, start a fresh turn with the oldest
+		// pending message — is decided where the turn lives (cmd/xdev).
+		// With nothing queued it is a notice, never a silent no-op: a chord
+		// that does nothing when pressed is a bug report waiting to happen.
+		if a.onSendNow != nil {
+			text := a.oldestQueued()
+			if text == "" {
+				a.AddSystemBlock("nothing queued — type a prompt and Enter while a turn runs, or click a queued row")
+				a.poke()
+				return
+			}
+			a.onSendNow(text)
+			a.poke()
+			return
+		}
+		a.AddSystemBlock("send now is not wired in this build")
+		return
 	case "thinking-toggle":
 		// Shift-Tab. Like the dock chords this runs after every modal
 		// handler, so an open picker keeps first claim on the key (the model
@@ -3080,6 +3223,26 @@ func (a *App) handleKey(ev tcell.Event) {
 		text := draft
 		if len(imgs) > 0 {
 			text = a.expandPastes(draft)
+		}
+		// Mid-turn submit (#157). With a turn running, a text prompt is not a
+		// lost keystroke: it becomes a pending entry above the composer and is
+		// handed to the live agent's steer channel, so the model reads it at
+		// its next step boundary. This branch runs BEFORE the transcript row is
+		// appended, because a queued prompt is not yet part of the
+		// conversation — the row belongs to the entry's list, and adding it
+		// here too would print it twice the moment it is delivered.
+		//
+		// Attachments keep the old contract: a queued image has no honest
+		// delivery story (the pixels are not in the steer channel), so it
+		// falls through to the multimodal path and comes back to the composer
+		// with its reason. An unwired onQueue falls through to the plain send
+		// for the same reason — the host still owns the turn claim and still
+		// prints its own refusal.
+		if running && len(imgs) == 0 && a.onQueue != nil {
+			if a.queuePrompt(text) {
+				a.poke()
+				return
+			}
 		}
 		a.mu.Lock()
 		a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: draft})
@@ -3496,31 +3659,38 @@ func (a *App) thinkRows(b *Block, w int) []string {
 // thinkMaxOff is the largest offset a reasoning box's window can use: past it
 // the window is already at the oldest thought, so a wheel there has nothing
 // left to scroll. One definition, because the render and the wheel must agree
-// on where the box stops.
-func thinkMaxOff(n int) int { return max(0, n-thinkBoxRows) }
+// on where the box stops. The collapsed box is one row, so its window is one
+// row and ThinkOff is pinned at the tail while it holds no wheel.
+func thinkMaxOff(n, rows int) int { return max(0, n-rows) }
 
 // thinkWindow slices a block's wrapped reasoning to the box's window: `off`
-// rows above the newest thought, at most thinkBoxRows tall. The window is
-// tail-anchored, the same way the transcript counts its own offset, so the
-// newest thought is what a reader following the turn sees. An offset past
-// either end reads as that end, never as an empty frame.
-func thinkWindow(n, off int) (start, end int) {
-	end = n - clamp(off, 0, thinkMaxOff(n))
-	return max(0, end-thinkBoxRows), end
+// rows above the newest thought, `rows` tall. The window is tail-anchored, the
+// same way the transcript counts its own offset, so the newest thought is what
+// a reader following the turn sees. An offset past either end reads as that
+// end, never as an empty frame.
+func thinkWindow(n, off, rows int) (start, end int) {
+	end = n - clamp(off, 0, thinkMaxOff(n, rows))
+	return max(0, end-rows), end
 }
 
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
-// "Thought for Xs" once it settles) and the body shows a fixed window of it —
-// at most thinkBoxRows rows, scrolled by the wheel once a click has focused the
-// box (App.thinkFocus, Block.ThinkOff) and dropped entirely by Ctrl+O. The full
-// reasoning always stays in the session JSONL, so the window is a view, never
-// the record. The focused box draws a bold rule: no other box takes the wheel,
-// so the frame has to say which one has it.
+// "Thought for Xs" once it settles) and the body shows a fixed window of it.
+//
+// The window's height IS the focus. An unfocused box is one row — the newest
+// thought — so a turn reads as a list of one-liners with its reasoning out of
+// the way, and a click (App.thinkFocus, set in selection.go) grows it to
+// thinkBoxRows, which the wheel then scrolls (Block.ThinkOff) and Ctrl+O drops
+// entirely. A second click on it, or a click anywhere else, gives the wheel
+// back and the box returns to one row. The focused box draws a bold rule: no
+// other box takes the wheel, so the frame has to say which one has it. The
+// full reasoning always stays in the session JSONL, so every height here is a
+// view, never the record.
 func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	box := a.th.Box()
+	focused := i == a.thinkFocus
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
-	if i == a.thinkFocus {
+	if focused {
 		// Bold is the terminal's own bright variant: the aim reads as the same
 		// hue turned up, not as a second colour with its own meaning.
 		border = border.Bold(true)
@@ -3550,17 +3720,27 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 		}
 	}
 	rows := a.thinkRows(b, w)
+	// Ctrl+O (Block.Expanded) is the one height the click does not own: it is
+	// every row, and it survives a focus change.
+	height := thinkBoxCollapsed
+	if focused || b.Expanded {
+		height = thinkBoxRows
+	}
 	start, end := 0, len(rows)
 	if !b.Expanded {
-		start, end = thinkWindow(len(rows), b.ThinkOff)
+		start, end = thinkWindow(len(rows), b.ThinkOff, height)
 	}
 	// The hidden-row notice leads the window the way it does in a result box:
 	// following the tail, what is elided is the head. Scrolled up, the count
 	// also covers the rows the wheel has yet to come back to — one notice
-	// beats two at this height.
+	// beats two at this height. Collapsed there is nothing to elide into a
+	// window — the single row IS the newest thought — so the notice is the
+	// focused box's alone: at one row it would cost the row the user came for.
 	out := []line{boxTop(box, border, hdr, w)}
-	if hidden := len(rows) - (end - start); hidden > 0 {
-		out = append(out, boxRow(box, border, bodySt, fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", hidden), inner))
+	if focused {
+		if hidden := len(rows) - (end - start); hidden > 0 {
+			out = append(out, boxRow(box, border, bodySt, fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", hidden), inner))
+		}
 	}
 	for _, wl := range rows[start:end] {
 		out = append(out, boxRow(box, border, bodySt, wl, inner))
@@ -3617,7 +3797,10 @@ func (a *App) scrollThinkBox(m *tcell.EventMouse, down bool) bool {
 	if !down {
 		step = 1
 	}
-	off := clamp(b.ThinkOff+step, 0, thinkMaxOff(len(a.thinkRows(b, a.contentWidth()))))
+	// A notch only ever reaches a focused box (the gate above), which is the
+	// full-height one — so the wheel's ceiling is thinkBoxRows, not the
+	// collapsed height.
+	off := clamp(b.ThinkOff+step, 0, thinkMaxOff(len(a.thinkRows(b, a.contentWidth())), thinkBoxRows))
 	consumed := off != b.ThinkOff
 	b.ThinkOff = off
 	a.mu.Unlock()
@@ -3858,6 +4041,7 @@ func (a *App) paint() {
 		a.drawSlashDropdown(composerTop)
 		a.drawAskCard(composerTop)
 		a.drawSettingsOverlay(composerTop)
+		a.drawQueue(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
 		a.drawStatusPopup()
@@ -4082,6 +4266,11 @@ func (a *App) paint() {
 	a.drawSlashDropdown(composerTop)
 	a.drawAskCard(composerTop)
 	a.drawSettingsOverlay(composerTop)
+	// The mid-turn queue (#157) paints between the transcript and the
+	// composer, so it goes after every overlay (an overlay is modal and owns
+	// its rows) and before the composer, whose top border must stay the edge
+	// of the box. It is chrome, not content, and publishes its own hit table.
+	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
 	// The pill popup paints after the status row (it is anchored to it) and

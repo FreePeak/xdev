@@ -499,6 +499,8 @@ func (a *App) applySettingImmediate(key, value string) {
 	switch key {
 	case "showThinking":
 		a.SetShowThinking(truthy())
+	case "renderMermaid":
+		a.SetRenderMermaid(truthy())
 	case "sidebarMode":
 		a.SetDockMode(value)
 	case "debugMouse":
