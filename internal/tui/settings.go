@@ -505,6 +505,9 @@ func (a *App) applySettingImmediate(key, value string) {
 		a.SetDockMode(value)
 	case "debugMouse":
 		a.SetDebugMouse(truthy())
+	case "tui.exitDetach":
+		// Takes effect on the next quit chord: cmd's SetExitDetach already
+		// refreshed lastSettings(), which SetQuitRunning reads live.
 	}
 }
 

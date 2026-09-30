@@ -123,6 +123,10 @@ type SettingsOps struct {
 	// text is untouched, and a diagram the renderer cannot draw falls back to
 	// the code band.
 	SetMermaid func(on bool) error
+	// SetExitDetach persists tui.exitDetach: when true (default), quitting
+	// the TUI with a turn in flight detaches it as a background job instead
+	// of killing it (opencode parity).
+	SetExitDetach func(on bool) error
 }
 
 // PlanOps wires the /plan command to the live plan-mode state (lives in

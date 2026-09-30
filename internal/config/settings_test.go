@@ -663,3 +663,56 @@ func TestListRendersTheEnforcedSurface(t *testing.T) {
 		})
 	}
 }
+
+func TestTuiExitDetachDefaultsOn(t *testing.T) {
+	var s *Settings
+	if !s.TuiExitDetachOn() {
+		t.Fatal("nil settings must default detach-on-quit ON")
+	}
+	s = &Settings{}
+	if !s.TuiExitDetachOn() {
+		t.Fatal("unset must default ON")
+	}
+	off := false
+	s.Tui.ExitDetach = &off
+	if s.TuiExitDetachOn() {
+		t.Fatal("explicit false must turn it off")
+	}
+	on := true
+	s.Tui.ExitDetach = &on
+	if !s.TuiExitDetachOn() {
+		t.Fatal("explicit true must stay on")
+	}
+}
+
+func TestSetTuiExitDetachRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := Set(path, "tui.exitDetach", "false"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "exitDetach") {
+		t.Fatalf("file missing exitDetach: %s", raw)
+	}
+	var s Settings
+	if err := yaml.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.TuiExitDetachOn() {
+		t.Fatal("loaded settings still on after set false")
+	}
+	if err := Set(path, "tui.exitDetach", "true"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(path)
+	if err := yaml.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.TuiExitDetachOn() {
+		t.Fatal("set true did not stick")
+	}
+}
