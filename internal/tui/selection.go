@@ -281,6 +281,19 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
+		// A status-row pill owns its own pixels the same way: a press on one
+		// opens its breakdown panel, never a selection anchor, and a press
+		// anywhere else on the row is left to the transcript branch below
+		// (the row has no text to copy there). The rects are the ones the
+		// painter published this frame, so a pill that was dropped for width
+		// cannot be clicked.
+		if name := a.statusHitAt(x, y); name != "" {
+			a.selDown, a.selShown, a.selCache = false, false, nil
+			a.linkClick, a.msgArmed = "", false
+			a.clearClick() // this press was not the start of a click sequence
+			a.openStatusPopup(name, x, y)
+			break
+		}
 		// A press on the scrollbar grabs the bar, not the text: the drag that
 		// follows moves the viewport, and the gesture owns no selection at all
 		// — the rows the painter recorded belong to the frame the bar was hit

@@ -24,15 +24,55 @@ import (
 
 // usageReport is the read-only snapshot a report is rendered from, taken
 // under one lock so a turn landing mid-render cannot mix two sessions' halves
-// into one set of numbers.
+// into one set of numbers. It is also what the status row's pills break out:
+// one snapshot, two renderers, so a figure can never disagree between /usage
+// and the popup the row opens.
 type usageReport struct {
-	in, out, cache, think int64
-	total                 int64
-	calls, errors         int
-	toolWork, llmWork     time.Duration
-	ttftSum               int64
-	ttftCount             int64
-	ctx, window           int64
+	in, out, cache, think, cacheWrite int64
+	total                             int64
+	calls, errors                     int
+	toolWork, llmWork                 time.Duration
+	ttftSum                           int64
+	ttftCount                         int64
+	ctx, window                       int64
+	// work is the ACTIVE time (banked spans plus the live one), which is
+	// not the same number as llmWork+toolWork: the active clock also
+	// carries bang-mode spans and pauses for a question card.
+	work         time.Duration
+	rate         float64
+	cost         float64
+	turns, steps int
+}
+
+// usageSnapshot reads the whole session's figures under one lock. Every
+// renderer of them (the /usage report, both status-row popups) starts here,
+// which is what keeps one set of numbers on screen.
+func (a *App) usageSnapshot() usageReport {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.usageSnapshotLocked()
+}
+
+// usageSnapshotLocked is usageSnapshot for callers that already hold a.mu —
+// the painter, which takes the lock once per frame. Taking it twice would
+// deadlock on the same mutex.
+func (a *App) usageSnapshotLocked() usageReport {
+	r := usageReport{
+		in: a.st.TokensIn, out: a.st.TokensOut, cache: a.st.TokensCache,
+		think: a.st.TokensThink, cacheWrite: a.st.TokensCacheWrite,
+		calls: a.st.ToolCalls, errors: a.st.ToolErrors,
+		toolWork: a.st.ToolWork, llmWork: a.st.LLMWork,
+		ctx: a.st.CtxUsed, window: a.st.CtxWindow,
+		ttftSum: a.st.TTFTSum, ttftCount: a.st.TTFTCount,
+		work: a.activeWork(), rate: a.st.Rate, cost: a.st.Cost,
+		turns: a.st.Turns, steps: a.st.Steps,
+	}
+	// The provider's own normalization (input + output + cacheRead =
+	// totalTokens) is the sum every wire already reports; total tokens
+	// billed is the same arithmetic over the session, so one sum and no
+	// second field that could disagree with the ↑⇢↓ counters.
+	r.total = r.in + r.out + r.cache + r.cacheWrite
+	return r
 }
 
 // UsageReport renders the session's token, time and tool-call totals.
@@ -42,22 +82,8 @@ type usageReport struct {
 // hides the halves it cannot know: an unwired cost is never drawn as $0.00,
 // and a session with no finished turn reports no average TTFT.
 func (a *App) UsageReport() string {
-	a.mu.Lock()
-	st := a.st
-	work := a.activeWork()
-	a.mu.Unlock()
-
-	r := usageReport{
-		in: st.TokensIn, out: st.TokensOut, cache: st.TokensCache, think: st.TokensThink,
-		calls: st.ToolCalls, errors: st.ToolErrors, toolWork: st.ToolWork, llmWork: st.LLMWork,
-		ctx: st.CtxUsed, window: st.CtxWindow,
-		ttftSum: st.TTFTSum, ttftCount: st.TTFTCount,
-	}
-	// The provider's own normalization (input + output + cacheRead =
-	// totalTokens) is the sum every wire already reports; total tokens
-	// billed is the same arithmetic over the session, so one fmt and no
-	// second field that could disagree with the ↑⇢↓ counters.
-	r.total = r.in + r.out + r.cache
+	r := a.usageSnapshot()
+	work := r.work
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Token usage\n")
@@ -74,8 +100,11 @@ func (a *App) UsageReport() string {
 	if r.think > 0 {
 		fmt.Fprintf(&b, "  (of which reasoning %s tok)\n", groupTokens(r.think))
 	}
-	if st.Cost > 0 {
-		fmt.Fprintf(&b, "  cost $%.4f\n", st.Cost)
+	if r.cacheWrite > 0 {
+		fmt.Fprintf(&b, "  cache writes %s tok\n", groupTokens(r.cacheWrite))
+	}
+	if r.cost > 0 {
+		fmt.Fprintf(&b, "  cost $%.4f\n", r.cost)
 	}
 	// The live context occupancy against the model's window, with the
 	// share that number is. The status row shows the same pair without the
