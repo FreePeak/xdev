@@ -111,7 +111,14 @@ func (a *App) handleStatusPopupMouse(m *tcell.EventMouse, press bool) bool {
 			return true
 		}
 	}
-	if !a.statusPopupBounds().contains(x, y) {
+	// Only a NEW press dismisses. The release and the drag reports of the
+	// gesture that opened the panel arrive at the pill's own cell, which is
+	// the row BELOW the panel it just put up — tested against the panel's own
+	// rectangle they closed it again on the button-up, so one click flashed
+	// the breakdown and a second click could not leave it up: the popup read
+	// as a press-and-hold peek. A report that is not a press is a click
+	// somewhere else, and that is what dismisses.
+	if press && !a.statusPopupBounds().contains(x, y) {
 		a.statusPop = nil
 		a.poke()
 	}
@@ -191,7 +198,13 @@ func (a *App) drawStatusPopup() {
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineSep)))
 	lblSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	valSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
-	bg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+	// The field is the terminal's own background (SGR 49), the call #495 made
+	// for the sidebar: theme.BgBase (#141414) painted a grey band under text
+	// cells that resolve to the terminal's black anyway, which is the same
+	// striping #466 built out of the diff popup. On a dark terminal that is
+	// black; on the light theme it is light, so the label/value inks are
+	// never stranded on a black box.
+	bg := tcell.StyleDefault
 	box := a.th.Box()
 
 	fillPanelRows(s, y, y+h-1, x, x+w, bg)
@@ -317,12 +330,15 @@ func (a *App) statusHitRect(name string) (panelRect, bool) {
 // decode speed, with the work timer ahead of it because that is the one
 // figure xdev's row has always led with and a fresh session's honest reading
 // is a 0s, not a blank.
+//
+// No leading glyph. dsh draws an icon per pill because it draws a row of
+// buttons in a browser; a terminal row is a fixed-cell grid whose every
+// column is contested, and the icon only said which family a figure belonged
+// to — a distinction the value's own unit already makes.
 func (a *App) pillLabel(name string) string {
-	icon := a.th.HUDIcon(theme.HUDIconGauge)
 	switch name {
 	case pillTime:
 		var b strings.Builder
-		b.WriteString(icon)
 		b.WriteString(humanDur(a.activeWork()))
 		if a.st.Turns > 0 || a.st.Steps > 0 {
 			// "12t·34s" is turns and STEPS, and the two-letter unit is what
@@ -340,7 +356,7 @@ func (a *App) pillLabel(name string) string {
 		if total == 0 {
 			return ""
 		}
-		s := a.th.HUDIcon(theme.HUDIconDatabase) + HumanTokens(total)
+		s := HumanTokens(total)
 		if a.st.TokensCache > 0 && a.st.TokensIn+a.st.TokensCache > 0 {
 			s += fmt.Sprintf(" · %d%%", 100*a.st.TokensCache/(a.st.TokensIn+a.st.TokensCache))
 		}

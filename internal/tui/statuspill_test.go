@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // The status row's two dsh pills and the popup a click on one opens
@@ -13,11 +15,19 @@ import (
 // two pills on the bottom line, everything else one click away, and a panel
 // that neither steals a key nor lets the click that dismissed it anchor a
 // selection underneath.
+//
+// The pill readings are plain numbers and units, so the glyphs dsh put on its
+// buttons are named here and the row's own contract is asserted against them:
+// they are what the pills must NOT wear any more.
+const (
+	stopwatch = "\u23f2" // dsh's gauge icon, off the pills
+	strata    = "\u25a4" // dsh's database icon, off the pills
+)
 
 // pillCell returns the SCREEN COLUMN of a pill's first glyph. The needle is
 // located in the row as a string and then converted to a column, because
-// strings.Index counts bytes: the ⏲ ahead of the token pill is three bytes
-// wide and a byte offset would click two cells to the right of the pill.
+// strings.Index counts bytes: a needle that is not pure ASCII would click two
+// cells to the right of the pill it names.
 func pillCell(t *testing.T, scr tcell.SimulationScreen, needle string) int {
 	t.Helper()
 	row := lastRow(screenText(scr))
@@ -88,7 +98,7 @@ func TestPillsReadDshsOwnLabels(t *testing.T) {
 	row := lastRow(screenText(scr))
 	// The token pill's total counts the cache WRITE as well as the read:
 	// 479 fresh + 1,770 out + 64,575 cached + 1,100 written = 67,924.
-	for _, want := range []string{"⏲4m12s", "12t·34g", "42.5 t/s", "▤67.9k", "99%"} {
+	for _, want := range []string{"4m12s", "12t·34g", "42.5 t/s", "67.9k", "99%"} {
 		if !strings.Contains(row, want) {
 			t.Fatalf("pill reading %q missing from the row: %q", want, row)
 		}
@@ -106,6 +116,15 @@ func TestPillsReadDshsOwnLabels(t *testing.T) {
 	if hits != 2 {
 		t.Fatalf("the row published %d clickable rects, want the two pills", hits)
 	}
+	// Neither pill wears an icon any more: dsh's glyphs are the first
+	// things the row gives up, because the value's own unit already says
+	// which family it belongs to. The opt-in segments (rate, ttft, calls,
+	// the token split) keep theirs — only the two default pills changed.
+	for _, glyph := range []string{stopwatch, strata} {
+		if strings.Contains(row, glyph) {
+			t.Fatalf("the row still wears the icon %q: %q", glyph, row)
+		}
+	}
 }
 
 // TestClickOnPillOpensItsBreakdown: the headline is on the row, the numbers
@@ -114,7 +133,7 @@ func TestPillsReadDshsOwnLabels(t *testing.T) {
 func TestClickOnPillOpensItsBreakdown(t *testing.T) {
 	app, scr := seededPillApp(t, 200, 30)
 
-	clickPill(t, app, scr, "⏲4m12s")
+	clickPill(t, app, scr, "4m12s")
 	if !app.StatusPopupOpen() {
 		t.Fatalf("a click on the time pill opened no panel")
 	}
@@ -126,7 +145,7 @@ func TestClickOnPillOpensItsBreakdown(t *testing.T) {
 	}
 
 	// The other pill, one click away, replaces it: the two are one control
-	clickPill(t, app, scr, "▤67.9k")
+	clickPill(t, app, scr, "67.9k")
 	text = screenText(scr)
 	if !strings.Contains(text, "Token usage") {
 		t.Fatalf("a click on the token pill did not switch panels:\n%s", text)
@@ -153,17 +172,17 @@ func TestPillClickOutsideAndEscapeDismiss(t *testing.T) {
 	app, scr := seededPillApp(t, 200, 30)
 
 	// A second click on the same pill closes it.
-	clickPill(t, app, scr, "⏲4m12s")
+	clickPill(t, app, scr, "4m12s")
 	if !app.StatusPopupOpen() {
 		t.Fatal("setup: the first click must open the panel")
 	}
-	clickPill(t, app, scr, "⏲4m12s")
+	clickPill(t, app, scr, "4m12s")
 	if app.StatusPopupOpen() {
 		t.Fatal("a click on the open pill must close it")
 	}
 
 	// A click on the transcript, well clear of the panel, dismisses it.
-	clickPill(t, app, scr, "⏲4m12s")
+	clickPill(t, app, scr, "4m12s")
 	if !app.StatusPopupOpen() {
 		t.Fatal("setup: the panel must be open")
 	}
@@ -174,7 +193,7 @@ func TestPillClickOutsideAndEscapeDismiss(t *testing.T) {
 
 	// Esc closes it too, and never reaches the double-Esc rewind ladder
 	// below (a draft that would otherwise be pulled out of the composer).
-	clickPill(t, app, scr, "▤67.9k")
+	clickPill(t, app, scr, "67.9k")
 	if !app.StatusPopupOpen() {
 		t.Fatal("setup: the panel must be open")
 	}
@@ -185,6 +204,101 @@ func TestPillClickOutsideAndEscapeDismiss(t *testing.T) {
 	}
 	if got := string(app.ed.Text()); got != "my draft" {
 		t.Fatalf("Esc must not reach the rewind ladder: draft is now %q", got)
+	}
+}
+
+// TestPillStaysUpUntilTheNextClick pins the toggle the report asked for: one
+// click shows the breakdown, and it STAYS shown — no press-and-hold, no
+// flicker on the button-up. Two clicks: the second takes it down again.
+func TestPillStaysUpUntilTheNextClick(t *testing.T) {
+	app, scr := seededPillApp(t, 200, 30)
+	app.draw()
+	app.mu.Lock()
+	rect, ok := app.statusHitRect(pillTime)
+	app.mu.Unlock()
+	if !ok {
+		t.Fatal("setup: the time pill painted no hit rect")
+	}
+	x, y := rect.x+1, rect.y
+	// The gesture goes through handleKey, and each half is followed by a
+	// paint the way the UI loop does one: the open panel takes the mouse in
+	// the modal chain ABOVE the selection handler (app.go), so handleMouse
+	// alone would not reach the dismiss test that has to survive here — and
+	// the panel's rectangle is only published by a paint, so the release
+	// must arrive after the frame that put the panel on screen.
+	press := func() {
+		app.handleKey(tcell.NewEventMouse(x, y, tcell.Button1, tcell.ModNone))
+		app.draw()
+	}
+	release := func() {
+		app.handleKey(tcell.NewEventMouse(x, y, tcell.ButtonNone, tcell.ModNone))
+		app.draw()
+	}
+
+	// One click: press, then release at the same cell. The release used to
+	// be read as a click outside the panel — the panel opens UP from the
+	// row, so the pill's own cell is below it — and closed it again, so the
+	// breakdown only showed while the button was held.
+	press()
+	if !app.StatusPopupOpen() {
+		t.Fatal("the press must open the panel")
+	}
+	release()
+	if !app.StatusPopupOpen() {
+		t.Fatal("the panel closed on the button-up: one click must leave it up")
+	}
+	if !strings.Contains(screenText(scr), "turns / steps") {
+		t.Fatalf("the panel is not on screen after the click:\n%s", screenText(scr))
+	}
+
+	// The next click on the same pill is what takes it down again.
+	press()
+	release()
+	if app.StatusPopupOpen() {
+		t.Fatal("a second click on the same pill must close the panel")
+	}
+}
+
+// TestPillPopupIsTheTerminalBackground pins the panel's field to the terminal's
+// own background (SGR 49) — the call #495 made for the sidebar, the one the
+// user asked for as "black". theme.BgBase (#141414) is not black: it is a
+// grey band, and the panel's text cells resolve to the terminal's black
+// anyway, which is the striping #466 built out of the diff popup. So this is
+// read from the painted cells, not from the style: a blank interior cell and
+// the cell a label's own glyph occupies must both resolve to the default
+// while the built-in theme still names bg_base.
+func TestPillPopupIsTheTerminalBackground(t *testing.T) {
+	app, scr := seededPillApp(t, 200, 30)
+	app.draw()
+	app.mu.Lock()
+	rect, ok := app.statusHitRect(pillTime)
+	app.mu.Unlock()
+	if !ok {
+		t.Fatal("setup: the time pill painted no hit rect")
+	}
+	app.mu.Lock()
+	press(app, rect.x+1, rect.y)
+	app.mu.Unlock()
+	app.draw()
+	if !app.StatusPopupOpen() {
+		t.Fatal("setup: the click opened no panel")
+	}
+	base, named := app.th.Slot(theme.BgBase)
+	if !named {
+		t.Fatal("the built-in theme must name bg_base, or this test proves nothing")
+	}
+	if app.cellColor(base) == tcell.ColorDefault {
+		t.Fatal("bg_base is the terminal's own black; the test would pass on stock main")
+	}
+
+	app.mu.Lock()
+	b := app.statusPopupBounds()
+	app.mu.Unlock()
+	for _, at := range []struct{ x, y int }{{b.x + 1, b.y + 1}, {b.x + 3, b.y + b.h - 2}} {
+		r, _, st, _ := scr.GetContent(at.x, at.y)
+		if _, bg, _ := st.Decompose(); bg != tcell.ColorDefault {
+			t.Fatalf("popup cell (%d,%d) %q has background %v, want the terminal's own (black on this terminal)", at.x, at.y, r, bg)
+		}
 	}
 }
 
@@ -229,7 +343,7 @@ func TestPillPopupHidesWhatItCannotKnow(t *testing.T) {
 	app.AddUsage(100, 0, 0, 0, 100)
 	app.draw()
 
-	clickPill(t, app, scr, "▤100")
+	clickPill(t, app, scr, "100")
 	text := screenText(scr)
 	// The buckets themselves are always listed — they are the accounting the
 	// total is a sum of, and a zero there is a real zero (nothing was cached),
@@ -250,7 +364,7 @@ func TestPillPopupHidesWhatItCannotKnow(t *testing.T) {
 	// The TIME panel is the one that always has a reading: a fresh session
 	// has genuinely worked for zero seconds, which is a fact and not a gap.
 	// The token panel has no such row — the timer lives on the time pill.
-	clickPill(t, app, scr, "⏲0s")
+	clickPill(t, app, scr, "0s")
 	text = screenText(scr)
 	if !strings.Contains(text, "active time") || !strings.Contains(text, "0s") {
 		t.Fatalf("active time must always report in the time panel:\n%s", text)
