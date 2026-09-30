@@ -55,11 +55,13 @@ const (
 	toolRecentTail    = 50
 	toolAgedHead      = 8
 	toolAgedTail      = 8
-
-	// thinkBoxRows is a reasoning box's fixed body height. Reasoning used to
-	// trim head+tail by tier; a fixed window the wheel scrolls reads the same
-	// at every tier and keeps the transcript layout stable.
-	thinkBoxRows = 12
+	// thinkBoxCollapsed is an unfocused reasoning box's body height, and
+	// thinkBoxRows the height a click grows it to. Reasoning is the one block
+	// that can outgrow any screen, and a fixed twelve rows per thought pushed
+	// the turn's real content off the screen: collapsed, the box is one row —
+	// the newest thought — and a click opens the window the wheel scrolls.
+	thinkBoxCollapsed = 1
+	thinkBoxRows      = 12
 )
 
 // blockRend is one block's render: the stamp of the inputs that produced it,
@@ -163,6 +165,7 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 		tool: b.ToolName, status: b.Status, stream: b.stream,
 		expanded: b.Expanded, age: age, trim: a.trimTier(i),
 		dlen: len(b.Diff), thinkOff: b.ThinkOff, focused: i == a.thinkFocus,
+		live: b.liveSeq, mermaid: a.renderMermaid,
 	}
 }
 

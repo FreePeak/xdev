@@ -51,6 +51,7 @@ var BuiltinActions = []string{
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
 	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
 	"app.settings",    // Alt+,: the settings overlay (grok settings panel)
+	"send-now",        // F6: interrupt the live turn and run a queued message now (#157)
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
@@ -117,6 +118,13 @@ func DefaultKeyMap() *KeyMap {
 			// without a new prompt. omp binds retry to Alt+R; function keys are
 			// first-class chords here, so keybindings.yml can move it freely.
 			"F5": "retry",
+			// F6: send now (#157). A prompt typed while a turn is running
+			// joins the pending list; this interrupts the turn and runs the
+			// oldest pending message immediately. It sits next to F5 for the
+			// same reason F5 does — both are "act on the live run" keys, and
+			// function keys are first-class chords here, so keybindings.yml
+			// can move it freely.
+			"F6": "send-now",
 			// The context dock (#291 §1). Ctrl+B is what the issue asked for and
 			// it is taken — scroll-page-up since the pager chords landed — so the
 			// panel rides the Alt+letter class the model and hub selectors already

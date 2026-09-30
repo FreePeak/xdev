@@ -367,10 +367,19 @@ type Agent struct {
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
-	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model. nil asks for none.
 	Thinking *ai.ThinkingBudget
+	Approve  ApprovalFunc
+	// OnOutput, when set, is handed every chunk a streaming tool produces, so
+	// a UI can paint a running command instead of waiting for its result. It
+	// is called on the tool's copier goroutine, with the id and name of the
+	// call the bytes belong to — calls in a batch run concurrently, so a
+	// stream without its call is a stream nobody can route. nil (print mode,
+	// RPC, tests) is the plain path: tools observe nothing and behave exactly
+	// as before, and tools that do not stream (read, grep, every MCP tool)
+	// simply never call it.
+	OnOutput func(callID, name, chunk string)
 	// Prewalk is the one-shot model handoff (nil = disabled): after the
 	// first successful edit/write, the run switches to the target model
 	// through the failover machinery (see prewalk.go).
@@ -411,6 +420,14 @@ type Agent struct {
 	// requiring /goal. Off by default so print/RPC/ACP still end at the
 	// first text-only yield.
 	PromptContinuation bool
+
+	// SteeringDelivered is called with the queued steering texts a run just
+	// injected as user messages, oldest first. The steering drain IS the
+	// delivery point, so this is the one place that knows a queued message
+	// reached the model — a host that shows pending-submit rows (the TUI's
+	// mid-turn queue, #157) retires them here instead of guessing when they
+	// landed. nil is fine: a headless host has no rows to retire.
+	SteeringDelivered func(texts []string)
 
 	// Handoff configures the handoff-document compaction (M5 #23): the
 	// side-request target, the artifact mirror, and the per-branch reset
@@ -604,6 +621,16 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			history = append(history, m)
 			a.persist(m)
 		}
+		// The messages are in the conversation now, so a host showing them
+		// as pending can retire the rows. Announced after the persist, so a
+		// row never disappears before its message is durable (#157).
+		if a.SteeringDelivered != nil && len(steering) > 0 {
+			texts := make([]string, 0, len(steering))
+			for _, s := range steering {
+				texts = append(texts, s.Text)
+			}
+			a.SteeringDelivered(texts)
+		}
 
 		// Threshold maintenance: compact before the window overflows.
 		// The handoff method (M5 #23) owns this boundary when the method
@@ -661,6 +688,17 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// Messages queued during the final turn continue the run
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
+			// Same announcement as the step boundary above: a message that
+			// arrives after the model's last tool call continues THIS run
+			// rather than waiting for the next one, and the host's pending
+			// rows must retire when it does.
+			if a.SteeringDelivered != nil && len(queued) > 0 {
+				texts := make([]string, 0, len(queued))
+				for _, s := range queued {
+					texts = append(texts, s.Text)
+				}
+				a.SteeringDelivered(texts)
+			}
 			// Todo reminder (M3/TODO-tracker): an assistant turn that
 			// ends with open todo work gets a developer-role reminder
 			// injected into the history so the model sees it next turn.
@@ -1896,7 +1934,17 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
 		return toolResultMsg(call, res, time.Since(started))
 	}
-	res, err := a.executeTool(ctx, t, args)
+	// A live-output observer rides the call context so a streaming tool can
+	// paint while it runs. It is per-CALL data, not a tool field: one tool
+	// instance serves every concurrent call, so the call id has to travel
+	// with the stream or a viewer cannot tell two `bash` calls' bytes apart.
+	toolCtx := ctx
+	if a.OnOutput != nil {
+		toolCtx = tool.WithOutputObserver(ctx, tool.OutputFunc(func(chunk string) {
+			a.OnOutput(call.ID, call.Name, chunk)
+		}))
+	}
+	res, err := a.executeTool(toolCtx, t, args)
 	// Todo tracker (M3/TODO-tracker): every finished tool result
 	// feeds the mid-run nudge counter. A successful todo call
 	// resets it; a failed todo call flags the next turn. Mutating

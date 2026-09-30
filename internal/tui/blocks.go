@@ -65,6 +65,19 @@ type Block struct {
 	// subVisible's answer; the block keeps them all, so a late settle
 	// still lands on the child it belongs to.
 	Sub []*SubActivity
+	// Live marks a result box a running call is still filling: the tool's own
+	// text is absent until it finishes, so without it a running command paints
+	// a spinner and nothing else. A live box renders a bounded TAIL window
+	// (what is happening now), carries no footer (there is no outcome yet),
+	// and settles into an ordinary result when the call ends.
+	Live bool
+	// liveAt is the paint bucket of a live box's last flush: its stamp moves
+	// at most once per livePaint, so a tool emitting thousands of chunks a
+	// second costs the frames a reader can actually see. liveSeq backs the
+	// render stamp, which has to move on every flush: a progress bar's chunks
+	// change the same bytes to the same length.
+	liveAt  time.Time
+	liveSeq uint64
 }
 
 // SubActivity is one child of a `task` call, as the user sees it: which
@@ -207,6 +220,25 @@ func wrap(s string, maxW int) []string {
 		}
 	}
 	return out
+}
+
+// wrapCapped is wrap with a row budget: a string too long for the surface it
+// lives on is laid out over at most max rows, and whatever did not fit is
+// joined back into the last row and clipped with an ellipsis. The rows are not
+// free — a session title that wraps to forty rows would push every other row
+// off a list — so the cut is still admitted rather than silent.
+func wrapCapped(s string, maxW, maxRows int) []string {
+	lines := wrap(s, maxW)
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if len(lines) > maxRows {
+		return append(lines[:maxRows-1:maxRows-1], clip(strings.Join(lines[maxRows-1:], " "), maxW))
+	}
+	return lines
 }
 
 // toolArgKeys name the argument that says what a call is ABOUT, in omp's

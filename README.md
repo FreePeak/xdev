@@ -171,12 +171,11 @@ A boxed row copies as its text: the output and the label on the top rule
 
 Thinking renders like a tool result: a rounded box whose top border carries the
 state (`⠹ Thinking…` while it streams, `Thought for Xs` when it settles) and
-whose body is a fixed 12-row window. The wheel always scrolls the transcript
-until you *click* a reasoning box: the clicked box draws a bold border and then
-the wheel over it scrolls its own window, so long reasoning stays readable
-without the transcript sliding along with it. A click anywhere else — or
-`Ctrl+O`, which expands the newest boxed block to every row — hands the wheel
-back to the transcript.
+whose body is ONE row — the newest thought. Click the box and it grows to a
+12-row window the wheel scrolls, drawing a bold border so you can see it has
+the wheel; a click on it again, or anywhere else, shrinks it back to the one row
+and hands the wheel back to the transcript. `Ctrl+O` expands the newest boxed
+block to every row, click or no click.
 
 Display and request are separate switches. The box above is *display*
 (`showThinking`, `/settings showThinking on|off`); `Shift+Tab` (or `/thinking
@@ -207,6 +206,10 @@ per frame. A pending plan is resolved where plans have always been resolved —
 `/plan off` approves, any typed prompt is revision feedback — and `/plan show`
 reprints the document in the transcript.
 
+`Alt+S` walks the display policy (shown → hidden → auto); `/sidebar` is the
+plain switch over what is actually on screen, so one keystroke or one command
+hides the sidebar and brings it back.
+
 **Slash commands** dispatch at input-submit and never reach the model:
 
 | Command | Action |
@@ -215,6 +218,7 @@ reprints the document in the transcript.
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
 | `/model [ref]` `/connect [name]` `/theme <name>` `/settings [overlay]` `/hotkeys` | model, provider catalog, theme and display control (`/settings overlay` — or `Alt+,` — opens the settings panel; `/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |

@@ -182,6 +182,48 @@ func TestSettingsShowThinking(t *testing.T) {
 	}
 }
 
+// renderMermaid is the same pointer-bool shape as showThinking and for the
+// same reason: the shipped default is ON, so only a *bool can carry a user's
+// explicit `false` through the zero-skip layer merge. Every assertion below
+// is one a plain bool would have failed.
+
+func TestRenderMermaidDefaultsOnAndHonoursExplicitFalse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.RenderMermaidOn() {
+		t.Fatal("renderMermaid must default to on")
+	}
+	// A repo may set the display key (it is on the repo-safe list), and a
+	// later layer still wins over the global one.
+	writeFile(t, GlobalSettingsPath(), "renderMermaid: false\n")
+	writeFile(t, projectSettingsPath(cwd), "renderMermaid: true\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.RenderMermaidOn() {
+		t.Fatal("project layer must win renderMermaid: true")
+	}
+	writeFile(t, projectSettingsPath(cwd), "renderMermaid: false\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.RenderMermaidOn() {
+		t.Fatal("explicit false must survive the merge")
+	}
+	// `xdev config set renderMermaid off` has to reach the same key, or the
+	// command reports success and the next start ignores it.
+	if err := Set(GlobalSettingsPath(), "renderMermaid", "true"); err != nil {
+		t.Fatalf("config set renderMermaid: %v", err)
+	}
+}
+
 func TestSettingsUnknownKeyIsRejected(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

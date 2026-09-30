@@ -281,6 +281,19 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
+		// A status-row pill owns its own pixels the same way: a press on one
+		// opens its breakdown panel, never a selection anchor, and a press
+		// anywhere else on the row is left to the transcript branch below
+		// (the row has no text to copy there). The rects are the ones the
+		// painter published this frame, so a pill that was dropped for width
+		// cannot be clicked.
+		if name := a.statusHitAt(x, y); name != "" {
+			a.selDown, a.selShown, a.selCache = false, false, nil
+			a.linkClick, a.msgArmed = "", false
+			a.clearClick() // this press was not the start of a click sequence
+			a.openStatusPopup(name, x, y)
+			break
+		}
 		// A press on the scrollbar grabs the bar, not the text: the drag that
 		// follows moves the viewport, and the gesture owns no selection at all
 		// — the rows the painter recorded belong to the frame the bar was hit
@@ -297,13 +310,16 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
-		// Past the bar: this press is on the transcript, and it aims the wheel.
-		// Pressing a reasoning box focuses it, pressing anywhere else takes the
-		// aim back, so the wheel scrolls the transcript until the human asks for
-		// a box by name. The notch never moves focus (app.go scrollThinkBox),
-		// which is what stops a box from stealing the wheel merely by sliding
-		// under a stationary pointer. thinkBoxAt returns -1 for "no box", which
-		// is exactly the "aim back at the transcript" value.
+		// Past the bar: this press is on the transcript, and it names the box
+		// the wheel belongs to. Pressing a reasoning box focuses it — which is
+		// also what grows it from its one collapsed row to the scrollable
+		// window (app.go thinkBoxLines) — and pressing anywhere else takes the
+		// aim back, so the wheel scrolls the transcript and the box shrinks
+		// again until the human asks for a box by name. The notch never moves
+		// focus (app.go scrollThinkBox), which is what stops a box from
+		// stealing the wheel merely by sliding under a stationary pointer.
+		// thinkBoxAt returns -1 for "no box", which is exactly the "aim back at
+		// the transcript" value.
 		//
 		// Except inside the dock: that column is a window of its own, so a press
 		// there aims at the panel and never at a row the panel covers — no

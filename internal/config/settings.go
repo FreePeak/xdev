@@ -351,6 +351,14 @@ type Settings struct {
 	// press at every report, and the gesture a user thinks they made
 	// is not always the one that arrives.
 	DebugMouse bool `yaml:"debugMouse"`
+	// RenderMermaid draws a ```mermaid fence in assistant output as an ASCII
+	// diagram instead of a code band (omp parity: tui.renderMermaid, default
+	// on). A *bool for ShowThinking's reason: the zero-skip merge cannot tell
+	// "unset" from "off", and the shipped default here is ON, so only a
+	// pointer expresses a user who turned it off. Display only — the source
+	// text is untouched either way, and a diagram the renderer cannot draw
+	// falls back to the code band.
+	RenderMermaid *bool `yaml:"renderMermaid"`
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
@@ -881,6 +889,12 @@ func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
 }
 
+// RenderMermaidOn reports whether a ```mermaid fence renders as a diagram;
+// unset follows the schema default (on), the same shape as ShowThinkingOn.
+func (s *Settings) RenderMermaidOn() bool {
+	return s == nil || s.RenderMermaid == nil || *s.RenderMermaid
+}
+
 // SidebarModeOn reports the effective context-dock policy: unset follows the
 // width rule ("auto"). Unknown values fall back to "auto" too, so a hand-edited
 // layer cannot leave the TUI guessing; the TUI owns the vocabulary.
@@ -1379,6 +1393,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
+	}
+	if layer.RenderMermaid != nil {
+		s.RenderMermaid = layer.RenderMermaid
 	}
 	if layer.SidebarMode != "" {
 		s.SidebarMode = layer.SidebarMode
@@ -1918,6 +1935,7 @@ func List(s *Settings, globalPath string) []string {
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
+		"renderMermaid " + fmt.Sprint(s.RenderMermaidOn()),
 		"sidebarMode " + s.SidebarModeOn(),
 		"thinking " + s.ThinkingLevel(),
 		"computer " + fmt.Sprint(s.ComputerOn()),

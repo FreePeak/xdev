@@ -122,8 +122,9 @@ func streamScript(h *tuiHooks, gap time.Duration, kinds ...ai.EventType) {
 }
 
 // TestHUDHooksMeasureTheMessage: a normal message — EventStart, deltas over
-// time, EventDone with usage — must leave the token counters and a measured
-// rate on the row.
+// time, EventDone with usage — must leave the token pill and a measured rate
+// on the row. The token reading is the pill (total, dsh's UsagePill), so the
+// assertion is the pill's own sum: 1,000 fresh + 300 out = 1.3k.
 func TestHUDHooksMeasureTheMessage(t *testing.T) {
 	app, scr := metricTestApp(t, 120, 24)
 	h := &tuiHooks{ts: &tuiSession{app: app}}
@@ -134,8 +135,8 @@ func TestHUDHooksMeasureTheMessage(t *testing.T) {
 		Usage: &ai.Usage{Input: 1000, Output: 300, TotalTokens: 1300}})
 
 	row := awaitHUD(t, scr, "t/s")
-	if !strings.Contains(row, "↑1k │ ↓300") {
-		t.Fatalf("the token counters did not render: %q", row)
+	if !strings.Contains(row, "1.3k") {
+		t.Fatalf("the token pill did not render the message's total: %q", row)
 	}
 	// 300 output tokens over a ~200ms window is ~1500 t/s. Assert the order
 	// of magnitude: the exact figure depends on scheduler jitter.
