@@ -323,6 +323,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// iteration stalls, xdev now writes the goroutine stacks where `xdev gc`
 	// already collects them.
 	app.SetStallDumpDir(filepath.Join(config.DataDir(), "dumps"))
+	// The last resort for a UI loop that never comes back: restore the
+	// terminal and end the session, because nothing inside the process can
+	// (the quit chord is applied by the loop, which is what is stuck). Ten
+	// minutes is far past every measured stall — the longest frozen write
+	// xdev has recorded is 17m, and every one of them ended with a kill from
+	// outside — and long enough that a loop which recovers on its own is
+	// never taken away. Same restore as the signal and panic guards.
+	app.SetStallExitAfter(10 * time.Minute)
+	app.SetStallRestore(scr.Fini)
 	// MCP servers (optional; absent config = nothing happens). Attached once
 	// the app exists, because a failed server is a startup fact the user has
 	// to read — and stderr is not readable under the alt screen (#272). The

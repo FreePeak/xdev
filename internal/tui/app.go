@@ -307,6 +307,19 @@ type App struct {
 	// watchdog that took App.mu could not report a loop stuck holding it.
 	loopBeat atomic.Int64
 	stallDir string
+	// stallExitAfter is how long a condemned episode may stay condemned
+	// before the watchdog gives up on it and ends the session
+	// (stall.go). 0 disables that. Set with SetStallExitAfter.
+	stallExitAfter time.Duration
+	// wedged records that the loop stopped beating. The quit chord can only
+	// be honoured by the loop itself, so a loop wedged in a blocking tty
+	// write cannot read a key: the chord is served here instead, off the
+	// loop, by the same goroutine that feeds keyq.
+	wedged atomic.Bool
+	// restoreTty puts the terminal back when the watchdog gives up on the
+	// loop (stall.go). Wired to scr.Fini; nil leaves the exit to whatever
+	// the caller restores.
+	restoreTty func()
 	// rowIdx is the transcript's row layout and per-block render cache; the
 	// per-frame cost is the viewport, not the session (see rowindex.go).
 	rowIdx rowIndex
@@ -2585,6 +2598,20 @@ func (a *App) Run() {
 				logx.Errorf("tui: terminal read failed, leaving the UI loop: %v", e)
 				a.Quit()
 				return
+			}
+			// A wedged loop cannot read the key that would end it, so the quit
+			// chord is served here, where a key still lands: the 2026-09-30
+			// report (session 00b1c5a0) was exactly this — the loop blocked
+			// 17 minutes inside a tty write, so Ctrl+C and Ctrl+D were read
+			// by nobody and the session could not be exited. Only the chord
+			// and only while the loop is wedged: every other key is the
+			// loop's to apply, and a chord resolved through the keymap (a
+			// user remap) is left exactly as it was.
+			if a.wedged.Load() {
+				if k, ok := ev.(*tcell.EventKey); ok && a.keyMap.Resolve(k) == "quit" {
+					a.quitOrCancel(true)
+					return
+				}
 			}
 			select {
 			case a.keyq <- ev:
