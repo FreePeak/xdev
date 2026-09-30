@@ -29,35 +29,67 @@ func welcomeMenuItems() []welcomeMenu {
 	}
 }
 
-// xdevLogo is the one welcome logo: the "xdev" pixel-grid wordmark — the
-// terminal rendering of the same artwork in assets/brand/xdev-logo.svg.
-// Each letter is a 5-wide matrix of pixels on a 20px grid — x and v are two
-// arms meeting mid-height, d a bowl under a full-height stem, e a closed top
-// eye, a centre crossbar and an open bottom aperture — and here every pixel
-// becomes two cells wide (a cell is about twice as tall as it is wide, so the
-// mark keeps its proportions) with one pixel of air between the letters, so
-// every stroke is a whole number of cells.
+// xdevLogoGrid is the brand bitmap the welcome wordmark is cut from: 22
+// columns × 7 rows, '#' ink and '.' air. assets/brand/xdev-logo.svg draws
+// the same grid at 20px per cell; xdevLogo is the terminal projection at
+// two cells per pixel. One table, two surfaces — edit the grid, not the
+// art strings, when the mark changes (TestLogoPixelParity locks the seam).
 //
-// The d owns the ascender (art rows 0-1); x, e and v sit on the baseline band
-// (rows 2-6). Every stem is on one absolute column across all seven rows and
-// the ragged rows are trimmed at the right only — nothing is resampled or
-// centred line by line, so no stroke wobbles. It renders identically at every
-// terminal size; the only size-dependent choice is whether it fits at all
-// (see logoArt).
-var xdevLogo = []string{
-	"                  ██",
-	"                  ██",
-	"██      ██    ██████    ██████    ██      ██",
-	"  ██  ██    ██    ██  ██      ██  ██      ██",
-	"    ██      ██    ██  ████████      ██  ██",
-	"  ██  ██    ██    ██  ██            ██  ██",
-	"██      ██    ██████    ██████        ██",
+// Layout: x (cols 0-4), d (6-9), e (11-15), v (17-21), one column of air
+// between glyphs. The d owns the ascender (rows 0-1); x, e and v sit on
+// the baseline band (rows 2-6).
+var xdevLogoGrid = []string{
+	".........#............",
+	".........#............",
+	"#...#..###..###..#...#",
+	".#.#..#..#.#...#.#...#",
+	"..#...#..#.####...#.#.",
+	".#.#..#..#.#......#.#.",
+	"#...#..###..###....#..",
 }
 
-// logoWidth returns the widest art row in cells.
-func logoWidth() int {
+// xdevLogoMonoGrid is the x glyph alone — the narrow-terminal fallback so
+// a pane under the full mark's 48-cell fit still brands. Same stroke weight
+// as the wordmark's x; five rows, no empty ascender padding.
+var xdevLogoMonoGrid = []string{
+	"#...#",
+	".#.#.",
+	"..#..",
+	".#.#.",
+	"#...#",
+}
+
+// logoCells projects a '#'/'.' pixel grid into terminal cells: every pixel
+// becomes two cells wide (a cell is about twice as tall as it is wide, so
+// the mark keeps its proportions). Trailing air is trimmed per row; the
+// left edge stays absolute so strokes never wobble under a common x.
+func logoCells(grid []string) []string {
+	out := make([]string, len(grid))
+	for i, row := range grid {
+		var b strings.Builder
+		b.Grow(len(row) * 2)
+		for _, c := range row {
+			if c == '#' {
+				b.WriteString("██")
+			} else {
+				b.WriteString("  ")
+			}
+		}
+		out[i] = strings.TrimRight(b.String(), " ")
+	}
+	return out
+}
+
+// xdevLogo is the full "xdev" wordmark — logoCells(xdevLogoGrid).
+var xdevLogo = logoCells(xdevLogoGrid)
+
+// xdevLogoMono is the narrow-pane monogram — logoCells(xdevLogoMonoGrid).
+var xdevLogoMono = logoCells(xdevLogoMonoGrid)
+
+// artWidth returns the widest art row in cells.
+func artWidth(art []string) int {
 	w := 0
-	for _, ln := range xdevLogo {
+	for _, ln := range art {
 		if lw := width(ln); lw > w {
 			w = lw
 		}
@@ -65,16 +97,26 @@ func logoWidth() int {
 	return w
 }
 
-// logoArt returns the xdev logo for the given terminal size, or nil
-// when the terminal can't fit it: content shorter than the 7 art rows
-// plus tagline, gap and menu, or narrower than the 44-cell art plus
-// margins. One logo at every size — no variant swapping, so the
-// artwork never changes shape between terminal sizes.
+// logoWidth returns the full wordmark width in cells (22 grid pixels × 2).
+func logoWidth() int { return artWidth(xdevLogo) }
+
+// logoArt returns the xdev logo for the given terminal size, or nil when
+// nothing fits. Prefer the full wordmark; below its fit threshold fall back
+// to the x monogram so a narrow pane still brands. One shape per tier —
+// no resampling — so the artwork never changes proportions mid-session.
 func logoArt(w, h int) []string {
-	if h < 13 || w < logoWidth()+4 {
+	// 7 art rows + tagline + gap + 4 menu rows (monogram is shorter, but
+	// the menu still needs the same vertical budget).
+	if h < 13 {
 		return nil
 	}
-	return xdevLogo
+	if w >= logoWidth()+4 {
+		return xdevLogo
+	}
+	if mw := artWidth(xdevLogoMono); w >= mw+4 {
+		return xdevLogoMono
+	}
+	return nil
 }
 
 // --- Sheen sweep (welcome-screen logo) ---
@@ -84,7 +126,7 @@ func logoArt(w, h int) []string {
 // about twice as tall as wide), ±2 columns is its half-width, and the
 // rest pauses the sweep between passes. The phase advances one column
 // per 33ms welcome tick (~30fps, see App.Run), so a pass over the
-// 44-cell mark takes ~2.5s including its rest.
+// full mark takes ~2.5s including its rest.
 const (
 	sheenSlant = 2
 	sheenHalf  = 2
@@ -92,9 +134,9 @@ const (
 )
 
 // sheenInBand reports whether logo cell (row, col) sits under the
-// sheen band at the given phase, for a logo of the given width.
-func sheenInBand(phase, row, col, logoW int) bool {
-	rows := len(xdevLogo)
+// sheen band at the given phase, for a logo of the given width and
+// row count (full wordmark or monogram).
+func sheenInBand(phase, row, col, logoW, rows int) bool {
 	if rows == 0 {
 		return false
 	}
@@ -316,7 +358,7 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		c := 0
 		for _, rn := range ln {
 			style := base
-			if sheenInBand(a.sheenPhase, r, c, logoW) {
+			if sheenInBand(a.sheenPhase, r, c, logoW, len(logo)) {
 				style = lit
 			}
 			s.SetContent(logoX+c, y+r, rn, nil, style)
@@ -324,10 +366,12 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 	}
 	y += len(logo)
-	if len(logo) > 0 {
+	if len(logo) == len(xdevLogo) {
 		tag := "01111000 01100100 01100101 01110110" // "xdev" in binary
 		drawText(s, max(2, (w-width(tag))/2), y, tag, st(grayC, false))
 		y++
+	} else if len(logo) > 0 {
+		y++ // keep the gap under the monogram even without the tagline
 	}
 	y++ // gap between logo and menu
 
