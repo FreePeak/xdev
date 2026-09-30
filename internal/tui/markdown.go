@@ -46,10 +46,11 @@ type mdStyle struct {
 	muted        tcell.Style // bullets, quote bars, rules
 	link         tcell.Style // underline, fg link_fg
 	codeBg       tcell.Color
+	code         codeStyle // fenced-code token palette (#501); plain = body
 }
 
 func (a *App) mdStyle() mdStyle {
-	return mdStyle{
+	ms := mdStyle{
 		h1:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading1))).Bold(true),
 		h2:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading2))).Bold(true),
 		h3:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading3))).Bold(true),
@@ -63,7 +64,12 @@ func (a *App) mdStyle() mdStyle {
 		muted:      tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdMuted))),
 		link:       tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.LinkFg))).Underline(true),
 		codeBg:     a.cellColor(a.th.Get(theme.MdCodeBg)),
+		code:       a.codeStyleFor(),
 	}
+	// A token the theme does not colour paints in the body ink, so a partial
+	// syntax_* theme degrades instead of dropping a class to terminal white.
+	ms.code.plain = ms.body
+	return ms
 }
 
 // renderMarkdown converts markdown source to visual lines of styled runs,
@@ -78,6 +84,7 @@ func (a *App) renderMarkdown(src string, w int) []line {
 	ms := a.mdStyle()
 
 	inCode := false
+	codeLang := ""
 	quoteDepth := 0
 	srcLines := strings.Split(src, "\n")
 	var out []line
@@ -85,13 +92,26 @@ func (a *App) renderMarkdown(src string, w int) []line {
 		raw := srcLines[i]
 		trimmed := strings.TrimSpace(raw)
 
-		// Fenced code blocks: hide the fence, band every content line.
+		// Fenced code blocks: hide the fence, band every content line. The
+		// opening fence's info string names the language (#501); a block with
+		// no tag, an unknown tag, or a theme that pins no syntax_* colour
+		// paints one run in the body ink — byte-for-byte the pre-#501 render.
 		if strings.HasPrefix(trimmed, "```") {
-			inCode = !inCode
+			if inCode {
+				inCode = false
+				codeLang = ""
+			} else {
+				inCode = true
+				codeLang = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+			}
 			continue
 		}
 		if inCode {
-			out = append(out, line{runs: []cell{{text: raw, style: ms.body}}, bg: ms.codeBg})
+			ln := line{runs: []cell{{text: raw, style: ms.body}}, bg: ms.codeBg}
+			if runs := a.highlightCode(raw, codeLang, ms.code); runs != nil {
+				ln.runs = runs
+			}
+			out = append(out, ln)
 			continue
 		}
 
