@@ -1426,3 +1426,5 @@ Tests: `internal/tui/mermaid_test.go` — the call-chain fixture (four participa
 
 *Last updated: 2026-09-30 (`fix/welcome-logo` E legibility). **The condensed E read as noise beside D.** Re-cut as a left stem with three full horizontal bars (top / mid / bottom) so the letter is unmistakable at logo size; X, D and tapering V unchanged on the 41-cell grid.
 
+*Last updated: 2026-09-30 (`fix/welcome-logo` artful E). **E stays legible and looks less like a slab.** Three bars on a left stem keep it readable beside D; Omarchy-style ▄/▀ soft ends on the top/bottom bars restore the hand-fitted logo.txt feel without the earlier unreadable condensed E.
+

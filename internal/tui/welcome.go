@@ -41,20 +41,20 @@ func welcomeMenuItems() []welcomeMenu {
 // absolute column across all eight rows so nothing wobbles. The V is a
 // deliberate taper: the stock face draws v like an open o ("XDeu" at
 // logo size); the taper keeps stroke weight and baseline with the
-// other three glyphs. E is three full bars on a
-// left stem — the stock condensed bars read as noise beside D's bowl.
+// other three glyphs. E keeps three bars on a left stem (legible beside D) with Omarchy-style
+// ▄/▀ soft ends so it stays artful rather than a slab.
 //
 // Same art at every size that fits; below the full mark's fit, the
 // capital-X monogram (see logoArt).
 var xdevLogo = []string{
-	"▀███    ▐███▀ ███████▄  ████████ █▌    ▐█",
+	"▀███    ▐███▀ ███████▄  ▄███████ █▌    ▐█",
 	"  ██▌   ███▀  ██    ▀██ ██       ██    ██",
 	"   ██  ▐██    ██     ██ ██       ██    ██",
 	"   ▀██▄██▀    ██     ██ ██████   ██    ██",
 	"   ███▀██▄    ██     ██ ██        ██  ██",
 	"  ▐██  ▀██    ██     ██ ██        ██  ██",
-	" ▄██     ██▄  ██    ▄██ ██         ████",
-	"███       ██▄ ███████▀  ████████    ██",
+	" ▄██     ██▄  ██    ▄██ ██     ▄   ████",
+	"███       ██▄ ███████▀  ▀███████    ██",
 }
 
 // xdevLogoMono is the capital-X monogram — narrow-pane fallback under
