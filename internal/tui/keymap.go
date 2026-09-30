@@ -50,8 +50,10 @@ var BuiltinActions = []string{
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
 	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
-	"app.settings",    // Alt+,: the settings overlay (grok settings panel)
-	"send-now",        // F6: interrupt the live turn and run a queued message now (#157)
+	"session.tab.next", "session.tab.previous",
+	"session.tab.next_unread", "session.tab.previous_unread",
+	"app.settings", // Alt+,: the settings overlay (grok settings panel)
+	"send-now",     // F6: interrupt the live turn and run a queued message now (#157)
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
@@ -139,6 +141,13 @@ func DefaultKeyMap() *KeyMap {
 			// the "S-Tab" spelling chordOf can never emit. keybindings.yml can
 			// move it like any other action.
 			"Shift-Tab": "thinking-toggle",
+			// Session tabs (opencode session.tab.next / .previous). Alt+letter
+			// class matches model-select / hub / dock; ] and [ are the natural
+			// "next / prev" pair and reach every terminal we target.
+			"A-]": "session.tab.next",
+			"A-[": "session.tab.previous",
+			"A-}": "session.tab.next_unread", // Shift+] with Alt
+			"A-{": "session.tab.previous_unread",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
