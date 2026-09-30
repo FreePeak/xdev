@@ -13,9 +13,9 @@ import (
 // A failed MCP server used to be written to stderr, which the alt screen
 // paints over the composer: the user read an error in the middle of their own
 // draft, and then again after quitting. The report sink is where a mode with a
-// UI of its own takes it instead, and the message must fit the one-line slot
-// it lands in (the divider drops a hint wider than the room beside the model
-// name, and the full error carries a whole fork/exec path).
+// UI of its own takes it instead — the TUI shows it as a toast in the corner
+// (tui.Toast) — and the message must fit the one row it lands in, since the
+// full error carries a whole fork/exec path.
 func TestFailedMCPServerReportsToTheSinkNotStderr(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDEV_AGENT_DIR", dir)

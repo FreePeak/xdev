@@ -317,9 +317,10 @@ type App struct {
 	selBarTotal int // transcript rows at paint time
 	selBarPos   int // thumb's first half row on the track at paint time
 	selBarEnd   int // thumb's half-row end at paint time (exclusive)
-	// selNotice is the copy confirmation (omp's showStatus for a copy); it
-	// rides the composer divider until selNoticeUntil.
-	selNotice            string
+	// toasts is the live notice stack (toast.go): the copy confirmation, a
+	// failed chord, a failed MCP server — everything transient, painted in
+	// the top-right corner and dropped on its own deadline.
+	toasts               []toast
 	selClickTime         time.Time
 	selClickCount        int
 	selClickX, selClickY int
@@ -330,7 +331,6 @@ type App struct {
 	// triple-click selects the whole line. Window and tolerance are pinned
 	// constants (clickWordWindow, clickWordTol), not settings.
 	// Guarded by mu; reset by clearClick.
-	selNoticeUntil time.Time
 	// thinkFocus is the reasoning box a click has aimed the wheel at: clicking a
 	// box focuses it and a click anywhere else lets it go, so the wheel scrolls
 	// the transcript by default instead of whatever box happens to sit under the
@@ -609,20 +609,14 @@ func (a *App) SetStartupNotice(text string) {
 	a.poke()
 }
 
-// SetNotice shows text on the composer divider for d and then drops it, the
-// channel a failed chord already answers on (paste.go setNotice). For a caller
-// off the UI thread — the MCP connect that lands mid-session — so it takes the
-// lock, unlike the UI-thread setNotice it shares the slot with.
+// SetNotice shows text as a toast for d and then drops it — the older name of
+// Toast, kept because a caller off the UI thread (the MCP connect) reads
+// better as a notice. A new producer calls Toast directly.
 //
-// ponytail: one slot, so a copy confirmation inside d overwrites this notice
-// (and vice versa). Fixing that means a second row of chrome on the divider;
-// worth it only if a real report of a lost notice shows up.
+// ponytail: one door. SetNotice is Toast(ToastError, …): every caller so far
+// is a failure, so the level is not a decision this call site has to make.
 func (a *App) SetNotice(text string, d time.Duration) {
-	a.mu.Lock()
-	a.selNotice = text
-	a.selNoticeUntil = time.Now().Add(d)
-	a.mu.Unlock()
-	a.poke()
+	a.Toast(ToastError, text, d)
 }
 
 // BeginAssistant starts (or continues into) the streaming assistant block. A
@@ -2118,6 +2112,22 @@ func (a *App) ToggleThinking() {
 	}
 }
 
+// thinkingLabel is the request-side level as the chrome shows it: the pinned
+// level named the way /thinking takes it, so the readout doubles as the
+// command that sets it. Empty when the seam is unwired — a host that never
+// wired /thinking has no level to report, and an invented "auto" would name a
+// budget nothing chose (the same rule the dock's version row follows).
+func (a *App) thinkingLabel() string {
+	if a.thinkingOps == nil || a.thinkingOps.Current == nil {
+		return ""
+	}
+	level := strings.TrimSpace(a.thinkingOps.Current())
+	if level == "" {
+		return ""
+	}
+	return "thinking " + level
+}
+
 func (a *App) currentThinkingLevel() string {
 	if a.thinkingOps != nil && a.thinkingOps.Current != nil {
 		return a.thinkingOps.Current()
@@ -2329,9 +2339,9 @@ func (a *App) Run() {
 				a.sheenPhase++
 				animate = true
 			}
-			// A copy confirmation is timed, and an idle UI does not repaint:
-			// the tick that finds it expired asks for the draw that drops it.
-			if a.selNotice != "" && a.copyHint() == "" {
+			// A toast is timed, and an idle UI does not repaint: the tick that
+			// finds one expired asks for the draw that drops it.
+			if a.toastsExpiring() {
 				animate = true
 			}
 			// A held drag parked on the transcript's edge is the one mouse
@@ -2947,7 +2957,7 @@ func (a *App) handleKey(ev tcell.Event) {
 }
 
 // returnDraft puts a draft that could not be sent back in the composer and
-// says why on the divider. It exists because an attached image has no text
+// says why in a toast. It exists because an attached image has no text
 // fallback: the alternative is a cleared box, a lost screenshot, and a user who
 // does not know either happened. The chips and the payloads go back together,
 // so one Enter retries.
@@ -2967,7 +2977,7 @@ func (a *App) returnDraft(draft string, imgs []PasteImage) {
 	case a.onSendImages != nil:
 		why = "the send declined the attachment (a guest room forwards text only)"
 	}
-	a.setNotice(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
+	a.setError(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
 	a.poke()
 }
 
@@ -3121,7 +3131,19 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// argument as a phrase — never the raw JSON the model sent. While the
 		// call is in flight the bullet spins and the elapsed ticks; the
 		// settled wall time belongs to the result frame's footer.
-		name, detail := toolSummary(b, w)
+		//
+		// A phrase too long for the row WRAPS onto continuation rows instead
+		// of being cut with an ellipsis. It used to be clipped to the width:
+		// the one thing a user opens the transcript to read — the command —
+		// was the one thing it silently shortened, at an ellipsis in the
+		// middle of a long pipeline. The continuations are indented to where
+		// the phrase starts, so the command reads as one block hanging off
+		// the call, and each rendered row is its own selRow, so a drag over
+		// them copies the rows as painted (the same contract the wrapped
+		// user prompt has). Nothing here clips: a tool that names itself with
+		// megabytes of arguments is the model's bug, and it should be
+		// readable rather than quietly shortened.
+		name, detail := toolSummary(b)
 		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
@@ -3132,24 +3154,49 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		case "ok":
 			bullet, fg = "●", theme.AccentSuccess
 		}
-		ln := textline(bullet+" ", tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))))
-		ln.runs = append(ln.runs, cell{
-			text:  name,
-			style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true),
-		})
-		if detail != "" {
-			ln.runs = append(ln.runs, cell{
-				text:  " · " + detail,
-				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))),
-			})
-		}
+		bulletSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
+		nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
+		detailSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		// The phrase starts after the bullet, the name and its " · ", so that
+		// column is both where every continuation row indents to and the
+		// width the phrase is wrapped at. A name longer than the row itself
+		// pushes the indent past what fits — the max(10, …) floor below is
+		// the same idiom every other wrapping row here uses (a user prompt, a
+		// system notice): a terminal that narrow has no layout to keep.
+		indent := width(bullet+" ") + width(name) + width(" · ")
+		// The live elapsed rides the head row, so the wrap budget shrinks by
+		// its width: a row that runs one cell past the content width paints
+		// into the right edge (the dock's border, the scrollbar's track).
+		elapsed := ""
 		if b.Status == "running" && !b.Ts.IsZero() {
+			elapsed = "  " + humanDur(time.Since(b.Ts))
+		}
+		// A call with no arguments at all names nothing, so it renders as the
+		// name alone — segs stays empty and there is no continuation to walk.
+		var segs []string
+		if detail != "" {
+			segs = wrap(detail, max(10, w-indent-width(elapsed)))
+		}
+		ln := textline(bullet+" ", bulletSt)
+		ln.runs = append(ln.runs, cell{text: name, style: nameSt})
+		if len(segs) > 0 {
+			ln.runs = append(ln.runs, cell{text: " · " + segs[0], style: detailSt})
+		}
+		if elapsed != "" {
 			ln.runs = append(ln.runs, cell{
-				text:  "  " + humanDur(time.Since(b.Ts)),
+				text:  elapsed,
 				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))),
 			})
 		}
 		lines = append(lines, ln)
+		for i, seg := range segs {
+			if i == 0 {
+				continue // the head already sits after the name
+			}
+			cont := textline(strings.Repeat(" ", indent), nameSt)
+			cont.runs = append(cont.runs, cell{text: seg, style: detailSt})
+			lines = append(lines, cont)
+		}
 		// A `task` call's children, one dim row each. They read as
 		// continuations of the row above (a `⎿` tick and an indent), not
 		// as sibling tool calls, and they are the only place a user can
@@ -3655,6 +3702,10 @@ func (a *App) paint() {
 		// only selectable surface there — is highlighted here too; the branch
 		// returns, so it never reaches the call at the end of paint().
 		a.drawSelection()
+		// The welcome screen has no transcript to sit over, but a toast
+		// arriving before the first turn is exactly when one shows up (the
+		// MCP connect finishes last), so the corner is taken here too.
+		a.drawToasts(s)
 		return
 	}
 
@@ -3874,6 +3925,11 @@ func (a *App) paint() {
 	// before the selection highlight, so a drag that ends over the panel does
 	// not shine through it.
 	a.drawStatusPopup()
+	// The toasts paint last, over everything, so the corner is theirs: a
+	// notice that scrolled under a selection highlight or a picker frame is
+	// a notice the user never saw. They live in the transcript's rows, above
+	// the composer, so nothing here can cover the draft.
+	a.drawToasts(s)
 	// Last, so it paints over every surface the frame just drew: see the note
 	// where the selection geometry is published above.
 	a.drawSelection()
@@ -4261,6 +4317,11 @@ func (a *App) drawComposer(yTop int) {
 	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
+	// The reasoning level beside the model it applies to: the two are one
+	// request, and "which model" alone left the other half of it invisible.
+	if l := a.thinkingLabel(); l != "" {
+		info += " · " + l
+	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		info += " · Vibe"
 	}
@@ -4284,18 +4345,14 @@ func (a *App) drawComposer(yTop int) {
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
-	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name. Three hints want the
-	// slot, in this order: a fresh copy confirmation (the only proof the mouse
-	// gesture did anything, since the app holds the mouse and the terminal
-	// stays quiet), then the draft's own hidden rows — text the user is
+	// takes the pixels instead; when the divider is too narrow for the hint,
+	// the hint is dropped rather than eating the model name. The copy
+	// confirmation that used to lead the queue is a toast now (toast.go), so
+	// two hints want the slot: the draft's own hidden rows — text the user is
 	// composing right now beats scrollback they already read — then the
 	// transcript's ▲n▼n.
-	hint := a.copyHint()
-	if hint == "" {
-		hint = draftHint(above, below)
-	}
-	if hint == "" {
+	var hint string
+	if hint = draftHint(above, below); hint == "" {
 		hint = a.scrollHint
 	}
 	if hint != "" {

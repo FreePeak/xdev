@@ -553,6 +553,12 @@ func (a *App) dockFooter() (dockFold, bool) {
 	if a.branch != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
 	}
+	// The reasoning level, in the section that is never folded away: the one
+	// request-side fact that outlives a busy transcript and that the divider
+	// beside the model name repeats.
+	if l := a.thinkingLabel(); l != "" {
+		f.rows = append(f.rows, dockRow{text: dockClip(l)})
+	}
 	if a.version != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version)})
 	}

@@ -678,7 +678,10 @@ func TestAskCardDrawsQuestionAndOptions(t *testing.T) {
 	waitAsk(t, app, true)
 	app.draw()
 	text := screenText(scr)
-	for _, want := range []string{"storage backend", "sqlite", "postgres", "(recommended)", "1-9 quick pick", "Esc skip"} {
+	// opencode's shape: the mark and title on the header row, the ordinal + box
+	// on every option row, the free-text row under them, and the footer naming
+	// the keys in opencode's wording (lowercase key, then the verb).
+	for _, want := range []string{"◆ ask", "storage backend", "1. [ ] sqlite", "2. [ ] postgres", "3. [ ] mysql", "(recommended)", "4. Type your own answer", "5. Chat about this", "↑↓ select", "enter confirm", "esc skip"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q:\n%s", want, text)
 		}
@@ -731,11 +734,11 @@ func TestAskCardIsTheMainPaneNotAFullWidthOverlay(t *testing.T) {
 		t.Fatalf("the panel is not reserving columns (rightEdge=%d), nothing to prove", edge)
 	}
 	// The rail: one ┃ on the pane's gutter column, on every row the card
-	// paints, in the human's accent. Its first row is the identity line and its
-	// last is the key footer.
+	// paints, in the human's accent. Its first row is the header — the ◆ mark
+	// and the title — and its last is the key footer.
 	top := -1
 	for y, ln := range rows {
-		if strings.Contains(ln, "? ask") {
+		if strings.Contains(ln, "◆ ask") {
 			top = y
 			break
 		}
@@ -771,6 +774,70 @@ func TestAskCardIsTheMainPaneNotAFullWidthOverlay(t *testing.T) {
 				t.Fatalf("the card painted %q at x=%d y=%d, inside the panel", string(ch), x, y)
 			}
 		}
+	}
+	pressKey(app, tcell.KeyEsc)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Esc must close the card")
+	}
+}
+
+// TestAskCardPaintsTheOpencodeLayout: the report this restyle answers is "make
+// the ask box look exactly like opencode's", so the card's own shape is pinned
+// here, on a live frame, one assertion per thing opencode's form does that the
+// card could drift on: the header's ◆ mark and title, the ordinal + checkbox on
+// every row, the free-text and chat rows under the options, the cursor's band
+// as a background (never a ❯ in the layout), and the footer in opencode's
+// "key + verb" wording. A regression in any of them fails here, and no other
+// test in the package reads these glyphs.
+func TestAskCardPaintsTheOpencodeLayout(t *testing.T) {
+	app, scr := drawnApp(t, 90, 26)
+	req := askOptions()
+	req.Multi = true
+	req.Recommended = []string{"postgres"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.AskCard(context.Background(), req, 5*time.Second)
+		close(done)
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+	text := screenText(scr)
+	for _, want := range []string{
+		"◆ ask",                          // the header: mark, then title
+		"Which storage backend",          // the question, plain, no bullet
+		"1. [ ] sqlite",                  // ordinal + checkbox, then the label
+		"2. [✓] postgres  (recommended)", // a pre-toggled box on a multi card
+		"3. [ ] mysql",
+		"4. Type your own answer", // opencode's custom row, last option + 1
+		"5. Chat about this",      // xdev's prose escape, on the row after it
+		"↑↓ select   space toggle   enter done   1-9 pick", // the footer, in order
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the card is not opencode's shape, missing %q:\n%s", want, text)
+		}
+	}
+	// The cursor is a background band on the row, not a ❯ glyph: opencode's
+	// option box has no cursor column, and a card that grows one shifts every
+	// label a cell right of where opencode puts it.
+	if strings.Contains(text, "❯ 1. ") {
+		t.Fatalf("the rows carry a cursor column again:\n%s", text)
+	}
+	band := app.cellColor(app.th.Get(theme.BgHighlight))
+	// The band covers the row it marks: a cursor the card paints only behind the
+	// glyphs it happens to write stops mid-row and reads as a stray highlight.
+	cells := 0
+	for y := 0; y < app.height; y++ {
+		for x := 0; x < app.width; x++ {
+			_, _, st, _ := scr.GetContent(x, y)
+			if _, bg, _ := st.Decompose(); bg == band {
+				cells++
+			}
+		}
+	}
+	if cells < 20 {
+		t.Fatalf("the selected row has no band across the pane (%d cells):\n%s", cells, text)
 	}
 	pressKey(app, tcell.KeyEsc)
 	select {
@@ -817,7 +884,7 @@ func TestAskCardWrapsLongOptionText(t *testing.T) {
 	for _, want := range []string{
 		"which nobody on the team currently owns or patches",
 		"rotate on the schedule the platform team agreed to",
-		"1-9 quick pick", // and the footer still fits beside them
+		"1-9 pick", // and the footer still fits beside them
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q:\n%s", want, text)

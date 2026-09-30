@@ -186,6 +186,12 @@ back to the model role's `:effort` (`@slow:high`, or the persisted `thinking`
 key). `/thinking low` pins one rung for the rest of the session and writes it to
 the global layer.
 
+The level is on screen wherever the model is: `thinking <level>` rides the
+composer's info divider beside the model name, and repeats as a row in the
+sidebar's SESSION footer — the section that is never folded away. Both read the
+live seam, so a `/thinking` flip or a `Shift+Tab` repaints both on the next
+frame; a host that never wired `/thinking` paints neither.
+
 The **context dock** (`Alt+S`) is a fixed 42-column window right of the
 transcript, opencode's sidebar shape: it owns every row of the terminal, so the
 screen is two windows — the main pane (top bar, transcript, prompt box, status
