@@ -31,12 +31,6 @@ import (
 	"github.com/FreePeak/xdev/internal/tui"
 )
 
-// mcpNoticeGrace is how long a failed MCP server's toast stays up. Longer
-// than a chord's confirmation (tui.toastInfoGrace): the user did not ask for
-// this one, and a missing tool set only becomes visible much later, when the
-// model works around a tool it never had.
-const mcpNoticeGrace = 2 * time.Minute
-
 // runTUI drives the interactive TUI mode (M4).
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	cwd, err := os.Getwd()
@@ -311,12 +305,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// MCP servers (optional; absent config = nothing happens). Attached once
 	// the app exists, because a failed server is a startup fact the user has
 	// to read — and stderr is not readable under the alt screen (#272). The
-	// toast stack carries it like any other notice, and drops it after
-	// mcpNoticeGrace so a broken server stops shouting. The last argument is
-	// the dock's: the MCP rows are painted ○ until the connect lands, and
-	// nothing else would repaint them the moment it does.
+	// toast stack carries it on the error grace every other failure gets: it
+	// had its own two minutes, which is not a toast but a status line, and a
+	// corner that holds its text from launch reads as broken. Nothing is lost
+	// by the shorter life — the dock's MCP section keeps the server listed
+	// with a ○ for as long as it stays down. The last argument is the dock's:
+	// the MCP rows are painted ○ until the connect lands, and nothing else
+	// would repaint them the moment it does.
 	mgr := attachMCP(context.Background(), reg, false, func(msg string) {
-		app.SetNotice(msg, mcpNoticeGrace)
+		app.Toast(tui.ToastError, msg, 0) // 0 = the level's own error grace
 	}, app.DockBump)
 	if mgr != nil {
 		defer mgr.Close()

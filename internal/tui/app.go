@@ -614,16 +614,6 @@ func (a *App) SetStartupNotice(text string) {
 	a.poke()
 }
 
-// SetNotice shows text as a toast for d and then drops it — the older name of
-// Toast, kept because a caller off the UI thread (the MCP connect) reads
-// better as a notice. A new producer calls Toast directly.
-//
-// ponytail: one door. SetNotice is Toast(ToastError, …): every caller so far
-// is a failure, so the level is not a decision this call site has to make.
-func (a *App) SetNotice(text string, d time.Duration) {
-	a.Toast(ToastError, text, d)
-}
-
 // BeginAssistant starts (or continues into) the streaming assistant block. A
 // stream that arrives with no turn opened (a feed that outlived its cancel)
 // opens its work span here too, so the time segment never loses the seconds
