@@ -207,6 +207,10 @@ per frame. A pending plan is resolved where plans have always been resolved —
 `/plan off` approves, any typed prompt is revision feedback — and `/plan show`
 reprints the document in the transcript.
 
+`Alt+S` walks the display policy (shown → hidden → auto); `/sidebar` is the
+plain switch over what is actually on screen, so one keystroke or one command
+hides the sidebar and brings it back.
+
 **Slash commands** dispatch at input-submit and never reach the model:
 
 | Command | Action |
@@ -215,6 +219,7 @@ reprints the document in the transcript.
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
 | `/model [ref]` `/connect [name]` `/theme <name>` `/settings [overlay]` `/hotkeys` | model, provider catalog, theme and display control (`/settings overlay` — or `Alt+,` — opens the settings panel; `/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |

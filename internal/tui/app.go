@@ -2173,7 +2173,7 @@ func (a *App) SettingsView(args string) error {
 		return nil
 	}
 	if fields[0] == "sidebarMode" {
-		return a.setDockModeSetting(fields[1:])
+		return a.setDockModeSetting("sidebarMode", fields[1:])
 	}
 	if fields[0] != "showThinking" {
 		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode)", fields[0])
@@ -2210,27 +2210,29 @@ func (a *App) SettingsView(args string) error {
 	return nil
 }
 
-// setDockModeSetting is /settings sidebarMode [auto|show|hide]: the context
-// dock's display policy (#291 §1). The App owns the state, so the flip works
-// with unwired ops; persisting is the config seam's job when it exists.
-func (a *App) setDockModeSetting(fields []string) error {
+// setDockModeSetting is the one place a sidebar policy is written: the dock's
+// display policy (#291 §1), reached by /settings sidebarMode and by /sidebar.
+// The App owns the state, so the flip works with unwired ops; persisting is
+// the config seam's job when it exists. label is the key the caller writes,
+// so the confirmation names the setting and not whichever command typed it.
+func (a *App) setDockModeSetting(label string, fields []string) error {
 	// Bare form asks, it does not write: a report that also persisted would make
 	// the panel's own explanation of itself a side effect.
 	if len(fields) == 0 {
-		a.AddSystemBlock("sidebarMode " + a.DockMode() + " — " + a.DockState())
+		a.AddSystemBlock(label + " " + a.DockMode() + " — " + a.DockState())
 		return nil
 	}
 	if len(fields) > 1 {
-		return fmt.Errorf("usage: /settings sidebarMode [auto|show|hide]")
+		return fmt.Errorf("usage: /%s [auto|show|hide]", label)
 	}
 	want := a.DockMode()
 	switch fields[0] {
 	case DockAuto, DockShow, DockHide:
 		want = fields[0]
 	default:
-		return fmt.Errorf("usage: /settings sidebarMode [auto|show|hide]")
+		return fmt.Errorf("usage: /%s [auto|show|hide]", label)
 	}
-	confirm := "sidebarMode " + want
+	confirm := label + " " + want
 	if a.settingsOps != nil && a.settingsOps.SetSidebar != nil {
 		if err := a.settingsOps.SetSidebar(want); err != nil {
 			return err
@@ -2240,6 +2242,42 @@ func (a *App) setDockModeSetting(fields []string) error {
 	a.SetDockMode(want)
 	a.AddSystemBlock(confirm)
 	return nil
+}
+
+// Sidebar implements CommandAPI /sidebar [show|hide|auto]: the two-state
+// show/hide a human reaches for mid-session. Alt+S already walks the policy
+// through all three states, but that is a mode, not a switch — a bare toggle
+// is what "hide the sidebar, now" means — and it lands on the same persisted
+// key through the same seam /settings sidebarMode uses, so the two cannot
+// disagree.
+func (a *App) Sidebar(args string) error {
+	fields := strings.Fields(args)
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /sidebar [show|hide|auto]")
+	}
+	want := ""
+	if len(fields) == 1 {
+		switch fields[0] {
+		case DockShow, DockHide, DockAuto:
+			want = fields[0]
+		default:
+			return fmt.Errorf("usage: /sidebar [show|hide|auto]")
+		}
+	} else {
+		// The toggle asks what is ON SCREEN, not what the policy says: a
+		// terminal that auto-closed the panel is not what the human is
+		// asking to take away, so a bare call opens it rather than
+		// persisting a hide for a panel that was never there.
+		a.mu.Lock()
+		shown := a.dockOn()
+		a.mu.Unlock()
+		if shown {
+			want = DockHide
+		} else {
+			want = DockShow
+		}
+	}
+	return a.setDockModeSetting("sidebarMode", []string{want})
 }
 
 // SendPrompt submits text through the normal send path (markdown commands).
