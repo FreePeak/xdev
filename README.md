@@ -171,12 +171,11 @@ A boxed row copies as its text: the output and the label on the top rule
 
 Thinking renders like a tool result: a rounded box whose top border carries the
 state (`⠹ Thinking…` while it streams, `Thought for Xs` when it settles) and
-whose body is a fixed 12-row window. The wheel always scrolls the transcript
-until you *click* a reasoning box: the clicked box draws a bold border and then
-the wheel over it scrolls its own window, so long reasoning stays readable
-without the transcript sliding along with it. A click anywhere else — or
-`Ctrl+O`, which expands the newest boxed block to every row — hands the wheel
-back to the transcript.
+whose body is ONE row — the newest thought. Click the box and it grows to a
+12-row window the wheel scrolls, drawing a bold border so you can see it has
+the wheel; a click on it again, or anywhere else, shrinks it back to the one row
+and hands the wheel back to the transcript. `Ctrl+O` expands the newest boxed
+block to every row, click or no click.
 
 Display and request are separate switches. The box above is *display*
 (`showThinking`, `/settings showThinking on|off`); `Shift+Tab` (or `/thinking
