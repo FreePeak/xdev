@@ -161,12 +161,14 @@ func TestThinkBoxKeepsJunkInTheRecord(t *testing.T) {
 
 // TestThinkBoxStillRendersHealthyReasoning is the regression guard for the
 // gate: ordinary reasoning keeps its rows, its window and its hidden-row
-// notice exactly as before.
+// notice exactly as before — so it reads the box with it focused, which is the
+// height the notice belongs to.
 func TestThinkBoxStillRendersHealthyReasoning(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	app.BeginThinking()
 	app.AppendThinking(padUntil(healthyReasoningEN, junkMinBytes+200))
 	app.EndThinking()
+	focusBox(app, 0)
 
 	got := renderBox(app, 0, 80)
 	if strings.Contains(strings.Join(got, "\n"), junkReasoningNotice) {
