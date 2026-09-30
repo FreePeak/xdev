@@ -415,12 +415,20 @@ const deferredIndexChars = 200
 
 // Register adds every remote tool to a registry under its namespaced name.
 //
-// Past DeferThreshold the tools are also moved behind the deferred catalog, so
-// they leave the eager schema and the prompt's tool recap and become reachable
-// through tool_search / tool_describe / tool_call. The catalog is a discovery
-// seam, not a boundary: a catalogued tool is still in the registry, so the
-// approval policy, the interceptor chain and a direct call all keep seeing it
-// under its real namespaced name.
+// A server whose own tool count passes DeferThreshold is moved behind the
+// deferred catalog: its tools leave the eager schema and the prompt's tool
+// recap and become reachable through tool_search / tool_describe / tool_call.
+// The catalog is a discovery seam, not a boundary: a catalogued tool is still
+// in the registry, so the approval policy, the interceptor chain and a direct
+// call all keep seeing it under its real namespaced name.
+//
+// The threshold is PER SERVER, never pooled across servers. Pooling hid
+// leankg_query and be-kg_query behind the catalog whenever a fatter server was
+// configured alongside them (db-mcp-server alone ships 28), so a session that
+// needed the knowledge graph never found it and re-derived the same answers
+// with bash — measured 2026-09-30 as a 20.6 min / 53-step run where the same
+// prompt on the same model took 4.5 min / 34 steps once the graph tool was
+// directly callable. A small server stays eager whatever else is configured.
 //
 // Register must run after the bundled defer table (which allocates the
 // catalog), which holds in every run mode: newToolRegistry builds the catalog
@@ -429,10 +437,13 @@ func Register(reg *tool.Registry, tools []tool.Tool) {
 	if reg == nil {
 		return
 	}
-	deferring := len(tools) > DeferThreshold
+	perServer := map[string]int{}
+	for _, t := range tools {
+		perServer[serverOf(t)]++
+	}
 	for _, t := range tools {
 		reg.Register(t)
-		if !deferring {
+		if perServer[serverOf(t)] <= DeferThreshold {
 			continue
 		}
 		index := indexLine(t.Description())
@@ -444,6 +455,22 @@ func Register(reg *tool.Registry, tools []tool.Tool) {
 		}
 		reg.Defer(t.Name(), index, searchTags(t)...)
 	}
+}
+
+// serverOf names the server a tool came from, falling back to the tool's own
+// namespace so a foreign tool with no ServerName is counted in its own bucket
+// rather than against every other tool at once.
+func serverOf(t tool.Tool) string {
+	type serverNamed interface{ ServerName() string }
+	if s, ok := t.(serverNamed); ok {
+		if n := s.ServerName(); n != "" {
+			return n
+		}
+	}
+	if i := strings.IndexByte(t.Name(), '_'); i > 0 {
+		return t.Name()[:i]
+	}
+	return t.Name()
 }
 
 // searchTags gives tool_search something to match a server or namespace name
