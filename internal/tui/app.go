@@ -4034,6 +4034,18 @@ func (a *App) drawPicker(yComposerTop int) {
 	} else if rows > avail-chrome {
 		rows = avail - chrome
 	}
+	// A row is 6 cells of marker/dot/indent, the name, then the detail cell.
+	// The name takes what the names need, up to the whole row: the old fixed
+	// 28-cell detail reserve is what cut a name to twelve cells plus an
+	// ellipsis on a narrow terminal, losing the tail of the title — and the
+	// detail is the part that goes when the row cannot hold both, not the
+	// thing being picked. The paint loop's room>4 guard drops it.
+	//
+	// It is measured BEFORE the window is taken, because a name wider than
+	// the column wraps onto continuation rows — windowing first would
+	// re-flow the rows the column was measured from. lines() reads labelW, so
+	// the wrap width and the painted width are one number.
+	p.labelW = min(p.widestLabel()+2, inner-6)
 	p.visible = rows // paging in handlePickerKey follows the drawn window
 	lines, start, selLine := p.window(rows)
 
@@ -4066,32 +4078,31 @@ func (a *App) drawPicker(yComposerTop int) {
 		y++
 	}
 
-	// Rows. The label column is aligned across the visible window so the
-	// detail column reads as a table.
-	labelW := 0
-	for _, ln := range lines {
-		if !ln.header {
-			labelW = max(labelW, width(ln.item.Label))
-		}
-	}
-	// The name column is the terminal's leftovers: the box, the 6 cells of
-	// marker/dot/indent at the row's head, and the detail column the row
-	// keeps. The old fixed 28 wrap made a wide terminal ellipsize names it
-	// had room to print, and a narrow one spend half the row on a detail
-	// that was then clipped away. The floor keeps a name legible when the
-	// row is too narrow for both — the detail is the part that drops (the
-	// room>4 guard below), not the thing being picked.
-	labelW = min(labelW+2, max(12, inner-6-pickerDetailCols))
+	// Rows. A label wider than the name column has already been wrapped into
+	// continuation rows by lines(); each paints its own line of the label at
+	// the column the label starts at, and only the row's first line carries
+	// the marker, the current dot and the detail cell. The name column is
+	// p.labelW, measured above the window for exactly this reason.
+	labelW := p.labelW
 	// Publish the row map the mouse router hit-tests against, so a click lands
-	// on exactly the row the user saw.
+	// on exactly the row the user saw — a continuation row included: it is the
+	// same item, and clicking it must select the row it belongs to.
 	p.hitY0, p.hitItem = y, make([]int, len(lines))
+	// The selection is an ITEM, not a line: a wrapped label's continuation
+	// rows are the highlighted row's, so the highlight follows the item and
+	// moving down past a three-line title never looks like selecting a blank.
+	selItem := -1
+	if i := selLine - start; i >= 0 && i < len(lines) {
+		selItem = lines[i].itemIdx
+	}
 	for i, ln := range lines {
 		p.hitItem[i] = -1 // a section header is not a target
 		if !ln.header {
 			p.hitItem[i] = ln.itemIdx
 		}
+		sel := !ln.header && ln.itemIdx == selItem
 		st := rowBg
-		if start+i == selLine {
+		if sel {
 			st = selBg
 		}
 		for x := x0 + 1; x < x1; x++ {
@@ -4104,15 +4115,24 @@ func (a *App) drawPicker(yComposerTop int) {
 			y++
 			continue
 		}
-		marker := "  "
-		if start+i == selLine {
-			marker = "▶ "
+		if !ln.cont {
+			marker := "  "
+			if sel {
+				marker = "▶ "
+			}
+			drawText(a.scr, x0+2, y, marker, st.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant))))
+			if ln.item.Current {
+				drawText(a.scr, x0+4, y, "●", st.Foreground(a.cellColor(a.th.Get(theme.AccentSuccess))))
+			}
 		}
-		drawText(a.scr, x0+2, y, marker, st.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant))))
-		if ln.item.Current {
-			drawText(a.scr, x0+4, y, "●", st.Foreground(a.cellColor(a.th.Get(theme.AccentSuccess))))
-		}
-		drawText(a.scr, x0+6, y, clip(ln.item.Label, labelW-1), st.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
+		// The label cell is already the wrapped line: wrapping it here would
+		// double the cut, and clipping it would put a second ellipsis on a
+		// line that fits. lines() owns the wrap width for this reason.
+		drawText(a.scr, x0+6, y, ln.text, st.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
+		// The detail rides the row's FIRST line, in the column the name
+		// column left, and is clipped by the room that is actually left —
+		// the same cell it always had. The wrapped rows below carry title
+		// text only, so a name never runs into it.
 		if ln.item.Detail != "" {
 			cell := x0 + 6 + labelW
 			if room := x1 - 2 - cell; room > 4 {
