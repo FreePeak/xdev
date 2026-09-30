@@ -262,6 +262,11 @@ type App struct {
 	onSendImages func(text string, imgs []PasteImage) bool
 	onCancel     func()
 	onQuit       func()
+	// onQuitRunning is the quit path when a turn is in flight: true means
+	// "detach it and leave" (opencode default), false means "kill it".
+	// Wired by cmd from settings tui.exitDetach. nil falls back to kill
+	// (onCancel then onQuit), matching the pre-detach behaviour.
+	onQuitRunning func() bool
 	// onRetry re-runs the current session's last turn with no new prompt (the
 	// F5 recovery for a stream a dropped connection cut short). Wired by cmd;
 	// nil degrades the chord to a notice.
@@ -567,6 +572,12 @@ func (a *App) SetStatusModel(m string) {
 func (a *App) SetHandlers(onSend func(text string), onCancel, onQuit func()) {
 	a.onSend, a.onCancel, a.onQuit = onSend, onCancel, onQuit
 }
+
+// SetQuitRunning wires the detach-on-quit path. When a turn is running and
+// the user hits the quit chord, this is called instead of onCancel+onQuit.
+// Returning true means the turn was (or will be) detached and the UI should
+// exit without cancelling; false means fall through to cancel-then-quit.
+func (a *App) SetQuitRunning(fn func() bool) { a.onQuitRunning = fn }
 
 // SetImageSend wires the multimodal send path (see App.onSendImages).
 func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
@@ -1546,6 +1557,17 @@ func (a *App) Quit() { a.quitOnce.Do(func() { close(a.quitCh) }) }
 // running after the UI is gone is the same leak every /quit had, and it never
 // outlives the process. Esc keeps cancel-only semantics for "stop and stay".
 func (a *App) quitOrCancel(running bool) {
+	// Detach-on-quit (settings tui.exitDetach, default on): a live turn is
+	// handed off so closing the TUI does not kill the work. Esc stays
+	// cancel-only; only the quit chord reaches here.
+	if running && a.onQuitRunning != nil {
+		if a.onQuitRunning() {
+			if a.onQuit != nil {
+				a.onQuit()
+			}
+			return
+		}
+	}
 	if running && a.onCancel != nil {
 		a.onCancel()
 	}

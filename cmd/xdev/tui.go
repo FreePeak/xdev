@@ -239,6 +239,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// is wiped) and the session file is closed. It reads `store` at exit, so
 	// /new, /fork and /resume change what the line names.
 	defer func() {
+		if id := lastDetachID(); id != "" {
+			fmt.Printf("─── detached ──────────────────────────────────────\n")
+			fmt.Printf("  turn kept running as background job %s\n", id)
+			fmt.Printf("  xdev bg logs %s\n", id)
+			fmt.Printf("  xdev bg stop %s\n", id)
+			fmt.Printf("  xdev config set tui.exitDetach false   # kill on quit\n")
+			fmt.Printf("──────────────────────────────────────────────────\n")
+		}
 		if s := storeOf(); s != nil {
 			if text := exitMenuText(s, cwd); text != "" {
 				fmt.Print(text)
@@ -411,6 +419,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			lastSettings().RenderMermaid = &v
 			return nil
 		},
+		SetExitDetach: func(on bool) error {
+			if err := config.Set(config.GlobalSettingsPath(), "tui.exitDetach", fmt.Sprint(on)); err != nil {
+				return err
+			}
+			v := on
+			lastSettings().Tui.ExitDetach = &v
+			return nil
+		},
 	})
 
 	// Settings overlay (Alt+,): the settings this session already has a live
@@ -429,6 +445,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
 					Editable: true, Kind: "toggle"},
 				{Key: "renderMermaid", Label: "Render mermaid", Value: fmt.Sprint(s.RenderMermaidOn()),
+					Editable: true, Kind: "toggle"},
+				{Key: "tui.exitDetach", Label: "Detach on quit", Value: fmt.Sprint(s.TuiExitDetachOn()),
 					Editable: true, Kind: "toggle"},
 				// thinking is a select, not a toggle: the vocabulary is the
 				// level ladder, and it lives behind one door (ThinkingOps.Set)
@@ -469,6 +487,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			case "renderMermaid":
 				v := value == "true"
 				lastSettings().RenderMermaid = &v
+			case "tui.exitDetach":
+				v := value == "true"
+				lastSettings().Tui.ExitDetach = &v
 			case "thinking":
 				lastSettings().Thinking = value
 			case "sidebarMode":
@@ -2355,6 +2376,76 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 		func() { app.Quit() },
 	)
+	// Detach-on-quit (settings tui.exitDetach, default ON — opencode parity).
+	// A live turn is handed to a --bg worker so killing the TUI does not
+	// kill the work. The worker resumes the same session id; hang caps are
+	// the same as an explicit --bg run (default --max-time 2h).
+	//
+	// ponytail: we cannot transplant the in-process turn goroutine across a
+	// process boundary, so "detach" means "cancel the TUI turn and spawn a
+	// print-mode child that continues the same session from disk". The model
+	// may re-do the last unfinished step; the session file is the source of
+	// truth either way. Upgrade path: a long-lived supervisor that owns the
+	// turn process from the start (#131 residual / attach).
+	var detachedOnQuit atomic.Bool
+	app.SetQuitRunning(func() bool {
+		if !lastSettings().TuiExitDetachOn() {
+			return false
+		}
+		// The FOREGROUND session is the one the user is looking at, so it is
+		// the one handed off. A parked session mid-turn stays in this
+		// process, and abortAll() cancels it when the TUI actually exits —
+		// detaching only the screen's own session is the honest reading.
+		// ponytail: one hand-off, not one per running tab. A PARKED session
+		// mid-turn is still cancelled by abortAll() on exit, so quitting with
+		// two busy sessions keeps only the foreground one. Upgrade path:
+		// spawn one child per running tab id and print one block per id.
+		s := storeOf()
+		if s == nil || !tabs.isRunning(s.ID()) {
+			return false
+		}
+		// Need a durable session file for the child to resume.
+		if s.Path() == "" {
+			if _, err := s.EnsureOnDisk(
+				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), s.ID()),
+				session.Options{},
+			); err != nil {
+				app.AddSystemBlock("· detach failed — session not on disk: " + err.Error())
+				return false
+			}
+		}
+		// Stop the in-process turn first so the store is quiet for the child.
+		tabs.abort(s.ID())
+		// Wait briefly for the turn to release; do not block quit forever.
+		deadline := time.Now().Add(2 * time.Second)
+		for tabs.isRunning(s.ID()) && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		childArgv := []string{
+			"--print",
+			"--resume", s.ID(),
+			"--max-time", "2h",
+		}
+		// Carry the live model so the child does not fall back to defaultModel.
+		modelMu.Lock()
+		ref := live.provName + "/" + live.model
+		modelMu.Unlock()
+		if ref != "/" && !strings.HasPrefix(ref, "/") && !strings.HasSuffix(ref, "/") {
+			childArgv = append(childArgv, "--model", ref)
+		}
+		// Empty prompt: print mode with --resume and no prompt still drives a
+		// turn from the session's unfinished state only when a prompt is
+		// supplied. Give the child a continuation nudge so Run has a user turn.
+		id, err := spawnBg("continue the unfinished work from this session", childArgv)
+		if err != nil {
+			app.AddSystemBlock("· detach failed: " + err.Error())
+			return false
+		}
+		detachedOnQuit.Store(true)
+		// Stash the id on the store via a side channel the exit banner reads.
+		setLastDetachID(id)
+		return true
+	})
 	app.SetImageSend(func(text string, imgs []tui.PasteImage) bool { return runTurn(text, imgs) })
 	// The mid-turn submit queue (#157). Two paths, both about the live turn:
 	//

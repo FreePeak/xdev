@@ -359,6 +359,9 @@ type Settings struct {
 	// text is untouched either way, and a diagram the renderer cannot draw
 	// falls back to the code band.
 	RenderMermaid *bool `yaml:"renderMermaid"`
+	// Tui is the interactive TUI group (tui.*). Nested so `xdev config set
+	// tui.exitDetach` walks a real struct path (settingsKeyOK / KnownFields).
+	Tui TuiSettings `yaml:"tui"`
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
@@ -567,6 +570,18 @@ type SkillsSettings struct {
 	// relative entry resolves against the project cwd; a missing or
 	// unreadable directory is skipped, never fatal.
 	CustomDirectories []string `yaml:"customDirectories"`
+}
+
+// TuiSettings is the `tui` group: interactive-session behaviour that is not
+// a HUD/chrome key. Nested so dotted CLI keys (tui.exitDetach) match the
+// YAML path and the KnownFields schema.
+type TuiSettings struct {
+	// ExitDetach keeps a still-running turn alive when the TUI quits
+	// (opencode's default: the TUI is a client, the run outlives it). The
+	// turn is handed to a detached --bg worker; `xdev bg list` shows it.
+	// Default ON — a *bool so unset stays "on" and an explicit false is the
+	// only way to restore kill-on-exit. `xdev config set tui.exitDetach false`.
+	ExitDetach *bool `yaml:"exitDetach"`
 }
 
 // StatusLineSettings is the `statusLine` group (M12 F5). Segments is the
@@ -893,6 +908,16 @@ func (s *Settings) ShowThinkingOn() bool {
 // unset follows the schema default (on), the same shape as ShowThinkingOn.
 func (s *Settings) RenderMermaidOn() bool {
 	return s == nil || s.RenderMermaid == nil || *s.RenderMermaid
+}
+
+// TuiExitDetachOn reports whether quitting the TUI should detach a live
+// turn instead of killing it. Default ON (opencode parity); an explicit
+// false restores the old kill-on-exit behaviour.
+func (s *Settings) TuiExitDetachOn() bool {
+	if s == nil || s.Tui.ExitDetach == nil {
+		return true
+	}
+	return *s.Tui.ExitDetach
 }
 
 // SidebarModeOn reports the effective context-dock policy: unset follows the
@@ -1396,6 +1421,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.RenderMermaid != nil {
 		s.RenderMermaid = layer.RenderMermaid
+	}
+	if layer.Tui.ExitDetach != nil {
+		s.Tui.ExitDetach = layer.Tui.ExitDetach
 	}
 	if layer.SidebarMode != "" {
 		s.SidebarMode = layer.SidebarMode
@@ -1936,6 +1964,7 @@ func List(s *Settings, globalPath string) []string {
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 		"renderMermaid " + fmt.Sprint(s.RenderMermaidOn()),
+		"tui.exitDetach " + fmt.Sprint(s.TuiExitDetachOn()),
 		"sidebarMode " + s.SidebarModeOn(),
 		"thinking " + s.ThinkingLevel(),
 		"computer " + fmt.Sprint(s.ComputerOn()),

@@ -119,7 +119,7 @@ func validateKey(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("memory must be off|local|mnemopi|hindsight|sharpshooter, got %q", value)
-	case "showThinking", "advisor", "ask.autoAnswer":
+	case "showThinking", "advisor", "ask.autoAnswer", "tui.exitDetach", "renderMermaid":
 		switch value {
 		case "true", "false":
 			return nil
@@ -152,6 +152,8 @@ func fallbackValue(s *config.Settings, key string) string {
 		return fmt.Sprint(s.ShowThinkingOn())
 	case "renderMermaid":
 		return fmt.Sprint(s.RenderMermaidOn())
+	case "tui.exitDetach":
+		return fmt.Sprint(s.TuiExitDetachOn())
 	case "thinking":
 		return s.ThinkingLevel()
 	case "advisor":
