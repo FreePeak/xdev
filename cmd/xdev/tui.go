@@ -291,9 +291,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// restore needs this fd still open while scr.Fini is trying, and it must
 	// also survive the NewScreen/Init failures above returning early.
 	defer releaseTerminal()
-	scr, err := tcell.NewScreen()
+	// A frame write must not be able to stop the UI loop: an unbounded write
+	// to a pane whose reader stopped drains blocks the loop for as long as
+	// the pty stays full, which is the session-dying stall in
+	// internal/tui/tty_deadline.go. The bounded screen is the same
+	// tcell screen with a write deadline; if it cannot be built (no
+	// /dev/tty, no terminfo), stock behaviour is what runs.
+	scr, dropped, err := tui.NewDeadlineScreen()
 	if err != nil {
-		return 2, fmt.Errorf("tui: screen: %w", err)
+		if scr, err = tcell.NewScreen(); err != nil {
+			return 2, fmt.Errorf("tui: screen: %w", err)
+		}
 	}
 	setCursorColor(th.Get(theme.AccentUser)) // OSC 12 (survives into raw mode)
 	if err := scr.Init(); err != nil {
@@ -327,6 +335,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer func() { terminalRestore = prevRestore }()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	app.SetFrameDropped(dropped)
 	// --log: write a TUI screen transcript to <path> after each
 	// paint frame (off by default). Relative paths resolve under
 	// config.DataDir(); the file is opened truncated and closed on exit.
@@ -576,13 +585,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// populated store here, a fresh session has none.
 	if len(storeOf().Entries()) > 0 {
 		if res, err := session.BuildContext(storeOf().Entries(), storeOf().LeafID(), session.SystemPrompt{}); err == nil {
-			replayTranscript(app, res.Messages)
-			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			app.SetWork(workOf(res.Messages))
-			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
-			turns, steps := countsOf(res.Messages)
-			app.SetSessionCounts(turns, steps)
+			replaySession(app, res.Messages)
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -713,13 +716,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetSessionID(t.store.ID())
 		saveBreadcrumb(breadcrumbPath(t.store))
 		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
-			replayTranscript(app, res.Messages)
-			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			app.SetWork(workOf(res.Messages))
-			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
-			turns, steps := countsOf(res.Messages)
-			app.SetSessionCounts(turns, steps)
+			replaySession(app, res.Messages)
 		}
 		// The HUD spinner follows the FOREGROUND session only.
 		app.SetRunning(t.running)
@@ -955,13 +952,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return
 		}
 		app.Reset()
-		replayTranscript(app, res.Messages)
-		app.SetContextReplay(agent.ContextTokens(res.Messages))
-		app.SetWork(workOf(res.Messages))
-		ttftSum, ttftCount := ttftOf(res.Messages)
-		app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
-		turns, steps := countsOf(res.Messages)
-		app.SetSessionCounts(turns, steps)
+		replaySession(app, res.Messages)
 	}
 	// navigateTree is the port of omp's session.navigateTree (the tree
 	// selector's Enter / Shift+Enter / Alt+S): the leaf lands on the
@@ -2983,16 +2974,37 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 }
 
 // workOf is the work a rebuilt history already banked: the provider-request
-// spans the assistant messages carry. A resumed, forked or rewound session
-// starts with that number on the HUD's time segment instead of zero, so the
-// active-work total survives restarts — and a tree navigation shows only the
-// path that is on screen. Messages written before durations were recorded, or
-// imported without one, simply add nothing.
+// spans the assistant messages carry PLUS the tool spans the toolResult
+// messages carry. A resumed, forked or rewound session starts with that
+// number on the HUD's time segment instead of zero, so the active-work total
+// survives restarts — and a tree navigation shows only the path that is on
+// screen.
+//
+// Tool spans belong here because the live timer counts them: markRun banks
+// the whole run span, thinking and streaming and tools alike. Measuring only
+// the provider requests made a resumed session read at roughly half what it
+// showed before it closed — 7,728s against 15,240s on one real session file,
+// a 49% under-report — and /usage's "tool time · N% of active time" line was
+// comparing two different denominators. Messages written before durations
+// were recorded, or imported without one, simply add nothing.
+//
+// ponytail: two ceilings, both stated rather than faked. (1) A bang-mode
+// (!bash) call never reaches the store, so its span is lost across a resume
+// even though the live timer counted it — upgrading means persisting those
+// calls as real toolResult entries instead of transcript-only rows. (2) Same-
+// batch tool calls run CONCURRENTLY (MaxToolWorkers = 6), so summing their
+// spans can exceed the wall time they actually took; the live timer measures
+// the run's wall clock and cannot over-count. The alternative — persisting
+// run spans rather than message spans — needs the run to be an entry of its
+// own, which the store has no type for.
 func workOf(msgs []ai.Message) time.Duration {
 	var work time.Duration
 	for _, m := range msgs {
-		if m.Role == ai.RoleAssistant && m.DurationMS > 0 {
-			work += time.Duration(m.DurationMS) * time.Millisecond
+		switch m.Role {
+		case ai.RoleAssistant, ai.RoleToolResult:
+			if m.DurationMS > 0 {
+				work += time.Duration(m.DurationMS) * time.Millisecond
+			}
 		}
 	}
 	return work
@@ -3030,6 +3042,53 @@ func countsOf(msgs []ai.Message) (turns, steps int) {
 		}
 	}
 	return turns, steps
+}
+
+// usageOf sums a rebuilt history's token buckets and spend the same way the
+// live path banks them (tuiHooks.OnEvent → AddUsage/AddCost), so a resumed
+// session's token pill, its cache-hit rate and /usage's cost line read the
+// same numbers the session had before it was closed. Every figure comes off
+// the persisted per-message Usage, which is the only record of the split —
+// an older message written before a bucket was tracked simply adds zero.
+func usageOf(msgs []ai.Message) (in, out, cache, think, cacheWrite int64, cost float64) {
+	for _, m := range msgs {
+		if m.Role != ai.RoleAssistant || m.Usage == nil {
+			continue
+		}
+		u := m.Usage
+		in += u.Input
+		out += u.Output
+		cache += u.CacheRead
+		think += u.ReasoningTokens
+		cacheWrite += u.CacheWrite
+		if u.Cost != nil {
+			cost += u.Cost.Total
+		}
+	}
+	return in, out, cache, think, cacheWrite, cost
+}
+
+// replaySession is the one replay path every adoption shares: a startup
+// --continue/--resume, a tab focus, a tree navigation or a branch. It draws
+// the transcript and re-bases EVERY session metric off the rebuilt messages,
+// so an adopted session shows the numbers it had before it was closed:
+// token buckets and spend, the work timer, LLM time, average TTFT, and the
+// turn/step counts.
+//
+// App.Reset is the per-session boundary that clears them; this is what puts
+// them back, and having one function is what keeps a new metric from being
+// wired at three sites and missed at the fourth.
+func replaySession(app *tui.App, msgs []ai.Message) {
+	replayTranscript(app, msgs)
+	work := workOf(msgs)
+	app.SetContextReplay(agent.ContextTokens(msgs))
+	app.SetWork(work)
+	ttftSum, ttftCount := ttftOf(msgs)
+	app.SetLLMTime(work, ttftSum, ttftCount)
+	in, out, cache, think, cacheWrite, cost := usageOf(msgs)
+	app.SetSessionUsage(in, out, cache, think, cacheWrite, cost)
+	turns, steps := countsOf(msgs)
+	app.SetSessionCounts(turns, steps)
 }
 
 // shortSessionID renders the first 8 chars of a session id (matches the TUI

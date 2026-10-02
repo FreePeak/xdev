@@ -274,8 +274,8 @@ func TestDockClipsDoNotWrap(t *testing.T) {
 
 // TestDockTitleWrapsNotClips is the reported bug: a long session title must be
 // readable in the panel, not cut with "…". The slot wraps across rows, the rows
-// below it shift down by however many it took, and a name long enough to eat the
-// work it names is still bounded — with the cut admitted on its last row.
+// below it shift down by however many it took, and nothing about the name's
+// length decides how many rows it may take — the panel is.
 func TestDockTitleWrapsNotClips(t *testing.T) {
 	long := strings.Repeat("full title ", 6) // 66 cells: two rows of 38, plus a tail
 	app, _, _ := dockTestApp(t, 200, 40)
@@ -293,14 +293,11 @@ func TestDockTitleWrapsNotClips(t *testing.T) {
 	if head < 2 {
 		t.Fatalf("a 66-cell title took %d row(s): %v", head, lines)
 	}
-	if head > dockTitleMax {
-		t.Fatalf("the title took %d rows, cap is %d", head, dockTitleMax)
-	}
 	if joined := strings.Join(lines, " "); !strings.Contains(joined, "full title full") {
 		t.Fatalf("title rows lost the text: %v", lines)
 	}
-	if strings.Contains(lines[0], "…") {
-		t.Fatalf("row 0 still clips: %q", lines[0])
+	if strings.Contains(strings.Join(lines, ""), "…") {
+		t.Fatalf("the whole name fits the panel, so nothing may be cut: %v", lines)
 	}
 	for _, l := range lines {
 		if w := width(l); w > dockInner {
@@ -322,10 +319,12 @@ func TestDockTitleWrapsNotClips(t *testing.T) {
 	}
 }
 
-// TestDockTitleBoundedAndClickMapFollows: an absurd title cannot push the panel's
-// sections out of the band, and a click resolves against the rows as painted —
-// which start below the slot however many rows it took.
-func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
+// TestDockTitleTakesTheRowsItNeeds is the unbounded half of #434: the name's
+// length no longer picks a row budget, so a 1000-cell name wraps over ~26 rows
+// instead of being cut at 3. The sections keep whatever the band still has
+// after it, and a click resolves against the rows as painted — which start
+// below the slot however many rows it took.
+func TestDockTitleTakesTheRowsItNeeds(t *testing.T) {
 	app, _, _ := dockTestApp(t, 200, 40)
 	app.SetDockOps(DockOps{
 		Session: func() (string, string) { return strings.Repeat("word ", 200), "sess1234" },
@@ -336,16 +335,19 @@ func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
 	defer app.mu.Unlock()
 	app.dockBuild()
 	head := app.dock.titleRows()
-	if head != dockTitleMax {
-		t.Fatalf("a 1000-cell title took %d rows, want the cap %d", head, dockTitleMax)
+	_, bandH := app.dockGrid()
+	if head <= 3 {
+		t.Fatalf("a 1000-cell title took %d rows: the 3-row cap is back", head)
 	}
-	// The title wraps away the "…" for a real name; the cap is where one comes
-	// back, so the same setting cannot lie about having shown the whole title.
-	if !strings.Contains(app.dock.titleLines[head-1], "…") {
-		t.Fatalf("a title cut at the cap must admit it: %q", app.dock.titleLines[head-1])
+	// Nothing is cut while the band has rows for it: an "…" here means a cap
+	// crept back in, and the setting would lie about showing the whole name.
+	if strings.Contains(strings.Join(app.dock.titleLines, ""), "…") {
+		t.Fatalf("a 1000-cell title was cut in a %d-row panel: %v", bandH, app.dock.titleLines)
 	}
+	// What the name did not take, the sections have — the panel is shared, not
+	// won outright, until the name has eaten all but the band's floor.
 	if len(app.dock.lines) == 0 {
-		t.Fatal("the cap must leave the sections their rows")
+		t.Fatalf("a %d-row name left the sections nothing in a %d-row band", head, bandH)
 	}
 	top, _ := app.dockGrid()
 	if _, act := app.dockRowAt(200-dockCols+1, top+head-1); act != "" {
@@ -357,12 +359,43 @@ func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
 	if path, _ := app.dockRowAt(200-dockCols+1, top+head+1); path != "" {
 		t.Fatalf("a task row must not resolve as a file: %q", path)
 	}
+	app.mu.Unlock()
+	// And the whole name reaches the SCREEN, tail included: a name that fits
+	// the panel must not end in the row the build happened to budget for.
+	app.draw()
+	scr := app.scr.(tcell.SimulationScreen)
+	if got := dockRowText(scr, head-1, 200-dockCols+dockPad); !strings.Contains(got, "word") {
+		t.Fatalf("the title's last row = %q, want the tail of the name", got)
+	}
+	app.mu.Lock()
 }
 
-// TestDockRebuildIsEventDriven is the acceptance line: an unchanged frame must not
-// run a single source, while a bump, a resize, or a transcript that grew must.
-// The alternative is a second column rebuilt at 30fps, which is the cost #283 and
-// #284 spent two issues removing from the draw path.
+// The band is the only bound left on the name: one too long for the panel
+// itself is cut, and the cut is admitted rather than silent, so a short
+// terminal does not become a wall of title with no marker that it is one.
+func TestDockTitleLongerThanTheBandIsAdmitted(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 8) // a band of 8: the name wants ~66 rows
+	app.SetDockOps(DockOps{Session: func() (string, string) {
+		return strings.Repeat("word ", 500), "sess1234"
+	}})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.dockBuild()
+	_, bandH := app.dockGrid()
+	head := app.dock.titleRows()
+	if head > bandH-dockTitleFloor {
+		t.Fatalf("a %d-row title in a %d-row band leaves the sections nothing", head, bandH)
+	}
+	if !strings.Contains(app.dock.titleLines[head-1], "…") {
+		t.Fatalf("a title cut at the band must admit it: %q", app.dock.titleLines[head-1])
+	}
+}
+
+// TestDockRebuildIsEventDriven is the acceptance line: an unchanged frame must
+// not run a single source, while a bump, a resize, or a transcript that grew
+// must. The alternative is a second column rebuilt at 30fps, which is the cost
+// #283 and #284 spent two issues removing from the draw path.
 func TestDockRebuildIsEventDriven(t *testing.T) {
 	app, _, runs := dockTestApp(t, 200, 40)
 	app.dockBuild()
