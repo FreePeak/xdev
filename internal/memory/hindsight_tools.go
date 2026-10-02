@@ -12,9 +12,14 @@ import (
 // The Hindsight backend exposes the model-facing trio omp documents:
 // recall, retain, reflect. memory_edit is deliberately absent — upstream
 // Hindsight memories are not edited through this backend.
+// HindsightStore is the concrete surface the trio uses directly
+// (Recall/Scope/Retain/Reflect). It stays a *Hindsight alias —
+// the trio is a UI feature, not a core boundary, so no Store
+// method is shoehorned in for it.
+type HindsightStore = *Hindsight
 
 // RecallTool is the model-facing `recall`.
-type RecallTool struct{ Backend *Hindsight }
+type RecallTool struct{ Backend HindsightStore }
 
 const (
 	RecallToolName  = "recall"
@@ -75,7 +80,7 @@ func (t *RecallTool) Execute(_ context.Context, args json.RawMessage) (tool.Resu
 }
 
 // RetainTool is the model-facing `retain`.
-type RetainTool struct{ Backend *Hindsight }
+type RetainTool struct{ Backend HindsightStore }
 
 func (t *RetainTool) Name() string { return RetainToolName }
 
@@ -118,7 +123,7 @@ func (t *RetainTool) Execute(_ context.Context, args json.RawMessage) (tool.Resu
 }
 
 // ReflectTool is the model-facing `reflect`.
-type ReflectTool struct{ Backend *Hindsight }
+type ReflectTool struct{ Backend HindsightStore }
 
 func (t *ReflectTool) Name() string { return ReflectToolName }
 

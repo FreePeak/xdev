@@ -77,8 +77,8 @@ func TestMemoryOpsDispatch(t *testing.T) {
 		t.Errorf("local view = (%q, %v)", got, err)
 	}
 	for _, verb := range []string{"queue", "sync", "enqueue text"} {
-		if _, err := local.Dispatch(verb); err == nil || !strings.Contains(err.Error(), "mnemopi") {
-			t.Errorf("Dispatch(%q) on the local backend = %v, want a mnemopi hint", verb, err)
+		if _, err := local.Dispatch(verb); err == nil || !strings.Contains(err.Error(), "not available") {
+			t.Errorf("Dispatch(%q) on the local backend = %v, want an unavailable hint", verb, err)
 		}
 	}
 	if _, err := local.Dispatch("diagnose"); err == nil || !strings.Contains(err.Error(), "hindsight") {
