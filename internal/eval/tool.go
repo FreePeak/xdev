@@ -54,7 +54,7 @@ func (t *Tool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "code": {"type": "string", "description": "Python source for the cell. The last expression's value is returned."},
+    "code": {"type": "string", "description": "Python source for the cell. The last expression's value is returned. Inside a cell, tools.<name>({...}) calls a harness tool and returns {text, details, is_error}."},
     "language": {"type": "string", "enum": ["py"], "description": "Kernel language; only \"py\" is supported (\"js\" is rejected)."},
     "timeout": {"type": "number", "description": "Cell time limit in seconds (default 30, 0 disables the limit, max 3600). On expiry the cell is interrupted and the kernel stays usable; a cell still running after 30s is backgrounded and its output reported on the next eval call."},
     "reset": {"type": "boolean", "description": "Wipe the kernel namespace before running the cell."}

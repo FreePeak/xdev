@@ -11,6 +11,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/eval"
 	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/tool"
 )
@@ -50,6 +51,28 @@ func TestWireAgentModeInstallsBothSeams(t *testing.T) {
 	}
 	if back := ag.Redactor.Expand(masked); !strings.Contains(back, secret) {
 		t.Fatalf("placeholder did not round-trip back to the value: %q", back)
+	}
+}
+
+// The eval-kernel bridge (#268) is a THIRD mode seam, and it is the one most
+// likely to drift: the kernel refuses every tool call until a runner is
+// installed, and nothing else in the turn would ever notice.
+func TestWireAgentModeWiresEvalKernel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reg := tool.NewRegistry()
+	et := eval.NewTool(t.TempDir())
+	reg.Register(et)
+	ag := &agent.Agent{Tools: reg, Model: "m"}
+	wireAgentMode(ag, reg, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := et.Kernel.RunCell(ctx, `tools.todo({})["text"]`, 10)
+	if err != nil {
+		t.Fatalf("RunCell: %v", err)
+	}
+	if strings.Contains(out.Text, "no runner installed") {
+		t.Fatal("the mode seam did not wire the eval kernel: a cell calling a tool still refuses")
 	}
 }
 

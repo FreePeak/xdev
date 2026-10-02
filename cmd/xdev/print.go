@@ -250,6 +250,7 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	ag.PromptContinuation = interactive
 	if reg != nil {
 		ag.WireCatalog(reg.Catalog())
+		ag.WireEvalKernel(reg)
 	}
 	ag.Redactor = redactorFor(cwd)
 	// #83: snapcompact's bitmap only helps a model that can read images.
