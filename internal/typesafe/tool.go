@@ -46,7 +46,7 @@ func (t *Tool) Parameters() json.RawMessage {
     },
     "questions": {
       "type": "object",
-      "description": "map of typed questions keyed by question id; each question has type (noul|choice|score), instructions, and criteria"
+      "description": "map of typed questions keyed by question id; each has type (noul|choice|score), instructions, and criteria. choice takes criteria as an object keyed by option label; score takes a LIST of level descriptions, index 0 first; noul takes either or omits criteria. Gate on the returned answer_confidence, not confidence."
     },
     "model": {
       "type": "string",
