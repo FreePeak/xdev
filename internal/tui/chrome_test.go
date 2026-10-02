@@ -1191,9 +1191,11 @@ func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 	}
 	// The transcript starts below the bar: the bar is chrome, content rows
 	// belong to the scrollback — and at the tail of a 60-row block the bar
-	// still names the last prompt.
-	if !strings.Contains(rows[1], "line") {
-		t.Fatalf("first transcript row lost to the top bar: %q", rows[1])
+	// still names the last prompt. A row the sticky header pinned sits above
+	// the scrollback, so the check looks at the first CONTENT row.
+	body := strings.Join(rows[1:], "\n")
+	if !strings.Contains(body, "line") {
+		t.Fatalf("transcript content lost to the top bar: %q", rows[1])
 	}
 }
 

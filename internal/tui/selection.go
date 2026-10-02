@@ -490,12 +490,28 @@ func (a *App) selViewport() (top, vp int) {
 // edge row, which is the one the auto-scroll is about to replace — so the
 // selection tracks the text it grabbed while the viewport moves. A chrome
 // gesture keeps screen rows.
+//
+// A row under the sticky header is the one case where a screen row does not
+// name the document row it shows: the header parks the prompt it pinned, so a
+// corner there takes THAT prompt's own rows (its top, clipped to what is on
+// screen). Any other row is unchanged.
 func (a *App) selCornerAt(x, y int) selCorner {
 	c := selCorner{x: x, y: a.clampScreen(y), doc: -1}
 	top, vp := a.selViewport()
 	hdr := a.transcriptTop()
-	if vp > 0 && (a.selDocMode || (y >= hdr && y < hdr+vp)) {
-		c.doc = top + min(max(y-hdr, 0), vp-1)
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return c
+	}
+	if dy := y - hdr; dy < a.stickyVis && a.stickyBlock >= 0 {
+		// The header's rows are the pinned prompt's, from wherever the next
+		// prompt has clipped it to.
+		c.doc = int(a.stickyRow) + a.stickyClip + dy
+		return c
+	}
+	if a.selDocMode || y >= hdr {
+		// Below the header the viewport's own row count applies: the transcript
+		// resumes at start+stickyHdr.
+		c.doc = top + min(max(y-hdr-a.stickyHdr, 0), vp-1)
 	}
 	return c
 }
@@ -723,11 +739,22 @@ func (a *App) selSpan() []selSpanRow {
 // selDocRow resolves one document row: its text from the live capture while it is
 // on screen, from the gesture's cache once it has scrolled away.
 func (a *App) selDocRow(d, top int, b selBounds) selSpanRow {
-	vy := d - top
-	y := vy + a.transcriptTop()
+	y := d - top + a.transcriptTop()
+	// A row of the pinned prompt is painted at the header, wherever in the
+	// transcript it sits; every other row sits `stickyHdr` rows lower than the
+	// viewport's own arithmetic says, because the header is above them.
+	switch {
+	case a.stickyVis > 0 && d >= int(a.stickyRow) && d < int(a.stickyRow)+a.stickyVis:
+		y = a.transcriptTop() + d - int(a.stickyRow)
+	case a.stickyHdr > 0:
+		y += a.stickyHdr
+	}
 	sr, have := selRow{}, false
-	if vy >= 0 && vy < len(a.selRows) {
-		sr, have = a.selRows[vy], true
+	// The capture is indexed by screen row (the header sits at the top of it),
+	// so it answers only for a row that is on screen at all; anything else is
+	// the gesture's own cache, keyed by document row.
+	if sy := y - a.transcriptTop(); sy >= 0 && sy < len(a.selRows) {
+		sr, have = a.selRows[sy], true
 	} else if c, cached := a.selCache[d]; cached {
 		sr, have = c, true
 	}

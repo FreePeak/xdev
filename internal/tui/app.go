@@ -380,6 +380,19 @@ type App struct {
 	selBarTotal int // transcript rows at paint time
 	selBarPos   int // thumb's first half row on the track at paint time
 	selBarEnd   int // thumb's half-row end at paint time (exclusive)
+	// The sticky header's geometry at paint time: stickyHdr is how many rows of
+	// the transcript's top the header owns (its prompt plus the gap under it),
+	// stickyVis how many of those are the prompt's own rows, stickyBlock the
+	// prompt pinned (-1 when none), stickyRow its first document row and
+	// stickyClip how many of its rows the header clipped from the top.
+	// Published every frame with the rest of the geometry: a header row shows
+	// the pinned prompt, not the document row its index names. (UI-thread;
+	// mu-guarded.)
+	stickyHdr   int
+	stickyVis   int
+	stickyBlock int
+	stickyRow   int32
+	stickyClip  int
 	// toasts is the live notice stack (toast.go): the copy confirmation, a
 	// failed chord, a failed MCP server — everything transient, painted in
 	// the top-right corner and dropped on its own deadline.
@@ -3871,7 +3884,12 @@ func (a *App) thinkBoxAt(y int) int {
 	if vp <= 0 || y < hdr || y >= hdr+vp {
 		return -1
 	}
-	bi := a.rowIdx.blockAt(int32(top + y - hdr))
+	// A header row belongs to the pinned prompt, so a reasoning box is not
+	// under the pointer there however the row index would resolve it.
+	if y-hdr < a.stickyHdr && a.stickyBlock >= 0 {
+		return -1
+	}
+	bi := a.rowIdx.blockAt(int32(top + y - hdr - a.stickyHdr))
 	if bi < 0 || a.blocks[bi].Kind != KindThinking {
 		return -1
 	}
@@ -4126,6 +4144,7 @@ func (a *App) paint() {
 	s.Clear()
 	// Per-frame facts about the viewport: a frame that draws no transcript
 	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
+	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyRow, a.stickyClip = 0, 0, -1, 0, 0
 	// The pills' hit table is a per-frame fact for the same reason the
 	// scrollbar's is: a frame that drops a pill for width must not leave
 	// last frame's rectangle live, or a click would open a popup for a
@@ -4194,10 +4213,7 @@ func (a *App) paint() {
 	// position against streaming output.
 	a.sm.NewContent(total, vp)
 	start := a.sm.Start(total, vp)
-	end := start + vp
-	if end > total {
-		end = total
-	}
+	end := min(start+vp, total)
 
 	// Proportional right-edge scrollbar (omp's ScrollView): while the
 	// transcript overflows the viewport, the last screen column carries a
@@ -4212,9 +4228,29 @@ func (a *App) paint() {
 	if sbOk {
 		bandLim = edge - 1
 	}
-	selRows := make([]selRow, 0, end-start)
+	// The sticky header (grok scrollback/sticky.rs): the prompt the viewport has
+	// scrolled past pins at the top of the transcript and the scrollback resumes
+	// under it. The header OWNS the rows it hides, so the transcript paints
+	// [start+rows, end) — one row of scroll still moves the viewport's bottom
+	// line by exactly one row.
+	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
+	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
+	gapRow := sticky.rows - len(header) // 1 while pinned, 0 while being pushed off
+	// One paint list — the pinned prompt's rows, the gap it leaves, then the
+	// transcript's. Both kinds are rowViews, so the loop below paints them the
+	// same way, and the screen keeps its one invariant: screen row top+y is
+	// document row start+y, header included. That is what leaves every hit-test
+	// below (selCornerAt, userRowAt, thinkBoxAt) and the selRows capture
+	// untouched — a header row simply reads the document row it displays.
+	view := make([]rowView, 0, sticky.rows+end-start)
+	view = append(view, header...)
+	for range gapRow {
+		view = append(view, rowView{})
+	}
+	view = append(view, a.viewRows(int32(start+sticky.rows), int32(end))...)
+	selRows := make([]selRow, 0, len(view))
 	linkHits := make([]linkHit, 0)
-	for row, r := range a.viewRows(int32(start), int32(end)) {
+	for row, r := range view {
 		y := row + top
 		// A banded row (user prompt / code fence) carries one background
 		// that the fill, the rail, the runs and the timestamp must all
@@ -4270,8 +4306,10 @@ func (a *App) paint() {
 		if startX < 0 {
 			startX = 0
 		}
-		// Selection hit-testing works off this text (the streaming
-		// cursor is decoration, not content).
+		// Selection hit-testing works off this text (the streaming cursor is
+		// decoration, not content). The header's rows are captured like any
+		// other: what is painted is what is copied, and the copy of a pinned
+		// prompt is the text the header shows.
 		selRows = append(selRows, selRow{text: strings.TrimSuffix(content.String(), "▍"), x0: startX})
 		// The timestamp is painted over the runs after them, so its columns are
 		// not clickable even where an earlier URL run extended underneath it.
@@ -4332,6 +4370,15 @@ func (a *App) paint() {
 		a.selBarX = edge - 1
 	}
 	a.selRows, a.selTop, a.linkHits = selRows, start, linkHits
+	// The sticky header's geometry, published like the scrollbar's: the screen
+	// row under a pointer is NOT the document row it shows while it is on the
+	// header, so the hit-tests below must consult this instead of re-deriving
+	// it. A header row belongs to the pinned prompt — a click there opens that
+	// prompt's menu, as it would inline — and to no reasoning box.
+	a.stickyHdr, a.stickyVis, a.stickyBlock = sticky.rows, len(header), sticky.block
+	if sticky.block >= 0 {
+		a.stickyRow, a.stickyClip = sticky.row, sticky.clipTop
+	}
 	if a.selDown {
 		a.selCacheRows(start) // keep the text a held drag has already passed
 	}
