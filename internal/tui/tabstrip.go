@@ -101,14 +101,25 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 // anywhere else on the cell focuses it. A modal is asked first, so a strip
 // under an open picker is not a way to change session behind the picker's
 // back. Caller holds no lock; it takes what it needs.
+//
+// The host callbacks fire UNLOCKED, and that is the whole point of the
+// structure: the host is cmd, and closing a tab calls app.SetTabs, which
+// takes a.mu itself. A `defer a.mu.Unlock()` around the lookup made the ×
+// close path call SetTabs with the lock ALREADY HELD on the same goroutine —
+// sync.Mutex is not reentrant, so the loop blocked forever and the watchdog
+// killed the process 90s later (stall dump tui-stall-20261002-151321, pid
+// 80950: goroutine 1 [sync.Mutex.Lock] in SetTabs <- closeTabByID <-
+// closeTab <- handleTabStripMouse). So the lock is taken to read the hit and
+// released before anything can call out.
 func (a *App) handleTabStripMouse(m *tcell.EventMouse, press bool) bool {
 	if !press {
 		return false
 	}
 	x, y := m.Position()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	hit, ok := a.tabHitAt(x, y)
+	pick := a.onTabPick
+	a.mu.Unlock()
 	if !ok {
 		return false
 	}
@@ -117,10 +128,12 @@ func (a *App) handleTabStripMouse(m *tcell.EventMouse, press bool) bool {
 		return true
 	}
 	// Focus through the same path /tabs uses, so a click and Enter on a row
-	// cannot diverge: one callback, one owner of the tabset.
-	if a.onTabPick != nil {
+	// cannot diverge: one callback, one owner of the tabset. The callback runs
+	// on its own goroutine because the host's focus path rebuilds the whole
+	// view (Reset + replay) — far too long to hold the UI loop for.
+	if pick != nil {
 		go func() {
-			if err := a.onTabPick(hit.id); err != nil {
+			if err := pick(hit.id); err != nil {
 				a.AddSystemBlock("error: " + err.Error())
 				a.poke()
 			}
@@ -148,7 +161,8 @@ func (a *App) tabHitAt(x, y int) (tabHit, bool) {
 // closeTab asks cmd to close one open session and reports what happened. It
 // is the single path both close affordances use — the session.delete chord
 // and the strip's × — so they cannot drift: an unwired host says so once,
-// rather than leaving a chord that looks like it works.
+// rather than leaving a chord that looks like it works. Caller holds no lock:
+// the host's close path republishes the tabset (SetTabs), which takes a.mu.
 func (a *App) closeTab(id string) {
 	if a.onTabClose == nil {
 		a.AddSystemBlock("session tabs are not wired in this build")
