@@ -5,7 +5,9 @@
 (`Runner`, the bridge-tool refusal), `internal/agent/catalog.go` (`WireCatalog`,
 `runCatalogCall`), `internal/agent/loop.go` (`runOneTool`, `runTools`, `MaxToolWorkers`),
 `internal/agent/task.go` (`maxDepth`, `resolveAgentTools`) · Date: 2026-10-02 ·
-Status: **design only — no code in this PR**
+Status: **implemented** (#268; `internal/agent/evalbridge.go`, `Kernel.SetRunner`,
+`dispatchToolCall`, `reply`, `failPending`; tests `internal/eval/bridge_test.go`,
+`cmd/xdev/wiremode_test.go`). §0.7 stays open — see "Still open" below.
 
 Origin: `docs/research/dsh-internals.md` §11, which names this *"the single biggest
 capability gap on xdev's side"* and sketches the route. This doc settles the three
@@ -151,3 +153,29 @@ will raise; a refusal is the registry not having the name.
    accepted as lost, should a resumed transcript show *that* a cell ran? The
    rebuild-time notice (`UnansweredToolCallNotice`) covers the crash case. This
    doc says yes via that path and leaves it there.
+
+## 0.8 What shipped, and where the doc was right
+
+The implementation is the three decisions above, unchanged: `route` never answers
+a call (`dispatchToolCall` returns before taking `k.mu`, and the tool runs on its
+own goroutine); the slot is per-call-id and cancellable (`reply` claims it with
+`sync.Once`, and `cancelCell`/`markExited`/`stopLocked` all release it, so a
+cancelled cell raises instead of waiting on an answer that is never coming); and
+the cell state does NOT survive a crash — `newCell` starts a fresh namespace, so
+a resumed session's first reference to a pre-crash name is a Python `NameError`
+with the kernel's own wording, never a silently empty namespace.
+
+Two things the doc left open, settled by the code rather than by argument:
+
+- **`eval` and the catalog bridge tools are refused by name** (§0.5's "refusal,
+  not a counter"), in `dispatchToolCall`. `eval` cannot come back through the
+  bridge — a cell that spawns a cell is unbounded recursion — and
+  `tool_search`/`tool_describe`/`tool_call` are refused so a cell cannot reach
+  the registry twice over. `tool.IsBridgeTool` is the exported predicate.
+- **One reader thread on stdin** (`runner.py:_stdin_loop`). The doc said the call
+  yields and the host answers on its own goroutine; in a synchronous kernel that
+  only works if stdin is drained by someone other than the running cell, so the
+  reader thread answers `tool_result` frames in place and queues cell requests
+  for `main`. The cell polls its slot rather than blocking on it, which is what
+  turns a cell clock or an agent abort into a `KeyboardInterrupt` where the cell
+  already knows how to report it.
