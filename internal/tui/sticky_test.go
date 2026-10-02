@@ -525,7 +525,6 @@ func TestStickyDragAcrossBoundaryCopiesEachRowOnce(t *testing.T) {
 	if header > rows {
 		t.Fatalf("the copy holds %d header rows for a %d-row header: %q", header, rows, got)
 	}
-	t.Logf("copy: %q", got)
 }
 
 // TestStickyHeaderPaintsOnce pins the frame's geometry: the header paints the
@@ -571,5 +570,124 @@ func TestStickyHeaderPaintsOnce(t *testing.T) {
 	body := strings.Join(rows[hdr:], "\n")
 	if got := strings.Count(body, "❯ HEADPROMPT"); got != 1 {
 		t.Fatalf("the pinned prompt paints its ❯ band %d times below the top bar", got)
+	}
+}
+
+// pushFixture is a transcript where the push is reachable at some scroll offset:
+// two multi-line prompts with enough stream between and after them. The tail
+// matters — the viewport can only scroll back far enough for the second prompt to
+// reach the top on a transcript that extends below it.
+func pushFixture(t *testing.T) *App {
+	t.Helper()
+	app, _ := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("pinned prompt line\n", 5))
+	app.AddAssistantBlock(strings.Repeat("prose\n", 20))
+	app.AddUserBlock(strings.Repeat("second prompt line\n", 5))
+	app.AddAssistantBlock(strings.Repeat("more prose\n", 15))
+	app.draw()
+	return app
+}
+
+// TestStickyPushClipsTheHeaderAndResolvesItsRows exercises the push at the level
+// the math defines it — computeSticky called with the rows of a real transcript,
+// over every scroll offset — instead of through the screen. A push header is a
+// MIDDLE slice of its prompt: its first painted row is the prompt's row
+// clipTop, not the prompt's row 0. That offset is what stickyDoc must carry,
+// because it is what makes a click on the header resolve to the row on screen.
+func TestStickyPushClipsTheHeaderAndResolvesItsRows(t *testing.T) {
+	app := pushFixture(t)
+	app.mu.Lock()
+	total, vp := app.totalLinesLocked(), app.viewportLinesLocked()
+	prompts := app.stickyPrompts()
+	app.mu.Unlock()
+	if len(prompts) != 2 {
+		t.Fatalf("eligible prompts = %d, want 2", len(prompts))
+	}
+	if total <= vp {
+		t.Fatalf("the transcript fits on screen (%d rows, viewport %d) — there is nothing to scroll", total, vp)
+	}
+
+	pushed := 0
+	for off := 1; off < total-vp; off++ {
+		start := total - vp - off
+		if start <= 0 {
+			continue
+		}
+		h := computeSticky(int32(start), vp, prompts)
+		if h.clipTop == 0 {
+			continue
+		}
+		pushed++
+		// The pushed header's first painted row is the prompt's own row
+		// clipTop, and its block is still the pinned prompt's.
+		if h.block != 0 {
+			t.Fatalf("off %d: a pushed header belongs to block %d, want 0", off, h.block)
+		}
+		if h.rows != h.visible {
+			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible — the gap goes first", off, h.rows, h.visible)
+		}
+		// The row the pointer is over resolves into the pinned prompt's own
+		// rows, at the offset the header is showing.
+		doc := h.row + int32(h.clipTop)
+		app.mu.Lock()
+		bi := app.rowIdx.blockAt(doc)
+		app.mu.Unlock()
+		if bi != 0 {
+			t.Fatalf("off %d: the pushed header's first row (doc %d) is block %d, want the pinned 0", off, doc, bi)
+		}
+		// And the header shows a slice that actually exists in that prompt.
+		if h.clipTop+h.visible > prompts[0].full {
+			t.Fatalf("off %d: the pushed header shows rows %d..%d of a %d-row prompt",
+				off, h.clipTop, h.clipTop+h.visible, prompts[0].full)
+		}
+	}
+	if pushed == 0 {
+		t.Fatal("no scroll offset produced a pushed header — the push is untested")
+	}
+}
+
+// TestStickyPushHeaderFirstRowIsTheClippedRow is the one assertion the frame's
+// published geometry must carry: while the next prompt is pushing the header
+// off, the header shows a MIDDLE slice of the pinned prompt, so its first
+// painted row is the prompt's row clipTop — not the prompt's row 0. stickyDoc is
+// exactly that number, and a click/copy on the header reads it, so a header
+// whose stickyDoc ignored clipTop would resolve a row the user cannot see.
+func TestStickyPushHeaderFirstRowIsTheClippedRow(t *testing.T) {
+	app := pushFixture(t)
+	app.mu.Lock()
+	total, vp := app.totalLinesLocked(), app.viewportLinesLocked()
+	app.mu.Unlock()
+	// Walk the scroll offsets until the header is being pushed, then assert the
+	// published row against the layout the header is actually drawing.
+	var seen bool
+	for off := 1; off < total-vp && !seen; off++ {
+		app.mu.Lock()
+		app.sm.offset = 0
+		app.sm.ScrollUp(off, total, vp)
+		want := computeSticky(int32(app.sm.Start(app.totalLinesLocked(), app.viewportLinesLocked())), app.viewportLinesLocked(), app.stickyPrompts())
+		app.mu.Unlock()
+		if want.clipTop == 0 {
+			continue
+		}
+		seen = true
+		app.draw()
+		app.mu.Lock()
+		doc, block := app.stickyDoc, app.stickyBlock
+		painted := len(app.stickyHeaderRows(want, app.contentWidth()-2))
+		app.mu.Unlock()
+		first := want.row + int32(want.clipTop)
+		if doc != first {
+			t.Fatalf("off %d: a header clipped by %d rows publishes stickyDoc %d, want its first painted row %d",
+				off, want.clipTop, doc, first)
+		}
+		if painted != want.visible {
+			t.Fatalf("off %d: header painted %d rows, want %d", off, painted, want.visible)
+		}
+		if block != want.block {
+			t.Fatalf("off %d: header names block %d, want %d", off, block, want.block)
+		}
+	}
+	if !seen {
+		t.Fatal("no scroll offset pushed the header off — the pushed geometry is untested")
 	}
 }
