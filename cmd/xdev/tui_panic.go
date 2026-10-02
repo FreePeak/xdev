@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"time"
 )
 
 // A panic on a background goroutine is unrecoverable by a recover() in main():
@@ -38,7 +39,7 @@ func goGuarded(f func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				restoreTerminal()
+				restoreTerminal("panic on a background goroutine")
 				fmt.Fprintf(os.Stderr, "xdev: panic on a background goroutine: %v\n%s\n", r, debug.Stack())
 				panic(r)
 			}
@@ -47,11 +48,54 @@ func goGuarded(f func()) {
 	}()
 }
 
-// restoreTerminal puts the tty back the way the shell expects. runTUI arms it
-// with scr.Fini; a panic before the screen exists leaves it nil and there is
-// nothing to restore.
-func restoreTerminal() {
-	if terminalRestore != nil {
-		terminalRestore()
+// restoreGrace bounds the tcell-owned restore. The reason it must be bounded
+// is the 2026-10-02 failure: the UI loop is usually wedged inside the
+// terminal write itself (24 of the dumps under the data dir name
+// tcell's draw → syscall.write), and scr.Fini writes to that same fd under
+// the same screen mutex. An unbounded restore blocks on exactly what it is
+// rescuing the terminal from, so on the signal path the handler never
+// re-raises and the process is left in a raw-mode alt screen with no way out —
+// a suspended terminal, which is what the user reported.
+const restoreGrace = 2 * time.Second
+
+// escapeGrace bounds the fallback's alt-screen write. Same reasoning, one
+// layer down: the terminal that is refusing writes is the one being asked to
+// leave the alt screen, so the settings restore stands on its own and only the
+// cosmetic escape sequences are allowed to fail.
+const escapeGrace = 500 * time.Millisecond
+
+// restoreTerminalBounded puts the tty back through fini, giving it
+// restoreGrace to finish. Two attempts, in order, because either one can be
+// the thing that blocks: scr.Fini normally (it also leaves the alt screen and
+// the mouse reporting the way tcell set them up), then — if that did not
+// return in time — the settings captured before tcell took the tty, restored
+// with an ioctl that cannot block (tui_termstate_unix.go). The second attempt
+// is what makes a wedged terminal usable again; the first is what keeps the
+// normal exit exactly as it was.
+//
+// reason names what was being rescued, for the one stderr line the user can
+// read once the screen is back.
+func restoreTerminalBounded(fini func(), reason string) {
+	if fini == nil {
+		return
 	}
+	restored := make(chan struct{})
+	go func() {
+		defer close(restored)
+		fini()
+	}()
+	select {
+	case <-restored:
+		return
+	case <-time.After(restoreGrace):
+		fmt.Fprintf(os.Stderr,
+			"xdev: terminal restore did not return in %s (%s); restoring the tty without it\n",
+			restoreGrace, reason)
+	}
+	restoreTerminalFallback(reason)
 }
+
+// restoreTerminal is the panic path's name for it: the restore runTUI armed
+// while tcell owns the tty, or nothing at all when the panic arrived before
+// the screen existed.
+func restoreTerminal(reason string) { restoreTerminalBounded(terminalRestore, reason) }

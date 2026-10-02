@@ -46,7 +46,18 @@ func watchTerminalRoutes(fini func()) (stop func()) {
 		for {
 			select {
 			case sig := <-sigs:
-				fini()
+				// Bounded, because fini() can block: the UI loop holds
+				// tcell's screen mutex across the whole flush, so a loop
+				// wedged in a write to a terminal that has stopped draining
+				// holds it too and fini() waits on the very fd it is
+				// rescuing. Unbounded, this handler IS the suspended
+				// terminal: Ctrl-Z arrives, the restore never returns, the
+				// re-raise below never runs, and the process sits in a
+				// raw-mode alt screen with no way out — 2026-10-02, the
+				// herdr pane dead on arrival. Bounded, the worst case is
+				// restoreGrace spent restoring the tty through the settings
+				// captured before tcell took it.
+				restoreTerminalBounded(fini, "signal "+sig.String())
 				if s, ok := sig.(syscall.Signal); ok {
 					// Re-raise after un-notifying, so the process still ends on
 					// the signal it was sent (a stopped/hung-up job) — with a
