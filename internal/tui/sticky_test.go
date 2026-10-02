@@ -220,6 +220,64 @@ func TestStickyHeaderRowResolvesToItsPrompt(t *testing.T) {
 	}
 }
 
+// TestStickyHeaderClickOpensThePinnedMenu pins the headline interaction: a
+// click on a row the header pinned opens THAT prompt's menu — the whole reason
+// the frame publishes the header's geometry. The prompt's own inline rows open
+// it too, so a wrong answer (the block the row index happens to name) is the
+// failure this catches.
+func TestStickyHeaderClickOpensThePinnedMenu(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("pinned prompt line\n", 5))
+	app.AddAssistantBlock(strings.Repeat("prose\n", 40))
+	app.AddUserBlock(strings.Repeat("second prompt line\n", 5))
+	app.draw()
+	app.mu.Lock()
+	app.sm.ScrollUp(1, app.totalLinesLocked(), app.viewportLinesLocked())
+	app.mu.Unlock()
+	app.draw()
+
+	app.mu.Lock()
+	hdr := app.transcriptTop()
+	rows := app.stickyHdr
+	pinned := app.stickyBlock
+	app.mu.Unlock()
+	if rows == 0 || pinned < 0 {
+		t.Fatalf("no sticky header painted (rows %d, block %d)", rows, pinned)
+	}
+
+	// A click on the header's row, then one on a row of the SECOND prompt that
+	// is inline below it — each must arm and open on its own block. Naming the
+	// second prompt's block index is the point: it is the block a header row
+	// must NOT open, and the one an inline row must.
+	var inlineScreenRow = -1
+	for i, sr := range app.selRows {
+		if strings.Contains(sr.text, "second prompt") && inlineScreenRow < 0 {
+			inlineScreenRow = i + hdr
+		}
+	}
+	if inlineScreenRow < 0 {
+		t.Fatal("the second prompt is not on screen to click")
+	}
+	for _, row := range []struct {
+		y    int
+		want int
+	}{{hdr, pinned}, {inlineScreenRow, 2}} {
+		app.mu.Lock()
+		press(app, 5, row.y)
+		armed := app.msgArmed
+		release(app, 5, row.y)
+		block := -1
+		if app.msgm != nil {
+			block = app.msgm.block
+		}
+		app.msgm = nil // dismiss, so the next click is its own
+		app.mu.Unlock()
+		if !armed || block != row.want {
+			t.Fatalf("a click on screen row %d opened block %d (armed=%v), want %d", row.y, block, armed, row.want)
+		}
+	}
+}
+
 // TestStickyHeaderCopiesAsPainted: a drag over the pinned prompt copies the
 // text the header shows — what is painted is what is copied.
 func TestStickyHeaderCopiesAsPainted(t *testing.T) {
@@ -276,5 +334,242 @@ func TestStickyHeaderDragSelectsHeaderAndTranscript(t *testing.T) {
 	}
 	if !strings.Contains(got, "prose") {
 		t.Fatalf("the copy lost the transcript below the header: %q", got)
+	}
+}
+
+// TestStickyHeaderClickOpensThePinnedMenuAfterAPush is the push case, where the
+// header shows a MIDDLE slice of a prompt rather than its top: the click must
+// still name the prompt, and the row's own document row must be the pinned
+// prompt's row the header is actually displaying (stickyDoc), not the viewport's
+// first row. A header that re-rendered its top would open the right menu and
+// copy the wrong text — this is what separates the two.
+func TestStickyHeaderPushResolvesMiddleRows(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("pinned prompt line\n", 6))
+	app.AddAssistantBlock(strings.Repeat("prose\n", 6))
+	app.AddUserBlock(strings.Repeat("second prompt line\n", 6))
+	app.draw()
+
+	// Park the viewport one row above the second prompt: the first is pinned and
+	// collapsing, the second is about to push it off.
+	app.mu.Lock()
+	total, vp := app.totalLinesLocked(), app.viewportLinesLocked()
+	app.sm.ScrollUp(1, total, vp)
+	app.mu.Unlock()
+	app.draw()
+
+	app.mu.Lock()
+	hdr, rows, vis, doc, block := app.transcriptTop(), app.stickyHdr, app.stickyVis, app.stickyDoc, app.stickyBlock
+	app.mu.Unlock()
+	if rows == 0 || block < 0 {
+		t.Fatalf("no sticky header painted (rows %d, block %d)", rows, block)
+	}
+	if vis == 0 {
+		t.Fatal("the header painted no prompt rows")
+	}
+	// The header's document row base is the prompt's own row, offset by the clip
+	// the push has taken: the row the pointer is over is a row of that prompt.
+	app.mu.Lock()
+	c := app.selCornerAt(5, hdr)
+	bi := app.rowIdx.blockAt(int32(c.doc))
+	app.mu.Unlock()
+	if bi != block {
+		t.Fatalf("the header's first row is document row %d (block %d), want a row of the pinned block %d",
+			c.doc, bi, block)
+	}
+	if c.doc != int(doc) {
+		t.Fatalf("the header's first row resolves to document row %d, want the published %d", c.doc, doc)
+	}
+	if got, _ := app.userRowAt(hdr); got != block {
+		t.Fatalf("a click on the header names block %d, want the pinned %d", got, block)
+	}
+}
+
+// TestStickyHeaderSelectionCacheKeysThePinnedRows pins the cache keying: a held
+// drag caches the frame's captured rows under the document rows they DISPLAY, so
+// after the viewport moves, a row the header covered still copies as the text
+// the header showed rather than as whatever scrolled into that slot.
+func TestStickyHeaderSelectionCacheKeysThePinnedRows(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("pinned prompt line\n", 5))
+	app.AddAssistantBlock(strings.Repeat("prose\n", 40))
+	app.draw()
+	app.mu.Lock()
+	app.sm.ScrollUp(10, app.totalLinesLocked(), app.viewportLinesLocked())
+	app.mu.Unlock()
+	app.draw()
+
+	app.mu.Lock()
+	top, _ := app.selViewport()
+	doc, vis := app.stickyDoc, app.stickyVis
+	app.selCache = map[int]selRow{}
+	app.selCacheRows(top)
+	cached := len(app.selCache)
+	hit, ok := app.selCache[int(doc)]
+	vpHit, _ := app.selCache[top]
+	app.mu.Unlock()
+
+	if vis == 0 {
+		t.Fatal("no header painted")
+	}
+	if !ok || !strings.Contains(hit.text, "pinned prompt line") {
+		t.Fatalf("the cache has no row for the header's document row %d (cache %d entries): %+v", doc, cached, hit)
+	}
+	if top != int(doc) && vpHit.text == hit.text {
+		// The viewport's own row at `top` is a different row of the transcript
+		// (the prompt has collapsed past it); sharing the header's key would
+		// mean the two overwrite each other in the cache.
+		t.Fatalf("the header's row and the viewport's first row share the text %q — the cache cannot tell them apart", hit.text)
+	}
+}
+
+// TestStickyInlineRowUnderHeaderKeepsItsOwnDocumentRow is the other half: the
+// header re-renders rows the viewport already had, so it must NOT move them. A
+// row of the stream below the header keeps the document row its screen position
+// has always named — otherwise every hit-test under a pinned header would point
+// one header-height too low, and a click on a reasoning box would open nothing.
+func TestStickyInlineRowUnderHeaderKeepsItsOwnDocumentRow(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("pinned prompt line\n", 5))
+	app.BeginThinking()
+	app.AppendThinking("a thought worth pinning over")
+	app.EndThinking()
+	app.AddAssistantBlock(strings.Repeat("prose\n", 40))
+	app.draw()
+	app.mu.Lock()
+	app.sm.ScrollUp(6, app.totalLinesLocked(), app.viewportLinesLocked())
+	app.mu.Unlock()
+	app.draw()
+
+	app.mu.Lock()
+	hdr, rows := app.transcriptTop(), app.stickyHdr
+	top, _ := app.selViewport()
+	app.mu.Unlock()
+	if rows == 0 {
+		t.Fatal("no sticky header painted")
+	}
+	// Every screen row under the header resolves to the document row its position
+	// names, with no header offset — that is the invariant the hit-tests share.
+	for y := hdr + rows; y < hdr+rows+4 && y < app.height; y++ {
+		app.mu.Lock()
+		c := app.selCornerAt(5, y)
+		want := top + (y - hdr)
+		app.mu.Unlock()
+		if c.doc != want {
+			t.Fatalf("screen row %d under the header names document row %d, want %d", y, c.doc, want)
+		}
+	}
+}
+
+// TestStickyDragAcrossBoundaryCopiesEachRowOnce is the copy contract under a
+// pinned header, in one gesture: press on a header row, drag down through the
+// stream, release. Every covered row must appear exactly once, in transcript
+// order, and the prompt's OWN rows must come first — the header shows them above
+// the answer, so the copy must read that way.
+func TestStickyDragAcrossBoundaryCopiesEachRowOnce(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("HEADPROMPT row\n", 5))
+	app.AddAssistantBlock(strings.Repeat("STREAM row\n", 40))
+	app.draw()
+	app.mu.Lock()
+	app.sm.ScrollUp(10, app.totalLinesLocked(), app.viewportLinesLocked())
+	app.mu.Unlock()
+	app.draw()
+
+	hdr := app.transcriptTop()
+	app.mu.Lock()
+	rows := app.stickyHdr
+	_, vp := app.selViewport()
+	app.mu.Unlock()
+	if rows == 0 {
+		t.Fatal("no sticky header painted")
+	}
+	// The gesture starts on the header's first row and ends on the viewport's
+	// last: the header rows, then everything under it.
+	far := hdr + vp - 1
+	app.mu.Lock()
+	press(app, 3, hdr)
+	dragTo(app, 3, far)
+	release(app, 3, far)
+	app.mu.Unlock()
+
+	got := string(scr.GetClipboardData())
+	lines := strings.Split(got, "\n")
+	var header, stream int
+	headAt, firstStreamAt := -1, -1
+	for i, ln := range lines {
+		switch {
+		case strings.Contains(ln, "HEADPROMPT"):
+			header++
+			if headAt < 0 {
+				headAt = i
+			}
+		case strings.Contains(ln, "STREAM"):
+			stream++
+			if firstStreamAt < 0 {
+				firstStreamAt = i
+			}
+		}
+	}
+	if header == 0 {
+		t.Fatalf("the copy lost the pinned prompt: %q", got)
+	}
+	if stream == 0 {
+		t.Fatalf("the copy lost the stream below it: %q", got)
+	}
+	if headAt > firstStreamAt {
+		t.Fatalf("the pinned prompt's rows must come first (header at %d, stream at %d): %q", headAt, firstStreamAt, got)
+	}
+	// Nothing is copied twice: the header re-renders rows the stream also has,
+	// and a drag across the boundary must not pick up both copies.
+	if header > rows {
+		t.Fatalf("the copy holds %d header rows for a %d-row header: %q", header, rows, got)
+	}
+	t.Logf("copy: %q", got)
+}
+
+// TestStickyHeaderPaintsOnce pins the frame's geometry: the header paints the
+// rows it claims, the stream starts UNDER them, and neither can be off by a row
+// in either direction. The mutation that moves the stream up one row still
+// passed every interaction test — a covered row is simply painted over, and no
+// assertion looked at which row carries which text — so this test looks at the
+// painted screen, which is the only place that difference exists.
+func TestStickyHeaderPaintsOnce(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.AddUserBlock(strings.Repeat("HEADPROMPT row\n", 5))
+	app.AddAssistantBlock(strings.Repeat("STREAM row\n", 40))
+	app.draw()
+	app.mu.Lock()
+	app.sm.ScrollUp(10, app.totalLinesLocked(), app.viewportLinesLocked())
+	app.mu.Unlock()
+	app.draw()
+
+	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
+	hdr := app.transcriptTop()
+	app.mu.Lock()
+	painted, block, vis := app.stickyHdr, app.stickyBlock, app.stickyVis
+	app.mu.Unlock()
+	if block < 0 || painted == 0 {
+		t.Fatalf("no sticky header painted (rows %d, block %d)", painted, block)
+	}
+	// The header's rows are the pinned prompt's, then exactly one blank row.
+	for i := range vis {
+		if !strings.Contains(rows[hdr+i], "HEADPROMPT") {
+			t.Fatalf("header row %d does not show the pinned prompt: %q", i, rows[hdr+i])
+		}
+	}
+	if strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+painted-1]), "█▀▄")) != "" {
+		t.Fatalf("the gap under the header is not blank: %q", rows[hdr+painted-1])
+	}
+	// The row just past the header is the stream, not another copy of the
+	// prompt: a stream that started a row early would be painted over here and
+	// the duplicate would read as content.
+	if !strings.Contains(rows[hdr+painted], "STREAM") {
+		t.Fatalf("the row under the header is not the stream: %q", rows[hdr+painted])
+	}
+	// And the prompt appears exactly once on screen.
+	body := strings.Join(rows[hdr:], "\n")
+	if got := strings.Count(body, "❯ HEADPROMPT"); got != 1 {
+		t.Fatalf("the pinned prompt paints its ❯ band %d times below the top bar", got)
 	}
 }

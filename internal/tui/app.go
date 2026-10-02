@@ -380,19 +380,22 @@ type App struct {
 	selBarTotal int // transcript rows at paint time
 	selBarPos   int // thumb's first half row on the track at paint time
 	selBarEnd   int // thumb's half-row end at paint time (exclusive)
-	// The sticky header's geometry at paint time: stickyHdr is how many rows of
+	// The sticky header's geometry at paint time. stickyHdr is how many rows of
 	// the transcript's top the header owns (its prompt plus the gap under it),
 	// stickyVis how many of those are the prompt's own rows, stickyBlock the
-	// prompt pinned (-1 when none), stickyRow its first document row and
-	// stickyClip how many of its rows the header clipped from the top.
-	// Published every frame with the rest of the geometry: a header row shows
-	// the pinned prompt, not the document row its index names. (UI-thread;
+	// prompt it pinned (-1 when none) and stickyDoc the document row its first
+	// painted row shows.
+	//
+	// Both numbers matter because a header row is NOT the document row its
+	// screen position names: below the header, screen row y is document row
+	// start+(y-top), exactly as it always was, but a header row shows a row of
+	// the pinned prompt, which the viewport has already scrolled past.
+	// Published every frame with the rest of the geometry; (UI-thread;
 	// mu-guarded.)
 	stickyHdr   int
 	stickyVis   int
 	stickyBlock int
-	stickyRow   int32
-	stickyClip  int
+	stickyDoc   int32
 	// toasts is the live notice stack (toast.go): the copy confirmation, a
 	// failed chord, a failed MCP server — everything transient, painted in
 	// the top-right corner and dropped on its own deadline.
@@ -3889,7 +3892,7 @@ func (a *App) thinkBoxAt(y int) int {
 	if y-hdr < a.stickyHdr && a.stickyBlock >= 0 {
 		return -1
 	}
-	bi := a.rowIdx.blockAt(int32(top + y - hdr - a.stickyHdr))
+	bi := a.rowIdx.blockAt(int32(top + y - hdr))
 	if bi < 0 || a.blocks[bi].Kind != KindThinking {
 		return -1
 	}
@@ -4144,7 +4147,7 @@ func (a *App) paint() {
 	s.Clear()
 	// Per-frame facts about the viewport: a frame that draws no transcript
 	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
-	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyRow, a.stickyClip = 0, 0, -1, 0, 0
+	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyDoc = 0, 0, -1, 0
 	// The pills' hit table is a per-frame fact for the same reason the
 	// scrollbar's is: a frame that drops a pill for width must not leave
 	// last frame's rectangle live, or a click would open a popup for a
@@ -4229,20 +4232,21 @@ func (a *App) paint() {
 		bandLim = edge - 1
 	}
 	// The sticky header (grok scrollback/sticky.rs): the prompt the viewport has
-	// scrolled past pins at the top of the transcript and the scrollback resumes
-	// under it. The header OWNS the rows it hides, so the transcript paints
-	// [start+rows, end) — one row of scroll still moves the viewport's bottom
-	// line by exactly one row.
+	// scrolled past pins at the top of the transcript, IN FRONT of the rows it
+	// re-renders — it replaces the viewport's first rows rather than pushing
+	// the stream down. One thing follows from that, and it is the reason the
+	// header is cheap: the document row a screen row shows does NOT move. Below
+	// the header, screen row y is still document row start+(y-top), so every
+	// hit-test and the selRows capture below keep their arithmetic untouched;
+	// only the header's OWN rows resolve elsewhere, and they are published
+	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
 	gapRow := sticky.rows - len(header) // 1 while pinned, 0 while being pushed off
-	// One paint list — the pinned prompt's rows, the gap it leaves, then the
-	// transcript's. Both kinds are rowViews, so the loop below paints them the
-	// same way, and the screen keeps its one invariant: screen row top+y is
-	// document row start+y, header included. That is what leaves every hit-test
-	// below (selCornerAt, userRowAt, thinkBoxAt) and the selRows capture
-	// untouched — a header row simply reads the document row it displays.
-	view := make([]rowView, 0, sticky.rows+end-start)
+	// The header rows first (they overwrite the viewport's own first rows),
+	// then the stream from the row the header ends at. Both are rowViews, so
+	// the paint loop below cannot tell them apart.
+	view := make([]rowView, 0, max(len(header)+gapRow, end-start))
 	view = append(view, header...)
 	for range gapRow {
 		view = append(view, rowView{})
@@ -4370,14 +4374,16 @@ func (a *App) paint() {
 		a.selBarX = edge - 1
 	}
 	a.selRows, a.selTop, a.linkHits = selRows, start, linkHits
-	// The sticky header's geometry, published like the scrollbar's: the screen
-	// row under a pointer is NOT the document row it shows while it is on the
-	// header, so the hit-tests below must consult this instead of re-deriving
-	// it. A header row belongs to the pinned prompt — a click there opens that
-	// prompt's menu, as it would inline — and to no reasoning box.
+	// The sticky header's geometry, published like the scrollbar's. Only the
+	// header's OWN rows are a special case (a corner on one takes the pinned
+	// prompt's rows); every row below it keeps the viewport's own mapping,
+	// because the header re-renders rows the viewport already owned.
 	a.stickyHdr, a.stickyVis, a.stickyBlock = sticky.rows, len(header), sticky.block
+	a.stickyDoc = 0
 	if sticky.block >= 0 {
-		a.stickyRow, a.stickyClip = sticky.row, sticky.clipTop
+		// The header's first painted row IS the prompt's row clipTop, so this is
+		// the document row every hit-test reads instead of re-deriving it.
+		a.stickyDoc = sticky.row + int32(sticky.clipTop)
 	}
 	if a.selDown {
 		a.selCacheRows(start) // keep the text a held drag has already passed

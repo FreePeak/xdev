@@ -148,12 +148,12 @@ func (a *App) userRowAt(y int) (ord, block int) {
 	}
 	bi := -1
 	switch dy := y - hdr; {
-	case dy < a.stickyVis:
+	case dy < a.stickyVis && a.stickyBlock >= 0:
 		bi = a.stickyBlock // a row of the pinned prompt
 	case dy < a.stickyHdr:
 		bi = -1 // the blank gap under it: nothing to hit
 	default:
-		bi = a.rowIdx.blockAt(int32(top + dy - a.stickyHdr))
+		bi = a.rowIdx.blockAt(int32(top + dy))
 	}
 	if bi < 0 || bi >= len(a.blocks) || a.blocks[bi].Kind != KindUser {
 		return -1, -1
