@@ -198,3 +198,34 @@ func TestTabsetEvictsIdleWhenFull(t *testing.T) {
 		t.Fatalf("expected errTooManyTabs, got %v", err)
 	}
 }
+
+// TestTabsetFocusByID: the /tabs row path. focus names the session instead
+// of stepping to a neighbour, clears that tab's badge the way activate does,
+// and is a no-op for an id that is not open (a session can be dropped while
+// the picker is up).
+func TestTabsetFocusByID(t *testing.T) {
+	a, b, c := memStore(t), memStore(t), memStore(t)
+	ts := newTabset(a)
+	if _, err := ts.open(b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.open(c); err != nil {
+		t.Fatal(err)
+	}
+	ts.note(c.ID())
+	if got := ts.focus(c.ID()); got == nil || got.store != c {
+		t.Fatalf("focus c: %+v", got)
+	}
+	if ts.store() != c {
+		t.Fatal("focus did not make c current")
+	}
+	if _, _, unread := ts.summary(); unread != 0 {
+		t.Fatalf("focused tab kept its badge: unread = %d, want 0", unread)
+	}
+	if got := ts.focus(a.ID()); got == nil || got.store != a {
+		t.Fatalf("focus a: %+v", got)
+	}
+	if got := ts.focus("nope"); got != nil {
+		t.Fatalf("focus of an unopened id = %+v, want nil", got)
+	}
+}
