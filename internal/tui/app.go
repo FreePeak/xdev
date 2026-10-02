@@ -153,6 +153,7 @@ type App struct {
 	st             Status
 	tabs           []TabInfo // open sessions (cmd owns the set; App paints)
 	onTabCycle     func(dir int, onlyUnread bool)
+	onTabPick      func(id string) error // /tabs row: focus that open session
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
 	// BeginMessage (one EventStart) discards one a dead turn left open, so
@@ -1452,6 +1453,10 @@ func (a *App) SetTabCycle(fn func(dir int, onlyUnread bool)) {
 	a.onTabCycle = fn
 }
 
+// SetTabPick wires what Enter on a /tabs row does. nil degrades /tabs to
+// a notice.
+func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
+
 // SetSessionID updates the status-row / dock identity after a switch.
 func (a *App) SetSessionID(id string) {
 	a.mu.Lock()
@@ -1898,6 +1903,63 @@ func (a *App) planShow() error {
 	}
 	a.AddSystemBlock(text)
 	return nil
+}
+
+// TabsPicker implements CommandAPI /tabs: the open-session set as a modal
+// list, so a session can be found by its title instead of cycled blind
+// (opencode's session list). It reads the snapshot SetTabs already
+// publishes — the status row's own data — so there is no second source of
+// truth to keep in step, and Enter hands the chosen id back to cmd, which
+// focuses the tab.
+func (a *App) TabsPicker() error {
+	if a.onTabPick == nil {
+		return fmt.Errorf("session tabs are not wired in this build")
+	}
+	a.mu.Lock()
+	tabs := append([]TabInfo(nil), a.tabs...)
+	a.mu.Unlock()
+	if len(tabs) == 0 {
+		a.AddSystemBlock("no sessions open")
+		return nil
+	}
+	items := make([]PickerItem, 0, len(tabs))
+	for _, t := range tabs {
+		items = append(items, PickerItem{
+			Label:   tabLabel(t),
+			Detail:  shortID(t.ID),
+			Value:   t.ID,
+			Current: t.Current,
+		})
+	}
+	pick := a.onTabPick
+	a.OpenPicker(PickerOptions{
+		Title: "open sessions",
+		Views: []PickerView{{Name: "open", Items: items, Action: "switch"}},
+		OnSelect: func(id string) {
+			if err := pick(id); err != nil {
+				a.AddSystemBlock("error: " + err.Error())
+			}
+		},
+	})
+	return nil
+}
+
+// tabLabel names one open session: its title, or the short id when the
+// title is still the mechanical one. Running and unread ride the label, so
+// the row itself says what is running where — the whole reason this list
+// exists instead of the status row's "2 tabs" count.
+func tabLabel(t TabInfo) string {
+	label := t.Title
+	if strings.TrimSpace(label) == "" {
+		label = shortID(t.ID)
+	}
+	if t.Running {
+		return "✦ " + label + " ·running"
+	}
+	if t.Unread {
+		return "✦ " + label
+	}
+	return label
 }
 
 // ResumeSession implements CommandAPI /resume. With no argument it opens the

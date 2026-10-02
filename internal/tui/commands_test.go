@@ -13,11 +13,11 @@ import (
 
 // fakeAPI records CommandAPI calls for dispatch tests.
 type fakeAPI struct {
-	newed, freshed, cleared, dropped, quit int
-	blocks                                 []string
-	sent                                   []string
-	dir                                    string
-	fail                                   string // method name that returns an error
+	newed, freshed, cleared, dropped, quit, tabsOpened int
+	blocks                                             []string
+	sent                                               []string
+	dir                                                string
+	fail                                               string // method name that returns an error
 
 	extCalls []string
 	extErr   error
@@ -612,6 +612,7 @@ func (f *fakeAPI) ShareSession() error {
 	return f.shareErr
 }
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
+func (f *fakeAPI) TabsPicker() error                { f.tabsOpened++; return nil }
 
 func (f *fakeAPI) SettingsView(args string) error { return nil }
 func (f *fakeAPI) SettingsOverlay() error         { return nil }
@@ -983,5 +984,17 @@ func TestConnectCommandUnwired(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	if err := app.Connect(""); err == nil {
 		t.Fatal("/connect with no catalog wired must error")
+	}
+}
+
+// TestDispatchTabs: /tabs reaches the App method, not just the registry —
+// a command table entry whose handler never runs is a dead row in /help.
+func TestDispatchTabs(t *testing.T) {
+	f := &fakeAPI{}
+	if !dispatch(f, "/tabs") {
+		t.Fatal("/tabs was not consumed")
+	}
+	if f.tabsOpened != 1 {
+		t.Fatalf("tabsOpened = %d, want 1", f.tabsOpened)
 	}
 }

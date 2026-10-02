@@ -337,12 +337,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetStallDumpDir(filepath.Join(config.DataDir(), "dumps"))
 	// The last resort for a UI loop that never comes back: restore the
 	// terminal and end the session, because nothing inside the process can
-	// (the quit chord is applied by the loop, which is what is stuck). Ten
-	// minutes is far past every measured stall — the longest frozen write
-	// xdev has recorded is 17m, and every one of them ended with a kill from
-	// outside — and long enough that a loop which recovers on its own is
-	// never taken away. Same restore as the signal and panic guards.
-	app.SetStallExitAfter(10 * time.Minute)
+	// (the quit chord is applied by the loop, which is what is stuck). Ninety
+	// seconds, not minutes: the stalls this exists for are the process
+	// getting no CPU, and the one thing a starved process cannot do is wait
+	// patiently — every extra second is a second the user spends killing the
+	// pane from outside. Long enough that a loop recovering on its own (a
+	// paste the user still holds, a burst of output) is never taken away.
+	// Same restore as the signal and panic guards.
+	app.SetStallExitAfter(90 * time.Second)
 	app.SetStallRestore(scr.Fini)
 	// MCP servers (optional; absent config = nothing happens). Attached once
 	// the app exists, because a failed server is a startup fact the user has
@@ -796,6 +798,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			label = t.title
 		}
 		app.AddSystemBlock("· session " + label)
+	}
+
+	// focusTabByID is the /tabs row path: Enter names the session to switch
+	// to, so the cycle's dir/onlyUnread arguments have no meaning here.
+	focusTabByID := func(id string) error {
+		t := tabs.focus(id)
+		if t == nil {
+			return fmt.Errorf("that session is no longer open")
+		}
+		sessMu.Lock()
+		focusTab(t)
+		sessMu.Unlock()
+		label := t.title
+		if label == "" {
+			label = shortSessionID(t.id)
+		}
+		app.AddSystemBlock("· session " + label)
+		return nil
 	}
 
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
@@ -2578,6 +2598,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// to the next unread one. Wired through the keybinding table so
 	// keybindings.yml can move them.
 	app.SetTabCycle(func(dir int, onlyUnread bool) { cycleTab(dir, onlyUnread) })
+	app.SetTabPick(focusTabByID)
 	app.SetTabs(tabInfos(tabs))
 	app.SetVision(func() bool {
 		modelMu.Lock()
