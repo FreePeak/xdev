@@ -60,3 +60,48 @@ func TestRunOneToolRepairsLiveFailureShapes(t *testing.T) {
 		t.Fatalf("tool received %s", got)
 	}
 }
+
+// echoInterceptor is what the real harness wires: hooks.Bus.ToolCall returns
+// call.Arguments unchanged when no hook revises, and ext.Manager.ToolCall
+// returns the same bytes when no extension is subscribed. The chain then
+// hands those bytes back as the "revised" payload.
+type echoInterceptor struct{}
+
+func (echoInterceptor) ToolCall(_ context.Context, call ai.ToolCallBlock) (json.RawMessage, error) {
+	return call.Arguments, nil
+}
+func (echoInterceptor) ToolResult(_ context.Context, _ ai.ToolCallBlock, r json.RawMessage, _ bool) json.RawMessage {
+	return r
+}
+func (echoInterceptor) Emit(context.Context, string, any) {}
+
+// TestRunOneToolCoercesPastAnEchoingInterceptor is the pin for the real wired
+// path. The repair happens, but every interceptor echoes call.Arguments back,
+// so unless the repaired bytes also land on the call block the tool still
+// receives the shape the model sent — which is exactly what happened in the
+// field: the coercion ran, reported changed=true, and the hub tool refused
+// the call anyway.
+func TestRunOneToolCoercesPastAnEchoingInterceptor(t *testing.T) {
+	var got json.RawMessage
+	reg := tool.NewRegistry()
+	reg.Register(waitSpy{got: &got})
+	a := &Agent{Tools: reg, Hooks: &hookLog{}, Model: "m", Intercept: echoInterceptor{}}
+
+	msg := a.runOneTool(context.Background(), ai.ToolCallBlock{
+		Name:      "hub",
+		Arguments: json.RawMessage(`{"op":"wait","ids":{"item":["hub-1","hub-2"]},"timeout":"600"}`),
+	})
+	if msg.IsError {
+		t.Fatalf("live failure shape still refused: %s", msg.Text())
+	}
+	var back struct {
+		IDs     []string `json:"ids"`
+		Timeout float64  `json:"timeout"`
+	}
+	if err := json.Unmarshal(got, &back); err != nil {
+		t.Fatalf("tool received undecodable args %s: %v", got, err)
+	}
+	if len(back.IDs) != 2 || back.IDs[1] != "hub-2" || back.Timeout != 600 {
+		t.Fatalf("tool received %s", got)
+	}
+}
