@@ -35,6 +35,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -50,6 +51,12 @@ type queuedEntry struct {
 	// kind is "text" (the default), "shell" for "!<cmd>" and "command" for
 	// "/<cmd>" — the two prefixes that mean something other than a prompt.
 	kind string
+	// session is the session that OWNS the entry (#157). The App is one
+	// transcript with several open sessions behind it, so an unowned row could
+	// be painted over a session that never typed it, taken back into the wrong
+	// composer, retired by another session's steering drain, or flushed by
+	// another session's run ending. Every read and write filters on this.
+	session string
 	// seq is the append order, used to keep the list stable if a future
 	// policy ever needs it. Ordering is positional today; the field exists so
 	// the invariant is testable rather than implied.
@@ -80,15 +87,15 @@ func queueLabel(text string) string {
 	}
 }
 
-// appendQueued adds an entry and returns the index it landed at. Caller holds
-// a.mu.
-func (a *App) appendQueued(text string) int {
+// appendQueued adds an entry owned by session sid and returns the index it
+// landed at. Caller holds a.mu.
+func (a *App) appendQueued(text, sid string) int {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return -1
 	}
 	a.queueSeq++
-	a.queue = append(a.queue, queuedEntry{text: text, kind: queueLabel(text), seq: a.queueSeq})
+	a.queue = append(a.queue, queuedEntry{text: text, kind: queueLabel(text), session: sid, seq: a.queueSeq})
 	return len(a.queue) - 1
 }
 
@@ -107,26 +114,26 @@ func (a *App) takeQueued(i int) (queuedEntry, bool) {
 // run-end flush uses it when the turn slot turned out to be taken: the entry
 // must not silently vanish between "the run ended" and "we tried to start the
 // next turn".
-func (a *App) QueueAgain(text string) {
+func (a *App) QueueAgain(text, sid string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
-	a.queue = append([]queuedEntry{{text: text, kind: queueLabel(text), seq: -1}}, a.queue...)
+	a.queue = append([]queuedEntry{{text: text, kind: queueLabel(text), session: sid, seq: -1}}, a.queue...)
 }
 
-// DropQueued removes the pending entry with this text, oldest match first, and
-// reports whether one went. The send-now path calls it once the HOST has
-// really taken the message: a row that survived the interrupt would be
-// delivered twice — once as the interrupted turn's replacement prompt, and
-// again by the queue's run-end flush when that turn ends. Not removing it is
-// the difference between "delivered now" and "delivered now and again".
-func (a *App) DropQueued(text string) bool {
+// DropQueued removes the pending entry with this text from session sid, oldest
+// match first, and reports whether one went. The send-now path calls it once
+// the HOST has really taken the message: a row that survived the interrupt
+// would be delivered twice — once as the interrupted turn's replacement prompt,
+// and again by the queue's run-end flush when that turn ends. Not removing it
+// is the difference between "delivered now" and "delivered now and again".
+func (a *App) DropQueued(sid, text string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.removeQueuedByTextLocked(text)
+	return a.removeQueuedByTextLocked(sid, text)
 }
 
 // queuePrompt records a pending submit and hands the text to the host's
@@ -139,7 +146,8 @@ func (a *App) DropQueued(text string) bool {
 // Caller: UI thread, outside a.mu.
 func (a *App) queuePrompt(text string) bool {
 	a.mu.Lock()
-	idx := a.appendQueued(text)
+	sid := a.st.SessionID
+	idx := a.appendQueued(text, sid)
 	a.mu.Unlock()
 	if idx < 0 {
 		return false
@@ -148,7 +156,7 @@ func (a *App) queuePrompt(text string) bool {
 		return true
 	}
 	a.mu.Lock()
-	a.takeQueued(idx)
+	a.removeQueuedByTextLocked(sid, text)
 	a.mu.Unlock()
 	return false
 }
@@ -160,65 +168,108 @@ func (a *App) queuePrompt(text string) bool {
 func (a *App) oldestQueued() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.queue) == 0 {
-		return ""
+	for _, e := range a.queueForLocked(a.st.SessionID) {
+		return e.text
 	}
-	return a.queue[0].text
+	return ""
 }
 
-// RetireDelivered drops the pending rows for texts the agent just injected
-// into its conversation, oldest match first. The loop's steering drain is the
-// delivery point (#157), so the host calls this from there and a queued row
-// disappears exactly when its message became part of the conversation — not
-// when the steer call returned, which only proves the text reached a channel.
+// queueForLocked is one session's pending entries in delivery order. Caller
+// holds a.mu. The App is one transcript over many open sessions, so every read
+// of the queue is a read of ONE session's rows — never the whole list.
+func (a *App) queueForLocked(sid string) []queuedEntry {
+	if sid == "" {
+		return nil
+	}
+	out := make([]queuedEntry, 0, len(a.queue))
+	for _, e := range a.queue {
+		if e.session == sid {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// RetireDelivered turns the pending rows for texts the agent just injected
+// into session sid's conversation into ordinary transcript rows. The loop's
+// steering drain is the delivery point (#157), so the host calls this from
+// there and a queued row becomes a ❯ row exactly when its message became part
+// of the conversation — not when the steer call returned, which only proves
+// the text reached a channel.
+//
+// The transcript row and the turn count are the point. A delivered prompt
+// whose row simply vanished was a prompt the person could not see the model
+// had, and one run that swallowed three of them counted a single turn. Each
+// matched row is one accepted user turn, counted as it is delivered.
+//
+// It is pinned to one session: two sessions drain steering at the same moment,
+// and each must only ever retire its own rows.
 //
 // Matching is by value, oldest first, on purpose: a person who typed the same
 // sentence twice has two entries and two deliveries, and retiring the newest
 // one would leave the oldest row looking pending while the message behind it
-// is already in the transcript. A text that is not in the queue is ignored, so
-// a steering message from an extension or the mailbox — which never had a row
-// — is a no-op rather than a corruption.
+// is already in the transcript. A text that is not in THIS session's queue is
+// ignored, so a steering message from an extension or the mailbox — which never
+// had a row — is a no-op rather than a corruption.
 //
 // Caller: the agent goroutine, so the lock is taken here.
-func (a *App) RetireDelivered(texts []string) {
+func (a *App) RetireDelivered(sid string, texts []string) {
 	a.mu.Lock()
+	delivered := 0
 	for _, t := range texts {
-		a.removeQueuedByTextLocked(t)
+		if !a.removeQueuedByTextLocked(sid, t) {
+			continue // never had a row: not something the person typed
+		}
+		delivered++
+		a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: t, Ts: time.Now()})
 	}
-	n := len(a.queue)
+	if delivered > 0 {
+		// Each delivered row is one accepted user turn. The count used to
+		// move once per finished run, so three prompts steered into a single
+		// run read as one turn (#157).
+		a.st.Turns += delivered
+		a.sm.Bottom()
+	}
+	// The painted list is the current session's; a parked session's queue
+	// stays invisible exactly like its transcript.
+	n := len(a.queueForLocked(a.st.SessionID))
 	a.mu.Unlock()
-	if n > 0 {
+	if n > 0 || delivered > 0 {
 		a.poke()
 	}
 }
 
-// TakeOldestQueued removes and returns the first pending entry's text, or ""
-// when the queue is empty. This is the queue's own delivery order: the message
-// that has been waiting longest goes first and the rest keep their place.
+// TakeOldestQueued removes and returns session sid's first pending entry's
+// text, or "" when it has none. This is the queue's own delivery order: the
+// message that has been waiting longest goes first and the rest keep their
+// place. It is keyed by session so one run's flush can never pick up another's
+// row.
 //
 // The host's run-end flush uses it for a row that was never delivered — a
 // prompt typed just as the run ended, or one the turn could not steer. A row
 // that survived the run is a message the model never saw, so the honest
 // outcome is to run it, not to leave it pending forever.
-func (a *App) TakeOldestQueued() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if len(a.queue) == 0 {
-		return ""
-	}
-	text := a.queue[0].text
-	a.queue = a.queue[1:]
-	return text
-}
-
-// TakeQueued removes and returns the OLDEST pending entry with this text. It
-// is the named form of TakeOldestQueued: a host flushing a specific entry (an
-// extension retry, a hook) wants that one, not the head of the queue.
-func (a *App) TakeQueued(text string) (string, bool) {
+func (a *App) TakeOldestQueued(sid string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i, e := range a.queue {
-		if e.text == text {
+		if e.session == sid {
+			a.queue = append(a.queue[:i], a.queue[i+1:]...)
+			return e.text
+		}
+	}
+	return ""
+}
+
+// TakeQueued removes and returns the OLDEST pending entry with this text in
+// session sid. It is the named form of TakeOldestQueued: a host flushing a
+// specific entry (an extension retry, a hook) wants that one, not the head of
+// the queue.
+func (a *App) TakeQueued(sid, text string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, e := range a.queue {
+		if e.session == sid && e.text == text {
 			a.queue = append(a.queue[:i], a.queue[i+1:]...)
 			return e.text, true
 		}
@@ -226,35 +277,34 @@ func (a *App) TakeQueued(text string) (string, bool) {
 	return "", false
 }
 
-// QueuedCount reports how many entries are pending.
+// QueuedCount reports how many entries the session on screen has pending.
 func (a *App) QueuedCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return len(a.queue)
+	return len(a.queueForLocked(a.st.SessionID))
 }
 
-// PendingTexts returns the pending entries in delivery order, oldest first.
-// Exported for tests and for a host that reports the queue on quit.
+// PendingTexts returns the session on screen's pending entries in delivery
+// order, oldest first. Exported for tests and for a host that reports the
+// queue on quit.
 func (a *App) PendingTexts() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := make([]string, 0, len(a.queue))
-	for _, e := range a.queue {
+	out := []string{}
+	for _, e := range a.queueForLocked(a.st.SessionID) {
 		out = append(out, e.text)
 	}
 	return out
 }
 
-// removeQueuedByText drops the oldest entry whose text matches and reports
-// whether one went. The take-back path is text-keyed rather than index-keyed
-// because the click that triggered it is a screen coordinate, and the queue may
-// have grown between the frame that published the hit table and the click
-// itself.
-func (a *App) removeQueuedByText(text string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// removeQueuedByTextLocked drops the oldest entry of session sid whose text
+// matches and reports whether one went. The take-back path is text-keyed
+// rather than index-keyed because the click that triggered it is a screen
+// coordinate, and the queue may have grown between the frame that published the
+// hit table and the click itself. Caller holds a.mu.
+func (a *App) removeQueuedByTextLocked(sid, text string) bool {
 	for i, e := range a.queue {
-		if e.text == text {
+		if e.session == sid && e.text == text {
 			a.queue = append(a.queue[:i], a.queue[i+1:]...)
 			return true
 		}
@@ -262,21 +312,10 @@ func (a *App) removeQueuedByText(text string) bool {
 	return false
 }
 
-// flushQueued drops every pending entry and returns them in order. Used by the
-// send-now path when a run is interrupted: the queue's whole point is that
-// nothing is lost, and a flush that kept the entries would re-deliver them
-// into the next turn as ghosts.
-func (a *App) flushQueued() []queuedEntry {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := a.queue
-	a.queue = nil
-	return out
-}
-
-// queueRows is the number of rows the list occupies on screen, 0 when empty.
+// queueRows is the number of rows the session on screen's list occupies, 0
+// when it is empty.
 func (a *App) queueRows() int {
-	n := len(a.queue)
+	n := len(a.queueForLocked(a.st.SessionID))
 	if n > queueRowMax {
 		n = queueRowMax
 	}
@@ -315,7 +354,8 @@ func queueRowText(s string) string {
 // Caller holds a.mu.
 func (a *App) drawQueue(composerTop int) {
 	a.queueHits = nil // no list, nothing to hit
-	if len(a.queue) == 0 {
+	shown := a.queueForLocked(a.st.SessionID)
+	if len(shown) == 0 {
 		return
 	}
 	s := a.scr
@@ -325,7 +365,7 @@ func (a *App) drawQueue(composerTop int) {
 	if y0 <= 0 || w < 20 {
 		return
 	}
-	hidden := len(a.queue) - rows
+	hidden := len(shown) - rows
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	textSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	mark := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
@@ -333,7 +373,7 @@ func (a *App) drawQueue(composerTop int) {
 		y := y0 + i
 		// Row i shows entry (hidden+i): the OLDEST first, so the list reads in
 		// delivery order rather than in reverse.
-		e := a.queue[hidden+i]
+		e := shown[hidden+i]
 		ord := fmt.Sprintf("%d", hidden+i+1)
 		drawText(s, 1, y, ord, dim)
 		drawText(s, 3, y, queueKindMark(e.kind), mark)
@@ -361,6 +401,7 @@ func (a *App) drawQueue(composerTop int) {
 			s.SetContent(x, y, ' ', nil, textSt)
 		}
 		a.queueHits = append(a.queueHits, queueHit{
+			sid:  a.st.SessionID,
 			text: e.text,
 			row:  panelRect{x: 1, y: y, w: w - 1, h: 1},
 			btn:  panelRect{x: bx, y: y, w: width(btn), h: 1},
@@ -390,9 +431,11 @@ func queueKindMark(kind string) string {
 // the docs agree on what the user is being offered.
 const sendNowLabel = "send now"
 
-// queueHit is one painted row: the text (the key, since a click is a screen
-// coordinate and the list may have changed) and the two rects.
+// queueHit is one painted row: the session that owns it (so a click taken after
+// a tab switch still names the right conversation), the text (the key, since a
+// click is a screen coordinate and the list may have changed) and the two rects.
 type queueHit struct {
+	sid  string
 	text string
 	row  panelRect
 	btn  panelRect
@@ -422,7 +465,7 @@ func (a *App) handleQueueMouse(x, y int, press bool) bool {
 		}
 		if h.btn.contains(x, y) {
 			if press {
-				a.queueFire = a.buildQueueSendNow(h.text)
+				a.queueFire = a.buildQueueSendNow(h.sid, h.text)
 			}
 			return true
 		}
@@ -431,7 +474,7 @@ func (a *App) handleQueueMouse(x, y int, press bool) bool {
 		// under the lock beyond the editor write.
 		if press {
 			a.ed.SetBuffer(h.text)
-			if a.removeQueuedByTextLocked(h.text) {
+			if a.removeQueuedByTextLocked(h.sid, h.text) {
 				a.poke()
 			}
 		}
@@ -440,28 +483,16 @@ func (a *App) handleQueueMouse(x, y int, press bool) bool {
 	return false
 }
 
-// removeQueuedByTextLocked is removeQueuedByText for callers already holding
-// a.mu. Both exist because half the callers (the click path) are under the
-// lock and half (a host flush) are not, and taking the lock twice on the same
-// goroutine is the deadlock this seam avoids.
-func (a *App) removeQueuedByTextLocked(text string) bool {
-	for i, e := range a.queue {
-		if e.text == text {
-			a.queue = append(a.queue[:i], a.queue[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
 // buildQueueSendNow returns the closure a click on the send-now button runs,
 // or nil when the host wired no immediate-delivery path (a headless build, a
-// test): an unwired button must do nothing rather than pretend to deliver.
-func (a *App) buildQueueSendNow(text string) func() {
+// test): an unwired button must do nothing rather than pretend to deliver. The
+// row's OWNING session rides into the callback, so the host delivers the
+// message to the session that queued it even if the screen has moved on.
+func (a *App) buildQueueSendNow(sid, text string) func() {
 	if a.onSendNow == nil {
 		return nil
 	}
-	return func() { a.onSendNow(text) }
+	return func() { a.onSendNow(sid, text) }
 }
 
 // queueMouse is handleQueueMouse's caller: it takes the lock the row geometry
