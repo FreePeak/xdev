@@ -830,8 +830,7 @@ dispositioned).
   `maxDepth = 2` (`internal/agent/task.go:231`) with nothing durable behind it; **#191** already owns
   the machine-readable cap refusal, so **#271** is only the id + the durable depth.
 
-- OpenCode does **not** rely on the provider's overflow error alone: it checks `isOverflow` against the *previous* turn's reported usage before building the request (`packages/opencode/src/session/prompt.ts:1164`) and again on live usage mid-stream (`packages/opencode/src/session/processor.ts:493`). But its proactive estimator is `Token.estimate(JSON.stringify(msgs))` (`packages/opencode/src/session/compaction.ts:220`) — a serialize-and-guess over the message array, i.e. precisely the number **#116** says not to trust. Both harnesses converge on the same correction; measure-the-body beats neither trigger.
-- Compaction-as-error-path vs. §5.2's over-refuse guardrail — OpenCode never summarizes *proactively* and relies on the provider's overflow error to trigger it. Cheaper, and it risks a whole failed request; needs a measured comparison before it can be considered for **#137**'s trigger table.
+- **OpenCode's compaction is proactive, and the next bullet's premise was wrong.** v2 (source re-read 2026-10-03, `cd9a14a`) decides *before* building the request: `SessionCompaction.required()` (`packages/core/src/session/compaction.ts:744-763`) is consulted at the top of every logical step (`packages/core/src/session/runner/llm.ts:220-225`) and compacts when the estimate reaches a ceiling that subtracts both a 20 000-token buffer and the completion allowance. The overflow path is not the trigger; it is a one-shot *recovery* that re-reads durable history rather than resubmitting the window that just failed (`llm.ts:265-272` → `compaction.ts:737-740`), bounded to one per step. So "rely on the provider's overflow error" describes v1, and `prompt.ts:1164` / `processor.ts:493` cited for it no longer exist in the tree. Two portable pieces ride along: the ceiling arithmetic (xdev's `threshold()` subtracts the reserve but never the model's `MaxTokens` — `internal/agent/compact.go:119-124`) and the free pre-summarize truncation of tool output to 2 000 chars (`compaction.ts:258-270`), which is the tier Claude Code calls microcompact and dsh ships as a pruner. Full re-read: [research/opencode-internals.md §7](research/opencode-internals.md).
 - dsh's `every_seconds >= 300` floor, latest-due collapse, and fixed-rate anchoring vs **#162**'s design — the collapse rule (a sleeping machine fires once, not N times) is portable; the "no cron grammar in v1" decision is not, because xdev's `#125` cron parser already exists.
 - dsh's `reported` flag (a completion notice suppressed once another reporter has committed to deliver it) vs **#244**'s completion-notify path — this is the dedupe xdev needs before a second notifier lands, not after.
 
@@ -932,7 +931,7 @@ real consumer and evidence from a running xdev interaction.
 - [docs/reference/extension-protocol.md](reference/extension-protocol.md) — the extension subprocess protocol: discovery, hello/capabilities handshake, frames, events, fail-closed policy semantics, runtime actions, and a runnable policy-hook example.
 - [docs/research/parity-pi-internals.md](research/parity-pi-internals.md) — pi v0.85 primary-source: 8 built-ins with verbatim TypeBox schemas, measured ~460–510-token prompt, two-layer retry, MCP via proxy-tool pattern only.
 - [docs/research/claude-code-internals.md](research/claude-code-internals.md) — Claude Code: session-rename flow (custom/ai-title cascade), inter-session communication (SendMessage/mailbox/InboxPoller/teammate frames), 19-tool inventory, hooks taxonomy.
-- [docs/research/opencode-internals.md](research/opencode-internals.md) — opencode v1.18.28: 14 tools, string-replace edit with 9-strategy fuzzy recovery, SQLite parts storage, first-class plan mode, last-match-wins permissions.
+- [docs/research/opencode-internals.md](research/opencode-internals.md) — opencode v1.18.28: 14 tools, string-replace edit with 9-strategy fuzzy recovery, SQLite parts storage, first-class plan mode, last-match-wins permissions. §7 re-read against the v2 source (`cd9a14a`, 2026-10-03): proactive threshold at the top of every step, `keep.tokens` tail, pre-summarize tool-output truncation, checkpoint template with required headings, provider-native compaction, one-shot overflow recovery from durable history.
 - [docs/research/hermes-internals.md](research/hermes-internals.md) — Hermes Agent (Nous Research): 45+ tools, 61,810-char three-tier prompt cache, 8-stage error classifier, fork-on-compression lineage, tool_search progressive disclosure.
 - [docs/research/omp-todos-internals.md](research/omp-todos-internals.md) — omp todo deep dive: 9-op contract, 5-status engine, transcript persistence, TodoTracker reminders, `/todo` markdown round-trip; the M3/M10 todo port spec.
 - [docs/research/omp-context-resilience.md](research/omp-context-resilience.md) — omp model switching, buildContext/compaction method ladder, API-error taxonomy + failure-mode matrix, resume guarantees; the M5/M9/M10 resilience spec.
@@ -1826,8 +1825,7 @@ dispositioned).
   `maxDepth = 2` (`internal/agent/task.go:231`) with nothing durable behind it; **#191** already owns
   the machine-readable cap refusal, so **#271** is only the id + the durable depth.
 
-- OpenCode does **not** rely on the provider's overflow error alone: it checks `isOverflow` against the *previous* turn's reported usage before building the request (`packages/opencode/src/session/prompt.ts:1164`) and again on live usage mid-stream (`packages/opencode/src/session/processor.ts:493`). But its proactive estimator is `Token.estimate(JSON.stringify(msgs))` (`packages/opencode/src/session/compaction.ts:220`) — a serialize-and-guess over the message array, i.e. precisely the number **#116** says not to trust. Both harnesses converge on the same correction; measure-the-body beats neither trigger.
-- Compaction-as-error-path vs. §5.2's over-refuse guardrail — OpenCode never summarizes *proactively* and relies on the provider's overflow error to trigger it. Cheaper, and it risks a whole failed request; needs a measured comparison before it can be considered for **#137**'s trigger table.
+- **OpenCode's compaction is proactive, and the next bullet's premise was wrong.** v2 (source re-read 2026-10-03, `cd9a14a`) decides *before* building the request: `SessionCompaction.required()` (`packages/core/src/session/compaction.ts:744-763`) is consulted at the top of every logical step (`packages/core/src/session/runner/llm.ts:220-225`) and compacts when the estimate reaches a ceiling that subtracts both a 20 000-token buffer and the completion allowance. The overflow path is not the trigger; it is a one-shot *recovery* that re-reads durable history rather than resubmitting the window that just failed (`llm.ts:265-272` → `compaction.ts:737-740`), bounded to one per step. So "rely on the provider's overflow error" describes v1, and `prompt.ts:1164` / `processor.ts:493` cited for it no longer exist in the tree. Two portable pieces ride along: the ceiling arithmetic (xdev's `threshold()` subtracts the reserve but never the model's `MaxTokens` — `internal/agent/compact.go:119-124`) and the free pre-summarize truncation of tool output to 2 000 chars (`compaction.ts:258-270`), which is the tier Claude Code calls microcompact and dsh ships as a pruner. Full re-read: [research/opencode-internals.md §7](research/opencode-internals.md).
 - dsh's `every_seconds >= 300` floor, latest-due collapse, and fixed-rate anchoring vs **#162**'s design — the collapse rule (a sleeping machine fires once, not N times) is portable; the "no cron grammar in v1" decision is not, because xdev's `#125` cron parser already exists.
 - dsh's `reported` flag (a completion notice suppressed once another reporter has committed to deliver it) vs **#244**'s completion-notify path — this is the dedupe xdev needs before a second notifier lands, not after.
 
@@ -2513,7 +2511,6 @@ Tests: `TestTabStripCloseClickDoesNotDeadlock` and `TestTabStripLabelClickDoesNo
 
 *Last updated: 2026-10-02 (feat/eval-tool-bridge, #268 — **a cell can now call the harness's tools**): `tools.read({...})` inside an `eval` cell reaches the agent loop and the answer comes back into the cell, so a fan-out of N tool calls costs one assistant message plus what each call did instead of N round trips (pi 1.0 Codemode, dsh `run_code`, opencode `execute`). The route is `docs/decisions/programmatic-tool-calling.md` (§0.1–0.6), settled 2026-10-02 and implemented here: `Kernel.SetRunner` takes a `tool.Runner` — the deferred-tool bridge's own type, so the contract is identical — and `dispatchToolCall` runs the call on its own goroutine, **never under `k.mu`** (§0.3's lock-order finding; `route` returns before the dispatch). Every call lands in `runOneTool`, so plan mode, the approval policy, the interceptor chain and the hooks all still decide, on the inner tool's real name. Three refusals by name rather than counters (§0.5): no runner installed → refuse; `eval` → refuse (a cell that spawns a cell is unbounded recursion); `tool_search`/`tool_describe`/`tool_call` → refuse (`tool.IsBridgeTool`, so a cell cannot reach the registry twice over). The slot is cancellable as §0.3 requires: `reply` claims it with `sync.Once` and `cancelCell`/`markExited`/`stopLocked` all release it, so an interrupted cell raises a Python exception rather than hanging on a host answer that is never coming, and a tool still running sees its context cancelled with the cell (§0.4's "state is lost, don't imply otherwise" holds: kernel state still dies with the process). One new mechanism on the python side and no new dependency: a single stdin reader thread (`_stdin_loop`) answers `tool_result` frames in place and queues cell requests for `main`, and the cell polls its slot so a cell clock or an agent abort becomes a `KeyboardInterrupt` the cell already knows how to report. The seam is wired in `wireAgentMode` beside `WireCatalog` — the third mode seam, and the one most likely to drift, since an unwired kernel refuses every call silently; `TestWireAgentModeWiresEvalKernel` pins it. Tests: `internal/eval/bridge_test.go` (a call round trip, two calls in one kernel, the refusals, the interrupt-does-not-hang case, tool-context cancellation) and the wiring pin. Known: a cell cannot call the model registry from inside — `typesafe`/Jev is reachable as a tool (`tools.typesafe({...})`) but there is no `models.classify` binding, and no `codemode`-only tool axis on the catalog (`tool.Entry` has `deferred` only); both are the next slices, not part of this one. Still open per §0.7: whether a cell's output is one tool result or N lines of what each call did (this PR takes the DSH reading — one result, printed/returned values only).
 
-
 *Last updated: 2026-10-02 (`fix/tool-arg-coercion` — found while collecting this session's five background subagents: **seven `hub` calls in a row were refused, all of them identically, and the refusals named the wrong field.** The cause is one thing: a model that READS a JSON Schema but is not CONSTRAINED by it sends two spellings the tools' plain `json.Unmarshal` cannot accept, and every tool in the repo decodes its own args by hand.
 +
 +**(1) A flattened array.** `{"ids":{"item":["hub-1","hub-2"]}}` instead of `{"ids":[...]}`. OpenAI structured outputs serialize a bare `{"type":"array"}` as an object with a single `item` key, and a model trained on that shape emits it even with `strict` off — which is every wire xdev speaks that is not `codex-responses` (`strictTools` is set on `codex_responses.go:31` and nowhere else; the session's model is `opencode/space-bunny-free` on `openai-completions`, i.e. never enforced). The error it produced was `cannot unmarshal object into Go struct field .ids of type []string`. **(2) A quoted scalar.** `{"timeout":"600"}` against `{"type":"number"}` — `cannot unmarshal string into Go struct field .timeout of type float64`. The same batch, 2026-09-23, had `githubArgs.limit` fail the same way as `"20"`. **`tool_describe` was no help**: it prints the JSON Schema, which is exactly the shape the model was getting wrong, and the flat `{"op":...}` shape is not something a deferred-tool bridge can route back.
@@ -2521,24 +2518,18 @@ Tests: `TestTabStripCloseClickDoesNotDeadlock` and `TestTabStripLabelClickDoesNo
 +Both are a wire-level shape fault, not a tool bug, and the fix is one chokepoint rather than 40: `internal/tool/argcoerce.go` `CoerceArgs(schema, args)` walks the tool's OWN declared schema against the payload and repairs only what is unambiguous — a single-key object under a declared array whose one key is one of `item`/`items`/`value`/`values` holding an array unwraps to that array; a string that is exactly an integer/number/boolean for a declared `integer`/`number`/`boolean` becomes that value; a number/bool for a declared `string` becomes its text. It is called at `internal/agent/loop.go:1867`, immediately after the argument bytes are resolved and BEFORE plan mode, the approval policy, the interceptor and the hooks — so every gate judges the arguments the tool will actually receive, and a direct call, a `tool_call` bridge and an `eval` cell all get it from the one site (`runOneTool` is the single entry; `catalog.go:32` and `evalbridge.go:45` both re-enter it). The repair never invents: a two-key wrapper, a non-numeric string for a number, an undeclared key, a non-array under a flatten key, or a non-object payload are all returned byte-identical, so a genuinely wrong call still reaches the tool and still gets the tool's own honest required-argument error. An untouched payload is returned as its ORIGINAL bytes (the decode uses `json.Number`, and a rewrite only re-marshals when `changed`), so nothing that used to work acquires float formatting or key reordering on the way past.
 +
 +Tests: `internal/tool/argcoerce_test.go` pins both live shapes, the integer-stays-integer rule (`"20"` → `20`, not `20.0`), the nested case (`task`'s `max_turns` inside `tasks[]`), byte-identical passthrough, and five refusal cases. `internal/agent/argcoerce_wire_test.go` `TestRunOneToolRepairsLiveFailureShapes` drives `runOneTool` with the exact arguments that failed seven times and decodes what the tool received — it fails on stock `main` with the field's own error, and it is the pin that the call site is wired. `internal/agent/catalog_test.go` `TestHubToolAcceptsTheLiveFailureShapes` runs the same shape through the REAL `HubTool`, which would otherwise be the tool that fails. Two pre-existing failures in `cmd/xdev` (`TestConnectPickerItems`, `TestSkillPromptBlockEmptyWithoutSkills`) are environment-dependent and reproduce unchanged on `origin/main`.
-
 ---
-
 ## The in-band tool-argument bug batch (2026-10-02)
-
 Seven `tool_call hub` invocations failed in one turn before any subagent
 result came back, and each failure looked like a different bug. The session
 transcript (`~/.xdev/agent/sessions/…/2026-10-02T09-18-46.460Z_44bf6c20….jsonl`)
 shows they were one: **the model was not wrong about what it wanted, it was
 wrong about the JSON envelope, and the tools' decoders refuse anything but the
 literal schema.**
-
 ```
 {"args":{"ids":{"item":["hub-1",…]},"op":"wait","timeout":"600"},"name":"hub"}
 ```
-
 Two distinct defects in that one payload:
-
 1. **`ids` is an object, not an array.** OpenAI structured outputs serialize a
    bare `{"type":"array"}` as an object with a single `item` key; models
    trained on that shape emit it even on wires with no strict enforcement
@@ -2548,25 +2539,20 @@ Two distinct defects in that one payload:
    the call is refused before the tool ever sees it.
 2. **`timeout` is the string `"600"` for a declared number.** Same root cause
    (the wire does not constrain the model), same refusal.
-
 The reported error compounds the confusion: Go's `encoding/json` names the
 *last* field it failed on, so the same call produced
 `cannot unmarshal object into … .ids of type []string` when `ids` was the
 culprit and `cannot unmarshal string into … .timeout of type float64` when
 only `timeout` was wrong. Neither message names the real defect, which is why
 the retries wandered (`ids` → `timeout` → `ids:"hub-1"` → dropping both).
-
 This was not new to today: on 2026-09-23 the same envelope shape broke the
 `github` tool twice (`cannot unmarshal string into Go struct field
 githubArgs.limit of type int` — `"limit":"20"` for an `int`), and on
 2026-09-28 it recurred. The batch is old; it was only noticed now because the
 `hub` tool has the most array-typed parameters of any tool in the tree.
-
 ### Fix: schema-driven coercion at the one chokepoint
-
 `internal/tool/argcoerce.go` walks the tool's declared schema alongside the
 argument payload and repairs only what is unambiguous:
-
 | sent | declared | repaired |
 |---|---|---|
 | `{"item":["a","b"]}` | `array` | `["a","b"]` |
@@ -2574,27 +2560,23 @@ argument payload and repairs only what is unambiguous:
 | `"20"` | `integer` | `20` (never `20.0`) |
 | `"true"` | `boolean` | `true` |
 | `600` | `string` | `"600"` |
-
 It refuses anything ambiguous — a two-key object, a wrapper whose value is not
 an array, a non-numeric string for a number, an undeclared key — so a genuinely
 wrong call still reaches the tool and still gets the tool's own honest
 required-argument error. A payload that needs no repair keeps its original
 bytes (no re-marshal, so a `command` string never acquires float formatting).
-
 It runs at `runOneTool`'s single seam (`internal/agent/loop.go`, just after the
 redactor and **before** plan mode, the approval policy, the bash interceptor,
 and the hooks), deliberately: those gates must judge the arguments the tool
 will actually receive, not the shape the model guessed. One call site covers a
 direct call, a `tool_call` bridge (`runCatalogCall`), and an `eval`-kernel cell
 (`runEvalTool`) — all three land in `runOneTool`.
-
 Tests: `internal/tool/argcoerce_test.go` (the five shapes, the byte-identical
 no-op, and eight ambiguous shapes that must stay untouched) and
 `TestHubToolAcceptsTheLiveFailureShapes` in `internal/agent/catalog_test.go`
 (the live payload end-to-end through `runOneTool`). Verified red/green: with
 the one-line call site reverted the agent test fails with the exact field
 error from the field, and passes with it.
-
 *Last updated: 2026-10-02 (fix/tool-arg-coercion — a schema-guided repair of the
 two argument-envelope shapes non-strict wires provoke, so a model's typo stops
 being seven refusals): the root cause was never the hub tool's schema; it was
@@ -2604,3 +2586,5 @@ array to `{"item":[…]}` and quotes its numbers, and every tool decoder refuses
 both. `tool.CoerceArgs` repairs the unambiguous cases against the tool's own
 declared schema and refuses everything else, so the honest error still comes
 from the tool.*
+
+*Last updated: 2026-10-03 (docs/opencode-compaction — the OpenCode compaction pass corrected against the v2 source, `cd9a14a`): §5.4 no longer claims OpenCode waits for the provider's overflow error. It does not: `required()` runs at the top of every step (`packages/core/src/session/runner/llm.ts:220`) and compacts against a ceiling that subtracts the buffer and the completion allowance (`session/compaction.ts:744-763`); the two `prompt.ts`/`processor.ts` citations behind the old claim no longer exist in the tree. The overflow path survives as a one-shot recovery that re-reads durable history. Two portable findings ride along: that ceiling arithmetic is exactly the subtraction xdev's `threshold()` omits (`internal/agent/compact.go:119`), and the pre-summarize 2 000-char tool-output truncation (`session/compaction.ts:258-270`) is the free tier this repo has been calling someone else's by name (#116/#83). [research/opencode-internals.md §7] was rewritten from v1 binary forensics to the v2 module: token-based keep (`keep.tokens 15_000`, not `tail_turns`), the required-heading checkpoint template with retry-on-missing-heading, no separate compaction model, provider-native compaction, and the typed no-op for a manual compact with nothing to drop.*
