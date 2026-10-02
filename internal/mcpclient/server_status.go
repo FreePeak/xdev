@@ -11,6 +11,18 @@ type ServerStatus struct {
 	Name      string // short label for the row ("server-name")
 	State     string // "online" | "unreachable" | "disabled" | "error"
 	Transport string // "stdio" | "http"
+	// ErrorDetail carries the error when State is "error". It is
+	// rendered below the server row and copied to the clipboard
+	// on demand so the user can paste it into a support thread
+	// or a ticket.
+	ErrorDetail string
+	// LastError is the raw error returned by the last probe,
+	// kept separately from ErrorDetail so callers that need
+	// the unfiltered text (logging, tests) have it.
+	LastError error
+	// ErrorTime records when the error was observed (RFC3339).
+	// Empty when the server is healthy.
+	ErrorTime string
 }
 
 // ServerHealthProbe probes every configured server's health endpoint
@@ -55,6 +67,9 @@ func ServerHealthProbe(ctx context.Context, cfg *Config) ([]ServerStatus, error)
 			if err != nil {
 				lastErr = fmt.Errorf("probe %s: %w", name, err)
 				st.State = "error"
+				st.ErrorDetail = err.Error()
+				st.LastError = err
+				st.ErrorTime = time.Now().Format(time.RFC3339)
 			} else if !ok {
 				st.State = "unreachable"
 			} else {

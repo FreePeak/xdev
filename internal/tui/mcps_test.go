@@ -201,4 +201,46 @@ func TestMcpsCommandProbeError(t *testing.T) {
 	}
 }
 
+// A broken server used to render as one word — "unreachable" — with no
+// endpoint, no error and no date, in the one view built to explain it. The
+// probe already captured all three; the listing just never showed them.
+func TestMcpsCommandShowsErrorDetailForBrokenServers(t *testing.T) {
+	mcpsSeam = func() (*mcpclient.Config, error) {
+		return &mcpclient.Config{
+			Servers: map[string]*mcpclient.ServerConfig{
+				"dead-http":  {URL: "http://localhost:1/mcp"},
+				"dead-stdio": {Command: "uvx"},
+				"healthy":    {URL: "http://localhost:9699/mcp"},
+			},
+		}, nil
+	}
+	testProbeSeam([]mcpclient.ServerStatus{
+		{Name: "dead-http", State: "unreachable", Transport: "http",
+			ErrorDetail: "connect: connection refused", ErrorTime: "2026-09-28T10:00:00Z"},
+		{Name: "dead-stdio", State: "error", Transport: "stdio",
+			ErrorDetail: "exit status 1", ErrorTime: "2026-09-29T09:00:00Z"},
+		{Name: "healthy", State: "online", Transport: "http"},
+	}, nil)
+	defer clearProbeSeam()
+
+	f := &fakeAPI{}
+	if !dispatch(f, "/mcps") {
+		t.Fatal("/mcps not consumed")
+	}
+	text := f.blocks[0]
+	for _, want := range []string{
+		"http://localhost:1/mcp", "connection refused", "2026-09-28T10:00:00Z",
+		"uvx", "exit status 1", "2026-09-29T09:00:00Z",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("broken-server detail %q missing from:\n%s", want, text)
+		}
+	}
+	// The healthy server has no error row to add, and adding one for it
+	// would be noise pretending to be a diagnosis.
+	if strings.Contains(text, "localhost:9699") {
+		t.Fatalf("an online server must not grow an error row:\n%s", text)
+	}
+}
+
 func boolPtr(b bool) *bool { return &b }

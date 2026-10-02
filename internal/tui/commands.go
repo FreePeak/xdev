@@ -600,6 +600,27 @@ func mcpsCommand(app CommandAPI, args string) error {
 				break
 			}
 		}
+		// A broken server used to render as one word with no name, no
+		// reason and no date, in the one view built to explain it: the URL
+		// or command it was configured with, the error the probe saw, and
+		// how long it has been that way. serverURL is the stdio/http
+		// fallback, so a stdio server shows its command.
+		if state == "unreachable" || state == "error" {
+			var detail, since string
+			for _, st := range statuses {
+				if st.Name != n {
+					continue
+				}
+				detail, since = st.ErrorDetail, st.ErrorTime
+			}
+			fmt.Fprintf(&b, "\n      %s", serverURL(sc))
+			if detail != "" {
+				fmt.Fprintf(&b, "  %s", detail)
+			}
+			if since != "" {
+				fmt.Fprintf(&b, "  (since %s)", since)
+			}
+		}
 		fmt.Fprintf(&b, "\n  %s  %-11s  %s", n, state, transport)
 	}
 	app.AddSystemBlock(b.String())
