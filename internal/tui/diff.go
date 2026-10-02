@@ -28,6 +28,7 @@ package tui
 // emphasis instead of painting a lie.
 
 import (
+	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -315,14 +316,24 @@ var diffInk = diffStyle{
 // honoured, one it leaves to the terminal keeps the terminal's own answer. The
 // four band slots are optional (they are xdev's own, not part of omp's token
 // contract), so an imported theme that has never heard of them renders exactly
-// as it did before — marker inks, no band.
+// as it did before — marker inks, no band, bold doing the word emphasis.
 //
-// NO_COLOR needs no branch here: tcell drops colour at emission when it is set
-// (tscreen.go:915), and every ink this reaches for is either the theme's own or
-// the terminal's own ANSI pair — none is a colour the renderer picked for
-// itself, which is the thing codeStyleFor's NO_COLOR check exists to prevent.
+// NO_COLOR is read HERE rather than left to tcell, for the reason
+// codeStyleFor states: tcell drops colour at emission, so a run that picked an
+// ink would still LOOK painted in a cell dump and in any tool that reads the
+// grid, while the terminal shows one ink. Attributes carry no colour and
+// survive, so the diff stays readable without it.
 func (a *App) diffStyle() diffStyle {
 	ds := diffInk
+	if os.Getenv("NO_COLOR") != "" {
+		// Attribute-only: the change still says what it is, in bold/italic/dim
+		// and in the terminal's own text ink. Nothing the renderer would have
+		// chosen for itself.
+		ds.add.mark, ds.add.text = tcell.StyleDefault, tcell.StyleDefault
+		ds.del.mark, ds.del.text = tcell.StyleDefault, tcell.StyleDefault
+		ds.ctx, ds.hunk, ds.file = tcell.StyleDefault, tcell.StyleDefault, tcell.StyleDefault
+		return ds
+	}
 	paint := func(slot string, base tcell.Style) tcell.Style {
 		if c, ok := a.th.Slot(slot); ok {
 			return base.Foreground(a.cellColor(c))

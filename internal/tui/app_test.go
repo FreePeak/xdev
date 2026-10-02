@@ -653,6 +653,7 @@ func TestHumanTokens(t *testing.T) {
 // on a stronger band. The plain model preview is not also painted as prose, and
 // text stays what the model saw.
 func TestToolBoxPaintsDiff(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app := idxApp(100, 40)
 	w := app.contentWidth()
 	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
@@ -740,6 +741,7 @@ func TestToolBoxPaintsDiff(t *testing.T) {
 // A bash result that merely prints a list is not re-painted as a diff; one
 // that prints a real `git diff` is.
 func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	if DiffLooksUnified("- item one\n- item two\n") {
 		t.Error("a bullet list read as a diff")
 	}
@@ -788,6 +790,7 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 // red/green is the pair some readers cannot separate, or a custom palette that
 // pins them — still owns them.
 func TestToolBoxDiffHonoursThemeInk(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app := idxApp(100, 40)
 	app.th = theme.ApplyColorBlindMode(theme.Load("groknight"))
 	w := app.contentWidth()

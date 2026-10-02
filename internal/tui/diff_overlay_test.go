@@ -130,6 +130,7 @@ func TestDiffOverlayInsideIsTheTerminalBackground(t *testing.T) {
 // interior one colour and left every text cell on the terminal's own, so a
 // viewer that named bg_base came up striped — black text bars on a grey band.
 func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app, scr := newTestApp(t, 120, 30)
 	defer scr.Fini()
 
@@ -161,19 +162,34 @@ func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
 	if _, bg, _ := blank.Decompose(); bg != tcell.ColorDefault {
 		t.Fatalf("overlay blank interior has background %v, want the terminal default", bg)
 	}
-	// Row 6 is a "-" row of the dock fixture's diff, so its cells carry a
-	// removed band — the row's own tint, or the stronger one under the changed
-	// words — and never the panel's field.
+	// A changed row is the one exception and it is not a field: a diff band is
+	// the claim ON that row, so a cell a changed row painted carries the
+	// row's tint (or the stronger one under its changed words) and never the
+	// panel's fill. Row 6 of the dock fixture is its "-" row.
 	remRow, _ := app.th.Slot(theme.ToolDiffRemovedBg)
 	remWord, _ := app.th.Slot(theme.ToolDiffRemovedWordBg)
-	r, _, st, _ := scr.GetContent(8, 6)
-	_, bg, _ := st.Decompose()
-	switch bg {
-	case app.cellColor(c):
-		t.Fatalf("overlay cell %d %q has the themed fill %v; the panel field must stay the terminal's", 8, r, bg)
-	case app.cellColor(remRow), app.cellColor(remWord):
-	default:
-		t.Fatalf("overlay diff cell %d %q has background %v, want a removed band %+v or %+v", 8, r, bg, remRow, remWord)
+	rowY, rowX := -1, -1
+	for y := 0; y < app.height && rowY < 0; y++ {
+		for x := 0; x < app.width; x++ {
+			r, _, st, _ := scr.GetContent(x, y)
+			_, bg, _ := st.Decompose()
+			switch bg {
+			case app.cellColor(remRow), app.cellColor(remWord):
+				rowX, rowY = x, y
+			case app.cellColor(c):
+				t.Fatalf("overlay cell %d,%d %q has the themed fill %v; only a changed row may paint", x, y, r, bg)
+			}
+		}
+	}
+	if rowY < 0 {
+		t.Fatalf("no removed band anywhere in the overlay: the diff rows lost their band (%+v / %+v)", remRow, remWord)
+	}
+	// The band is a stripe, not a glyph: it runs to the panel's right border.
+	if r, _, st, _ := scr.GetContent(rowX+1, rowY); func() bool {
+		_, bg, _ := st.Decompose()
+		return bg != tcell.ColorDefault
+	}() {
+		t.Fatalf("cell %d,%d %q painted no band where the row does", rowX+1, rowY, r)
 	}
 }
 
