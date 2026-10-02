@@ -566,9 +566,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if res, err := session.BuildContext(storeOf().Entries(), storeOf().LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			app.SetWork(workOf(res.Messages))
+			work := workOf(res.Messages)
+			app.SetWork(work)
 			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+			app.SetLLMTime(work, ttftSum, ttftCount)
+			in, out, cache, think, cw, cost := usageOf(res.Messages)
+			app.SetSessionUsage(in, out, cache, think, cw, cost)
 			turns, steps := countsOf(res.Messages)
 			app.SetSessionCounts(turns, steps)
 		}
@@ -699,13 +702,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.Reset()
 		app.SetLocation(t.store.CWD())
 		app.SetSessionID(t.store.ID())
-		saveBreadcrumb(breadcrumbPath(t.store))
 		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
 			replayTranscript(app, res.Messages)
 			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			app.SetWork(workOf(res.Messages))
+			work := workOf(res.Messages)
+			app.SetWork(work)
 			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+			app.SetLLMTime(work, ttftSum, ttftCount)
+			in, out, cache, think, cw, cost := usageOf(res.Messages)
+			app.SetSessionUsage(in, out, cache, think, cw, cost)
 			turns, steps := countsOf(res.Messages)
 			app.SetSessionCounts(turns, steps)
 		}
@@ -945,9 +950,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.Reset()
 		replayTranscript(app, res.Messages)
 		app.SetContextReplay(agent.ContextTokens(res.Messages))
-		app.SetWork(workOf(res.Messages))
+		work := workOf(res.Messages)
+		app.SetWork(work)
 		ttftSum, ttftCount := ttftOf(res.Messages)
-		app.SetLLMTime(workOf(res.Messages), ttftSum, ttftCount)
+		app.SetLLMTime(work, ttftSum, ttftCount)
+		in, out, cache, think, cw, cost := usageOf(res.Messages)
+		app.SetSessionUsage(in, out, cache, think, cw, cost)
 		turns, steps := countsOf(res.Messages)
 		app.SetSessionCounts(turns, steps)
 	}
@@ -3018,6 +3026,30 @@ func countsOf(msgs []ai.Message) (turns, steps int) {
 		}
 	}
 	return turns, steps
+}
+
+// usageOf sums a rebuilt history's token buckets and spend the same way the
+// live path banks them (tuiHooks.OnEvent → AddUsage/AddCost), so a resumed
+// session's token pill, its cache-hit rate and /usage's cost line read the
+// same numbers the session had before it was closed. Every figure comes off
+// the persisted per-message Usage, which is the only record of the split —
+// an older message written before a bucket was tracked simply adds zero.
+func usageOf(msgs []ai.Message) (in, out, cache, think, cacheWrite int64, cost float64) {
+	for _, m := range msgs {
+		if m.Role != ai.RoleAssistant || m.Usage == nil {
+			continue
+		}
+		u := m.Usage
+		in += u.Input
+		out += u.Output
+		cache += u.CacheRead
+		think += u.ReasoningTokens
+		cacheWrite += u.CacheWrite
+		if u.Cost != nil {
+			cost += u.Cost.Total
+		}
+	}
+	return in, out, cache, think, cacheWrite, cost
 }
 
 // shortSessionID renders the first 8 chars of a session id (matches the TUI

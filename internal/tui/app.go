@@ -1516,6 +1516,27 @@ func (a *App) SetSessionCounts(turns, steps int) {
 	a.poke()
 }
 
+// SetSessionUsage re-bases the session's token buckets and its spend from a
+// rebuilt history (/resume, /fork, tab focus, tree navigation) the way
+// SetWork re-bases the timer: it REPLACES rather than adds, because the
+// replayed path measures the whole adopted history in one call and adding
+// would double-count it.
+//
+// CtxUsed and Rate are deliberately NOT re-based here. The first is the LIVE
+// context occupancy — SetContextReplay measures the rebuilt messages, and
+// AddUsage owns it for a live turn — and the second is the last decoded
+// message's speed, which a history cannot re-measure: carrying a stale rate
+// forward is what Reset() clears it to prevent.
+func (a *App) SetSessionUsage(in, out, cache, think, cacheWrite int64, cost float64) {
+	a.mu.Lock()
+	a.st.TokensIn, a.st.TokensOut = max(in, 0), max(out, 0)
+	a.st.TokensCache, a.st.TokensThink = max(cache, 0), max(think, 0)
+	a.st.TokensCacheWrite = max(cacheWrite, 0)
+	a.st.Cost = max(cost, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
 // markRun opens or closes the work span (caller holds a.mu). It is idempotent
 // per state, so every streaming hook may claim the run: time between turns —
 // reading output, deciding the next prompt — is never counted. An open span
