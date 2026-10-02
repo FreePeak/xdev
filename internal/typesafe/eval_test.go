@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -307,12 +308,40 @@ func contains(s, sub string) bool {
 }
 
 // TestFormatResultKeepsTheGatingNumber pins the two properties the `ask`
-// confidence gate and the memory pre-filter depend on, against the answer
-// shape a real local Laya server returned (POST /v1/systemone, english
-// checkpoint, MPS, 2026-09-30): the score answer renders at 227 chars, which
-// the old 200 limit cut mid-`probabilities`, and the header tells the model
-// which confidence field is calibrated.
+// confidence gate and the memory pre-filter depend on, against answers a real
+// local Laya server returned (POST /v1/systemone, english checkpoint, MPS).
+//
+// The wide case is the one that earns the limit: a twenty-option choice
+// renders at 388 chars, so the old 200-char cut landed inside `probabilities`
+// and removed twelve options — the winner's own probability among them. The
+// distribution is what separates a decisive answer from a flat one, so the tail
+// is not decoration.
 func TestFormatResultKeepsTheGatingNumber(t *testing.T) {
+	// Every option verbatim from the live twenty-option answer, so the rendered
+	// length is the measured one rather than an estimate of it.
+	probs := map[string]any{
+		"investigation": 0.0009, "fix": 0.0001, "docs": 0.0002, "research": 0.0,
+		"config": 0.0151, "deploy": 0.02, "test": 0.9263, "perf": 0.0012,
+		"refactor": 0.0036, "migration": 0.0061, "schema": 0.0001, "types": 0.0006,
+		"lint": 0.0, "build": 0.0016, "ci": 0.0112, "release": 0.0083,
+		"security": 0.001, "ux": 0.0019, "a11y": 0.0004, "misc": 0.0016,
+	}
+	wide := FormatResult(map[string]any{
+		"owner": map[string]any{
+			"type":              "choice",
+			"choice":            "test",
+			"probabilities":     probs,
+			"confidence":        0.1926,
+			"answer_confidence": 0.9263,
+			"action":            map[string]any{"act_probability": 1.0},
+		},
+	})
+	for option, p := range probs {
+		if !contains(wide, fmt.Sprintf("%v:%v", option, p)) {
+			t.Errorf("option %q lost to truncation: %q", option, wide)
+		}
+	}
+
 	answers := map[string]any{
 		"urgency": map[string]any{
 			"type":              "score",
@@ -336,7 +365,7 @@ func TestFormatResultKeepsTheGatingNumber(t *testing.T) {
 			t.Errorf("tail %q cut off: %q", tail, got)
 		}
 	}
-	if contains(got, "…") {
-		t.Errorf("a real answer was truncated: %q", got)
+	if contains(got, "…") || contains(wide, "…") {
+		t.Errorf("a real answer was truncated: %q %q", got, wide)
 	}
 }

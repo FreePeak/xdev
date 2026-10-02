@@ -168,10 +168,13 @@ func FormatResult(answers map[string]any) string {
 }
 
 // truncateLimit bounds one answer line so a pathological payload cannot eat the
-// window. 200 was short enough to cut a real three-option Laya answer at 227
-// chars, and the tail is where answer_confidence and the probabilities sit, so
-// the number a caller is meant to gate on was the number that vanished. 1024
-// holds a twenty-option choice answer whole.
+// window. 200 was not enough for a real choice answer: the twenty-option answer
+// a local Laya returned renders at 388 chars, and the cut landed at
+// `config:0.0151`, taking the other twelve options — including
+// `test:0.9263`, the winner's own probability. Go's %v sorts map keys, so the
+// loss is always the tail of `probabilities`: the distribution a caller needs
+// in order to tell a decisive answer from a flat one. 1024 holds that answer
+// whole.
 const truncateLimit = 1024
 
 func truncate(s string, n int) string {
