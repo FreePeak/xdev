@@ -249,19 +249,22 @@ func writePickerSession(t *testing.T, cwd, id, title, prompt string) string {
 	return path
 }
 
-// TestWorkOfSumsAssistantSpans: the HUD's re-based total is the provider
-// request time the replayed path carries — assistant spans only, missing
-// timings add nothing (an old or imported message must not invent seconds).
-func TestWorkOfSumsAssistantSpans(t *testing.T) {
+// TestWorkOfSumsRunSpans: the HUD's re-based total is the ACTIVE work a
+// rebuilt history banked — provider-request spans AND tool spans, because the
+// live timer (markRun) counts both and a resumed session reading at half what
+// it showed before it closed is the defect. User messages carry no span and
+// add nothing, and neither does a message from before durations were recorded.
+func TestWorkOfSumsRunSpans(t *testing.T) {
 	msgs := []ai.Message{
 		{Role: ai.RoleUser},
 		{Role: ai.RoleAssistant, DurationMS: 4000},
 		{Role: ai.RoleToolResult, DurationMS: 9000},
 		{Role: ai.RoleAssistant, DurationMS: 2500},
-		{Role: ai.RoleAssistant}, // pre-timing history: contributes 0
+		{Role: ai.RoleAssistant},              // pre-timing history: contributes 0
+		{Role: ai.RoleUser, DurationMS: 9999}, // no span of its own: contributes 0
 	}
-	if got := workOf(msgs); got != 6500*time.Millisecond {
-		t.Fatalf("workOf = %v, want 6.5s", got)
+	if got := workOf(msgs); got != 15500*time.Millisecond {
+		t.Fatalf("workOf = %v, want 15.5s", got)
 	}
 }
 

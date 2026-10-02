@@ -279,6 +279,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if lastSettings().ColorBlindMode {
 		th = theme.ApplyColorBlindMode(th)
 	}
+	// The settings the shell had before tcell took the tty, captured here so
+	// the restore has a path that does NOT go through tcell's screen mutex: a
+	// UI loop wedged in a write holds that mutex for the whole flush, so
+	// scr.Fini — the normal restore — is unreachable exactly when it is most
+	// needed. Armed before Init, the first thing that makes the tty raw, and
+	// released on the same defer stack as scr.Fini below so an early return
+	// cannot leak the fd.
+	captureTerminal()
+	// Registered before the screen's own defers so it runs LAST: the fallback
+	// restore needs this fd still open while scr.Fini is trying, and it must
+	// also survive the NewScreen/Init failures above returning early.
+	defer releaseTerminal()
 	// A frame write must not be able to stop the UI loop: an unbounded write
 	// to a pane whose reader stopped drains blocks the loop for as long as
 	// the pty stays full, which is the session-dying stall in
@@ -2962,16 +2974,37 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 }
 
 // workOf is the work a rebuilt history already banked: the provider-request
-// spans the assistant messages carry. A resumed, forked or rewound session
-// starts with that number on the HUD's time segment instead of zero, so the
-// active-work total survives restarts — and a tree navigation shows only the
-// path that is on screen. Messages written before durations were recorded, or
-// imported without one, simply add nothing.
+// spans the assistant messages carry PLUS the tool spans the toolResult
+// messages carry. A resumed, forked or rewound session starts with that
+// number on the HUD's time segment instead of zero, so the active-work total
+// survives restarts — and a tree navigation shows only the path that is on
+// screen.
+//
+// Tool spans belong here because the live timer counts them: markRun banks
+// the whole run span, thinking and streaming and tools alike. Measuring only
+// the provider requests made a resumed session read at roughly half what it
+// showed before it closed — 7,728s against 15,240s on one real session file,
+// a 49% under-report — and /usage's "tool time · N% of active time" line was
+// comparing two different denominators. Messages written before durations
+// were recorded, or imported without one, simply add nothing.
+//
+// ponytail: two ceilings, both stated rather than faked. (1) A bang-mode
+// (!bash) call never reaches the store, so its span is lost across a resume
+// even though the live timer counted it — upgrading means persisting those
+// calls as real toolResult entries instead of transcript-only rows. (2) Same-
+// batch tool calls run CONCURRENTLY (MaxToolWorkers = 6), so summing their
+// spans can exceed the wall time they actually took; the live timer measures
+// the run's wall clock and cannot over-count. The alternative — persisting
+// run spans rather than message spans — needs the run to be an entry of its
+// own, which the store has no type for.
 func workOf(msgs []ai.Message) time.Duration {
 	var work time.Duration
 	for _, m := range msgs {
-		if m.Role == ai.RoleAssistant && m.DurationMS > 0 {
-			work += time.Duration(m.DurationMS) * time.Millisecond
+		switch m.Role {
+		case ai.RoleAssistant, ai.RoleToolResult:
+			if m.DurationMS > 0 {
+				work += time.Duration(m.DurationMS) * time.Millisecond
+			}
 		}
 	}
 	return work

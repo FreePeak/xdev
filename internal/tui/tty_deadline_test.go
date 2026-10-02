@@ -206,3 +206,56 @@ func TestNoDeadlineFlagMeansNoRepair(t *testing.T) {
 		t.Fatalf("an app with no dropped-frame flag repainted %d times", scr.syncs)
 	}
 }
+
+// A terminal that cannot carry a deadline must still receive its frame. This is
+// the shipped macOS shape: /dev/tty is a character device, SetWriteDeadline
+// answers os.ErrNoDeadline, and returning that error instead of writing left
+// the TUI blank — the screen never entered the alt screen, so no key, no
+// prompt and no output ever appeared. A frame lost is worse than the
+// unbounded write the deadline was added to bound.
+type deadlineLessWriter struct {
+	wrote []byte
+	err   error
+}
+
+func (w *deadlineLessWriter) SetWriteDeadline(time.Time) error { return os.ErrNoDeadline }
+
+func (w *deadlineLessWriter) Write(p []byte) (int, error) {
+	w.wrote = append(w.wrote, p...)
+	return len(p), w.err
+}
+
+func TestFrameWriteLandsOnATtyThatCannotCarryADeadline(t *testing.T) {
+	w := &deadlineLessWriter{}
+	d := &deadlineTty{w: w}
+
+	n, err := d.Write([]byte("frame"))
+	if err != nil {
+		t.Fatalf("a frame write to a deadline-less tty failed instead of writing: %v", err)
+	}
+	if n != len("frame") {
+		t.Fatalf("short write: %d of %d bytes", n, len("frame"))
+	}
+	if string(w.wrote) != "frame" {
+		t.Fatalf("the frame never reached the terminal, wrote %q", w.wrote)
+	}
+	if d.dropped.Load() {
+		t.Error("a frame that landed was recorded as dropped, so draw() repaints for nothing")
+	}
+}
+
+// The same end to end over the draw path: an app on a deadline-less tty must
+// actually paint. This is the shipped symptom — the loop ran and every frame
+// was refused, so the screen stayed blank with the process alive.
+func TestDeadlineLessTtyStillPaints(t *testing.T) {
+	w := &deadlineLessWriter{}
+	app, scr, _ := deadlineApp(t, w)
+
+	app.draw()
+	if len(w.wrote) == 0 {
+		t.Fatal("draw() wrote no frame at all: the screen would stay blank")
+	}
+	if scr.syncs != 0 {
+		t.Fatalf("a frame that landed asked for %d repairs", scr.syncs)
+	}
+}
