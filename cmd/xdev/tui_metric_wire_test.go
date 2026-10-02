@@ -236,3 +236,50 @@ func TestHUDHooksEmptyMessageDoesNotPanic(t *testing.T) {
 		t.Fatalf("an empty message drew %q", row)
 	}
 }
+
+// TestResumedSessionKeepsStatusMetrics is the field report's defect: every
+// metric on the status bar was wiped by Reset() at resume and only WORK TIME
+// was re-banked from the replayed history, so a resumed session showed a
+// fresh 0s, no tokens, and no spend for work it had already done and been
+// charged for. Reset is the right boundary — the counters are per-session —
+// but the replay has to put them back, and the row is where that is read.
+func TestResumedSessionKeepsStatusMetrics(t *testing.T) {
+	app, scr := metricTestApp(t, 120, 24)
+
+	// What the live session banked before it closed, then what the resume
+	// path replays: the same persisted usage, off the assistant messages.
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "first"}}},
+		{Role: ai.RoleAssistant, DurationMS: 4000, Usage: &ai.Usage{
+			Input: 479, Output: 1770, CacheRead: 64575, CacheWrite: 1100,
+			TotalTokens: 66824, ReasoningTokens: 1264,
+			Cost: &ai.UsageCost{Total: 0.0123},
+		}},
+		{Role: ai.RoleAssistant, DurationMS: 2500, Usage: &ai.Usage{
+			Input: 500, Output: 100, TotalTokens: 600,
+			Cost: &ai.UsageCost{Total: 0.001},
+		}},
+	}
+	// Reset is the adoption boundary (/resume, a tab switch, a tree rewind):
+	// everything goes, and the one replay path has to put it all back.
+	app.Reset()
+	replaySession(app, msgs)
+
+	row := awaitHUD(t, scr, "1t·2g")
+	// 979 in + 1870 out + 64575 cache + 1100 cache writes = 68524 tokens.
+	if !strings.Contains(row, "68.5k") {
+		t.Fatalf("the token pill lost the resumed session's total: %q", row)
+	}
+	// The cache-hit rate beside it: 64575 of the (979 + 64575) prompt side
+	// the replayed history actually billed.
+	if !strings.Contains(row, "98%") {
+		t.Fatalf("the resumed cache-hit rate is gone: %q", row)
+	}
+	if !strings.Contains(row, "6s") {
+		t.Fatalf("the work timer lost the resumed history's 6.5s: %q", row)
+	}
+	report := app.UsageReport()
+	if !strings.Contains(report, "$0.0133") {
+		t.Fatalf("the report lost the resumed session's spend:\n%s", report)
+	}
+}

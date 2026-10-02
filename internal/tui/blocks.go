@@ -260,16 +260,20 @@ func wrapCapped(s string, maxW, maxRows int) []string {
 var toolArgKeys = []string{"command", "path", "file_path", "pattern", "query", "url", "input"}
 
 // toolDetail renders one call's raw JSON arguments as the phrase omp prints
-// after the tool name: the first line of the naming field, whitespace
-// collapsed, with " …" when the argument continued. Unparseable arguments, or
-// ones naming nothing, fall back to the flattened JSON so an unfamiliar tool
-// still says something instead of rendering an empty row.
+// after the tool name: the naming field in full, whitespace collapsed within
+// each line and its line breaks kept. Unparseable arguments, or ones naming
+// nothing, fall back to the flattened JSON so an unfamiliar tool still says
+// something instead of rendering an empty row.
 //
-// The first line is returned WHOLE. It used to stop at 400 bytes on the
-// reasoning that a row is one line wide, but the row wraps now — a command is
-// worth reading in full — so there is no width left to guess at. The FIRST
-// LINE only is still the rule, so a `write` body or a heredoc never becomes
-// the row, and the transcript stays a conversation rather than a log.
+// The field is returned WHOLE, every line, for every tool. It used to stop at
+// 400 bytes on the reasoning that a row is one line wide, and then at the
+// first newline with a " …" — so the one thing a user opens the transcript to
+// read, the command, was the one thing it hid, at an ellipsis in the middle of
+// a pipeline. The call row WRAPS (blockLines, case KindTool), so a long phrase
+// costs rows, not text: there is no width left to guess at.
+//
+// Newlines survive as newlines: they are a command's structure (a continuation
+// line, a heredoc's body), so they become rows rather than spaces.
 //
 // JSON gives no promise that a command is valid UTF-8: an `input` field the
 // model built by slicing bytes holds a torn rune, and 711 xdev sessions carry
@@ -289,20 +293,14 @@ func toolDetail(rawArgs string) string {
 		if !ok || json.Unmarshal(v, &s) != nil {
 			continue
 		}
-		// The whole first line, never a window of it: the call row WRAPS
+		// The whole field, never a window of it: the call row WRAPS
 		// (blockLines, case KindTool), so there is no width to cut to, and a
 		// phrase cut at an arbitrary byte is neither readable nor copyable.
-		// Invalid bytes are dropped before the first-line cut, so no rune can
-		// be torn — the doc comment below says why that matters here.
-		head, rest, multiline := strings.Cut(strings.TrimRight(utf8Only(s), "\n"), "\n")
-		head = strings.Join(strings.Fields(head), " ")
-		if head == "" {
-			continue
+		// Invalid bytes are dropped first, so no rune can be torn — the doc
+		// comment below says why that matters here.
+		if detail := collapseLines(utf8Only(s)); detail != "" {
+			return detail
 		}
-		if multiline && strings.TrimSpace(rest) != "" {
-			head += " …"
-		}
-		return head
 	}
 	return utf8Only(strings.Join(strings.Fields(rawArgs), " "))
 }
@@ -311,6 +309,17 @@ func toolDetail(rawArgs string) string {
 // replacement char is one cell wide where the torn bytes were zero, and a row
 // whose width is a lie paints its box border in the wrong column.
 func utf8Only(s string) string { return strings.ToValidUTF8(s, "") }
+
+// collapseLines collapses runs of horizontal whitespace within each line and
+// keeps the line breaks. strings.Fields alone would flatten a multi-line
+// command into one run of spaces and lose where one statement ended.
+func collapseLines(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = strings.Join(strings.Fields(l), " ")
+	}
+	return strings.Join(lines, "\n")
+}
 
 // toolSummary splits the call row into the two runs it renders: the tool name
 // and the whole of its detail. The detail is NOT clipped here — the row lays it
