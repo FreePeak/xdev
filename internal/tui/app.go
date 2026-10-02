@@ -4345,7 +4345,7 @@ func (a *App) paint() {
 		// Top bar, then the session strip under it, then the welcome body —
 		// the strip owns its row whether or not the transcript exists, so the
 		// two screens cannot disagree about what is open.
-		a.drawTopBar(s, w, false)
+		a.drawTopBar(s)
 		a.drawTabStrip(s, w)
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
@@ -4380,10 +4380,9 @@ func (a *App) paint() {
 	if vp < 1 {
 		vp = 1
 	}
-	// The top bar belongs to the main pane: its prompts get the pane's width,
-	// and a bar running the terminal's full width would print them under the
-	// panel's own surface.
-	a.drawTopBar(s, a.rightEdge(), true)
+	// The top bar belongs to the main pane: the branch is chrome and must not
+	// paint under the panel's own surface.
+	a.drawTopBar(s)
 	// The session strip owns the row under the top bar (opencode's tab row),
 	// so the transcript's first row shifts with it — transcriptTop() is the
 	// single place that offset is computed, so the strip cannot desync the
