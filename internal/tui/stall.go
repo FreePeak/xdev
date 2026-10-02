@@ -67,18 +67,39 @@ func (a *App) SetStallExitAfter(d time.Duration) { a.stallExitAfter = d }
 // exitWedgedLoop ends a session whose UI loop is not coming back. The restore
 // hook is the same one the signal and panic guards use (tui.go:
 // terminalRestore), so the tty leaves raw mode and the alt screen however this
-// process ends; the message says why, on stderr, which the user can read once
-// the screen is back. It does not go through Quit: closing quitCh ASKS a loop
-// that is already wedged to return, which is the thing that does not work.
-// The process exits because nothing else can — the turn goroutine, the MCP
-// servers and the tool workers are all still inside this pid.
+// ends. It does not go through Quit: closing quitCh ASKS a loop that is
+// already wedged to return, which is the thing that does not work. The process
+// exits because nothing else can — the turn goroutine, the MCP servers and the
+// tool workers are all still inside this pid.
 func (a *App) exitWedgedLoop(stuck time.Duration) {
 	fmt.Fprintf(os.Stderr, "\nxdev: UI loop wedged for %s and is not recovering — restoring the terminal and exiting.\n", stuck.Truncate(time.Second))
+	// The restore is BOUNDED, and that is the whole point of this change.
+	// The loop is frequently wedged inside the terminal write itself (17
+	// frozen writes of up to 17m are recorded under dumps/), and scr.Fini
+	// writes to that same fd — so an unbounded restore blocks on exactly the
+	// thing it is rescuing the terminal from, the give-up never reaches
+	// exitProcess, and the only way out is a kill from outside. Waiting is a
+	// courtesy to the common case (a wedged loop, a tty that still accepts
+	// bytes); passing the deadline is what makes the escape hatch an escape
+	// hatch.
 	if a.restoreTty != nil {
-		a.restoreTty()
+		restored := make(chan struct{})
+		go func() {
+			defer close(restored)
+			a.restoreTty()
+		}()
+		select {
+		case <-restored:
+		case <-time.After(restoreGrace):
+			fmt.Fprintf(os.Stderr, "xdev: terminal restore did not return in %s; exiting anyway\n", restoreGrace)
+		}
 	}
 	exitProcess(1)
 }
+
+// restoreGrace bounds the pre-exit terminal restore: long enough for the
+// usual case, short enough that a wedged tty cannot keep the process alive.
+const restoreGrace = 2 * time.Second
 
 // exitProcess is os.Exit behind one seam, so a test can observe the decision
 // to end a wedged session without ending the test binary with it.
