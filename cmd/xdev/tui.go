@@ -146,6 +146,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// the persisted key only. Rebuild the registry if that ever matters.
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
+	// Rebuild-time interruption notice names the calls that are free to
+	// repeat (tool.Replayer). Set against reg, which MCP/extension tools join
+	// as they register — the same registry every turn reads.
+	session.ReplaySafety = reg.ReplaySafe
 	// toolsForTurn routes each turn at the vibe director's restricted view
 	// while the mode is on. The parent registry is never mutated, so exiting
 	// the mode restores the full toolset by construction.

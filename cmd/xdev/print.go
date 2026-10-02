@@ -485,6 +485,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		defer mgr.Close()
 	}
 
+	// Rebuild-time interruption notice names the calls that are free to
+	// repeat (tool.Replayer). Wired after attachMCP/attachExtensions so a
+	// registered MCP or extension tool answers from its own declaration.
+	session.ReplaySafety = reg.ReplaySafe
+
 	// --- system prompt ---
 	overrides := agent.LoadSystemPromptOverrides(cwd)
 	preset := opts.Personality
