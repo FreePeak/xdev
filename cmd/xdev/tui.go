@@ -2576,12 +2576,25 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				app.AddSystemBlock("that session is no longer on screen — the message stays queued")
 				return
 			}
+			// Take the row out of the queue FIRST, before touching the turn.
+			// From here the message has exactly one owner: this callback. It
+			// used to stay queued until the delivery landed, and the
+			// interrupted run's own end-of-run flush picked it up too — the
+			// drive that found this persisted the message twice, printed two
+			// ACK rows and counted two turns for one message (#157).
+			if _, ok := app.TakeQueued(sid, text); !ok {
+				return // already delivered, or taken back into the composer
+			}
+			requeue := func() { app.QueueAgain(text, sid) }
 			if !tabs.isRunning(sid) {
 				// Nothing to interrupt: the message is an ordinary submit now.
-				runTurn(text, nil)
+				if !runTurn(text, nil) {
+					requeue()
+				}
 				return
 			}
 			if collabGuestJoined() {
+				requeue()
 				app.AddSystemBlock("joined as a guest — the host runs the turn")
 				return
 			}
@@ -2592,7 +2605,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			stopped := tabs.abort(sid)
 			if !stopped {
 				app.AddSystemBlock("no turn is running — sending the message now")
-				runTurn(text, nil)
+				if !runTurn(text, nil) {
+					requeue()
+				}
 				return
 			}
 			// The abort is asynchronous by nature: the run is mid-stream and
@@ -2635,15 +2650,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					}
 					claimed, ok := tabs.claimCurrent()
 					if !ok {
-						return // another turn took it; that run's flush drains the row
+						requeue() // another turn took the slot; the row waits its own turn
+						return
 					}
 					app.SetRunning(false)
 					if !runTurnNow(text) {
 						tabs.release(claimed)
-						app.QueueAgain(text, sid)
+						requeue()
 						return
 					}
-					app.DropQueued(sid, text)
 					app.AddSystemBlock("· delivered now")
 				})
 				return
@@ -2653,18 +2668,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// there first, and the row stays queued for that turn's flush.
 			claimed, ok := tabs.claimCurrent()
 			if !ok {
+				requeue()
 				app.AddSystemBlock("another turn started first — this message is still queued")
 				return
 			}
 			app.SetRunning(false)
-			// runTurnNow persists the message and starts the turn; the row is
-			// dropped only once that succeeded, because a message persisted
-			// AND left queued would be delivered a second time by the flush.
-			if runTurnNow(text) {
-				app.DropQueued(sid, text)
-				return
+			// runTurnNow persists the message and starts the turn. The row is
+			// already out of the queue, so a failure here is the one case that
+			// puts it back — and a crash-free session never delivers it twice.
+			if !runTurnNow(text) {
+				tabs.release(claimed)
+				requeue()
 			}
-			tabs.release(claimed)
 		})
 	// Shell mode (M10 #163): "!<command>" in the composer runs locally and
 	// prints to the transcript. Nothing is sent to the model, so the draft

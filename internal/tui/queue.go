@@ -124,18 +124,6 @@ func (a *App) QueueAgain(text, sid string) {
 	a.queue = append([]queuedEntry{{text: text, kind: queueLabel(text), session: sid, seq: -1}}, a.queue...)
 }
 
-// DropQueued removes the pending entry with this text from session sid, oldest
-// match first, and reports whether one went. The send-now path calls it once
-// the HOST has really taken the message: a row that survived the interrupt
-// would be delivered twice — once as the interrupted turn's replacement prompt,
-// and again by the queue's run-end flush when that turn ends. Not removing it
-// is the difference between "delivered now" and "delivered now and again".
-func (a *App) DropQueued(sid, text string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.removeQueuedByTextLocked(sid, text)
-}
-
 // queuePrompt records a pending submit and hands the text to the host's
 // mid-turn delivery seam. It reports whether the entry was queued: a host
 // whose onQueue refused it (a guest room that cannot forward into a live

@@ -628,3 +628,38 @@ func (a *App) userTexts() []string {
 	}
 	return out
 }
+
+// TestSendNowTakesTheRowBeforeTheInterrupt: send-now's row must be GONE from
+// the queue by the time the interrupted run unwinds. It used to stay until the
+// delivery landed, so the interrupted run's own end-of-run flush found it and
+// started the same message a second time — the model saw it twice, the
+// transcript printed two ACK rows, and the pill counted two turns for one
+// message (#157). TakeQueued is therefore the FIRST thing the path does.
+func TestSendNowTakesTheRowBeforeTheInterrupt(t *testing.T) {
+	app, _, _ := queueApp(t)
+	typeText(app, "this must go now")
+	enter(app)
+	if app.QueuedCount() != 1 {
+		t.Fatalf("the prompt did not queue: %v", app.PendingTexts())
+	}
+	sid := app.SessionID()
+
+	// The host's first move: claim the message, exactly as cmd does before
+	// touching the turn. Nothing else has run yet, so a row still visible here
+	// is a row the interrupted run's flush would also deliver.
+	if _, ok := app.TakeQueued(sid, "this must go now"); !ok {
+		t.Fatal("the host could not take the row it was asked to deliver")
+	}
+	if n := app.QueuedCount(); n != 0 {
+		t.Fatalf("a taken row is still pending, so a flush would deliver it twice: %v", app.PendingTexts())
+	}
+	// And the flush's own take now finds nothing — which is the whole point.
+	if got := app.TakeOldestQueued(sid); got != "" {
+		t.Fatalf("the run-end flush still got %q from a row already delivered", got)
+	}
+	// A host that fails to deliver puts it back, and only then.
+	app.QueueAgain("this must go now", sid)
+	if got := app.PendingTexts(); len(got) != 1 || got[0] != "this must go now" {
+		t.Fatalf("requeue after a failed delivery = %v, want the message back", got)
+	}
+}
