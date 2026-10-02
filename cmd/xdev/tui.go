@@ -2615,12 +2615,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// before starting the next turn, bounded so a provider that ignores
 			// the cancel cannot wedge the composer.
 			//
-			// The row leaves the queue ONLY when this actually delivers it, and
-			// a run that is still unwinding at the deadline will flush the queue
-			// at ITS end — so keeping the row here is both safe and necessary.
-			// Dropping it early would lose the message; dropping it after a
-			// successful runTurn is what prevents a double delivery, because
-			// runTurn IS the delivery.
+			// The row is already OUT of the queue (taken above, before the
+			// abort), so the interrupted run's own end-of-run flush cannot find
+			// it and cannot deliver this message a second time. Keeping it here
+			// "until the delivery lands" is exactly what it used to do, and the
+			// drive that found it printed two ACK rows and persisted the prompt
+			// twice (#157).
 			app.AddSystemBlock("· interrupted — delivering now")
 			deadline := time.Now().Add(sendNowWait)
 			for tabs.isRunning(sid) && time.Now().Before(deadline) {
@@ -2643,10 +2643,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 						if sid == tabs.currentID() {
 							app.AddSystemBlock("· still unwinding — this message runs as soon as it releases")
 						}
-						return // row stays queued; its own run's flush owns it
+						requeue() // the slot never came back; the row must not evaporate
+						return
 					}
 					if sid != tabs.currentID() {
-						return // parked again: its own flush owns the row
+						requeue() // parked again: its next turn flushes the row
+						return
 					}
 					claimed, ok := tabs.claimCurrent()
 					if !ok {
