@@ -111,6 +111,12 @@ servers:
 	if res.IsError || !strings.Contains(res.Text, "round-trip") {
 		t.Fatalf("res = %+v", res)
 	}
+	// The fixture answers with a text summary AND structuredContent (the
+	// shape a modern MCP server returns, SEP-2106); both must reach the
+	// model. Before the fix the model saw only "echo: round-trip".
+	if !strings.Contains(res.Text, `"echoed":"round-trip"`) {
+		t.Fatalf("structuredContent did not reach the tool result:\n%s", res.Text)
+	}
 }
 
 // TestConfigFilters pins per-server enable/disable and tool filtering.
@@ -163,5 +169,33 @@ func TestRenderContentIsBounded(t *testing.T) {
 	small := renderContent(&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "tiny"}}})
 	if small != "tiny" {
 		t.Fatalf("small result = %q", small)
+	}
+}
+
+// TestRenderContentKeepsStructuredContentBesideText pins the unit half of
+// the same bug: a server answering with a human summary in Content AND the
+// real payload in structuredContent had that payload silently dropped,
+// because the old gate rendered it only when Content rendered empty.
+func TestRenderContentKeepsStructuredContentBesideText(t *testing.T) {
+	res := &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: "found 2 issues"}},
+		StructuredContent: map[string]any{"issues": []any{map[string]any{"key": "FOOD-2"}}},
+	}
+	got := renderContent(res)
+	if !strings.Contains(got, "found 2 issues") {
+		t.Fatalf("text content lost: %q", got)
+	}
+	if !strings.Contains(got, `"FOOD-2"`) {
+		t.Fatalf("structuredContent dropped alongside text content: %q", got)
+	}
+
+	// The compliant-server case: both channels carry the same JSON (the
+	// SDK populates Content from the typed Out value). One copy, not two.
+	dup := &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: `{"issues":["FOOD-1"]}`}},
+		StructuredContent: map[string]any{"issues": []any{"FOOD-1"}},
+	}
+	if n := strings.Count(renderContent(dup), `"FOOD-1"`); n != 1 {
+		t.Fatalf("identical structured output rendered %d times, want 1: %q", n, renderContent(dup))
 	}
 }

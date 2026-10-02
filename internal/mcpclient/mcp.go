@@ -375,11 +375,21 @@ func renderContent(res *mcp.CallToolResult) string {
 			}
 		}
 	}
-	if res.StructuredContent != nil && b.Len() == 0 {
-		raw, _ := json.Marshal(res.StructuredContent)
-		b.Write(raw)
+	body := b.String()
+	// structuredContent is a channel of its own (SEP-2106), not a fallback
+	// for Content: a server may put a one-line human summary in Content and
+	// the real payload in structuredContent, and gating on an empty body
+	// dropped that payload whenever any text block existed at all. Append it
+	// unless the text already carries the identical JSON, which is what a
+	// compliant server populating both channels does.
+	if res.StructuredContent != nil {
+		if raw, err := json.Marshal(res.StructuredContent); err == nil {
+			if s := string(raw); !strings.Contains(body, s) {
+				body += s + "\n"
+			}
+		}
 	}
-	_, _ = sink.Write([]byte(b.String()))
+	_, _ = sink.Write([]byte(body))
 	out, truncated := sink.Result()
 	out = strings.TrimRight(out, "\n")
 	if out == "" {
