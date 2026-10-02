@@ -196,12 +196,26 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 			m := t.Message
 			switch m.Role {
 			case ai.RoleAssistant:
+				// A turn whose only content was tool calls, none of which ever
+				// produced a result, neutralizes to an assistant message with
+				// zero blocks. Replaying that shell is what an interrupted session
+				// used to hand the provider: openai-completions encoded it as
+				// `{"role":"assistant","content":""}` (a request many upstreams
+				// reject) and every other wire dropped it, so the model saw the
+				// turn silently disappear. The call still happened and its result
+				// is unknowable, so the honest record is the crash-repair text —
+				// the same shape ai.EnsureToolOutput already guarantees for a
+				// silent tool (#386 lineage), applied here at rebuild time
+				// instead of once per run. dropped names the calls when the
+				// turn had any, so the notice can say which are free to repeat.
+				var dropped []string
 				if hasToolCalls(m) {
-					blocks, dropped := neutralizeToolCalls(m, answered)
-					m.Content = blocks
-					if len(m.Content) == 0 && len(dropped) > 0 {
-						m.Content = []ai.Block{ai.TextBlock{Text: unansweredToolCallText(dropped)}}
-					}
+					m.Content, dropped = neutralizeToolCalls(m, answered)
+				}
+				// Neutralizing a turn whose every block was a dangling call
+				// leaves it with nothing, which is the case the notice covers.
+				if len(dropped) > 0 && len(m.Content) == 0 {
+					m.Content = []ai.Block{ai.TextBlock{Text: unansweredToolCallText(dropped)}}
 				}
 				for _, b := range m.ToolCalls() {
 					if answered[b.ID] {
