@@ -1858,6 +1858,14 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		// (M13 #55).
 		args = json.RawMessage(a.Redactor.Expand(string(args)))
 	}
+	// Schema-driven argument repair (internal/tool/argcoerce.go). It runs
+	// BEFORE every gate below, so plan mode, the approval policy, the bash
+	// interceptor, and the hooks all judge the arguments the tool will
+	// actually receive rather than a shape the model guessed wrong. Every
+	// tool call passes through here — a direct call, a tool_call bridge, an
+	// eval-kernel cell — so one call site covers all three.
+	args = tool.CoerceArgs(t.Parameters(), args)
+	call.Arguments = args
 	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
 	// to propose while the sub-state is active. Checked before approval —
 	// a read-only run must never reach an approval prompt for a mutation.

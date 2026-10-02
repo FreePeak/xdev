@@ -2514,4 +2514,100 @@ Tests: `TestTabStripCloseClickDoesNotDeadlock` and `TestTabStripLabelClickDoesNo
 *Last updated: 2026-10-02 (feat/eval-tool-bridge, #268 — **a cell can now call the harness's tools**): `tools.read({...})` inside an `eval` cell reaches the agent loop and the answer comes back into the cell, so a fan-out of N tool calls costs one assistant message plus what each call did instead of N round trips (pi 1.0 Codemode, dsh `run_code`, opencode `execute`). The route is `docs/decisions/programmatic-tool-calling.md` (§0.1–0.6), settled 2026-10-02 and implemented here: `Kernel.SetRunner` takes a `tool.Runner` — the deferred-tool bridge's own type, so the contract is identical — and `dispatchToolCall` runs the call on its own goroutine, **never under `k.mu`** (§0.3's lock-order finding; `route` returns before the dispatch). Every call lands in `runOneTool`, so plan mode, the approval policy, the interceptor chain and the hooks all still decide, on the inner tool's real name. Three refusals by name rather than counters (§0.5): no runner installed → refuse; `eval` → refuse (a cell that spawns a cell is unbounded recursion); `tool_search`/`tool_describe`/`tool_call` → refuse (`tool.IsBridgeTool`, so a cell cannot reach the registry twice over). The slot is cancellable as §0.3 requires: `reply` claims it with `sync.Once` and `cancelCell`/`markExited`/`stopLocked` all release it, so an interrupted cell raises a Python exception rather than hanging on a host answer that is never coming, and a tool still running sees its context cancelled with the cell (§0.4's "state is lost, don't imply otherwise" holds: kernel state still dies with the process). One new mechanism on the python side and no new dependency: a single stdin reader thread (`_stdin_loop`) answers `tool_result` frames in place and queues cell requests for `main`, and the cell polls its slot so a cell clock or an agent abort becomes a `KeyboardInterrupt` the cell already knows how to report. The seam is wired in `wireAgentMode` beside `WireCatalog` — the third mode seam, and the one most likely to drift, since an unwired kernel refuses every call silently; `TestWireAgentModeWiresEvalKernel` pins it. Tests: `internal/eval/bridge_test.go` (a call round trip, two calls in one kernel, the refusals, the interrupt-does-not-hang case, tool-context cancellation) and the wiring pin. Known: a cell cannot call the model registry from inside — `typesafe`/Jev is reachable as a tool (`tools.typesafe({...})`) but there is no `models.classify` binding, and no `codemode`-only tool axis on the catalog (`tool.Entry` has `deferred` only); both are the next slices, not part of this one. Still open per §0.7: whether a cell's output is one tool result or N lines of what each call did (this PR takes the DSH reading — one result, printed/returned values only).
 
 
+*Last updated: 2026-10-02 (`fix/tool-arg-coercion` — found while collecting this session's five background subagents: **seven `hub` calls in a row were refused, all of them identically, and the refusals named the wrong field.** The cause is one thing: a model that READS a JSON Schema but is not CONSTRAINED by it sends two spellings the tools' plain `json.Unmarshal` cannot accept, and every tool in the repo decodes its own args by hand.
++
++**(1) A flattened array.** `{"ids":{"item":["hub-1","hub-2"]}}` instead of `{"ids":[...]}`. OpenAI structured outputs serialize a bare `{"type":"array"}` as an object with a single `item` key, and a model trained on that shape emits it even with `strict` off — which is every wire xdev speaks that is not `codex-responses` (`strictTools` is set on `codex_responses.go:31` and nowhere else; the session's model is `opencode/space-bunny-free` on `openai-completions`, i.e. never enforced). The error it produced was `cannot unmarshal object into Go struct field .ids of type []string`. **(2) A quoted scalar.** `{"timeout":"600"}` against `{"type":"number"}` — `cannot unmarshal string into Go struct field .timeout of type float64`. The same batch, 2026-09-23, had `githubArgs.limit` fail the same way as `"20"`. **`tool_describe` was no help**: it prints the JSON Schema, which is exactly the shape the model was getting wrong, and the flat `{"op":...}` shape is not something a deferred-tool bridge can route back.
++
++Both are a wire-level shape fault, not a tool bug, and the fix is one chokepoint rather than 40: `internal/tool/argcoerce.go` `CoerceArgs(schema, args)` walks the tool's OWN declared schema against the payload and repairs only what is unambiguous — a single-key object under a declared array whose one key is one of `item`/`items`/`value`/`values` holding an array unwraps to that array; a string that is exactly an integer/number/boolean for a declared `integer`/`number`/`boolean` becomes that value; a number/bool for a declared `string` becomes its text. It is called at `internal/agent/loop.go:1867`, immediately after the argument bytes are resolved and BEFORE plan mode, the approval policy, the interceptor and the hooks — so every gate judges the arguments the tool will actually receive, and a direct call, a `tool_call` bridge and an `eval` cell all get it from the one site (`runOneTool` is the single entry; `catalog.go:32` and `evalbridge.go:45` both re-enter it). The repair never invents: a two-key wrapper, a non-numeric string for a number, an undeclared key, a non-array under a flatten key, or a non-object payload are all returned byte-identical, so a genuinely wrong call still reaches the tool and still gets the tool's own honest required-argument error. An untouched payload is returned as its ORIGINAL bytes (the decode uses `json.Number`, and a rewrite only re-marshals when `changed`), so nothing that used to work acquires float formatting or key reordering on the way past.
++
++Tests: `internal/tool/argcoerce_test.go` pins both live shapes, the integer-stays-integer rule (`"20"` → `20`, not `20.0`), the nested case (`task`'s `max_turns` inside `tasks[]`), byte-identical passthrough, and five refusal cases. `internal/agent/argcoerce_wire_test.go` `TestRunOneToolRepairsLiveFailureShapes` drives `runOneTool` with the exact arguments that failed seven times and decodes what the tool received — it fails on stock `main` with the field's own error, and it is the pin that the call site is wired. `internal/agent/catalog_test.go` `TestHubToolAcceptsTheLiveFailureShapes` runs the same shape through the REAL `HubTool`, which would otherwise be the tool that fails. Two pre-existing failures in `cmd/xdev` (`TestConnectPickerItems`, `TestSkillPromptBlockEmptyWithoutSkills`) are environment-dependent and reproduce unchanged on `origin/main`.
+
+---
+
+## The in-band tool-argument bug batch (2026-10-02)
+
+Seven `tool_call hub` invocations failed in one turn before any subagent
+result came back, and each failure looked like a different bug. The session
+transcript (`~/.xdev/agent/sessions/…/2026-10-02T09-18-46.460Z_44bf6c20….jsonl`)
+shows they were one: **the model was not wrong about what it wanted, it was
+wrong about the JSON envelope, and the tools' decoders refuse anything but the
+literal schema.**
+
+```
+{"args":{"ids":{"item":["hub-1",…]},"op":"wait","timeout":"600"},"name":"hub"}
+```
+
+Two distinct defects in that one payload:
+
+1. **`ids` is an object, not an array.** OpenAI structured outputs serialize a
+   bare `{"type":"array"}` as an object with a single `item` key; models
+   trained on that shape emit it even on wires with no strict enforcement
+   (`openai-completions` has no `strictTools` at all — only `codex_responses`
+   does, `internal/ai/codex_responses.go:31`). Every gateway that proxies
+   chat/completions inherits this. `hubtool.go:60` declares `IDs []string`, so
+   the call is refused before the tool ever sees it.
+2. **`timeout` is the string `"600"` for a declared number.** Same root cause
+   (the wire does not constrain the model), same refusal.
+
+The reported error compounds the confusion: Go's `encoding/json` names the
+*last* field it failed on, so the same call produced
+`cannot unmarshal object into … .ids of type []string` when `ids` was the
+culprit and `cannot unmarshal string into … .timeout of type float64` when
+only `timeout` was wrong. Neither message names the real defect, which is why
+the retries wandered (`ids` → `timeout` → `ids:"hub-1"` → dropping both).
+
+This was not new to today: on 2026-09-23 the same envelope shape broke the
+`github` tool twice (`cannot unmarshal string into Go struct field
+githubArgs.limit of type int` — `"limit":"20"` for an `int`), and on
+2026-09-28 it recurred. The batch is old; it was only noticed now because the
+`hub` tool has the most array-typed parameters of any tool in the tree.
+
+### Fix: schema-driven coercion at the one chokepoint
+
+`internal/tool/argcoerce.go` walks the tool's declared schema alongside the
+argument payload and repairs only what is unambiguous:
+
+| sent | declared | repaired |
+|---|---|---|
+| `{"item":["a","b"]}` | `array` | `["a","b"]` |
+| `"600"` | `number` | `600` |
+| `"20"` | `integer` | `20` (never `20.0`) |
+| `"true"` | `boolean` | `true` |
+| `600` | `string` | `"600"` |
+
+It refuses anything ambiguous — a two-key object, a wrapper whose value is not
+an array, a non-numeric string for a number, an undeclared key — so a genuinely
+wrong call still reaches the tool and still gets the tool's own honest
+required-argument error. A payload that needs no repair keeps its original
+bytes (no re-marshal, so a `command` string never acquires float formatting).
+
+It runs at `runOneTool`'s single seam (`internal/agent/loop.go`, just after the
+redactor and **before** plan mode, the approval policy, the bash interceptor,
+and the hooks), deliberately: those gates must judge the arguments the tool
+will actually receive, not the shape the model guessed. One call site covers a
+direct call, a `tool_call` bridge (`runCatalogCall`), and an `eval`-kernel cell
+(`runEvalTool`) — all three land in `runOneTool`.
+
+Tests: `internal/tool/argcoerce_test.go` (the five shapes, the byte-identical
+no-op, and eight ambiguous shapes that must stay untouched) and
+`TestHubToolAcceptsTheLiveFailureShapes` in `internal/agent/catalog_test.go`
+(the live payload end-to-end through `runOneTool`). Verified red/green: with
+the one-line call site reverted the agent test fails with the exact field
+error from the field, and passes with it.
+
+*Last updated: 2026-10-02 (fix/tool-arg-coercion — a schema-guided repair of the
+two argument-envelope shapes non-strict wires provoke, so a model's typo stops
+being seven refusals): the root cause was never the hub tool's schema; it was
+that `openai-completions` — the wire this session runs on — sends no strict
+enforcement, so a model trained on OpenAI structured outputs flattens a bare
+array to `{"item":[…]}` and quotes its numbers, and every tool decoder refuses
+both. `tool.CoerceArgs` repairs the unambiguous cases against the tool's own
+declared schema and refuses everything else, so the honest error still comes
+from the tool.*
+
+*Last updated: 2026-10-02 (`fix/interceptor-echo` — found by driving the merged #530 in a real print run, not by a test: **the coercion ran, reported `changed=true`, and the tool still received the model's original bytes.**) The unit pins for #530 all passed and the field bug was genuinely fixed at `CoerceArgs` — but the real harness wires an interceptor on every call, and that interceptor ECHOED the unrepaired payload back over the repair. `runOneTool` coerced into the local `args`, then `a.Intercept.ToolCall(ctx, call)` returned `call.Arguments` (still the raw model blob — `hooks.Bus.ToolCall` `internal/hooks/interceptor.go:35` returns `args` unchanged when no hook revises, and `ext.Manager.ToolCall` `internal/ext/ext.go:591` returns `current` unchanged when no extension is subscribed), and the loop's `if len(revised) > 0 { args = revised }` (`loop.go:1939`) overwrote the repair with it. So a call with a hooks bus installed silently reverted to pre-#530 behaviour, while the same call with `Intercept == nil` (every unit test) took the repair. Instrumented print run against `origin/main` @ `8114a58`: `COERCE-STEP … changed=true` immediately followed by `INTERCEPT-REVISED {"ids":["hub-1"],…} -> {"op":"wait","ids":{"item":["hub-1"]},…}` and then the field's own error.
++
++The one-line fix: `loop.go` also writes the repair back onto the call block (`call.Arguments = args`) right after the coercion, so the block the interceptor receives IS the repaired payload, and the echo returns the repaired bytes. A real revision still wins, because the interceptor's return value is applied afterwards exactly as before.
++
++Tests: `TestRunOneToolCoercesPastAnEchoingInterceptor` drives `runOneTool` with an interceptor that behaves like the wired one (returns `call.Arguments`, nil) and the field's exact arguments; it fails on the merged main with `cannot unmarshal object into Go struct field .ids of type []string` and passes with the fix. Verified end to end, not just in a test: a local openai-completions SSE server emitting `{"op":"wait","ids":{"item":["hub-1","hub-2","hub-3"]},"timeout":"1"}` on the wire, driven through the real `xdev print` binary — `hub [ok, 1.025s] wait: nothing settled within the timeout` with the fix, `hub [error, 0s] … malformed arguments` on `8114a58`. `go build ./...`, `go vet ./...` clean; `go test ./...` clean except the two environment-dependent `cmd/xdev` failures that reproduce on `origin/main`.
 *Last updated: 2026-10-03 (`fix/resume-status-metrics` — user-reported: "fix xdev total time and token and all metrics in the bottom status bar must be resumed after resume a session"). **Every metric on the status bar was wiped by `/resume` and only the work timer came back.** `App.Reset` zeroes the whole `Status` (↑⇢↓˟, cache-write, cost, rate, TTFT, ctx, tool calls/time, LLM time, turns/steps) — correct as a per-session boundary — but the replay path then re-banked only what it could measure cheaply: `SetContextReplay`, `SetWork`, `SetLLMTime`, `SetSessionCounts`. The token buckets and the spend were never re-banked, so a session reopened at "0s" with no tokens and no cost for work it had already done and been charged for (`internal/tui/app.go` `Reset`, `cmd/xdev/tui.go` `workOf`/`ttftOf`/`countsOf`). Fix: one more re-base on the same replayed path — `usageOf` (`cmd/xdev/tui.go`) sums the persisted per-message `ai.Usage` the way the live hook banks it (`AddUsage`/`AddCost`, `tuiHooks.OnEvent`), and `App.SetSessionUsage` (`internal/tui/app.go`) REPLACES the buckets + cost, the same no-double-count contract `SetWork`/`SetSessionCounts` keep. Deliberately NOT re-based: `CtxUsed` (live occupancy — `SetContextReplay` measures it) and `Rate` (a history cannot re-measure the last decoded message's speed). The adoption path is ONE function, `replaySession(app, msgs)` (`cmd/xdev/tui.go`), shared by every site that rebuilds a history — startup `--continue`/`--resume`, `focusTab` (tab switching), `branchReplay` (tree navigation/branch), and everything routed through `swapStoreTo` (fork, import, picker resume). A metric wired at two of three sites and missed at the third is the defect itself, so the copies are gone rather than patched. Tests: `cmd/xdev/sessionops_test.go` (`TestUsageOfSumsPersistedBuckets` — every bucket off the persisted split, no-usage and pre-usage messages contributing zero) and `cmd/xdev/tui_metric_wire_test.go` (`TestResumedSessionKeepsStatusMetrics` — Reset then the real replay path, reading the PAINTED status row: 68.5k tokens, 98% cache hit, 6s work, and `$0.0133` in /usage). Pre-existing failures on `main`, unrelated: `TestConnectPickerItems` (reads this machine's cursor credential state) and `TestSkillPromptBlockEmptyWithoutSkills` (reads this machine's installed skills).
