@@ -279,9 +279,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if lastSettings().ColorBlindMode {
 		th = theme.ApplyColorBlindMode(th)
 	}
-	scr, err := tcell.NewScreen()
+	// A frame write must not be able to stop the UI loop: an unbounded write
+	// to a pane whose reader stopped drains blocks the loop for as long as
+	// the pty stays full, which is the session-dying stall in
+	// internal/tui/tty_deadline.go. The bounded screen is the same
+	// tcell screen with a write deadline; if it cannot be built (no
+	// /dev/tty, no terminfo), stock behaviour is what runs.
+	scr, dropped, err := tui.NewDeadlineScreen()
 	if err != nil {
-		return 2, fmt.Errorf("tui: screen: %w", err)
+		if scr, err = tcell.NewScreen(); err != nil {
+			return 2, fmt.Errorf("tui: screen: %w", err)
+		}
 	}
 	setCursorColor(th.Get(theme.AccentUser)) // OSC 12 (survives into raw mode)
 	if err := scr.Init(); err != nil {
@@ -315,6 +323,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer func() { terminalRestore = prevRestore }()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	app.SetFrameDropped(dropped)
 	// --log: write a TUI screen transcript to <path> after each
 	// paint frame (off by default). Relative paths resolve under
 	// config.DataDir(); the file is opened truncated and closed on exit.
