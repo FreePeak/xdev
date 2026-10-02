@@ -259,6 +259,11 @@ func TestResumedSessionKeepsStatusMetrics(t *testing.T) {
 			Input: 500, Output: 100, TotalTokens: 600,
 			Cost: &ai.UsageCost{Total: 0.001},
 		}},
+		// A tool call's span belongs to the work timer too: the live one
+		// banks the whole run, so a resumed timer that counted only the
+		// provider requests read at roughly half.
+		{Role: ai.RoleToolResult, ToolCallID: "c1", ToolName: "bash", DurationMS: 9000,
+			Content: []ai.Block{ai.TextBlock{Text: "ok"}}},
 	}
 	// Reset is the adoption boundary (/resume, a tab switch, a tree rewind):
 	// everything goes, and the one replay path has to put it all back.
@@ -275,8 +280,9 @@ func TestResumedSessionKeepsStatusMetrics(t *testing.T) {
 	if !strings.Contains(row, "98%") {
 		t.Fatalf("the resumed cache-hit rate is gone: %q", row)
 	}
-	if !strings.Contains(row, "6s") {
-		t.Fatalf("the work timer lost the resumed history's 6.5s: %q", row)
+	// 4000 + 2500 assistant spans + the 9000ms tool span = 15.5s of work.
+	if !strings.Contains(row, "15s") {
+		t.Fatalf("the work timer lost the resumed history's 15.5s: %q", row)
 	}
 	report := app.UsageReport()
 	if !strings.Contains(report, "$0.0133") {
