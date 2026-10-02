@@ -142,6 +142,57 @@ func TestRestoreChangesRestoresFile(t *testing.T) {
 	}
 }
 
+// TestExitResumeLineSurvivesTheCloseDefer: the TUI's exit defers run in the
+// opposite order to their registration — the store is flushed and closed
+// first, and the resume line prints second. closeAll empties the tabset, so
+// the line must name a store captured BEFORE that, not storeOf() read after
+// it (#519: it printed nothing at all, on every quit).
+func TestExitResumeLineSurvivesTheCloseDefer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := "/tmp/exit-capture-test"
+	id := "EEEE5555-0000-0000-0000-000000000000"
+	path := writePickerSession(t, cwd, id, "captured", "hello")
+	st, err := session.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tabs := newTabset(st)
+
+	// the close defer, in runTUI's order: capture, then closeAll.
+	var exitStore *session.Store
+	if s := tabs.store(); s != nil {
+		exitStore = s
+	}
+	tabs.closeAll()
+
+	if got := tabs.store(); got != nil {
+		t.Fatalf("the trap this guards is gone: storeOf() still resolves after closeAll (%v)", got)
+	}
+	if got := exitMenuText(tabs.store(), cwd); got != "" {
+		t.Fatalf("exitMenuText(storeOf() after closeAll) = %q, want empty — nothing to name", got)
+	}
+	if got := exitMenuText(exitStore, cwd); !strings.Contains(got, "--resume "+id) {
+		t.Fatalf("the captured store lost the resume line:\n%s", got)
+	}
+}
+
+// The print defer itself is not reachable from a test (runTUI needs a tty), so
+// this pins the one fact the fix rests on: the line names the store the close
+// defer captured, not storeOf() read after the tabset has been emptied.
+func TestExitLineReadsTheCapturedStore(t *testing.T) {
+	src, err := os.ReadFile("tui.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	if !strings.Contains(s, "exitMenuText(exitStore, cwd)") {
+		t.Fatal("the exit line no longer names the captured store: it reads storeOf(), which closeAll empties (#519)")
+	}
+	if !strings.Contains(s, "exitStore = s") {
+		t.Fatal("the close defer no longer captures the store the exit line names")
+	}
+}
+
 func runGitT(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

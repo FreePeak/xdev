@@ -240,8 +240,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// The resume line on the way out. Registered BEFORE the defers that flush
 	// and close the store and release the screen, so LIFO order prints it last
 	// of the three: tcell has left the alt screen (anything written before Fini
-	// is wiped) and the session file is closed. It reads `store` at exit, so
-	// /new, /fork and /resume change what the line names.
+	// is wiped) and the session file is closed. It names the store the close
+	// defer below captured — closeAll empties the tabset, so storeOf() reads
+	// nil by then and the line printed nothing at all (#519). That capture is
+	// what lets /new, /fork and /resume change what the line names.
+	var exitStore *session.Store
 	defer func() {
 		if id := lastDetachID(); id != "" {
 			fmt.Printf("─── detached ──────────────────────────────────────\n")
@@ -251,8 +254,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			fmt.Printf("  xdev config set tui.exitDetach false   # kill on quit\n")
 			fmt.Printf("──────────────────────────────────────────────────\n")
 		}
-		if s := storeOf(); s != nil {
-			if text := exitMenuText(s, cwd); text != "" {
+		if exitStore != nil {
+			if text := exitMenuText(exitStore, cwd); text != "" {
 				fmt.Print(text)
 			}
 		}
@@ -266,6 +269,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if s := storeOf(); s != nil {
 			_ = s.Append(&session.ModelChangeEntry{Model: lm})
 			_ = s.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
+			exitStore = s // the exit line's store, read before closeAll drops it
 		}
 		tabs.closeAll()
 	}()
