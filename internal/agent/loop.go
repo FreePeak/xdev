@@ -1865,6 +1865,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	// tool call passes through here — a direct call, a tool_call bridge, an
 	// eval-kernel cell — so one call site covers all three.
 	args = tool.CoerceArgs(t.Parameters(), args)
+	call.Arguments = args
 	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
 	// to propose while the sub-state is active. Checked before approval —
 	// a read-only run must never reach an approval prompt for a mutation.

@@ -55,9 +55,12 @@ const (
 	dockListMax = 6                    // rows one list shows before "+N more"
 	dockPlanMax = 18                   // rows the plan document may take: the section is
 	// the reason the panel exists, so it gets the bigger half of the budget.
-	// dockTitleMax bounds the rows the session's own name may take: a name is read
-	// whole, but not at the price of the work it names.
-	dockTitleMax = 3
+	// There is no cap on the session's own name: it is the one string in the
+	// panel a human reads whole, so it takes the rows it needs from the
+	// sections below (dockTitleLines). ponytail: a name long enough to fill
+	// the panel shows the panel and nothing else — that is the trade asked
+	// for; the other one was a "…" in the middle of the name.
+	dockTitleFloor = 4 // rows the sections keep whatever the name takes
 )
 
 // Section ids, in the order the panel paints them: what the session is doing,
@@ -795,14 +798,13 @@ func (d *dockState) titleRows() int {
 
 // dockTitleLines wraps the session's name to the panel's interior instead of
 // clipping it. The name is the one string in the panel a human reads whole, and
-// a "\u2026" at 38 cells turned "showing full title" into a riddle. The rows are
-// not free: layout spends them out of the content budget, and dockTitleMax
-// bounds what the name may take from the work it names — the same
-// wrap-and-cap the session pickers give their titles (wrapCapped). Caller
-// holds a.mu.
+// a "\u2026" at 38 cells turned "showing full title" into a riddle — so it is
+// not capped by row count: it wraps over as many rows as it takes and layout
+// spends those rows out of the content budget. The band is the only bound left,
+// because a title row that is not on screen is not a title. Caller holds a.mu.
 func (a *App) dockTitleLines(bandH int) []string {
 	return wrapCapped(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner,
-		min(dockTitleMax, max(1, bandH-4)))
+		max(1, bandH-dockTitleFloor))
 }
 
 // selDockRowsForPaint returns the dock's rows as selectable rows with their
@@ -858,11 +860,12 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	ink := body.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	// The change counts wear the diff's own inks, on the panel's background: a
-	// file's "+N" is the green its diff block already paints with. Those inks
-	// are built from StyleDefault, so they already carry the terminal's
-	// background and only their foreground is the diff's own.
+	// file's "+N" is the green its diff block already paints with — the MARKER
+	// ink, since the panel has no band behind a two-character count. Built from
+	// StyleDefault, so it carries the terminal's background and only the
+	// foreground is the diff's own.
 	ds := a.diffStyle()
-	added, removed := ds.added, ds.removed
+	added, removed := ds.add.mark, ds.del.mark
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
 			s.SetContent(cx, y, ' ', nil, body)
@@ -1091,7 +1094,6 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 		s.SetContent(w-x-1, y, vr, nil, brdSt)
 	}
 	drawText(s, x+2, y0+1, "diff "+ov.path, fgSt.Bold(true))
-	ds := a.diffStyle()
 	// Body rows: title at y0+1, footer at y0+panelH-2, bottom border at
 	// y0+panelH-1 → panelH-3 interior lines the viewport can show.
 	ov.scrollVp = max(1, panelH-3)
@@ -1109,19 +1111,12 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 		if y >= y0+panelH-1 {
 			break
 		}
-		ln := ov.lines[i]
-		if len(ln.runs) > 0 && strings.HasPrefix(ln.runs[0].text, "+") {
-			for _, r := range ln.runs {
-				drawText(s, x+2, y, r.text, ds.added)
-			}
-		} else if len(ln.runs) > 0 && strings.HasPrefix(ln.runs[0].text, "-") {
-			for _, r := range ln.runs {
-				drawText(s, x+2, y, r.text, ds.removed)
-			}
-		} else {
-			for _, r := range ln.runs {
-				drawText(s, x+2, y, r.text, r.style)
-			}
+		// The rows carry their own styles — diffCells already painted the
+		// marker, the band and the word runs — so the viewer repaints them as
+		// they are. Repainting every +/- row in one ink (which this used to
+		// do) flattened the band and the word emphasis back into plain text.
+		for _, r := range ov.lines[i].runs {
+			drawText(s, x+2, y, r.text, r.style)
 		}
 	}
 	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll", dimSt)

@@ -104,25 +104,32 @@ func TestCapabilityFromEnv(t *testing.T) {
 	}
 }
 
-// The built-in palettes leave the diff slots to the terminal: the TUI cannot
-// learn the emulator's palette, so a fixed green/red it picks for itself is
-// free to land on the user's — Slot must say "no colour here" for exactly the
-// three slots the diff renderer reads, and nothing else.
-func TestBuiltinThemesLeaveDiffToTerminal(t *testing.T) {
+// The built-in palettes own the diff inks, and a band beside them: the change
+// is read from the band's colour and the marker's ink, so a built-in theme that
+// named neither would fall back to the terminal's own green/red with no band at
+// all — the look this retired. All four band slots are xdev's own vocabulary
+// (not omp's 66-token contract), so they are optional for an imported theme and
+// required of a built-in.
+func TestBuiltinThemesPaintTheDiff(t *testing.T) {
 	for _, name := range []string{"groknight", "grokday"} {
 		th := Builtins()[name]
-		for _, slot := range []string{ToolDiffAdded, ToolDiffRemoved, ToolDiffContext} {
-			if c, ok := th.Slot(slot); ok {
-				t.Errorf("%s: %s pins %+v, want the terminal's own ink", name, slot, c)
-			}
-			// The slots still carry the palette's green/red as color-blind
-			// mode's source pair — Get answers, Slot abstains.
-			if th.Get(slot) == (Color{}) {
-				t.Errorf("%s: %s has no palette color for the color-blind remap", name, slot)
+		for _, slot := range []string{ToolDiffAdded, ToolDiffRemoved, ToolDiffContext,
+			ToolDiffAddedBg, ToolDiffRemovedBg, ToolDiffAddedWordBg, ToolDiffRemovedWordBg} {
+			if c, ok := th.Slot(slot); !ok || c == (Color{}) {
+				t.Errorf("%s: %s must pin a colour, got %+v (ok=%v)", name, slot, c, ok)
 			}
 		}
-		if _, ok := th.Slot(AccentError); !ok {
-			t.Errorf("%s: only the diff slots may be terminal-default", name)
+		// A band that equals its word band teaches nothing: the changed words
+		// are the whole reason wordPair exists.
+		add, _ := th.Slot(ToolDiffAddedBg)
+		addW, _ := th.Slot(ToolDiffAddedWordBg)
+		rem, _ := th.Slot(ToolDiffRemovedBg)
+		remW, _ := th.Slot(ToolDiffRemovedWordBg)
+		if add == addW || rem == remW {
+			t.Errorf("%s: the word band must differ from the row band", name)
+		}
+		if add == rem {
+			t.Errorf("%s: added and removed collapsed onto one band", name)
 		}
 	}
 }
@@ -145,8 +152,19 @@ func TestColorBlindRemapsDiffSlots(t *testing.T) {
 		if cbAdd != cb.Get(AccentSuccess) || cbRem != cb.Get(AccentError) {
 			t.Errorf("%s: diff inks must join the success/error pair: %+v vs %+v", name, []Color{cbAdd, cbRem}, []Color{cb.Get(AccentSuccess), cb.Get(AccentError)})
 		}
-		if base.TerminalDefault(ToolDiffAdded) != true {
-			t.Errorf("%s: the mode must remap a copy, not the shared built-in", name)
+		if base.Get(ToolDiffAdded) == cbAdd {
+			t.Errorf("%s: the mode must remap a copy, not the shared built-in (%+v)", name, base.Get(ToolDiffAdded))
+		}
+		// The bands move with the markers: a green band under a blue marker
+		// leaves the red/green pair standing exactly where it is hardest to
+		// read, so the mode tints them from the pair ink too.
+		row, _ := cb.Slot(ToolDiffAddedBg)
+		word, _ := cb.Slot(ToolDiffAddedWordBg)
+		if row == cbAdd || word == cbAdd {
+			t.Errorf("%s: diff bands must be tints, not the marker ink itself: %+v %+v", name, row, word)
+		}
+		if row == word {
+			t.Errorf("%s: the color-blind word band collapsed onto the row band", name)
 		}
 	}
 }
