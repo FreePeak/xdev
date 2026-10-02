@@ -140,16 +140,29 @@ var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
 var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error|404 page not found`)
 
 // upstreamRefusalRe matches a 400 the gateway wraps when the UPSTREAM
-// refused the request, not one the gateway itself rejected on shape:
+// refused the request, not one the gateway itself rejected on shape.
+// Two phrasings of the same relay, both live:
 //
 //	HTTP 400 {"error":{"code":"400","message":"Error from provider (Console Go): Upstream request could not be processed","type":"invalid_request_error"}}
+//	HTTP 400 {"error":{"code":"400","message":"Upstream request failed: [invalid_request_error] invalid request","type":"invalid_request_error"}}
 //
-// "from provider (Console …)" is a relay of an upstream verdict — the
-// same turn served seconds later succeeds, so it classifies transient
-// and the retry ladder re-enters (beside the routing-verdict 404s in
-// modelVerdictRe). A gateway 400 that names no upstream (bare
-// invalid_request_error) stays ClassBadRequest and fails fast.
-var upstreamRefusalRe = regexp.MustCompile(`(?i)error from provider \([^)]*\): (upstream request|upstream response was not valid json)`)
+// The second names no provider and still relays an upstream verdict: the
+// gateway got a non-2xx from upstream and wrapped it with its own 400
+// shape. Left ClassBadRequest it took only the bounded escalation rounds
+// (two quick retries) and ended the run, because there is nothing in the
+// body a rebuild could fix — the same turn served seconds later succeeds.
+// ClassTransient gives it the full ladder instead: backoff in place,
+// failover to the next chain target, then escalation rounds (see the
+// 404 routing verdicts in modelVerdictRe). A gateway 400 that names no
+// upstream at all (bare invalid_request_error) stays ClassBadRequest and
+// fails fast.
+//
+// ponytail: a body regex is a deliberate shortcut with a ceiling — it
+// trusts any body carrying this vocabulary, so a proxy whose error page
+// happens to include it retries before surfacing the same 400. The
+// upgrade path is a provider-reported error code on HTTPError instead of
+// body sniffing.
+var upstreamRefusalRe = regexp.MustCompile(`(?i)upstream (request (failed|could not be processed)|response was not valid json)`)
 
 // toolNameTooLongRe matches a 400 the gateway rejects because a tool
 // name exceeds the provider's 64-character ceiling. Names come from

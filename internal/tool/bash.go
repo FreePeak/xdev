@@ -623,7 +623,7 @@ func backgroundRun(jobs *BashJobs, cmd *exec.Cmd, stdoutW, stderrW *switchWriter
 		<-done
 		close(watch)
 		waitErr := cmd.Wait()
-		f.Close()
+		f.Close() // release the fd; the process has been reaped
 		code, killed := exitStatus(waitErr)
 		job.finish(code, killed)
 	}()

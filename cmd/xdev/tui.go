@@ -240,8 +240,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// The resume line on the way out. Registered BEFORE the defers that flush
 	// and close the store and release the screen, so LIFO order prints it last
 	// of the three: tcell has left the alt screen (anything written before Fini
-	// is wiped) and the session file is closed. It reads `store` at exit, so
-	// /new, /fork and /resume change what the line names.
+	// is wiped) and the session file is closed. It names the store the close
+	// defer below captured — closeAll empties the tabset, so storeOf() reads
+	// nil by then and the line printed nothing at all (#519). That capture is
+	// what lets /new, /fork and /resume change what the line names.
+	var exitStore *session.Store
 	defer func() {
 		if id := lastDetachID(); id != "" {
 			fmt.Printf("─── detached ──────────────────────────────────────\n")
@@ -251,8 +254,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			fmt.Printf("  xdev config set tui.exitDetach false   # kill on quit\n")
 			fmt.Printf("──────────────────────────────────────────────────\n")
 		}
-		if s := storeOf(); s != nil {
-			if text := exitMenuText(s, cwd); text != "" {
+		if exitStore != nil {
+			if text := exitMenuText(exitStore, cwd); text != "" {
 				fmt.Print(text)
 			}
 		}
@@ -266,6 +269,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if s := storeOf(); s != nil {
 			_ = s.Append(&session.ModelChangeEntry{Model: lm})
 			_ = s.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
+			exitStore = s // the exit line's store, read before closeAll drops it
 		}
 		tabs.closeAll()
 	}()
@@ -337,12 +341,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetStallDumpDir(filepath.Join(config.DataDir(), "dumps"))
 	// The last resort for a UI loop that never comes back: restore the
 	// terminal and end the session, because nothing inside the process can
-	// (the quit chord is applied by the loop, which is what is stuck). Ten
-	// minutes is far past every measured stall — the longest frozen write
-	// xdev has recorded is 17m, and every one of them ended with a kill from
-	// outside — and long enough that a loop which recovers on its own is
-	// never taken away. Same restore as the signal and panic guards.
-	app.SetStallExitAfter(10 * time.Minute)
+	// (the quit chord is applied by the loop, which is what is stuck). Ninety
+	// seconds, not minutes: the stalls this exists for are the process
+	// getting no CPU, and the one thing a starved process cannot do is wait
+	// patiently — every extra second is a second the user spends killing the
+	// pane from outside. Long enough that a loop recovering on its own (a
+	// paste the user still holds, a burst of output) is never taken away.
+	// Same restore as the signal and panic guards.
+	app.SetStallExitAfter(90 * time.Second)
 	app.SetStallRestore(scr.Fini)
 	// MCP servers (optional; absent config = nothing happens). Attached once
 	// the app exists, because a failed server is a startup fact the user has
