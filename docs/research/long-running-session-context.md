@@ -148,17 +148,24 @@ compaction, rebuilding indexes in batches without touching the file. Measured:
 ## 3. The six peers
 
 Every number below carries its source. "Both-same" means the two harnesses use
-the same rule; the constants still differ.
+the same rule; the constants still differ. §3.1 and §3.3–§3.5 are peer
+scouting; **§3.6 (ZCode) is the one written to be ported from**, because it is
+the only harness whose compaction story is three explicit tiers with three
+triggers and three costs.
 
 ### 3.1 Claude Code
 
 Source: official docs, `docs/research/claude-code/cc-official-docs.md:66-68`;
 the 9-section compaction prompt is quoted verbatim in
-`docs/research/claude-code/cc-compact.txt` (78 lines).
+`docs/research/claude-code/cc-compact.txt` (78 lines). The microcompact
+constants below are **not** in the official docs — they come from the bundle
+crawl recorded in
+[cc-resweep-2026-09-14.md:300](claude-code/cc-resweep-2026-09-14.md), which
+notes the `5000` constant's unit as unconfirmable.
 
 - **Two-phase, cheapest first:** *"Auto-compact: clears older tool outputs
   FIRST, then summarizes."* This is the **microcompact** tier — new tool results
-  beyond the newest ~5 are replaced with a cleared-content marker, over a
+  beyond the newest few are replaced with a cleared-content marker, over a
   declared tool set, with a minimum-savings threshold so it does not fire for
   nothing.
 - **Window:** default = the model's context limit (200k models compact near
@@ -170,7 +177,7 @@ the 9-section compaction prompt is quoted verbatim in
   rather than compacting forever.
 - **Manual:** `/compact [focus]` with custom instructions; a
   `CLAUDE.md` "Compact instructions" section feeds it.
-- **What survives** (`cc-official-docs.md:66`, verbatim): *"project CLAUDE.md
+- **What survives** ([cc-official-docs.md:66](claude-code/cc-official-docs.md), verbatim): *"project CLAUDE.md
   re-injected, MEMORY.md, conversation summary + kept key snippets; skill
   descriptions list NOT re-injected (only invoked skills re-attach w/ budgets)."*
   Invoked skills re-attach at 5k tokens each, 25k combined.
@@ -478,14 +485,14 @@ The gap this repo has been citing under other names. **Four** peers ship a
 model-free pass that shrinks or clears old tool results before the summarizer
 runs:
 
-- Claude Code: microcompact — clear old tool outputs, keep the newest ~5, over
+- Claude Code: microcompact — clear old tool outputs, keep the newest few, over
   a declared tool set, with a `minTokenSavings` floor and a
   `microcompact_boundary` event so the transcript knows content was dropped
   ([PRD §5.1 adopt bullet](https://github.com/FreePeak/xdev/blob/main/docs/PRD.md);
   [cc-resweep-2026-09-14.md:300](claude-code/cc-resweep-2026-09-14.md))
 - ZCode: `microcompactIfNeeded` **before** `autoCompactIfNeeded` in the step
-  loop (`runRegularTurnLoop`), same 5-keep rule
-  ([zcode-internals.md:87](zcode-internals.md)) — and it is the peer that also
+  loop (`runRegularTurnLoop`), the explicit keep-5 rule
+  ([zcode-internals.md §6.1](zcode-internals.md)) — and it is the peer that also
   ships the breaker in §5.5
 - dsh: `compaction-tool-result-pruner`, 8 192/4 096/1 024 chars, no model call
 - OpenCode: `truncateToolOutput` at 2 000 chars, ~15 lines, no model call
@@ -562,7 +569,7 @@ merely logged.
 | | xdev | CC | OpenCode | dsh | omp | pi | ZCode |
 |---|---|---|---|---|---|---|---|
 | Threshold | `window − max(16384, 20 %)` — **no `MaxTokens` subtraction** | model's limit (near 200k; ~967k on 1M) | `min(input−buffer, ctx−max(out,buffer))`, buffer 20 000 | `ratio 0.8`, headroom 65 536 | `%` / fixed / `window − reserve` (15 % floor) | overflow-driven | `ctx − min(maxOut, 21 000) − 13 000` |
-| Kept tail | 20 000 tok | newest ~5 tool results | 15 000 tok | `retainRatio 0.16` | 20 000 tok | — | `selectPersistedCompactTail` |
+| Kept tail | 20 000 tok | newest few tool results | 15 000 tok | `retainRatio 0.16` | 20 000 tok | — | `selectPersistedCompactTail` |
 | Summary cap | 16 384 tok | — | output-limit typed failure | `maxTokens 8_192` | 16 384 tok (budget `0.8×reserve`) | — | 9 sections + `<analysis>` first |
 | Free tier | ✗ (seam only) | microcompact | 2 000-char truncation | 8 192/4 096/1 024 pruner | supersede-reads + dropUseless | ✗ | microcompact, keep 5, floor 256 |
 | Ladder members | 5 + registry | 1 | 1 + native | 1 + post-processors | 5 + per-method advance | 1 | 1 (auto-compact) |
