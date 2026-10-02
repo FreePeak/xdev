@@ -222,15 +222,171 @@ func TestMermaidFlowchartCycleTerminates(t *testing.T) {
 func TestMermaidUnsupportedTypesAndBadSourceFallBack(t *testing.T) {
 	for name, src := range map[string]string{
 		"class diagram": "classDiagram\n  Animal <|-- Duck\n",
-		"state diagram": "stateDiagram-v2\n  [*] --> pending\n  pending --> done\n",
 		"empty graph":   "flowchart TD\n",
-		"subgraph":      "flowchart TD\n  subgraph one\n  A --> B\n  end\n",
 		"bare arrow":    "sequenceDiagram\n  A - B: no arrow head at all\n",
 		"bare word":     "hello\n",
+		"unbalanced":    "flowchart TD\n  A[unclosed --> B\n",
 	} {
 		if _, ok := renderMermaid(t, src, 100); ok {
 			t.Errorf("%s must fall back to the code band, not render", name)
 		}
+	}
+}
+
+// An edge chain is one statement and N-1 edges: `A --> B --> C` must draw
+// three boxes and two heads, not lose the tail of the chain on the way.
+func TestMermaidFlowchartEdgeChainDrawsEveryHop(t *testing.T) {
+	got, ok := renderMermaid(t, "flowchart TD\n  A --> B --> C --> D\n", 100)
+	if !ok {
+		t.Fatal("a chain must render")
+	}
+	for _, want := range []string{"│A│", "│B│", "│C│", "│D│"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("chain lost %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "▼"); n != 3 {
+		t.Errorf("want 3 heads for a 3-hop chain, got %d:\n%s", n, got)
+	}
+}
+
+// Both spellings of an edge label have to reach the render: `A -- yes --> B`
+// writes it on the head side of the arrow, `A -->|yes| B` writes it after.
+// Neither may swallow the target as if the label were a node.
+func TestMermaidFlowchartInlineAndPipeEdgeLabels(t *testing.T) {
+	// want is everything the row owes the reader: the target box, the label in
+	// whichever spelling the source used, and the head its arrow draws — solid
+	// for `-->`, dotted for `-.->`.
+	for name, tc := range map[string]struct {
+		src  string
+		want []string
+	}{
+		"inline":  {"flowchart TD\n  D -- resume() --> B\n", []string{"│D│", "│B│", "resume()", "▼"}},
+		"pipe":    {"flowchart TD\n  D -->|resume()| B\n", []string{"│D│", "│B│", "resume()", "▼"}},
+		"dotted":  {"flowchart TD\n  T[Sandbox] -. isolated .-> B\n", []string{"│B│", "isolated", "▽"}},
+		"chained": {"flowchart TD\n  A -- go --> B --> C\n", []string{"│C│", "go", "▼"}},
+	} {
+		got, ok := renderMermaid(t, tc.src, 110)
+		if !ok {
+			t.Errorf("%s must render", name)
+			continue
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s lost %q:\n%s", name, want, got)
+			}
+		}
+	}
+}
+
+// A node written on its own is still a node: `IDX[("Index")]` declares one
+// without an edge, and the quotes are the label's, not the box's.
+func TestMermaidFlowchartBareNodeDeclaration(t *testing.T) {
+	got, ok := renderMermaid(t, "flowchart TD\n  IDX[(\"Index\")]\n", 60)
+	if !ok {
+		t.Fatal("a bare shaped node must render")
+	}
+	if !strings.Contains(got, "Index") {
+		t.Errorf("bare node lost its label:\n%s", got)
+	}
+}
+
+// A comma inside a bracketed label is part of the label. Splitting the line on
+// commas would invent a node called `notes` and lose the real one.
+func TestMermaidFlowchartCommaInLabelIsNotASeparator(t *testing.T) {
+	got, ok := renderMermaid(t, "flowchart TD\n  A[docs, notes, specs] --> B[tests]\n", 110)
+	if !ok {
+		t.Fatal("a comma in a label must render")
+	}
+	if !strings.Contains(got, "docs, notes, specs") {
+		t.Errorf("label was split on the comma:\n%s", got)
+	}
+	if strings.Contains(got, "│notes│") {
+		t.Errorf("a comma invented a node:\n%s", got)
+	}
+}
+
+// A subgraph is a frame around its own members, so it draws rather than
+// costing the whole block its fallback.
+func TestMermaidFlowchartSubgraphRenders(t *testing.T) {
+	got, ok := renderMermaid(t, "flowchart TD\n  subgraph one\n  A --> B\n  end\n  B --> C\n", 100)
+	if !ok {
+		t.Fatal("a subgraph must render")
+	}
+	for _, want := range []string{"│A│", "│B│", "│C│"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("subgraph lost %q:\n%s", want, got)
+		}
+	}
+}
+
+// Activation markers are part of the arrow (`A->>+B`, `B-->>-A`), not part of a
+// participant name, so a diagram that uses them still draws both messages.
+func TestMermaidSequenceActivationMarkers(t *testing.T) {
+	got, ok := renderMermaid(t, "sequenceDiagram\n  A->>+B: req\n  B-->>-A: res\n", 60)
+	if !ok {
+		t.Fatal("activation markers must render")
+	}
+	for _, want := range []string{"│A│", "│B│", "req", "res"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("activation render lost %q:\n%s", want, got)
+		}
+	}
+}
+
+// A control block wraps messages; the wrapper has no terminal frame, but its
+// label and every message inside it must survive into the rows.
+func TestMermaidSequenceControlBlocks(t *testing.T) {
+	for name, src := range map[string]string{
+		"loop": "sequenceDiagram\n  loop every minute\n  A->>B: poll\n  end\n",
+		"alt":  "sequenceDiagram\n  alt ok\n  A->>B: yes\n  else no\n  A->>B: no\n  end\n",
+		"opt":  "sequenceDiagram\n  opt debug\n  A->>B: trace\n  end\n",
+	} {
+		got, ok := renderMermaid(t, src, 80)
+		if !ok {
+			t.Errorf("%s block must render", name)
+			continue
+		}
+		for _, want := range []string{"A", "B"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s block lost participant %q:\n%s", name, want, got)
+			}
+		}
+	}
+	if got, _ := renderMermaid(t, "sequenceDiagram\n  alt ok\n  A->>B: yes\n  end\n", 80); !strings.Contains(got, "ok") {
+		t.Errorf("alt label lost:\n%s", got)
+	}
+	if got, _ := renderMermaid(t, "sequenceDiagram\n  loop every minute\n  A->>B: poll\n  end\n", 80); !strings.Contains(got, "every minute") {
+		t.Errorf("loop label lost:\n%s", got)
+	}
+}
+
+// A state diagram is a flowchart in different punctuation, so it draws through
+// the same reader: the marker becomes a node, and the event after the colon
+// becomes the edge label.
+func TestMermaidStateDiagramRenders(t *testing.T) {
+	got, ok := renderMermaid(t, "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> [*]\n", 100)
+	if !ok {
+		t.Fatal("a stateDiagram must render")
+	}
+	for _, want := range []string{"Idle", "Running", "start"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("state render lost %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "▼"); n != 3 {
+		t.Errorf("want 3 transition heads, got %d:\n%s", n, got)
+	}
+}
+
+// `state "Long name" as id` is how a state gets its label.
+func TestMermaidStateNamedState(t *testing.T) {
+	got, ok := renderMermaid(t, "stateDiagram-v2\n  state \"Waiting for auth\" as W\n  [*] --> W\n", 100)
+	if !ok {
+		t.Fatal("a named state must render")
+	}
+	if !strings.Contains(got, "Waiting for auth") {
+		t.Errorf("named state lost its label:\n%s", got)
 	}
 }
 
@@ -354,12 +510,12 @@ func TestMermaidFenceTagDecidesInMarkdown(t *testing.T) {
 // the whole promise of turning it off.
 func TestMermaidFallsBackToTheCodeBand(t *testing.T) {
 	app, _ := newTestApp(t, 100, 24)
-	src := "before\n\n```mermaid\nstateDiagram-v2\n  [*] --> pending\n```\n\nafter"
+	src := "before\n\n```mermaid\nclassDiagram\n  Animal <|-- Duck\n```\n\nafter"
 	app.mu.Lock()
 	lines := app.renderMarkdown(src, 100)
 	got := joinedLines(lines)
 	app.mu.Unlock()
-	for _, want := range []string{"before", "after", "```mermaid", "stateDiagram-v2"} {
+	for _, want := range []string{"before", "after", "```mermaid", "classDiagram"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fallback lost %q:\n%s", want, got)
 		}
