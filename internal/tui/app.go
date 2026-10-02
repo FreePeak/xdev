@@ -112,8 +112,13 @@ type Status struct {
 // the exported mutators (mutex-guarded); the UI loop redraws at ~30fps and
 // on every key event.
 type App struct {
-	scr    tcell.Screen
-	th     *theme.Theme
+	scr tcell.Screen
+	th  *theme.Theme
+	// md/mdFor/mdSet are mdStyle's memo (markdown.go). mdFor is the theme the
+	// memo was built from, so SetTheme — which swaps a.th — rebuilds it.
+	md     mdStyle
+	mdFor  *theme.Theme
+	mdSet  bool
 	mu     sync.Mutex
 	blocks []*Block
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
@@ -5457,7 +5462,7 @@ func boxRune(glyph string) rune {
 func drawText(s tcell.Screen, x, y int, text string, st tcell.Style) {
 	for _, r := range text {
 		s.SetContent(x, y, r, nil, st)
-		x += width(string(r))
+		x += runeWidth(r)
 	}
 }
 
@@ -5467,7 +5472,7 @@ func drawText(s tcell.Screen, x, y int, text string, st tcell.Style) {
 func paintedWidth(s string) int {
 	n := 0
 	for _, r := range s {
-		n += width(string(r))
+		n += runeWidth(r)
 	}
 	return n
 }

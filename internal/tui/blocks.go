@@ -107,6 +107,19 @@ func subRow(w int) int { return max(8, w-6) }
 // Width returns the display width of s in cells.
 func width(s string) int { return runewidth.StringWidth(s) }
 
+// runeWidth is width() for a single rune the painter already has in hand.
+// width(string(r)) allocates a one-rune string per character per frame, and
+// the painters call it for every cell at ~30fps (measured 10.1ns + 1 alloc
+// per ASCII char, 3.5us + 200 allocs per 200 CJK chars — app.go:drawText,
+// paintedWidth). RuneWidth is the same table lookup with no decode.
+//
+// It is width() for exactly one rune, which is the only case the painter has:
+// a lone rune cannot form the multi-rune grapheme cluster that makes
+// StringWidth disagree with a per-rune walk (see paintedWidth), and both
+// agree on the control-char and non-print cases because the same table
+// answers them.
+func runeWidth(r rune) int { return runewidth.RuneWidth(r) }
+
 // truncateCells shortens s to at most maxW display cells, appending ell
 // (a single-width "…" by convention) when it had to cut.
 func truncateCells(s string, maxW int, ell string) string {
