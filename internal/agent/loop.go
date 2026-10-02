@@ -1216,14 +1216,26 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, serr
 			}
 			continue
+		case ai.ClassAuthFailed:
+			// A 401/403 is a credential verdict, not a blip: the same
+			// request with the same key gets the same answer. This fell
+			// into `default:` below, which retried it up to
+			// maxSilentRecoveryRounds (12, and retry.infinite is
+			// default-on) — 62.6s of backoff at the shipped 500ms/8s
+			// ladder before surfacing a key that was never going to
+			// work. Fail fast and let the user fix the key, which is
+			// what ClassAuthFailed has always been documented to mean
+			// (internal/ai/errors.go: "401/403 — fail fast").
+			return nil, history, err
 		default:
-			// Auth / unknown failures rebuild history from the persisted
-			// session and re-send on the current context. ClassBadRequest
-			// returned above: replaying a provider-rejected shape cannot
-			// repair it. Bounded rounds stop hard failures; infinite retry
-			// is reserved for transport/transient outages — and even there
-			// only for maxSilentRecoveryRounds, so no turn pins the
-			// session's single turn claim (a7e17741, 2026-09-28).
+			// Unknown failures rebuild history from the persisted session
+			// and re-send on the current context. ClassBadRequest and
+			// ClassAuthFailed returned above: replaying a rejected shape or
+			// a bad credential cannot repair either. Bounded rounds stop
+			// hard failures; infinite retry is reserved for
+			// transport/transient outages — and even there only for
+			// maxSilentRecoveryRounds, so no turn pins the session's
+			// single turn claim (a7e17741, 2026-09-28).
 			if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
 				escalation++
 				attempt = 0

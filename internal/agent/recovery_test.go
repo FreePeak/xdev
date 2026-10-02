@@ -74,11 +74,12 @@ func TestRetryTransientPreContentSucceeds(t *testing.T) {
 	}
 }
 
-func TestRetryAuthRetriesThenSurfaces(t *testing.T) {
-	// Auth failures used to fail fast. The ladder now retries every
-	// class from the current context window (bounded by escalation
-	// rounds) so a transient upstream 401/403 is survived; a real
-	// bad key still surfaces after the bound is spent.
+func TestAuthFailsFast(t *testing.T) {
+	// A 401 is a credential verdict: the same request with the same key
+	// gets the same answer, so retrying cannot succeed. This used to fall
+	// into the classifier's `default:` branch and burn up to
+	// maxSilentRecoveryRounds (12) escalation rounds — 62.6s of backoff
+	// at the shipped 500ms/8s ladder — before surfacing the error.
 	auth := &ai.HTTPError{API: "openai-completions", Status: 401, Body: `{"error":{"type":"authentication_error","message":"invalid api key"}}`}
 	p := &fakeProvider{calls: []fakeScript{
 		{err: auth},
@@ -89,15 +90,14 @@ func TestRetryAuthRetriesThenSurfaces(t *testing.T) {
 	a.Retry = RetryPolicy{MaxRetries: 5, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
 	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
 	if err == nil {
-		t.Fatal("Run: expected 401 error after retries")
+		t.Fatal("Run: expected the 401 surfaced")
 	}
 	if !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("err = %v", err)
 	}
-	// 1 initial + maxEscalationRounds retries.
-	want := 1 + maxEscalationRounds
-	if len(p.gotReqs) != want {
-		t.Fatalf("stream calls = %d, want %d (initial + escalation retries)", len(p.gotReqs), want)
+	// Exactly one request: a bad key is not a blip to ride out.
+	if len(p.gotReqs) != 1 {
+		t.Fatalf("stream calls = %d, want 1 (a bad key is not retried)", len(p.gotReqs))
 	}
 }
 
