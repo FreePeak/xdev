@@ -798,6 +798,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.AddSystemBlock("· session " + label)
 	}
 
+	// focusTabByID is the /tabs row path: Enter names the session to switch
+	// to, so the cycle's dir/onlyUnread arguments have no meaning here.
+	focusTabByID := func(id string) error {
+		t := tabs.focus(id)
+		if t == nil {
+			return fmt.Errorf("that session is no longer open")
+		}
+		sessMu.Lock()
+		focusTab(t)
+		sessMu.Unlock()
+		label := t.title
+		if label == "" {
+			label = shortSessionID(t.id)
+		}
+		app.AddSystemBlock("· session " + label)
+		return nil
+	}
+
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh.
@@ -2578,6 +2596,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// to the next unread one. Wired through the keybinding table so
 	// keybindings.yml can move them.
 	app.SetTabCycle(func(dir int, onlyUnread bool) { cycleTab(dir, onlyUnread) })
+	app.SetTabPick(focusTabByID)
 	app.SetTabs(tabInfos(tabs))
 	app.SetVision(func() bool {
 		modelMu.Lock()

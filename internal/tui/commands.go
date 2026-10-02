@@ -403,6 +403,7 @@ type CommandAPI interface {
 	ExportSession(path string) error
 	ShareSession() error
 	ResumeSession(query string) error
+	TabsPicker() error
 	SwitchModel(args string) error
 	PlanMode(args string) error
 	Vibe(args string) error
@@ -475,6 +476,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.ShareSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
+		{Name: "tabs", Description: "show the open sessions and switch to one",
+			Fn: func(app CommandAPI, args string) error { return app.TabsPicker() }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings overlay, or toggle: /settings [overlay|showThinking on|off]",

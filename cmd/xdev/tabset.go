@@ -148,6 +148,19 @@ func (ts *tabset) activate(i int) *tab {
 	return t
 }
 
+// focus makes the tab with this id current, or nil when it is not open.
+// It is the /tabs row path: the user names the session, so there is
+// nothing to cycle to.
+func (ts *tabset) focus(id string) *tab {
+	ts.mu.Lock()
+	i := ts.indexOfLocked(id)
+	ts.mu.Unlock()
+	if i < 0 {
+		return nil
+	}
+	return ts.activate(i)
+}
+
 // close drops a tab, aborting its turn first — a parked session whose turn is
 // still running would otherwise keep a writer nobody can reach. The active tab
 // closes onto its neighbour (next, else previous), which is what /drop needs.

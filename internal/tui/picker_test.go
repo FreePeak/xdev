@@ -959,3 +959,54 @@ func TestSessionPickerDrawWrapsTitle(t *testing.T) {
 		t.Fatalf("the second row was pushed off the panel:\n%s", txt)
 	}
 }
+
+// TestTabsPickerListsOpenSessionsAndPicks: /tabs is the one surface that
+// SHOWS the open set (the status row only counts it), so every row must
+// name its session and say which one is running, and Enter must hand back
+// the chosen session's id — the whole point is switching to a session you
+// did not have to count your way to with Alt+].
+func TestTabsPickerListsOpenSessionsAndPicks(t *testing.T) {
+	app, scr := newTestApp(t, 90, 30)
+	app.SetTabs([]TabInfo{
+		{ID: "aaaa111122", Title: "parser work", Current: true},
+		{ID: "bbbb222233", Title: "deploy notes", Running: true},
+		{ID: "cccc333344", Unread: true},
+	})
+	var picked string
+	app.SetTabPick(func(id string) error { picked = id; return nil })
+	if err := app.TabsPicker(); err != nil {
+		t.Fatal(err)
+	}
+	if !app.PickerOpen() {
+		t.Fatal("/tabs must open the picker")
+	}
+	app.draw()
+	txt := screenText(scr)
+	for _, want := range []string{"parser work", "deploy notes", "cccc3333", "running"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("row %q missing from /tabs picker:\n%s", want, txt)
+		}
+	}
+	// Down twice lands on the untitled session; Enter hands its id back.
+	pressKey(app, tcell.KeyDown)
+	pressKey(app, tcell.KeyDown)
+	pressKey(app, tcell.KeyEnter)
+	if picked != "cccc333344" {
+		t.Fatalf("picked %q, want the third session cccc333344", picked)
+	}
+	if app.PickerOpen() {
+		t.Fatal("picker stayed open after the selection")
+	}
+}
+
+// TestTabsPickerUnwiredIsANotice: a harness that never wired the set must
+// say so rather than opening an empty list that owns the keyboard.
+func TestTabsPickerUnwiredIsANotice(t *testing.T) {
+	app, _ := newTestApp(t, 90, 30)
+	if err := app.TabsPicker(); err == nil {
+		t.Fatal("/tabs with no wired tabset must return an error")
+	}
+	if app.PickerOpen() {
+		t.Fatal("an unwired /tabs must not open a picker")
+	}
+}
