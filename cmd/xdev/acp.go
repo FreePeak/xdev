@@ -65,6 +65,8 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	if mgr != nil {
 		defer mgr.Close()
 	}
+	// The rebuild-time interruption notice names the calls free to repeat.
+	session.ReplaySafety = reg.ReplaySafe
 
 	overrides := agent.LoadSystemPromptOverrides(cwd)
 	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
