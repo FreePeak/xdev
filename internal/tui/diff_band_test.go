@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,19 +41,33 @@ func TestDiffBandReachesTheInteriorWidth(t *testing.T) {
 	const inner = 40
 	rows := app.diffCells(diffFixture, inner)
 
+	addRow, _ := app.th.Slot(theme.ToolDiffAddedBg)
+	addWord, _ := app.th.Slot(theme.ToolDiffAddedWordBg)
+	remRow, _ := app.th.Slot(theme.ToolDiffRemovedBg)
+	remWord, _ := app.th.Slot(theme.ToolDiffRemovedWordBg)
+	want := []tcell.Color{app.cellColor(addRow), app.cellColor(addWord), app.cellColor(remRow), app.cellColor(remWord)}
 	striped, plain := 0, 0
 	for _, ln := range rows {
 		bg, ok := banded(ln)
-		switch {
-		case !ok:
+		if !ok {
 			plain++
 			continue
-		case bg == tcell.ColorDefault:
-			t.Fatalf("row %q reports a band of %v", runsText(ln.runs), bg)
+		}
+		if !slices.Contains(want, bg) {
+			t.Fatalf("row %q is banded in %v, want one of the four theme bands", runsText(ln.runs), bg)
 		}
 		striped++
 		if w := lineWidth(ln); w != inner {
 			t.Errorf("banded row %q is %d cells, want the interior width %d", runsText(ln.runs), w, inner)
+		}
+		// The band has to be on the MARKER too: a stripe that stops under the
+		// words leaves the +/- a hole in its own row, and the marker is the one
+		// cell that says what the row is. This is the defect the live run found
+		// — a cell dump shows the words banded and the row reads as banded, so
+		// only asserting "some run has a background" passes while the screen
+		// does not.
+		if _, mbg, _ := ln.runs[0].style.Decompose(); mbg == tcell.ColorDefault {
+			t.Errorf("marker %q paints no band, so it is a hole in its own stripe", ln.runs[0].text)
 		}
 		// The pad is chrome: painted, never read back as text or copied.
 		last := ln.runs[len(ln.runs)-1]

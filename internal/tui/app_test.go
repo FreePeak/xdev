@@ -715,20 +715,17 @@ func TestToolBoxPaintsDiff(t *testing.T) {
 		}
 	}
 	// Word emphasis: the changed token inside a -/+ pair rides the word band,
-	// and only the token does.
-	bgOf := func(runs []cell) (tcell.Color, string) {
-		var text string
-		var bg tcell.Color
-		for _, r := range runs {
-			if _, b, _ := r.style.Decompose(); b != tcell.ColorDefault {
-				bg, text = b, text+r.text
-			}
-		}
-		return bg, text
-	}
+	// and only the token does — so the strongest background on the row is the
+	// one exactly the token's cells carry.
 	addWord, _ := app.th.Slot(theme.ToolDiffAddedWordBg)
-	if bg, text := bgOf(rowRuns("+b := 2")); bg != app.cellColor(addWord) || strings.TrimSpace(text) != "2" {
-		t.Errorf("word band on the added row = %v over %q, want %+v over %q", bg, text, addWord, "2")
+	var word strings.Builder
+	for _, r := range rowRuns("+b := 2") {
+		if _, b, _ := r.style.Decompose(); b == app.cellColor(addWord) {
+			word.WriteString(r.text)
+		}
+	}
+	if strings.TrimSpace(word.String()) != "2" {
+		t.Errorf("word band on the added row covers %q, want %q", strings.TrimSpace(word.String()), "2")
 	}
 	// The word band is strictly stronger than the row band: identical bands
 	// would make wordPair's whole pass invisible.

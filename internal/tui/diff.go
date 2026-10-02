@@ -290,12 +290,13 @@ type diffBand struct {
 }
 
 // wordStyle is the changed run's style inside a -/+ pair: the word band when
-// the theme named one, bold when it did not.
-func (b diffBand) wordStyle() tcell.Style {
+// the theme named one, bold when it did not. It rides on the row's own base so
+// a word band replaces the row band rather than stacking on it.
+func (b diffBand) wordStyle(base tcell.Style) tcell.Style {
 	if b.wordBg != tcell.ColorDefault {
-		return b.text.Background(b.wordBg)
+		return base.Background(b.wordBg)
 	}
-	return b.text.Bold(true)
+	return base.Bold(true)
 }
 
 // diffInk is what a row falls back to when the theme leaves its slot to the
@@ -390,25 +391,32 @@ func (ds diffStyle) bandRow(r diffRow, b diffBand) line {
 	// The marker is its own run: it says what the row is, and it is the one
 	// cell that has to stay legible on the band, so it takes the polarity's
 	// ink rather than the body ink the words are painted in.
-	ln := line{runs: []cell{{text: r.text[:1], style: b.mark}}}
+	// The row band goes on EVERY run of the row, the marker included: a band
+	// that stops under the glyphs is not a band. The marker keeps its own ink
+	// and the words keep the body ink — only the background is shared.
+	row, mark := b.text, b.mark
+	if b.bg != tcell.ColorDefault {
+		row, mark = row.Background(b.bg), mark.Background(b.bg)
+	}
+	ln := line{runs: []cell{{text: r.text[:1], style: mark}}}
 	push := func(text string, st tcell.Style) {
 		if text != "" {
 			ln.runs = append(ln.runs, cell{text: text, style: st})
 		}
 	}
 	if len(r.segs) == 0 {
-		push(r.text[1:], b.text)
+		push(r.text[1:], row)
 		return ln
 	}
-	word := b.wordStyle()
+	word := b.wordStyle(row)
 	off := 1
 	for _, sg := range r.segs {
 		o, c := sg.o+1, sg.c+1
-		push(r.text[off:o], b.text)
+		push(r.text[off:o], row)
 		push(r.text[o:c], word)
 		off = c
 	}
-	push(r.text[off:], b.text)
+	push(r.text[off:], row)
 	return ln
 }
 
