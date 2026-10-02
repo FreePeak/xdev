@@ -1,18 +1,23 @@
 package tui
 
 // Diff colouring for tool results. A file change's unified diff reaches the
-// renderer as plain text (Block.Diff) and is painted here: added/removed/
-// context rows take an ink, and the changed words inside a replaced pair are
-// bolded so a one-token edit reads as that token rather than as two whole
-// lines of noise.
+// renderer as plain text (Block.Diff) and is painted here in Claude Code's
+// model (v2.1.287): a changed row is a BAND, the changed words inside a
+// replaced pair ride a stronger band on top of it, and the +/- marker is the
+// only coloured text on the row.
 //
-// The ink defaults to the terminal's own ANSI palette and no row ever paints
-// a background: xdev cannot learn the emulator's colours, so a fixed RGB it
-// chooses is free to land on the user's red or green — and a band tinted from
-// such an ink buries that ink under itself, which is how red came to sit on
-// red. A theme may still name tool_diff_* explicitly (a custom palette, or
-// color-blind mode), and that override is honoured; what no theme may do is
-// make a row's background someone else's foreground.
+// The band is a flat tint of its own, not a tint of the polarity's ink, and
+// the words wear the body's ink — so no ink is ever laid under itself. That is
+// the whole difference from the model retired for "red on red": that one
+// coloured a row's own text with a fixed RGB and then banded that text with
+// the same ink beneath it, and the words drowned. Here the ink paints one
+// cell. What the theme may NOT do is claim the whole panel: a diff lives
+// inside the tool box's frame, and the frame, the rail and the margins stay
+// the terminal's own. Bands ride the runs and are padded to the interior
+// width (padBand), so a stripe stops at the border it is inside. A theme that
+// names none of the four band slots keeps the terminal's own ANSI markers and
+// paints no band — the old look, which is the correct one when the renderer
+// cannot see the palette it is drawing into.
 //
 // The pass is stateless per row on purpose: the model-visible text may be
 // head/tail trimmed, a diff split across a hidden middle has no partner to
@@ -42,9 +47,33 @@ func (a *App) diffCells(text string, inner int) []line {
 
 	out := make([]line, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, wrapCells(ds.row(r), inner)...)
+		wrapped := wrapCells(ds.row(r), inner)
+		for _, ln := range wrapped {
+			out = append(out, padBand(ln, inner))
+		}
 	}
 	return out
+}
+
+// padBand fills a banded row out to the interior width so its stripe runs the
+// full width of the box instead of stopping at the last glyph. The pad is
+// chrome: painted, never copied (the box's own pad cell behaves this way), and
+// it is banded rows only — an unbanded row keeps the terminal's background to
+// its right edge, which is what the overlay's fill and the transcript both
+// assume.
+func padBand(ln line, inner int) line {
+	bg, ok := banded(ln)
+	if !ok {
+		return ln
+	}
+	pad := inner - lineWidth(ln)
+	if pad <= 0 {
+		return ln
+	}
+	_, _, attrs := ln.runs[len(ln.runs)-1].style.Decompose()
+	st := tcell.StyleDefault.Background(bg).Attributes(attrs)
+	ln.runs = append(ln.runs, cell{text: strings.Repeat(" ", pad), style: st, chrome: true})
+	return ln
 }
 
 // diff kinds, in the order a unified-diff row falls into them.
@@ -234,47 +263,86 @@ func changedRuns(text string, ranges [][2]int, keep []bool) []diffSeg {
 	return out
 }
 
-// diffStyle is one diff's row palette: five foregrounds, no backgrounds.
+// diffStyle is one diff's row palette: three chrome inks, plus a band per
+// polarity. A change is read from a BACKGROUND, and the only coloured text on
+// the row is the +/- marker, whose one cell says what the row is and has to
+// stay legible whatever band it sits on.
+//
+// This is Claude Code's model (v2.1.287): addLine/addWord/deleteLine/deleteWord
+// per polarity, the row's own words in the body ink. It is not the model that
+// was retired for "red on red" — that one coloured the row TEXT from a fixed
+// RGB and then laid a band tinted from the same ink under it, so the words
+// drowned in their own colour. Here the ink paints one marker cell and the
+// band is a flat tint of its own, so there is no ink for a band to bury.
 type diffStyle struct {
-	ctx, hunk, file, added, removed tcell.Style
+	ctx, hunk, file tcell.Style
+	add, del        diffBand
+}
+
+// diffBand is one polarity's three inks: the marker's foreground, the row's
+// body foreground (the body ink — the band carries the claim, not the words),
+// and the two backgrounds. wordBg 0 means the theme paints no band at all, and
+// wordStyle falls back to the attribute that survives any palette.
+type diffBand struct {
+	mark, text tcell.Style
+	bg, wordBg tcell.Color
+}
+
+// wordStyle is the changed run's style inside a -/+ pair: the word band when
+// the theme named one, bold when it did not.
+func (b diffBand) wordStyle() tcell.Style {
+	if b.wordBg != tcell.ColorDefault {
+		return b.text.Background(b.wordBg)
+	}
+	return b.text.Bold(true)
 }
 
 // diffInk is what a row falls back to when the theme leaves its slot to the
-// terminal: two of the terminal's own sixteen system colours for the change,
-// plus attributes for everything that is not a claim about the change.
-//
-// The fallback is the default because xdev cannot learn the emulator's
-// palette: a fixed RGB it picks itself is free to land on the user's red or
-// green, and a band tinted from such an ink then buries that ink under itself —
-// which is how red came to sit on red. The system colours are the one palette a
-// terminal is guaranteed to have tuned to its own scheme, which is what
-// `git diff` paints (31m/32m) and what a user who cannot tell the two apart has
-// already reached, in the emulator's own settings. Attributes — bold, dim,
-// italic — claim no colour at all and clash with nothing.
+// terminal: the terminal's own two system colours for the markers — which is
+// what `git diff` paints (32m/31m) and the one palette every emulator has
+// tuned to its own scheme — and attributes for everything that is not a claim
+// about the change. No band: a theme that names no diff band keeps the
+// foreground-only look, which is exactly what this fallback is.
 var diffInk = diffStyle{
-	ctx:     tcell.StyleDefault.Dim(true), // unchanged: the terminal's own text
-	hunk:    tcell.StyleDefault.Italic(true),
-	file:    tcell.StyleDefault.Bold(true),
-	added:   tcell.StyleDefault.Foreground(tcell.ColorGreen),  // SGR 32, as `git diff`
-	removed: tcell.StyleDefault.Foreground(tcell.ColorMaroon), // SGR 31
+	ctx:  tcell.StyleDefault.Dim(true), // unchanged: the terminal's own text
+	hunk: tcell.StyleDefault.Italic(true),
+	file: tcell.StyleDefault.Bold(true),
+	add:  diffBand{mark: tcell.StyleDefault.Foreground(tcell.ColorGreen)},  // SGR 32
+	del:  diffBand{mark: tcell.StyleDefault.Foreground(tcell.ColorMaroon)}, // SGR 31
 }
 
-// diffStyle reads the palette off the theme: a theme that names a diff ink
-// (a custom palette, or color-blind mode) is honoured, and one that leaves a
-// slot to the terminal keeps the terminal's own answer. Only the three
-// statement-bearing rows are colourable; the hunk header and the file pair are
-// chrome, so the theme's grays tint them and nothing paints a background.
+// diffStyle reads the palette off the theme: a slot the theme names is
+// honoured, one it leaves to the terminal keeps the terminal's own answer. The
+// four band slots are optional (they are xdev's own, not part of omp's token
+// contract), so an imported theme that has never heard of them renders exactly
+// as it did before — marker inks, no band.
+//
+// NO_COLOR needs no branch here: tcell drops colour at emission when it is set
+// (tscreen.go:915), and every ink this reaches for is either the theme's own or
+// the terminal's own ANSI pair — none is a colour the renderer picked for
+// itself, which is the thing codeStyleFor's NO_COLOR check exists to prevent.
 func (a *App) diffStyle() diffStyle {
 	ds := diffInk
-	ink := func(slot string, base tcell.Style) tcell.Style {
+	paint := func(slot string, base tcell.Style) tcell.Style {
 		if c, ok := a.th.Slot(slot); ok {
 			return base.Foreground(a.cellColor(c))
 		}
 		return base
 	}
-	ds.added = ink(theme.ToolDiffAdded, ds.added)
-	ds.removed = ink(theme.ToolDiffRemoved, ds.removed)
-	ds.ctx = ink(theme.ToolDiffContext, ds.ctx)
+	body := paint(theme.Text, tcell.StyleDefault)
+	band := func(b *diffBand, inkSlot, bg, wordBg string) {
+		b.mark = paint(inkSlot, b.mark)
+		b.text = body
+		if c, ok := a.th.Slot(bg); ok {
+			b.bg = a.cellColor(c)
+		}
+		if c, ok := a.th.Slot(wordBg); ok {
+			b.wordBg = a.cellColor(c)
+		}
+	}
+	band(&ds.add, theme.ToolDiffAdded, theme.ToolDiffAddedBg, theme.ToolDiffAddedWordBg)
+	band(&ds.del, theme.ToolDiffRemoved, theme.ToolDiffRemovedBg, theme.ToolDiffRemovedWordBg)
+	ds.ctx = paint(theme.ToolDiffContext, ds.ctx)
 	if c, ok := a.th.Slot(theme.Gray); ok {
 		ds.hunk = ds.hunk.Foreground(a.cellColor(c))
 	}
@@ -284,41 +352,64 @@ func (a *App) diffStyle() diffStyle {
 	return ds
 }
 
-// row renders one diff row: the whole row in its kind's colour, with the
-// changed runs bolded. The +/- marker keeps the row colour — it says what the
-// row is, not that it changed — so the offsets, which wordPair counted from
-// the content, shift right by it here.
+// row renders one diff row. A changed row is a band: the marker cell wears the
+// polarity's ink, the rest of the row is body text on the row band, and the
+// runs wordPair found ride a stronger band (bold where the theme named none).
+// A row that is not a change keeps the foreground-only chrome inks and no band.
 func (ds diffStyle) row(r diffRow) line {
-	base := ds.ctx
 	switch r.kind {
 	case diffHunk:
 		return textline(r.text, ds.hunk)
 	case diffFile:
 		return textline(r.text, ds.file)
 	case diffAdded:
-		base = ds.added
+		return ds.bandRow(r, ds.add)
 	case diffRemoved:
-		base = ds.removed
+		return ds.bandRow(r, ds.del)
+	}
+	return textline(r.text, ds.ctx)
+}
+
+func (ds diffStyle) bandRow(r diffRow, b diffBand) line {
+	// The band rides on the RUNS, not on line.bg: line.bg paints the whole
+	// terminal row — rail, margins and the tool box's own frame — which would
+	// run the band out through borders it is not inside. A diff lives in that
+	// frame's interior, so diffCells pads a banded row out to the interior
+	// width and the stripe stops at the frame.
+	// The marker is its own run: it says what the row is, and it is the one
+	// cell that has to stay legible on the band, so it takes the polarity's
+	// ink rather than the body ink the words are painted in.
+	ln := line{runs: []cell{{text: r.text[:1], style: b.mark}}}
+	push := func(text string, st tcell.Style) {
+		if text != "" {
+			ln.runs = append(ln.runs, cell{text: text, style: st})
+		}
 	}
 	if len(r.segs) == 0 {
-		return textline(r.text, base)
+		push(r.text[1:], b.text)
+		return ln
 	}
-	// The changed word is lifted with bold, not a background: the emphasis
-	// has to survive a palette the renderer cannot see.
-	ln := line{runs: []cell{{text: r.text[:1], style: base}}}
+	word := b.wordStyle()
 	off := 1
 	for _, sg := range r.segs {
 		o, c := sg.o+1, sg.c+1
-		if o > off {
-			ln.runs = append(ln.runs, cell{text: r.text[off:o], style: base})
-		}
-		ln.runs = append(ln.runs, cell{text: r.text[o:c], style: base.Bold(true)})
+		push(r.text[off:o], b.text)
+		push(r.text[o:c], word)
 		off = c
 	}
-	if off < len(r.text) {
-		ln.runs = append(ln.runs, cell{text: r.text[off:], style: base})
-	}
+	push(r.text[off:], b.text)
 	return ln
+}
+
+// banded reports the background a row paints, 0 when it paints none. The pad
+// needs it: only a banded row is filled out to the interior width.
+func banded(ln line) (tcell.Color, bool) {
+	for _, r := range ln.runs {
+		if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
+			return bg, true
+		}
+	}
+	return tcell.ColorDefault, false
 }
 
 // wrapCells is wrap() for a styled row: the same column budget, but every
