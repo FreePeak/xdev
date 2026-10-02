@@ -334,6 +334,12 @@ type App struct {
 	// write cannot read a key: the chord is served here instead, off the
 	// loop, by the same goroutine that feeds keyq.
 	wedged atomic.Bool
+	// frameDropped is the screen's own dropped-frame flag
+	// (tty_deadline.go): set when a frame write ran out of time, i.e. the
+	// terminal behind this pane could not keep up. Nil when the screen is
+	// not a deadline-bounded one, and then nothing is repaired because
+	// nothing was dropped. Wired by SetFrameDropped.
+	frameDropped *atomic.Bool
 	// restoreTty puts the terminal back when the watchdog gives up on the
 	// loop (stall.go). Wired to scr.Fini; nil leaves the exit to whatever
 	// the caller restores.
@@ -473,6 +479,12 @@ type App struct {
 	// (settings `sidebarMode`); nil = this session cannot persist it.
 	dockSetMode func(mode string)
 }
+
+// SetFrameDropped wires the dropped-frame flag draw() consults after every
+// flush. Pass the flag NewDeadlineScreen returned; nil leaves draw() with
+// nothing to repair, which is correct for a screen whose writes cannot time
+// out. Call before Run.
+func (a *App) SetFrameDropped(flag *atomic.Bool) { a.frameDropped = flag }
 
 type blockKey struct {
 	idx      int
@@ -4261,10 +4273,20 @@ func isWindowRow(s string) bool {
 // 12m9s (#283 RCA §1: held across it, that freeze starved every provider
 // delta waiting on a.mu and let the stream watchdog kill a healthy stream).
 // With Show outside the lock, a frozen tty costs display freshness only;
-// the agent goroutine is never blocked by it.
+// the agent goroutine is never blocked by it. Since tty_deadline.go the flush
+// is also bounded, so a frozen tty costs one dropped frame instead of the
+// whole session.
 func (a *App) draw() {
 	a.paint()
 	a.scr.Show()
+	// A frame the terminal never took is not self-healing: tcell marks each
+	// cell clean before the write, so a dropped frame leaves a partial screen
+	// with nothing left to redraw. Sync forces every cell dirty, which costs a
+	// full repaint exactly once per dropped frame — the price of not losing
+	// the session to a pane that stopped reading.
+	if a.frameDropped != nil && a.frameDropped.Swap(false) {
+		a.scr.Sync()
+	}
 }
 
 // logFrameAfterDraw is called once per frame after draw()
