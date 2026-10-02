@@ -49,7 +49,16 @@ type mdStyle struct {
 	code         codeStyle // fenced-code token palette (#501); plain = body
 }
 
+// mdStyle is memoized on the App. The painter reaches it on the frame path
+// (app.go: toolBoxLines, the streaming cursor) and renderMarkdown once per
+// markdown re-render, so at 30fps a live turn rebuilt 14 tcell.Style values
+// plus the whole syntax codeStyle — a slot lookup each and a map iteration
+// over syntaxSlots — dozens of times a second. mdFor is the theme pointer the
+// cache was built from: SetTheme swaps a.th, so the next call rebuilds.
 func (a *App) mdStyle() mdStyle {
+	if a.mdFor == a.th && a.mdSet {
+		return a.md
+	}
 	ms := mdStyle{
 		h1:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading1))).Bold(true),
 		h2:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading2))).Bold(true),
@@ -69,6 +78,7 @@ func (a *App) mdStyle() mdStyle {
 	// A token the theme does not colour paints in the body ink, so a partial
 	// syntax_* theme degrades instead of dropping a class to terminal white.
 	ms.code.plain = ms.body
+	a.md, a.mdFor, a.mdSet = ms, a.th, true
 	return ms
 }
 
