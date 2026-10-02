@@ -14,6 +14,7 @@ import (
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
+	"github.com/FreePeak/xdev/internal/typesafe"
 )
 
 // TurnHooks receive turn progress. print mode prints deltas; the session
@@ -327,6 +328,16 @@ type Agent struct {
 	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means unbounded (no cap).
 	MaxTurns int
+	// SessionBudget, when set, runs a Jev advisory before
+	// the hard wall-clock cap bites. nil disables the advisory.
+	SessionBudget *typesafe.SessionBudget
+	// SessionEvaluator runs the advisory request.
+	SessionEvaluator *typesafe.Evaluator
+	// sessionStart is the wall clock Run() stamps at entry.
+	sessionStart time.Time
+	// budgetAdvisoryLast is when the last advisory fired,
+	// so the early nudge does not run every turn.
+	budgetAdvisoryLast time.Time
 	// TurnTokenBudget caps one turn's token spend (provider requests +
 	// retries). 0 → DefaultTurnTokenBudget. It is per-turn, not cumulative:
 	// a session is not a turn, so capping the session ends a long task that
@@ -505,6 +516,7 @@ func (a *Agent) drainSteering() []Steering {
 // one wrap-up message rather than an error.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (final *ai.Message, runErr error) {
+	a.sessionStart = time.Now()
 	if a.Hooks == nil {
 		a.Hooks = TurnHooksFunc{} // no-op: an unwired agent must not panic mid-turn
 	}
@@ -571,6 +583,35 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 	}
 	limit := a.effectiveMaxTurns()
+	// maybeBudgetAdvisory asks System One whether the session
+	// should continue. It fires at WarnPct (default 90%) of Max
+	// (VWrapUp) and at Max itself (VStopNow). Throttled:
+	// one advisory per budget window, never one-per-turn.
+	maybeBudgetAdvisory := func() {
+		if a.SessionBudget == nil || a.SessionEvaluator == nil {
+			return
+		}
+		elapsed := time.Since(a.sessionStart)
+		max := a.SessionBudget.Max
+		warn := time.Duration(float64(max) * a.SessionBudget.WarnPct)
+		var v typesafe.Verdict
+		switch {
+		case elapsed >= max:
+			if !a.budgetAdvisoryLast.IsZero() && time.Since(a.budgetAdvisoryLast) < max {
+				return
+			}
+			v = typesafe.VStopNow
+		case elapsed >= warn:
+			if !a.budgetAdvisoryLast.IsZero() && time.Since(a.budgetAdvisoryLast) < max-warn {
+				return
+			}
+			v = typesafe.VWrapUp
+		default:
+			return
+		}
+		a.budgetAdvisoryLast = time.Now()
+		a.budgetAdvisory(ctx, v)
+	}
 	// Per-turn token cap (RCA #1): a session is not a turn, so capping the
 	// session ended a long task that legitimately burned millions of tokens
 	// across many turns and asked the user to say "continue" to restart it.
@@ -607,6 +648,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 
 		turnsUsed = turn + 1
 		emit("turn_start", map[string]any{"turn": turn})
+		maybeBudgetAdvisory()
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
 		// A steering message is a human changing the instruction, so it ends
@@ -877,6 +919,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		}
 		emit("turn_end", map[string]any{"turn": turn})
 	}
+	maybeBudgetAdvisory()
 
 	// Turn cap reached: ask for one wrap-up message rather than erroring.
 	// The per-turn token cap is handled inline above and never ends the
