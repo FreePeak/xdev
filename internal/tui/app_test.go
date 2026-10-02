@@ -646,13 +646,14 @@ func TestHumanTokens(t *testing.T) {
 	}
 }
 
-// A tool result that changed a file paints its diff: the rows take the
-// terminal's own ANSI ink on no background — xdev cannot see the emulator's
-// palette, so a colour it picks itself (or a band tinted from it) is free to
-// land on the user's red or green, which is the reported bug — the changed
-// token inside a -/+ pair is lifted with bold, and the plain model preview is
-// not also painted as prose. Text stays what the model saw.
+// A tool result that changed a file paints its diff in Claude Code's model: the
+// +/- marker wears the palette's own green/red and the rest of the row is body
+// text on a flat band (a tint of its own, never of the marker's ink — that band
+// is what buried coloured text before), with the changed token inside a -/+ pair
+// on a stronger band. The plain model preview is not also painted as prose, and
+// text stays what the model saw.
 func TestToolBoxPaintsDiff(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app := idxApp(100, 40)
 	w := app.contentWidth()
 	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
@@ -697,40 +698,47 @@ func TestToolBoxPaintsDiff(t *testing.T) {
 		fg, _, _ := runs[0].style.Decompose()
 		return fg
 	}
-	if got := inkOf(rowRuns("+b := 2")); got != tcell.ColorGreen {
-		t.Errorf("added row ink = %v, want the terminal's green", got)
+	// The MARKER is the coloured text: it is the first run of a changed row and
+	// the only one that takes the polarity's ink.
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
+	rem, _ := app.th.Slot(theme.ToolDiffRemoved)
+	if got := inkOf(rowRuns("+b := 2")); got != app.cellColor(add) {
+		t.Errorf("added marker ink = %v, want the theme's %+v", got, add)
 	}
-	if got := inkOf(rowRuns("-b := 1")); got != tcell.ColorMaroon {
-		t.Errorf("removed row ink = %v, want the terminal's red", got)
+	if got := inkOf(rowRuns("-b := 1")); got != app.cellColor(rem) {
+		t.Errorf("removed marker ink = %v, want the theme's %+v", got, rem)
 	}
-	if got := inkOf(rowRuns(" c ")); got != tcell.ColorDefault {
-		t.Errorf("context row ink = %v, want the terminal's own text", got)
-	}
-	// Nothing in the box claims a background: a background is the one thing
-	// xdev cannot check against the terminal it is drawn in.
-	for _, ln := range lines {
-		for _, r := range ln.runs {
-			if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
-				t.Fatalf("diff run %q paints background %v:\n%s", r.text, bg, joined)
-			}
+	// A context row is not a change: no band, the terminal's own dimmed text.
+	for _, r := range rowRuns(" c ") {
+		if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
+			t.Fatalf("context run %q paints background %v:\n%s", r.text, bg, joined)
 		}
 	}
-	// Word emphasis: inside a replaced pair the changed token goes bold — an
-	// attribute, so it survives any palette — and only the token, not the row.
-	var bold string
+	// Word emphasis: the changed token inside a -/+ pair rides the word band,
+	// and only the token does — so the strongest background on the row is the
+	// one exactly the token's cells carry.
+	addWord, _ := app.th.Slot(theme.ToolDiffAddedWordBg)
+	var word strings.Builder
 	for _, r := range rowRuns("+b := 2") {
-		if _, _, attrs := r.style.Decompose(); attrs&tcell.AttrBold != 0 {
-			bold += r.text
+		if _, b, _ := r.style.Decompose(); b == app.cellColor(addWord) {
+			word.WriteString(r.text)
 		}
 	}
-	if strings.TrimSpace(bold) != "2" {
-		t.Errorf("bold text on the added row = %q, want %q", strings.TrimSpace(bold), "2")
+	if strings.TrimSpace(word.String()) != "2" {
+		t.Errorf("word band on the added row covers %q, want %q", strings.TrimSpace(word.String()), "2")
+	}
+	// The word band is strictly stronger than the row band: identical bands
+	// would make wordPair's whole pass invisible.
+	addRow, _ := app.th.Slot(theme.ToolDiffAddedBg)
+	if addRow == addWord {
+		t.Error("the added word band equals the row band")
 	}
 }
 
 // A bash result that merely prints a list is not re-painted as a diff; one
 // that prints a real `git diff` is.
 func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	if DiffLooksUnified("- item one\n- item two\n") {
 		t.Error("a bullet list read as a diff")
 	}
@@ -747,15 +755,16 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 	app.AddToolBlock("", "bash", `{"command":"git diff"}`)
 	app.FinishTool("", "bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
 	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], w)
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
 	var addedInk bool
 	for _, ln := range lines {
 		if strings.Contains(runsText(ln.runs), "+new") {
 			fg, _, _ := ln.runs[1].style.Decompose()
-			addedInk = fg == tcell.ColorGreen
+			addedInk = fg == app.cellColor(add)
 		}
 	}
 	if !addedInk {
-		t.Errorf("bash git diff not painted with the terminal's green:\n%s", joinedLines(lines))
+		t.Errorf("bash git diff not painted with the theme's added ink %+v:\n%s", add, joinedLines(lines))
 	}
 
 	// The same tool's ordinary output keeps the plain body colour.
@@ -766,7 +775,7 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 	for _, ln := range ln2 {
 		if txt := runsText(ln.runs); strings.Contains(txt, "item one") {
 			fg, _, _ := ln.runs[1].style.Decompose()
-			if fg == tcell.ColorGreen {
+			if fg == app2.cellColor(add) {
 				t.Errorf("plain bash output painted as a diff addition:\n%s", joinedLines(ln2))
 			}
 		}
@@ -778,6 +787,7 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 // red/green is the pair some readers cannot separate, or a custom palette that
 // pins them — still owns them.
 func TestToolBoxDiffHonoursThemeInk(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app := idxApp(100, 40)
 	app.th = theme.ApplyColorBlindMode(theme.Load("groknight"))
 	w := app.contentWidth()
