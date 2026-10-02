@@ -136,14 +136,25 @@ func (a *App) MsgViewOpen() bool {
 // userRowAt maps a screen row to the user block it shows, and to that block's
 // ordinal among the transcript's user rows. It is the same screen-row →
 // document-row → block-index walk thinkBoxAt does, because the row index is the
-// only thing that knows where a block landed on screen. Caller holds a.mu.
+// only thing that knows where a block landed on screen — with one exception: a
+// row under the sticky header shows the prompt the header pinned, whatever
+// document row that row's index names, so a click on the header opens the same
+// menu a click on the prompt inline does. Caller holds a.mu.
 func (a *App) userRowAt(y int) (ord, block int) {
 	top, vp := a.selViewport()
 	hdr := a.transcriptTop()
 	if vp <= 0 || y < hdr || y >= hdr+vp {
 		return -1, -1
 	}
-	bi := a.rowIdx.blockAt(int32(top + y - hdr))
+	bi := -1
+	switch dy := y - hdr; {
+	case dy < a.stickyVis && a.stickyBlock >= 0:
+		bi = a.stickyBlock // a row of the pinned prompt
+	case dy < a.stickyHdr:
+		bi = -1 // the blank gap under it: nothing to hit
+	default:
+		bi = a.rowIdx.blockAt(int32(top + dy))
+	}
 	if bi < 0 || bi >= len(a.blocks) || a.blocks[bi].Kind != KindUser {
 		return -1, -1
 	}
@@ -220,8 +231,10 @@ func (a *App) runPendingMsgAction() {
 	}
 }
 
-// copyMessage puts the message on the clipboard and confirms it on the divider
-// with the same notice a drag-copy uses, so the two copy paths look alike.
+// copyMessage puts the message on the clipboard and confirms it with the same
+// toast a drag-copy uses, so the two copy paths look alike. A failure is a
+// transcript block, not a toast: it says what went wrong, and the block is
+// where a message the user may want to act on belongs.
 func (a *App) copyMessage(text string) {
 	if strings.TrimSpace(text) == "" {
 		a.AddSystemBlock("message is empty — nothing to copy")
@@ -232,8 +245,7 @@ func (a *App) copyMessage(text string) {
 		return
 	}
 	a.mu.Lock()
-	a.selNotice = "Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars"
-	a.selNoticeUntil = time.Now().Add(selGrace)
+	a.setNotice("Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars")
 	a.mu.Unlock()
 	a.poke()
 }

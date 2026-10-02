@@ -42,6 +42,73 @@ var defaultSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 // asciiSpinnerFrames is the preset default for terminals without braille.
 var asciiSpinnerFrames = []string{"|", "/", "-", "\\"}
 
+// HUD icon families, borrowed from the deepseek harness's composer pills
+// (deepseek-harness StatsPills.tsx): IconGaugeOutline leads the timing
+// readings, IconDatabaseOutline the token ones, and dsh's tool rows carry
+// the wrench a tool call is drawn with. dsh draws them as 16px SVG; a
+// terminal draws one cell, so these are the closest monospace stand-ins.
+// Themes override them under symbols.overrides as "hud.<key>", and the ascii
+// preset substitutes a letter tag, because a terminal that cannot draw the
+// glyph would rather read "hit 96%" than paint a tofu box.
+//
+// Every default here must be one cell in EVERY terminal, not one cell by
+// runewidth's reckoning: the status row is a fixed-cell grid, so a glyph a
+// terminal paints two cells wide is written into one cell, spills its own
+// second column over the first digit of the number beside it, and the
+// reading collides. U+23F1 STOPWATCH is that glyph — East Asian Ambiguous,
+// drawn double-width by most terminals — so the gauge reads U+23F2, which is
+// Unambiguous. ▤ and ✳ are already one cell everywhere.
+const (
+	HUDIconGauge    = "gauge"    // timing: work timer, decode rate, ttft
+	HUDIconDatabase = "database" // tokens: the token split, the cache hit rate
+	HUDIconTool     = "tool"     // the session's tool-call count
+)
+
+var (
+	// The gauge is U+23F2 STOPWATCH, never U+23F1: the note above is the
+	// whole reason. ▤ and ✳ are already one cell in every terminal.
+	hudUnicodeIcons = map[string]string{
+		HUDIconGauge:    "⏲",
+		HUDIconDatabase: "▤",
+		HUDIconTool:     "✳",
+	}
+	hudAsciiIcons = map[string]string{
+		HUDIconGauge:    "t",
+		HUDIconDatabase: "k",
+		HUDIconTool:     "*",
+	}
+)
+
+// HUDIcon returns the one-cell icon a HUD segment leads with, for the
+// metric family it names. A theme that overrides an unknown key is ignored
+// (the same rule box/spinner overrides follow); the ascii preset substitutes
+// a letter tag rather than a glyph its terminal cannot draw.
+//
+// The result is cut to ONE character. A theme's "hud.<key>" override is a
+// free string, and a two-cell glyph in that slot is the overlap this call
+// exists to prevent: the status row is a fixed-cell grid, so the icon lands
+// in one cell, the terminal paints the glyph's own second column there, and
+// the first digit of the number beside it is overwritten. One character of
+// icon, or a letter — never a collision the user reads as a wrong number. A
+// theme that wants a two-cell icon is asking for a two-cell row.
+func (t *Theme) HUDIcon(key string) string {
+	icon := ""
+	if t != nil {
+		if v, ok := t.Symbols.Overrides["hud."+key]; ok && v != "" {
+			icon = v
+		} else if t.SymbolPreset() == "ascii" {
+			icon = hudAsciiIcons[key]
+		}
+	}
+	if icon == "" {
+		icon = hudUnicodeIcons[key]
+	}
+	for _, r := range icon {
+		return string(r)
+	}
+	return ""
+}
+
 // Box returns the outline glyphs for outlined chrome under the theme's box
 // style (symbols.box: round — the default and today's glyphs — or sharp).
 // Per-glyph overrides live under "box.round.<key>"/"box.sharp.<key>" with

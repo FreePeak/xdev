@@ -32,7 +32,9 @@ func dockTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen, *int) {
 		// The identity the panel's title slot reads. Not counted by runs: the
 		// session's name is not one of the lists whose rebuild this file bounds.
 		Session: func() (string, string) { return "opencode sidebar", "sess1234" },
-		MCP:     func() string { return "MCP · 3 servers" },
+		// The block shape cmd builds: a count heading, then one row per enabled
+		// server, marked ○ when nothing has connected to it yet.
+		MCP: func() string { return "MCP · 3\n○ be-kg\n○ db\n○ leankg" },
 	})
 	return app, scr, runs
 }
@@ -130,6 +132,67 @@ func TestDockCycleWalksPolicy(t *testing.T) {
 	}
 }
 
+// TestSidebarCommandTogglesWhatIsOnScreen: /sidebar is the switch form of the
+// Alt+S cycle. Bare, it hides a panel that is actually painted and opens one
+// that is not — the question is the SCREEN, not the policy, so an auto-closed
+// panel is never the thing the human hid — and every flip lands on the same
+// persisted key the cycle writes. A word outside the vocabulary is a usage
+// error, never a silent toggle.
+func TestSidebarCommandTogglesWhatIsOnScreen(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	var saved []string
+	app.SetSettingsOps(&SettingsOps{Path: "/tmp/settings.yml", SetSidebar: func(m string) error {
+		saved = append(saved, m)
+		return nil
+	}})
+
+	// auto at 200 columns: the panel is on screen, so a bare call hides it.
+	if err := app.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockHide {
+		t.Fatalf("bare toggle from a painted panel = %q, want hide", app.DockMode())
+	}
+	// And back: hidden is not on screen, so the same call shows it.
+	if err := app.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockShow {
+		t.Fatalf("bare toggle from a hidden panel = %q, want show", app.DockMode())
+	}
+	if strings.Join(saved, ",") != "hide,show" {
+		t.Fatalf("persisted %v, want hide,show", saved)
+	}
+
+	// A terminal below the auto floor has no panel to hide: the toggle opens
+	// it rather than persisting a hide for one that was never painted.
+	small, _, _ := dockTestApp(t, 100, 40)
+	small.SetSettingsOps(&SettingsOps{Path: "/tmp/settings.yml", SetSidebar: func(string) error { return nil }})
+	if err := small.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if small.DockMode() != DockShow {
+		t.Fatalf("toggle under the width floor = %q, want show", small.DockMode())
+	}
+
+	// The named forms are the policy itself, and anything else is refused.
+	if err := app.Sidebar("auto"); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockAuto {
+		t.Fatalf("/sidebar auto = %q", app.DockMode())
+	}
+	if err := app.Sidebar("sideways"); err == nil {
+		t.Fatal("an unknown argument must be refused, not toggled")
+	}
+	if err := app.Sidebar("show hide"); err == nil {
+		t.Fatal("two arguments must be refused")
+	}
+	if app.DockMode() != DockAuto {
+		t.Fatalf("a refused call changed the policy to %q", app.DockMode())
+	}
+}
+
 // TestDockFoldKeepsThePlan is Ctrl+T's one promise: the pending document survives
 // every fold state, because folding away the thing the human is being asked to
 // read is worse than no panel at all.
@@ -211,8 +274,8 @@ func TestDockClipsDoNotWrap(t *testing.T) {
 
 // TestDockTitleWrapsNotClips is the reported bug: a long session title must be
 // readable in the panel, not cut with "…". The slot wraps across rows, the rows
-// below it shift down by however many it took, and a name long enough to eat the
-// work it names is still bounded — with the cut admitted on its last row.
+// below it shift down by however many it took, and nothing about the name's
+// length decides how many rows it may take — the panel is.
 func TestDockTitleWrapsNotClips(t *testing.T) {
 	long := strings.Repeat("full title ", 6) // 66 cells: two rows of 38, plus a tail
 	app, _, _ := dockTestApp(t, 200, 40)
@@ -230,14 +293,11 @@ func TestDockTitleWrapsNotClips(t *testing.T) {
 	if head < 2 {
 		t.Fatalf("a 66-cell title took %d row(s): %v", head, lines)
 	}
-	if head > dockTitleMax {
-		t.Fatalf("the title took %d rows, cap is %d", head, dockTitleMax)
-	}
 	if joined := strings.Join(lines, " "); !strings.Contains(joined, "full title full") {
 		t.Fatalf("title rows lost the text: %v", lines)
 	}
-	if strings.Contains(lines[0], "…") {
-		t.Fatalf("row 0 still clips: %q", lines[0])
+	if strings.Contains(strings.Join(lines, ""), "…") {
+		t.Fatalf("the whole name fits the panel, so nothing may be cut: %v", lines)
 	}
 	for _, l := range lines {
 		if w := width(l); w > dockInner {
@@ -259,10 +319,12 @@ func TestDockTitleWrapsNotClips(t *testing.T) {
 	}
 }
 
-// TestDockTitleBoundedAndClickMapFollows: an absurd title cannot push the panel's
-// sections out of the band, and a click resolves against the rows as painted —
-// which start below the slot however many rows it took.
-func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
+// TestDockTitleTakesTheRowsItNeeds is the unbounded half of #434: the name's
+// length no longer picks a row budget, so a 1000-cell name wraps over ~26 rows
+// instead of being cut at 3. The sections keep whatever the band still has
+// after it, and a click resolves against the rows as painted — which start
+// below the slot however many rows it took.
+func TestDockTitleTakesTheRowsItNeeds(t *testing.T) {
 	app, _, _ := dockTestApp(t, 200, 40)
 	app.SetDockOps(DockOps{
 		Session: func() (string, string) { return strings.Repeat("word ", 200), "sess1234" },
@@ -273,16 +335,19 @@ func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
 	defer app.mu.Unlock()
 	app.dockBuild()
 	head := app.dock.titleRows()
-	if head != dockTitleMax {
-		t.Fatalf("a 1000-cell title took %d rows, want the cap %d", head, dockTitleMax)
+	_, bandH := app.dockGrid()
+	if head <= 3 {
+		t.Fatalf("a 1000-cell title took %d rows: the 3-row cap is back", head)
 	}
-	// The title wraps away the "…" for a real name; the cap is where one comes
-	// back, so the same setting cannot lie about having shown the whole title.
-	if !strings.Contains(app.dock.titleLines[head-1], "…") {
-		t.Fatalf("a title cut at the cap must admit it: %q", app.dock.titleLines[head-1])
+	// Nothing is cut while the band has rows for it: an "…" here means a cap
+	// crept back in, and the setting would lie about showing the whole name.
+	if strings.Contains(strings.Join(app.dock.titleLines, ""), "…") {
+		t.Fatalf("a 1000-cell title was cut in a %d-row panel: %v", bandH, app.dock.titleLines)
 	}
+	// What the name did not take, the sections have — the panel is shared, not
+	// won outright, until the name has eaten all but the band's floor.
 	if len(app.dock.lines) == 0 {
-		t.Fatal("the cap must leave the sections their rows")
+		t.Fatalf("a %d-row name left the sections nothing in a %d-row band", head, bandH)
 	}
 	top, _ := app.dockGrid()
 	if _, act := app.dockRowAt(200-dockCols+1, top+head-1); act != "" {
@@ -294,12 +359,43 @@ func TestDockTitleBoundedAndClickMapFollows(t *testing.T) {
 	if path, _ := app.dockRowAt(200-dockCols+1, top+head+1); path != "" {
 		t.Fatalf("a task row must not resolve as a file: %q", path)
 	}
+	app.mu.Unlock()
+	// And the whole name reaches the SCREEN, tail included: a name that fits
+	// the panel must not end in the row the build happened to budget for.
+	app.draw()
+	scr := app.scr.(tcell.SimulationScreen)
+	if got := dockRowText(scr, head-1, 200-dockCols+dockPad); !strings.Contains(got, "word") {
+		t.Fatalf("the title's last row = %q, want the tail of the name", got)
+	}
+	app.mu.Lock()
 }
 
-// TestDockRebuildIsEventDriven is the acceptance line: an unchanged frame must not
-// run a single source, while a bump, a resize, or a transcript that grew must.
-// The alternative is a second column rebuilt at 30fps, which is the cost #283 and
-// #284 spent two issues removing from the draw path.
+// The band is the only bound left on the name: one too long for the panel
+// itself is cut, and the cut is admitted rather than silent, so a short
+// terminal does not become a wall of title with no marker that it is one.
+func TestDockTitleLongerThanTheBandIsAdmitted(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 8) // a band of 8: the name wants ~66 rows
+	app.SetDockOps(DockOps{Session: func() (string, string) {
+		return strings.Repeat("word ", 500), "sess1234"
+	}})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.dockBuild()
+	_, bandH := app.dockGrid()
+	head := app.dock.titleRows()
+	if head > bandH-dockTitleFloor {
+		t.Fatalf("a %d-row title in a %d-row band leaves the sections nothing", head, bandH)
+	}
+	if !strings.Contains(app.dock.titleLines[head-1], "…") {
+		t.Fatalf("a title cut at the band must admit it: %q", app.dock.titleLines[head-1])
+	}
+}
+
+// TestDockRebuildIsEventDriven is the acceptance line: an unchanged frame must
+// not run a single source, while a bump, a resize, or a transcript that grew
+// must. The alternative is a second column rebuilt at 30fps, which is the cost
+// #283 and #284 spent two issues removing from the draw path.
 func TestDockRebuildIsEventDriven(t *testing.T) {
 	app, _, runs := dockTestApp(t, 200, 40)
 	app.dockBuild()
@@ -462,6 +558,55 @@ func TestDockAnatomyIsOpencode(t *testing.T) {
 	x := left + dockPad + dockInner - width(file.right())
 	if got := dockRowText(scr, y, x); !strings.HasPrefix(got, "+1 -1") {
 		t.Fatalf("counts are not right-aligned at the panel's edge: %q", got)
+	}
+}
+
+// TestDockPaintsEveryMCPName: the section is a list, not a count. The whole
+// point of the block is that a human can read which server is which — and
+// which one is ○, i.e. the one the session could not reach. A heading with a
+// single row under it (or the count alone) fails both, so assert the painted
+// screen, not the fold: what matters is that every name reaches the panel.
+func TestDockPaintsEveryMCPName(t *testing.T) {
+	app, scr, _ := dockTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.draw()
+
+	app.mu.Lock()
+	top, _ := app.dockGrid()
+	head := app.dock.titleRows()
+	rows := app.dock.lines
+	app.mu.Unlock()
+
+	// The fold the source produced: a heading plus one row per name, never a
+	// single "3 servers" line.
+	seen, names := 0, 0
+	for _, r := range rows {
+		if r.head && strings.HasPrefix(r.text, "MCP") {
+			seen++
+		}
+		if strings.HasPrefix(r.text, "○ ") {
+			names++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("MCP headings = %d, want 1\n%s", seen, dockLines(rows))
+	}
+	if names != 3 {
+		t.Fatalf("MCP rows = %d, want one per enabled server\n%s", names, dockLines(rows))
+	}
+	// And the screen agrees with the fold: the names are where a reader looks.
+	left := 160 - dockCols + dockPad
+	for _, want := range []string{"MCP", "○ be-kg", "○ db", "○ leankg"} {
+		found := false
+		for i := range rows {
+			if got := dockRowText(scr, top+head+i, left); strings.Contains(got, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%q never reached the panel:\n%s", want, dockLines(rows))
+		}
 	}
 }
 

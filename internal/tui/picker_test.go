@@ -796,10 +796,11 @@ func TestResumePickerWindowFollowsTerminalHeight(t *testing.T) {
 }
 
 // TestPickerNameColumnFollowsTerminalWidth: the name column takes what the
-// terminal leaves after the detail column, so a wide terminal prints a long
-// session name whole and a narrow one ellipsizes it.
+// terminal leaves, so a wide terminal prints a long session name whole and a
+// narrow one WRAPS it rather than cutting it — a title's tail is where the
+// work it describes is named.
 func TestPickerNameColumnFollowsTerminalWidth(t *testing.T) {
-	const name = "a-very-long-session-name-that-wants-the-whole-row"
+	const name = "a very long session name that wants the whole row"
 	open := func(w int) (tcell.SimulationScreen, *App) {
 		app, scr := newTestApp(t, w, 30)
 		app.SetSessionOps(&SessionOps{
@@ -820,13 +821,192 @@ func TestPickerNameColumnFollowsTerminalWidth(t *testing.T) {
 
 	wide, _ := open(140)
 	if !gridContains(wide, name) {
-		t.Fatalf("wide terminal ellipsized a name it had room for:\n%s", screenText(wide))
+		t.Fatalf("wide terminal wrapped a name it had room for:\n%s", screenText(wide))
 	}
 	narrow, _ := open(40)
 	if gridContains(narrow, name) {
-		t.Fatal("narrow terminal printed the name whole — it must clip to the width")
+		t.Fatal("narrow terminal printed the name whole — it must wrap to the width")
 	}
-	if !gridContains(narrow, "…") {
-		t.Fatalf("clipped name carries no ellipsis:\n%s", screenText(narrow))
+	// Wrapped, not cut: every word of the name is on screen somewhere, and
+	// the name never ends a row in an ellipsis.
+	txt := screenText(narrow)
+	for _, word := range strings.Fields(name) {
+		if !gridContains(narrow, word) {
+			t.Fatalf("narrow terminal lost %q from the name:\n%s", word, txt)
+		}
+	}
+	if strings.Contains(txt, "…") && !strings.Contains(txt, "Type a message…") {
+		t.Fatalf("narrow terminal ellipsized the name instead of wrapping it:\n%s", txt)
+	}
+	// The rows below the wrapped one are still rows: the name took the width,
+	// not the room.
+	if !gridContains(narrow, "short") {
+		t.Fatalf("the wrapped name pushed the next row out of the panel:\n%s", txt)
+	}
+	// The name has first claim on the row; the detail takes what is left and
+	// is clipped inside ITS cell, never the name's.
+	medium, _ := open(80)
+	mtxt := screenText(medium)
+	if !gridContains(medium, name) || !gridContains(medium, "aaaa1111 ·") {
+		t.Fatalf("a wide-enough row lost the name or the detail cell:\n%s", mtxt)
+	}
+}
+
+// TestPickerWrapsLongLabelOntoContinuationRows: a name wider than the column
+// takes continuation rows, each keeping the row's item so a click on any of
+// them selects the row they belong to, and the window never opens on a
+// continuation whose head is scrolled out of sight.
+func TestPickerWrapsLongLabelOntoContinuationRows(t *testing.T) {
+	p := newPicker(PickerOptions{Title: "model", Views: []PickerView{{
+		Name: "All models", Action: "use",
+		Items: []PickerItem{
+			{Label: "a-very-long-model-name-that-cannot-fit-one-row", Value: "long"},
+			{Label: "short", Value: "short"},
+		},
+	}}})
+	p.labelW = 24
+	lines := p.lines()
+	head, cont := 0, 0
+	for _, ln := range lines {
+		if ln.header {
+			continue
+		}
+		if ln.cont {
+			cont++
+			if ln.itemIdx != 0 {
+				t.Fatalf("continuation row lost the item it belongs to: %+v", ln)
+			}
+			continue
+		}
+		head++
+	}
+	if head != 2 || cont == 0 {
+		t.Fatalf("lines = %d heads, %d continuations; want 2 heads and a wrapped name", head, cont)
+	}
+	// A window never opens on a continuation whose head is scrolled out: the
+	// selection walks items, and a wrapped item is still one item.
+	p.sel = 0
+	lines, start, selLine := p.window(2)
+	if selLine < 0 {
+		t.Fatal("selection not visible")
+	}
+	if lines[start].cont {
+		t.Fatalf("window opens on an orphan continuation: %+v", lines[start])
+	}
+	p.sel = 1
+	lines, start, _ = p.window(2)
+	if lines[start].cont {
+		t.Fatalf("window opens on an orphan continuation: %+v", lines[start])
+	}
+}
+
+// TestSessionPickerWrapsLongTitle: a /resume title too wide for the panel
+// WRAPS onto its own rows and keeps its id, meta and badge — the flat row used
+// to run off the right edge, taking the badge with it.
+func TestSessionPickerWrapsLongTitle(t *testing.T) {
+	const title = "port the resume picker so a very long session title still reads whole"
+	it := SessionPickerItem{ID: "aaaa1111", Title: title, Mtime: "Jan 02 15:04", Size: "1 KB", CWD: "/home/u/p", Status: "done"}
+	// A title that fits is the one line it always was, meta included.
+	plain := sessionPickerRowLines(it, "  ", 200)
+	if len(plain.lines) != 1 || plain.lines[0] != "  "+plain.head {
+		t.Fatalf("a fitting title = %q, want the marked one-line row %q", plain.lines, "  "+plain.head)
+	}
+	// A title that does not wraps, and the fields take their own line rather
+	// than being cut at the edge.
+	row := sessionPickerRowLines(it, "  ", 40)
+	if len(row.lines) < 2 {
+		t.Fatalf("a long title stayed on one row: %q", row.lines)
+	}
+	joined := strings.Join(row.lines, " ")
+	if !strings.Contains(joined, "port the resume picker") || !strings.Contains(joined, "still reads whole") {
+		t.Fatalf("wrapped title lost its tail: %q", row.lines)
+	}
+	if !strings.HasSuffix(row.lines[len(row.lines)-1], "done") {
+		t.Fatalf("the badge did not close the wrapped row: %q", row.lines)
+	}
+	if len(row.lines) > pickerTitleMaxRows+1 {
+		t.Fatalf("row took %d lines, want the title capped at %d (+meta)", len(row.lines), pickerTitleMaxRows)
+	}
+	// Pathological: past the cap the title is joined back and the cut is
+	// admitted with an ellipsis, never silent.
+	long := sessionPickerRowLines(SessionPickerItem{ID: "b", Title: strings.Repeat("word ", 200), Mtime: "t", Size: "s"}, "  ", 40)
+	if got := len(long.lines); got > pickerTitleMaxRows+1 {
+		t.Fatalf("pathological title took %d rows", got)
+	}
+	if !strings.Contains(strings.Join(long.lines, " "), "…") {
+		t.Fatalf("capped title carries no ellipsis: %q", long.lines)
+	}
+}
+
+// TestSessionPickerDrawWrapsTitle: the wrapping is on the screen, not just in
+// the row builder — the box grows by the wrapped rows and the badge survives.
+func TestSessionPickerDrawWrapsTitle(t *testing.T) {
+	const title = "port the resume picker so a very long session title still reads whole"
+	app, scr := newTestApp(t, 60, 30)
+	app.OpenSessionPicker([]SessionPickerItem{
+		{ID: "aaaa1111", Title: title, Mtime: "Jan 02 15:04", Size: "1 KB", InCwd: true, Status: "done"},
+		{ID: "bbbb2222", Title: "short", Mtime: "Jan 02 15:04", Size: "2 KB", InCwd: true},
+	})
+	app.draw()
+	txt := screenText(scr)
+	if !strings.Contains(txt, "port the resume picker") {
+		t.Fatalf("wrapped title missing from the screen:\n%s", txt)
+	}
+	if !strings.Contains(txt, "done") {
+		t.Fatalf("the badge did not reach the screen:\n%s", txt)
+	}
+	if !gridContains(scr, "bbbb2222") {
+		t.Fatalf("the second row was pushed off the panel:\n%s", txt)
+	}
+}
+
+// TestTabsPickerListsOpenSessionsAndPicks: /tabs is the one surface that
+// SHOWS the open set (the status row only counts it), so every row must
+// name its session and say which one is running, and Enter must hand back
+// the chosen session's id — the whole point is switching to a session you
+// did not have to count your way to with Alt+].
+func TestTabsPickerListsOpenSessionsAndPicks(t *testing.T) {
+	app, scr := newTestApp(t, 90, 30)
+	app.SetTabs([]TabInfo{
+		{ID: "aaaa111122", Title: "parser work", Current: true},
+		{ID: "bbbb222233", Title: "deploy notes", Running: true},
+		{ID: "cccc333344", Unread: true},
+	})
+	var picked string
+	app.SetTabPick(func(id string) error { picked = id; return nil })
+	if err := app.TabsPicker(); err != nil {
+		t.Fatal(err)
+	}
+	if !app.PickerOpen() {
+		t.Fatal("/tabs must open the picker")
+	}
+	app.draw()
+	txt := screenText(scr)
+	for _, want := range []string{"parser work", "deploy notes", "cccc3333", "running"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("row %q missing from /tabs picker:\n%s", want, txt)
+		}
+	}
+	// Down twice lands on the untitled session; Enter hands its id back.
+	pressKey(app, tcell.KeyDown)
+	pressKey(app, tcell.KeyDown)
+	pressKey(app, tcell.KeyEnter)
+	if picked != "cccc333344" {
+		t.Fatalf("picked %q, want the third session cccc333344", picked)
+	}
+	if app.PickerOpen() {
+		t.Fatal("picker stayed open after the selection")
+	}
+}
+
+// TestTabsPickerUnwiredIsANotice: a harness that never wired the set must
+// say so rather than opening an empty list that owns the keyboard.
+func TestTabsPickerUnwiredIsANotice(t *testing.T) {
+	app, _ := newTestApp(t, 90, 30)
+	if err := app.TabsPicker(); err == nil {
+		t.Fatal("/tabs with no wired tabset must return an error")
+	}
+	if app.PickerOpen() {
+		t.Fatal("an unwired /tabs must not open a picker")
 	}
 }

@@ -66,9 +66,6 @@ type selCorner struct {
 	x, y, doc int
 }
 
-// selGrace is how long the copy confirmation stays on the divider.
-const selGrace = 2 * time.Second
-
 // clearClick resets the click-count state after a double/triple-click
 // gesture completes (or when a new gesture begins from a different
 // position). Callers hold a.mu.
@@ -284,6 +281,19 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
+		// A status-row pill owns its own pixels the same way: a press on one
+		// opens its breakdown panel, never a selection anchor, and a press
+		// anywhere else on the row is left to the transcript branch below
+		// (the row has no text to copy there). The rects are the ones the
+		// painter published this frame, so a pill that was dropped for width
+		// cannot be clicked.
+		if name := a.statusHitAt(x, y); name != "" {
+			a.selDown, a.selShown, a.selCache = false, false, nil
+			a.linkClick, a.msgArmed = "", false
+			a.clearClick() // this press was not the start of a click sequence
+			a.openStatusPopup(name, x, y)
+			break
+		}
 		// A press on the scrollbar grabs the bar, not the text: the drag that
 		// follows moves the viewport, and the gesture owns no selection at all
 		// — the rows the painter recorded belong to the frame the bar was hit
@@ -300,13 +310,16 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
-		// Past the bar: this press is on the transcript, and it aims the wheel.
-		// Pressing a reasoning box focuses it, pressing anywhere else takes the
-		// aim back, so the wheel scrolls the transcript until the human asks for
-		// a box by name. The notch never moves focus (app.go scrollThinkBox),
-		// which is what stops a box from stealing the wheel merely by sliding
-		// under a stationary pointer. thinkBoxAt returns -1 for "no box", which
-		// is exactly the "aim back at the transcript" value.
+		// Past the bar: this press is on the transcript, and it names the box
+		// the wheel belongs to. Pressing a reasoning box focuses it — which is
+		// also what grows it from its one collapsed row to the scrollable
+		// window (app.go thinkBoxLines) — and pressing anywhere else takes the
+		// aim back, so the wheel scrolls the transcript and the box shrinks
+		// again until the human asks for a box by name. The notch never moves
+		// focus (app.go scrollThinkBox), which is what stops a box from
+		// stealing the wheel merely by sliding under a stationary pointer.
+		// thinkBoxAt returns -1 for "no box", which is exactly the "aim back at
+		// the transcript" value.
 		//
 		// Except inside the dock: that column is a window of its own, so a press
 		// there aims at the panel and never at a row the panel covers — no
@@ -422,7 +435,7 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			opened := false
 			if target != "" && a.linkAt(x, y) == target {
 				if err := a.openLink(target); err != nil {
-					a.setNotice("link: " + err.Error())
+					a.setError("link: " + err.Error())
 				}
 				opened = true
 			}
@@ -450,28 +463,13 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			if strings.TrimSpace(text) == "" {
 				a.selShown = false
 			} else if a.copyToClipboard(text) == nil {
-				a.selNotice = "Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars"
-				a.selNoticeUntil = time.Now().Add(selGrace)
+				a.setNotice("Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars")
 			}
 		}
 		a.poke()
 	}
 	// Remaining buttons (right/middle, bare motion) are ignored; wheel was
 	// already handled by the caller.
-}
-
-// copyHint returns the copy confirmation while it is still fresh. Once its
-// deadline passes the notice is dropped here, so no later draw can resurrect it;
-// the caller falls back to the viewport hint.
-func (a *App) copyHint() string {
-	if a.selNotice == "" {
-		return ""
-	}
-	if !time.Now().Before(a.selNoticeUntil) {
-		a.selNotice = ""
-		return ""
-	}
-	return a.selNotice
 }
 
 // --- anchoring --------------------------------------------------------------
@@ -492,11 +490,28 @@ func (a *App) selViewport() (top, vp int) {
 // edge row, which is the one the auto-scroll is about to replace — so the
 // selection tracks the text it grabbed while the viewport moves. A chrome
 // gesture keeps screen rows.
+//
+// A row of the sticky header is the one case where a screen row does not name
+// the document row it shows: the header parks the prompt it pinned, so a corner
+// on one takes THAT prompt's own rows (from wherever the push has clipped it).
+// Every other row keeps the viewport's own arithmetic — the header re-renders
+// rows the viewport already had, so it inserts none.
 func (a *App) selCornerAt(x, y int) selCorner {
 	c := selCorner{x: x, y: a.clampScreen(y), doc: -1}
 	top, vp := a.selViewport()
 	hdr := a.transcriptTop()
-	if vp > 0 && (a.selDocMode || (y >= hdr && y < hdr+vp)) {
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return c
+	}
+	if dy := y - hdr; dy < a.stickyVis && a.stickyBlock >= 0 {
+		// The header's own rows are the pinned prompt's, from wherever the push
+		// has clipped it to (stickyDoc is its first painted row).
+		c.doc = int(a.stickyDoc) + dy
+		return c
+	}
+	if a.selDocMode || y >= hdr {
+		// Below the header the viewport's own arithmetic is unchanged: the
+		// header re-renders rows it already owned rather than inserting any.
 		c.doc = top + min(max(y-hdr, 0), vp-1)
 	}
 	return c
@@ -658,13 +673,22 @@ func (a *App) selThumbTo(y int) {
 // selCacheRows records the frame's transcript rows under their document numbers
 // while a drag is held, so a row that scrolls out of sight afterwards is still
 // copyable. Each draw caches the row the last scroll revealed, which is what
-// lets one gesture outgrow the viewport. Callers hold a.mu.
+// lets one gesture outgrow the viewport.
+//
+// The capture is screen-ordered and the header sits at the top of it, so the
+// header's rows are keyed by the pinned prompt's own document rows (stickyDoc+)
+// and everything else by top+i — the header re-renders rows the viewport already
+// had, so it moves none. Callers hold a.mu.
 func (a *App) selCacheRows(top int) {
 	if a.selCache == nil {
 		return
 	}
 	for i, sr := range a.selRows {
-		a.selCache[top+i] = sr
+		doc := top + i
+		if a.stickyVis > 0 && i < a.stickyVis {
+			doc = int(a.stickyDoc) + i
+		}
+		a.selCache[doc] = sr
 	}
 }
 
@@ -725,11 +749,26 @@ func (a *App) selSpan() []selSpanRow {
 // selDocRow resolves one document row: its text from the live capture while it is
 // on screen, from the gesture's cache once it has scrolled away.
 func (a *App) selDocRow(d, top int, b selBounds) selSpanRow {
-	vy := d - top
-	y := vy + a.transcriptTop()
 	sr, have := selRow{}, false
-	if vy >= 0 && vy < len(a.selRows) {
-		sr, have = a.selRows[vy], true
+	// Where the row is on screen, in three cases and no more:
+	//   - it is one the header painted (the pinned prompt's own rows);
+	//   - it is below the header, at the position the viewport's arithmetic
+	//     has always named;
+	//   - it is anywhere else, from the gesture's cache, keyed by document row.
+	// Anything the header is painted OVER is in none of them: reading the grid
+	// there would copy the header's text a second time underneath it, so such a
+	// row copies as the blank line it looks like.
+	y := -1
+	switch {
+	case a.stickyVis > 0 && d >= int(a.stickyDoc) && d < int(a.stickyDoc)+a.stickyVis:
+		y = a.transcriptTop() + d - int(a.stickyDoc)
+	case d < top+a.stickyHdr && d >= top:
+		return spanRow(-1, selRow{text: "", x0: 0}, selBounds{lo: 1, hi: 0})
+	case d >= top:
+		y = d - top + a.transcriptTop()
+	}
+	if sy := y - a.transcriptTop(); y >= 0 && sy >= 0 && sy < len(a.selRows) {
+		sr, have = a.selRows[sy], true
 	} else if c, cached := a.selCache[d]; cached {
 		sr, have = c, true
 	}

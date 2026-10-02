@@ -367,10 +367,19 @@ type Agent struct {
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
-	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model. nil asks for none.
 	Thinking *ai.ThinkingBudget
+	Approve  ApprovalFunc
+	// OnOutput, when set, is handed every chunk a streaming tool produces, so
+	// a UI can paint a running command instead of waiting for its result. It
+	// is called on the tool's copier goroutine, with the id and name of the
+	// call the bytes belong to — calls in a batch run concurrently, so a
+	// stream without its call is a stream nobody can route. nil (print mode,
+	// RPC, tests) is the plain path: tools observe nothing and behave exactly
+	// as before, and tools that do not stream (read, grep, every MCP tool)
+	// simply never call it.
+	OnOutput func(callID, name, chunk string)
 	// Prewalk is the one-shot model handoff (nil = disabled): after the
 	// first successful edit/write, the run switches to the target model
 	// through the failover machinery (see prewalk.go).
@@ -411,6 +420,14 @@ type Agent struct {
 	// requiring /goal. Off by default so print/RPC/ACP still end at the
 	// first text-only yield.
 	PromptContinuation bool
+
+	// SteeringDelivered is called with the queued steering texts a run just
+	// injected as user messages, oldest first. The steering drain IS the
+	// delivery point, so this is the one place that knows a queued message
+	// reached the model — a host that shows pending-submit rows (the TUI's
+	// mid-turn queue, #157) retires them here instead of guessing when they
+	// landed. nil is fine: a headless host has no rows to retire.
+	SteeringDelivered func(texts []string)
 
 	// Handoff configures the handoff-document compaction (M5 #23): the
 	// side-request target, the artifact mirror, and the per-branch reset
@@ -604,6 +621,16 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			history = append(history, m)
 			a.persist(m)
 		}
+		// The messages are in the conversation now, so a host showing them
+		// as pending can retire the rows. Announced after the persist, so a
+		// row never disappears before its message is durable (#157).
+		if a.SteeringDelivered != nil && len(steering) > 0 {
+			texts := make([]string, 0, len(steering))
+			for _, s := range steering {
+				texts = append(texts, s.Text)
+			}
+			a.SteeringDelivered(texts)
+		}
 
 		// Threshold maintenance: compact before the window overflows.
 		// The handoff method (M5 #23) owns this boundary when the method
@@ -661,6 +688,17 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// Messages queued during the final turn continue the run
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
+			// Same announcement as the step boundary above: a message that
+			// arrives after the model's last tool call continues THIS run
+			// rather than waiting for the next one, and the host's pending
+			// rows must retire when it does.
+			if a.SteeringDelivered != nil && len(queued) > 0 {
+				texts := make([]string, 0, len(queued))
+				for _, s := range queued {
+					texts = append(texts, s.Text)
+				}
+				a.SteeringDelivered(texts)
+			}
 			// Todo reminder (M3/TODO-tracker): an assistant turn that
 			// ends with open todo work gets a developer-role reminder
 			// injected into the history so the model sees it next turn.
@@ -892,12 +930,16 @@ func (a *Agent) goalSystem(system string) string {
 // reached the hooks — replaying such a turn would double-emit it.
 // partial carries the accumulated text/thinking when the stream died
 // mid-content: the retain-and-continue path persists it and resumes the
-// turn instead of replaying (M5 tail). Tool calls are never captured —
-// an unpaired call would make the continuation request invalid.
+// turn instead of replaying (M5 tail). Tool calls are never captured as
+// a partial — an unpaired call would make the continuation request
+// invalid — but they are COUNTED (orphanToolCalls), because a turn that
+// died on a call and rendered nothing is the one post-content failure a
+// whole-turn replay can still repair.
 type turnError struct {
-	err            error
-	contentEmitted bool
-	partial        *ai.Message
+	err             error
+	contentEmitted  bool
+	partial         *ai.Message
+	orphanToolCalls int
 }
 
 func (e *turnError) Error() string { return e.err.Error() }
@@ -910,6 +952,23 @@ func (e *turnError) Unwrap() error { return e.err }
 func turnContentEmitted(err error) bool {
 	var te *turnError
 	return errors.As(err, &te) && te.contentEmitted
+}
+
+// orphanToolCalls reports the tool calls a failed turn left unpaired — a
+// stream that died mid-call, with no text behind it. The adapters emit
+// EventToolcallEnd only on their terminal path, so a call whose stream
+// dies is never persisted and never paired with a tool result; nothing
+// of it reaches the screen. That leaves the turn replayable: a
+// whole-turn re-send regenerates the call from the same history, where a
+// retained partial could not. This is what "stream ended without
+// finish_reason" hits when the cut lands mid-tool-call, and why that
+// failure used to end the session instead of reaching the ladder.
+func orphanToolCalls(err error) int {
+	var te *turnError
+	if errors.As(err, &te) {
+		return te.orphanToolCalls
+	}
+	return 0
 }
 
 // oneTurnWithRecovery wraps oneTurn with the full M5 recovery ladder (omp
@@ -1021,7 +1080,18 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		}
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
-			if turnContentEmitted(err) {
+			// A turn that died on a tool call with no text behind it has no
+			// partial to continue from and an unpaired call nothing can
+			// consume — but nothing was rendered either, so the whole turn
+			// is replayable. It takes the pre-content ladder below instead
+			// of surfacing the error, which is how a "stream ended without
+			// finish_reason" cut mid-tool-call used to end the session
+			// (orphanToolCalls).
+			orphans := orphanToolCalls(err)
+			if orphans > 0 {
+				logx.Errorf("recovery: stream died on %d unpaired tool call(s) — replaying the turn", orphans)
+			}
+			if turnContentEmitted(err) && orphans == 0 {
 				// Retain-and-continue (M5 tail): persist the partial, follow
 				// with a continuation prompt, resume. A bounded ladder keeps
 				// its one-shot budget; retry.infinite now gets a real
@@ -1146,14 +1216,26 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, serr
 			}
 			continue
+		case ai.ClassAuthFailed:
+			// A 401/403 is a credential verdict, not a blip: the same
+			// request with the same key gets the same answer. This fell
+			// into `default:` below, which retried it up to
+			// maxSilentRecoveryRounds (12, and retry.infinite is
+			// default-on) — 62.6s of backoff at the shipped 500ms/8s
+			// ladder before surfacing a key that was never going to
+			// work. Fail fast and let the user fix the key, which is
+			// what ClassAuthFailed has always been documented to mean
+			// (internal/ai/errors.go: "401/403 — fail fast").
+			return nil, history, err
 		default:
-			// Auth / unknown failures rebuild history from the persisted
-			// session and re-send on the current context. ClassBadRequest
-			// returned above: replaying a provider-rejected shape cannot
-			// repair it. Bounded rounds stop hard failures; infinite retry
-			// is reserved for transport/transient outages — and even there
-			// only for maxSilentRecoveryRounds, so no turn pins the
-			// session's single turn claim (a7e17741, 2026-09-28).
+			// Unknown failures rebuild history from the persisted session
+			// and re-send on the current context. ClassBadRequest and
+			// ClassAuthFailed returned above: replaying a rejected shape or
+			// a bad credential cannot repair either. Bounded rounds stop
+			// hard failures; infinite retry is reserved for
+			// transport/transient outages — and even there only for
+			// maxSilentRecoveryRounds, so no turn pins the session's
+			// single turn claim (a7e17741, 2026-09-28).
 			if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
 				escalation++
 				attempt = 0
@@ -1548,6 +1630,12 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 					partial.Role = ai.RoleAssistant
 				}
 				te.partial = &partial
+			} else if len(order) > 0 {
+				// A tool call with no text behind it: no partial exists to
+				// continue from, and the call is unpaired no matter what —
+				// but nothing of it was rendered, so count the orphans and
+				// let the ladder replay the turn whole.
+				te.orphanToolCalls = len(order)
 			}
 			return nil, te
 		}
@@ -1770,6 +1858,14 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		// (M13 #55).
 		args = json.RawMessage(a.Redactor.Expand(string(args)))
 	}
+	// Schema-driven argument repair (internal/tool/argcoerce.go). It runs
+	// BEFORE every gate below, so plan mode, the approval policy, the bash
+	// interceptor, and the hooks all judge the arguments the tool will
+	// actually receive rather than a shape the model guessed wrong. Every
+	// tool call passes through here — a direct call, a tool_call bridge, an
+	// eval-kernel cell — so one call site covers all three.
+	args = tool.CoerceArgs(t.Parameters(), args)
+	call.Arguments = args
 	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
 	// to propose while the sub-state is active. Checked before approval —
 	// a read-only run must never reach an approval prompt for a mutation.
@@ -1858,7 +1954,17 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
 		return toolResultMsg(call, res, time.Since(started))
 	}
-	res, err := a.executeTool(ctx, t, args)
+	// A live-output observer rides the call context so a streaming tool can
+	// paint while it runs. It is per-CALL data, not a tool field: one tool
+	// instance serves every concurrent call, so the call id has to travel
+	// with the stream or a viewer cannot tell two `bash` calls' bytes apart.
+	toolCtx := ctx
+	if a.OnOutput != nil {
+		toolCtx = tool.WithOutputObserver(ctx, tool.OutputFunc(func(chunk string) {
+			a.OnOutput(call.ID, call.Name, chunk)
+		}))
+	}
+	res, err := a.executeTool(toolCtx, t, args)
 	// Todo tracker (M3/TODO-tracker): every finished tool result
 	// feeds the mid-run nudge counter. A successful todo call
 	// resets it; a failed todo call flags the next turn. Mutating

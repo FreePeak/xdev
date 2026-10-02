@@ -57,6 +57,59 @@ func (a *App) SetStallDumpDir(dir string) {
 	a.stallDir = dir
 }
 
+// SetStallExitAfter arms the watchdog's last resort. A loop stuck this long in
+// one episode is not coming back — nothing can reach it, not even the quit
+// chord, because handleKey runs on the loop — so the session ends: the
+// terminal is put back first (scr.Fini via the app's restore hook) and the
+// process exits non-zero. Call before Run.
+func (a *App) SetStallExitAfter(d time.Duration) { a.stallExitAfter = d }
+
+// exitWedgedLoop ends a session whose UI loop is not coming back. The restore
+// hook is the same one the signal and panic guards use (tui.go:
+// terminalRestore), so the tty leaves raw mode and the alt screen however this
+// ends. It does not go through Quit: closing quitCh ASKS a loop that is
+// already wedged to return, which is the thing that does not work. The process
+// exits because nothing else can — the turn goroutine, the MCP servers and the
+// tool workers are all still inside this pid.
+func (a *App) exitWedgedLoop(stuck time.Duration) {
+	fmt.Fprintf(os.Stderr, "\nxdev: UI loop wedged for %s and is not recovering — restoring the terminal and exiting.\n", stuck.Truncate(time.Second))
+	// The restore is BOUNDED, and that is the whole point of this change.
+	// The loop is frequently wedged inside the terminal write itself (17
+	// frozen writes of up to 17m are recorded under dumps/), and scr.Fini
+	// writes to that same fd — so an unbounded restore blocks on exactly the
+	// thing it is rescuing the terminal from, the give-up never reaches
+	// exitProcess, and the only way out is a kill from outside. Waiting is a
+	// courtesy to the common case (a wedged loop, a tty that still accepts
+	// bytes); passing the deadline is what makes the escape hatch an escape
+	// hatch.
+	if a.restoreTty != nil {
+		restored := make(chan struct{})
+		go func() {
+			defer close(restored)
+			a.restoreTty()
+		}()
+		select {
+		case <-restored:
+		case <-time.After(restoreGrace):
+			fmt.Fprintf(os.Stderr, "xdev: terminal restore did not return in %s; exiting anyway\n", restoreGrace)
+		}
+	}
+	exitProcess(1)
+}
+
+// restoreGrace bounds the pre-exit terminal restore: long enough for the
+// usual case, short enough that a wedged tty cannot keep the process alive.
+const restoreGrace = 2 * time.Second
+
+// exitProcess is os.Exit behind one seam, so a test can observe the decision
+// to end a wedged session without ending the test binary with it.
+var exitProcess = os.Exit
+
+// SetStallRestore wires the terminal restore exitWedgedLoop must run before
+// ending the process. cmd passes scr.Fini, the same value terminalRestore
+// holds. Call before Run.
+func (a *App) SetStallRestore(fini func()) { a.restoreTty = fini }
+
 // beatDone closes one loop iteration and names it when it took absurdly long.
 // A stall dump only fires for a loop that never comes back; the slow-but-alive
 // iteration is the one the user actually reports ("it froze while I was
@@ -105,6 +158,14 @@ func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop 
 	// construction. Two stall windows is the whole allowance: past that the
 	// beat is a real stall, sleep or not, and it is reported.
 	graceUntil := time.Time{}
+	// condemnedAt is when this episode was first reported. A loop that never
+	// comes back must not keep the process alive forever: after stallExitAfter
+	// the watchdog restores the terminal and ends the session, because the
+	// user reported the dead end as "I cannot exit, Ctrl+C and Ctrl+D do
+	// nothing" (session 00b1c5a0, 2026-09-30) and no key can reach a loop
+	// that is wedged. A recovered loop clears it, so the next hang is judged
+	// on its own clock.
+	condemnedAt := time.Time{}
 	// prev is the previous poll's wall time; a skip shows up as one gap far
 	// wider than the poll interval.
 	prev := now()
@@ -125,9 +186,24 @@ func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop 
 			}
 			beat := a.loopBeat.Load()
 			if at.Sub(time.Unix(0, beat)) < after {
+				// The loop came back: a new episode starts from scratch, and
+				// the chord belongs to the loop again.
+				condemnedAt = time.Time{}
+				a.wedged.Store(false)
 				continue
 			}
+			a.wedged.Store(true)
+			if condemnedAt.IsZero() {
+				condemnedAt = at
+			}
 			if beat == dumpedForBeat {
+				// Already reported for this beat, but the exit clock keeps
+				// running: a loop that never recovers must not hold the
+				// process forever.
+				if a.stallExitAfter > 0 && at.Sub(condemnedAt) >= a.stallExitAfter {
+					a.exitWedgedLoop(at.Sub(time.Unix(0, beat)))
+					return
+				}
 				continue
 			}
 			dumpedForBeat = beat

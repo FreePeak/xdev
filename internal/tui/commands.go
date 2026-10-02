@@ -118,6 +118,15 @@ type SettingsOps struct {
 	// SetSidebar persists the context dock's display policy (#291 §1), the
 	// sidebarMode key in the same layer Alt+s writes.
 	SetSidebar func(mode string) error
+	// SetMermaid persists the mermaid rendering flag (the renderMermaid key
+	// in the same layer the settings panel writes). Display only: the source
+	// text is untouched, and a diagram the renderer cannot draw falls back to
+	// the code band.
+	SetMermaid func(on bool) error
+	// SetExitDetach persists tui.exitDetach: when true (default), quitting
+	// the TUI with a turn in flight detaches it as a background job instead
+	// of killing it (opencode parity).
+	SetExitDetach func(on bool) error
 }
 
 // PlanOps wires the /plan command to the live plan-mode state (lives in
@@ -394,12 +403,17 @@ type CommandAPI interface {
 	ExportSession(path string) error
 	ShareSession() error
 	ResumeSession(query string) error
+	TabsPicker() error
 	SwitchModel(args string) error
 	PlanMode(args string) error
 	Vibe(args string) error
 	// Trajectory is /trajectory: the session's event ledger, opened as a
 	// modal list where a row's inspector shows the record's full body.
 	Trajectory() error
+	// Usage is /usage: the session's token, time and tool-call report, in
+	// the long form the status row has no width for (cache hit rate, an
+	// average TTFT, the tool-call count).
+	Usage() error
 	// AutoAnswer is /auto-answer [yes|no]: the ask card's answer policy,
 	// off by default (an unanswered question waits for the human).
 	AutoAnswer(args string) error
@@ -416,6 +430,9 @@ type CommandAPI interface {
 	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
+	// Sidebar is /sidebar [show|hide|auto]: the context dock's two-state
+	// toggle, the switch form of the Alt+S cycle.
+	Sidebar(args string) error
 	// SettingsOverlay opens the visual settings panel (grok-style overlay).
 	SettingsOverlay() error
 	// ThinkingLevel is /thinking [level]: bare reports, a level applies and
@@ -459,6 +476,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.ShareSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
+		{Name: "tabs", Description: "show the open sessions and switch to one",
+			Fn: func(app CommandAPI, args string) error { return app.TabsPicker() }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
 		{Name: "settings", Description: "show settings overlay, or toggle: /settings [overlay|showThinking on|off]",
@@ -468,6 +487,8 @@ func builtinCommands() []Command {
 				}
 				return app.SettingsView(args)
 			}},
+		{Name: "sidebar", Aliases: []string{"dock"}, Description: "show or hide the sidebar: /sidebar [show|hide|auto] (bare toggles; alt+s cycles the policy)",
+			Fn: func(app CommandAPI, args string) error { return app.Sidebar(args) }},
 		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
 			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default: the session model)",
@@ -478,6 +499,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
 		{Name: "auto-answer", Aliases: []string{"autoanswer"}, Description: "ask card policy: /auto-answer yes|no (bare toggles; off = an unanswered question waits for you)",
 			Fn: func(app CommandAPI, args string) error { return app.AutoAnswer(args) }},
+		{Name: "usage", Description: "session token, time and tool-call report",
+			Fn: func(app CommandAPI, args string) error { return app.Usage() }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear, plus queue|sync|enqueue (mnemopi) and diagnose|enqueue (hindsight)",
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",

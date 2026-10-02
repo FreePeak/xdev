@@ -1,0 +1,189 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// /usage: the session's own token-and-time report, in the three blocks a
+// dashboard is read by — what it cost, what it took, and how many tool calls
+// were spent along the way.
+//
+// The status row answers the same questions one glance at a time and cannot
+// answer the ones a report exists for: the cache HIT RATE (the split only
+// makes sense as a ratio), an average TTFT (the row shows the last turn's),
+// and the tool-call count (the row has no room for it at all). This is the
+// long form, not a second source of truth: every number is the same
+// Status field the HUD reads, under the same lock.
+//
+// It is a system block, not an overlay, for the reason /help is: a report is
+// something you read once and keep in the scrollback next to the turn that
+// produced it, and it must not steal a key the ask card or the composer
+// needs.
+
+// usageReport is the read-only snapshot a report is rendered from, taken
+// under one lock so a turn landing mid-render cannot mix two sessions' halves
+// into one set of numbers. It is also what the status row's pills break out:
+// one snapshot, two renderers, so a figure can never disagree between /usage
+// and the popup the row opens.
+type usageReport struct {
+	in, out, cache, think, cacheWrite int64
+	total                             int64
+	calls, errors                     int
+	toolWork, llmWork                 time.Duration
+	ttftSum                           int64
+	ttftCount                         int64
+	ctx, window                       int64
+	// work is the ACTIVE time (banked spans plus the live one), which is
+	// not the same number as llmWork+toolWork: the active clock also
+	// carries bang-mode spans and pauses for a question card.
+	work         time.Duration
+	rate         float64
+	cost         float64
+	turns, steps int
+}
+
+// usageSnapshot reads the whole session's figures under one lock. Every
+// renderer of them (the /usage report, both status-row popups) starts here,
+// which is what keeps one set of numbers on screen.
+func (a *App) usageSnapshot() usageReport {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.usageSnapshotLocked()
+}
+
+// usageSnapshotLocked is usageSnapshot for callers that already hold a.mu —
+// the painter, which takes the lock once per frame. Taking it twice would
+// deadlock on the same mutex.
+func (a *App) usageSnapshotLocked() usageReport {
+	r := usageReport{
+		in: a.st.TokensIn, out: a.st.TokensOut, cache: a.st.TokensCache,
+		think: a.st.TokensThink, cacheWrite: a.st.TokensCacheWrite,
+		calls: a.st.ToolCalls, errors: a.st.ToolErrors,
+		toolWork: a.st.ToolWork, llmWork: a.st.LLMWork,
+		ctx: a.st.CtxUsed, window: a.st.CtxWindow,
+		ttftSum: a.st.TTFTSum, ttftCount: a.st.TTFTCount,
+		work: a.activeWork(), rate: a.st.Rate, cost: a.st.Cost,
+		turns: a.st.Turns, steps: a.st.Steps,
+	}
+	// The provider's own normalization (input + output + cacheRead =
+	// totalTokens) is the sum every wire already reports; total tokens
+	// billed is the same arithmetic over the session, so one sum and no
+	// second field that could disagree with the ↑⇢↓ counters.
+	r.total = r.in + r.out + r.cache + r.cacheWrite
+	return r
+}
+
+// UsageReport renders the session's token, time and tool-call totals.
+//
+// Zero means the session has not done the thing the line describes, and a
+// zero line is a claim about a measurement rather than a fact, so each block
+// hides the halves it cannot know: an unwired cost is never drawn as $0.00,
+// and a session with no finished turn reports no average TTFT.
+func (a *App) UsageReport() string {
+	r := a.usageSnapshot()
+	work := r.work
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Token usage\n")
+	fmt.Fprintf(&b, "  %s tok\n", groupTokens(r.total))
+	// Hit rate is cached / (cached + fresh input) — the share of PROMPT
+	// tokens the cache served. Over total it would read low and mean
+	// nothing, since output was never cacheable.
+	if r.cache > 0 {
+		fmt.Fprintf(&b, "  cache hit %d%%\n", int(100*r.cache/(r.in+r.cache)))
+	}
+	fmt.Fprintf(&b, "  uncached input %s tok\n", groupTokens(r.in))
+	fmt.Fprintf(&b, "  cached input %s tok\n", groupTokens(r.cache))
+	fmt.Fprintf(&b, "  output %s tok\n", groupTokens(r.out))
+	if r.think > 0 {
+		fmt.Fprintf(&b, "  (of which reasoning %s tok)\n", groupTokens(r.think))
+	}
+	if r.cacheWrite > 0 {
+		fmt.Fprintf(&b, "  cache writes %s tok\n", groupTokens(r.cacheWrite))
+	}
+	if r.cost > 0 {
+		fmt.Fprintf(&b, "  cost $%.4f\n", r.cost)
+	}
+	// The live context occupancy against the model's window, with the
+	// share that number is. The status row shows the same pair without the
+	// percentage, because there it competes with the path for width; here
+	// it is the question the whole report is read under — a glance at
+	// "how much room is left" is not a subtraction.
+	if r.ctx > 0 && r.window > 0 {
+		fmt.Fprintf(&b, "  context %s/%s (%d%%)\n", HumanTokens(r.ctx), HumanTokens(r.window),
+			int(100*r.ctx/r.window))
+	}
+
+	b.WriteString("\nSession statistics\n")
+	// LLM time and tool time are the two halves of a turn's wall time, and
+	// they are reported apart because they are the two different problems:
+	// a slow model and a slow tool look identical in the total.
+	if r.llmWork > 0 {
+		fmt.Fprintf(&b, "  LLM time %s\n", humanDur(r.llmWork))
+	}
+	if r.toolWork > 0 {
+		fmt.Fprintf(&b, "  tool time %s\n", humanDur(r.toolWork))
+	}
+	if r.ttftCount > 0 {
+		fmt.Fprintf(&b, "  avg time to first token %s\n",
+			(time.Duration(r.ttftSum/r.ttftCount) * time.Millisecond).Round(10*time.Millisecond))
+	}
+	// The tool-call block is the third one the row has no room for: how
+	// many calls the session spent, how many failed, and their share of
+	// the session's active time.
+	if r.calls > 0 {
+		fmt.Fprintf(&b, "  tool calls %d", r.calls)
+		if r.errors > 0 {
+			fmt.Fprintf(&b, " (%d failed)", r.errors)
+		}
+		// The share is a ratio of two differently-measured spans, so it is
+		// only shown when it is a ratio: the active-work total banks
+		// provider request spans, while tool time also counts calls made
+		// outside a run (bang mode), which can push the share past 100% and
+		// claim more than the total it divides. Omitted rather than clamped —
+		// a clamped 100% would be a lie about a denominator that is wrong.
+		// ponytail: ceiling is that a bang-mode call is invisible to the
+		// active-work total; the fix is to bank bang spans into Work, which
+		// needs the run-span seam to know about out-of-run work.
+		if r.toolWork > 0 && work > 0 && r.toolWork <= work {
+			fmt.Fprintf(&b, " · %d%% of active time", int(100*r.toolWork/work))
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "  active time %s\n", humanDur(work))
+	return b.String()
+}
+
+// groupTokens renders a token count with thousands separators: the report's
+// job is to be readable at a glance, and "1016717" is a number you have to
+// parse while "1,016,717" is one you read. The status row's HumanTokens stays
+// compact (1.0M) because it is competing for width there; a report has a line
+// to itself.
+func groupTokens(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// Usage implements CommandAPI: the report lands in the transcript as a
+// system block, the way /help and /hotkeys do — it is read once, not
+// operated, so an overlay would only add a key to close.
+func (a *App) Usage() error {
+	a.AddSystemBlock(a.UsageReport())
+	return nil
+}

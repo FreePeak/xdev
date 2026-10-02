@@ -65,6 +65,19 @@ type Block struct {
 	// subVisible's answer; the block keeps them all, so a late settle
 	// still lands on the child it belongs to.
 	Sub []*SubActivity
+	// Live marks a result box a running call is still filling: the tool's own
+	// text is absent until it finishes, so without it a running command paints
+	// a spinner and nothing else. A live box renders a bounded TAIL window
+	// (what is happening now), carries no footer (there is no outcome yet),
+	// and settles into an ordinary result when the call ends.
+	Live bool
+	// liveAt is the paint bucket of a live box's last flush: its stamp moves
+	// at most once per livePaint, so a tool emitting thousands of chunks a
+	// second costs the frames a reader can actually see. liveSeq backs the
+	// render stamp, which has to move on every flush: a progress bar's chunks
+	// change the same bytes to the same length.
+	liveAt  time.Time
+	liveSeq uint64
 }
 
 // SubActivity is one child of a `task` call, as the user sees it: which
@@ -93,6 +106,19 @@ func subRow(w int) int { return max(8, w-6) }
 
 // Width returns the display width of s in cells.
 func width(s string) int { return runewidth.StringWidth(s) }
+
+// runeWidth is width() for a single rune the painter already has in hand.
+// width(string(r)) allocates a one-rune string per character per frame, and
+// the painters call it for every cell at ~30fps (measured 10.1ns + 1 alloc
+// per ASCII char, 3.5us + 200 allocs per 200 CJK chars — app.go:drawText,
+// paintedWidth). RuneWidth is the same table lookup with no decode.
+//
+// It is width() for exactly one rune, which is the only case the painter has:
+// a lone rune cannot form the multi-rune grapheme cluster that makes
+// StringWidth disagree with a per-rune walk (see paintedWidth), and both
+// agree on the control-char and non-print cases because the same table
+// answers them.
+func runeWidth(r rune) int { return runewidth.RuneWidth(r) }
 
 // truncateCells shortens s to at most maxW display cells, appending ell
 // (a single-width "…" by convention) when it had to cut.
@@ -209,16 +235,45 @@ func wrap(s string, maxW int) []string {
 	return out
 }
 
+// wrapCapped is wrap with a row budget: a string too long for the surface it
+// lives on is laid out over at most max rows, and whatever did not fit is
+// joined back into the last row and clipped with an ellipsis. The rows are not
+// free — a session title that wraps to forty rows would push every other row
+// off a list — so the cut is still admitted rather than silent.
+func wrapCapped(s string, maxW, maxRows int) []string {
+	lines := wrap(s, maxW)
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if len(lines) > maxRows {
+		return append(lines[:maxRows-1:maxRows-1], clip(strings.Join(lines[maxRows-1:], " "), maxW))
+	}
+	return lines
+}
+
 // toolArgKeys name the argument that says what a call is ABOUT, in omp's
 // precedence (command, path, input) extended with xdev's search and fetch
 // tools. The first one present wins.
 var toolArgKeys = []string{"command", "path", "file_path", "pattern", "query", "url", "input"}
 
-// toolDetail renders one call's raw JSON arguments as the short phrase omp
-// prints after the tool name: the first line of the naming field, whitespace
-// collapsed, with " …" when the argument continued. Unparseable arguments, or
-// ones naming nothing, fall back to the flattened JSON so an unfamiliar tool
-// still says something instead of rendering an empty row.
+// toolDetail renders one call's raw JSON arguments as the phrase omp prints
+// after the tool name: the naming field in full, whitespace collapsed within
+// each line and its line breaks kept. Unparseable arguments, or ones naming
+// nothing, fall back to the flattened JSON so an unfamiliar tool still says
+// something instead of rendering an empty row.
+//
+// The field is returned WHOLE, every line, for every tool. It used to stop at
+// 400 bytes on the reasoning that a row is one line wide, and then at the
+// first newline with a " …" — so the one thing a user opens the transcript to
+// read, the command, was the one thing it hid, at an ellipsis in the middle of
+// a pipeline. The call row WRAPS (blockLines, case KindTool), so a long phrase
+// costs rows, not text: there is no width left to guess at.
+//
+// Newlines survive as newlines: they are a command's structure (a continuation
+// line, a heredoc's body), so they become rows rather than spaces.
 //
 // JSON gives no promise that a command is valid UTF-8: an `input` field the
 // model built by slicing bytes holds a torn rune, and 711 xdev sessions carry
@@ -238,38 +293,16 @@ func toolDetail(rawArgs string) string {
 		if !ok || json.Unmarshal(v, &s) != nil {
 			continue
 		}
-		// Every byte index below is a rune boundary or nothing: the 400-byte
-		// cap would otherwise tear a rune exactly where an omp-shaped command
-		// crosses it, which is the same defect this sanitize exists to stop.
-		s = utf8Only(s)
-		head, rest, multiline := strings.Cut(strings.TrimRight(s, "\n"), "\n")
-		if len(head) > 400 {
-			// A write call's first line can be enormous; the row shows a
-			// phrase, so stop working past what any terminal can display.
-			head, multiline = head[:runeBoundary(head, 400)], true
+		// The whole field, never a window of it: the call row WRAPS
+		// (blockLines, case KindTool), so there is no width to cut to, and a
+		// phrase cut at an arbitrary byte is neither readable nor copyable.
+		// Invalid bytes are dropped first, so no rune can be torn — the doc
+		// comment below says why that matters here.
+		if detail := collapseLines(utf8Only(s)); detail != "" {
+			return detail
 		}
-		head = strings.Join(strings.Fields(head), " ")
-		if head == "" {
-			continue
-		}
-		if multiline && strings.TrimSpace(rest) != "" {
-			head += " …"
-		}
-		return head
 	}
 	return utf8Only(strings.Join(strings.Fields(rawArgs), " "))
-}
-
-// runeBoundary is the largest index <= i that starts a rune, so a byte slice
-// cut there cannot split one. i itself when it already is a boundary.
-func runeBoundary(s string, i int) int {
-	if i > len(s) {
-		i = len(s)
-	}
-	for i > 0 && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return i
 }
 
 // utf8Only drops invalid bytes. Dropped rather than replaced (U+FFFD): the
@@ -277,16 +310,23 @@ func runeBoundary(s string, i int) int {
 // whose width is a lie paints its box border in the wrong column.
 func utf8Only(s string) string { return strings.ToValidUTF8(s, "") }
 
-// toolSummary splits the call row into the two runs it renders: the tool name
-// (bold) and its detail, truncated so the row fits maxW cells.
-func toolSummary(b *Block, maxW int) (name, detail string) {
-	name = b.ToolName
-	if detail = toolDetail(b.Text); maxW > 0 {
-		if budget := maxW - width(name) - 6; width(detail) > budget {
-			detail = truncateCells(detail, max(1, budget), "…")
-		}
+// collapseLines collapses runs of horizontal whitespace within each line and
+// keeps the line breaks. strings.Fields alone would flatten a multi-line
+// command into one run of spaces and lose where one statement ended.
+func collapseLines(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = strings.Join(strings.Fields(l), " ")
 	}
-	return name, detail
+	return strings.Join(lines, "\n")
+}
+
+// toolSummary splits the call row into the two runs it renders: the tool name
+// and the whole of its detail. The detail is NOT clipped here — the row lays it
+// out as rows until it is done (blockLines, case KindTool); a phrase cut to a
+// guessed width is exactly the truncation that row now exists to not do.
+func toolSummary(b *Block) (name, detail string) {
+	return b.ToolName, toolDetail(b.Text)
 }
 
 // blockAccent picks the rail/accent slot for a block.

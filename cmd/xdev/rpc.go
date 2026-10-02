@@ -55,10 +55,12 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
-	mgr := attachMCP(context.Background(), reg, false, nil)
+	mgr := attachMCP(context.Background(), reg, false, nil, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}
+	// The rebuild-time interruption notice names the calls free to repeat.
+	session.ReplaySafety = reg.ReplaySafe
 
 	// Recomputed per prompt: async MCP/extension tools must reach the
 	// model that is being told they exist.

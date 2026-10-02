@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -15,6 +16,17 @@ import (
 	"github.com/FreePeak/xdev/internal/config"
 )
 
+// leaderTimeout is how long a pending prefix chord stays armed, matching
+// opencode's leader_timeout (2000ms). An expired prefix would otherwise stay
+// armed until the next keystroke, turning "I changed my mind" into a chord.
+const leaderTimeout = 2 * time.Second
+
+// leaderToken is the "<leader>" spelling a chord may contain. It expands to
+// leaderToken is the "<leader>" spelling a chord may contain. It expands to
+// the map's leader chord at load, so a keybindings.yml written in opencode's
+// syntax works unchanged: `session.new: "<leader>n"`.
+const leaderToken = "<leader>"
+
 // KeyMap is the remappable keybinding layer (M10 #11, parity-session-ux §3).
 // keybindings.yml maps action-ids to chords; an empty list disables the
 // action entirely. Unmapped actions fall back to DefaultKeyMap so a partial
@@ -22,10 +34,17 @@ import (
 
 // KeyMap resolves chords to action ids and back.
 type KeyMap struct {
-	// bindings maps "C-x" style chord strings to action ids.
+	// bindings maps a chord to an action id. A two-chord binding is stored
+	// space-joined ("C-x n"), which is what Resolve probes for.
 	bindings map[string]string
 	// actions lists the known action ids for /hotkeys display.
 	actions []string
+	// leader is the prefix chord ("C-x"), or "" when the map binds no pair.
+	leader string
+	// pending is the armed prefix and its deadline. Kept out of the table and
+	// mutated only through Resolve, so the rest of the map stays immutable.
+	pending    string
+	pendingDue time.Time
 }
 
 // BuiltinActions are the ~20 core actions the keybinding layer manages.
@@ -50,7 +69,13 @@ var BuiltinActions = []string{
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
 	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
-	"app.settings",    // Alt+,: the settings overlay (grok settings panel)
+	"session.tab.next", "session.tab.previous",
+	"session.tab.next_unread", "session.tab.previous_unread",
+	"app.settings", // Alt+,: the settings overlay (grok settings panel)
+	"send-now",     // F6: interrupt the live turn and run a queued message now (#157)
+	// Session lifecycle (opencode session_new / session_list / session_delete),
+	// reachable single-key or behind the leader prefix.
+	"session.list", "session.new", "session.delete",
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
 }
@@ -70,9 +95,16 @@ func DefaultKeyMap() *KeyMap {
 			"S-Enter": "newline",
 			"Escape":  "cancel",
 			"C-u":     "clear-input",
-			// Quit
+			// Quit. C-d is deliberately NOT here: opencode reads C-d as
+			// session_delete (close this tab) and keeps exit on C-c, and a
+			// tab strip with a × on every tab is only honest if the keyboard
+			// can close one. C-d closes the current tab; on the last tab
+			// that falls back to quit, so one chord still ends the app.
 			"C-c": "quit",
-			"C-d": "quit",
+			"C-d": "session.delete",
+			// opencode's own alias for the same close, and the one chord of
+			// that set every terminal delivers.
+			"A-w": "session.delete",
 			"Tab": "menu-accept",
 			// omp's app.model.cycle: Ctrl+P advances the active model
 			// through --models patterns. While the slash dropdown is open
@@ -117,6 +149,13 @@ func DefaultKeyMap() *KeyMap {
 			// without a new prompt. omp binds retry to Alt+R; function keys are
 			// first-class chords here, so keybindings.yml can move it freely.
 			"F5": "retry",
+			// F6: send now (#157). A prompt typed while a turn is running
+			// joins the pending list; this interrupts the turn and runs the
+			// oldest pending message immediately. It sits next to F5 for the
+			// same reason F5 does — both are "act on the live run" keys, and
+			// function keys are first-class chords here, so keybindings.yml
+			// can move it freely.
+			"F6": "send-now",
 			// The context dock (#291 §1). Ctrl+B is what the issue asked for and
 			// it is taken — scroll-page-up since the pager chords landed — so the
 			// panel rides the Alt+letter class the model and hub selectors already
@@ -131,6 +170,13 @@ func DefaultKeyMap() *KeyMap {
 			// the "S-Tab" spelling chordOf can never emit. keybindings.yml can
 			// move it like any other action.
 			"Shift-Tab": "thinking-toggle",
+			// Session tabs (opencode session.tab.next / .previous). Alt+letter
+			// class matches model-select / hub / dock; ] and [ are the natural
+			// "next / prev" pair and reach every terminal we target.
+			"A-]": "session.tab.next",
+			"A-[": "session.tab.previous",
+			"A-}": "session.tab.next_unread", // Shift+] with Alt
+			"A-{": "session.tab.previous_unread",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
@@ -143,6 +189,18 @@ func DefaultKeyMap() *KeyMap {
 		},
 		actions: append([]string(nil), BuiltinActions...),
 	}
+	// C-x is opencode's leader, and its four pairs are opencode's:
+	// C-x n new session, C-x l session list, C-x w close session,
+	// C-x q exit. opencode also spells C-x d close; both are bound so
+	// neither muscle memory is wrong. A keybindings.yml entry for any of
+	// these actions REPLACES its chords, prefix pairs included — the same
+	// rule every other action already had.
+	m.leader = "C-x"
+	m.bindings[m.leader+" n"] = "session.new"
+	m.bindings[m.leader+" l"] = "session.list"
+	m.bindings[m.leader+" w"] = "session.delete"
+	m.bindings[m.leader+" d"] = "session.delete"
+	m.bindings[m.leader+" q"] = "quit"
 	return m
 }
 
@@ -182,10 +240,58 @@ func LoadKeyMap() (*KeyMap, error) {
 			if !ok {
 				return nil, fmt.Errorf("tui: keybindings.yml %q: chord must be a string", action)
 			}
-			m.bindings[s] = action // an empty chord string disables the action
+			// A chord is a list on the wire (opencode's spelling: "C-d",
+			// "A-w" and "<leader>w" side by side) and one chord after
+			// expansion. Split on the comma so both reach the table the
+			// same way, and expand "<leader>" into the leader chord.
+			for _, alt := range strings.Split(s, ",") {
+				alt = m.expandChord(strings.TrimSpace(alt))
+				if alt == "" {
+					continue // an empty chord disables that half
+				}
+				m.bindings[alt] = action
+			}
 		}
 	}
 	return m, nil
+}
+
+// expandChord turns one written chord into the stored form: opencode's
+// "<leader>w" becomes "C-x w", everything else is normalized and trimmed.
+// The space is the stored form's own — the table joins a prefix and its
+// follow-up with one — so a comma-joined list and a YAML list reach the
+// same place.
+func (m *KeyMap) expandChord(chord string) string {
+	chord = normalizeChord(chord)
+	if rest, ok := strings.CutPrefix(chord, leaderToken); ok {
+		return m.leader + " " + rest
+	}
+	return chord
+}
+
+// normalizeChord accepts opencode's spelling of the same key: opencode writes
+// "ctrl+d" / "alt+w" / "<leader>w", the table stores "C-d" / "A-w" / "C-x w".
+// A config pasted from an opencode tui.json must resolve without being
+// hand-edited, so the modifiers are folded here — once, at load.
+func normalizeChord(chord string) string {
+	mods, rest, ok := strings.Cut(chord, "+")
+	if !ok {
+		return chord
+	}
+	prefix := ""
+	for _, mod := range strings.Split(mods, "+") {
+		switch strings.ToLower(mod) {
+		case "ctrl", "c":
+			prefix += "C-"
+		case "alt", "a", "meta":
+			prefix += "A-"
+		case "shift", "s":
+			prefix += "S-"
+		default:
+			return chord // not a modifier we know: leave the chord alone
+		}
+	}
+	return prefix + rest
 }
 
 func isKnownAction(name string) bool {
@@ -206,20 +312,65 @@ func (m *KeyMap) clearAction(action string) {
 }
 
 // Resolve maps a key event to an action id ("" when unbound).
+// Resolve maps a key event to an action id ("" when unbound).
+//
+// Two keystrokes resolve when a prefix is armed: a chord that completes a
+// bound pair fires that action, and anything else disarms the prefix and
+// resolves on its own — so Ctrl+X then a letter is a chord when one exists,
+// and Ctrl+N is still "next line" when none does. That fallback is what lets
+// C-x stay the leader without C-x losing whatever it meant before.
 func (m *KeyMap) Resolve(ev *tcell.EventKey) string {
-	chord := chordOf(ev)
-	if chord == "" {
+	return m.resolve(chordOf(ev), time.Now())
+}
+
+// resolve is Resolve with an injected clock, so the prefix timeout is
+// testable without a sleep.
+func (m *KeyMap) resolve(chord string, now time.Time) string {
+	m.ExpirePending(now)
+	if m.pending != "" {
+		pending := m.pending
+		m.pending = ""
+		if action, ok := m.bindings[pending+" "+chord]; ok {
+			return action
+		}
+		return m.bindings[chord] // the follow-up stands on its own
+	}
+	if chord == m.leader && m.leaderArmed() {
+		m.pending, m.pendingDue = chord, now.Add(leaderTimeout)
 		return ""
 	}
 	return m.bindings[chord]
 }
 
-// Chord returns the display string for an action's first binding ("" if none).
-func (m *KeyMap) Chord(action string) string {
-	for _, chord := range m.sortedChords() {
-		if m.bindings[chord] == action {
-			return chord
+// leaderArmed reports whether any binding extends the leader prefix, so a map
+// with no two-chord action never swallows the key.
+func (m *KeyMap) leaderArmed() bool {
+	prefix := m.leader + " "
+	for chord := range m.bindings {
+		if strings.HasPrefix(chord, prefix) {
+			return true
 		}
+	}
+	return false
+}
+
+// ExpirePending disarms a prefix whose timeout has passed, reporting whether
+// it did. The UI loop calls it on its tick so a half-typed pair goes away on
+// its own, and Resolve calls it so a late second key is not misread.
+func (m *KeyMap) ExpirePending(now time.Time) bool {
+	if m.pending == "" || !now.After(m.pendingDue) {
+		return false
+	}
+	m.pending = ""
+	return true
+}
+
+// Chord returns the display string for an action's preferred binding ("" if
+// none). It reads Chords, not the raw table, so the hint a status row shows
+// is the portable one rather than whichever chord sorted first.
+func (m *KeyMap) Chord(action string) string {
+	if all := m.Chords(action); len(all) > 0 {
+		return all[0]
 	}
 	return ""
 }
@@ -278,6 +429,13 @@ func isPrimaryChord(action, chord string) bool {
 		return chord == "Escape"
 	case "quit":
 		return chord == "C-c"
+	case "session.delete":
+		// C-d is the chord every terminal sends without a modifier prefix
+		// dance, and it is the one opencode reads as session_delete.
+		return chord == "C-d"
+	case "session.new", "session.list":
+		// The leader pair is the only binding these have.
+		return strings.Contains(chord, " ")
 	case "clear-input":
 		return chord == "C-u"
 	case "app.session.tree":

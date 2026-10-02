@@ -46,10 +46,20 @@ type mdStyle struct {
 	muted        tcell.Style // bullets, quote bars, rules
 	link         tcell.Style // underline, fg link_fg
 	codeBg       tcell.Color
+	code         codeStyle // fenced-code token palette (#501); plain = body
 }
 
+// mdStyle is memoized on the App. The painter reaches it on the frame path
+// (app.go: toolBoxLines, the streaming cursor) and renderMarkdown once per
+// markdown re-render, so at 30fps a live turn rebuilt 14 tcell.Style values
+// plus the whole syntax codeStyle — a slot lookup each and a map iteration
+// over syntaxSlots — dozens of times a second. mdFor is the theme pointer the
+// cache was built from: SetTheme swaps a.th, so the next call rebuilds.
 func (a *App) mdStyle() mdStyle {
-	return mdStyle{
+	if a.mdFor == a.th && a.mdSet {
+		return a.md
+	}
+	ms := mdStyle{
 		h1:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading1))).Bold(true),
 		h2:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading2))).Bold(true),
 		h3:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading3))).Bold(true),
@@ -63,7 +73,13 @@ func (a *App) mdStyle() mdStyle {
 		muted:      tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdMuted))),
 		link:       tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.LinkFg))).Underline(true),
 		codeBg:     a.cellColor(a.th.Get(theme.MdCodeBg)),
+		code:       a.codeStyleFor(),
 	}
+	// A token the theme does not colour paints in the body ink, so a partial
+	// syntax_* theme degrades instead of dropping a class to terminal white.
+	ms.code.plain = ms.body
+	a.md, a.mdFor, a.mdSet = ms, a.th, true
+	return ms
 }
 
 // renderMarkdown converts markdown source to visual lines of styled runs,
@@ -78,6 +94,7 @@ func (a *App) renderMarkdown(src string, w int) []line {
 	ms := a.mdStyle()
 
 	inCode := false
+	codeLang := ""
 	quoteDepth := 0
 	srcLines := strings.Split(src, "\n")
 	var out []line
@@ -85,13 +102,47 @@ func (a *App) renderMarkdown(src string, w int) []line {
 		raw := srcLines[i]
 		trimmed := strings.TrimSpace(raw)
 
-		// Fenced code blocks: hide the fence, band every content line.
+		// Fenced code blocks: hide the fence, band every content line. A
+		// ```mermaid fence is not a code block though — it is a diagram the
+		// renderer may be able to draw, and the fence's own language tag is
+		// the only thing that says which one it is. So the opening fence is
+		// read for its tag, the body is gathered to the closing fence, and
+		// mermaidLines gets first refusal on it: a block it cannot draw (an
+		// unsupported type, a source it cannot parse, a diagram too wide for
+		// the terminal) returns nil and the same lines are banded as code,
+		// which is what the reader had before. Every other fence keeps its
+		// info string for #501 highlighting: unknown/empty tags and themes
+		// that pin no syntax_* colour still paint one body-ink run.
 		if strings.HasPrefix(trimmed, "```") {
-			inCode = !inCode
+			if inCode {
+				inCode = false
+				codeLang = ""
+				continue
+			}
+			if lang := fenceLang(trimmed); lang == mermaidFenceTag && a.renderMermaid {
+				body, n := fenceBody(srcLines, i+1)
+				if drawn := a.mermaidLines(body, w); drawn != nil {
+					out = append(out, drawn...)
+					i += n
+					continue
+				}
+				// Undrawable: band the source as code, fence included.
+				for j := i; j <= i+n && j < len(srcLines); j++ {
+					out = append(out, line{runs: []cell{{text: srcLines[j], style: ms.body}}, bg: ms.codeBg})
+				}
+				i += n
+				continue
+			}
+			inCode = true
+			codeLang = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
 			continue
 		}
 		if inCode {
-			out = append(out, line{runs: []cell{{text: raw, style: ms.body}}, bg: ms.codeBg})
+			ln := line{runs: []cell{{text: raw, style: ms.body}}, bg: ms.codeBg}
+			if runs := a.highlightCode(raw, codeLang, ms.code); runs != nil {
+				ln.runs = runs
+			}
+			out = append(out, ln)
 			continue
 		}
 
@@ -333,6 +384,30 @@ func withEmphasis(style, outer tcell.Style) tcell.Style {
 func appendRuns(dst []cell, runs []cell, w int) []cell {
 	// Simple approach: concatenate as text; wrapping happens per-line in draw.
 	return append(dst, runs...)
+}
+
+// fenceLang returns a fence line's info string, lowercased — ` ```mermaid `
+// is a diagram request, ` ``` ` and ` ```go ` are code. Only the first word
+// counts, so a model that writes ```mermaid title=flow still gets a diagram.
+func fenceLang(fence string) string {
+	rest := strings.TrimLeft(strings.TrimPrefix(strings.TrimSpace(fence), "```"), " \t")
+	lang, _, _ := strings.Cut(rest, " ")
+	lang, _, _ = strings.Cut(lang, "\t")
+	return strings.ToLower(strings.TrimSpace(lang))
+}
+
+// fenceBody gathers the lines between an opening fence and its close, and
+// reports how many lines it consumed. An unterminated fence runs to the end
+// of the text: the transcript is a render of what the model said, and a
+// missing closing fence is the model's typo, not a reason to paint the rest
+// of the message as a code band.
+func fenceBody(lines []string, from int) (string, int) {
+	for i := from; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+			return strings.Join(lines[from:i], "\n"), i - from + 1
+		}
+	}
+	return strings.Join(lines[from:], "\n"), len(lines) - from
 }
 
 // isHR reports whether s is a thematic break (3+ of -, *, _).

@@ -148,3 +148,35 @@ func TestIndexLineIsCappedAndFlat(t *testing.T) {
 		t.Fatalf("flattening = %q, want %q", got, "a b")
 	}
 }
+
+// TestRegisterDefersPerServerNotPooled is the fix: a wide surface must not
+// drag a small server's tools behind the catalog with it. db-mcp-server
+// (28 tools) configured beside leankg (3) used to push leankg_query out of the
+// eager schema, and a session needing the knowledge graph then re-derived it
+// with bash instead.
+func TestRegisterDefersPerServerNotPooled(t *testing.T) {
+	reg := tool.NewRegistry()
+	var tools []tool.Tool
+	for i := range DeferThreshold + 5 {
+		tools = append(tools, stubTool{name: "db" + strconv.Itoa(i), desc: "sql call", server: "db"})
+	}
+	for i := range 3 {
+		tools = append(tools, stubTool{name: "kg" + strconv.Itoa(i), desc: "graph search", server: "leankg"})
+	}
+	Register(reg, tools)
+
+	for _, e := range reg.Deferred() {
+		if strings.HasPrefix(e.Name, "leankg_") {
+			t.Fatalf("%q deferred: a 3-tool server must stay eager beside a 17-tool one", e.Name)
+		}
+	}
+	for i := range 3 {
+		name := "leankg_kg" + strconv.Itoa(i)
+		if _, ok := reg.Get(name); !ok {
+			t.Fatalf("%q missing from the registry", name)
+		}
+	}
+	if got, want := len(reg.Deferred()), DeferThreshold+5; got != want {
+		t.Fatalf("deferred = %d, want %d (only the fat server)", got, want)
+	}
+}

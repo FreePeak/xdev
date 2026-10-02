@@ -269,6 +269,12 @@ var legacyOrder = []string{
 	PromptBorder, PromptBorderActive,
 	MdHeading1, MdHeading2, MdHeading3,
 	MdCode, MdCodeBg, MdMuted, LinkFg,
+	// The diff bands: optional like every other entry here, and no derivation
+	// chain, so a theme that omits them paints no band at all. They are NOT in
+	// requiredSlots — they are xdev's own vocabulary (Claude Code's
+	// addLine/addWord per polarity), and a theme written for omp has never
+	// heard of them.
+	ToolDiffAddedBg, ToolDiffRemovedBg, ToolDiffAddedWordBg, ToolDiffRemovedWordBg,
 }
 
 // extraChains: the optional legacy slots omp has no equivalent for, with

@@ -50,6 +50,12 @@ func NewReadTool() *ReadTool { return &ReadTool{} }
 // setRegistry receives the owning registry from Registry.Register.
 func (t *ReadTool) setRegistry(r *Registry) { t.reg = r }
 
+// ReplaySafe implements Replayer: reading a file again after an interrupted
+// turn costs a call and yields the same window, or a fresher one. It records
+// a freshness snapshot, which a second read simply overwrites with the same
+// values.
+func (t *ReadTool) ReplaySafe() bool { return true }
+
 // Name implements Tool.
 func (t *ReadTool) Name() string { return "read" }
 

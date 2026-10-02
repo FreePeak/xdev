@@ -54,6 +54,19 @@ func TestClassify(t *testing.T) {
 			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` + "`input[185]` missing required field `output`"}, ClassTransient},
 		{"400 invalid_request_error without a field", &HTTPError{API: "a", Status: 400,
 			Body: `{"error":{"type":"invalid_request_error"}}`}, ClassBadRequest},
+		// The reported 400 (2026-10-01): onegw/OpenCode wrapped an upstream
+		// verdict in its own 400 shape, naming no provider. Nothing in the
+		// body a rebuild could fix, but the same turn served seconds later
+		// succeeds — so it must classify transient and take the full ladder
+		// (backoff in place → failover → escalation rounds), not stop after
+		// the two bounded escalation rounds of a ClassBadRequest.
+		{"400 upstream relay with no provider named", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Upstream request failed: [invalid_request_error] invalid request","type":"invalid_request_error"}}`}, ClassTransient},
+		// The guard the other side of that change: a 400 that names no
+		// upstream at all is the gateway rejecting the request's SHAPE, and
+		// replaying it can only replay the same rejection.
+		{"400 gateway shape rejection, no upstream named", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"invalid request","type":"invalid_request_error"}}`}, ClassBadRequest},
 		// A 404 is a dead route unless the body is a gateway relaying an
 		// upstream verdict about the MODEL. Live 2026-09-18: `onegw/xdev`
 		// left its upstream's catalog and every turn ended on

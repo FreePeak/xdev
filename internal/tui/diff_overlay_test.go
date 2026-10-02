@@ -130,6 +130,7 @@ func TestDiffOverlayInsideIsTheTerminalBackground(t *testing.T) {
 // interior one colour and left every text cell on the terminal's own, so a
 // viewer that named bg_base came up striped — black text bars on a grey band.
 func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app, scr := newTestApp(t, 120, 30)
 	defer scr.Fini()
 
@@ -151,11 +152,68 @@ func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
 	}
 	app.draw()
 
-	// A blank interior cell and a cell the diff text painted: one background.
-	for _, x := range []int{100, 8} {
-		r, _, st, _ := scr.GetContent(x, 6)
+	// The panel's FIELD is the terminal's, whatever bg_base names: a themed
+	// fill painted the blank interior one colour while every text cell kept
+	// the terminal's own, so a viewer that named bg_base came up striped — black
+	// text bars on a grey band. A changed row is the one exception and it is
+	// not a field: a diff band is the claim on that row, so a cell a changed
+	// row painted carries the band's tint and never the themed fill.
+	_, _, blank, _ := scr.GetContent(100, 6)
+	if _, bg, _ := blank.Decompose(); bg != tcell.ColorDefault {
+		t.Fatalf("overlay blank interior has background %v, want the terminal default", bg)
+	}
+	// A changed row is the one exception and it is not a field: a diff band is
+	// the claim ON that row, so a cell a changed row painted carries the
+	// row's tint (or the stronger one under its changed words) and never the
+	// panel's fill. Row 6 of the dock fixture is its "-" row.
+	remRow, _ := app.th.Slot(theme.ToolDiffRemovedBg)
+	remWord, _ := app.th.Slot(theme.ToolDiffRemovedWordBg)
+	rowY, rowX := -1, -1
+	for y := 0; y < app.height && rowY < 0; y++ {
+		for x := 0; x < app.width; x++ {
+			r, _, st, _ := scr.GetContent(x, y)
+			_, bg, _ := st.Decompose()
+			switch bg {
+			case app.cellColor(remRow), app.cellColor(remWord):
+				rowX, rowY = x, y
+			case app.cellColor(c):
+				t.Fatalf("overlay cell %d,%d %q has the themed fill %v; only a changed row may paint", x, y, r, bg)
+			}
+		}
+	}
+	if rowY < 0 {
+		t.Fatalf("no removed band anywhere in the overlay: the diff rows lost their band (%+v / %+v)", remRow, remWord)
+	}
+	// The band is a stripe, not a glyph: it runs to the panel's right border.
+	if r, _, st, _ := scr.GetContent(rowX+1, rowY); func() bool {
+		_, bg, _ := st.Decompose()
+		return bg != tcell.ColorDefault
+	}() {
+		t.Fatalf("cell %d,%d %q painted no band where the row does", rowX+1, rowY, r)
+	}
+}
+
+// TestSidebarIsTheTerminalBackground pins the sidebar's field to the terminal's
+// own background (#466 for the diff popup, the same call for the panel beside
+// it). A themed fill here painted bg_base — #141414 — beside a transcript that
+// is the terminal's black, so the two windows read as two different themes. The
+// panel's text cells resolve to the default whatever the fill says, so a
+// surviving fill is not a cosmetic difference: it is a grey band with black
+// text bars in it, the same striping #454 built into the popup.
+func TestSidebarIsTheTerminalBackground(t *testing.T) {
+	app, scr, _ := dockTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.draw()
+
+	base, ok := app.th.Slot(theme.BgBase)
+	if !ok {
+		t.Fatal("the built-in theme must name bg_base, or this test proves nothing")
+	}
+	edge := app.width - dockCols
+	for _, at := range []struct{ x, y int }{{edge, 0}, {edge + dockPad, 1}, {edge + 1, 39}} {
+		r, _, st, _ := scr.GetContent(at.x, at.y)
 		if _, bg, _ := st.Decompose(); bg != tcell.ColorDefault {
-			t.Fatalf("overlay cell %d %q has background %v, want the terminal default (bg_base is %v)", x, r, bg, app.cellColor(c))
+			t.Fatalf("sidebar cell (%d,%d) %q has background %v, want the terminal default (bg_base is %v)", at.x, at.y, r, bg, app.cellColor(base))
 		}
 	}
 }

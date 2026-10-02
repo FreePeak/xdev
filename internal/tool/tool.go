@@ -45,10 +45,10 @@ type Registry struct {
 	tools   map[string]Tool
 	snaps   map[string]*fileSnapshot
 	catalog *Catalog
-	// MCPNames is set by cmd/xdev from the mcpclient manager;
-	// it lists connected server names for the dock's MCP section.
-	// It is a snapshot read once at wire time, not a live lock.
-	MCPNames func() string
+	// MCPBlock is set by cmd/xdev from the mcp.yml config: the sidebar's
+	// MCP section as one block — the enabled server names, one per line.
+	// A live snapshot read when the dock builds, not a cached string.
+	MCPBlock func() string
 }
 
 // NewRegistry returns an empty registry.

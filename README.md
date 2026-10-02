@@ -171,12 +171,11 @@ A boxed row copies as its text: the output and the label on the top rule
 
 Thinking renders like a tool result: a rounded box whose top border carries the
 state (`⠹ Thinking…` while it streams, `Thought for Xs` when it settles) and
-whose body is a fixed 12-row window. The wheel always scrolls the transcript
-until you *click* a reasoning box: the clicked box draws a bold border and then
-the wheel over it scrolls its own window, so long reasoning stays readable
-without the transcript sliding along with it. A click anywhere else — or
-`Ctrl+O`, which expands the newest boxed block to every row — hands the wheel
-back to the transcript.
+whose body is ONE row — the newest thought. Click the box and it grows to a
+12-row window the wheel scrolls, drawing a bold border so you can see it has
+the wheel; a click on it again, or anywhere else, shrinks it back to the one row
+and hands the wheel back to the transcript. `Ctrl+O` expands the newest boxed
+block to every row, click or no click.
 
 Display and request are separate switches. The box above is *display*
 (`showThinking`, `/settings showThinking on|off`); `Shift+Tab` (or `/thinking
@@ -185,6 +184,15 @@ and the toggle flips between "off" and "auto", where "auto" hands the decision
 back to the model role's `:effort` (`@slow:high`, or the persisted `thinking`
 key). `/thinking low` pins one rung for the rest of the session and writes it to
 the global layer.
+
+The level is on screen wherever the model is: the bare rung rides the
+composer's info divider beside the model name (`╰─ onegw/…-free · high ──╯`),
+and repeats in the sidebar's SESSION footer as one row pairing the two
+(`onegw/…-free · high`) — the section that is never folded away. The word
+"thinking" is the command, not the label, and the model it sits beside says what
+the pair is. Both read the live seam, so a `/thinking` flip or a `Shift+Tab`
+repaints both on the next frame; a host that never wired `/thinking` paints
+neither.
 
 The **context dock** (`Alt+S`) is a fixed 42-column window right of the
 transcript, opencode's sidebar shape: it owns every row of the terminal, so the
@@ -201,6 +209,10 @@ per frame. A pending plan is resolved where plans have always been resolved —
 `/plan off` approves, any typed prompt is revision feedback — and `/plan show`
 reprints the document in the transcript.
 
+`Alt+S` walks the display policy (shown → hidden → auto); `/sidebar` is the
+plain switch over what is actually on screen, so one keystroke or one command
+hides the sidebar and brings it back.
+
 **Slash commands** dispatch at input-submit and never reach the model:
 
 | Command | Action |
@@ -209,9 +221,11 @@ reprints the document in the transcript.
 | `/resume [id]` `/fork` `/branch` `/tree` | session picker, fork, entry switch, tree navigator |
 | `/rename <title>` `/dump` `/export [path]` `/share` `/collab` | title, export to markdown/HTML, share an E2E-encrypted view |
 | `/model [ref]` `/connect [name]` `/theme <name>` `/settings [overlay]` `/hotkeys` | model, provider catalog, theme and display control (`/settings overlay` — or `Alt+,` — opens the settings panel; `/settings sidebarMode auto\|show\|hide` pins the dock) |
+| `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |
+| `/usage` | the session's token, time and tool-call report: totals with thousands separators, cache hit rate, live context against the model's window, LLM vs tool time, average time-to-first-token, and the tool-call count — the same readings the status row carries, at report width |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |
 

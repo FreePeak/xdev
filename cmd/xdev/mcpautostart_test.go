@@ -36,7 +36,7 @@ func TestAttachMCPDoesNotHealthProbeOnTheCallersGoroutine(t *testing.T) {
 	start := time.Now()
 	// wait=false is the TUI/rpc/acp path: the connect is deferred, so the
 	// only work left on this goroutine is loading mcp.yml.
-	if mgr := attachMCP(context.Background(), tool.NewRegistry(), false, nil); mgr != nil {
+	if mgr := attachMCP(context.Background(), tool.NewRegistry(), false, nil, nil); mgr != nil {
 		defer mgr.Close()
 	}
 	elapsed := time.Since(start)

@@ -77,19 +77,23 @@ func awaitHUD(t *testing.T, scr tcell.SimulationScreen, want string) string {
 // event, so a negative assertion cannot pass just because nothing repainted.
 func settle() { time.Sleep(120 * time.Millisecond) }
 
-// rateOf pulls the ⚡ figure off the row, or 0 when the segment is hidden.
+// rateOf pulls the decode-rate figure off the row, or 0 when the segment is
+// hidden. It matches on the "t/s" unit rather than a glyph: the leading icon
+// is theme-owned (dsh's gauge, theme.HUDIcon) and a test that pinned a glyph
+// would break the moment a theme overrode it.
 func rateOf(t *testing.T, row string) float64 {
 	t.Helper()
-	i := strings.Index(row, "⚡")
+	i := strings.Index(row, "t/s")
 	if i < 0 {
 		return 0
 	}
-	fields := strings.Fields(row[i:])
-	if len(fields) < 2 {
+	// The number sits in the last space-separated field before the unit.
+	fields := strings.Fields(row[:i])
+	if len(fields) == 0 {
 		return 0
 	}
 	var v float64
-	if _, err := fmt.Sscanf(fields[1], "%f", &v); err != nil {
+	if _, err := fmt.Sscanf(fields[len(fields)-1], "%f", &v); err != nil {
 		t.Fatalf("rate is not a number: %q", row)
 	}
 	return v
@@ -118,8 +122,9 @@ func streamScript(h *tuiHooks, gap time.Duration, kinds ...ai.EventType) {
 }
 
 // TestHUDHooksMeasureTheMessage: a normal message — EventStart, deltas over
-// time, EventDone with usage — must leave the token counters and a measured
-// rate on the row.
+// time, EventDone with usage — must leave the token pill and a measured rate
+// on the row. The token reading is the pill (total, dsh's UsagePill), so the
+// assertion is the pill's own sum: 1,000 fresh + 300 out = 1.3k.
 func TestHUDHooksMeasureTheMessage(t *testing.T) {
 	app, scr := metricTestApp(t, 120, 24)
 	h := &tuiHooks{ts: &tuiSession{app: app}}
@@ -130,8 +135,8 @@ func TestHUDHooksMeasureTheMessage(t *testing.T) {
 		Usage: &ai.Usage{Input: 1000, Output: 300, TotalTokens: 1300}})
 
 	row := awaitHUD(t, scr, "t/s")
-	if !strings.Contains(row, "↑1k │ ↓300") {
-		t.Fatalf("the token counters did not render: %q", row)
+	if !strings.Contains(row, "1.3k") {
+		t.Fatalf("the token pill did not render the message's total: %q", row)
 	}
 	// 300 output tokens over a ~200ms window is ~1500 t/s. Assert the order
 	// of magnitude: the exact figure depends on scheduler jitter.
@@ -229,5 +234,52 @@ func TestHUDHooksEmptyMessageDoesNotPanic(t *testing.T) {
 	settle()
 	if row := hudRow(scr); strings.Contains(row, "t/s") {
 		t.Fatalf("an empty message drew %q", row)
+	}
+}
+
+// TestResumedSessionKeepsStatusMetrics is the field report's defect: every
+// metric on the status bar was wiped by Reset() at resume and only WORK TIME
+// was re-banked from the replayed history, so a resumed session showed a
+// fresh 0s, no tokens, and no spend for work it had already done and been
+// charged for. Reset is the right boundary — the counters are per-session —
+// but the replay has to put them back, and the row is where that is read.
+func TestResumedSessionKeepsStatusMetrics(t *testing.T) {
+	app, scr := metricTestApp(t, 120, 24)
+
+	// What the live session banked before it closed, then what the resume
+	// path replays: the same persisted usage, off the assistant messages.
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "first"}}},
+		{Role: ai.RoleAssistant, DurationMS: 4000, Usage: &ai.Usage{
+			Input: 479, Output: 1770, CacheRead: 64575, CacheWrite: 1100,
+			TotalTokens: 66824, ReasoningTokens: 1264,
+			Cost: &ai.UsageCost{Total: 0.0123},
+		}},
+		{Role: ai.RoleAssistant, DurationMS: 2500, Usage: &ai.Usage{
+			Input: 500, Output: 100, TotalTokens: 600,
+			Cost: &ai.UsageCost{Total: 0.001},
+		}},
+	}
+	// Reset is the adoption boundary (/resume, a tab switch, a tree rewind):
+	// everything goes, and the one replay path has to put it all back.
+	app.Reset()
+	replaySession(app, msgs)
+
+	row := awaitHUD(t, scr, "1t·2g")
+	// 979 in + 1870 out + 64575 cache + 1100 cache writes = 68524 tokens.
+	if !strings.Contains(row, "68.5k") {
+		t.Fatalf("the token pill lost the resumed session's total: %q", row)
+	}
+	// The cache-hit rate beside it: 64575 of the (979 + 64575) prompt side
+	// the replayed history actually billed.
+	if !strings.Contains(row, "98%") {
+		t.Fatalf("the resumed cache-hit rate is gone: %q", row)
+	}
+	if !strings.Contains(row, "6s") {
+		t.Fatalf("the work timer lost the resumed history's 6.5s: %q", row)
+	}
+	report := app.UsageReport()
+	if !strings.Contains(report, "$0.0133") {
+		t.Fatalf("the report lost the resumed session's spend:\n%s", report)
 	}
 }

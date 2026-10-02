@@ -1,6 +1,8 @@
 package session
 
 import (
+	"strings"
+
 	"github.com/FreePeak/xdev/internal/ai"
 )
 
@@ -49,6 +51,41 @@ type ContextResult struct {
 // neutralized assistant shell — reaches the provider as an empty content list
 // or, on openai-completions, `"content": ""`, which upstreams reject or
 // silently drop. It is deliberately retry-guiding: the model is told to re-run
+
+// ReplaySafety answers whether re-running an interrupted call to name is
+// harmless. cmd/xdev wires it to the live tool registry (tool.Replayer); the
+// nil default leaves every call unsafe, so a build that never wires it behaves
+// exactly as it does today.
+//
+// The session package cannot import the tool package (tool imports session,
+// for checkpoint/todo/imagegen), so this is the seam — the same
+// overridable-func shape internal/tool/ast.go uses for ast-grep.
+var ReplaySafety func(name string) bool
+
+// replaySafe reports whether name is known to be free to repeat.
+func replaySafe(name string) bool {
+	return ReplaySafety != nil && ReplaySafety(name)
+}
+
+// unansweredToolCallText is the notice for one turn's dropped calls, naming
+// the ones that are safe to repeat. A turn whose calls are all reads gets
+// told plainly; a turn holding a single unsafe call keeps the plain notice,
+// because telling the model which of them "may be re-run" is worse than
+// leaving it to judge the whole set.
+func unansweredToolCallText(names []string) string {
+	safe := make([]string, 0, len(names))
+	for _, n := range names {
+		if replaySafe(n) {
+			safe = append(safe, n)
+		}
+	}
+	if len(safe) == 0 || len(safe) != len(names) {
+		return UnansweredToolCallNotice
+	}
+	return UnansweredToolCallNotice + " (" + strings.Join(safe, ", ") +
+		" only reads state, so re-running it is free)"
+}
+
 // the call rather than assume it succeeded.
 const UnansweredToolCallNotice = "the previous turn ended before this tool call returned; its result is unknown, so run it again if you still need it"
 
@@ -159,14 +196,6 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 			m := t.Message
 			switch m.Role {
 			case ai.RoleAssistant:
-				if hasToolCalls(m) {
-					m.Content = neutralizeToolCalls(m, answered)
-				}
-				for _, b := range m.ToolCalls() {
-					if answered[b.ID] {
-						seenCalls[b.ID] = true
-					}
-				}
 				// A turn whose only content was tool calls, none of which ever
 				// produced a result, neutralizes to an assistant message with
 				// zero blocks. Replaying that shell is what an interrupted session
@@ -177,9 +206,21 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 				// is unknowable, so the honest record is the crash-repair text —
 				// the same shape ai.EnsureToolOutput already guarantees for a
 				// silent tool (#386 lineage), applied here at rebuild time
-				// instead of once per run.
-				if len(m.Content) == 0 {
-					m.Content = []ai.Block{ai.TextBlock{Text: UnansweredToolCallNotice}}
+				// instead of once per run. dropped names the calls when the
+				// turn had any, so the notice can say which are free to repeat.
+				var dropped []string
+				if hasToolCalls(m) {
+					m.Content, dropped = neutralizeToolCalls(m, answered)
+				}
+				// Neutralizing a turn whose every block was a dangling call
+				// leaves it with nothing, which is the case the notice covers.
+				if len(dropped) > 0 && len(m.Content) == 0 {
+					m.Content = []ai.Block{ai.TextBlock{Text: unansweredToolCallText(dropped)}}
+				}
+				for _, b := range m.ToolCalls() {
+					if answered[b.ID] {
+						seenCalls[b.ID] = true
+					}
 				}
 				out = append(out, m)
 				entryIDs = append(entryIDs, e.Envelope().ID)
@@ -265,15 +306,18 @@ func hasToolCalls(m ai.Message) bool {
 }
 
 // neutralizeToolCalls drops dangling toolCall blocks (no matching result in
-// the path) from an assistant message, keeping text/thinking blocks. When
-// every block was a dangling call, the message is dropped entirely.
-func neutralizeToolCalls(m ai.Message, answered map[string]bool) []ai.Block {
+// the path) from an assistant message, keeping text/thinking blocks, and
+// returns the names of the calls it dropped so the caller can say which of
+// them are free to repeat. When every block was a dangling call, the message
+// is left with no blocks and the caller fills it with the notice.
+func neutralizeToolCalls(m ai.Message, answered map[string]bool) (blocks []ai.Block, dropped []string) {
 	kept := make([]ai.Block, 0, len(m.Content))
 	for _, b := range m.Content {
 		if tc, ok := b.(ai.ToolCallBlock); ok && !answered[tc.ID] {
+			dropped = append(dropped, tc.Name)
 			continue // dangling call
 		}
 		kept = append(kept, b)
 	}
-	return kept
+	return kept, dropped
 }

@@ -280,10 +280,10 @@ func (a *App) settingsOverlayAction(st *settingsOverlayState) {
 		// Read-only rows are shown so a user can see what is in effect. Enter
 		// says nothing about them, and a click saying nothing either left a
 		// dead row that looks like every other — so the click answers, naming
-		// the key that CAN change it. It rides the composer's notice slot
-		// rather than the transcript: this is a gesture's answer, not output,
-		// and a notice cannot scroll the user out of the panel they are in.
-		a.setNotice(row.Label + " is read-only — `xdev config set " + row.Key + " <value>`")
+		// the key that CAN change it. It is a toast rather than a transcript
+		// block: this is a gesture's answer, not output, and a toast cannot
+		// scroll the user out of the panel they are in.
+		a.setError(row.Label + " is read-only — `xdev config set " + row.Key + " <value>`")
 		return
 	}
 	ops := a.settingsOverlayOps
@@ -499,10 +499,15 @@ func (a *App) applySettingImmediate(key, value string) {
 	switch key {
 	case "showThinking":
 		a.SetShowThinking(truthy())
+	case "renderMermaid":
+		a.SetRenderMermaid(truthy())
 	case "sidebarMode":
 		a.SetDockMode(value)
 	case "debugMouse":
 		a.SetDebugMouse(truthy())
+	case "tui.exitDetach":
+		// Takes effect on the next quit chord: cmd's SetExitDetach already
+		// refreshed lastSettings(), which SetQuitRunning reads live.
 	}
 }
 
