@@ -564,16 +564,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// populated store here, a fresh session has none.
 	if len(storeOf().Entries()) > 0 {
 		if res, err := session.BuildContext(storeOf().Entries(), storeOf().LeafID(), session.SystemPrompt{}); err == nil {
-			replayTranscript(app, res.Messages)
-			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			work := workOf(res.Messages)
-			app.SetWork(work)
-			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(work, ttftSum, ttftCount)
-			in, out, cache, think, cw, cost := usageOf(res.Messages)
-			app.SetSessionUsage(in, out, cache, think, cw, cost)
-			turns, steps := countsOf(res.Messages)
-			app.SetSessionCounts(turns, steps)
+			replaySession(app, res.Messages)
 		}
 	}
 	// Live conversation is the store: user/assistant/toolResult messages
@@ -702,17 +693,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.Reset()
 		app.SetLocation(t.store.CWD())
 		app.SetSessionID(t.store.ID())
+		saveBreadcrumb(breadcrumbPath(t.store))
 		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
-			replayTranscript(app, res.Messages)
-			app.SetContextReplay(agent.ContextTokens(res.Messages))
-			work := workOf(res.Messages)
-			app.SetWork(work)
-			ttftSum, ttftCount := ttftOf(res.Messages)
-			app.SetLLMTime(work, ttftSum, ttftCount)
-			in, out, cache, think, cw, cost := usageOf(res.Messages)
-			app.SetSessionUsage(in, out, cache, think, cw, cost)
-			turns, steps := countsOf(res.Messages)
-			app.SetSessionCounts(turns, steps)
+			replaySession(app, res.Messages)
 		}
 		// The HUD spinner follows the FOREGROUND session only.
 		app.SetRunning(t.running)
@@ -948,16 +931,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return
 		}
 		app.Reset()
-		replayTranscript(app, res.Messages)
-		app.SetContextReplay(agent.ContextTokens(res.Messages))
-		work := workOf(res.Messages)
-		app.SetWork(work)
-		ttftSum, ttftCount := ttftOf(res.Messages)
-		app.SetLLMTime(work, ttftSum, ttftCount)
-		in, out, cache, think, cw, cost := usageOf(res.Messages)
-		app.SetSessionUsage(in, out, cache, think, cw, cost)
-		turns, steps := countsOf(res.Messages)
-		app.SetSessionCounts(turns, steps)
+		replaySession(app, res.Messages)
 	}
 	// navigateTree is the port of omp's session.navigateTree (the tree
 	// selector's Enter / Shift+Enter / Alt+S): the leaf lands on the
@@ -3050,6 +3024,29 @@ func usageOf(msgs []ai.Message) (in, out, cache, think, cacheWrite int64, cost f
 		}
 	}
 	return in, out, cache, think, cacheWrite, cost
+}
+
+// replaySession is the one replay path every adoption shares: a startup
+// --continue/--resume, a tab focus, a tree navigation or a branch. It draws
+// the transcript and re-bases EVERY session metric off the rebuilt messages,
+// so an adopted session shows the numbers it had before it was closed:
+// token buckets and spend, the work timer, LLM time, average TTFT, and the
+// turn/step counts.
+//
+// App.Reset is the per-session boundary that clears them; this is what puts
+// them back, and having one function is what keeps a new metric from being
+// wired at three sites and missed at the fourth.
+func replaySession(app *tui.App, msgs []ai.Message) {
+	replayTranscript(app, msgs)
+	work := workOf(msgs)
+	app.SetContextReplay(agent.ContextTokens(msgs))
+	app.SetWork(work)
+	ttftSum, ttftCount := ttftOf(msgs)
+	app.SetLLMTime(work, ttftSum, ttftCount)
+	in, out, cache, think, cacheWrite, cost := usageOf(msgs)
+	app.SetSessionUsage(in, out, cache, think, cacheWrite, cost)
+	turns, steps := countsOf(msgs)
+	app.SetSessionCounts(turns, steps)
 }
 
 // shortSessionID renders the first 8 chars of a session id (matches the TUI

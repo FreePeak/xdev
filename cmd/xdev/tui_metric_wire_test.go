@@ -260,17 +260,10 @@ func TestResumedSessionKeepsStatusMetrics(t *testing.T) {
 			Cost: &ai.UsageCost{Total: 0.001},
 		}},
 	}
-	replayTranscript(app, msgs)
+	// Reset is the adoption boundary (/resume, a tab switch, a tree rewind):
+	// everything goes, and the one replay path has to put it all back.
 	app.Reset()
-	replayTranscript(app, msgs)
-	work := workOf(msgs)
-	app.SetWork(work)
-	ttftSum, ttftCount := ttftOf(msgs)
-	app.SetLLMTime(work, ttftSum, ttftCount)
-	in, out, cache, think, cw, cost := usageOf(msgs)
-	app.SetSessionUsage(in, out, cache, think, cw, cost)
-	turns, steps := countsOf(msgs)
-	app.SetSessionCounts(turns, steps)
+	replaySession(app, msgs)
 
 	row := awaitHUD(t, scr, "1t·2g")
 	// 979 in + 1870 out + 64575 cache + 1100 cache writes = 68524 tokens.
