@@ -53,6 +53,7 @@ var appliedLimit int64
 // subcommands are the first-arg names that select a mode instead of a
 // prompt. One entry per subcommand keeps merges (and reviews) trivial.
 var subcommands = map[string]bool{
+	"mcps":  true,
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
@@ -61,7 +62,7 @@ var subcommands = map[string]bool{
 	// Wave 9 CLI suite (#34).
 	"models": true, "search": true, "commit": true, "compress": true,
 	"cleanse": true, "gallery": true, "render": true, "gc": true,
-	"usage": true, "ps": true, "token": true, "completions": true,
+	"usage": true, "ps": true, "bg": true, "token": true, "completions": true,
 	"connect":  true,
 	"worktree": true, "wt": true,
 	// Repository hook trust (#241): the review and the decision.
@@ -98,9 +99,12 @@ func handoffSaveDir(s *config.Settings) string {
 // survives in the text users read.
 const rootUsage = `xdev %s — lightweight coding agent (Go)
 
+  xdev mcps                  list configured MCP servers and their status
   xdev                         interactive TUI (bare invocation, TTY)
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
+  xdev --bg [flags] "prompt"   detached print run (survives terminal kill)
+  xdev bg <list|logs|stop|rm>  manage detached jobs
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev rpc                     JSONL-over-stdio RPC server (embedders)
   xdev acp                     ACP server on stdio (editors)
@@ -158,6 +162,7 @@ func main() {
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	apiKeyValue := fs.String("api-key", "", "credential for this run only (never persisted)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
+	logFile := fs.String("log", "", "write TUI screen transcript to <path> after each frame (off by default)")
 	prewalkFlag := fs.Bool("prewalk", false, "one-shot model handoff: switch to the prewalk target after the first successful edit/write once a plan todo list exists")
 	planFlag := fs.Bool("plan", false, "plan mode: read-only research; the run proposes a plan before implementing")
 	prewalkInto := fs.String("prewalk-into", "", "prewalk target: model ref (default: prewalk.into, else the session model)")
@@ -197,12 +202,14 @@ func main() {
 	// --- omp CLI parity (docs/parity-delta.md): the aliases and flags the
 	// baseline accepts, each with a real consumer below.
 	printModeFlag := fs.Bool("print", false, "force headless print mode (alias: -p)")
+	bgFlag := fs.Bool("bg", false, "run the print job detached (survives terminal close; manage with `xdev bg`)")
 	fs.BoolVar(printModeFlag, "p", false, "alias for --print")
 	fs.BoolVar(continueLast, "c", false, "alias for --continue")
 	fs.StringVar(resumePrefix, "r", "", "alias for --resume (session id prefix)")
 	fs.StringVar(resumePrefix, "session", "", "resume a session by id prefix (alias: --session)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
 	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
+	retryAllErrors := fs.Bool("retry-all-errors", false, "retry every error class, including empty turns (retry.retryAllErrors for this run)")
 	providerFlag := fs.String("provider", "", "force the provider when the model ref does not name one")
 	addDirs := repeatable{}
 	fs.Var(&addDirs, "add-dir", "extra workspace root beyond the launch cwd: joins context-file discovery and is named in the prompt (repeatable)")
@@ -327,6 +334,12 @@ func main() {
 		NoPTY:           *noPTY,
 		Extensions:      extensionPaths,
 		PluginDirs:      pluginDirs,
+		LogFile:         *logFile,
+	}
+	// A --bg worker that somehow started without a wall-clock cap still
+	// gets one: unattended runs must not hang forever (issue #131).
+	if isBgWorker() && launch.MaxTime == 0 {
+		launch.MaxTime = bgDefaultMaxAge
 	}
 	// --- launch-flag overrides onto the layered settings. Each one is a
 	// documented flag, so each must win over the file: approval mode and
@@ -350,6 +363,12 @@ func main() {
 	if *retryForever {
 		infiniteFlag := true
 		settings.Retry.Infinite = &infiniteFlag
+	}
+	// -retry-all-errors is the one-run form of retry.retryAllErrors: the
+	// same layered-settings pattern as -retry-forever.
+	if *retryAllErrors {
+		allErrorsFlag := true
+		settings.Retry.RetryAllErrors = &allErrorsFlag
 	}
 	// --models patterns enable Ctrl+P cycling; the catalog print stays on
 	// the `models` subcommand (omp keeps the same split).
@@ -491,6 +510,10 @@ func main() {
 		os.Exit(code)
 	}
 
+	if mode == "mcps" {
+		os.Exit(runMcps(args))
+	}
+
 	if mode == "acp" {
 		opts := printOptions{
 			Model:        *model,
@@ -605,6 +628,9 @@ func main() {
 	if mode == "ps" {
 		os.Exit(runPS(args))
 	}
+	if mode == "bg" {
+		os.Exit(runBg(args))
+	}
 	if mode == "token" {
 		os.Exit(runToken(args))
 	}
@@ -697,6 +723,33 @@ func main() {
 		}
 		if *planYoloInto != "" && !*planYolo {
 			fmt.Fprintln(os.Stderr, "xdev: -plan-yolo-into has no effect without -plan-yolo")
+		}
+		// --bg: detach a print worker and return the job id. The child is the
+		// same binary in print mode with XDEV_BG_ID set; hang caps below keep
+		// an unattended run from living forever.
+		if *bgFlag {
+			if isBgWorker() {
+				fmt.Fprintln(os.Stderr, "xdev: --bg child refusing to re-detach")
+				os.Exit(2)
+			}
+			// Default hang ceiling: 2h wall clock when the user set no --max-time.
+			// Stream watchdogs still bound a stalled provider; --max-turns bounds
+			// a runaway tool loop. An explicit --max-time 0 is not expressible
+			// today (parseMaxTime rejects non-positive), so "unset" is the only
+			// path that gets the default.
+			childArgv := stripBgFlag(os.Args[1:])
+			if launch.MaxTime == 0 {
+				childArgv = append([]string{"--max-time", "2h"}, childArgv...)
+			}
+			id, err := spawnBg(prompt, childArgv)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "xdev:", err)
+				os.Exit(2)
+			}
+			fmt.Printf("%s\n", id)
+			ofmt := "xdev bg logs %s   # tail\nxdev bg stop %s   # cancel\n"
+			fmt.Fprintf(os.Stderr, ofmt, id, id)
+			os.Exit(0)
 		}
 		code, err := runPrint(prompt, opts)
 		if err != nil {

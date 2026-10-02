@@ -118,6 +118,19 @@ const (
 	SyntaxOperator    = "syntax_operator"
 	SyntaxPunctuation = "syntax_punctuation"
 
+	// Diff bands (4, xdev's own — NOT in omp's 66-token contract, so they are
+	// optional and a theme that omits them paints no band at all: the change
+	// reads from the tool_diff_added/removed ink alone, the way it always
+	// has). A row band and the stronger band the changed words ride on, per
+	// polarity. The rule that retired coloured bands was coloured TEXT on a
+	// band tinted from the same ink — the row's own words drown in it. These
+	// are the opposite: the ink paints the marker and nothing else, and the
+	// band is a flat tint of its own (Claude Code's addLine/addWord).
+	ToolDiffAddedBg       = "tool_diff_added_bg"
+	ToolDiffRemovedBg     = "tool_diff_removed_bg"
+	ToolDiffAddedWordBg   = "tool_diff_added_word_bg"
+	ToolDiffRemovedWordBg = "tool_diff_removed_word_bg"
+
 	// Thinking-mode rails (8 + 1 optional: ThinkingMax falls back to
 	// ThinkingXhigh when a theme omits it).
 	ThinkingOff     = "thinking_off"
@@ -268,15 +281,36 @@ func groknightSlots() map[string]Color {
 		StatusLineOutput:    Hex("#6c6c6c"),
 		StatusLineCost:      Hex("#6c6c6c"),
 		StatusLineSubagents: Hex("#bb9af7"),
-		// Diff rows. These keep the palette's own green/red — the pair the
-		// status line paints a clean/dirty tree in — but the TUI does not
-		// paint a change with them: Builtins marks the three slots terminal-
-		// default, because a colour xdev picks for itself is free to land on
-		// the user's red or green. They stay as color-blind mode's source
-		// pair, and a custom theme may still pin them.
-		ToolDiffAdded:   Hex("#9ece6a"),
-		ToolDiffRemoved: Hex("#f7768e"),
-		ToolDiffContext: Hex("#6c6c6c"),
+		// Diff rows, Claude Code's model (v2.1.287, the diff renderer): the
+		// +/- marker wears the palette's own green/red — the pair the status
+		// line paints a clean/dirty tree in, so one system owns both — and
+		// the change itself is read from a BAND, not from coloured text.
+		// The bands are CC's own tints (addLine rgb(2,40,0), addWord
+		// rgb(4,71,0) and the two red equivalents): near-black, so they
+		// carry no palette identity and cannot land on the canvas.
+		ToolDiffAdded:         Hex("#9ece6a"),
+		ToolDiffRemoved:       Hex("#f7768e"),
+		ToolDiffContext:       Hex("#6c6c6c"),
+		ToolDiffAddedBg:       Hex("#022800"), // CC addLine
+		ToolDiffRemovedBg:     Hex("#3d0100"), // CC deleteLine
+		ToolDiffAddedWordBg:   Hex("#044700"), // CC addWord
+		ToolDiffRemovedWordBg: Hex("#5c0200"), // CC deleteWord
+		// Fenced-code tokens (#501), on Claude Code's dark scope map
+		// (v2.1.287, the hljs emitter's `scopes` table — One Dark). The 9
+		// roles map one-to-one onto its scopes, so a code block reads like a
+		// code block there. They DO paint (unlike the diff's old slots): an
+		// unpainted token class would leave the model's own code ambiguous,
+		// and the risk is a block that is harder to skim, not a change
+		// rendered in the reader's own green/red.
+		SyntaxComment:     Hex("#75715e"), // comment/meta
+		SyntaxKeyword:     Hex("#f92672"), // keyword/operator
+		SyntaxString:      Hex("#e6db74"), // string/regexp
+		SyntaxNumber:      Hex("#be84ff"), // literal/number
+		SyntaxType:        Hex("#a6e22e"), // built_in/type
+		SyntaxVariable:    Hex("#e6e6e6"), // variable/property (body text)
+		SyntaxFunction:    Hex("#a6e22e"), // title.function
+		SyntaxOperator:    Hex("#f92672"), // operator
+		SyntaxPunctuation: Hex("#f8f8f2"), // punctuation
 	}
 }
 
@@ -322,29 +356,45 @@ func grokdaySlots() map[string]Color {
 		StatusLineOutput:    Hex("#767676"),
 		StatusLineCost:      Hex("#767676"),
 		StatusLineSubagents: Hex("#7D4BC6"),
-		// Diff rows: the day palette's own green/red and comment gray.
-		ToolDiffAdded:   Hex("#378E23"),
-		ToolDiffRemoved: Hex("#cd3048"),
-		ToolDiffContext: Hex("#767676"),
+		// Diff rows — see groknightSlots. The bands are CC's day tints
+		// (addLine rgb(220,255,220), addWord rgb(178,255,178) and the two
+		// red equivalents): near-white, so the day canvas shows through.
+		ToolDiffAdded:         Hex("#378E23"),
+		ToolDiffRemoved:       Hex("#cd3048"),
+		ToolDiffContext:       Hex("#767676"),
+		ToolDiffAddedBg:       Hex("#dcffdc"),
+		ToolDiffRemovedBg:     Hex("#ffdcdc"),
+		ToolDiffAddedWordBg:   Hex("#b2ffb2"),
+		ToolDiffRemovedWordBg: Hex("#ffc7c7"),
+		// Fenced-code tokens (#501) — see groknightSlots: the same 9 roles on
+		// Claude Code's light scope map (v2.1.287 — One Light), whose inks
+		// hold contrast on the light code band.
+		SyntaxComment:     Hex("#969896"), // comment/meta
+		SyntaxKeyword:     Hex("#a71d5d"), // keyword/operator
+		SyntaxString:      Hex("#183691"), // string/regexp
+		SyntaxNumber:      Hex("#0086b3"), // literal/number
+		SyntaxType:        Hex("#0086b3"), // built_in/type
+		SyntaxVariable:    Hex("#333333"), // variable/property (body text)
+		SyntaxFunction:    Hex("#795da3"), // title.function
+		SyntaxOperator:    Hex("#a71d5d"), // operator
+		SyntaxPunctuation: Hex("#333333"), // punctuation
 	}
 }
 
-// Builtins returns the launch themes. The diff slots are marked terminal-
-// default (the state a theme file reaches by spelling a color ""): the TUI
-// reads that as "paint the change in the terminal's own palette", which is
-// the only palette xdev can be sure matches the screen it is drawn on. The
-// slots keep their palette values above so color-blind mode — which exists
-// precisely because those two inks are unreadable to some readers — has a
-// pair to remap and a difference to name.
+// Builtins returns the launch themes.
+//
+// The diff slots are NOT terminal-default any more. They were, because the
+// renderer used to colour the row's own WORDS with them, and a fixed RGB it
+// picked for itself was free to land on the user's red or green. The claim
+// now lives on the marker's single cell and on a flat band (Claude Code's
+// model), so the theme's own green/red owns both the marker and the status
+// line's clean/dirty tree, and the band is a tint of its own rather than of
+// that ink. A theme that still leaves a slot "" keeps the terminal's answer.
 func Builtins() map[string]*Theme {
 	return map[string]*Theme{
-		"groknight": {Name: "groknight", Dark: true, Slots: groknightSlots(), Defaults: diffToTerminal()},
-		"grokday":   {Name: "grokday", Dark: false, Slots: grokdaySlots(), Defaults: diffToTerminal()},
+		"groknight": {Name: "groknight", Dark: true, Slots: groknightSlots(), Defaults: map[string]bool{}},
+		"grokday":   {Name: "grokday", Dark: false, Slots: grokdaySlots(), Defaults: map[string]bool{}},
 	}
-}
-
-func diffToTerminal() map[string]bool {
-	return map[string]bool{ToolDiffAdded: true, ToolDiffRemoved: true, ToolDiffContext: true}
 }
 
 // Load resolves the theme by name ("groknight"|"grokday"; "" → auto). Auto

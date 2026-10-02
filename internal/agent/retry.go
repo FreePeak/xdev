@@ -13,6 +13,19 @@ type RetryPolicy struct {
 	MaxRetries int           // attempts after the first failure
 	BaseDelay  time.Duration // first backoff
 	MaxDelay   time.Duration // backoff cap
+	// RetryAllErrors makes every error class — including
+	// empty turns (ErrEmptyTurn, "the model produced no answer")
+	// — retryable: Run rebuilds context from history and
+	// re-runs the ladder instead of ending the session, so a
+	// transient upstream stall never looks like a silent death
+	// (#331 follow-up: keep going until the goal is done).
+	// Off by default — an empty turn is usually the model being
+	// done, and retrying it forever burns tokens on a hard stop.
+	// RetryPolicy.Infinite already lifts the transient and
+	// overflow bounds; this controls the empty-turn bound
+	// independently because a model that can only ever answer
+	// nothing would otherwise loop with no out.
+	RetryAllErrors bool
 	// Infinite is retry.infinite / -retry-forever: once the failover chain
 	// has drained, keep re-running the ladder instead of surfacing the
 	// error, so an outage of any length is survived. Off by default — see
@@ -40,9 +53,10 @@ func (p RetryPolicy) withDefaults() RetryPolicy {
 	if p.MaxRetries == 0 && p.BaseDelay == 0 {
 		d := DefaultRetryPolicy()
 		// No production build site sets the ladder timings, so the copy
-		// must carry Infinite across — otherwise wireAgentMode's one-line
-		// settings copy is silently dropped on the floor.
+		// must carry Infinite and RetryAllErrors across — otherwise
+		// wireAgentMode's one-line settings copy is silently dropped.
 		d.Infinite = p.Infinite
+		d.RetryAllErrors = p.RetryAllErrors
 		p = d
 	}
 	return p
@@ -67,15 +81,74 @@ func (e *AllTargetsDownError) Error() string {
 
 func (e *AllTargetsDownError) Unwrap() error { return e.LastErr }
 
+// EmptyTurnRetryError is the voice of an unbounded empty-turn wait
+// (retry.retryAllErrors): once the nudge budget is spent, the loop keeps
+// rebuilding context and re-running. Raised through TurnHooks.OnEvent so
+// a run that keeps trying reads as waiting, not as hung.
+type EmptyTurnRetryError struct {
+	Round int           // 1-based empty-turn recovery round
+	Delay time.Duration // backoff before the next attempt
+}
+
+func (e *EmptyTurnRetryError) Error() string {
+	return fmt.Sprintf("empty turn — retrying in %s (round %d)",
+		e.Delay.Round(time.Second), e.Round)
+}
+
+// ContinuationRetryError is the voice of a retain-and-continue round
+// (oneTurnWithRecovery's post-content path): the partial was kept, a
+// continuation turn was injected, and the ladder is about to wait Delay
+// before re-asking. Same contract as AllTargetsDownError and
+// EmptyTurnRetryError — a console that collapses the wire error into one
+// notice still has the wait to print. Unlike those two it carries no
+// underlying failure: the recovery already happened.
+type ContinuationRetryError struct {
+	Delay time.Duration // backoff before the continuation turn is re-sent
+}
+
+func (e *ContinuationRetryError) Error() string {
+	return fmt.Sprintf("provider cut off mid-message — continuation injected, retrying in %s",
+		e.Delay.Round(time.Second))
+}
+
 // delay computes the backoff for attempt n (1-based): base·2^(n−1) capped,
 // with 25% downward jitter so simultaneous failures don't retry in lockstep.
+// n < 1 is treated as 1: callers that reset attempt to 0 before sleeping
+// (escalation / auth rebuild) must still wait, not busy-spin.
+//
+// The exponential is saturated before it is multiplied. retry.infinite and
+// retry.retryAllErrors are both default-on, so the round counters that feed n
+// (escalation, emptyRetries) have no ceiling, and measured against the old
+// multiply with the default 500ms base / 8s cap: n = 1…35 land at or below
+// the cap, then every n from 36 to 56 except 39, 43, 44, 47, 49, 52, 53 and
+// 55 panics with "invalid argument to Int64N" (the int64 overflow leaves a
+// negative duration that the MaxDelay clamp cannot catch, because d > max is
+// false for a negative), and n = 57+ wraps to exactly zero — which
+// sleepBackoff reads as "nothing to wait for", the busy-spin half of the bug.
+// The panic is the crash the TUI dies with; the zero is the freeze.
 func (p RetryPolicy) delay(n int) time.Duration {
+	if n < 1 {
+		n = 1
+	}
 	base := p.BaseDelay
 	if base <= 0 {
 		base = 500 * time.Millisecond
 	}
-	d := base * time.Duration(1<<uint(n-1))
-	if max := p.MaxDelay; max > 0 && d > max {
+	max := p.MaxDelay
+	if max <= 0 {
+		max = base
+	}
+	d := base
+	for i := 1; i < n && d < max; i++ {
+		if d > max/2 {
+			// The next doubling would pass max, and max is the cap anyway:
+			// stopping here is where the old multiply-and-clamp landed too.
+			d = max
+			break
+		}
+		d *= 2
+	}
+	if d > max {
 		d = max
 	}
 	return d - time.Duration(rand.Int64N(int64(d)/4+1))

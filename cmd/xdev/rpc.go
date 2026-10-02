@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -54,10 +55,12 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
-	mgr := attachMCP(context.Background(), reg, false, nil)
+	mgr := attachMCP(context.Background(), reg, false, nil, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}
+	// The rebuild-time interruption notice names the calls free to repeat.
+	session.ReplaySafety = reg.ReplaySafe
 
 	// Recomputed per prompt: async MCP/extension tools must reach the
 	// model that is being told they exist.
@@ -175,6 +178,17 @@ func (h *rpcHandler) Prompt(id, text string) {
 	go func() {
 		defer cancel()
 		msg, err := h.agent.Run(ctx, h.buildSys(), hist)
+		if err != nil && errors.Is(err, agent.ErrEmptyTurn) {
+			// The model answered nothing after every nudge was spent
+			// (a thinking-mode upstream leaving only a reasoning block,
+			// or nothing at all). Rebuild context from the persisted
+			// history and re-run the agent so the session auto-resumes
+			// instead of dying with a dead-end error (#331).
+			ctxRes, rerr := session.BuildContext(h.store.Entries(), h.store.LeafID(), session.SystemPrompt{})
+			if rerr == nil {
+				msg, err = h.agent.Run(ctx, h.buildSys(), ctxRes.Messages)
+			}
+		}
 		resp := protocol.Response{Ok: err == nil}
 		if err != nil {
 			resp.Err = err.Error()

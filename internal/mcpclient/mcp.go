@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -55,6 +56,55 @@ type ServerConfig struct {
 	// Source names the file (or gemini:<extension>) the entry came from.
 	// The loader sets it; it is never read from the file.
 	Source string `yaml:"-"`
+	// AutoStart is an optional recipe for launching this server when it is
+	// unreachable. Used for local HTTP servers (e.g. leankg) that ship as a
+	// binary the user may not have started yet.
+	AutoStart *AutoStartConfig `yaml:"autoStart,omitempty"`
+}
+
+// AutoStartConfig describes how to launch a local MCP server on demand.
+type AutoStartConfig struct {
+	// Command + Args launch the server (detached, in its own session,
+	// so it outlives the xdev process that spawned it).
+	Command string   `yaml:"command,omitempty"`
+	Args    []string `yaml:"args,omitempty"`
+	// Cwd is the working directory for the launch (empty = inherit).
+	Cwd string `yaml:"cwd,omitempty"`
+	// Env is the environment for the launched process (merged over the
+	// parent's). The loader resolves ${VAR} and !command forms at load
+	// time, exactly like ServerConfig.Env.
+	Env map[string]string `yaml:"env,omitempty"`
+	// HealthURL overrides the health probe URL derived from URL. Set it
+	// when the server's health endpoint is not at <scheme://host/health>.
+	HealthURL string `yaml:"healthUrl,omitempty"`
+	// HealthTimeoutSec bounds the post-launch health probe (default 30).
+	HealthTimeoutSec int `yaml:"healthTimeoutSec,omitempty"`
+	// PidFile records the launched process, so a second xdev run waits
+	// for the existing daemon instead of starting a duplicate.
+	PidFile string `yaml:"pidFile,omitempty"`
+}
+
+// HealthEndpoint returns the URL used to probe whether an HTTP MCP server
+// is up. AutoStart.HealthURL wins when set; otherwise the server URL's path
+// is replaced with /health and any query is dropped.
+func (sc *ServerConfig) HealthEndpoint() string {
+	if sc == nil {
+		return ""
+	}
+	if sc.AutoStart != nil && sc.AutoStart.HealthURL != "" {
+		return sc.AutoStart.HealthURL
+	}
+	if sc.URL == "" {
+		return ""
+	}
+	u, err := url.Parse(sc.URL)
+	if err != nil {
+		return ""
+	}
+	u.Path = "/health"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 // IsEnabled reports whether the server should connect: an explicit
@@ -209,6 +259,19 @@ func (m *Manager) Tools() []tool.Tool {
 	return out
 }
 
+// Servers returns the connected server names, sorted. The dock
+// reads this for its MCP section; nil means MCP is off.
+func (m *Manager) Servers() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.sessions))
+	for name := range m.sessions {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Close tears every session down (process transports are killed).
 func (m *Manager) Close() {
 	m.mu.Lock()
@@ -312,11 +375,21 @@ func renderContent(res *mcp.CallToolResult) string {
 			}
 		}
 	}
-	if res.StructuredContent != nil && b.Len() == 0 {
-		raw, _ := json.Marshal(res.StructuredContent)
-		b.Write(raw)
+	body := b.String()
+	// structuredContent is a channel of its own (SEP-2106), not a fallback
+	// for Content: a server may put a one-line human summary in Content and
+	// the real payload in structuredContent, and gating on an empty body
+	// dropped that payload whenever any text block existed at all. Append it
+	// unless the text already carries the identical JSON, which is what a
+	// compliant server populating both channels does.
+	if res.StructuredContent != nil {
+		if raw, err := json.Marshal(res.StructuredContent); err == nil {
+			if s := string(raw); !strings.Contains(body, s) {
+				body += s + "\n"
+			}
+		}
 	}
-	_, _ = sink.Write([]byte(b.String()))
+	_, _ = sink.Write([]byte(body))
 	out, truncated := sink.Result()
 	out = strings.TrimRight(out, "\n")
 	if out == "" {
@@ -328,9 +401,117 @@ func renderContent(res *mcp.CallToolResult) string {
 	return out
 }
 
+// DeferThreshold is the number of remote tools above which Register puts them
+// behind the deferred catalog.
+//
+// MCP is the widest part of a session's tool surface: one server can ship 40+
+// tool schemas, and every schema in the eager set is re-sent on every request.
+// The measured cost is in
+// docs/research/2026-09-15-xdev-slow-session-rca.md (per-step uncached input
+// p50 2,094 tok against omp's 983) — so a wide surface is a tax paid per turn.
+//
+// The gate rather than an unconditional defer is deliberate: a session with
+// three servers and six tools is better served by direct schemas, and hiding
+// them would be a pure usability regression for no measurable gain. Above the
+// threshold the model gets one index line per tool plus tool_search, which is
+// the same trade the bundled long tail already makes (see the defer table in
+// cmd/xdev/print.go).
+const DeferThreshold = 12
+
+// deferredIndexChars caps a remote description reduced to an index line. MCP
+// descriptions are server-authored and unbounded — a single one ran past 900
+// chars — and the index is one line per tool, not a documentation slot.
+const deferredIndexChars = 200
+
 // Register adds every remote tool to a registry under its namespaced name.
+//
+// A server whose own tool count passes DeferThreshold is moved behind the
+// deferred catalog: its tools leave the eager schema and the prompt's tool
+// recap and become reachable through tool_search / tool_describe / tool_call.
+// The catalog is a discovery seam, not a boundary: a catalogued tool is still
+// in the registry, so the approval policy, the interceptor chain and a direct
+// call all keep seeing it under its real namespaced name.
+//
+// The threshold is PER SERVER, never pooled across servers. Pooling hid
+// leankg_query and be-kg_query behind the catalog whenever a fatter server was
+// configured alongside them (db-mcp-server alone ships 28), so a session that
+// needed the knowledge graph never found it and re-derived the same answers
+// with bash — measured 2026-09-30 as a 20.6 min / 53-step run where the same
+// prompt on the same model took 4.5 min / 34 steps once the graph tool was
+// directly callable. A small server stays eager whatever else is configured.
+//
+// Register must run after the bundled defer table (which allocates the
+// catalog), which holds in every run mode: newToolRegistry builds the catalog
+// before attachMCP is ever called.
 func Register(reg *tool.Registry, tools []tool.Tool) {
+	if reg == nil {
+		return
+	}
+	perServer := map[string]int{}
+	for _, t := range tools {
+		perServer[serverOf(t)]++
+	}
 	for _, t := range tools {
 		reg.Register(t)
+		if perServer[serverOf(t)] <= DeferThreshold {
+			continue
+		}
+		index := indexLine(t.Description())
+		if index == "" {
+			// Defer panics on an empty index. remoteTool.Description never
+			// returns "", but Register takes tool.Tool, so a foreign
+			// implementation could.
+			continue
+		}
+		reg.Defer(t.Name(), index, searchTags(t)...)
 	}
+}
+
+// serverOf names the server a tool came from, falling back to the tool's own
+// namespace so a foreign tool with no ServerName is counted in its own bucket
+// rather than against every other tool at once.
+func serverOf(t tool.Tool) string {
+	type serverNamed interface{ ServerName() string }
+	if s, ok := t.(serverNamed); ok {
+		if n := s.ServerName(); n != "" {
+			return n
+		}
+	}
+	if i := strings.IndexByte(t.Name(), '_'); i > 0 {
+		return t.Name()[:i]
+	}
+	return t.Name()
+}
+
+// searchTags gives tool_search something to match a server or namespace name
+// against; without them a query like "leankg" cannot reach leankg_query.
+func searchTags(t tool.Tool) []string {
+	tags := []string{"mcp"}
+	type serverNamed interface{ ServerName() string }
+	if s, ok := t.(serverNamed); ok {
+		if n := s.ServerName(); n != "" {
+			tags = append(tags, n)
+		}
+	}
+	// The bare tool name, so a query for "query" or "status" also lands.
+	if i := strings.IndexByte(t.Name(), '_'); i > 0 {
+		tags = append(tags, t.Name()[i+1:])
+	}
+	return tags
+}
+
+// ServerName reports which MCP server owns this tool. Exported so the
+// deferred index can carry it as a search tag without a package cycle.
+func (t *remoteTool) ServerName() string { return t.server }
+
+// indexLine flattens a description to a single capped line.
+func indexLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	if len(s) > deferredIndexChars {
+		s = s[:deferredIndexChars] + "…"
+	}
+	return s
 }

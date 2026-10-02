@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -28,6 +30,49 @@ func TestWrap(t *testing.T) {
 	}
 	if strings.Join(got, "") != "abcdefghij"+"klmnopqrst"+"uvwxyz" {
 		t.Fatalf("hard break lost content: %q", got)
+	}
+	// Multi-byte UTF-8 (CJK, Thai, Arabic) must never be split
+	// mid-rune: every output line must be valid UTF-8 and every
+	// rune must be whole. Byte slicing used to break characters
+	// here, producing the garbled mixed-script fragments seen in
+	// the thinking box (issue: "6 rows hidden").
+	for _, tc := range []struct {
+		s    string
+		maxW int
+	}{
+		{"abcdefghijklmnopqrstuvwxyz我们热爱编程", 10},
+		{"สวัสดีครับโลกสวยงาม", 8},
+		{"مرحبا بالعالم الجميل", 10},
+		{"日本語テスト日本語テスト", 12},
+		{"emoji 😀🎉 test wrap here", 10},
+		{"a我们b泰国c阿拉伯d", 6},
+	} {
+		got := wrap(tc.s, tc.maxW)
+		for _, l := range got {
+			if !utf8.ValidString(l) {
+				t.Fatalf("wrap(%q, %d) produced invalid UTF-8: %q", tc.s, tc.maxW, l)
+			}
+			if width(l) > tc.maxW {
+				t.Fatalf("wrap(%q, %d) line exceeds maxW: %q (%d cells)", tc.s, tc.maxW, l, width(l))
+			}
+		}
+		// No rune is lost or split: strip spaces and every
+		// source rune appears in the output exactly once.
+		srcContent := strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, tc.s)
+		outContent := strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, strings.Join(got, ""))
+		if srcContent != outContent {
+			t.Fatalf("wrap(%q, %d) content mismatch:\n  src: %q\n  out: %q", tc.s, tc.maxW, srcContent, outContent)
+		}
 	}
 }
 
@@ -195,8 +240,8 @@ func TestStreamingBlocksAndTools(t *testing.T) {
 	app.BeginThinking()
 	app.AppendThinking("pondering")
 	app.EndThinking()
-	app.AddToolBlock("read", `{"path":"a.txt"}`)
-	app.FinishTool("read", false, "1:hi\n2:there", ToolOutcome{Dur: "3ms"})
+	app.AddToolBlock("", "read", `{"path":"a.txt"}`)
+	app.FinishTool("", "read", false, "1:hi\n2:there", ToolOutcome{Dur: "3ms"})
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -223,6 +268,9 @@ func TestThinkingDisplayToggle(t *testing.T) {
 	if len(app.blocks) != 1 || app.blocks[0].Kind != KindThinking {
 		t.Fatalf("thinking block missing: blocks=%d", len(app.blocks))
 	}
+	// Collapsed the box is one row, so the whole body is read with a click —
+	// this test is about the toggle, not the height, so it clicks.
+	app.thinkFocus = 0
 	lines := app.blockLines(0, app.blocks[0], 80)
 	app.mu.Unlock()
 	var got []string
@@ -235,6 +283,7 @@ func TestThinkingDisplayToggle(t *testing.T) {
 			t.Fatalf("thinking render missing %q:\n%s", want, joined)
 		}
 	}
+	app.thinkFocus = -1
 	// Turning it off drops existing thinking blocks and suppresses new ones.
 	app.SetShowThinking(false)
 	app.mu.Lock()
@@ -294,7 +343,7 @@ func lineText(ln line) string {
 // the naming argument as a phrase, never the raw JSON the model sent.
 func TestToolCallRowShowsNamedArgument(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.AddToolBlock("bash", `{"command":"seq 1 400","timeout":120}`)
+	app.AddToolBlock("", "bash", `{"command":"seq 1 400","timeout":120}`)
 	app.mu.Lock()
 	lines := app.blockLines(0, app.blocks[0], 80)
 	app.mu.Unlock()
@@ -311,13 +360,101 @@ func TestToolCallRowShowsNamedArgument(t *testing.T) {
 	}
 }
 
+// TestToolCallRowWrapsTheCommand is the headline: a command longer than the
+// row is WRAPPED onto continuation rows, not cut with an ellipsis. The row
+// used to fit a phrase at any width, which meant the one thing a user opens
+// the transcript to read — the command — was the one thing it hid, mid
+// pipeline, with no way to read the rest short of copying the arguments out
+// of the session file. The continuations align under the phrase, every row
+// fits the content width, and the whole command is there.
+func TestToolCallRowWrapsTheCommand(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	// One realistic-shaped command well past both the old 400-byte window and
+	// the row width: a pipeline whose every stage must be readable.
+	parts := []string{
+		"find . -name '*.go' -not -path './dist/*' -not -path './.git/*' -not -path './.worktrees/*'",
+		"| xargs gofmt -l",
+		"| xargs -r rg -n --no-heading 'ToolName|KindToolDone' internal/tui",
+		"| sort",
+	}
+	cmd := strings.Join(parts, " ")
+	args, err := json.Marshal(map[string]string{"command": cmd, "timeout": "120"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A settled call: the live elapsed is a run of its own on the head row, so
+	// a RUNNING one would put "0s" into the middle of the command below.
+	app.AddToolBlock("", "bash", string(args))
+	app.FinishTool("", "bash", false, "ok", ToolOutcome{Dur: "3ms"})
+	app.mu.Lock()
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+
+	if len(lines) < 2 {
+		t.Fatalf("call row = %d lines, want the command wrapped over several:\n%s", len(lines), joinLines(lines))
+	}
+	head := lineText(lines[0])
+	_, phrase, ok := strings.Cut(head, " · ")
+	if !ok {
+		t.Fatalf("head row %q carries no phrase", head)
+	}
+	var got strings.Builder
+	got.WriteString(phrase)
+	for i, ln := range lines[1:] {
+		row := lineText(ln)
+		if w := width(row); w > 80 {
+			t.Fatalf("row %d is %d cells wide, past the 80 the block was rendered at: %q", i+1, w, row)
+		}
+		got.WriteString(" " + strings.TrimSpace(row))
+	}
+	// Every character of the command survives, across the rows: wrap cuts at
+	// whitespace or a hard break, so the concatenation of the rows is the
+	// command itself. No "…", no gap.
+	joined := got.String()
+	flat := strings.Join(strings.Fields(joined), " ")
+	want := strings.Join(strings.Fields(cmd), " ")
+	if flat != want {
+		t.Fatalf("the wrapped row lost the command:\n got %q\nwant %q", flat, want)
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("the command was still shortened with an ellipsis:\n%s", joined)
+	}
+	// The continuations hang off the phrase, not the bullet: the column the
+	// phrase starts at is where they indent to. Measured in CELLS, not bytes —
+	// "·" is two bytes and one cell, and the bullet is one cell of glyph.
+	indent := width(strings.SplitN(head, "·", 2)[0]) + width("· ")
+	if indent <= 0 {
+		t.Fatalf("head row %q has no phrase to align to", head)
+	}
+	for i, ln := range lines[1:] {
+		row := lineText(ln)
+		lead := len(row) - len(strings.TrimLeft(row, " "))
+		if got := width(row[:lead]); got != indent {
+			t.Fatalf("continuation %d indents to %d, want the phrase's %d: %q", i+1, got, indent, row)
+		}
+	}
+}
+
+// A command that fits still renders as ONE row: wrapping is not a behaviour
+// every call pays for.
+func TestToolCallRowStaysOneRowWhenItFits(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	app.AddToolBlock("", "bash", `{"command":"seq 1 400","timeout":120}`)
+	app.mu.Lock()
+	lines := app.blockLines(0, app.blocks[0], 80)
+	app.mu.Unlock()
+	if len(lines) != 1 {
+		t.Fatalf("call row = %d lines, want 1:\n%s", len(lines), joinLines(lines))
+	}
+}
+
 // TestToolResultRendersBox pins the frame for a result standing alone (no call
 // row above it): a rounded box whose top border names the tool, whose body
 // keeps every output line, and whose wall time prints in omp's footer row
 // rather than in the border.
 func TestToolResultRendersBox(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.FinishTool("bash", false, "line-one\nline-two\nline-three", ToolOutcome{Dur: "5ms"})
+	app.FinishTool("", "bash", false, "line-one\nline-two\nline-three", ToolOutcome{Dur: "5ms"})
 	app.mu.Lock()
 	i := len(app.blocks) - 1
 	lines := app.blockLines(i, app.blocks[i], 80)
@@ -359,7 +496,7 @@ func TestToolResultRendersBox(t *testing.T) {
 func TestToolResultBoxAlignsTabbedOutput(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	out := "\tmsg := ai.Message{\n\t\tRole: ai.RoleUser,\n\t}\r\n\x1b[31mred\x1b[0m"
-	app.FinishTool("bash", false, out, ToolOutcome{Dur: "5ms"})
+	app.FinishTool("", "bash", false, out, ToolOutcome{Dur: "5ms"})
 	app.mu.Lock()
 	i := len(app.blocks) - 1
 	lines := app.blockLines(i, app.blocks[i], 80)
@@ -385,8 +522,8 @@ func TestToolResultBoxAlignsTabbedOutput(t *testing.T) {
 // once — as a status, not as prose inside the result.
 func TestToolResultExitCodeSitsInTheFooter(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
-	app.AddToolBlock("bash", `{"command":"sh -c 'exit 9'"}`)
-	app.FinishTool("bash", true, "boom\n[exit code 9]", ToolOutcome{Dur: "80ms", Exit: 9, HasExit: true})
+	app.AddToolBlock("", "bash", `{"command":"sh -c 'exit 9'"}`)
+	app.FinishTool("", "bash", true, "boom\n[exit code 9]", ToolOutcome{Dur: "80ms", Exit: 9, HasExit: true})
 	app.mu.Lock()
 	i := len(app.blocks) - 1
 	lines := app.blockLines(i, app.blocks[i], 80)
@@ -419,7 +556,7 @@ func TestToolResultRowWindow(t *testing.T) {
 	for i := 1; i <= 400; i++ {
 		fmt.Fprintf(&b, "row-%03d\n", i)
 	}
-	app.FinishTool("bash", false, strings.TrimSuffix(b.String(), "\n"), ToolOutcome{Dur: "9ms"})
+	app.FinishTool("", "bash", false, strings.TrimSuffix(b.String(), "\n"), ToolOutcome{Dur: "9ms"})
 	render := func() []line {
 		app.mu.Lock()
 		defer app.mu.Unlock()
@@ -503,24 +640,25 @@ func a_totalLines(app *App) int { return app.totalLinesLocked() }
 func TestHumanTokens(t *testing.T) {
 	cases := map[int64]string{0: "0", 999: "999", 1500: "1.5k", 2_500_000: "2.5M"}
 	for in, want := range cases {
-		if got := humanTokens(in); got != want {
-			t.Fatalf("humanTokens(%d) = %q, want %q", in, got, want)
+		if got := HumanTokens(in); got != want {
+			t.Fatalf("HumanTokens(%d) = %q, want %q", in, got, want)
 		}
 	}
 }
 
-// A tool result that changed a file paints its diff: the rows take the
-// terminal's own ANSI ink on no background — xdev cannot see the emulator's
-// palette, so a colour it picks itself (or a band tinted from it) is free to
-// land on the user's red or green, which is the reported bug — the changed
-// token inside a -/+ pair is lifted with bold, and the plain model preview is
-// not also painted as prose. Text stays what the model saw.
+// A tool result that changed a file paints its diff in Claude Code's model: the
+// +/- marker wears the palette's own green/red and the rest of the row is body
+// text on a flat band (a tint of its own, never of the marker's ink — that band
+// is what buried coloured text before), with the changed token inside a -/+ pair
+// on a stronger band. The plain model preview is not also painted as prose, and
+// text stays what the model saw.
 func TestToolBoxPaintsDiff(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app := idxApp(100, 40)
 	w := app.contentWidth()
 	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
-	app.AddToolBlock("edit", `{"path":"f.go"}`)
-	app.FinishTool("edit", false, "[f.go#abc]\n1:a\n2:b := 2\n3:c", ToolOutcome{Dur: "12ms", Diff: diff})
+	app.AddToolBlock("", "edit", `{"path":"f.go"}`)
+	app.FinishTool("", "edit", false, "[f.go#abc]\n1:a\n2:b := 2\n3:c", ToolOutcome{Dur: "12ms", Diff: diff})
 	idx := len(app.blocks) - 1
 	lines := app.blockLines(idx, app.blocks[idx], w)
 	joined := joinedLines(lines)
@@ -560,40 +698,47 @@ func TestToolBoxPaintsDiff(t *testing.T) {
 		fg, _, _ := runs[0].style.Decompose()
 		return fg
 	}
-	if got := inkOf(rowRuns("+b := 2")); got != tcell.ColorGreen {
-		t.Errorf("added row ink = %v, want the terminal's green", got)
+	// The MARKER is the coloured text: it is the first run of a changed row and
+	// the only one that takes the polarity's ink.
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
+	rem, _ := app.th.Slot(theme.ToolDiffRemoved)
+	if got := inkOf(rowRuns("+b := 2")); got != app.cellColor(add) {
+		t.Errorf("added marker ink = %v, want the theme's %+v", got, add)
 	}
-	if got := inkOf(rowRuns("-b := 1")); got != tcell.ColorMaroon {
-		t.Errorf("removed row ink = %v, want the terminal's red", got)
+	if got := inkOf(rowRuns("-b := 1")); got != app.cellColor(rem) {
+		t.Errorf("removed marker ink = %v, want the theme's %+v", got, rem)
 	}
-	if got := inkOf(rowRuns(" c ")); got != tcell.ColorDefault {
-		t.Errorf("context row ink = %v, want the terminal's own text", got)
-	}
-	// Nothing in the box claims a background: a background is the one thing
-	// xdev cannot check against the terminal it is drawn in.
-	for _, ln := range lines {
-		for _, r := range ln.runs {
-			if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
-				t.Fatalf("diff run %q paints background %v:\n%s", r.text, bg, joined)
-			}
+	// A context row is not a change: no band, the terminal's own dimmed text.
+	for _, r := range rowRuns(" c ") {
+		if _, bg, _ := r.style.Decompose(); bg != tcell.ColorDefault {
+			t.Fatalf("context run %q paints background %v:\n%s", r.text, bg, joined)
 		}
 	}
-	// Word emphasis: inside a replaced pair the changed token goes bold — an
-	// attribute, so it survives any palette — and only the token, not the row.
-	var bold string
+	// Word emphasis: the changed token inside a -/+ pair rides the word band,
+	// and only the token does — so the strongest background on the row is the
+	// one exactly the token's cells carry.
+	addWord, _ := app.th.Slot(theme.ToolDiffAddedWordBg)
+	var word strings.Builder
 	for _, r := range rowRuns("+b := 2") {
-		if _, _, attrs := r.style.Decompose(); attrs&tcell.AttrBold != 0 {
-			bold += r.text
+		if _, b, _ := r.style.Decompose(); b == app.cellColor(addWord) {
+			word.WriteString(r.text)
 		}
 	}
-	if strings.TrimSpace(bold) != "2" {
-		t.Errorf("bold text on the added row = %q, want %q", strings.TrimSpace(bold), "2")
+	if strings.TrimSpace(word.String()) != "2" {
+		t.Errorf("word band on the added row covers %q, want %q", strings.TrimSpace(word.String()), "2")
+	}
+	// The word band is strictly stronger than the row band: identical bands
+	// would make wordPair's whole pass invisible.
+	addRow, _ := app.th.Slot(theme.ToolDiffAddedBg)
+	if addRow == addWord {
+		t.Error("the added word band equals the row band")
 	}
 }
 
 // A bash result that merely prints a list is not re-painted as a diff; one
 // that prints a real `git diff` is.
 func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	if DiffLooksUnified("- item one\n- item two\n") {
 		t.Error("a bullet list read as a diff")
 	}
@@ -607,29 +752,30 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 
 	app := idxApp(100, 40)
 	w := app.contentWidth()
-	app.AddToolBlock("bash", `{"command":"git diff"}`)
-	app.FinishTool("bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
+	app.AddToolBlock("", "bash", `{"command":"git diff"}`)
+	app.FinishTool("", "bash", false, git, ToolOutcome{Dur: "5ms", Exit: 0, HasExit: true})
 	lines := app.blockLines(len(app.blocks)-1, app.blocks[len(app.blocks)-1], w)
+	add, _ := app.th.Slot(theme.ToolDiffAdded)
 	var addedInk bool
 	for _, ln := range lines {
 		if strings.Contains(runsText(ln.runs), "+new") {
 			fg, _, _ := ln.runs[1].style.Decompose()
-			addedInk = fg == tcell.ColorGreen
+			addedInk = fg == app.cellColor(add)
 		}
 	}
 	if !addedInk {
-		t.Errorf("bash git diff not painted with the terminal's green:\n%s", joinedLines(lines))
+		t.Errorf("bash git diff not painted with the theme's added ink %+v:\n%s", add, joinedLines(lines))
 	}
 
 	// The same tool's ordinary output keeps the plain body colour.
 	app2 := idxApp(100, 40)
-	app2.AddToolBlock("bash", `{"command":"ls"}`)
-	app2.FinishTool("bash", false, "- item one\n- item two\n", ToolOutcome{Dur: "1ms"})
+	app2.AddToolBlock("", "bash", `{"command":"ls"}`)
+	app2.FinishTool("", "bash", false, "- item one\n- item two\n", ToolOutcome{Dur: "1ms"})
 	ln2 := app2.blockLines(len(app2.blocks)-1, app2.blocks[len(app2.blocks)-1], app2.contentWidth())
 	for _, ln := range ln2 {
 		if txt := runsText(ln.runs); strings.Contains(txt, "item one") {
 			fg, _, _ := ln.runs[1].style.Decompose()
-			if fg == tcell.ColorGreen {
+			if fg == app2.cellColor(add) {
 				t.Errorf("plain bash output painted as a diff addition:\n%s", joinedLines(ln2))
 			}
 		}
@@ -641,12 +787,13 @@ func TestToolBoxDetectsDiffInBashOutput(t *testing.T) {
 // red/green is the pair some readers cannot separate, or a custom palette that
 // pins them — still owns them.
 func TestToolBoxDiffHonoursThemeInk(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	app := idxApp(100, 40)
 	app.th = theme.ApplyColorBlindMode(theme.Load("groknight"))
 	w := app.contentWidth()
 	diff := "--- a/f.go\n+++ b/f.go\n@@ -1,3 +1,3 @@\n a\n-b := 1\n+b := 2\n c\n"
-	app.AddToolBlock("edit", `{"path":"f.go"}`)
-	app.FinishTool("edit", false, "[f.go#abc]", ToolOutcome{Dur: "12ms", Diff: diff})
+	app.AddToolBlock("", "edit", `{"path":"f.go"}`)
+	app.FinishTool("", "edit", false, "[f.go#abc]", ToolOutcome{Dur: "12ms", Diff: diff})
 	idx := len(app.blocks) - 1
 	lines := app.blockLines(idx, app.blocks[idx], w)
 	joined := joinedLines(lines)

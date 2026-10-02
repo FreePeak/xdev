@@ -13,11 +13,26 @@ import (
 )
 
 // Ask card (#46): the blocking "the agent needs a decision" panel the `ask`
-// tool (#36) puts on screen. Modelled on the two cards that hold this role in
-// the tools on this machine — Claude Code's AskUserQuestion panel and Grok
-// CLI's ask_user_question card — under xdev's own card rules: modal (it owns
-// every key), floating above the composer, Esc skips, a click picks, and it
-// always resolves so nothing can hang on it.
+// tool (#36) puts on screen. It is a surface of the MAIN PANE in opencode's
+// shape (#480 made the pane the card's home; this made the card look like
+// opencode's own ask box, `packages/tui/src/routes/session/form.tsx`): one
+// ┃ rail down its left edge, a ◆ header row, ordinals with a checkbox,
+// "Type your own answer" as the last row, and a key footer in opencode's
+// wording. It stays under xdev's own card rules — modal (it owns every key),
+// floating above the composer, Esc skips, a click picks, always resolves so
+// nothing can hang on it.
+//
+// What the baselines taught, and what this card copies:
+//   - a batch of questions is ONE tabbed card, not N interruptions;
+//   - every question carries a free-text row — a fixed option list is wrong
+//     more often than a typed answer is, and both baselines let you type;
+//   - "Chat about this" closes the card unanswered: the human wants to say it
+//     in prose in the next turn rather than click a button;
+//   - quick pick (1-9), vim movement (j/k rows, h/l questions), Tab/Shift-Tab
+//     and ←/→ across questions, and a review step that shows what will
+//     actually be submitted before it is;
+//   - a card that cannot be painted closes rather than sit invisible owning
+//     the keyboard (the 5b999f0 invariant).
 //
 // What the baselines taught, and what this card copies:
 //   - a batch of questions is ONE tabbed card, not N interruptions;
@@ -83,16 +98,21 @@ type AskOps struct {
 }
 
 // NewAskOps returns the seam value for the ask tool: Show is AskCard,
-// ShowBatch is AskCardBatch. The timeout is captured here and the per-call
-// argument is ignored, so a sink cannot wait a second, different length of time
-// than the card actually gave.
-func (a *App) NewAskOps(timeout time.Duration) *AskOps {
+// ShowBatch is AskCardBatch. The wait is READ per call, not captured, so a
+// policy the human flips mid-session (/auto-answer) applies to the next card
+// rather than to the next process. The per-call argument is still ignored, so
+// a sink cannot wait a second, different length of time than the card gave; a
+// nil wait means "no timer" — the card waits for the human.
+func (a *App) NewAskOps(wait func() time.Duration) *AskOps {
+	if wait == nil {
+		wait = func() time.Duration { return 0 }
+	}
 	return &AskOps{
 		Show: func(ctx context.Context, req AskRequest, _ time.Duration) (AskAnswer, bool) {
-			return a.AskCard(ctx, req, timeout)
+			return a.AskCard(ctx, req, wait())
 		},
 		ShowBatch: func(ctx context.Context, reqs []AskRequest, _ time.Duration) ([]AskAnswer, bool) {
-			return a.AskCardBatch(ctx, reqs, timeout)
+			return a.AskCardBatch(ctx, reqs, wait())
 		},
 	}
 }
@@ -105,7 +125,7 @@ const (
 	minAskCardWidth = 24
 	askMaxVisible   = 9
 	askMaxQRows     = 4
-	askFreeLabel    = "Type something…"
+	askFreeLabel    = "Type your own answer"
 
 	// Row kinds. The row index is uniform (options, then free text, then chat)
 	// so the key router and the painter cannot disagree about which row a "4"
@@ -113,6 +133,12 @@ const (
 	askRowOption = iota
 	askRowFree
 	askRowChat
+
+	// askMark leads the card's header the way opencode's form does: one glyph
+	// in the question hue, then the title. No framed block in the transcript
+	// leads with a mark, and this is the one surface where the turn is stopped
+	// on purpose.
+	askMark = "◆"
 )
 
 // askRow is one selectable line: an option, the free-text row, or the chat row.
@@ -222,13 +248,16 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		return nil, false
 	}
 	a.mu.Lock()
-	narrow := a.width < minAskCardWidth
+	// The pane, not the terminal: with the context panel open the card is a
+	// surface of the main pane, and a card the panel's columns cut through is
+	// the last thing still reading as a full-width overlay.
+	narrow := a.rightEdge() < minAskCardWidth
 	a.mu.Unlock()
 	if narrow {
 		// No room for the card: say the questions in the transcript and take
 		// the skip path, so the tool's headless policy answers instead of the
 		// questions vanishing.
-		a.askNotice(keep, "window too narrow for the option card — using the recommended path")
+		a.askNotice(keep, "window too narrow for the option card — answer in chat")
 		return nil, false
 	}
 
@@ -272,8 +301,8 @@ func (a *App) AskCardBatch(ctx context.Context, reqs []AskRequest, timeout time.
 		}
 		return res.answers, true
 	case <-deadline:
-		// The wait the headless policy would have run is already spent, so
-		// record the question and let the caller answer from it alone.
+		// The card's wait is the policy's wait, so record the question and
+		// let the caller answer from it alone.
 		a.askNotice(keep, fmt.Sprintf("no answer within %s — using the recommended path", timeout))
 		return nil, false
 	case <-ctx.Done():
@@ -845,20 +874,31 @@ func clamp(v, lo, hi int) int {
 // composer's first input row). Topmost modal: draw() calls it last among the
 // overlays. Callers hold a.mu (draw does), so it must not re-lock: a card it
 // cannot paint resolves through the channel and the parked caller records why.
+//
+// The card is a surface of the MAIN PANE, in opencode's shape: one ┃ rail down
+// its left edge, no box around it. It used to draw a framed ╭─╮ card the
+// terminal's full width, so the context panel cut straight through the middle
+// of the question the human was answering — and a box frame is the transcript's
+// own look, since thinking blocks and tool results are exactly that. Width comes
+// from rightEdge(), so the card ends where the composer, the top bar and the
+// status row end.
 func (a *App) drawAskCard(yComposerTop int) {
 	st := a.ask
 	if st == nil || st.dead {
 		return
 	}
 	st.hit = askHit{}
-	w := a.width
+	w := a.rightEdge()
 	rows := st.rows()
 	// Publish the clamp the key path uses too, so a resize cannot leave the
 	// cursor and the highlight on different rows.
 	st.cur[st.q] = st.cursor(rows)
 
-	x0, x1 := 2, w-3 // border columns; content is x0+1..x1-1
-	inner := x1 - x0 - 1
+	// The rail takes the pane's own gutter column and the body starts two cells
+	// in from it, the same inset the transcript's rows carry, so nothing the
+	// card prints sits flush against its own frame.
+	railX, x1, cx := 1, w-2, 3
+	textW := x1 - cx - 1
 	qLines := askQuestionLines(st.reqs[st.q].Question, w-8)
 	tabs := 0
 	if len(st.reqs) > 1 {
@@ -874,11 +914,11 @@ func (a *App) drawAskCard(yComposerTop int) {
 	painted := []askRowLine(nil)
 	body := len(st.reqs) + 1 // the answers, plus the line saying what Enter does
 	if !st.review {
-		painted = askRowWindow(st, rows, inner, yComposerTop-5-tabs-len(qLines)-msgRows)
+		painted = askRowWindow(st, rows, textW, yComposerTop-3-tabs-len(qLines)-msgRows)
 		body = len(qLines) + len(painted)
 	}
 	body += msgRows
-	height := 2 + tabs + body + 1 // borders, tabs, body, footer
+	height := 1 + tabs + body + 1 // the identity line, the tabs, the body, the footer
 	yTop := yComposerTop - 1 - height
 	// The card may overlap the composer's own top border row (like the other
 	// cards) but never its input rows. An unpaintable card closes: a modal that
@@ -888,50 +928,73 @@ func (a *App) drawAskCard(yComposerTop int) {
 		a.ask = nil
 		select {
 		case st.ch <- askResult{notice: askNotice(st.reqs,
-			"no room above the composer for the option card — using the recommended path")}:
+			"no room above the composer for the option card — answer in chat")}:
 		default:
 		}
 		return
 	}
 
-	box := a.th.Box()
+	// The surface is the transcript's own canvas colour, so what the card covers
+	// still reads as the scrollback it interrupted. (opencode raises its
+	// background a step; a second plane here would fight the highlight band the
+	// card's own selected row already wears.)
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 	textSt := rowSt.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := textSt.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-	selSt := textSt.Background(a.cellColor(a.th.Get(theme.BgHighlight))).Bold(true)
-	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
+	// The rail is the human's accent — the colour the user's own turn already
+	// wears (user-message prefix, prompt text, the msgmenu popup) — and not the
+	// dim border slot the framed content blocks wear. Thinking is magenta and a
+	// tool result is dark grey, and both sit in the scrollback behind a rail of
+	// their own: a card wearing theirs read as one more transcript block.
+	railSt := rowSt.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
+	// Nothing the card prints reaches the pane's edge: the last cell stays blank,
+	// so a long option or footer ends at a column the eye reads as margin rather
+	// than as text jammed against the frame.
 	paint := func(y, x int, s string, st0 tcell.Style) {
-		drawText(a.scr, x, y, truncateCells(s, x1-x, "…"), st0)
+		drawText(a.scr, x, y, truncateCells(s, x1-x-1, "…"), st0)
 	}
-	fill := func(y int) {
-		for x := x0 + 1; x < x1; x++ {
-			a.scr.SetContent(x, y, ' ', nil, rowSt)
+	// One fill per row: the surface, then the rail on the pane's gutter column.
+	// The fill starts at column 0, so a transcript rail or a user band behind
+	// the card cannot show through beside it — a stray rail one cell left of
+	// the card's own is the doubled line a rail must never sit next to. The
+	// rail is the card's whole frame: no rule above or below it, so the card
+	// reads as a panel the turn stopped in, not a box in the scrollback.
+	fill := func(y int, st tcell.Style) {
+		for x := 0; x < x1; x++ {
+			a.scr.SetContent(x, y, ' ', nil, st)
+		}
+		drawText(a.scr, railX, y, "┃", railSt)
+	}
+	// band is the cursor's row in opencode's own mark: the highlight background
+	// covers the whole choice, but starts after the rail — the rail is the
+	// card's frame and no row state paints over it.
+	band := rowSt.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
+	selSt := textSt.Background(a.cellColor(a.th.Get(theme.BgHighlight))).Bold(true)
+	fillBand := func(y int) {
+		for x := railX + 1; x < x1; x++ {
+			a.scr.SetContent(x, y, ' ', nil, band)
 		}
 	}
-	edge := func(y int) { drawText(a.scr, x1, y, box.Vertical, borderSt) }
-
-	// Top border with the card's identity embedded: ╭─ ask · 1/2 ────…──╮
-	title := " ask"
+	y := yTop
+	// The header row, in opencode's shape: the mark in the question hue, then
+	// the title and — for a batch — the position right after it. A headline with
+	// no rule above it reads as a section of the pane; the mark is the tell that
+	// this one is a question the turn is stopped on.
+	fill(y, rowSt)
+	paint(y, cx, askMark, railSt)
+	paint(y, cx+2, "ask", textSt)
 	if tabs > 0 {
-		title += fmt.Sprintf(" · %d/%d", st.q+1, len(st.reqs))
+		pos := fmt.Sprintf("%d/%d", st.q+1, len(st.reqs))
+		if st.review {
+			pos = "Review"
+		}
+		paint(y, cx+2+width("ask")+2, pos, dimSt)
 	}
-	if st.review {
-		title += " · review"
-	} else if st.reqs[st.q].Multi {
-		title += " · multi"
-	}
-	fill(yTop)
-	drawText(a.scr, x0, yTop, box.TopLeft+title, borderSt)
-	if pad := inner - width(title); pad > 0 {
-		drawText(a.scr, x0+2+width(title), yTop, strings.Repeat(box.Horizontal, pad)+box.TopRight, borderSt)
-	} else {
-		drawText(a.scr, x1, yTop, box.TopRight, borderSt)
-	}
-	y := yTop + 1
+	y++
 
 	if tabs > 0 { // the question strip: one chip per tab, ✓ on the answered ones
-		fill(y)
-		x := x0 + 2
+		fill(y, rowSt)
+		x := cx
 		for q := range st.reqs {
 			name, style := st.name(q), textSt
 			if st.summary(q) != "" {
@@ -947,7 +1010,6 @@ func (a *App) drawAskCard(yComposerTop int) {
 			paint(y, x, name, style)
 			x += width(name) + 2
 		}
-		edge(y)
 		y++
 	}
 
@@ -955,88 +1017,96 @@ func (a *App) drawAskCard(yComposerTop int) {
 		for q := range st.reqs {
 			line, style := st.name(q)+": ", textSt
 			if q == st.q {
-				line, style = "❯ "+line, selSt
-			} else {
-				line = "  " + line
+				style = selSt
 			}
 			if sum := st.summary(q); sum != "" {
 				line += sum
 			} else {
 				line, style = line+"(no answer)", dimSt
 			}
-			fill(y)
-			paint(y, x0+1, line, style)
-			edge(y)
+			fill(y, rowSt)
+			paint(y, cx, line, style)
 			st.hit.addRow(y, q)
 			y++
 		}
-		note := "Enter submit answers · ←/→ edit a question · Esc back"
+		note := "enter submit answers · ←/→ edit a question · esc back"
 		if q := st.firstUnanswered(); q >= 0 {
-			note = "Enter answers " + st.name(q) + " · ↑/↓ pick · Esc back"
+			note = "enter answers " + st.name(q) + " · ↑↓ pick · esc back"
 		}
-		fill(y)
-		paint(y, x0+1, note, dimSt)
-		edge(y)
+		fill(y, rowSt)
+		paint(y, cx, note, dimSt)
+		y++
 	} else {
 		for _, line := range qLines {
-			fill(y)
-			paint(y, x0+1, line, textSt.Bold(true))
-			edge(y)
+			fill(y, rowSt)
+			paint(y, cx, line, textSt)
 			y++
 		}
 		for _, pl := range painted {
-			style := rowSt
+			style := textSt
 			switch {
 			case pl.row == st.cur[st.q]:
 				style = selSt
-			case rows[pl.row].kind != askRowOption && rows[pl.row].label == "":
-				style = dimSt
 			case rows[pl.row].kind == askRowChat:
 				style = dimSt
 			}
-			fill(y)
-			paint(y, x0+1, pl.text, style)
-			edge(y)
+			// opencode's cursor is a background on the choice's own box, so it
+			// covers the label and the description under it and starts after the
+			// rail: the rail is the card's frame, not part of the choice.
+			if pl.row == st.cur[st.q] {
+				fillBand(y)
+			} else {
+				fill(y, rowSt)
+			}
+			paint(y, cx, pl.text, style)
 			st.hit.addRow(y, pl.row)
 			y++
 		}
 		if st.msg != "" { // the one thing the human just did wrong, in one line
-			fill(y)
-			paint(y, x0+1, "  "+st.msg, textSt.Foreground(a.cellColor(a.th.Get(theme.AccentError))))
-			edge(y)
+			fill(y, rowSt)
+			paint(y, cx, st.msg, textSt.Foreground(a.cellColor(a.th.Get(theme.AccentError))))
 			y++
 		}
 	}
 
-	// Footer: the keys that work on this screen, then the bottom border.
-	fill(y)
-	paint(y, x0+1, a.askFooter(st, rows), textSt.Foreground(a.cellColor(a.th.Get(theme.Gray))))
-	edge(y)
-	y++
-	fill(y)
-	drawText(a.scr, x0, y, box.BottomLeft+strings.Repeat(box.Horizontal, inner)+box.BottomRight, borderSt)
+	// Footer: the keys that work on this screen. No bottom rule — the rail
+	// runs the card's whole height and the footer is the last row of it.
+	fill(y, rowSt)
+	paint(y, cx, a.askFooter(st, rows), textSt.Foreground(a.cellColor(a.th.Get(theme.Gray))))
 }
 
-// askFooter names the keys that work here, and only the ones that fit.
+// askFooter names the keys that work here, in opencode's shape: the key glyph,
+// then the verb, three spaces between the hints, and the card's own extras
+// between "select" and "esc" — the digits and the z/x rows the card carries
+// that opencode's form has no shorthand for.
+//
+// One word differs on purpose: opencode's esc dismisses the request and the
+// tool fails, while xdev's esc leaves the question on the record and lets the
+// tool fall back to its own policy (#451) — so it is "skip", not "dismiss".
 func (a *App) askFooter(st *askState, rows []askRow) string {
 	if st.review {
-		return "Enter submit · ↑/↓ or j/k review · Esc back · x skip"
+		return "↑↓ review   enter submit   esc back"
 	}
 	if rows[st.cursor(rows)].kind == askRowFree {
-		return "type the answer · Enter submit · Backspace edit · ↑ leaves the text"
+		return "backspace edit   ↑↓ leave   enter save"
 	}
-	parts := []string{"↑/↓ select", "Enter confirm"}
-	if st.reqs[st.q].Multi {
-		parts[0] = "↑/↓ move · Space toggle"
-	}
-	// The batch hint leads because it is the one a human cannot guess: two
-	// questions are on the card and nothing else says how to reach the next.
-	// Quick pick reads off the row numbers, so it is last of the optional set.
+	var parts []string
 	if len(st.reqs) > 1 {
-		parts = append(parts, "Tab/←→ questions")
+		parts = append(parts, "⇆ tab")
 	}
-	parts = append(parts, "1-9 quick pick", "z type an answer", "x chat instead", "Esc skip")
-	return strings.Join(parts, " · ")
+	parts = append(parts, "↑↓ select")
+	if st.reqs[st.q].Multi {
+		parts = append(parts, "space toggle")
+	}
+	// Enter's verb follows what it does: Space toggles a box and stays put on a
+	// multi card, so Enter is what closes the question with the set it holds;
+	// a single-select Enter takes the cursor's row, which opencode calls confirm.
+	enter := "enter confirm"
+	if st.reqs[st.q].Multi {
+		enter = "enter done"
+	}
+	parts = append(parts, enter, "1-9 pick", "z type", "x chat", "esc skip")
+	return strings.Join(parts, "   ")
 }
 
 // askQuestionLines wraps the question, capped so a long question cannot push
@@ -1054,35 +1124,37 @@ func askQuestionLines(text string, cells int) []string {
 	return lines
 }
 
-// askRowLines renders one row as every line it takes: the cursor, the box, the
-// ordinal, then the label — which wraps instead of running under the right
-// border. The description follows on its own indented lines (omp's shape: the
-// reason to pick a row is not a tail to cut off), capped at two with a "…"
-// saying there is more. The ordinal doubles as the quick-pick hint, so the
-// free-text and chat rows get one too.
+// askRowLines renders one row as every line it takes, in opencode's shape: the
+// ordinal, the box, then the label — which wraps instead of running under the
+// pane's edge. The description follows on its own lines under the label (omp's
+// shape: the reason to pick a row is not a tail to cut off), capped at two with
+// a "…" saying there is more. No cursor column: opencode marks the cursor with
+// a focused background, and xdev's rows are painted that way too, so a ❯ here
+// would put the cursor in the layout a second time. The ordinal is the
+// quick-pick hint, so the free-text and chat rows get one too.
 func askRowLines(st *askState, r askRow, i, cells int) []string {
-	box, here := "  ", " " // two fixed columns: the cursor never shifts a label
-	if r.kind == askRowOption {
-		box = "☐ "
-		if st != nil && hasLabel(st.sel[st.q], r.label) {
-			box = "☑ "
-		}
-	}
-	if st != nil && i == st.cur[st.q] {
-		here = "❯"
-	}
+	prefix := fmt.Sprintf("%d. ", i+1)
 	label := r.label
 	switch r.kind {
 	case askRowFree:
 		if label == "" {
 			label = askFreeLabel
 		}
-		label = `"` + label + `" ▍` // the text row reads as a field, cursor included
+		if st != nil && st.cur[st.q] == i {
+			label += " ▍" // the text row's cursor: it is the row you are typing into
+		}
+	case askRowOption:
+		// opencode's checkbox, always on a single-select row too: the mark says
+		// "this one is picked" the same way whether or not the card multi-picks.
+		if st != nil && hasLabel(st.sel[st.q], r.label) {
+			prefix = fmt.Sprintf("%d. [✓] ", i+1)
+		} else {
+			prefix = fmt.Sprintf("%d. [ ] ", i+1)
+		}
 	}
 	if st != nil && hasLabel(st.reqs[st.q].Recommended, r.label) {
 		label += "  (recommended)"
 	}
-	prefix := fmt.Sprintf("%s%s%d. ", here, box, i+1)
 	wrapped := wrap(label, max(1, cells-width(prefix)))
 	lines := make([]string, 0, len(wrapped)+2)
 	lines = append(lines, prefix+wrapped[0])
@@ -1091,14 +1163,14 @@ func askRowLines(st *askState, r askRow, i, cells int) []string {
 		lines = append(lines, indent+line)
 	}
 	if r.desc != "" {
-		descW := max(1, cells-6)
+		descW := max(1, cells-width(prefix))
 		desc := wrap(r.desc, descW)
 		if len(desc) > 2 {
 			desc = desc[:2]
 			desc[1] = truncateCells(desc[1]+"…", descW, "…")
 		}
 		for _, line := range desc {
-			lines = append(lines, "      "+line)
+			lines = append(lines, indent+line)
 		}
 	}
 	return lines
@@ -1106,10 +1178,13 @@ func askRowLines(st *askState, r askRow, i, cells int) []string {
 
 // askRowLine is one painted line of the option list, tagged with the selectable
 // row it belongs to (a wrapped row owns several, so a click and the highlight
-// land on the row, not the line).
+// land on the row, not the line). head is the row's first line: the band
+// starts there, the way opencode's focused background covers the choice itself
+// and not the description hanging under it.
 type askRowLine struct {
 	row  int
 	text string
+	head bool
 }
 
 // askRowWindow picks the rows the card paints, as the wrapped lines they cost.
@@ -1135,8 +1210,8 @@ func askRowWindow(st *askState, rows []askRow, cells, budget int) []askRowLine {
 	}
 	out := make([]askRowLine, 0, used)
 	for i := top; i < top+vis; i++ {
-		for _, line := range askRowLines(st, rows[i], i, cells) {
-			out = append(out, askRowLine{row: i, text: line})
+		for j, line := range askRowLines(st, rows[i], i, cells) {
+			out = append(out, askRowLine{row: i, text: line, head: j == 0})
 		}
 	}
 	return out

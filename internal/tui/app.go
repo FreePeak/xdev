@@ -5,6 +5,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,11 +21,57 @@ import (
 // Status carries the status-line state. The running indicator's frames come
 // from the theme (Symbols.SpinnerFrames → preset default, see
 // theme.Theme.SpinnerFrames).
+// TabInfo is one open session the status row and tab cycle expose.
+// cmd owns the set; the App only paints what it is given.
+type TabInfo struct {
+	ID, Title                string
+	Running, Unread, Current bool
+}
+
 type Status struct {
 	Model     string
 	SessionID string
+	// TokensIn is the session's FRESH input — the provider's input
+	// exclusive of cache reads, which is the split every provider
+	// normalizes onto (input + output + cacheRead = totalTokens) and
+	// the split compaction prices against. It is NOT the prompt the
+	// model saw: on a cached conversation that is TokensCache too, and
+	// the "tokens" segment shows both.
 	TokensIn  int64
 	TokensOut int64
+	// TokensCache is the prompt-cache reads billed across the session,
+	// and TokensThink the reasoning already counted inside TokensOut
+	// (completion_tokens is inclusive of reasoning_tokens on every
+	// wire xdev speaks). Both are tracked so the status row can show
+	// the split the glyphs claim instead of one half of it.
+	TokensCache int64
+	TokensThink int64
+	// ToolCalls counts the tool calls this session opened, ToolErrors the
+	// ones that came back failed, and ToolWork the wall time they took.
+	// AddToolBlock counts a call, FinishTool settles it. These are the
+	// /usage panel's third block: the status row answers "how much", the
+	// panel answers "spent how long and on what".
+	ToolCalls  int
+	ToolErrors int
+	ToolWork   time.Duration
+	// TokensCacheWrite is the prompt-cache WRITES billed across the
+	// session, kept beside TokensCache (the reads) because the wire
+	// reports them as separate buckets and the token pill's dialog breaks
+	// out all three. Zero on a provider that reports no cache writes.
+	TokensCacheWrite int64
+	// Turns and Steps count what the session asked for: one turn per
+	// finished run, one step per provider request inside it — dsh's
+	// TimePill "{turns} turns {steps} steps". They are rendered by the
+	// pill alone, which is the only place that has the room.
+	Turns int
+	Steps int
+	// LLMWork is the wall time the provider's own messages took
+	// (msg.DurationMS — request to last token, queue included), and
+	// TTFTCount/TTFTSum the turns' time-to-first-token so /usage can report
+	// an average instead of the last reading the status row shows.
+	LLMWork   time.Duration
+	TTFTSum   int64
+	TTFTCount int64
 	// Cost is the session spend in USD (0 when the provider reports none),
 	// CtxWindow the model's context window (0 = unknown) and Rate the last
 	// measured decode speed in output tokens/second (0 = never measured).
@@ -65,8 +112,13 @@ type Status struct {
 // the exported mutators (mutex-guarded); the UI loop redraws at ~30fps and
 // on every key event.
 type App struct {
-	scr    tcell.Screen
-	th     *theme.Theme
+	scr tcell.Screen
+	th  *theme.Theme
+	// md/mdFor/mdSet are mdStyle's memo (markdown.go). mdFor is the theme the
+	// memo was built from, so SetTheme — which swaps a.th — rebuilds it.
+	md     mdStyle
+	mdFor  *theme.Theme
+	mdSet  bool
 	mu     sync.Mutex
 	blocks []*Block
 	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
@@ -100,21 +152,37 @@ type App struct {
 	// (UI thread; mu-guarded.)
 	debugMouse     bool
 	debugMouseLine string
-	keyMap       *KeyMap // remappable keybinding layer
-	st           Status
+	logMu          sync.Mutex
+	logFile        *os.File
+	keyMap         *KeyMap // remappable keybinding layer
+	st             Status
+	tabs           []TabInfo // open sessions (cmd owns the set; App paints)
+	onTabCycle     func(dir int, onlyUnread bool)
+	onTabPick      func(id string) error // /tabs row: focus that open session
+	// onTabClose closes one open session (opencode session_delete): the
+	// session.delete chord and a click on a tab's × both land here, and a
+	// nil degrades both to a notice.
+	onTabClose func(id string) error
+	// tabHits is the tab strip's clickable geometry, published each frame by
+	// the painter (tabstrip.go).
+	tabHits []tabHit
 	// The decode window of the message being streamed: the first and last
-	// delta, and the runes between them. AddUsage closes the window and
-	// turns it into st.Rate; starting a run discards an unfinished one.
-	// Guarded by mu.
+	// delta. AddUsage closes the window and turns it into st.Rate;
+	// BeginMessage (one EventStart) discards one a dead turn left open, so
+	// the next message's rate is never divided by the previous one's elapsed
+	// time. Guarded by mu.
 	deltaFirst, deltaLast time.Time
-	deltaRunes            int64
 
 	// cmd is the active tool call the session is running (set by
-	// the agent loop via SetActiveCommand, displayed left of the
-	// path). cmdMu guards cmd/cmdActive separately from st so the
-	// drawer never reads a half-written command.
+	// the agent loop via BeginActiveCommand, displayed left of the
+	// path). cmdMu guards cmd/cmdActive/cmdDepth separately from st
+	// so the drawer never reads a half-written command. cmdDepth is
+	// a COUNT, not a flag: same-batch calls run concurrently, so the
+	// first of two to finish must not clear the indicator while the
+	// other is still in flight.
 	cmd       string
 	cmdActive bool
+	cmdDepth  int
 	cmdMu     sync.Mutex
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
@@ -122,50 +190,82 @@ type App struct {
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
 
+	// statusPop is the detail panel a click on a status-row pill opens,
+	// and statusHits the pills' rectangles the painter published this
+	// frame — the same publish-then-hit-test contract a.jump keeps, so a
+	// pill that is not on screen cannot be clicked (statuspill.go).
+	statusPop  *statusPopup
+	statusHits []statusHit
+
 	// diffOv is the full-width diff overlay shown when the user
 	// clicks a changed file in the dock; nil when closed.
 	diffOv *diffOverlay
+
+	// msgm is the user-message menu a click on a ❯ row opens; nil = closed.
+	msgm *msgMenu
+	// msgv is the read-only message surface behind the menu's "jump" row.
+	msgv *msgView
+	// msgArmed records that a press landed on a user prompt. The menu opens on
+	// the no-motion RELEASE of that press, not on the press itself, so a drag
+	// that starts on a prompt still selects text (see msgmenu.go).
+	msgArmed bool
+	// msgFire is a menu action built under a.mu and run after unlocking — the
+	// session rewind replays the transcript and must not run locked.
+	msgFire func()
 
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
 
+	// renderMermaid draws a ```mermaid fence as a diagram instead of a code
+	// band (settings key `renderMermaid`, default on). It is display-only and
+	// per-render, so flipping it re-stamps nothing but the render cache: the
+	// next frame redraws the same blocks as source.
+	renderMermaid bool
+
 	width, height int
 
 	// Wired by cmd: onSend runs the agent turn; onCancel aborts it; onQuit exits.
-	ops               *SessionOps
-	modelOps          *ModelOps                              // session lifecycle, wired by cmd (nil → notices)
-	planOps           *PlanOps                               // /plan, wired by cmd (nil → notices)
-	advisorOps        *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
-	memoryOps         *MemoryOps                             // /memory, wired by cmd (nil → notices)
-	themeOps          *ThemeOps                              // /theme, wired by cmd (nil → notices)
-	connectOps        *ConnectOps                            // /connect, wired by cmd (nil → notices)
-	prewalkOps        *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
-	goalOps           *GoalOps                               // /goal, wired by cmd (nil → notices)
-	vibeOps           *VibeOps                               // /vibe, wired by cmd (nil → notices)
-	spick             *sessionPicker                         // /resume selector (nil = closed)
-	onPickerResume    func(id string)                        // wired by cmd: performs the resume
-	onPickerSearch    func(query string) []SessionPickerItem // wired by cmd: prompt-text matches (nil → local id+title filter)
-	onPickerPinToggle func(id string)                        // wired by cmd: persists the pin sidecar
-	onPickerDelete    func(id string) error                  // wired by cmd: deletes JSONL + artifacts after confirmation
-	tpick             *treeSelector                          // /tree selector (nil = closed)
-	treeData          func() []TreeEntry                     // entry snapshot, wired by cmd
-	treeLabelLoad     func() map[string]string
-	treeLabelSave     func(id, label string) error
-	treeLabels        map[string]string        // id→label snapshot, refreshed on open
-	settingsOps       *SettingsOps             // /settings, wired by cmd (nil → notices)
-	thinkingOps       *ThinkingOps             // /thinking, wired by cmd (nil → notices)
-	cwd               string                   // working directory (the status row's left side)
-	branch            string                   // git branch for the top bar ("" when none)
-	commandDir        string                   // markdown command discovery root
-	pathRoot          string                   // @-completion root (empty disables the menu)
-	pathList          func(string) []PathEntry // one directory's entries (the only source)
-	extCommands       map[string]string        // "/server:cmd" -> description
-	extRun            ExtensionCommand
-	renderers         map[string]RenderSpec   // tool name -> declarative render spec
-	sessionBranch     func(args string) error // /branch to an entry id
-	resumeList        func(cwd string) error  // /resume session listing
-	onSend            func(text string)
+	ops           *SessionOps
+	modelOps      *ModelOps      // session lifecycle, wired by cmd (nil → notices)
+	planOps       *PlanOps       // /plan, wired by cmd (nil → notices)
+	autoAnswerOps *AutoAnswerOps // /auto-answer, wired by cmd (nil → notices)
+	// version is the build this process is (`xdev version`), painted in the
+	// context dock's footer; empty (a dev build) paints nothing.
+	version            string
+	advisorOps         *AdvisorOps                            // /advisor, wired by cmd (nil → notices)
+	memoryOps          *MemoryOps                             // /memory, wired by cmd (nil → notices)
+	themeOps           *ThemeOps                              // /theme, wired by cmd (nil → notices)
+	connectOps         *ConnectOps                            // /connect, wired by cmd (nil → notices)
+	prewalkOps         *PrewalkOps                            // /prewalk, wired by cmd (nil → notices)
+	goalOps            *GoalOps                               // /goal, wired by cmd (nil → notices)
+	scheduleOps        *ScheduleOps                           // /schedule, wired by cmd
+	vibeOps            *VibeOps                               // /vibe, wired by cmd (nil → notices)
+	spick              *sessionPicker                         // /resume selector (nil = closed)
+	onPickerResume     func(id string)                        // wired by cmd: performs the resume
+	onPickerSearch     func(query string) []SessionPickerItem // wired by cmd: prompt-text matches (nil → local id+title filter)
+	onPickerPinToggle  func(id string)                        // wired by cmd: persists the pin sidecar
+	onPickerDelete     func(id string) error                  // wired by cmd: deletes JSONL + artifacts after confirmation
+	tpick              *treeSelector                          // /tree selector (nil = closed)
+	treeData           func() []TreeEntry                     // entry snapshot, wired by cmd
+	treeLabelLoad      func() map[string]string
+	treeLabelSave      func(id, label string) error
+	treeLabels         map[string]string        // id→label snapshot, refreshed on open
+	settingsOps        *SettingsOps             // /settings, wired by cmd (nil → notices)
+	settingsOverlayOps *SettingsOverlayOps      // /settings overlay, wired by cmd (nil → disabled)
+	thinkingOps        *ThinkingOps             // /thinking, wired by cmd (nil → notices)
+	cwd                string                   // working directory (the status row's left side)
+	branch             string                   // git branch for the top bar ("" when none)
+	commandDir         string                   // markdown command discovery root
+	pathRoot           string                   // @-completion root (empty disables the menu)
+	pathList           func(string) []PathEntry // one directory's entries (the only source)
+	pathIdx            pathIndex                // background whole-cwd file index (pathindex.go)
+	extCommands        map[string]string        // "/server:cmd" -> description
+	extRun             ExtensionCommand
+	renderers          map[string]RenderSpec   // tool name -> declarative render spec
+	sessionBranch      func(args string) error // /branch to an entry id
+	resumeList         func(cwd string) error  // /resume session listing
+	onSend             func(text string)
 	// onSendImages is the multimodal send: the draft with every attached
 	// image's chip stripped, plus the payloads in prompt order. It returns
 	// true when it took the turn. False (or nil) means the attachments cannot
@@ -175,20 +275,75 @@ type App struct {
 	onSendImages func(text string, imgs []PasteImage) bool
 	onCancel     func()
 	onQuit       func()
+	// onQuitRunning is the quit path when a turn is in flight: true means
+	// "detach it and leave" (opencode default), false means "kill it".
+	// Wired by cmd from settings tui.exitDetach. nil falls back to kill
+	// (onCancel then onQuit), matching the pre-detach behaviour.
+	onQuitRunning func() bool
 	// onRetry re-runs the current session's last turn with no new prompt (the
 	// F5 recovery for a stream a dropped connection cut short). Wired by cmd;
 	// nil degrades the chord to a notice.
 	onRetry func()
+	// onQueue is the mid-turn submit: a prompt typed while a turn is running
+	// becomes a pending entry (queue.go) instead of being refused, and this
+	// handler decides what "delivered" means for the host. cmd hands it to the
+	// live agent's Steer channel, so it reaches the model at the next step
+	// boundary of the SAME run rather than after it. A false return means the
+	// host declined it (a guest room cannot forward into a live turn), and the
+	// queued row is withdrawn rather than left promising a delivery that will
+	// never happen. nil (a headless host, a test) means a mid-turn submit is
+	// refused again, which is the pre-queue behavior and never a silent drop:
+	// the draft comes back to the composer.
+	onQueue func(text string) bool
+	// onSendNow is the immediate-delivery path: interrupt the live turn,
+	// acknowledge it, and run this message now (the row's [send now] button
+	// and the F6 chord). It is a separate seam from onQueue because the two
+	// have genuinely different outcomes — one joins the run in flight, the
+	// other replaces it — and a host that wires only the first must still be
+	// able to say "send now is not wired in this build" rather than silently
+	// queueing something the user asked to have sent.
+	onSendNow func(text string)
+	// queue holds the pending mid-turn submits in delivery order and queueSeq
+	// is the append counter (queue.go). queueHits is the last painted frame's
+	// geometry — the mouse hit-tests against what was on screen, not against
+	// geometry recomputed on the spot, the same contract the message menu
+	// uses. queueFire is an armed send-now action, run AFTER a.mu is
+	// released: interrupting a turn and starting another is not something to
+	// do while holding the lock the transcript paints under.
+	queue     []queuedEntry
+	queueSeq  int
+	queueHits []queueHit
+	queueFire func()
 
-	keyq   chan tcell.Event
-	dirty  chan struct{}
-	quitCh chan struct{}
+	keyq     chan tcell.Event
+	dirty    chan struct{}
+	quitCh   chan struct{}
+	quitOnce sync.Once
 
 	// UI-loop stall detection (stall.go). loopBeat is written from the loop
 	// and read by the watchdog, so it is atomic rather than mutex-guarded: a
 	// watchdog that took App.mu could not report a loop stuck holding it.
 	loopBeat atomic.Int64
 	stallDir string
+	// stallExitAfter is how long a condemned episode may stay condemned
+	// before the watchdog gives up on it and ends the session
+	// (stall.go). 0 disables that. Set with SetStallExitAfter.
+	stallExitAfter time.Duration
+	// wedged records that the loop stopped beating. The quit chord can only
+	// be honoured by the loop itself, so a loop wedged in a blocking tty
+	// write cannot read a key: the chord is served here instead, off the
+	// loop, by the same goroutine that feeds keyq.
+	wedged atomic.Bool
+	// frameDropped is the screen's own dropped-frame flag
+	// (tty_deadline.go): set when a frame write ran out of time, i.e. the
+	// terminal behind this pane could not keep up. Nil when the screen is
+	// not a deadline-bounded one, and then nothing is repaired because
+	// nothing was dropped. Wired by SetFrameDropped.
+	frameDropped *atomic.Bool
+	// restoreTty puts the terminal back when the watchdog gives up on the
+	// loop (stall.go). Wired to scr.Fini; nil leaves the exit to whatever
+	// the caller restores.
+	restoreTty func()
 	// rowIdx is the transcript's row layout and per-block render cache; the
 	// per-frame cost is the viewport, not the session (see rowindex.go).
 	rowIdx rowIndex
@@ -234,27 +389,46 @@ type App struct {
 	// selBar* is the scrollbar's geometry as the painter last drew it, published
 	// every frame like the picker's hit table: a press is tested against the bar
 	// that is on screen rather than a re-derivation that could disagree with it.
+	// The thumb is measured in HALF ROWS (opencode's slider unit, scroll.go
+	// Scrollbar): selBarPos/selBarEnd are its span on a 2*selBarVP-tall track, so
+	// a grab can land on the half row the finger is really over.
 	// (UI thread; mu-guarded.)
 	selBarOn    bool
 	selBarX     int // the screen column the bar was painted in (the transcript's last column, or 0)
 	selBarVP    int // visible transcript rows the bar spans
 	selBarTotal int // transcript rows at paint time
-	selBarThumb int // thumb rows at paint time
-	selBarPos   int // thumb's first track row at paint time
-	// selNotice is the copy confirmation (omp's showStatus for a copy); it
-	// rides the composer divider until selNoticeUntil.
-	selNotice      string
-	selClickTime  time.Time
-	selClickCount int
+	selBarPos   int // thumb's first half row on the track at paint time
+	selBarEnd   int // thumb's half-row end at paint time (exclusive)
+	// The sticky header's geometry at paint time. stickyHdr is how many rows of
+	// the transcript's top the header owns (its prompt plus the gap under it),
+	// stickyVis how many of those are the prompt's own rows, stickyBlock the
+	// prompt it pinned (-1 when none) and stickyDoc the document row its first
+	// painted row shows.
+	//
+	// Both numbers matter because a header row is NOT the document row its
+	// screen position names: below the header, screen row y is document row
+	// start+(y-top), exactly as it always was, but a header row shows a row of
+	// the pinned prompt, which the viewport has already scrolled past.
+	// Published every frame with the rest of the geometry; (UI-thread;
+	// mu-guarded.)
+	stickyHdr   int
+	stickyVis   int
+	stickyBlock int
+	stickyDoc   int32
+	// toasts is the live notice stack (toast.go): the copy confirmation, a
+	// failed chord, a failed MCP server — everything transient, painted in
+	// the top-right corner and dropped on its own deadline.
+	toasts               []toast
+	selClickTime         time.Time
+	selClickCount        int
 	selClickX, selClickY int
-	selClickLocked bool // re-entry guard (no mu needed on the App)
+	selClickLocked       bool // re-entry guard (no mu needed on the App)
 	// Double/triple-click detection: selClickTime/selClickCount/selClickX/Y
 	// track the last primary-button release so rapid repeats on the same
 	// position expand the gesture — double-click selects the word,
 	// triple-click selects the whole line. Window and tolerance are pinned
 	// constants (clickWordWindow, clickWordTol), not settings.
 	// Guarded by mu; reset by clearClick.
-	selNoticeUntil time.Time
 	// thinkFocus is the reasoning box a click has aimed the wheel at: clicking a
 	// box focuses it and a click anywhere else lets it go, so the wheel scrolls
 	// the transcript by default instead of whatever box happens to sit under the
@@ -263,6 +437,11 @@ type App struct {
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
+	// jump is the "↓ n new" chip the painter draws over the transcript
+	// whenever rows are hidden below the viewport — cleared every frame, so
+	// a click is tested against the chip that is actually on screen
+	// (selection.go press).
+	jump panelRect
 	// Pasted images (paste.go): the payloads the chips in the composer name,
 	// the bracketed-paste window, and the clipboard reader. All three are
 	// UI-thread-owned exactly like the editor beside them — no lock covers
@@ -279,10 +458,33 @@ type App struct {
 	// state, its built rows. Nil until a source is wired; every reader of it
 	// tolerates that, because a session with no dock is a normal session.
 	dock *dockState
+	// selDockRows is the dock panel's rows, populated by paint()
+	// while the dock is on, so a selection drag over the panel
+	// copies the dock text (session id, task name) instead of
+	// the transcript rows painted underneath. nil when the dock
+	// is off. Callers hold a.mu.
+	selDockRows []selRow
+	// linkHits is the clickable region of the last painted frame. It follows
+	// resize, scroll, and dock geometry because paint rebuilds it from the exact
+	// run positions it draws.
+	linkHits []linkHit
+	// linkOpen is the platform browser opener; tests inject a recorder. The
+	// default is nil so the function stays a small seam rather than a new
+	// subsystem.
+	linkOpen func(string) error
+	// linkClick is the target under the press that began the current primary
+	// gesture. A release opens it only when the pointer never moved.
+	linkClick string
 	// dockSetMode persists a display policy the human changed with Alt+s
 	// (settings `sidebarMode`); nil = this session cannot persist it.
 	dockSetMode func(mode string)
 }
+
+// SetFrameDropped wires the dropped-frame flag draw() consults after every
+// flush. Pass the flag NewDeadlineScreen returned; nil leaves draw() with
+// nothing to repair, which is correct for a screen whose writes cannot time
+// out. Call before Run.
+func (a *App) SetFrameDropped(flag *atomic.Bool) { a.frameDropped = flag }
 
 type blockKey struct {
 	idx      int
@@ -298,6 +500,16 @@ type blockKey struct {
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// mermaid stamps whether a ```mermaid fence in this block drew as a
+	// diagram. Flipping the setting changes every block's rows without any of
+	// them changing length, so the stamp has to say which way it rendered or
+	// a toggled transcript would keep the cache it should have dropped.
+	mermaid bool
+	// live stamps a result box whose text is still growing. Length alone is
+	// not enough there: a tool that rewrites the same window of bytes (a
+	// progress bar, a counter) keeps the tail the same size while the text
+	// inside it changes.
+	live uint64
 }
 
 // New creates the App over an initialized screen.
@@ -309,12 +521,13 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		km = DefaultKeyMap()
 	}
 	return &App{
-		keyMap:       km,
-		scr:          scr,
-		th:           th,
-		st:           Status{Model: model, SessionID: sessionID},
-		showThinking: true,
-		width:        w, height: h,
+		keyMap:        km,
+		scr:           scr,
+		th:            th,
+		st:            Status{Model: model, SessionID: sessionID},
+		showThinking:  true,
+		renderMermaid: true,
+		width:         w, height: h,
 		keyq:   make(chan tcell.Event, 64),
 		dirty:  make(chan struct{}, 1),
 		quitCh: make(chan struct{}),
@@ -334,13 +547,39 @@ func (a *App) SetLocation(cwd string) {
 	a.mu.Unlock()
 }
 
-// SetActiveCommand sets the running tool call shown on the status
-// row's left side (the cwd is its right neighbor). Empty name and
-// active=false clear it (a run ending, or a prompt-only turn).
-func (a *App) SetActiveCommand(name string, active bool) {
+// SetVersion records the build this process is (`xdev version`): the context
+// dock's footer row, so "which build is this" has an answer on screen. Empty
+// is a dev build and paints nothing.
+func (a *App) SetVersion(v string) {
+	a.mu.Lock()
+	a.version = strings.TrimSpace(v)
+	a.mu.Unlock()
+	a.DockBump()
+}
+
+// BeginActiveCommand notes that a tool call started, so the status row's left
+// side ("● name") shows the work. Nested calls are counted, not replaced: two
+// concurrent calls to the same tool must not clear the indicator when the
+// first one finishes.
+func (a *App) BeginActiveCommand(name string) {
 	a.cmdMu.Lock()
-	a.cmd = name
-	a.cmdActive = active
+	a.cmd, a.cmdActive = name, true
+	a.cmdDepth++
+	a.cmdMu.Unlock()
+	a.poke()
+}
+
+// EndActiveCommand notes that a started call finished. The indicator clears
+// only when the last one does.
+func (a *App) EndActiveCommand() {
+	a.cmdMu.Lock()
+	if a.cmdDepth > 0 {
+		a.cmdDepth--
+	}
+	if a.cmdDepth == 0 {
+		a.cmdActive = false
+		a.cmd = ""
+	}
 	a.cmdMu.Unlock()
 	a.poke()
 }
@@ -375,9 +614,27 @@ func (a *App) SetHandlers(onSend func(text string), onCancel, onQuit func()) {
 	a.onSend, a.onCancel, a.onQuit = onSend, onCancel, onQuit
 }
 
+// SetQuitRunning wires the detach-on-quit path. When a turn is running and
+// the user hits the quit chord, this is called instead of onCancel+onQuit.
+// Returning true means the turn was (or will be) detached and the UI should
+// exit without cancelling; false means fall through to cancel-then-quit.
+func (a *App) SetQuitRunning(fn func() bool) { a.onQuitRunning = fn }
+
 // SetImageSend wires the multimodal send path (see App.onSendImages).
 func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 	a.onSendImages = fn
+}
+
+// SetQueueHandlers wires the mid-turn submit path (issue #157): onQueue for a
+// prompt typed while a turn is running — it joins the run in flight through
+// the host's steer channel — and onSendNow for the immediate-delivery button
+// and its chord, which interrupts the turn and runs the message instead. Both
+// are separate from SetHandlers because they are a different outcome, not a
+// variation on sending. A host that wires only onQueue still gets the queue;
+// a host that wires neither keeps the pre-queue behavior, so the submit is
+// refused with a reason instead of vanishing.
+func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(text string)) {
+	a.onQueue, a.onSendNow = onQueue, onSendNow
 }
 
 // SetVision wires "can the live model take an image?", which cmd answers from
@@ -485,22 +742,6 @@ func (a *App) SetStartupNotice(text string) {
 	a.poke()
 }
 
-// SetNotice shows text on the composer divider for d and then drops it, the
-// channel a failed chord already answers on (paste.go setNotice). For a caller
-// off the UI thread — the MCP connect that lands mid-session — so it takes the
-// lock, unlike the UI-thread setNotice it shares the slot with.
-//
-// ponytail: one slot, so a copy confirmation inside d overwrites this notice
-// (and vice versa). Fixing that means a second row of chrome on the divider;
-// worth it only if a real report of a lost notice shows up.
-func (a *App) SetNotice(text string, d time.Duration) {
-	a.mu.Lock()
-	a.selNotice = text
-	a.selNoticeUntil = time.Now().Add(d)
-	a.mu.Unlock()
-	a.poke()
-}
-
 // BeginAssistant starts (or continues into) the streaming assistant block. A
 // stream that arrives with no turn opened (a feed that outlived its cancel)
 // opens its work span here too, so the time segment never loses the seconds
@@ -565,26 +806,49 @@ func (a *App) AppendThinking(delta string) {
 }
 
 // noteDelta extends the decode window with one streamed delta. Callers hold
-// a.mu. Runes are counted for the live estimate only; the settled rate is the
-// provider's own token count over the same window.
+// a.mu.
 func (a *App) noteDelta(delta string) {
+	a.extendWindow()
+}
+
+// noteToolDelta extends the window for a tool call's argument stream, which
+// the provider counts in output_tokens even though the transcript never
+// renders it. Callers hold a.mu.
+func (a *App) noteToolDelta() {
+	a.extendWindow()
+}
+
+// extendWindow stamps the decode window with now: the first delta opens it,
+// every delta extends it. Callers hold a.mu.
+func (a *App) extendWindow() {
 	now := time.Now()
 	if a.deltaFirst.IsZero() {
 		a.deltaFirst = now
 	}
 	a.deltaLast = now
-	a.deltaRunes += int64(len([]rune(delta)))
 }
 
-// liveRate estimates the rate while a message is still streaming: the runes
-// received so far, at four to a token, over the window they arrived in. It is
-// replaced by the measured st.Rate the moment usage lands. Callers hold a.mu.
-func (a *App) liveRate() float64 {
-	window := a.deltaLast.Sub(a.deltaFirst)
-	if window < 100*time.Millisecond || a.deltaRunes == 0 {
-		return 0
-	}
-	return float64(a.deltaRunes/4) / window.Seconds()
+// BeginMessage closes the decode window the previous message left open. Every
+// provider opens a message with exactly one EventStart (anthropic.go:365 and
+// its three siblings), which is the only message boundary the hook layer can
+// rely on: a turn that died into the retry ladder never emits EventDone, so
+// without this its window stays open and becomes the next turn's denominator
+// — a rate several times too low that never corrects itself.
+func (a *App) BeginMessage() {
+	a.mu.Lock()
+	a.closeWindow()
+	a.mu.Unlock()
+}
+
+// NoteToolDelta extends the decode window for a tool call's argument stream.
+// The exported twin of noteDelta, for a hook layer: output_tokens counts
+// tool-argument JSON that the transcript never renders, so the window has to
+// span it or the rate divides every token the provider billed by a window
+// that stopped at the last text delta.
+func (a *App) NoteToolDelta() {
+	a.mu.Lock()
+	a.noteToolDelta()
+	a.mu.Unlock()
 }
 
 // EndThinking closes the last streaming thinking block, freezing its
@@ -617,8 +881,12 @@ func (a *App) AddAssistantBlock(text string) {
 // saw. cmd flattens tool-specific Details into it so the transcript never has
 // to type-switch over another package's payload.
 type ToolOutcome struct {
-	Dur       string // formatted wall time, e.g. "70ms" ("" = unknown)
-	Exit      int    // process exit code; read only when HasExit
+	Dur string // formatted wall time, e.g. "70ms" ("" = unknown)
+	// Elapsed is Dur's raw value, for the /usage tool-time total: the string
+	// is one row's footer, and summing formatted strings is how a report ends
+	// up minutes off. 0 = the caller did not measure.
+	Elapsed   time.Duration
+	Exit      int // process exit code; read only when HasExit
 	HasExit   bool
 	Truncated bool
 	Diff      string // unified diff of the file change, when the tool made one
@@ -626,31 +894,59 @@ type ToolOutcome struct {
 
 // AddToolBlock appends one tool-call row in the running state, carrying the
 // call's raw JSON arguments: the renderer reads the naming argument out of
-// them (omp's `name · detail`), so no flattened preview is baked in here.
-func (a *App) AddToolBlock(name, rawArgs string) {
+// them (omp's `name · detail` row), so no flattened preview is baked in here.
+// callID is the provider's id for this call — the half that says WHICH call a
+// result belongs to when two calls share a name. Empty is fine for a caller
+// that pairs add and finish back to back (replay, bang mode).
+func (a *App) AddToolBlock(callID, name, rawArgs string) {
 	a.mu.Lock()
+	// The /usage report's "tool calls" line. A replayed history replays the
+	// same call, so this counts what the user watched, not what the
+	// provider billed (billing is the ↑⇢↓ counters' business).
+	a.st.ToolCalls++
 	a.blocks = append(a.blocks, &Block{
-		Kind: KindTool, ToolName: name, Text: rawArgs,
+		Kind: KindTool, CallID: callID, ToolName: name, Text: rawArgs,
 		Status: "running", Ts: time.Now(),
 	})
 	a.mu.Unlock()
 	a.poke()
 }
 
-// FinishTool marks the last running tool block done (ok/error) and appends
-// the tool-result block carrying the full (sink-windowed) output.
-func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome) {
+// FinishTool closes the running row for THIS call (ok/error) and appends the
+// tool-result block carrying the full (sink-windowed) output.
+//
+// The row is matched by call id. Name-only matching was the bug: same-batch
+// calls run concurrently (agent MaxToolWorkers) and finish in whatever order
+// the shells do, so "the newest running row with this name" was a guess — with
+// two `bash` calls it closed the wrong row, so one command's output painted
+// under the other command's name and the pairing read as "the command never
+// ran". An id also means a replayed history (no ids) cannot steal a live row.
+// A nameless call id still falls back to the name, so a caller that only knows
+// the name keeps working.
+//
+// A live box opened by the first streamed chunk is REPLACED, not left behind:
+// the settled text is the same output, windowed the same way, and two boxes
+// for one command is the transcript lying about what ran.
+func (a *App) FinishTool(callID, name string, isErr bool, output string, out ToolOutcome) {
 	a.mu.Lock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
-		if b.Kind == KindTool && b.ToolName == name && b.Status == "running" {
-			if isErr {
-				b.Status = "error"
-			} else {
-				b.Status = "ok"
-			}
-			break
+		if b.Kind != KindTool || b.ToolName != name || b.Status != "running" {
+			continue
 		}
+		// An id that is known on both sides must match: a row carrying a
+		// different id belongs to another call and is not ours to close. A
+		// row with no id (replayTranscript) is still eligible, which keeps a
+		// resumed history pairing while a live call is in flight.
+		if callID != "" && b.CallID != "" && b.CallID != callID {
+			continue
+		}
+		if isErr {
+			b.Status = "error"
+		} else {
+			b.Status = "ok"
+		}
+		break
 	}
 	text := output
 	if !isErr && len(a.renderers) > 0 {
@@ -666,13 +962,286 @@ func (a *App) FinishTool(name string, isErr bool, output string, out ToolOutcome
 	if out.HasExit && out.Exit != 0 {
 		text = strings.TrimSuffix(text, fmt.Sprintf("\n[exit code %d]", out.Exit))
 	}
+	// A live box is REPLACED, not left behind: the settled text is the same
+	// output, windowed the same way, and two boxes for one command is the
+	// transcript lying about what ran. The box's OWN slot is rewritten —
+	// the box sits under its call row, so appending would hoist the result
+	// above every call that started after it.
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindToolDone || !b.Live || b.ToolName != name {
+			continue
+		}
+		if callID != "" && b.CallID != "" && b.CallID != callID {
+			continue
+		}
+		a.blocks[i] = &Block{
+			Kind: KindToolDone, CallID: callID, ToolName: name, Text: text,
+			Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
+			Truncated: out.Truncated, Diff: out.Diff,
+		}
+		// /usage's "tool time": the calls' own wall time, one sample per
+		// finished call, counted whether the call succeeded or not.
+		if isErr {
+			a.st.ToolErrors++
+		}
+		a.st.ToolWork += out.Elapsed
+		a.mu.Unlock()
+		a.poke()
+		return
+	}
 	a.blocks = append(a.blocks, &Block{
-		Kind: KindToolDone, ToolName: name, Text: text,
+		Kind: KindToolDone, CallID: callID, ToolName: name, Text: text,
 		Dur: out.Dur, Err: isErr, Exit: out.Exit, HasExit: out.HasExit,
 		Truncated: out.Truncated, Diff: out.Diff,
 	})
+	// /usage's "tool time": the calls' own wall time, one sample per
+	// finished call, counted whether the call succeeded or not.
+	if isErr {
+		a.st.ToolErrors++
+	}
+	a.st.ToolWork += out.Elapsed
 	a.mu.Unlock()
 	a.poke()
+}
+
+// livePaint is the fastest a live output box repaints. A command that emits
+// thousands of lines a second is not readable at that rate, and every frame
+// the terminal cannot show is a frame spent walking the transcript: chunks
+// coalesce into the newest bytes and the box repaints ten times a second.
+const livePaint = 100 * time.Millisecond
+
+// liveTailBytes bounds what a live box keeps. A live view is "what is
+// happening now"; the settled result is windowed by the tool's own sink, so
+// nothing is lost here — it is just not kept twice.
+const liveTailBytes = 64 << 10
+
+// liveRows is how many rows a live box paints. It matches toolRecentHead, the
+// window a settled result keeps: a running command is worth the same screen
+// real estate as a finished one, and a box that grows past the viewport is a
+// box the rest of the conversation has scrolled out of.
+const liveRows = toolRecentHead
+
+// liveBoxLocked is this call's live box, opening one if the call is running
+// and has produced its first bytes. A tool that streams nothing (read, grep,
+// every MCP tool) never opens one, so the transcript gains no empty frame it
+// has nothing to put in.
+//
+// The new box is spliced in directly under ITS OWN call row, not appended: a
+// batch's calls run concurrently, so "the end of the transcript" is whatever
+// started last, and a box there would paint one command's bytes under a
+// different call's name.
+func (a *App) liveBoxLocked(callID, name string) *Block {
+	row := -1
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind == KindToolDone && b.Live && b.ToolName == name &&
+			(callID == "" || b.CallID == "" || b.CallID == callID) {
+			return b
+		}
+		if row < 0 && b.Kind == KindTool && b.ToolName == name && b.Status == "running" &&
+			(callID == "" || b.CallID == "" || b.CallID == callID) {
+			row = i
+		}
+	}
+	if row < 0 {
+		return nil
+	}
+	box := &Block{Kind: KindToolDone, CallID: callID, ToolName: name, Live: true}
+	a.blocks = append(a.blocks, nil)
+	copy(a.blocks[row+2:], a.blocks[row+1:])
+	a.blocks[row+1] = box
+	// No markDirty needed: the splice inserts a block whose render key can
+	// not match the render cached at that index (a live result box is never
+	// a call row), so sync re-renders from the insertion point on — which
+	// recomputes the row offsets the shift invalidated.
+	return box
+}
+
+// AppendToolOutput adds one chunk to this call's live box, opening that box
+// on the first chunk. Chunks are the tool's own read boundaries, so they may
+// split a line: the box keeps them as they came, and the renderer windows
+// what it paints. A chunk for a call that never ran, or that has already
+// settled, is dropped rather than opening a box under a command the
+// transcript is done with.
+func (a *App) AppendToolOutput(callID, name, chunk string) {
+	if chunk == "" {
+		return
+	}
+	a.mu.Lock()
+	b := a.liveBoxLocked(callID, name)
+	if b == nil {
+		a.mu.Unlock()
+		return
+	}
+	b.Text += chunk
+	if len(b.Text) > liveTailBytes {
+		b.Text = b.Text[len(b.Text)-liveTailBytes:]
+	}
+	// The stamp ages per livePaint, not per chunk: the box re-renders on the
+	// next frame at most, however fast the tool talks.
+	if now := time.Now(); now.Sub(b.liveAt) >= livePaint {
+		b.liveAt = now
+		b.liveSeq++
+		a.poke()
+	}
+	a.mu.Unlock()
+}
+
+// taskToolName is the one tool whose children the transcript shows. The
+// name lives in the agent package, which the TUI deliberately does not
+// import, so the host passes the rows in and the TUI only has to know which
+// call row they belong to.
+const taskToolName = "task"
+
+// AddTaskChild records that a `task` call started a child. The child is
+// attached to the newest running `task` row — the same call a result would
+// close — and a child that arrives after the call settled is dropped: the
+// row it belonged to is gone, and inventing one would paint a child under
+// whatever call came next.
+func (a *App) AddTaskChild(callID, label, agent, model string) {
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b != nil {
+		b.Sub = append(b.Sub, &SubActivity{
+			Label: label, Agent: agent, Model: model, Status: "running", Ts: time.Now(),
+		})
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// UpdateTaskChild records what a child just did. Unknown children (a host
+// that only forwards tool events) are adopted rather than dropped, so the
+// row still says something is running.
+func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b != nil {
+		c := findSubLocked(b, label)
+		if c == nil {
+			c = &SubActivity{Label: label, Ts: time.Now()}
+			b.Sub = append(b.Sub, c)
+		}
+		c.Tool, c.Args, c.Status = toolName, rawArgs, status
+		c.Calls++
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// FinishTaskChild settles one child with its terminal status and wall time.
+func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b != nil {
+		if c := findSubLocked(b, label); c != nil {
+			c.Status, c.Dur = status, d
+		}
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// runningToolLocked is the running call row for callID/name, newest first.
+// Callers hold a.mu.
+func (a *App) runningToolLocked(callID, name string) *Block {
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != name || b.Status != "running" {
+			continue
+		}
+		if callID != "" && b.CallID != "" && b.CallID != callID {
+			continue
+		}
+		return b
+	}
+	return nil
+}
+
+// findSubLocked is the child with this label, or nil. Labels are unique
+// per batch: a batch that named two children the same way already reports
+// two indistinguishable sections, and merging their rows would be a lie.
+func findSubLocked(b *Block, label string) *SubActivity {
+	for _, c := range b.Sub {
+		if c.Label == label {
+			return c
+		}
+	}
+	return nil
+}
+
+// subVisible splits a call's children into the rows the transcript paints
+// and the count it reports for the rest. A batch runs up to 8 children and
+// the block keeps them all (a handful of small structs, and dropping them
+// would make a late settle land on the wrong child); the CAP is a paint
+// decision, so it belongs here, not in the state.
+func (b *Block) subVisible() (rows []*SubActivity, more int) {
+	if len(b.Sub) > subRowsMax {
+		return b.Sub[:subRowsMax], len(b.Sub) - subRowsMax
+	}
+	return b.Sub, 0
+}
+
+// RunningTaskCallID is the call id of the newest running `task` row, or ""
+// when none is in flight. A host that receives a child event with no call
+// id of its own asks this to place it: the spawn that is blocking the turn
+// is the one whose row is still spinning.
+func (a *App) RunningTaskCallID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if b := a.runningToolLocked("", taskToolName); b != nil {
+		return b.CallID
+	}
+	return ""
+}
+
+// subLines renders a `task` call's children as continuation rows under the
+// call row. Each row is `⎿ <label> · <what it last did>`, dim: it is
+// narration inside someone else's call, not a call of its own, and it must
+// not compete with the parent row for attention.
+//
+// The naming argument comes from toolDetail — the SAME precedence the
+// parent's own call rows use — so a child row and a call row read alike and
+// the rules live in one place.
+func (a *App) subLines(b *Block, w int) []line {
+	rows, more := b.subVisible()
+	if len(rows) == 0 && more == 0 {
+		return nil
+	}
+	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))).Bold(true)
+	var out []line
+	emit := func(text string) {
+		ln := textline("  ⎿ ", dim)
+		ln.runs = append(ln.runs, cell{text: text, style: nameSt})
+		out = append(out, ln)
+	}
+	for _, c := range rows {
+		phrase := c.Tool
+		if detail := toolDetail(c.Args); detail != "" {
+			if phrase == "" {
+				phrase = detail
+			} else {
+				phrase += " · " + detail
+			}
+		}
+		if phrase == "" {
+			phrase = "starting"
+		}
+		row := c.Label + " · " + phrase
+		// No per-child elapsed while the call is in flight: the call row
+		// right above already counts the wall time, and two clocks on one
+		// row is noise. The settled summary carries the child's own time.
+		if budget := subRow(w); width(row) > budget {
+			row = truncateCells(row, budget, "…")
+		}
+		emit(row)
+	}
+	if more > 0 {
+		emit(fmt.Sprintf("+%d more running", more))
+	}
+	return out
 }
 
 // ToggleBoxExpand flips the Ctrl+O state of the newest boxed block — a finished
@@ -699,36 +1268,84 @@ func (a *App) ToggleBoxExpand() bool {
 
 // AddUsage folds token usage into the status line and measures the decode
 // rate the HUD's rate segment shows: the provider's own output-token count
-// over the window in which deltas actually arrived (omp's per-message math,
-// the same rule internal/dist/bench.go measures with). A message with no
-// usable window — nothing streamed, or a sub-100ms burst — keeps the previous
-// rate rather than inventing one.
+// over the window in which deltas actually arrived (omp's per-message math).
+// The window is per message, not per run: the first delta of a message opens
+// it and EVERY delta extends it — text, thinking, and the tool-call argument
+// deltas that output_tokens counts but the transcript never renders. A window
+// that no EventDone closed (a turn that died into the retry ladder) is
+// discarded by the next message's first delta rather than inherited as its
+// denominator. A message with no usable window — nothing streamed, or a
+// sub-100ms burst — measures no rate at all, and the segment hides rather
+// than carry a previous turn's number as if it were this one's.
 // It also refreshes CtxUsed, the live occupancy behind the HUD's context
 // segment, with total: the provider's token count for this request, cached
 // input included. ctx is what sits in the window, not only what the window had
 // to re-read — a prompt-cache hit still occupies those tokens, and an
 // input+output sum reads 90 % low on a cached conversation (the same total
 // agent.ContextTokens and compaction trigger on). total <= 0 (a provider that
-// reports none) falls back to in+out.
-func (a *App) AddUsage(in, out, total int64) {
+// reports none) falls back to in+out+cache.
+//
+// cache and thinking arrive as their own arguments because the split is the
+// point: in is the fresh input only and out already CONTAINS the reasoning, so
+// a row that printed just those two claimed a smaller prompt and a larger
+// answer than the provider billed. On a cached turn the ↑ glyph read 479 for a
+// 65054-token prompt (99 % of it invisible, cacheRead 64575) and the ↓ glyph
+// read 1770 for 506 tokens of visible text (71 % of it thinking).
+func (a *App) AddUsage(in, out, cache, thinking, total int64) {
 	a.mu.Lock()
 	a.st.TokensIn += in
 	a.st.TokensOut += out
+	a.st.TokensCache += cache
+	a.st.TokensThink += thinking
 	if total <= 0 {
-		total = in + out // a provider that reports no total gets the floor
+		total = in + out + cache // a provider that reports no total gets the floor
 	}
 	a.st.CtxUsed = total
 	if window := a.deltaLast.Sub(a.deltaFirst); out > 1 && window >= 100*time.Millisecond {
 		a.st.Rate = float64(out) / window.Seconds()
+	} else {
+		a.st.Rate = 0 // an unmeasurable message measures nothing, and says so
 	}
-	a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
+	a.closeWindow()
 	a.mu.Unlock()
+}
+
+// closeWindow drops the decode window so the next message's first delta
+// opens a fresh one instead of extending this message's. Callers hold a.mu.
+func (a *App) closeWindow() {
+	a.deltaFirst, a.deltaLast = time.Time{}, time.Time{}
 }
 
 // AddCost folds provider-reported spend (USD) into the HUD cost segment.
 func (a *App) AddCost(usd float64) {
 	a.mu.Lock()
 	a.st.Cost += usd
+	a.mu.Unlock()
+}
+
+// AddCacheWrite banks the prompt-cache WRITES one request billed. The wire
+// reports them as their own bucket (Anthropic's cache creation input tokens,
+// the write side of OpenAI's prompt details), and neither /usage's token
+// block nor the token pill's total had anywhere to put them: a session that
+// warms a long prefix bills those tokens and never showed them. A separate
+// setter rather than a sixth AddUsage argument, so the existing AddUsage
+// call sites (every provider, every test) stay as they are and a provider
+// that reports no writes is simply never called.
+func (a *App) AddCacheWrite(n int64) {
+	a.mu.Lock()
+	a.st.TokensCacheWrite += max(n, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddStep counts one provider request — the step a dsh TimePill reports
+// beside its turn count. BeginMessage is the seam: every provider opens a
+// message with exactly one EventStart, so a turn of five tool calls counts
+// six steps, and a turn that died into the retry ladder still counts the
+// steps it actually sent.
+func (a *App) AddStep() {
+	a.mu.Lock()
+	a.st.Steps++
 	a.mu.Unlock()
 }
 
@@ -770,10 +1387,43 @@ func (a *App) SetContextWindow(tokens int64) {
 // SetWork re-bases the HUD time segment with the work a session has already
 // banked. Wired by cmd when a store is adopted (/new, /drop, /resume, fork):
 // the turns already on disk were active time even though this process never
-// watched them happen.
+// watched them happen. It also re-bases /usage's own re-based counters, since
+// a replayed history is the only source of them.
 func (a *App) SetWork(d time.Duration) {
 	a.mu.Lock()
 	a.st.Work = max(d, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetLLMTime re-bases /usage's LLM time and average-TTFT from a rebuilt
+// history (/resume, /fork, tree navigation) the way SetWork re-bases the
+// timer. It REPLACES rather than adds: the replayed path measures the whole
+// adopted history in one call, and adding would double-count it.
+func (a *App) SetLLMTime(d time.Duration, ttftSum int64, ttftCount int64) {
+	a.mu.Lock()
+	a.st.LLMWork = max(d, 0)
+	a.st.TTFTSum = max(ttftSum, 0)
+	a.st.TTFTCount = max(ttftCount, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddLLMTime banks one finished provider request's wall time (msg.DurationMS
+// — request sent to last token, gateway queue included) and, when the turn
+// carried one, its time-to-first-token. /usage reports LLM time and the
+// average TTFT; the status row's ⚡ and ⌚ stay last-turn readings.
+//
+// 0 durations are ignored rather than added: a message persisted before
+// durations were recorded contributes nothing, which is what the replay path
+// already assumes when it banks work.
+func (a *App) AddLLMTime(dur time.Duration, ttftMS int64) {
+	a.mu.Lock()
+	a.st.LLMWork += max(dur, 0)
+	if ttftMS > 0 {
+		a.st.TTFTSum += ttftMS
+		a.st.TTFTCount++
+	}
 	a.mu.Unlock()
 	a.poke()
 }
@@ -808,13 +1458,93 @@ func (a *App) SetStatusSegments(segs []string) {
 // SetRunning toggles the spinner state and opens/closes the work span the
 // HUD's time segment measures. Starting a run also discards a decode window
 // the last one never closed — an aborted stream would otherwise make the next
-// rate divide new tokens by old elapsed time.
+// rate divide new tokens by old elapsed time. Per message, BeginMessage is
+// what does that; this is the coarser run-level backstop.
+
+// SetTabs publishes the open-session snapshot for the status row. cmd
+// calls it after every switch and whenever a parked session raises its
+// unread badge.
+func (a *App) SetTabs(tabs []TabInfo) {
+	a.mu.Lock()
+	a.tabs = tabs
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetTabCycle wires Alt+]/Alt+[ (and the unread variants). nil degrades
+// the chords to a notice.
+func (a *App) SetTabCycle(fn func(dir int, onlyUnread bool)) {
+	a.onTabCycle = fn
+}
+
+// SetTabClose wires what "close this session" means. cmd owns the tabset, so
+// the chord and the tab strip's × both name a session id and let it decide
+// (park, abort, close the store, focus a neighbour).
+func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
+
+// SetTabPick wires what Enter on a /tabs row does. nil degrades /tabs to
+// a notice.
+func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
+
+// SetSessionID updates the status-row / dock identity after a switch.
+func (a *App) SetSessionID(id string) {
+	a.mu.Lock()
+	a.st.SessionID = id
+	a.mu.Unlock()
+	a.DockBump()
+}
+
 func (a *App) SetRunning(r bool) {
 	a.mu.Lock()
 	a.markRun(r)
 	if r {
-		a.deltaFirst, a.deltaLast, a.deltaRunes = time.Time{}, time.Time{}, 0
+		a.closeWindow()
 	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// AddTurn counts one finished run — the turn a dsh TimePill reports beside
+// its step count. SetRunning's falling edge is the seam: the run that
+// actually ended is the turn, whatever it ended with, and an idle re-render
+// never counts.
+func (a *App) AddTurn() {
+	a.mu.Lock()
+	a.st.Turns++
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetSessionCounts re-bases the pill's turn/step counts from a rebuilt
+// history (/resume, /fork, tree navigation) the way SetWork re-bases the
+// timer: it REPLACES rather than adds, because the replayed path measures the
+// whole adopted history in one call and adding would double-count it. A zero
+// pair (a history with no counted steps) leaves the counts out of the pill
+// rather than claiming a session that ran nothing.
+func (a *App) SetSessionCounts(turns, steps int) {
+	a.mu.Lock()
+	a.st.Turns, a.st.Steps = max(turns, 0), max(steps, 0)
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetSessionUsage re-bases the session's token buckets and its spend from a
+// rebuilt history (/resume, /fork, tab focus, tree navigation) the way
+// SetWork re-bases the timer: it REPLACES rather than adds, because the
+// replayed path measures the whole adopted history in one call and adding
+// would double-count it.
+//
+// CtxUsed and Rate are deliberately NOT re-based here. The first is the LIVE
+// context occupancy — SetContextReplay measures the rebuilt messages, and
+// AddUsage owns it for a live turn — and the second is the last decoded
+// message's speed, which a history cannot re-measure: carrying a stale rate
+// forward is what Reset() clears it to prevent.
+func (a *App) SetSessionUsage(in, out, cache, think, cacheWrite int64, cost float64) {
+	a.mu.Lock()
+	a.st.TokensIn, a.st.TokensOut = max(in, 0), max(out, 0)
+	a.st.TokensCache, a.st.TokensThink = max(cache, 0), max(think, 0)
+	a.st.TokensCacheWrite = max(cacheWrite, 0)
+	a.st.Cost = max(cost, 0)
 	a.mu.Unlock()
 	a.poke()
 }
@@ -879,8 +1609,43 @@ func (a *App) activeWork() time.Duration {
 // FinishRun closes the run, folding its span into the active-time total.
 func (a *App) FinishRun() { a.SetRunning(false) }
 
-// Quit terminates the UI loop.
-func (a *App) Quit() { close(a.quitCh) }
+// Quit terminates the UI loop. It is idempotent: a terminal can deliver the
+// quit chord more than once in one burst, and the UI loop drains those events
+// before it returns to its select. Closing the channel a second time would
+// panic the process instead of exiting it.
+func (a *App) Quit() { a.quitOnce.Do(func() { close(a.quitCh) }) }
+
+// quitOrCancel is what the quit chord (Ctrl+C, Ctrl+D) does: exit, and take
+// the live turn down with it. It used to cancel a running turn and stop, which
+// reads as "the exit key is dead" whenever the turn is slow to unwind — the
+// turn's own recovery ladder, an in-flight tool, an MCP call still draining.
+// The second press landed in the same branch, so the chord had no way out at
+// all: session 2750b48c, where C-c and C-d did nothing for the whole of an
+// unbroken turn.
+//
+// Cancelling is not dropped: onQuit's own teardown stops the agent, and the
+// turn goroutine is abandoned if it outlives the loop. A turn that keeps
+// running after the UI is gone is the same leak every /quit had, and it never
+// outlives the process. Esc keeps cancel-only semantics for "stop and stay".
+func (a *App) quitOrCancel(running bool) {
+	// Detach-on-quit (settings tui.exitDetach, default on): a live turn is
+	// handed off so closing the TUI does not kill the work. Esc stays
+	// cancel-only; only the quit chord reaches here.
+	if running && a.onQuitRunning != nil {
+		if a.onQuitRunning() {
+			if a.onQuit != nil {
+				a.onQuit()
+			}
+			return
+		}
+	}
+	if running && a.onCancel != nil {
+		a.onCancel()
+	}
+	if a.onQuit != nil {
+		a.onQuit()
+	}
+}
 
 // ForkSession implements CommandAPI by delegating to wired SessionOps.Fork.
 func (a *App) ForkSession() error {
@@ -981,17 +1746,30 @@ func (a *App) Prewalk(args string) error {
 // SetGoalOps wires the /goal command (the goal state lives in cmd).
 func (a *App) SetGoalOps(ops *GoalOps) { a.goalOps = ops }
 
-// Goal implements CommandAPI /goal: a bare /goal (or /goal view) shows the
-// current goal and budget; the verbs create/resume/evidence/complete/drop
-// drive the same state the goal tool owns, so an interactive session steers
-// its own objective without a model turn. The args used to be dropped, which
-// made `/goal create …` look like a dead command.
+// Goal implements CommandAPI /goal: `/goal <objective>` names the session's
+// objective and starts working on it; a bare /goal shows the current goal and
+// budget, and complete/drop close it.
 func (a *App) Goal(args string) error {
 	block, err := a.goalOps.Dispatch(args)
 	if err != nil {
 		return err
 	}
 	a.AddSystemBlock(block)
+	return nil
+}
+
+// SetScheduleOps wires /schedule to the session-local reminder state.
+func (a *App) SetScheduleOps(ops *ScheduleOps) { a.scheduleOps = ops }
+
+// Schedule implements CommandAPI /schedule.
+func (a *App) Schedule(args string) error {
+	out, err := a.scheduleOps.Dispatch(args)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		a.AddSystemBlock(out)
+	}
 	return nil
 }
 
@@ -1043,8 +1821,57 @@ func (a *App) Memory(args string) error {
 	return nil
 }
 
+// SetAutoAnswerOps wires the /auto-answer command (the ask policy lives in cmd).
+func (a *App) SetAutoAnswerOps(ops *AutoAnswerOps) { a.autoAnswerOps = ops }
+
 // SetAdvisorOps wires the /advisor command (advisor state lives in cmd).
 func (a *App) SetAdvisorOps(ops *AdvisorOps) { a.advisorOps = ops }
+
+// AutoAnswer implements CommandAPI /auto-answer: "yes" turns the policy on,
+// "no" turns it off, and no argument toggles. A bare toggle is the whole
+// reason this is a command rather than a settings row — a human deciding
+// mid-session to stop answering their own questions must not have to leave
+// the transcript to say so.
+//
+// The vocabulary is yes|no AND on|off: `yes` is what was asked for, and
+// `on`/`off` is what every other toggle here (/plan, /advisor, /prewalk)
+// already accepts. Anything else is a usage error, never a silent toggle — a
+// typo must not be the thing that answers a question for them.
+func (a *App) AutoAnswer(args string) error {
+	if a.autoAnswerOps == nil || a.autoAnswerOps.Current == nil || a.autoAnswerOps.Set == nil {
+		return fmt.Errorf("auto-answer not wired")
+	}
+	cur := a.autoAnswerOps.Current()
+	var on bool
+	fields := strings.Fields(strings.TrimSpace(args))
+	switch {
+	case len(fields) == 0:
+		on = !cur
+	case len(fields) == 1:
+		switch fields[0] {
+		case "yes", "on", "true":
+			on = true
+		case "no", "off", "false":
+			on = false
+		default:
+			return fmt.Errorf("usage: /auto-answer yes|no")
+		}
+	default:
+		return fmt.Errorf("usage: /auto-answer yes|no")
+	}
+	if err := a.autoAnswerOps.Set(on); err != nil {
+		return err
+	}
+	confirm := "auto-answer no — an unanswered question waits for you"
+	if on {
+		confirm = "auto-answer yes — an unanswered question takes the recommended option"
+	}
+	if a.autoAnswerOps.Path != "" {
+		confirm += " (saved to " + a.autoAnswerOps.Path + ")"
+	}
+	a.AddSystemBlock(confirm)
+	return nil
+}
 
 // Advisor implements CommandAPI /advisor: on|off|status|dump.
 func (a *App) Advisor(args string) error {
@@ -1128,6 +1955,63 @@ func (a *App) planShow() error {
 	return nil
 }
 
+// TabsPicker implements CommandAPI /tabs: the open-session set as a modal
+// list, so a session can be found by its title instead of cycled blind
+// (opencode's session list). It reads the snapshot SetTabs already
+// publishes — the status row's own data — so there is no second source of
+// truth to keep in step, and Enter hands the chosen id back to cmd, which
+// focuses the tab.
+func (a *App) TabsPicker() error {
+	if a.onTabPick == nil {
+		return fmt.Errorf("session tabs are not wired in this build")
+	}
+	a.mu.Lock()
+	tabs := append([]TabInfo(nil), a.tabs...)
+	a.mu.Unlock()
+	if len(tabs) == 0 {
+		a.AddSystemBlock("no sessions open")
+		return nil
+	}
+	items := make([]PickerItem, 0, len(tabs))
+	for _, t := range tabs {
+		items = append(items, PickerItem{
+			Label:   tabLabel(t),
+			Detail:  shortID(t.ID),
+			Value:   t.ID,
+			Current: t.Current,
+		})
+	}
+	pick := a.onTabPick
+	a.OpenPicker(PickerOptions{
+		Title: "open sessions",
+		Views: []PickerView{{Name: "open", Items: items, Action: "switch"}},
+		OnSelect: func(id string) {
+			if err := pick(id); err != nil {
+				a.AddSystemBlock("error: " + err.Error())
+			}
+		},
+	})
+	return nil
+}
+
+// tabLabel names one open session: its title, or the short id when the
+// title is still the mechanical one. Running and unread ride the label, so
+// the row itself says what is running where — the whole reason this list
+// exists instead of the status row's "2 tabs" count.
+func tabLabel(t TabInfo) string {
+	label := t.Title
+	if strings.TrimSpace(label) == "" {
+		label = shortID(t.ID)
+	}
+	if t.Running {
+		return "✦ " + label + " ·running"
+	}
+	if t.Unread {
+		return "✦ " + label
+	}
+	return label
+}
+
 // ResumeSession implements CommandAPI /resume. With no argument it opens the
 // session picker (the recent sessions for this directory); with a query it
 // resolves immediately, so `/resume <id-prefix>` still works headlessly.
@@ -1171,15 +2055,41 @@ func (a *App) ResumeSession(query string) error {
 // leaving the previous session's measurement on the row would lie. The time
 // segment follows the same rule: the work on a blanked history is 0 until a
 // replayed session banks its path's spans back in with SetWork. A replay also
-// measures the history back in with SetContextReplay. Streaming state is
-// untouched — callers must not be running a turn when they call this.
+// measures the history back in with SetContextReplay.
+//
+// The ↑ ↓ ⇢ ˟ counters, the spend, the decode rate and the ttft are
+// per-session too, and Reset is where that boundary is: without clearing
+// them, /resume and /fork drew the previous session's numbers beside the
+// freshly replayed transcript, and a new session opened showing a ⚡ it had
+// never measured. Streaming state is otherwise untouched — callers must
+// not be running a turn when they call this.
+// too, and Reset is where that boundary is: without clearing them, /resume
+// and /fork drew the previous session's numbers beside the freshly replayed
+// transcript, and a new session opened showing a ⚡ it had never measured.
+// Streaming state is otherwise untouched — callers must not be running a
+// turn when they call this.
 func (a *App) Reset() {
 	a.mu.Lock()
 	a.st.Work = 0
-	a.blocks = nil
-	a.thinkFocus = -1 // the focused box went with them
-	a.sm = newScrollModel()
+	a.st.TokensIn, a.st.TokensOut = 0, 0
+	a.st.TokensCache, a.st.TokensThink = 0, 0
+	a.st.TokensCacheWrite = 0
+	a.st.Turns, a.st.Steps = 0, 0
+	a.st.Cost = 0
+	a.st.Rate = 0
+	a.st.TTFT = 0
 	a.st.CtxUsed = 0
+	a.st.ToolCalls, a.st.ToolErrors = 0, 0
+	a.st.ToolWork, a.st.LLMWork = 0, 0
+	a.st.TTFTSum, a.st.TTFTCount = 0, 0
+	a.closeWindow()
+	a.blocks = nil
+	a.thinkFocus = -1  // the focused box went with them
+	a.msgArmed = false // so did the armed menu row: its block is gone
+	a.msgm = nil       // a menu over replayed-away blocks is not a menu
+	a.msgv = nil       // likewise the read-only surface naming one
+	a.statusPop = nil  // a panel over the previous session's transcript
+	a.sm = newScrollModel()
 	a.clearRenderCache()
 	a.mu.Unlock()
 	a.poke()
@@ -1466,6 +2376,26 @@ func (a *App) SetShowThinking(on bool) {
 	a.poke()
 }
 
+// SetRenderMermaid turns mermaid diagram rendering on or off (settings key
+// `renderMermaid`). It is the one display setting that does not drop content:
+// with it off a ```mermaid fence paints as the code band it was before the
+// feature existed, so the render cache is dropped and the next frame redraws
+// the same blocks from source.
+func (a *App) SetRenderMermaid(on bool) {
+	a.mu.Lock()
+	a.renderMermaid = on
+	a.clearRenderCache()
+	a.mu.Unlock()
+	a.poke()
+}
+
+// Mermaid reports whether mermaid fences render as diagrams.
+func (a *App) Mermaid() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.renderMermaid
+}
+
 // SetDebugMouse enables rendering of every mouse event on the
 // status bar (settings `tui.debugMouse`). Off by default: the log
 // is opt-in so a normal session does not scroll the HUD with
@@ -1478,6 +2408,38 @@ func (a *App) SetDebugMouse(on bool) {
 	}
 	a.mu.Unlock()
 	a.poke()
+}
+
+// SetLogFile opens <f> for writing a TUI screen transcript
+// (one text dump per paint frame). Off by default (nil).
+func (a *App) SetLogFile(f *os.File) {
+	a.logMu.Lock()
+	a.logFile = f
+	a.logMu.Unlock()
+}
+
+// logFrame writes a text dump of the screen buffer to
+// the log file (if open). It snapshots the pointer under
+// logMu, then writes without any lock so a stalled terminal
+// cannot hold up the UI loop.
+func (a *App) logFrame() {
+	a.logMu.Lock()
+	f := a.logFile
+	a.logMu.Unlock()
+	if f == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(f, "\n=== frame %d ===\n", time.Now().UnixNano())
+	for y := 0; y < a.height; y++ {
+		for x := 0; x < a.width; x++ {
+			text, _, _ := a.scr.Get(x, y)
+			if text != "" {
+				_, _ = f.WriteString(text)
+			}
+		}
+		_, _ = f.WriteString("\n")
+	}
+	_ = f.Sync()
 }
 
 // SetSettingsOps wires the /settings command (settings live in cmd).
@@ -1531,6 +2493,20 @@ func (a *App) ToggleThinking() {
 	}
 }
 
+// thinkingLevel is the request-side level as the chrome shows it: the bare
+// rung /thinking takes, so the readout sits beside the model it applies to
+// without naming the mechanism ("model · high" is one request; "model ·
+// thinking high" repeated the command beside the answer). Empty when the
+// seam is unwired — a host that never wired /thinking has no level to report,
+// and an invented "auto" would name a budget nothing chose (the same rule the
+// dock's version row follows).
+func (a *App) thinkingLevel() string {
+	if a.thinkingOps == nil || a.thinkingOps.Current == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.thinkingOps.Current())
+}
+
 func (a *App) currentThinkingLevel() string {
 	if a.thinkingOps != nil && a.thinkingOps.Current != nil {
 		return a.thinkingOps.Current()
@@ -1576,10 +2552,13 @@ func (a *App) SettingsView(args string) error {
 		return nil
 	}
 	if fields[0] == "sidebarMode" {
-		return a.setDockModeSetting(fields[1:])
+		return a.setDockModeSetting("sidebarMode", fields[1:])
+	}
+	if fields[0] == "renderMermaid" {
+		return a.setMermaidSetting(fields[1:])
 	}
 	if fields[0] != "showThinking" {
-		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode)", fields[0])
+		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode|renderMermaid)", fields[0])
 	}
 	on := !a.Thinking()
 	if len(fields) == 2 {
@@ -1613,27 +2592,29 @@ func (a *App) SettingsView(args string) error {
 	return nil
 }
 
-// setDockModeSetting is /settings sidebarMode [auto|show|hide]: the context
-// dock's display policy (#291 §1). The App owns the state, so the flip works
-// with unwired ops; persisting is the config seam's job when it exists.
-func (a *App) setDockModeSetting(fields []string) error {
+// setDockModeSetting is the one place a sidebar policy is written: the dock's
+// display policy (#291 §1), reached by /settings sidebarMode and by /sidebar.
+// The App owns the state, so the flip works with unwired ops; persisting is
+// the config seam's job when it exists. label is the key the caller writes,
+// so the confirmation names the setting and not whichever command typed it.
+func (a *App) setDockModeSetting(label string, fields []string) error {
 	// Bare form asks, it does not write: a report that also persisted would make
 	// the panel's own explanation of itself a side effect.
 	if len(fields) == 0 {
-		a.AddSystemBlock("sidebarMode " + a.DockMode() + " — " + a.DockState())
+		a.AddSystemBlock(label + " " + a.DockMode() + " — " + a.DockState())
 		return nil
 	}
 	if len(fields) > 1 {
-		return fmt.Errorf("usage: /settings sidebarMode [auto|show|hide]")
+		return fmt.Errorf("usage: /%s [auto|show|hide]", label)
 	}
 	want := a.DockMode()
 	switch fields[0] {
 	case DockAuto, DockShow, DockHide:
 		want = fields[0]
 	default:
-		return fmt.Errorf("usage: /settings sidebarMode [auto|show|hide]")
+		return fmt.Errorf("usage: /%s [auto|show|hide]", label)
 	}
-	confirm := "sidebarMode " + want
+	confirm := label + " " + want
 	if a.settingsOps != nil && a.settingsOps.SetSidebar != nil {
 		if err := a.settingsOps.SetSidebar(want); err != nil {
 			return err
@@ -1643,6 +2624,79 @@ func (a *App) setDockModeSetting(fields []string) error {
 	a.SetDockMode(want)
 	a.AddSystemBlock(confirm)
 	return nil
+}
+
+// setMermaidSetting is /settings renderMermaid [on|off]: the same shape as
+// setDockModeSetting — a bare form reports rather than writes, and the value
+// lands on the one persisted key (renderMermaid) through the same seam the
+// settings panel uses, so the two cannot disagree.
+func (a *App) setMermaidSetting(fields []string) error {
+	if len(fields) == 0 {
+		state := "off"
+		if a.Mermaid() {
+			state = "on"
+		}
+		a.AddSystemBlock("renderMermaid " + state + " — ```mermaid fences draw as diagrams; a diagram that will not fit falls back to source")
+		return nil
+	}
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /settings renderMermaid [on|off]")
+	}
+	var on bool
+	switch fields[0] {
+	case "on", "true":
+		on = true
+	case "off", "false":
+		on = false
+	default:
+		return fmt.Errorf("usage: /settings renderMermaid [on|off]")
+	}
+	confirm := "renderMermaid " + fields[0]
+	if a.settingsOps != nil && a.settingsOps.SetMermaid != nil {
+		if err := a.settingsOps.SetMermaid(on); err != nil {
+			return err
+		}
+		confirm += " (saved to " + a.settingsOps.Path + ")"
+	}
+	a.SetRenderMermaid(on)
+	a.AddSystemBlock(confirm)
+	return nil
+}
+
+// Sidebar implements CommandAPI /sidebar [show|hide|auto]: the two-state
+// show/hide a human reaches for mid-session. Alt+S already walks the policy
+// through all three states, but that is a mode, not a switch — a bare toggle
+// is what "hide the sidebar, now" means — and it lands on the same persisted
+// key through the same seam /settings sidebarMode uses, so the two cannot
+// disagree.
+func (a *App) Sidebar(args string) error {
+	fields := strings.Fields(args)
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /sidebar [show|hide|auto]")
+	}
+	want := ""
+	if len(fields) == 1 {
+		switch fields[0] {
+		case DockShow, DockHide, DockAuto:
+			want = fields[0]
+		default:
+			return fmt.Errorf("usage: /sidebar [show|hide|auto]")
+		}
+	} else {
+		// The toggle asks what is ON SCREEN, not what the policy says: a
+		// terminal that auto-closed the panel is not what the human is
+		// asking to take away, so a bare call opens it rather than
+		// persisting a hide for a panel that was never there.
+		a.mu.Lock()
+		shown := a.dockOn()
+		a.mu.Unlock()
+		if shown {
+			want = DockHide
+		} else {
+			want = DockShow
+		}
+	}
+	return a.setDockModeSetting("sidebarMode", []string{want})
 }
 
 // SendPrompt submits text through the normal send path (markdown commands).
@@ -1681,6 +2735,32 @@ func (a *App) Run() {
 			if ev == nil {
 				return
 			}
+			// A tty read error is terminal, and only here: tcell's
+			// inputLoop posts one EventError and returns, so nothing will
+			// ever be read from the terminal again (tscreen.go). Polling on
+			// would leave the UI alive and deaf — no key, no resize, no
+			// quit chord, with the tty still in raw mode and the alt
+			// screen up. Leaving the loop instead lets runTUI's defers
+			// restore the terminal; the user relaunches.
+			if e, ok := ev.(*tcell.EventError); ok {
+				logx.Errorf("tui: terminal read failed, leaving the UI loop: %v", e)
+				a.Quit()
+				return
+			}
+			// A wedged loop cannot read the key that would end it, so the quit
+			// chord is served here, where a key still lands: the 2026-09-30
+			// report (session 00b1c5a0) was exactly this — the loop blocked
+			// 17 minutes inside a tty write, so Ctrl+C and Ctrl+D were read
+			// by nobody and the session could not be exited. Only the chord
+			// and only while the loop is wedged: every other key is the
+			// loop's to apply, and a chord resolved through the keymap (a
+			// user remap) is left exactly as it was.
+			if a.wedged.Load() {
+				if k, ok := ev.(*tcell.EventKey); ok && a.keyMap.Resolve(k) == "quit" {
+					a.quitOrCancel(true)
+					return
+				}
+			}
 			select {
 			case a.keyq <- ev:
 			case <-a.quitCh:
@@ -1690,8 +2770,10 @@ func (a *App) Run() {
 	}()
 
 	a.draw()
+	a.logFrameAfterDraw()
+
 	for {
-		a.beat()
+		iter := time.Now()
 		select {
 		case <-a.quitCh:
 			return
@@ -1699,8 +2781,12 @@ func (a *App) Run() {
 			a.handleKey(ev)
 			a.drainKeys()
 			a.draw()
+			a.logFrameAfterDraw()
+			a.beatDone("event", iter)
 		case <-a.dirty:
 			a.draw()
+			a.logFrameAfterDraw()
+			a.beatDone("dirty", iter)
 		case <-tick.C:
 			// A paste window whose end marker never arrived must still close,
 			// or the keys held inside it would never reach the user again
@@ -1724,9 +2810,9 @@ func (a *App) Run() {
 				a.sheenPhase++
 				animate = true
 			}
-			// A copy confirmation is timed, and an idle UI does not repaint:
-			// the tick that finds it expired asks for the draw that drops it.
-			if a.selNotice != "" && a.copyHint() == "" {
+			// A toast is timed, and an idle UI does not repaint: the tick that
+			// finds one expired asks for the draw that drops it.
+			if a.toastsExpiring() {
 				animate = true
 			}
 			// A held drag parked on the transcript's edge is the one mouse
@@ -1735,13 +2821,31 @@ func (a *App) Run() {
 			if a.selEdgeTick() {
 				animate = true
 			}
+			// An armed leader prefix is the same kind of timer: the pair has
+			// to stop waiting on its own, because Resolve alone would keep it
+			// armed until the next keystroke (keymap.go). Checked under the
+			// lock this tick already holds.
+			if a.keyMap.ExpirePending(time.Now()) {
+				animate = true
+			}
 			a.mu.Unlock()
+			// The whole-cwd file index landing (pathindex.go): re-query an
+			// OPEN @-dropdown so the recursive hits appear without another
+			// keystroke. takeBuilt is a CAS, so this fires once per build.
+			if a.pathList != nil && a.pathIdx.takeBuilt() {
+				if _, _, ok := pathToken(a.ed.Text()); ok {
+					a.syncSlashMenu()
+					animate = true
+				}
+			}
 			// Nothing repaints for the HUD: a running draw keeps the time
 			// segment live, and idle, the number is a frozen total that needs
 			// no tick to stay correct.
 			if running || animate || stuck {
 				a.draw()
+				a.logFrameAfterDraw()
 			}
+			a.beatDone("tick", iter)
 		}
 	}
 }
@@ -1818,23 +2922,55 @@ func (a *App) handleKey(ev tcell.Event) {
 			// them should scroll or start a text selection. The ask card
 			// outranks the rest — while it is up it takes the wheel and the
 			// click, or the human scrolls the transcript underneath a question
-			// they were trying to answer.
-			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) {
+			// they were trying to answer. The status popup is last of the
+			// chain: it is a panel over the transcript, so anything modal
+			// above it must win.
+			if a.handleAskMouse(m, press) || a.handlePickerMouse(m, press) || a.handleHubRosterMouse(m, press) || a.handleSettingsOverlayMouse(m, press) || a.handleTrajectoryMouse(m, press) || a.handleMsgMenuMouse(m, press) || a.handleStatusPopupMouse(m, press) {
+				// A menu row picked by click arms its action under the lock;
+				// it runs here, unlocked.
+				a.runPendingMsgAction()
+				return // the UI loop repaints after handleKey
+			}
+			// The tab strip is chrome under the top bar: a click there names a
+			// session, never a transcript row, so it is asked after every
+			// modal (a picker owns its own screen) and before the queue and
+			// the transcript selection below.
+			if a.handleTabStripMouse(m, press) {
+				return
+			}
+			// The mid-turn queue (#157) sits above the composer, over the
+			// transcript's tail. It is a surface, not content, so a click on a
+			// row spends itself on the row instead of anchoring a selection
+			// over the transcript text it covers. Checked after the modals,
+			// which are modal and keep first claim on a click.
+			if a.queueMouse(m, press) {
+				a.runPendingQueueAction()
 				return // the UI loop repaints after handleKey
 			}
 			switch m.Buttons() {
 			case tcell.WheelUp:
-				if !a.scrollThinkBox(m, false) {
+				// Diff overlay owns the wheel while open — same as a modal —
+				// otherwise the notch scrolls the transcript underneath it.
+				if a.diffOverlayOpen() {
+					a.dockOverlayScroll(3, false)
+				} else if a.MsgViewOpen() {
+					a.msgViewScroll(3, false)
+				} else if !a.scrollThinkBox(m, false) {
 					a.scroll(3, false)
 				}
 			case tcell.WheelDown:
-				if !a.scrollThinkBox(m, true) {
+				if a.diffOverlayOpen() {
+					a.dockOverlayScroll(3, true)
+				} else if a.MsgViewOpen() {
+					a.msgViewScroll(3, true)
+				} else if !a.scrollThinkBox(m, true) {
 					a.scroll(3, true)
 				}
 			default:
 				a.mu.Lock()
 				a.handleMouse(m, press)
 				a.mu.Unlock()
+				a.runPendingMsgAction()
 			}
 		}
 		return
@@ -1862,6 +2998,41 @@ func (a *App) handleKey(ev tcell.Event) {
 	// The tree selector is modal too: it owns every key while open
 	// (filters, search, labels, Enter/Esc).
 	if a.handleTreeKey(key) {
+		return
+	}
+	// The trajectory ledger is modal on the same terms as the tree selector:
+	// it owns every key while open, so nothing underneath it navigates.
+	// The settings overlay is modal: it owns every key while open.
+	if a.handleSettingsOverlayKey(key) {
+		return
+	}
+	if a.handleTrajectoryKey(key) {
+		return
+	}
+	// Diff overlay is modal for navigation: ↑↓/PgUp/PgDn/Home/End scroll
+	// its body, and Esc closes it — the same modal contract the tree
+	// selector and trajectory ledger use, so the double-Esc rewind block
+	// below never sees an Esc while the overlay is up.
+	if a.handleDiffOverlayKey(key) {
+		return
+	}
+	// The user-message menu and its read-only surface are modal on the same
+	// terms, and they sit ABOVE the diff overlay: the message view is what
+	// "jump" opens, and a menu can be opened from a click that closed nothing
+	// else. Their Esc case matters for the same reason the diff overlay's does
+	// — without it, Esc falls through to the double-Esc rewind block below.
+	if a.handleMsgMenuKey(key) {
+		return
+	}
+
+	// The pill popup takes Esc before the double-Esc rewind ladder: a panel
+	// over the transcript is dismissed by the same chord every other panel
+	// answers, and Esc must not instead pull the draft out of the composer
+	// while a metrics question is still on screen.
+	if key.Key() == tcell.KeyEsc && a.StatusPopupOpen() {
+		a.mu.Lock()
+		a.closeStatusPopupLocked()
+		a.mu.Unlock()
 		return
 	}
 
@@ -1985,6 +3156,14 @@ func (a *App) handleKey(ev tcell.Event) {
 	case "cancel":
 		// Esc aborts a running turn; idle it is a no-op (the dropdown,
 		// when open, was already closed by the menu branch above).
+		// The diff overlay (opened from a dock click) is dismissed first.
+		a.mu.Lock()
+		hasOverlay := a.diffOv != nil
+		a.mu.Unlock()
+		if hasOverlay {
+			a.closeDiffOverlay()
+			return
+		}
 		if running {
 			a.onCancel()
 		}
@@ -2003,29 +3182,75 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.cycleModel()
 		return
 	case "quit":
-		if running {
-			a.onCancel()
-			return
-		}
-		a.onQuit()
+		a.quitOrCancel(running)
 		return
 	case "scroll-up":
-		a.scroll(1, false)
+		if a.diffOverlayOpen() {
+			a.dockOverlayScroll(1, false)
+		} else {
+			a.scroll(1, false)
+		}
 		return
 	case "scroll-down":
-		a.scroll(1, true)
+		if a.diffOverlayOpen() {
+			a.dockOverlayScroll(1, true)
+		} else {
+			a.scroll(1, true)
+		}
 		return
 	case "scroll-page-up":
-		a.scrollPage(false)
+		if a.diffOverlayOpen() {
+			// handleDiffOverlayKey already owns bare PgUp; this covers a
+			// remapped chord that resolves to the scroll-page action.
+			a.mu.Lock()
+			vp := 1
+			if a.diffOv != nil {
+				vp = max(1, a.diffOv.scrollVp-1)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(vp, false)
+		} else {
+			a.scrollPage(false)
+		}
 		return
 	case "scroll-page-down":
-		a.scrollPage(true)
+		if a.diffOverlayOpen() {
+			a.mu.Lock()
+			vp := 1
+			if a.diffOv != nil {
+				vp = max(1, a.diffOv.scrollVp-1)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(vp, true)
+		} else {
+			a.scrollPage(true)
+		}
 		return
 	case "scroll-top":
-		a.scrollTo(false)
+		if a.diffOverlayOpen() {
+			a.mu.Lock()
+			n := 0
+			if a.diffOv != nil {
+				n = len(a.diffOv.lines)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(n, false)
+		} else {
+			a.scrollTo(false)
+		}
 		return
 	case "scroll-bottom":
-		a.scrollTo(true)
+		if a.diffOverlayOpen() {
+			a.mu.Lock()
+			n := 0
+			if a.diffOv != nil {
+				n = len(a.diffOv.lines)
+			}
+			a.mu.Unlock()
+			a.dockOverlayScroll(n, true)
+		} else {
+			a.scrollTo(true)
+		}
 		return
 	case "redraw":
 		a.Invalidate()
@@ -2053,11 +3278,102 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 		a.AddSystemBlock("retry is not wired in this build")
 		return
+	case "send-now":
+		// F6 / the queued row's button (#157). The host owns the turn, so
+		// the chord only names the intent; what "now" means — interrupt the
+		// live run, acknowledge it, start a fresh turn with the oldest
+		// pending message — is decided where the turn lives (cmd/xdev).
+		// With nothing queued it is a notice, never a silent no-op: a chord
+		// that does nothing when pressed is a bug report waiting to happen.
+		if a.onSendNow != nil {
+			text := a.oldestQueued()
+			if text == "" {
+				a.AddSystemBlock("nothing queued — type a prompt and Enter while a turn runs, or click a queued row")
+				a.poke()
+				return
+			}
+			a.onSendNow(text)
+			a.poke()
+			return
+		}
+		a.AddSystemBlock("send now is not wired in this build")
+		return
+	case "session.tab.next":
+		if a.onTabCycle != nil {
+			a.onTabCycle(1, false)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.tab.previous":
+		if a.onTabCycle != nil {
+			a.onTabCycle(-1, false)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.tab.next_unread":
+		if a.onTabCycle != nil {
+			a.onTabCycle(1, true)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.tab.previous_unread":
+		if a.onTabCycle != nil {
+			a.onTabCycle(-1, true)
+		} else {
+			a.AddSystemBlock("session tabs are not wired in this build")
+		}
+		return
+	case "session.delete":
+		// C-d / A-w / <leader>w. Close the CURRENT tab — or, on the last one,
+		// quit: "close this" with nothing left to close has to mean "exit",
+		// or a user who learned C-d quits from xdev still has to learn C-c.
+		a.mu.Lock()
+		tabs := append([]TabInfo(nil), a.tabs...)
+		a.mu.Unlock()
+		if len(tabs) <= 1 {
+			// Nothing left to close, so the chord still exits — and it is
+			// checked BEFORE the wiring test, so C-d keeps meaning "exit"
+			// on a host with no tabset to close into.
+			a.quitOrCancel(running)
+			return
+		}
+		if a.onTabClose == nil {
+			a.AddSystemBlock("session tabs are not wired in this build")
+			return
+		}
+		a.closeTab(currentTabID(tabs))
+		return
+	case "session.list":
+		// <leader>l — the open-session set as a modal list (opencode's
+		// session_list). It reads the snapshot the status row already has.
+		if err := a.TabsPicker(); err != nil {
+			a.AddSystemBlock(err.Error())
+			a.poke()
+		}
+		return
+	case "session.new":
+		// <leader>n — /new from the keyboard: a fresh session file, the
+		// previous one parked in the tabset rather than dropped.
+		if err := a.NewSession(); err != nil {
+			a.AddSystemBlock(err.Error())
+			a.poke()
+		}
+		return
 	case "thinking-toggle":
 		// Shift-Tab. Like the dock chords this runs after every modal
 		// handler, so an open picker keeps first claim on the key (the model
 		// picker binds Shift-Tab to "previous tab").
 		a.ToggleThinking()
+		return
+	case "app.settings":
+		if a.SettingsOverlayOpen() {
+			a.CloseSettingsOverlay()
+		} else {
+			a.OpenSettingsOverlay()
+		}
 		return
 	case "dock-cycle", "dock-fold":
 		// The context dock's own two chords (#291 §1), handled here — after
@@ -2106,7 +3422,12 @@ func (a *App) handleKey(ev tcell.Event) {
 	// runs, so a remapped chord (keybindings.yml) works rather than being
 	// decorative. Editor-adjacent actions are handled here; everything
 	// else falls through to the editor's own key handling.
-	if action := a.keyMap.Resolve(key); action != "" {
+	//
+	// `action` is the value Resolve already computed above — this switch does
+	// NOT call Resolve again. A two-chord prefix is consumed by the first
+	// call, so a second call on the same event disarms what it just armed:
+	// Ctrl+X then L resolved as "l" alone and the pair never fired.
+	if action != "" {
 		switch action {
 		case "submit":
 			// Fall through to the editor: Enter also completes an open
@@ -2119,6 +3440,13 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		case "clear-input":
 			a.ed.Reset()
+			a.poke()
+			return
+		case "history-prev":
+			// The chord /hotkeys advertises. Editor.HandleKey has no
+			// KeyCtrlR case, so without this the key resolved to an action
+			// nothing dispatched and recall was Up-only.
+			a.ed.HistoryPrev()
 			a.poke()
 			return
 		case "cancel":
@@ -2134,11 +3462,7 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.OpenTreeSelector()
 			return
 		case "quit":
-			if running {
-				a.onCancel()
-				return
-			}
-			a.onQuit()
+			a.quitOrCancel(running)
 			return
 		}
 	}
@@ -2192,6 +3516,26 @@ func (a *App) handleKey(ev tcell.Event) {
 		if len(imgs) > 0 {
 			text = a.expandPastes(draft)
 		}
+		// Mid-turn submit (#157). With a turn running, a text prompt is not a
+		// lost keystroke: it becomes a pending entry above the composer and is
+		// handed to the live agent's steer channel, so the model reads it at
+		// its next step boundary. This branch runs BEFORE the transcript row is
+		// appended, because a queued prompt is not yet part of the
+		// conversation — the row belongs to the entry's list, and adding it
+		// here too would print it twice the moment it is delivered.
+		//
+		// Attachments keep the old contract: a queued image has no honest
+		// delivery story (the pixels are not in the steer channel), so it
+		// falls through to the multimodal path and comes back to the composer
+		// with its reason. An unwired onQueue falls through to the plain send
+		// for the same reason — the host still owns the turn claim and still
+		// prints its own refusal.
+		if running && len(imgs) == 0 && a.onQueue != nil {
+			if a.queuePrompt(text) {
+				a.poke()
+				return
+			}
+		}
 		a.mu.Lock()
 		a.blocks = append(a.blocks, &Block{Kind: KindUser, Text: draft})
 		a.sm.Bottom()
@@ -2216,7 +3560,7 @@ func (a *App) handleKey(ev tcell.Event) {
 }
 
 // returnDraft puts a draft that could not be sent back in the composer and
-// says why on the divider. It exists because an attached image has no text
+// says why in a toast. It exists because an attached image has no text
 // fallback: the alternative is a cleared box, a lost screenshot, and a user who
 // does not know either happened. The chips and the payloads go back together,
 // so one Enter retries.
@@ -2236,7 +3580,7 @@ func (a *App) returnDraft(draft string, imgs []PasteImage) {
 	case a.onSendImages != nil:
 		why = "the send declined the attachment (a guest room forwards text only)"
 	}
-	a.setNotice(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
+	a.setError(fmt.Sprintf("not sent: %d image(s) — %s", len(imgs), why))
 	a.poke()
 }
 
@@ -2390,7 +3734,19 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// argument as a phrase — never the raw JSON the model sent. While the
 		// call is in flight the bullet spins and the elapsed ticks; the
 		// settled wall time belongs to the result frame's footer.
-		name, detail := toolSummary(b, w)
+		//
+		// A phrase too long for the row WRAPS onto continuation rows instead
+		// of being cut with an ellipsis. It used to be clipped to the width:
+		// the one thing a user opens the transcript to read — the command —
+		// was the one thing it silently shortened, at an ellipsis in the
+		// middle of a long pipeline. The continuations are indented to where
+		// the phrase starts, so the command reads as one block hanging off
+		// the call, and each rendered row is its own selRow, so a drag over
+		// them copies the rows as painted (the same contract the wrapped
+		// user prompt has). Nothing here clips: a tool that names itself with
+		// megabytes of arguments is the model's bug, and it should be
+		// readable rather than quietly shortened.
+		name, detail := toolSummary(b)
 		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
@@ -2401,24 +3757,55 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		case "ok":
 			bullet, fg = "●", theme.AccentSuccess
 		}
-		ln := textline(bullet+" ", tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg))))
-		ln.runs = append(ln.runs, cell{
-			text:  name,
-			style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true),
-		})
-		if detail != "" {
-			ln.runs = append(ln.runs, cell{
-				text:  " · " + detail,
-				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))),
-			})
-		}
+		bulletSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
+		nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
+		detailSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		// The phrase starts after the bullet, the name and its " · ", so that
+		// column is both where every continuation row indents to and the
+		// width the phrase is wrapped at. A name longer than the row itself
+		// pushes the indent past what fits — the max(10, …) floor below is
+		// the same idiom every other wrapping row here uses (a user prompt, a
+		// system notice): a terminal that narrow has no layout to keep.
+		indent := width(bullet+" ") + width(name) + width(" · ")
+		// The live elapsed rides the head row, so the wrap budget shrinks by
+		// its width: a row that runs one cell past the content width paints
+		// into the right edge (the dock's border, the scrollbar's track).
+		elapsed := ""
 		if b.Status == "running" && !b.Ts.IsZero() {
+			elapsed = "  " + humanDur(time.Since(b.Ts))
+		}
+		// A call with no arguments at all names nothing, so it renders as the
+		// name alone — segs stays empty and there is no continuation to walk.
+		var segs []string
+		if detail != "" {
+			segs = wrap(detail, max(10, w-indent-width(elapsed)))
+		}
+		ln := textline(bullet+" ", bulletSt)
+		ln.runs = append(ln.runs, cell{text: name, style: nameSt})
+		if len(segs) > 0 {
+			ln.runs = append(ln.runs, cell{text: " · " + segs[0], style: detailSt})
+		}
+		if elapsed != "" {
 			ln.runs = append(ln.runs, cell{
-				text:  "  " + humanDur(time.Since(b.Ts)),
+				text:  elapsed,
 				style: tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim))),
 			})
 		}
 		lines = append(lines, ln)
+		for i, seg := range segs {
+			if i == 0 {
+				continue // the head already sits after the name
+			}
+			cont := textline(strings.Repeat(" ", indent), nameSt)
+			cont.runs = append(cont.runs, cell{text: seg, style: detailSt})
+			lines = append(lines, cont)
+		}
+		// A `task` call's children, one dim row each. They read as
+		// continuations of the row above (a `⎿` tick and an indent), not
+		// as sibling tool calls, and they are the only place a user can
+		// see what a subagent is doing while its call blocks — the model
+		// sees only the yield (TestSubagentYieldOnlyIsolation).
+		lines = append(lines, a.subLines(b, w)...)
 	case KindToolDone:
 		lines = append(lines, a.toolBoxLines(i, b, w)...)
 	case KindSystem:
@@ -2564,31 +3951,38 @@ func (a *App) thinkRows(b *Block, w int) []string {
 // thinkMaxOff is the largest offset a reasoning box's window can use: past it
 // the window is already at the oldest thought, so a wheel there has nothing
 // left to scroll. One definition, because the render and the wheel must agree
-// on where the box stops.
-func thinkMaxOff(n int) int { return max(0, n-thinkBoxRows) }
+// on where the box stops. The collapsed box is one row, so its window is one
+// row and ThinkOff is pinned at the tail while it holds no wheel.
+func thinkMaxOff(n, rows int) int { return max(0, n-rows) }
 
 // thinkWindow slices a block's wrapped reasoning to the box's window: `off`
-// rows above the newest thought, at most thinkBoxRows tall. The window is
-// tail-anchored, the same way the transcript counts its own offset, so the
-// newest thought is what a reader following the turn sees. An offset past
-// either end reads as that end, never as an empty frame.
-func thinkWindow(n, off int) (start, end int) {
-	end = n - clamp(off, 0, thinkMaxOff(n))
-	return max(0, end-thinkBoxRows), end
+// rows above the newest thought, `rows` tall. The window is tail-anchored, the
+// same way the transcript counts its own offset, so the newest thought is what
+// a reader following the turn sees. An offset past either end reads as that
+// end, never as an empty frame.
+func thinkWindow(n, off, rows int) (start, end int) {
+	end = n - clamp(off, 0, thinkMaxOff(n, rows))
+	return max(0, end-rows), end
 }
 
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
-// "Thought for Xs" once it settles) and the body shows a fixed window of it —
-// at most thinkBoxRows rows, scrolled by the wheel once a click has focused the
-// box (App.thinkFocus, Block.ThinkOff) and dropped entirely by Ctrl+O. The full
-// reasoning always stays in the session JSONL, so the window is a view, never
-// the record. The focused box draws a bold rule: no other box takes the wheel,
-// so the frame has to say which one has it.
+// "Thought for Xs" once it settles) and the body shows a fixed window of it.
+//
+// The window's height IS the focus. An unfocused box is one row — the newest
+// thought — so a turn reads as a list of one-liners with its reasoning out of
+// the way, and a click (App.thinkFocus, set in selection.go) grows it to
+// thinkBoxRows, which the wheel then scrolls (Block.ThinkOff) and Ctrl+O drops
+// entirely. A second click on it, or a click anywhere else, gives the wheel
+// back and the box returns to one row. The focused box draws a bold rule: no
+// other box takes the wheel, so the frame has to say which one has it. The
+// full reasoning always stays in the session JSONL, so every height here is a
+// view, never the record.
 func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	box := a.th.Box()
+	focused := i == a.thinkFocus
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
-	if i == a.thinkFocus {
+	if focused {
 		// Bold is the terminal's own bright variant: the aim reads as the same
 		// hue turned up, not as a second colour with its own meaning.
 		border = border.Bold(true)
@@ -2604,18 +3998,41 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
 	}
 
+	body := strings.TrimRight(b.Text, "\n")
+	// A body the model never wrote is not rendered: the box keeps its frame
+	// and its state header, and says what happened in one dim row. The full
+	// text stays in the session JSONL — the box is a view, never the record —
+	// so nothing is lost, and the transcript no longer paints a wall of
+	// mojibake that hides the turn's real content.
+	if junkThinking(body) {
+		return []line{
+			boxTop(box, border, hdr, w),
+			boxRow(box, border, bodySt, junkReasoningNotice, inner),
+			boxBottom(box, border, w),
+		}
+	}
 	rows := a.thinkRows(b, w)
+	// Ctrl+O (Block.Expanded) is the one height the click does not own: it is
+	// every row, and it survives a focus change.
+	height := thinkBoxCollapsed
+	if focused || b.Expanded {
+		height = thinkBoxRows
+	}
 	start, end := 0, len(rows)
 	if !b.Expanded {
-		start, end = thinkWindow(len(rows), b.ThinkOff)
+		start, end = thinkWindow(len(rows), b.ThinkOff, height)
 	}
 	// The hidden-row notice leads the window the way it does in a result box:
 	// following the tail, what is elided is the head. Scrolled up, the count
 	// also covers the rows the wheel has yet to come back to — one notice
-	// beats two at this height.
+	// beats two at this height. Collapsed there is nothing to elide into a
+	// window — the single row IS the newest thought — so the notice is the
+	// focused box's alone: at one row it would cost the row the user came for.
 	out := []line{boxTop(box, border, hdr, w)}
-	if hidden := len(rows) - (end - start); hidden > 0 {
-		out = append(out, boxRow(box, border, bodySt, fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", hidden), inner))
+	if focused {
+		if hidden := len(rows) - (end - start); hidden > 0 {
+			out = append(out, boxRow(box, border, bodySt, fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", hidden), inner))
+		}
 	}
 	for _, wl := range rows[start:end] {
 		out = append(out, boxRow(box, border, bodySt, wl, inner))
@@ -2635,6 +4052,11 @@ func (a *App) thinkBoxAt(y int) int {
 	top, vp := a.selViewport()
 	hdr := a.transcriptTop()
 	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return -1
+	}
+	// A header row belongs to the pinned prompt, so a reasoning box is not
+	// under the pointer there however the row index would resolve it.
+	if y-hdr < a.stickyHdr && a.stickyBlock >= 0 {
 		return -1
 	}
 	bi := a.rowIdx.blockAt(int32(top + y - hdr))
@@ -2672,7 +4094,10 @@ func (a *App) scrollThinkBox(m *tcell.EventMouse, down bool) bool {
 	if !down {
 		step = 1
 	}
-	off := clamp(b.ThinkOff+step, 0, thinkMaxOff(len(a.thinkRows(b, a.contentWidth()))))
+	// A notch only ever reaches a focused box (the gate above), which is the
+	// full-height one — so the wheel's ceiling is thinkBoxRows, not the
+	// collapsed height.
+	off := clamp(b.ThinkOff+step, 0, thinkMaxOff(len(a.thinkRows(b, a.contentWidth())), thinkBoxRows))
 	consumed := off != b.ThinkOff
 	b.ThinkOff = off
 	a.mu.Unlock()
@@ -2764,16 +4189,27 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 		}
 	}
 
+	// A live box shows the newest rows and nothing else. Its head is not
+	// history yet — the settled result will print that head in full when the
+	// command exits — and a head window over a command still running is a
+	// window the reader watches scroll away from the line that just arrived.
+	if b.Live && len(rows) > liveRows {
+		rows = rows[len(rows)-liveRows:]
+	}
+
 	var out []line
 	out = append(out, top)
 	if header != "" {
 		out = append(out, boxRow(box, border, bodySt, header, inner))
 	}
 	switch {
-	case len(rows) == 0 && !b.Err:
+	case len(rows) == 0 && !b.Err && !b.Live:
 		out = append(out, boxRow(box, border, mutedSt, "(no output)", inner))
 	case len(rows) == 0:
 		// An error result with nothing to say: the frame and footer carry it.
+		// A live box with nothing yet has not said anything either — no
+		// placeholder, because "(no output)" under a command that is two
+		// seconds old is a verdict the transcript has not earned.
 	case b.Expanded || len(rows) <= headRows+tailRows+1:
 		// Aged results collapse to a head+tail window: the middle of the
 		// output is trimmed before anything else in the transcript is.
@@ -2794,23 +4230,27 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 
 	// Status footer: only the facts this result has. A signalled command
 	// reports no exit code (tool.Outcome says so), so it never shows a signal
-	// dressed up as a status.
-	var notes []string
-	if b.Dur != "" {
-		notes = append(notes, "Wall: "+b.Dur)
-	}
-	if b.HasExit && b.Exit != 0 {
-		notes = append(notes, fmt.Sprintf("Exit: %d", b.Exit))
-	}
-	if b.Truncated {
-		notes = append(notes, "output truncated")
-	}
-	if len(notes) > 0 {
-		notesSt := dimSt
-		if b.Err {
-			notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+	// dressed up as a status. A live box has no facts yet: the running call
+	// row above it is the "still going" statement, and a footer printing
+	// nothing for the next ten seconds is noise.
+	if !b.Live {
+		var notes []string
+		if b.Dur != "" {
+			notes = append(notes, "Wall: "+b.Dur)
 		}
-		out = append(out, boxRow(box, border, notesSt, "⟦"+strings.Join(notes, " | ")+"⟧", inner))
+		if b.HasExit && b.Exit != 0 {
+			notes = append(notes, fmt.Sprintf("Exit: %d", b.Exit))
+		}
+		if b.Truncated {
+			notes = append(notes, "output truncated")
+		}
+		if len(notes) > 0 {
+			notesSt := dimSt
+			if b.Err {
+				notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+			}
+			out = append(out, boxRow(box, border, notesSt, "⟦"+strings.Join(notes, " | ")+"⟧", inner))
+		}
 	}
 
 	out = append(out, boxBottom(box, border, w))
@@ -2854,11 +4294,25 @@ func isWindowRow(s string) bool {
 // 12m9s (#283 RCA §1: held across it, that freeze starved every provider
 // delta waiting on a.mu and let the stream watchdog kill a healthy stream).
 // With Show outside the lock, a frozen tty costs display freshness only;
-// the agent goroutine is never blocked by it.
+// the agent goroutine is never blocked by it. Since tty_deadline.go the flush
+// is also bounded, so a frozen tty costs one dropped frame instead of the
+// whole session.
 func (a *App) draw() {
 	a.paint()
 	a.scr.Show()
+	// A frame the terminal never took is not self-healing: tcell marks each
+	// cell clean before the write, so a dropped frame leaves a partial screen
+	// with nothing left to redraw. Sync forces every cell dirty, which costs a
+	// full repaint exactly once per dropped frame — the price of not losing
+	// the session to a pane that stopped reading.
+	if a.frameDropped != nil && a.frameDropped.Swap(false) {
+		a.scr.Sync()
+	}
 }
+
+// logFrameAfterDraw is called once per frame after draw()
+// to snapshot the screen buffer to the log file when --log is active.
+func (a *App) logFrameAfterDraw() { a.logFrame() }
 
 // paint renders the current state into the screen buffer. a.mu guards the
 // state reads; it must NEVER be held across the Show() flush (see draw).
@@ -2869,30 +4323,51 @@ func (a *App) paint() {
 	w, h := a.width, a.height
 	s.Clear()
 	// Per-frame facts about the viewport: a frame that draws no transcript
-	// (welcome, /clear) must not keep last frame's scroll hint, nor its
+	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
+	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyDoc = 0, 0, -1, 0
+	// The pills' hit table is a per-frame fact for the same reason the
+	// scrollbar's is: a frame that drops a pill for width must not leave
+	// last frame's rectangle live, or a click would open a popup for a
+	// reading that is no longer on screen.
+	a.statusHits = nil
+	// The tab strip's rectangles are a per-frame fact for the same reason.
+	a.tabHits = nil
 	// selection capture — rows recorded before /clear would copy text that is
 	// no longer on screen.
 	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
 	// draws no bar must not leave last frame's grab live on the last column.
-	a.scrollHint, a.selRows, a.selBarOn = "", nil, false
+	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
 	if len(a.blocks) == 0 {
 		composerTop := h - 1 - a.composerRows()
+		// Top bar, then the session strip under it, then the welcome body —
+		// the strip owns its row whether or not the transcript exists, so the
+		// two screens cannot disagree about what is open.
+		a.drawTopBar(s, w, false)
+		a.drawTabStrip(s, w)
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
 		a.drawHubRoster(composerTop)
 		a.drawTreeSelector(composerTop)
+		a.drawTrajectory(composerTop)
 		a.drawPicker(composerTop)
 		a.drawSlashDropdown(composerTop)
 		a.drawAskCard(composerTop)
+		a.drawSettingsOverlay(composerTop)
+		a.drawQueue(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
+		a.drawStatusPopup()
 		// A gesture made before the first block exists — the composer is the
 		// only selectable surface there — is highlighted here too; the branch
 		// returns, so it never reaches the call at the end of paint().
 		a.drawSelection()
+		// The welcome screen has no transcript to sit over, but a toast
+		// arriving before the first turn is exactly when one shows up (the
+		// MCP connect finishes last), so the corner is taken here too.
+		a.drawToasts(s)
 		return
 	}
 
@@ -2905,7 +4380,15 @@ func (a *App) paint() {
 	if vp < 1 {
 		vp = 1
 	}
-	a.drawTopBar(s, w, true)
+	// The top bar belongs to the main pane: its prompts get the pane's width,
+	// and a bar running the terminal's full width would print them under the
+	// panel's own surface.
+	a.drawTopBar(s, a.rightEdge(), true)
+	// The session strip owns the row under the top bar (opencode's tab row),
+	// so the transcript's first row shifts with it — transcriptTop() is the
+	// single place that offset is computed, so the strip cannot desync the
+	// scroll math by being drawn without being counted.
+	a.drawTabStrip(s, a.rightEdge())
 	// The panel is built before the transcript's width is computed: with it open
 	// the lines wrap at its left edge, and a frame that painted the transcript
 	// first would have to redo every render cache entry it drew.
@@ -2922,10 +4405,7 @@ func (a *App) paint() {
 	// position against streaming output.
 	a.sm.NewContent(total, vp)
 	start := a.sm.Start(total, vp)
-	end := start + vp
-	if end > total {
-		end = total
-	}
+	end := min(start+vp, total)
 
 	// Proportional right-edge scrollbar (omp's ScrollView): while the
 	// transcript overflows the viewport, the last screen column carries a
@@ -2940,8 +4420,30 @@ func (a *App) paint() {
 	if sbOk {
 		bandLim = edge - 1
 	}
-	selRows := make([]selRow, 0, end-start)
-	for row, r := range a.viewRows(int32(start), int32(end)) {
+	// The sticky header (grok scrollback/sticky.rs): the prompt the viewport has
+	// scrolled past pins at the top of the transcript, IN FRONT of the rows it
+	// re-renders — it replaces the viewport's first rows rather than pushing
+	// the stream down. One thing follows from that, and it is the reason the
+	// header is cheap: the document row a screen row shows does NOT move. Below
+	// the header, screen row y is still document row start+(y-top), so every
+	// hit-test and the selRows capture below keep their arithmetic untouched;
+	// only the header's OWN rows resolve elsewhere, and they are published
+	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
+	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
+	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
+	gapRow := sticky.rows - len(header) // 1 while pinned, 0 while being pushed off
+	// The header rows first (they overwrite the viewport's own first rows),
+	// then the stream from the row the header ends at. Both are rowViews, so
+	// the paint loop below cannot tell them apart.
+	view := make([]rowView, 0, max(len(header)+gapRow, end-start))
+	view = append(view, header...)
+	for range gapRow {
+		view = append(view, rowView{})
+	}
+	view = append(view, a.viewRows(int32(start+sticky.rows), int32(end))...)
+	selRows := make([]selRow, 0, len(view))
+	linkHits := make([]linkHit, 0)
+	for row, r := range view {
 		y := row + top
 		// A banded row (user prompt / code fence) carries one background
 		// that the fill, the rail, the runs and the timestamp must all
@@ -2974,6 +4476,7 @@ func (a *App) paint() {
 		// copied. A row that is chrome end to end (a bare rule) records no
 		// text and copies as the blank line it looks like.
 		startX, content := -1, strings.Builder{}
+		rowLinkHits := make([]linkHit, 0)
 		for _, run := range r.ln.runs {
 			st := run.style
 			if banded {
@@ -2982,20 +4485,38 @@ func (a *App) paint() {
 				st = st.Background(r.ln.bg)
 			}
 			drawText(s, x, y, run.text, st)
+			if run.link != "" {
+				rowLinkHits = append(rowLinkHits, linkHit{x0: x, x1: x + paintedWidth(run.text) - 1, y: y, target: run.link})
+			}
 			if !run.chrome {
 				if startX < 0 {
 					startX = x
 				}
 				content.WriteString(run.text)
 			}
-			x += width(run.text)
+			x += paintedWidth(run.text)
 		}
 		if startX < 0 {
 			startX = 0
 		}
-		// Selection hit-testing works off this text (the streaming
-		// cursor is decoration, not content).
+		// Selection hit-testing works off this text (the streaming cursor is
+		// decoration, not content). The header's rows are captured like any
+		// other: what is painted is what is copied, and the copy of a pinned
+		// prompt is the text the header shows.
 		selRows = append(selRows, selRow{text: strings.TrimSuffix(content.String(), "▍"), x0: startX})
+		// The timestamp is painted over the runs after them, so its columns are
+		// not clickable even where an earlier URL run extended underneath it.
+		if r.ts != "" {
+			last := edge - width(r.ts) - 3
+			for i := range rowLinkHits {
+				rowLinkHits[i].x1 = min(rowLinkHits[i].x1, last)
+			}
+		}
+		for _, hit := range rowLinkHits {
+			if hit.x0 <= hit.x1 {
+				linkHits = append(linkHits, hit)
+			}
+		}
 		// Right-aligned dim timestamp (grok draws these on first rows).
 		if r.ts != "" {
 			tsSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
@@ -3006,16 +4527,26 @@ func (a *App) paint() {
 		}
 	}
 	// Paint the scrollbar over the reserved column, spanning the visible
-	// rows: the thumb marks the current window, the track fills the rest.
+	// rows: a filled groove with the thumb riding it (opencode's ScrollBar —
+	// a track background rather than a hairline glyph, and a thumb that can
+	// land between two rows). The half-row span says which cells are thumb: a
+	// full block, the upper or lower half block, or the bare groove.
 	if sbOk {
-		trackSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-		thumbSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+		// The groove is the page's own raised surface (bg_highlight), one step
+		// off the background: enough to read as a rail, quiet enough not to
+		// compete with the transcript. The thumb is the palette's own bright
+		// gray — Get's documented fallback chain resolves it for a custom
+		// theme (gray_bright → gray → muted) without a new slot.
+		groove := a.cellColor(a.th.Get(theme.BgHighlight))
+		grooveSt := tcell.StyleDefault.Background(groove)
+		thumbSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayBright))).Background(groove)
 		for y := range end - start {
-			ch, st := "│", trackSt
-			if y >= sbStart && y < sbEnd {
-				ch, st = "█", thumbSt
+			ch := sbGlyph(y, sbStart, sbEnd)
+			st := grooveSt
+			if ch != ' ' {
+				st = thumbSt
 			}
-			drawText(s, edge-1, y+top, ch, st)
+			s.SetContent(edge-1, y+top, ch, nil, st)
 		}
 	}
 	// Publish the bar's geometry for the mouse hit-test (selection.go): the
@@ -3024,13 +4555,25 @@ func (a *App) paint() {
 	// sbOk false is what keeps grab off a column that carries content. The
 	// column travels with it: with the context dock open the transcript's last
 	// column is not the terminal's last, and a grab keyed to width-1 answers a
-	// press on the panel's border instead of the bar under the pointer.
-	a.selBarOn, a.selBarVP, a.selBarPos = sbOk, vp, sbStart
-	a.selBarX, a.selBarTotal, a.selBarThumb = 0, total, sbEnd-sbStart
+	// press on the panel's border instead of the bar under the pointer. The
+	// thumb is published in half rows, the unit the bar was drawn in.
+	a.selBarOn, a.selBarVP, a.selBarPos, a.selBarEnd = sbOk, vp, sbStart, sbEnd
+	a.selBarX, a.selBarTotal = 0, total
 	if sbOk {
 		a.selBarX = edge - 1
 	}
-	a.selRows, a.selTop = selRows, start
+	a.selRows, a.selTop, a.linkHits = selRows, start, linkHits
+	// The sticky header's geometry, published like the scrollbar's. Only the
+	// header's OWN rows are a special case (a corner on one takes the pinned
+	// prompt's rows); every row below it keeps the viewport's own mapping,
+	// because the header re-renders rows the viewport already owned.
+	a.stickyHdr, a.stickyVis, a.stickyBlock = sticky.rows, len(header), sticky.block
+	a.stickyDoc = 0
+	if sticky.block >= 0 {
+		// The header's first painted row IS the prompt's row clipTop, so this is
+		// the document row every hit-test reads instead of re-deriving it.
+		a.stickyDoc = sticky.row + int32(sticky.clipTop)
+	}
 	if a.selDown {
 		a.selCacheRows(start) // keep the text a held drag has already passed
 	}
@@ -3044,11 +4587,16 @@ func (a *App) paint() {
 	// to the top row (a long thinking line, or the last prompt) and any
 	// right-aligned timestamp there, so the first line showed a hint glued to
 	// the text that never scrolled away. The divider is chrome: never content.
-	if up, down := a.sm.Indicator(total, vp); up > 0 || down > 0 {
+	up, down := a.sm.Indicator(total, vp)
+	if up > 0 || down > 0 {
 		a.scrollHint = fmt.Sprintf("▲ %d ▼ %d", up, down)
 	} else {
 		a.scrollHint = ""
 	}
+	// "↓ n new": the scroll hint says a jump is possible, this is the jump.
+	// Painted over the transcript's own rows, before the dock and every
+	// overlay, so a panel that covers the chip wins the click.
+	a.drawJumpChip(s, edge, top, vp, down)
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
 	composerTop := h - 1 - cRows
@@ -3057,20 +4605,44 @@ func (a *App) paint() {
 	if a.dockOn() {
 		dtop, dh := a.dockGrid()
 		a.drawDock(s, w-dockCols, dtop, dh)
+		a.selDockRows = a.selDockRowsForPaint()
 	}
 	a.drawSessionPicker(composerTop)
 	a.drawDiffOverlay(composerTop)
 
 	a.drawHubRoster(composerTop)
+	a.drawTrajectory(composerTop)
 	a.drawTreeSelector(composerTop)
 	a.drawPicker(composerTop)
 	a.drawSlashDropdown(composerTop)
 	a.drawAskCard(composerTop)
+	a.drawSettingsOverlay(composerTop)
+	// The mid-turn queue (#157) paints between the transcript and the
+	// composer, so it goes after every overlay (an overlay is modal and owns
+	// its rows) and before the composer, whose top border must stay the edge
+	// of the box. It is chrome, not content, and publishes its own hit table.
+	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
+	// The pill popup paints after the status row (it is anchored to it) and
+	// before the selection highlight, so a drag that ends over the panel does
+	// not shine through it.
+	a.drawStatusPopup()
+	// The toasts paint last, over everything, so the corner is theirs: a
+	// notice that scrolled under a selection highlight or a picker frame is
+	// a notice the user never saw. They live in the transcript's rows, above
+	// the composer, so nothing here can cover the draft.
+	a.drawToasts(s)
 	// Last, so it paints over every surface the frame just drew: see the note
 	// where the selection geometry is published above.
 	a.drawSelection()
+	// The user-message surfaces paint after even the selection: they are
+	// transient popups anchored to a click, and a highlight left over from an
+	// earlier drag must not shine through the menu. The menu's own geometry
+	// clamps it above the composer, so painting last cannot cover the prompt
+	// the user is about to type into.
+	a.drawMsgView(composerTop)
+	a.drawMsgMenu()
 }
 
 // drawSlashDropdown renders the "/" autocomplete popup above the composer
@@ -3165,6 +4737,18 @@ func (a *App) drawPicker(yComposerTop int) {
 	} else if rows > avail-chrome {
 		rows = avail - chrome
 	}
+	// A row is 6 cells of marker/dot/indent, the name, then the detail cell.
+	// The name takes what the names need, up to the whole row: the old fixed
+	// 28-cell detail reserve is what cut a name to twelve cells plus an
+	// ellipsis on a narrow terminal, losing the tail of the title — and the
+	// detail is the part that goes when the row cannot hold both, not the
+	// thing being picked. The paint loop's room>4 guard drops it.
+	//
+	// It is measured BEFORE the window is taken, because a name wider than
+	// the column wraps onto continuation rows — windowing first would
+	// re-flow the rows the column was measured from. lines() reads labelW, so
+	// the wrap width and the painted width are one number.
+	p.labelW = min(p.widestLabel()+2, inner-6)
 	p.visible = rows // paging in handlePickerKey follows the drawn window
 	lines, start, selLine := p.window(rows)
 
@@ -3197,32 +4781,31 @@ func (a *App) drawPicker(yComposerTop int) {
 		y++
 	}
 
-	// Rows. The label column is aligned across the visible window so the
-	// detail column reads as a table.
-	labelW := 0
-	for _, ln := range lines {
-		if !ln.header {
-			labelW = max(labelW, width(ln.item.Label))
-		}
-	}
-	// The name column is the terminal's leftovers: the box, the 6 cells of
-	// marker/dot/indent at the row's head, and the detail column the row
-	// keeps. The old fixed 28 wrap made a wide terminal ellipsize names it
-	// had room to print, and a narrow one spend half the row on a detail
-	// that was then clipped away. The floor keeps a name legible when the
-	// row is too narrow for both — the detail is the part that drops (the
-	// room>4 guard below), not the thing being picked.
-	labelW = min(labelW+2, max(12, inner-6-pickerDetailCols))
+	// Rows. A label wider than the name column has already been wrapped into
+	// continuation rows by lines(); each paints its own line of the label at
+	// the column the label starts at, and only the row's first line carries
+	// the marker, the current dot and the detail cell. The name column is
+	// p.labelW, measured above the window for exactly this reason.
+	labelW := p.labelW
 	// Publish the row map the mouse router hit-tests against, so a click lands
-	// on exactly the row the user saw.
+	// on exactly the row the user saw — a continuation row included: it is the
+	// same item, and clicking it must select the row it belongs to.
 	p.hitY0, p.hitItem = y, make([]int, len(lines))
+	// The selection is an ITEM, not a line: a wrapped label's continuation
+	// rows are the highlighted row's, so the highlight follows the item and
+	// moving down past a three-line title never looks like selecting a blank.
+	selItem := -1
+	if i := selLine - start; i >= 0 && i < len(lines) {
+		selItem = lines[i].itemIdx
+	}
 	for i, ln := range lines {
 		p.hitItem[i] = -1 // a section header is not a target
 		if !ln.header {
 			p.hitItem[i] = ln.itemIdx
 		}
+		sel := !ln.header && ln.itemIdx == selItem
 		st := rowBg
-		if start+i == selLine {
+		if sel {
 			st = selBg
 		}
 		for x := x0 + 1; x < x1; x++ {
@@ -3235,15 +4818,24 @@ func (a *App) drawPicker(yComposerTop int) {
 			y++
 			continue
 		}
-		marker := "  "
-		if start+i == selLine {
-			marker = "▶ "
+		if !ln.cont {
+			marker := "  "
+			if sel {
+				marker = "▶ "
+			}
+			drawText(a.scr, x0+2, y, marker, st.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant))))
+			if ln.item.Current {
+				drawText(a.scr, x0+4, y, "●", st.Foreground(a.cellColor(a.th.Get(theme.AccentSuccess))))
+			}
 		}
-		drawText(a.scr, x0+2, y, marker, st.Foreground(a.cellColor(a.th.Get(theme.AccentAssistant))))
-		if ln.item.Current {
-			drawText(a.scr, x0+4, y, "●", st.Foreground(a.cellColor(a.th.Get(theme.AccentSuccess))))
-		}
-		drawText(a.scr, x0+6, y, clip(ln.item.Label, labelW-1), st.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
+		// The label cell is already the wrapped line: wrapping it here would
+		// double the cut, and clipping it would put a second ellipsis on a
+		// line that fits. lines() owns the wrap width for this reason.
+		drawText(a.scr, x0+6, y, ln.text, st.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
+		// The detail rides the row's FIRST line, in the column the name
+		// column left, and is clipped by the room that is actually left —
+		// the same cell it always had. The wrapped rows below carry title
+		// text only, so a name never runs into it.
 		if ln.item.Detail != "" {
 			cell := x0 + 6 + labelW
 			if room := x1 - 2 - cell; room > 4 {
@@ -3324,9 +4916,12 @@ func clip(s string, maxCells int) string {
 }
 
 // composerAvail is the editor's text width in cells inside the prompt box
-// (border+pad+prefix+right pad+border).
+// (border+pad+prefix+right pad+border). It is measured against rightEdge, not
+// the terminal: with the sidebar open the box sits inside the main pane, so a
+// draft must wrap where the box ends — text the box cannot show is a wrap the
+// editor has to know about, or the prompt grows rows the box will not paint.
 func (a *App) composerAvail() int {
-	avail := a.width - 7
+	avail := a.rightEdge() - 7
 	if avail < 4 {
 		avail = 4
 	}
@@ -3381,9 +4976,12 @@ func (a *App) composerRows() int {
 
 // drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
 // editor text, blinking block cursor; the model + running spinner ride the
-// info divider, tinted with the statusLine tokens.
+// info divider, tinted with the statusLine tokens. The box is as wide as the
+// main pane, so the sidebar's columns are its right edge — the prompt is a
+// window of its own now, not a row that runs the terminal's full width under
+// the panel.
 func (a *App) drawComposer(yTop int) {
-	w := a.width
+	w := a.rightEdge()
 	if w < 6 || yTop < 1 {
 		return
 	}
@@ -3442,6 +5040,13 @@ func (a *App) drawComposer(yTop int) {
 	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
 	yBottom := yTop + len(lines)
 	info := " " + a.st.Model
+	// The reasoning level beside the model it applies to: the two are one
+	// request, and "which model" alone left the other half of it invisible.
+	// The bare rung, not "thinking <level>" — the model it sits beside says
+	// what the pair is, and the word only added width.
+	if l := a.thinkingLevel(); l != "" {
+		info += " · " + l
+	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		info += " · Vibe"
 	}
@@ -3465,18 +5070,14 @@ func (a *App) drawComposer(yTop int) {
 	// painted on transcript row 0, where it overwrote whatever content had
 	// scrolled to the top: a long thinking line, or the last prompt, looked
 	// like it had gone static in the first line. The divider is chrome, so it
-	// takes the pixels instead; when the divider is too narrow for both, the
-	// hint is dropped rather than eating the model name. Three hints want the
-	// slot, in this order: a fresh copy confirmation (the only proof the mouse
-	// gesture did anything, since the app holds the mouse and the terminal
-	// stays quiet), then the draft's own hidden rows — text the user is
+	// takes the pixels instead; when the divider is too narrow for the hint,
+	// the hint is dropped rather than eating the model name. The copy
+	// confirmation that used to lead the queue is a toast now (toast.go), so
+	// two hints want the slot: the draft's own hidden rows — text the user is
 	// composing right now beats scrollback they already read — then the
 	// transcript's ▲n▼n.
-	hint := a.copyHint()
-	if hint == "" {
-		hint = draftHint(above, below)
-	}
-	if hint == "" {
+	var hint string
+	if hint = draftHint(above, below); hint == "" {
 		hint = a.scrollHint
 	}
 	if hint != "" {
@@ -3509,44 +5110,84 @@ func draftHint(above, below int) string {
 	return ""
 }
 
+// drawJumpChip paints the "↓ n new" jump-to-latest button over the
+// transcript's own bottom-right corner while rows are hidden below the
+// viewport, and publishes the rectangle it drew so the mouse can hit it
+// (App.jump). The scroll hint on the composer divider says a jump is
+// possible; this is the jump. Caller holds a.mu.
+//
+// It takes the transcript's edge, not the terminal's, so the chip stays with
+// the content when the context dock is open. down is the hidden-row count
+// from the scroll model: zero means the tail is on screen and the button has
+// nothing to say.
+func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
+	a.jump = panelRect{}
+	if down <= 0 || vp < 2 {
+		return
+	}
+	// A pill, not a bare line of text: the row behind it is transcript
+	// content, so the button needs its own background (and a cell of padding
+	// on each side) to read as a control rather than as a scrolled line.
+	label := "↓ " + strconv.Itoa(down) + " new"
+	w := width(label) + 2
+	if w > edge-6 {
+		label, w = "↓", 3
+	}
+	// Two rows above the bottom edge, and clear of the scrollbar's column: the
+	// bar reports position continuously and must stay readable behind the
+	// chip, and a chip on the last row would sit on the newest line.
+	x, y := edge-1-w, top+vp-2
+	bg := tcell.StyleDefault.
+		Background(a.cellColor(a.th.Get(theme.BgHighlight))).
+		Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+	fillPanelRows(s, y, y, x, edge-1, bg)
+	drawText(s, x+1, y, label, bg)
+	a.jump = panelRect{x: x, y: y, w: w, h: 1}
+}
+
 // drawStatusRow renders the bottom row: the working directory on the left,
 // the configured HUD segments (settings statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
-// on a small terminal.
+// on a small terminal. The row belongs to the main pane: its budget and its
+// right edge are the pane's, not the terminal's, so the metrics never paint
+// into the sidebar's columns.
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
+	w := a.rightEdge()
 	// The running tool call leads the row: "● <name> · cd <cwd>" on
 	// the left, the configured segments right-aligned.
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		pathLbl := pathDisplay(a.cwd, a.width-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
+		pathLbl := pathDisplay(a.cwd, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
 		if pathLbl != "" {
 			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			drawText(a.scr, 2, y, pathLbl, pathSt)
 		}
-		a.drawHUD(y, 2+width(cmdLabel)+width(pathLbl)+2, parts)
+		a.drawHUD(y, w, 2+width(cmdLabel)+width(pathLbl)+2, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the path is what shrinks.
-	budget := a.width - 2 - hudEssentialWidth(parts) - 1
+	budget := w - 2 - hudEssentialWidth(parts) - 1
 	lbl := pathDisplay(a.cwd, budget-2)
 	if lbl != "" {
 		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		drawText(a.scr, 2, y, lbl, pathSt)
 	}
-	a.drawHUD(y, 2+width(lbl), parts)
+	a.drawHUD(y, w, 2+width(lbl), parts)
 }
 
 // drawHUD renders the configured status segments right-aligned on the
-// status row (caller holds a.mu). Segment colors come from the
-// statusLine* tokens, the separators from statusLineSep, and statusLineBg
-// fills the row when the theme sets one. The metrics win a narrow row:
-// the path is drawn first against the space the essential segments need,
-// and any segment that still does not fit is dropped by keep-rank (theme
-// and model first, the work timer and the rate last).
-func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
+// status row (caller holds a.mu), within the main pane's own width — w is the
+// pane's right edge, not the terminal's, so the metrics stop at the sidebar
+// instead of running under it. Segment colors come from the statusLine*
+// tokens, the separators from statusLineSep, and statusLineBg fills the row
+// when the theme sets one. The metrics win a narrow row: the path is drawn
+// first against the space the essential segments need, and any segment that
+// still does not fit is dropped by keep-rank (theme and model first, the work
+// timer and the rate last).
+func (a *App) drawHUD(y, w, leftEnd int, parts []hudPart) {
 	if len(parts) == 0 {
 		return
 	}
@@ -3561,7 +5202,7 @@ func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
 		}
 		return n
 	}
-	end := a.width - 2
+	end := w - 2
 	for len(parts) > 0 && end-widthOf(parts) < leftEnd+1 {
 		drop := 0
 		for i, p := range parts {
@@ -3591,12 +5232,24 @@ func (a *App) drawHUD(y, leftEnd int, parts []hudPart) {
 			x += width(sep)
 		}
 		drawText(a.scr, x, y, p.text, bgSt.Foreground(a.cellColor(a.th.Get(p.token))))
+		// Publish a pill's rectangle as it is painted, so the click that
+		// opens its popup is tested against the pixels the frame actually
+		// put there. A pill dropped for width never publishes one, so a
+		// reading that is not on screen cannot be clicked.
+		if p.popup {
+			a.statusHits = append(a.statusHits, statusHit{
+				name: p.name,
+				rect: panelRect{x: x, y: y, w: width(p.text), h: 1},
+			})
+		}
 		x += width(p.text)
 	}
 }
 
 // statusSegments is the HUD segment vocabulary (settings
 // statusLine.segments): model, tokens, context, cost, rate, theme, time.
+// `tokens` and `time` are the two dsh PILLS (statuspill.go) — clickable, and
+// carrying the headline reading only.
 var statusSegments = map[string]bool{
 	"model":   true,
 	"tokens":  true,
@@ -3607,24 +5260,44 @@ var statusSegments = map[string]bool{
 	"theme":   true,
 	"time":    true,
 	"command": true,
+	// split is the pre-pill `tokens` reading: the ↑⇢↓ glyph split, kept
+	// reachable under a name of its own so a session that wants the
+	// buckets inline can still ask for them
+	// (`statusLine.segments: time,split,context`).
+	"split": true,
+	// cache is the dsh "Cache hit N%" reading (deepseek-harness
+	// StatsPills.tsx UsagePill): the session's total with the hit rate
+	// beside it, so the one number that says whether the prefix cache is
+	// working needs no subtraction. dsh is the donor here — the pill is
+	// exactly "total · Cache hit N%", and xdev's tokens segment already
+	// carries the split the pill's dialog breaks out.
+	"cache": true,
+	// toolcalls is dsh's "{turns} turns {steps} steps" TimePill count
+	// reduced to the one figure xdev has no other home for: how many tool
+	// calls this session spent, with failures beside it.
+	"toolcalls": true,
 	// debugMouse renders the last mouse event on the status bar
 	// (settings `tui.debugMouse`, off by default). It always shows
 	// when enabled: the segment never hides, so the log is visible
 	// the moment it is opted in.
 	"debugMouse": true,
+	// sessions is the open-tab count with busy/unread marks — the whole
+	// signal the multi-session TUI needs without a painted tab strip.
+	"sessions": true,
 }
 
-// defaultStatusSegments is the shipped layout: the work timer, the token
-// counters, the live context total and the decode speed, right-aligned (the
-// timer reads leftmost so the rate's own " │ " stays the row's right edge).
-// The context segment is the number: what this session's context costs against
-// the model's window (ctx 92k/200k), read from Status.CtxUsed — the last
-// request's provider-reported total, cached input included, which covers the
-// system prompt, the visible history and the tool schemas. It hides while
-// either half is unknown (an undiscovered window, or a session that has not
-// answered yet), so a fresh run keeps a clean row. The model keeps its
-// composer divider slot, which is chrome rather than a segment.
-var defaultStatusSegments = []string{"command", "time", "tokens", "context", "rate"}
+// defaultStatusSegments is the shipped layout: the two dsh composer pills,
+// right-aligned, and nothing else. dsh solved the same problem — a metrics
+// row competing with the rest of the composer dock — by keeping two pills
+// whose dialogs carry the breakdown, and that is the shape here: the time
+// pill reads the work timer, the turn/step counts and the decode speed; the
+// token pill reads the session total and the cache hit rate. Every other
+// figure (the context meter, the spend, the call count, the token split)
+// is one click away, which is where /usage's long form used to be the only
+// place to read it — a report is not where a glance should have to go.
+// The model keeps its composer divider slot, which is chrome rather than a
+// segment.
+var defaultStatusSegments = []string{"sessions", "command", pillTime, pillToken}
 
 func statusSegmentNames() []string {
 	out := make([]string, 0, len(statusSegments))
@@ -3642,11 +5315,76 @@ func (a *App) hudSegment(name string) (text, token string) {
 	switch name {
 	case "model":
 		return a.st.Model, theme.StatusLineModel
-	case "tokens":
+	case pillToken:
+		// The token PILL, not the old ↑⇢↓ split: dsh's UsagePill button
+		// reads "{total} · Cache hit N%" and its dialog breaks out the
+		// buckets, which is the same division of labour this row now has
+		// (pillLabel draws the button, drawStatusPopup the dialog). The
+		// split is still one settings entry away (`tokens` keeps the old
+		// meaning below) for a session that wants it inline.
+		//
+		// The total counts the cache write as well as the read: it is a
+		// billed bucket, and dropping it would make the pill's own total
+		// disagree with the popup it opens.
+		if lbl := a.pillLabel(pillToken); lbl == "" {
+			return "", ""
+		} else {
+			return lbl, theme.StatusLineSpend
+		}
+	case "split":
+		// The pre-pill token reading, kept reachable under its own name:
+		// the two glyphs each claim one half of a split the provider
+		// reports three ways, so the row shows the split: ↑ is fresh
+		// input, ⇢ the cache read beside it, and ↓ output with the
+		// reasoning already inside it broken out. cache and think hide
+		// when the provider reports none, so a provider that bills no
+		// cache and reasons for nothing keeps the plain two-glyph row.
 		if a.st.TokensIn == 0 && a.st.TokensOut == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("↑%s │ ↓%s", humanTokens(a.st.TokensIn), humanTokens(a.st.TokensOut)), theme.StatusLineSpend
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s↑%s", a.th.HUDIcon(theme.HUDIconDatabase), HumanTokens(a.st.TokensIn))
+		if a.st.TokensCache > 0 {
+			fmt.Fprintf(&b, " ⇢%s", HumanTokens(a.st.TokensCache))
+		}
+		fmt.Fprintf(&b, " │ ↓%s", HumanTokens(a.st.TokensOut))
+		if a.st.TokensThink > 0 {
+			fmt.Fprintf(&b, " ˟%s", HumanTokens(a.st.TokensThink))
+		}
+		return b.String(), theme.StatusLineSpend
+	case "cache":
+		// dsh's cache-hit RATE (deepseek-harness StatsPills.tsx), and only
+		// the rate. dsh's pill reads "{total} · Cache hit N%" because that
+		// pill is its ONLY token reading; xdev's row already carries the
+		// split, and the total beside it was the same 66.3k drawn twice.
+		//
+		// No leading icon either: the database icon is already on the token
+		// segment this one refines, and a second ▤ three cells later is the
+		// same duplication in another dress. The rate is cacheRead over the
+		// BILLED prompt side (fresh + cached) — dsh's three disjoint
+		// buckets minus the cache write xdev does not bill separately —
+		// because output was never cacheable and counting it would read
+		// low for the wrong reason. Hidden until something was actually
+		// served from the cache: 0% on a provider that reports no cache is
+		// a claim about a measurement nobody made.
+		if a.st.TokensCache <= 0 || a.st.TokensIn+a.st.TokensCache <= 0 {
+			return "", ""
+		}
+		return fmt.Sprintf("cache %d%%",
+			100*a.st.TokensCache/(a.st.TokensIn+a.st.TokensCache)), theme.StatusLineSpend
+	case "toolcalls":
+		// dsh's TimePill counts turns and steps; the one figure xdev has
+		// no other home for is the call count, and a failed call is worth
+		// seeing beside the total rather than only in /usage. Hides at
+		// zero so a session that has not called a tool keeps a clean row.
+		if a.st.ToolCalls == 0 {
+			return "", ""
+		}
+		if a.st.ToolErrors > 0 {
+			return fmt.Sprintf("%s%d calls (%d failed)", a.th.HUDIcon(theme.HUDIconTool),
+				a.st.ToolCalls, a.st.ToolErrors), theme.StatusLineSpend
+		}
+		return fmt.Sprintf("%s%d calls", a.th.HUDIcon(theme.HUDIconTool), a.st.ToolCalls), theme.StatusLineSpend
 	case "context":
 		// used/total of the LIVE context: what the next request costs against
 		// the model's window. Hidden until both halves are known — an
@@ -3654,41 +5392,72 @@ func (a *App) hudSegment(name string) (text, token string) {
 		if a.st.CtxWindow <= 0 || a.st.CtxUsed == 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("ctx %s/%s", humanTokens(a.st.CtxUsed), humanTokens(a.st.CtxWindow)), theme.StatusLineContext
+		return fmt.Sprintf("ctx %s/%s", HumanTokens(a.st.CtxUsed), HumanTokens(a.st.CtxWindow)), theme.StatusLineContext
 	case "cost":
 		if a.st.Cost <= 0 {
 			return "", ""
 		}
 		return fmt.Sprintf("$%.4f", a.st.Cost), theme.StatusLineCost
-	case "time":
-		// Total time spent WORKING: the banked spans plus the live one. An idle
-		// agent — and an agent parked on a question card — shows a frozen
-		// number; the wall clock between turns belongs to the user, not to the
-		// session. "0s" is a reading, so the segment never hides.
-		return humanDur(a.activeWork()), theme.StatusLineSpend
+	case pillTime:
+		// The time PILL (dsh's TimePill): the work timer, then the
+		// turn/step counts, then the decode speed. Total time spent
+		// WORKING — the banked spans plus the live one; an idle agent, and
+		// an agent parked on a question card, shows a frozen number,
+		// because the wall clock between turns belongs to the user. "0s"
+		// is a reading, so the pill never hides.
+		return a.pillLabel(pillTime), theme.StatusLineSpend
 	case "rate":
-		// omp's ⚡ tok/s: the decode speed of the last completed message, or a
-		// live estimate from the deltas arriving right now. Never measured is
-		// never displayed — the segment hides rather than show a fake zero.
-		rate := a.st.Rate
-		if a.st.Running {
-			if live := a.liveRate(); live > 0 {
-				rate = live
-			}
-		}
-		if rate <= 0 {
+		// omp's ⚡ tok/s: the decode speed of the last message the provider
+		// gave a token count for. ONE formula, one source — a live estimate
+		// from rune counts reads up to 5x off the measured value, and swapping
+		// between the two mid-turn is what made the number look like it was
+		// drifting. Unmeasured hides; a message too short to measure clears
+		// the rate (AddUsage), so a stale reading never stands in for one.
+		if a.st.Rate <= 0 {
 			return "", ""
 		}
-		return fmt.Sprintf("⚡ %.1f t/s", rate), theme.StatusLineSpend
+		return fmt.Sprintf("%s %.1f t/s", a.th.HUDIcon(theme.HUDIconGauge), a.st.Rate), theme.StatusLineSpend
 	case "ttft":
 		// ⌚ ttft: per-turn time-to-first-token. SetTTFT writes it;
 		// the segment stays hidden until a turn has actually finished.
 		if a.st.TTFT <= 0 {
 			return "", ""
 		}
-		return "⌚ " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
+		return a.th.HUDIcon(theme.HUDIconGauge) + " " + humanDur(time.Duration(a.st.TTFT)*time.Millisecond) + " ", ""
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
+	case "sessions":
+		// Open-session summary: "2 tabs" idle, "2 tabs ·1" with one busy,
+		// "2 tabs ·1 ✦1" with unread. Hidden on a single idle session so a
+		// normal one-chat TUI keeps a clean row.
+		n := len(a.tabs)
+		if n == 0 {
+			return "", ""
+		}
+		busy, unread := 0, 0
+		for _, t := range a.tabs {
+			if t.Running {
+				busy++
+			}
+			if t.Unread {
+				unread++
+			}
+		}
+		if n == 1 && busy == 0 && unread == 0 {
+			return "", ""
+		}
+		label := "tabs"
+		if n == 1 {
+			label = "tab"
+		}
+		text := fmt.Sprintf("%d %s", n, label)
+		if busy > 0 {
+			text += fmt.Sprintf(" ·%d", busy)
+		}
+		if unread > 0 {
+			text += fmt.Sprintf(" ✦%d", unread)
+		}
+		return text, theme.StatusLineSep
 	case "debugMouse":
 		return a.debugMouseLine, theme.StatusLineSep
 	}
@@ -3749,9 +5518,12 @@ func mouseDebugLine(m *tcell.EventMouse, press bool) string {
 }
 
 // hudPart is one rendered HUD segment, carrying the segment name the
-// keep-rank drop loop keys on.
+// keep-rank drop loop keys on. popup marks the two segments that are
+// clickable: their text is the dsh pill's own label, and a click on one
+// opens the panel that breaks that label out (statuspill.go).
 type hudPart struct {
 	name, text, token string
+	popup             bool
 }
 
 // hudSep separates HUD segments on the status row.
@@ -3769,19 +5541,29 @@ func (a *App) hudParts() []hudPart {
 	for _, name := range segs {
 		text, token := a.hudSegment(name)
 		if text != "" {
-			parts = append(parts, hudPart{name, text, token})
+			parts = append(parts, hudPart{name, text, token, statusPills[name]})
 		}
 	}
 	return parts
 }
 
 // hudEssentialWidth is the space the metrics that must always survive a
-// narrow row take: the work timer and the decode rate, separated by a
-// HUD separator. The rest of the HUD (and the hotkeys) give way to them.
+// narrow row take: the two dsh pills (and the rate, when it is configured
+// on its own), separated by a HUD separator. The rest of the HUD (and the
+// hotkeys) give way to them.
+//
+// hudEssentialRank is that threshold by name rather than by number: the
+// token split moved rank when the dsh segments landed, and a magic 5 would
+// have silently promoted the wrong segment to "always survives" — which is
+// exactly how the token counter stopped dropping on a narrow row. The two
+// pills both sit at or above it now (statusKeepRank: tokens 7, time 8), so
+// the path is what gives way on a narrow row, never a headline.
+const hudEssentialRank = 7 // statusKeepRank: the pills and the rate
+
 func hudEssentialWidth(parts []hudPart) int {
 	essential := make([]hudPart, 0, 2)
 	for _, p := range parts {
-		if statusKeepRank[p.name] >= 5 {
+		if statusKeepRank[p.name] >= hudEssentialRank {
 			essential = append(essential, p)
 		}
 	}
@@ -3799,16 +5581,24 @@ func hudEssentialWidth(parts []hudPart) int {
 }
 
 // statusKeepRank orders segments by how essential they are when the row
-// runs out of width. The decode rate and the work timer are what the
-// user reads during a run, so they are dropped last.
+// runs out of width — the drop loop sheds the LOWEST rank first. The two dsh
+// pills are what the user reads during a run, so they are dropped last and
+// rank at or above hudEssentialRank; the theme name and the model label go
+// first, and every opt-in refinement (the cache rate, the call count, the
+// context meter, the token split) gives way before the two headlines it
+// refines.
 var statusKeepRank = map[string]int{
-	"theme":   0,
-	"model":   1,
-	"tokens":  2,
-	"context": 3,
-	"cost":    4,
-	"time":    5,
-	"rate":    6,
+	"theme":     0,
+	"model":     1,
+	"cost":      2,
+	"toolcalls": 3,
+	"cache":     4,
+	"split":     5,
+	"context":   6,
+	"tokens":    7,
+	"time":      8,
+	"rate":      9,
+	"sessions":  6,
 }
 
 // pathDisplay renders the working directory for the status row: home
@@ -3847,8 +5637,19 @@ func boxRune(glyph string) rune {
 func drawText(s tcell.Screen, x, y int, text string, st tcell.Style) {
 	for _, r := range text {
 		s.SetContent(x, y, r, nil, st)
-		x += width(string(r))
+		x += runeWidth(r)
 	}
+}
+
+// paintedWidth is the number of terminal cells drawText advances through.
+// runewidth.StringWidth can disagree for a multi-rune grapheme, while the
+// painter advances once per rune; hit rectangles must follow the painter.
+func paintedWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeWidth(r)
+	}
+	return n
 }
 
 func (a *App) cellColor(c theme.Color) tcell.Color {
@@ -3862,10 +5663,10 @@ func shortID(id string) string {
 	return id
 }
 
-// humanTokens renders 1234 as "1.2k" and a round 200000 as "200k": the HUD
+// HumanTokens renders 1234 as "1.2k" and a round 200000 as "200k": the HUD
 // meter shows round windows and round spend, where ".0" is pure noise in a
 // row that is always competing with the working-directory path for width.
-func humanTokens(n int64) string {
+func HumanTokens(n int64) string {
 	switch {
 	case n >= 1_000_000:
 		s := fmt.Sprintf("%.1f", float64(n)/1_000_000)

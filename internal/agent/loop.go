@@ -123,12 +123,27 @@ func WithCompactionEvent(h TurnHooks, i Interceptor) TurnHooks {
 	return compactionNotifier{TurnHooks: h, intercept: i}
 }
 
-// DefaultMaxTurns bounds one Run against runaway tool loops.
+// DefaultMaxTurns is retained for the -max-turns flag and historical reference.
+// effectiveMaxTurns returns MaxTurns directly; MaxTurns=0 means unbounded.
 const DefaultMaxTurns = 200
 
-// TurnBudgetPrompt is the synthetic user message injected when a Run hits
-// its turn cap: the model gets one wrap-up turn instead of a hard error.
-const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the user can say \"continue\""
+// DefaultTurnTokenBudget is the per-turn token cap. 0 means unbounded.
+//
+// This used to be a *session* budget (5M tokens cumulative), and crossing it
+// ended the run with a wrap-up message asking the user to say "continue" —
+// so a long task that legitimately burned millions of tokens across many
+// turns stopped dead mid-work and needed a human to restart it. A session
+// is not a single turn: the provider caps one turn's output, so the same
+// number is a per-turn floor that a real turn can never reach, and when it
+// does the turn wraps up and the session keeps going instead of ending.
+const DefaultTurnTokenBudget = 5000000
+
+// TurnBudgetPrompt is the synthetic user message injected when a single
+// turn crosses the per-turn token cap: the model gets one wrap-up turn
+// instead of the run ending. The session keeps going after it — the
+// wrap-up is a turn boundary, not a run end — so the user is never asked
+// to say "continue".
+const TurnBudgetPrompt = "turn budget reached — wrap up the current step and report status; the session keeps going"
 
 // TurnBudgetAttribution tags that wrap-up prompt as harness text: the user
 // never typed it, so the transcript must not invent a ❯ block for it and
@@ -146,12 +161,36 @@ const EmptyTurnNudgePrompt = "your last turn produced no answer and no tool call
 // handed back as a rewind draft).
 const EmptyTurnAttribution = "empty-turn"
 
+// PromptContinuationAttribution tags the hidden nudge that keeps a TUI
+// prompt running after a mid-task yield (no /goal required). Same
+// contract as GoalContinuationAttribution: no ❯ block, never typed input.
+const PromptContinuationAttribution = "prompt-continuation"
+
+// PromptContinuationPrompt is injected when an interactive run has already
+// used tools (or still has open todos) and the model yields with text and
+// no tool calls. The user asked for Claude-style keep-going, not a
+// "should I continue?" pause.
+const PromptContinuationPrompt = "the user's request is not finished: take the next concrete step now with tools. Do not ask the user to approve or continue. Do not stop at a plan or a status report. If the work is fully verified complete, say so in one sentence and stop."
+
+// maxPromptContinuations bounds keep-going without /goal. A completed
+// answer after tools still gets at most this many nudges; two consecutive
+// text-only yields after a nudge end the run.
+const maxPromptContinuations = 8
+
 // ErrEmptyTurn is the failure voice of a model that answered nothing
 // after every nudge was spent. Ending the run is what the old code did;
 // ending it with an ERROR is what makes the stop visible and retryable
 // upward, instead of a silent "the session just stopped" (#331 field
-// report: session 1883e928 painted a stop and no error).
-var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call")
+// report: session 1883e928 painted a stop and no error). When
+// Retry.RetryAllErrors is on, Run never returns this error: it
+// rebuilds context from history and re-runs the ladder instead, so a
+// transient upstream stall never looks like a silent death (#331
+// follow-up: keep going until the goal is done).
+// ErrEmptyTurnSuffix is appended to ErrEmptyTurn so callers can
+// detect the condition and recover from it.
+const ErrEmptyTurnSuffix = "empty-turn"
+
+var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call: " + ErrEmptyTurnSuffix)
 
 // maxEmptyTurnNudges bounds blank-turn recovery. One was the old bound and
 // it is not enough: a thinking-mode upstream that answers every request
@@ -159,14 +198,71 @@ var ErrEmptyTurn = errors.New("agent: model produced no answer and no tool call"
 // ended with lastAssistant still nil.
 const maxEmptyTurnNudges = 2
 
-// maxPostContentContinuations bounds retain-and-continue when the ladder is
-// bounded (retry.infinite, default on, lifts it). A mid-stream failure
-// after visible content cannot be replayed — that would double-emit it —
-// so recovery resumes from the retained partial instead.
+// maxPostContentContinuations bounds retain-and-continue. A mid-stream
+// failure after visible content cannot be replayed — that would double-emit
+// it — so recovery resumes from the retained partial instead. The bound used
+// to apply only when the ladder was bounded; retry.infinite (the default)
+// skipped it entirely, so a stream that cut off after text retried every
+// backoff for the life of the process. An outage is what Infinite is for; a
+// message already half on screen is not one.
 const maxPostContentContinuations = 3
+
+// maxEmptyTurnRecoveries bounds the RetryAllErrors empty-turn recovery. The
+// nudge budget asks the model twice; past that, a model answering nothing is
+// a model that has stopped, and re-asking every backoff indefinitely is what
+// left a session's turn goroutine alive for 53 minutes with nothing in the
+// transcript (a7e17741, 2026-09-28). RetryAllErrors keeps a real budget; it
+// is just not an infinite one, so the run ends with the error the TUI
+// already renders and the user can resubmit.
+const maxEmptyTurnRecoveries = 3
+
+// maxSilentRecoveryRounds bounds the ladder's "nothing came back" rounds
+// under retry.infinite — the health-check escalation and the all-targets-down
+// escalation. Same reasoning as the two above: no turn may outlive its
+// budget, because a turn that does holds the session's single turn claim
+// (cmd/xdev/tui.go's `running`) and every later submit is refused with
+// "a turn is already running" — the wedged session in the same report.
+//
+// 12, and not the 90 minutes the live measurement below implies. One round
+// is not one attempt: it is a full bounded ladder (MaxRetries+1 calls) and
+// each call now waits out the stream watchdog's FirstProgressTimeout when
+// the host accepts and then goes silent. 12 rounds x 5 calls x 90s is ~90
+// minutes of a wedged TUI before the turn gives up — measured live on
+// 2026-09-29 against a gateway that accepts the connection and never
+// answers, where the first round alone outlived a 128-second observation
+// window. The bound is honest but the unit is wrong: a ROUND count cannot
+// express a wall clock, and the session's real cost is a wedged TUI rather
+// than a slow one. ponytail: the upgrade path is a per-turn wall-clock
+// budget on oneTurnWithRecovery's context — there is still no WithTimeout
+// anywhere on the interactive turn path — not a smaller constant, which
+// would only shrink the outage an unattended run can survive.
+const maxSilentRecoveryRounds = 12
+
+// continuationBudget is how many retain-and-continue rounds a ladder may
+// spend. A bounded policy keeps its historical one-shot budget (the second
+// post-content failure must surface, and TestRetryPostContentSecondFailureSurfaces
+// pins that); retry.infinite gets maxPostContentContinuations. Written as one
+// function because the rule reads off both halves of the policy and the
+// precedence is the whole point.
+func continuationBudget(p RetryPolicy) int {
+	if p.Infinite {
+		return maxPostContentContinuations
+	}
+	return 1
+}
 
 // MaxToolWorkers bounds the same-batch tool pool (PRD: ~4-8).
 const MaxToolWorkers = 6
+
+// DefaultToolTimeout bounds one tool call that declares no bound of its own
+// (bash's schema timeout and ask's configured wait are theirs). A wedged
+// non-bash call used to hold a worker, and through it the turn and the
+// session, until the user gave up and restarted.
+//
+// ponytail: one flat ceiling, not per-tool tuning — it bounds the worst case,
+// it does not claim what each tool needs. Upgrade path if it ever shows up in
+// practice: a per-tool `timeout` field defaulted from here.
+const DefaultToolTimeout = 10 * time.Minute
 
 // ApprovalFunc asks the user to approve one tool call. It returns the
 // verdict; an implementation with no user available (print mode, a child
@@ -198,7 +294,10 @@ type Agent struct {
 	// MaxTokens caps assistant output (0 → provider default).
 	MaxTokens int
 	// Retry tunes the transient-error backoff ladder; zero value →
-	// DefaultRetryPolicy.
+	// DefaultRetryPolicy. RetryAllErrors on the policy lifts the
+	// empty-turn bound (see loop.go's empty-turn return path): a
+	// model that answers nothing keeps getting retried instead of
+	// ending the session.
 	Retry RetryPolicy
 	// Failovers is the ordered backup-model chain (M5): overflow promotes
 	// to a bigger window, a drained retry ladder fails over to the next
@@ -227,7 +326,7 @@ type Agent struct {
 	// compactAsync holds the one background summarize the async trigger
 	// may have in flight (nil = none; see compact_async.go).
 	compactAsync *asyncCompactState
-	// MaxTurns caps one Run's turns; 0 means DefaultMaxTurns.
+	// MaxTurns caps one Run's turns; 0 means unbounded (no cap).
 	MaxTurns int
 	// SessionBudget, when set, runs a Jev advisory before
 	// the hard wall-clock cap bites. nil disables the advisory.
@@ -239,9 +338,19 @@ type Agent struct {
 	// budgetAdvisoryLast is when the last advisory fired,
 	// so the early nudge does not run every turn.
 	budgetAdvisoryLast time.Time
+	// TurnTokenBudget caps one turn's token spend (provider requests +
+	// retries). 0 → DefaultTurnTokenBudget. It is per-turn, not cumulative:
+	// a session is not a turn, so capping the session ends a long task that
+	// legitimately burned millions of tokens across many turns and asks the
+	// user to say "continue" to restart it.
+	TurnTokenBudget int
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
+	// ToolTimeout bounds one tool call that carries no bound of its own
+	// (bash's schema timeout, ask's configured wait); 0 means
+	// DefaultToolTimeout.
+	ToolTimeout time.Duration
 	// Offload is the artifact-offload seam for oversized tool results
 	// (#283 RCA §4, backend owned by #115); nil keeps results verbatim.
 	Offload ArtifactOffloader
@@ -269,10 +378,19 @@ type Agent struct {
 	// Redactor hides configured secrets in provider-visible text and
 	// restores placeholders in inbound tool arguments (M13 #55). nil = off.
 	Redactor Redactor
-	Approve  ApprovalFunc
 	// Thinking requests reasoning on every turn — the resolved ":effort" of
 	// the active model. nil asks for none.
 	Thinking *ai.ThinkingBudget
+	Approve  ApprovalFunc
+	// OnOutput, when set, is handed every chunk a streaming tool produces, so
+	// a UI can paint a running command instead of waiting for its result. It
+	// is called on the tool's copier goroutine, with the id and name of the
+	// call the bytes belong to — calls in a batch run concurrently, so a
+	// stream without its call is a stream nobody can route. nil (print mode,
+	// RPC, tests) is the plain path: tools observe nothing and behave exactly
+	// as before, and tools that do not stream (read, grep, every MCP tool)
+	// simply never call it.
+	OnOutput func(callID, name, chunk string)
 	// Prewalk is the one-shot model handoff (nil = disabled): after the
 	// first successful edit/write, the run switches to the target model
 	// through the failover machinery (see prewalk.go).
@@ -293,6 +411,12 @@ type Agent struct {
 	// discovered from the tool registry on the first Run.
 	Goals *GoalState
 
+	// Todo is the session-scoped todo tracker (M3/TODO-tracker,
+	// nil = todo mode off). The tracker owns the stop-time reminder
+	// loop, the mid-run nudge counters, and the failed-todo reminder.
+	// Discovered from the registry on first Run when a todo tool exists.
+	Todo *TodoTracker
+
 	// GoalContinuation lets an active goal keep the run going: a turn that
 	// ends with no tool calls injects the goal's continuation prompt and
 	// continues instead of idling (omp's goal-continuation message). Only a
@@ -302,6 +426,20 @@ type Agent struct {
 	// turn budget is spent.
 	GoalContinuation bool
 
+	// PromptContinuation keeps an interactive prompt running after a
+	// mid-task yield (tools already used this Run, or open todos) without
+	// requiring /goal. Off by default so print/RPC/ACP still end at the
+	// first text-only yield.
+	PromptContinuation bool
+
+	// SteeringDelivered is called with the queued steering texts a run just
+	// injected as user messages, oldest first. The steering drain IS the
+	// delivery point, so this is the one place that knows a queued message
+	// reached the model — a host that shows pending-submit rows (the TUI's
+	// mid-turn queue, #157) retires them here instead of guessing when they
+	// landed. nil is fine: a headless host has no rows to retire.
+	SteeringDelivered func(texts []string)
+
 	// Handoff configures the handoff-document compaction (M5 #23): the
 	// side-request target, the artifact mirror, and the per-branch reset
 	// seam. See handoff.go.
@@ -309,6 +447,13 @@ type Agent struct {
 
 	// prewalk is the live state machine; Run is single-goroutine, no lock.
 	prewalk prewalkState
+
+	// repeats is the run's consecutive-repeat chain (repeat.go): the last
+	// tool call's identity key and how many times it has run in a row, used
+	// to notice a model that is paying a full round trip to re-ask the same
+	// question. Single-goroutine Run like the rest of this struct — the chain
+	// is advanced on the loop's own goroutine, never from a tool worker.
+	repeats repeatChain
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -321,10 +466,16 @@ type Agent struct {
 }
 
 func (a *Agent) effectiveMaxTurns() int {
-	if a.MaxTurns > 0 {
-		return a.MaxTurns
+	return a.MaxTurns
+}
+
+// effectiveTurnTokenBudget returns the per-turn token cap. 0 →
+// DefaultTurnTokenBudget.
+func (a *Agent) effectiveTurnTokenBudget() int64 {
+	if a.TurnTokenBudget > 0 {
+		return int64(a.TurnTokenBudget)
 	}
-	return DefaultMaxTurns
+	return DefaultTurnTokenBudget
 }
 
 // Steering is a queued user message injected at a step boundary.
@@ -356,12 +507,13 @@ func (a *Agent) drainSteering() []Steering {
 	return out
 }
 
-// Run executes turns until the model stops calling tools or the turn budget
-// (Agent.MaxTurns, else DefaultMaxTurns) runs out. history is the
+// Run executes turns until the model stops calling tools.
+// history is the
 // conversation so far (mutable within this run: assistant and toolResult
 // messages are appended as the run progresses).
-// On budget exhaustion it asks the model for one wrap-up message instead of
-// failing the run.
+// The per-turn token cap wraps up a turn inline and the session keeps
+// going; only the turn cap (MaxTurns) ends the run, and it does so with
+// one wrap-up message rather than an error.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (final *ai.Message, runErr error) {
 	a.sessionStart = time.Now()
@@ -408,6 +560,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	if a.Goals != nil {
 		a.Goals.SetOnUpdate(GoalNotify(a.Hooks))
 	}
+	// Todo mode (M3/TODO-tracker): the todo tool owns the live
+	// phased list; the tracker owns the reminder loop. Discovered
+	// from the registry on first Run (same shape as Goals) so every
+	// mode that wires a todo tool gets the engine for free.
+	if a.Todo == nil {
+		a.Todo = TodoStateOf(a.Tools)
+	}
 	// Magic keywords (research §8): standalone prose words in the user's
 	// prompt inject a hidden, user-attributed notice for this turn. The
 	// notice is persisted so a compaction rebuild replays it consistently.
@@ -453,12 +612,29 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		a.budgetAdvisoryLast = time.Now()
 		a.budgetAdvisory(ctx, v)
 	}
+	// Per-turn token cap (RCA #1): a session is not a turn, so capping the
+	// session ended a long task that legitimately burned millions of tokens
+	// across many turns and asked the user to say "continue" to restart it.
+	// The cap is per-turn: the provider caps one turn's output, so this
+	// number is a per-turn floor a real turn cannot reach, and when it does
+	// the turn wraps up and the session keeps going instead of ending.
+	turnTokenBudget := a.effectiveTurnTokenBudget()
 	// nudges is per run, not per turn: the empty-completion nudge below is
 	// spent at most maxEmptyTurnNudges times, so a model that can only ever
 	// emit reasoning cannot make the loop spend unbounded turns on it (the
 	// same shape as the TTSR interrupt budget and maxEscalationRounds).
 	nudges := 0
-	for turn := 0; turn < limit; turn++ {
+	promptConts := 0
+	// resumeFloor is where this run's own history begins: everything before it
+	// was rebuilt from the store by a resume or a compaction. The prompt
+	// continuation guard below needs the boundary because the two questions it
+	// asks have different scopes (see there). len(history) at Run entry.
+	resumeFloor := len(history)
+	// emptyRetries counts RetryAllErrors empty-turn recoveries after the
+	// nudge budget is spent. Used for escalating backoff and the
+	// "still waiting" notice so the run never looks frozen.
+	emptyRetries := 0
+	for turn := 0; limit == 0 || turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
 			// An abort also drops any in-flight background summarize: nothing
@@ -475,10 +651,27 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		maybeBudgetAdvisory()
 		// Step boundary: inject queued steering as user messages. Persisted
 		// too (a compaction rebuild from the store must not drop them).
-		for _, s := range a.drainSteering() {
+		// A steering message is a human changing the instruction, so it ends
+		// the repeat chain: the same call twice around a new instruction is
+		// compliance, not a loop (repeat.go).
+		steering := a.drainSteering()
+		if len(steering) > 0 {
+			a.repeats = repeatChain{}
+		}
+		for _, s := range steering {
 			m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
 			history = append(history, m)
 			a.persist(m)
+		}
+		// The messages are in the conversation now, so a host showing them
+		// as pending can retire the rows. Announced after the persist, so a
+		// row never disappears before its message is durable (#157).
+		if a.SteeringDelivered != nil && len(steering) > 0 {
+			texts := make([]string, 0, len(steering))
+			for _, s := range steering {
+				texts = append(texts, s.Text)
+			}
+			a.SteeringDelivered(texts)
 		}
 
 		// Threshold maintenance: compact before the window overflows.
@@ -508,11 +701,60 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			a.Goals.AddUsage(msg.Usage.TotalTokens)
 		}
 
+		// Per-turn token cap (RCA #1): a session is not a turn, so capping
+		// the session ended a long task that legitimately burned millions of
+		// tokens across many turns and asked the user to say "continue" to
+		// restart it. The cap is per-turn: the provider caps one turn's
+		// output, so this number is a per-turn floor a real turn cannot
+		// reach. When a single turn does cross it, the turn wraps up with a
+		// status report and the session keeps going instead of ending — the
+		// wrap-up's tool calls run, because the session is staying alive and
+		// the model is still working (the old "do not execute them" contract
+		// only made sense while the run was ending).
+		if turnTokenBudget > 0 && msg.Usage != nil && msg.Usage.TotalTokens >= turnTokenBudget {
+			wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
+			history = append(history, wrap)
+			a.persist(wrap)
+			wrapMsg, _, werr := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
+			if werr != nil {
+				return lastAssistant, werr
+			}
+			a.Hooks.OnMessageEnd(wrapMsg)
+			lastAssistant = wrapMsg
+			emit("turn_end", map[string]any{"turn": turn})
+			continue
+		}
+
 		if len(msg.ToolCalls()) == 0 {
 			a.Hooks.OnMessageEnd(msg)
 			// Messages queued during the final turn continue the run
 			// (queued steering is never discarded).
 			queued := a.drainSteering()
+			// Same announcement as the step boundary above: a message that
+			// arrives after the model's last tool call continues THIS run
+			// rather than waiting for the next one, and the host's pending
+			// rows must retire when it does.
+			if a.SteeringDelivered != nil && len(queued) > 0 {
+				texts := make([]string, 0, len(queued))
+				for _, s := range queued {
+					texts = append(texts, s.Text)
+				}
+				a.SteeringDelivered(texts)
+			}
+			// Todo reminder (M3/TODO-tracker): an assistant turn that
+			// ends with open todo work gets a developer-role reminder
+			// injected into the history so the model sees it next turn.
+			// omp's checkCompletion fires the same text at this boundary
+			// (todo-tracker.ts:199-285); the tracker's counters gate
+			// the attempt and exclude blocked tasks.
+			if rem := a.todoReminder(); rem != "" {
+				m := ai.Message{
+					Role:    ai.RoleUser,
+					Content: []ai.Block{ai.TextBlock{Text: rem}},
+				}
+				history = append(history, m)
+				a.persist(m)
+			}
 			// Goal continuation (M11 #40 tail): an active goal must not idle.
 			// This yield would have ended the run with the objective
 			// untouched — the reminder only ever rode along with a turn the
@@ -521,8 +763,60 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			// type it), persisted so a store rebuild keeps it; the goal's own
 			// complete/drop/budget_exhausted is what ends the run.
 			var cont string
+			var contAttr string
 			if len(queued) == 0 && a.GoalContinuation && a.Goals != nil {
 				cont = a.Goals.ContinuationPrompt()
+				if cont != "" {
+					contAttr = GoalContinuationAttribution
+				}
+			}
+			if cont == "" && len(queued) == 0 && a.PromptContinuation && promptConts < maxPromptContinuations {
+				// Two questions, two scopes. The single loop below gave both
+				// the wrong one.
+				//
+				// "Has this conversation used tools?" — usedTools — reads ALL of
+				// history: a run that resumed a session which used tools is
+				// still a run whose work owes a summary.
+				//
+				// "Did THIS run already nudge and get a second yield?" —
+				// lastWasPromptCont — reads only from resumeFloor. It used to
+				// read all of history, which answered for a run that never
+				// happened: after a resume the last user message IS a persisted
+				// nudge, the flag latched true, continuation was refused, the
+				// turn ended with no assistant reply, and the TUI exited 0 —
+				// every resume of a nudged session. That is the 2026-09-28
+				// report, session 6917d52f, records 407-410: text-only yield,
+				// nudge, model_change, session_exit, and no assistant message
+				// after the nudge at all. A nudge in the persisted tail is a
+				// previous run's unfinished business, not an answer this run
+				// received, so it must not count as one.
+				usedTools := false
+				for _, h := range history {
+					if h.Role == ai.RoleAssistant && len(h.ToolCalls()) > 0 {
+						usedTools = true
+					}
+				}
+				lastWasPromptCont := false
+				for _, h := range history[min(len(history), resumeFloor):] {
+					if h.Role == ai.RoleUser && h.Attribution == PromptContinuationAttribution {
+						lastWasPromptCont = true
+					} else if h.Role == ai.RoleUser {
+						lastWasPromptCont = false
+					}
+				}
+				openTodos := false
+				if a.Tools != nil {
+					if t, ok := a.Tools.Get("todo"); ok {
+						if tt, ok := t.(interface{ Snapshot() []tool.TodoPhase }); ok {
+							openTodos = len(tool.OpenForReminder(tt.Snapshot())) > 0
+						}
+					}
+				}
+				if !lastWasPromptCont && (usedTools || openTodos) {
+					cont = PromptContinuationPrompt
+					contAttr = PromptContinuationAttribution
+					promptConts++
+				}
 			}
 			// Empty completion (#331): the model ended its turn with no text
 			// and no tool call — only reasoning, or nothing at all. That is
@@ -547,6 +841,41 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				continue
 			}
 			if isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
+				if a.Retry.RetryAllErrors && emptyRetries < maxEmptyTurnRecoveries {
+					// Retry-all-errors (#331 follow-up): the model
+					// answered nothing, but we keep going — rebuild
+					// context from the persisted history, wait a
+					// backoff, then re-run the ladder. The nudges above
+					// already asked it maxEmptyTurnNudges times.
+					//
+					// Bounded at maxEmptyTurnRecoveries. This loop had no
+					// ceiling at all under the shipped default
+					// (RetryAllErrors on, one-way settings merge): a model
+					// that never answers re-asked every 8s forever, holding
+					// the session's single turn claim and refusing every
+					// later submit with "a turn is already running" — the
+					// wedged session a7e17741 (2026-09-28), whose file
+					// shows a toolResult at 22:49:13 and a user "continue"
+					// at 23:42:21 with nothing between them.
+					//
+					// Each round still announces on the event stream and
+					// escalates the backoff, so a long stall reads as
+					// waiting rather than hung.
+					emptyRetries++
+					policy := a.Retry.withDefaults()
+					d := policy.delay(emptyRetries)
+					emit("turn_end", map[string]any{"turn": turn})
+					if a.Store != nil {
+						rebuilt, _ := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{})
+						history = rebuilt.Messages
+					}
+					a.noticeEmptyTurnRetry(emptyRetries, d)
+					a.persistEmptyTurnRetry(emptyRetries, d)
+					if serr := sleepBackoff(ctx, d); serr != nil {
+						return lastAssistant, serr
+					}
+					continue
+				}
 				emit("turn_end", map[string]any{"turn": turn})
 				return msg, ErrEmptyTurn
 			}
@@ -564,7 +893,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				m := ai.Message{
 					Role:        ai.RoleUser,
 					Content:     []ai.Block{ai.TextBlock{Text: cont}},
-					Attribution: GoalContinuationAttribution,
+					Attribution: contAttr,
 				}
 				history = append(history, m)
 				a.persist(m)
@@ -591,21 +920,25 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		emit("turn_end", map[string]any{"turn": turn})
 	}
 	maybeBudgetAdvisory()
-	// Budget exhausted: ask for one wrap-up message rather than erroring.
-	// The prompt is persisted so a store rebuild keeps it, and tool calls in
-	// the wrap-up reply are NOT executed (session/context neutralizes the
-	// dangling calls on rebuild — the budget is spent by design).
-	wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
-	history = append(history, wrap)
-	a.persist(wrap)
-	msg, _, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
-	if err != nil {
-		return lastAssistant, err
+
+	// Turn cap reached: ask for one wrap-up message rather than erroring.
+	// The per-turn token cap is handled inline above and never ends the
+	// run; only a user-set turn limit stops the session here.
+	if limit > 0 {
+		wrap := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: TurnBudgetPrompt}}, Attribution: TurnBudgetAttribution}
+		history = append(history, wrap)
+		a.persist(wrap)
+		msg, _, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
+		if err != nil {
+			return lastAssistant, err
+		}
+		a.Hooks.OnMessageEnd(msg)
+		a.flushTTFT()
+		emit("turn_end", map[string]any{"turn": limit})
+		return msg, nil
 	}
-	a.Hooks.OnMessageEnd(msg)
-	a.flushTTFT()
-	emit("turn_end", map[string]any{"turn": limit})
-	return msg, nil
+
+	return lastAssistant, nil
 }
 
 // flushTTFT hands the last completed turn's ttft (ms) to OnTurnEnd
@@ -640,12 +973,16 @@ func (a *Agent) goalSystem(system string) string {
 // reached the hooks — replaying such a turn would double-emit it.
 // partial carries the accumulated text/thinking when the stream died
 // mid-content: the retain-and-continue path persists it and resumes the
-// turn instead of replaying (M5 tail). Tool calls are never captured —
-// an unpaired call would make the continuation request invalid.
+// turn instead of replaying (M5 tail). Tool calls are never captured as
+// a partial — an unpaired call would make the continuation request
+// invalid — but they are COUNTED (orphanToolCalls), because a turn that
+// died on a call and rendered nothing is the one post-content failure a
+// whole-turn replay can still repair.
 type turnError struct {
-	err            error
-	contentEmitted bool
-	partial        *ai.Message
+	err             error
+	contentEmitted  bool
+	partial         *ai.Message
+	orphanToolCalls int
 }
 
 func (e *turnError) Error() string { return e.err.Error() }
@@ -660,15 +997,36 @@ func turnContentEmitted(err error) bool {
 	return errors.As(err, &te) && te.contentEmitted
 }
 
+// orphanToolCalls reports the tool calls a failed turn left unpaired — a
+// stream that died mid-call, with no text behind it. The adapters emit
+// EventToolcallEnd only on their terminal path, so a call whose stream
+// dies is never persisted and never paired with a tool result; nothing
+// of it reaches the screen. That leaves the turn replayable: a
+// whole-turn re-send regenerates the call from the same history, where a
+// retained partial could not. This is what "stream ended without
+// finish_reason" hits when the cut lands mid-tool-call, and why that
+// failure used to end the session instead of reaching the ladder.
+func orphanToolCalls(err error) int {
+	var te *turnError
+	if errors.As(err, &te) {
+		return te.orphanToolCalls
+	}
+	return 0
+}
+
 // oneTurnWithRecovery wraps oneTurn with the full M5 recovery ladder (omp
 // TurnRecovery): pre-content transient errors backoff-and-retry in place
 // and fail over to the next chain target when the ladder drains; post-
 // content transient errors retain the partial message and continue once
 // (replaying would double-emit the visible content); context overflow
 // promotes to a bigger window first and compacts only at the top of the
-// ladder; auth/bad-request failures surface as-is. The returned history
+// ladder. Auth / bad-request / unknown failures are handled by their own
+// bounded or terminal paths; retry.infinite only lifts transient recovery
+// bounds, never a provider-rejected request shape. The returned history
 // carries everything recovery appended (partials, continuation prompts,
 // compacted rebuilds) so the caller's loop stays consistent.
+// (partials, continuation prompts, compacted rebuilds) so the caller's
+// loop stays consistent.
 func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history []ai.Message) (*ai.Message, []ai.Message, error) {
 	a.ttsrBeginTurn()
 	// A turn that burned its interrupt budget stays quiet until it ends.
@@ -678,8 +1036,13 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	// before a turn is spent on a near-quota target.
 	a.fallbackPreTurn()
 	policy := a.Retry.withDefaults()
-	attempt, continued, compacted := 0, false, false
-	escalation := 0
+	attempt, compacted := 0, false
+	// continued counts retain-and-continue rounds, and it counts on the
+	// infinite ladder too. It was a single bool that Infinite deliberately
+	// skipped setting, so the bound above could never fire under the shipped
+	// default.
+	continued := 0
+	escalation, healthEscalation := 0, 0
 	interrupted := 0
 	for {
 		// Health-check the active provider before spending a turn: a dead
@@ -687,13 +1050,53 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		// its attempts on an endpoint that cannot serve. Fail over
 		// before the ladder drains so a restart reads as waiting.
 		if hcErr := a.healthCheckProvider(ctx); hcErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, history, ctxErr
+			}
 			if nxt := a.nextFailoverTarget(); nxt > 0 {
 				a.switchTarget(nxt, "health-check")
 				attempt = 0
+				healthEscalation = 0
+				continue
+			}
+			// A failed probe can outlast a fallback cooldown. If the
+			// pre-turn pass restores the primary, probe it next rather than
+			// immediately selecting the same failed fallback again.
+			beforeTarget := a.curTarget
+			a.fallbackPreTurn()
+			if a.curTarget != beforeTarget {
+				healthEscalation = 0
+				continue
+			}
+			if nxt := a.nextFailoverTarget(); nxt > 0 {
+				a.switchTarget(nxt, "health-check")
+				attempt = 0
+				healthEscalation = 0
+				continue
+			}
+			// A refused or unreachable model host is the same outage the
+			// stream ladder handles. retry.infinite keeps probing after a
+			// capped backoff — but only for maxSilentRecoveryRounds, so a
+			// host that never comes back cannot hold the turn claim for the
+			// life of the process (a7e17741, 2026-09-28). A bounded policy
+			// keeps its own finite escalation rounds.
+			if healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite) {
+				healthEscalation++
+				attempt = 0
+				d := policy.delay(healthEscalation)
+				logx.Errorf("recovery: health check failed, retrying probe in %s (round %d): %v", d, healthEscalation, hcErr)
+				if policy.Infinite {
+					a.persistAllTargetsDown(healthEscalation, d, hcErr)
+					a.noticeAllTargetsDown(healthEscalation, d, hcErr)
+				}
+				if serr := sleepBackoff(ctx, d); serr != nil {
+					return nil, history, serr
+				}
 				continue
 			}
 			return nil, history, fmt.Errorf("agent: health check failed and all targets drained: %w", hcErr)
 		}
+		healthEscalation = 0
 		msg, err := a.oneTurn(ctx, system, history)
 		if err == nil {
 			return msg, history, nil
@@ -720,41 +1123,44 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		}
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
-			if turnContentEmitted(err) {
-				// Retain-and-continue (M5 tail): persist the partial,
-				// follow with a continuation prompt, resume. On a BOUNDED
-				// ladder (retry.infinite off) the budget is
-				// maxPostContentContinuations; retry.infinite (the default)
-				// lifts it. Only text/thinking partials qualify — a tool
-				// call without its result is not a request a provider
-				// would accept.
+			// A turn that died on a tool call with no text behind it has no
+			// partial to continue from and an unpaired call nothing can
+			// consume — but nothing was rendered either, so the whole turn
+			// is replayable. It takes the pre-content ladder below instead
+			// of surfacing the error, which is how a "stream ended without
+			// finish_reason" cut mid-tool-call used to end the session
+			// (orphanToolCalls).
+			orphans := orphanToolCalls(err)
+			if orphans > 0 {
+				logx.Errorf("recovery: stream died on %d unpaired tool call(s) — replaying the turn", orphans)
+			}
+			if turnContentEmitted(err) && orphans == 0 {
+				// Retain-and-continue (M5 tail): persist the partial, follow
+				// with a continuation prompt, resume. A bounded ladder keeps
+				// its one-shot budget; retry.infinite now gets a real
+				// ceiling too (it used to get none at all). Only
+				// text/thinking partials qualify: a tool call without its
+				// result is not a request a provider would accept.
 				var te *turnError
-				resumeLeft := maxPostContentContinuations
-				if policy.Infinite {
-					resumeLeft = -1
-				}
-				if !continued && (policy.Infinite || resumeLeft > 0) && errors.As(err, &te) && te.partial != nil {
+				canRetain := errors.As(err, &te) && te.partial != nil
+				if canRetain && continued < continuationBudget(policy) {
 					history = append(history, *te.partial)
 					a.persist(*te.partial)
 					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}, Attribution: ContinuationAttribution}
 					history = append(history, cont)
 					a.persist(cont)
-					continued = true
+					continued++
 					a.Hooks.OnContinuation(ContinuationPrompt)
-					if policy.Infinite {
-						logx.Errorf("recovery: post-content failure on an infinite ladder (retry.infinite)")
-					} else {
-						logx.Errorf("recovery: post-content failure %d of %d", maxPostContentContinuations-resumeLeft+1, maxPostContentContinuations)
-					}
-					if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
+					logx.Errorf("recovery: post-content failure %d of %d", continued, maxPostContentContinuations)
+					d := policy.delay(1)
+					a.persistContinuationRetry(continued, d)
+					a.noticeContinuationRetry(d)
+					if serr := sleepBackoff(ctx, d); serr != nil {
 						return nil, history, serr
 					}
 					continue
 				}
-				if continued && !policy.Infinite {
-					return nil, history, err
-				}
-				continue
+				return nil, history, err
 			}
 			if attempt >= policy.MaxRetries {
 				// Ladder drained: fail over to the next model-host.
@@ -764,15 +1170,18 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 					continue
 				}
 				// Chain drained too: re-run the ladder on the current
-				// target. Rounds are bounded so a hard failure
-				// misclassified as transient still ends the turn (see
-				// maxEscalationRounds); retry.infinite lifts the bound and
-				// announces each round on the event stream, so an outage
-				// of any length reads as waiting rather than hanging.
-				if escalation < maxEscalationRounds || policy.Infinite {
+				// target. Rounds are bounded so a hard failure misclassified
+				// as transient still ends the turn (maxEscalationRounds);
+				// retry.infinite lifts that to maxSilentRecoveryRounds and
+				// announces each round on the event stream, so an outage of
+				// any length reads as waiting rather than hanging — while a
+				// turn still ends rather than pinning the session's single
+				// turn claim forever.
+				if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
 					escalation++
 					attempt = 0
 					d := policy.delay(policy.MaxRetries + 1)
+					a.persistAllTargetsDown(escalation, d, err)
 					logx.Errorf("recovery: all targets drained, escalation round %d after backoff", escalation)
 					if policy.Infinite {
 						a.noticeAllTargetsDown(escalation, d, err)
@@ -790,6 +1199,24 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, err
 			}
 			attempt++
+		case ai.ClassBadRequest:
+			// A provider-rejected request can be retried only for the
+			// bounded escalation rounds. Never let retry.infinite turn
+			// the same rejected body into an outage-style replay loop.
+			if escalation < maxEscalationRounds {
+				escalation++
+				attempt = 0
+				if a.Store != nil {
+					if res, buildErr := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{}); buildErr == nil {
+						history = res.Messages
+					}
+				}
+				if serr := sleepBackoff(ctx, policy.delay(escalation)); serr != nil {
+					return nil, history, serr
+				}
+				continue
+			}
+			return nil, history, err
 		case ai.ClassContextOverflow:
 			// Promotion before compaction (M5 tail): a bigger window may
 			// just fit; each overflow climbs one ladder step. At the top
@@ -810,7 +1237,70 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				return nil, history, fmt.Errorf("agent: context overflow unrecoverable: %w", err)
 			}
 			history, compacted = rebuilt, true
+		case ai.ClassEmptyTurn:
+			// Empty turn (#389, #331): the model answered nothing —
+			// reasoning-only, or nothing at all. Rebuild context
+			// from the persisted history and re-run the ladder.
+			// Always back off + announce: a silent continue here was
+			// the freeze the TUI painted as "retrying forever".
+			rebuilt, rerr := a.recoverEmptyTurn(ctx, history)
+			if rerr != nil {
+				return nil, history, fmt.Errorf("agent: empty turn unrecoverable: %w", rerr)
+			}
+			if rebuilt == nil {
+				return nil, history, err
+			}
+			history = rebuilt
+			escalation++
+			d := policy.delay(escalation)
+			a.persistEmptyTurnRetry(escalation, d)
+			a.noticeEmptyTurnRetry(escalation, d)
+			if serr := sleepBackoff(ctx, d); serr != nil {
+				return nil, history, serr
+			}
+			continue
+		case ai.ClassAuthFailed:
+			// A 401/403 is a credential verdict, not a blip: the same
+			// request with the same key gets the same answer. This fell
+			// into `default:` below, which retried it up to
+			// maxSilentRecoveryRounds (12, and retry.infinite is
+			// default-on) — 62.6s of backoff at the shipped 500ms/8s
+			// ladder before surfacing a key that was never going to
+			// work. Fail fast and let the user fix the key, which is
+			// what ClassAuthFailed has always been documented to mean
+			// (internal/ai/errors.go: "401/403 — fail fast").
+			return nil, history, err
 		default:
+			// Unknown failures rebuild history from the persisted session
+			// and re-send on the current context. ClassBadRequest and
+			// ClassAuthFailed returned above: replaying a rejected shape or
+			// a bad credential cannot repair either. Bounded rounds stop
+			// hard failures; infinite retry is reserved for
+			// transport/transient outages — and even there only for
+			// maxSilentRecoveryRounds, so no turn pins the session's
+			// single turn claim (a7e17741, 2026-09-28).
+			if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
+				escalation++
+				attempt = 0
+				logx.Errorf("recovery: retrying %v from current context", ai.Classify(err))
+				if a.Store != nil {
+					if res, buildErr := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{}); buildErr == nil {
+						history = res.Messages
+					}
+				}
+				// delay(escalation) — attempt was just reset to 0, and
+				// delay(0) used to busy-spin. Escalating by round keeps
+				// a hard-failing upstream from hammering the wire.
+				d := policy.delay(escalation)
+				if policy.Infinite {
+					a.persistAllTargetsDown(escalation, d, err)
+					a.noticeAllTargetsDown(escalation, d, err)
+				}
+				if serr := sleepBackoff(ctx, d); serr != nil {
+					return nil, history, serr
+				}
+				continue
+			}
 			return nil, history, err
 		}
 		// omp's auto_retry_* pair (#92): a hook that logs provider health
@@ -845,6 +1335,116 @@ func (a *Agent) noticeAllTargetsDown(round int, d time.Duration, last error) {
 	a.Hooks.OnEvent(ai.Errorf(&AllTargetsDownError{Round: round, Delay: d, LastErr: last}))
 }
 
+// maxNoticeStride throttles the persisted recovery notice: the first round
+// and then every Nth, so a loop bounded at maxSilentRecoveryRounds writes
+// five records rather than twelve. The screen still gets every round (the
+// notice* funcs are untouched) — this is only about the session file.
+const maxNoticeStride = 3
+
+// persistRecoveryNotice writes one unbounded-wait round into the session
+// file as a CustomEntry.
+//
+// Every recovery announcement used to be an AddSystemBlock — display-only —
+// so a turn that spent 53 minutes inside one of these loops left a session
+// file whose last record was a toolResult from before the loop started, and
+// the transcript said nothing at all. On the reporting machine 0 of 132
+// session files contained a persisted retry notice, which is why a7e17741
+// (2026-09-28) took an afternoon to diagnose from the file alone.
+//
+// A CustomEntry is the right shape because session.buildContext switches
+// only on MessageEntry, CompactionEntry and BranchSummaryEntry: this is
+// readable by `xdev` and by a human with jq, and it never reaches the model
+// as a turn. A nil store or a failed append is a no-op — a notice that
+// cannot be written must never break the recovery it describes.
+func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duration, last error) {
+	if a == nil || a.Store == nil {
+		return
+	}
+	if round != 1 && round%maxNoticeStride != 0 {
+		return
+	}
+	// A store with auto-persist enabled materializes on the first ASSISTANT
+	// message (internal/session/store.go's appendLocked) — so a run that
+	// never gets one, which is exactly the run this notice describes, wrote
+	// its notice into memory and lost it. That is the whole point of the
+	// record: it is the only thing a recovery loop leaves behind when there
+	// is no answer, and it has to be on disk. This is the same materialise-
+	// before-the-first-durable-fact move schedule.go:317 already makes.
+	if a.Store.Path() == "" && a.Store.AutoPath() != "" {
+		if _, err := a.Store.EnsureOnDisk(a.Store.AutoPath(), a.Store.Options()); err != nil {
+			logx.Errorf("persist recovery notice: materialize session: %v", err)
+			return
+		}
+	}
+	data := map[string]any{
+		"round":           round,
+		"delaySeconds":    int(delay.Round(time.Second) / time.Second),
+		"remainingRounds": max(0, boundRounds(kind)-round),
+	}
+	if last != nil {
+		data["error"] = last.Error()
+	}
+	if err := a.Store.Append(&session.CustomEntry{CustomType: kind, Data: data}); err != nil {
+		logx.Errorf("persist recovery notice: %v", err)
+	}
+}
+
+// boundRounds is the ceiling that produced a given notice kind. Naming it
+// per kind is what lets the record say "3 rounds left" instead of making a
+// reader of the file guess.
+func boundRounds(kind string) int {
+	switch kind {
+	case "recovery_empty_turn":
+		return maxEmptyTurnRecoveries
+	case "recovery_continuation":
+		return maxPostContentContinuations
+	default: // recovery_all_targets_down
+		return maxSilentRecoveryRounds
+	}
+}
+
+// noticeEmptyTurnRetry raises one empty-turn recovery round on the event
+// stream (retry.retryAllErrors). Same contract as noticeAllTargetsDown:
+// a long stall must read as waiting, not as hung.
+func (a *Agent) noticeEmptyTurnRetry(round int, d time.Duration) {
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&EmptyTurnRetryError{Round: round, Delay: d}))
+}
+
+// The three notice* funcs above are the SCREEN voice of a recovery round and
+// fire every round. The three persist* calls below are the FILE voice of the
+// same round: one CustomEntry, throttled, so a session that spent an hour in
+// a recovery loop says so in its own transcript instead of looking like a
+// process that simply stopped mid-tool.
+func (a *Agent) persistAllTargetsDown(round int, d time.Duration, last error) {
+	a.persistRecoveryNotice("recovery_all_targets_down", round, d, last)
+}
+
+func (a *Agent) persistEmptyTurnRetry(round int, d time.Duration) {
+	a.persistRecoveryNotice("recovery_empty_turn", round, d, nil)
+}
+
+func (a *Agent) persistContinuationRetry(round int, d time.Duration) {
+	a.persistRecoveryNotice("recovery_continuation", round, d, nil)
+}
+
+// noticeContinuationRetry raises one retain-and-continue round on the event
+// stream: the partial was kept, a continuation turn was injected, and the
+// ladder is about to wait d before re-asking. Same contract as
+// noticeAllTargetsDown and noticeEmptyTurnRetry — nil-safe, so a mode that
+// installs no hooks stays quiet and keeps its logx line. It exists because a
+// post-content retry is the one recovery the console otherwise shows as a
+// bare "stream error" line: the partial is on screen, so a silent backoff
+// reads as the turn hanging.
+func (a *Agent) noticeContinuationRetry(d time.Duration) {
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&ContinuationRetryError{Delay: d}))
+}
+
 // recoverOverflow forces a compaction (ignoring the threshold — the
 // provider just proved the context does not fit) and returns the rebuilt
 // history. nil means compaction was impossible or failed.
@@ -861,6 +1461,17 @@ func (a *Agent) recoverOverflow(ctx context.Context) []ai.Message {
 		return nil
 	}
 	return res.Messages
+}
+
+func (a *Agent) recoverEmptyTurn(ctx context.Context, history []ai.Message) ([]ai.Message, error) {
+	if a.Store == nil {
+		return nil, nil
+	}
+	res, err := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{})
+	if err != nil {
+		return nil, err
+	}
+	return res.Messages, nil
 }
 
 // persist appends m to the session mirror when one is attached. The hooks
@@ -895,6 +1506,34 @@ func (a *Agent) popFollowUp() string {
 		}
 	}
 	return ""
+}
+
+// todoReminder renders the stop-time reminder when the tracker
+// says it is ready, or "" otherwise. AcknowledgeReminder
+// advances the counters, so this function both checks readiness
+// and fires the reminder in one call (no double-injection).
+func (a *Agent) todoReminder() string {
+	if a == nil || a.Todo == nil {
+		return ""
+	}
+	if !a.Todo.ReminderReady() {
+		return ""
+	}
+	a.Todo.AcknowledgeReminder()
+	return a.Todo.FormatReminder(a.Todo.Attempt())
+}
+
+// isTodoMutatingTool reports whether a finished tool call counts toward
+// the todo tracker's mid-run nudge counter (omp's MUTATING_TOOLS list:
+// bash, eval, edit, write, ast_edit). A successful todo call resets
+// the counter via OnTodoResult, so todo itself is deliberately absent.
+func isTodoMutatingTool(name string) bool {
+	switch name {
+	case "bash", "eval", "edit", "write", "ast_edit":
+		return true
+	default:
+		return false
+	}
 }
 
 // healthCheckProvider probes the active provider's liveness via the
@@ -945,11 +1584,15 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	)
 	closeBlock := func() {
 		if thinkOpen {
-			msg.Content = append(msg.Content, ai.ThinkingBlock{Thinking: thinking.String()})
+			if th := ai.CleanUTF8(thinking.String()); th != "" {
+				msg.Content = append(msg.Content, ai.ThinkingBlock{Thinking: th})
+			}
 			thinkOpen = false
 		}
 		if textOpen {
-			msg.Content = append(msg.Content, ai.TextBlock{Text: text.String()})
+			if tx := ai.CleanUTF8(text.String()); tx != "" {
+				msg.Content = append(msg.Content, ai.TextBlock{Text: tx})
+			}
 			textOpen = false
 		}
 	}
@@ -1030,6 +1673,12 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 					partial.Role = ai.RoleAssistant
 				}
 				te.partial = &partial
+			} else if len(order) > 0 {
+				// A tool call with no text behind it: no partial exists to
+				// continue from, and the call is unpaired no matter what —
+				// but nothing of it was rendered, so count the orphans and
+				// let the ladder replay the turn whole.
+				te.orphanToolCalls = len(order)
 			}
 			return nil, te
 		}
@@ -1108,6 +1757,13 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 		}(i)
 	}
 	wg.Wait()
+	// The repeat chain counts in MODEL order, not worker-finish order: the
+	// loop the guard exists to catch is a sequence of ISSUED calls, and a
+	// batch whose workers finished out of order must still count as the
+	// model wrote it. Single-goroutine here, after the join, so no lock.
+	for i := range out {
+		a.repeatNotice(&out[i], calls[i])
+	}
 	return out
 }
 
@@ -1133,19 +1789,37 @@ func (o toolOutcome) unwrap() (tool.Result, error) {
 	return o.res, o.err
 }
 
-// executeTool runs one tool call, bounding how long a cancelled turn waits for
-// it. The loop already refuses to *start* a tool once cancelled; that answers
-// the question for every tool, including the ones with no entry check of their
-// own (grep, glob) and the third-party ext_*/mcp_* tools whose code we cannot
-// assume checks anything. It cannot un-start a call that was already running
-// when the cancel landed, and waiting on it forever means a stopped turn is not
-// stopped — the user pressed cancel and the harness is still blocked on
-// someone else's loop. So: wait for the tool, and if cancellation arrives first,
-// give it the grace period to notice, then stop waiting and say so. The
-// abandoned call keeps running (Go cannot kill a goroutine); its result is
-// dropped and any side effect it makes after this point is named as untracked
-// rather than reported as cancelled-clean.
+// executeTool runs one tool call under two bounds.
+//
+// The cancel bound: the loop already refuses to *start* a tool once cancelled;
+// that answers the question for every tool, including the ones with no entry
+// check of their own (grep, glob) and the third-party ext_*/mcp_* tools whose
+// code we cannot assume checks anything. It cannot un-start a call that was
+// already running when the cancel landed, and waiting on it forever means a
+// stopped turn is not stopped — the user pressed cancel and the harness is
+// still blocked on someone else's loop. So: wait for the tool, and if
+// cancellation arrives first, give it the grace period to notice, then stop
+// waiting and say so.
+//
+// The deadline bound covers the other direction: a tool that simply never
+// returns — no cancel, no error, a wedged read or an MCP server that stopped
+// answering — holds its worker, and through it the turn and the session,
+// with nothing on screen to explain why. bash and ask carry their own bounds
+// (the schema `timeout`, the configured wait); everything else inherits
+// ToolTimeout. The deadline lives on a per-call context, not the turn's, so a
+// tool that honours it returns a real error through the normal path and the
+// grace is never spent.
+//
+// Either way the abandoned call keeps running (Go cannot kill a goroutine);
+// its result is dropped and any side effect it makes after this point is named
+// as untracked rather than reported as cancelled-clean.
 func (a *Agent) executeTool(ctx context.Context, t tool.Tool, args json.RawMessage) (tool.Result, error) {
+	timeout := a.ToolTimeout
+	if timeout <= 0 {
+		timeout = DefaultToolTimeout
+	}
+	tctx, endCall := context.WithTimeout(ctx, timeout)
+	defer endCall()
 	done := make(chan toolOutcome, 1) // buffered: an abandoned tool never parks on the send
 	go func() {
 		out := toolOutcome{}
@@ -1155,12 +1829,24 @@ func (a *Agent) executeTool(ctx context.Context, t tool.Tool, args json.RawMessa
 			}
 			done <- out
 		}()
-		out.res, out.err = t.Execute(ctx, args)
+		out.res, out.err = t.Execute(tctx, args)
 	}()
 	select {
 	case o := <-done:
 		return o.unwrap()
 	case <-ctx.Done():
+	case <-tctx.Done():
+		// The deadline, not the user. Naming it a cancellation would tell the
+		// model someone stopped it, and invite a re-run of a call whose side
+		// effects are unknown — the same words the cancel path below uses,
+		// for the same reason.
+		if ctx.Err() == nil {
+			return tool.Result{
+				Text: fmt.Sprintf("tool %q did not finish within %s and was abandoned: its result is unknown, and any side effect it still makes is not reported by this turn",
+					t.Name(), timeout),
+				IsError: true,
+			}, nil
+		}
 	}
 	grace := a.CancelGrace
 	if grace <= 0 {
@@ -1196,13 +1882,13 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 			res = tool.Result{Text: "propose: " + rerr.Error(), IsError: true}
 		}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
-		return toolResultMsg(call, res)
+		return toolResultMsg(call, res, time.Since(started))
 	}
 	t, ok := a.Tools.Get(call.Name)
 	if !ok {
 		res := tool.Result{Text: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
-		return toolResultMsg(call, res)
+		return toolResultMsg(call, res, time.Since(started))
 	}
 	var args json.RawMessage
 	if len(call.Arguments) > 0 {
@@ -1215,12 +1901,20 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		// (M13 #55).
 		args = json.RawMessage(a.Redactor.Expand(string(args)))
 	}
+	// Schema-driven argument repair (internal/tool/argcoerce.go). It runs
+	// BEFORE every gate below, so plan mode, the approval policy, the bash
+	// interceptor, and the hooks all judge the arguments the tool will
+	// actually receive rather than a shape the model guessed wrong. Every
+	// tool call passes through here — a direct call, a tool_call bridge, an
+	// eval-kernel cell — so one call site covers all three.
+	args = tool.CoerceArgs(t.Parameters(), args)
+	call.Arguments = args
 	// Plan mode (M11): mutating/unmodeled tools are denied with a pointer
 	// to propose while the sub-state is active. Checked before approval —
 	// a read-only run must never reach an approval prompt for a mutation.
-	if denied, blocked := applyPlanMode(a.PlanMode, call); blocked {
+	if denied, blocked := applyPlanMode(a.PlanMode, call, a.Tools); blocked {
 		a.Hooks.OnToolEnd(call, denied, time.Since(started))
-		return toolResultMsg(call, denied)
+		return toolResultMsg(call, denied, time.Since(started))
 	}
 	// bash.interceptor (M13 #56): a settings-declared external review of the
 	// proposed command, run at the same seam as the pattern rules. It is
@@ -1234,12 +1928,12 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if verr != nil {
 			res := tool.Result{Text: "tool call denied: " + verr.Error(), IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		if verdict.Action == tool.ActionDeny {
 			res := tool.Result{Text: "tool call denied: " + verdict.Reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		if verdict.Action == tool.ActionPrompt {
 			interceptReason = verdict.Reason
@@ -1264,7 +1958,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if dec.Action == tool.ActionDeny {
 			res := tool.Result{Text: "tool call denied: " + dec.Reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		reason := dec.Reason
 		if reason == "" {
@@ -1273,7 +1967,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if a.Approve == nil || !a.Approve(call, reason) {
 			res := tool.Result{Text: "tool call refused by user: " + reason, IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 	}
 	if a.Intercept != nil {
@@ -1283,7 +1977,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		if berr != nil {
 			res := tool.Result{Text: "tool call blocked: " + berr.Error(), IsError: true}
 			a.Hooks.OnToolEnd(call, res, time.Since(started))
-			return toolResultMsg(call, res)
+			return toolResultMsg(call, res, time.Since(started))
 		}
 		if len(revised) > 0 {
 			args = revised
@@ -1301,9 +1995,30 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	if cerr := ctx.Err(); cerr != nil {
 		res := tool.Result{Text: fmt.Sprintf("tool %q canceled before execution: %v", call.Name, cerr), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
-		return toolResultMsg(call, res)
+		return toolResultMsg(call, res, time.Since(started))
 	}
-	res, err := a.executeTool(ctx, t, args)
+	// A live-output observer rides the call context so a streaming tool can
+	// paint while it runs. It is per-CALL data, not a tool field: one tool
+	// instance serves every concurrent call, so the call id has to travel
+	// with the stream or a viewer cannot tell two `bash` calls' bytes apart.
+	toolCtx := ctx
+	if a.OnOutput != nil {
+		toolCtx = tool.WithOutputObserver(ctx, tool.OutputFunc(func(chunk string) {
+			a.OnOutput(call.ID, call.Name, chunk)
+		}))
+	}
+	res, err := a.executeTool(toolCtx, t, args)
+	// Todo tracker (M3/TODO-tracker): every finished tool result
+	// feeds the mid-run nudge counter. A successful todo call
+	// resets it; a failed todo call flags the next turn. Mutating
+	// tools (bash, eval, edit, write, ast_edit) are counted.
+	if a.Todo != nil {
+		if call.Name == "todo" {
+			a.Todo.OnTodoResult(err)
+		} else {
+			a.Todo.OnMutatingToolResult()
+		}
+	}
 	dur := time.Since(started)
 	if err != nil {
 		res = tool.Result{Text: fmt.Sprintf("tool %q failed: %v", call.Name, err), IsError: true}
@@ -1344,7 +2059,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		}
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
-	return toolResultMsg(call, res)
+	return toolResultMsg(call, res, dur)
 }
 
 // toolResultMsg builds the toolResult message for one finished call. Every
@@ -1354,8 +2069,8 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 // the upstream answered the whole turn with HTTP 400 [invalid_request_error]
 // "`input[185]` missing required field `output`" — a bad request the retry
 // ladder does not retry, so the run ended (ai.Message.EnsureToolOutput).
-func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
-	return ai.Message{
+func toolResultMsg(call ai.ToolCallBlock, res tool.Result, dur time.Duration) ai.Message {
+	m := ai.Message{
 		Role:       ai.RoleToolResult,
 		Content:    []ai.Block{ai.TextBlock{Text: res.Text}},
 		ToolCallID: call.ID,
@@ -1363,6 +2078,12 @@ func toolResultMsg(call ai.ToolCallBlock, res tool.Result) ai.Message {
 		IsError:    res.IsError,
 		Details:    res.Details,
 	}.EnsureToolOutput()
+	// Wall time from OnToolStart→end, so /trajectory and resume can show the
+	// same latency the live tool box already painted. Zero stays omitted.
+	if ms := dur.Milliseconds(); ms > 0 {
+		m.DurationMS = ms
+	}
+	return m
 }
 
 // Redactor hides configured secrets in provider-visible text and restores

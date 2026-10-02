@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxLineBytes bounds a single SSE line (1 MiB) — honoring the <100 MB RSS
@@ -44,6 +45,15 @@ var ErrMalformed = errors.New("sse: malformed stream")
 
 // Next returns the next complete frame. Returns io.EOF when the stream ends.
 // Comment lines (":"), BOM, and CRLF are handled per the WHATWG spec.
+//
+// A frame whose data payload is not valid UTF-8 is rejected with
+// ErrMalformed. A vendor that decodes its own SSE with a broken tokenizer
+// can splice invalid bytes inside a JSON string; Go's encoding/json would
+// silently substitute U+FFFD and the client would frame and persist mojibake
+// (the thinking box, for english/mandarin/vietnamese text alike — live
+// 2026-09-20). Rejecting here, before any JSON decode, lets the adapter's
+// ErrMalformedStream retry ladder treat the bad bytes as a transient stream
+// instead of real output.
 func (r *Reader) Next(ctx context.Context) (Frame, error) {
 	if err := ctx.Err(); err != nil {
 		return Frame{}, err
@@ -59,12 +69,21 @@ func (r *Reader) Next(ctx context.Context) (Frame, error) {
 			if data.Len() == 0 && ev == "" {
 				continue // empty event; dispatch nothing
 			}
+			if !utf8.ValidString(data.String()) {
+				return Frame{}, fmt.Errorf("%w: data payload is not valid UTF-8", ErrMalformed)
+			}
 			r.frame = Frame{Event: ev, Data: data.String()}
 			return r.frame, nil
 		case strings.HasPrefix(line, ":"):
 			continue // comment
 		}
 		field, value, _ := cutField(line)
+		// A per-line check catches the common case early; the payload
+		// re-check catches a multi-byte rune split between two "data:"
+		// lines of the same field (each line valid alone, the join not).
+		if !utf8.ValidString(value) {
+			return Frame{}, fmt.Errorf("%w: data line is not valid UTF-8", ErrMalformed)
+		}
 		switch field {
 		case "event":
 			ev = value
@@ -73,6 +92,9 @@ func (r *Reader) Next(ctx context.Context) (Frame, error) {
 				data.WriteByte('\n')
 			}
 			data.WriteString(value)
+			if !utf8.ValidString(data.String()) {
+				return Frame{}, fmt.Errorf("%w: data payload is not valid UTF-8", ErrMalformed)
+			}
 		case "id", "retry":
 			// Not used by any adapter; ignore.
 		default:
@@ -87,6 +109,9 @@ func (r *Reader) Next(ctx context.Context) (Frame, error) {
 	}
 	// Final dispatch if the stream ended mid-event without a blank line.
 	if data.Len() > 0 || ev != "" {
+		if !utf8.ValidString(data.String()) {
+			return Frame{}, fmt.Errorf("%w: data payload is not valid UTF-8", ErrMalformed)
+		}
 		return Frame{Event: ev, Data: data.String()}, io.EOF
 	}
 	return Frame{}, io.EOF

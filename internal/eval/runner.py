@@ -21,7 +21,9 @@ an orphan kernel behind.
 import ast
 import base64
 import json
+import queue
 import sys
+import threading
 import traceback
 
 ENV = {"__name__": "__main__", "__builtins__": __builtins__}
@@ -35,7 +37,129 @@ BINARY_MIMES = ("image/png", "image/jpeg", "image/gif", "application/octet-strea
 # Max characters of one stdout/stderr frame (mirrors the Go reader's limit).
 _CHUNK = 65536
 
-CUR_ID = 0
+
+# --- host tool calls (M13 #268) -------------------------------------------
+#
+# A cell reaches the harness through one object, `tools`: the call leaves the
+# kernel as a frame and the answer comes back on stdin, so the Go side can run
+# it on its own goroutine. That is the whole point — the kernel never holds its
+# lock across a dispatch, and a cell cancelled mid-call gets an exception
+# instead of hanging on a host answer that will never come.
+#
+# ONE reader thread owns stdin. Two would race for the same fd, and the answer
+# path has to work exactly when the request path is busy, which is while a cell
+# is running — so cell requests are queued for the main loop, not read there.
+_REQUESTS = queue.Queue()
+_PENDING = {}
+_PENDING_LOCK = threading.Lock()
+_CALL_LOCK = threading.Lock()
+_NEXT_CALL = [0]
+_CUR_CELL = [0]
+
+
+class ToolError(RuntimeError):
+    """The harness answered a tool call with a failure the cell must see."""
+
+
+def _next_call_id():
+    with _CALL_LOCK:
+        _NEXT_CALL[0] += 1
+        return _NEXT_CALL[0]
+
+
+def _invoke(name, args, kwargs):
+    """Emit one tool_call frame and wait for its answer."""
+    if len(args) > 1:
+        raise TypeError("tools.%s takes one dict or keyword arguments" % name)
+    if args and kwargs:
+        raise TypeError("tools.%s: pass a dict or keywords, not both" % name)
+    if args:
+        if not isinstance(args[0], dict):
+            raise TypeError("tools.%s expects a dict of arguments" % name)
+        params = args[0]
+    else:
+        params = kwargs
+    call_id = _next_call_id()
+    slot = {"event": threading.Event(), "answer": None}
+    with _PENDING_LOCK:
+        _PENDING[call_id] = slot
+    try:
+        emit({"type": "tool_call", "id": _CUR_CELL[0], "call_id": call_id,
+              "name": name, "args": params})
+        # Polled, not waited on: the cell clock and the agent abort both land
+        # as signals on THIS thread, and a blocked wait() would only surface
+        # them once the host answered. Polling turns both into a
+        # KeyboardInterrupt right here, which run_cell already reports.
+        while not slot["event"].wait(0.25):
+            pass
+    finally:
+        with _PENDING_LOCK:
+            _PENDING.pop(call_id, None)
+    answer = slot["answer"] or {}
+    if answer.get("error"):
+        raise ToolError("%s: %s" % (name, answer["error"]))
+    return {"text": answer.get("text", ""),
+            "details": answer.get("details"),
+            "is_error": bool(answer.get("is_error"))}
+
+
+class _Tools:
+    """tools.read({...}) — every name dispatches to the harness, not to the
+    local registry, so a bridged call takes the same plan-mode, approval and
+    hook path a direct model call takes. An unknown name is dispatched too and
+    comes back as the harness's own error: one failure shape for the cell.
+
+    ONE instance for the kernel's lifetime, reading the running cell id at call
+    time — a per-cell object would be one stale reference away from naming the
+    wrong cell, since the namespace deliberately outlives the cell that made
+    it."""
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def call(*args, **kwargs):
+            return _invoke(name, args, kwargs)
+
+        call.__name__ = str(name)
+        return call
+
+
+_TOOLS = _Tools()
+
+
+def _bind_tools(env):
+    env["tools"] = _TOOLS
+    return env
+
+
+def _stdin_loop():
+    """The one stdin reader: answers tool calls in place, queues cell requests."""
+    while True:
+        try:
+            line = sys.__stdin__.readline()
+        except (KeyboardInterrupt, ValueError):
+            continue
+        if not line:
+            _REQUESTS.put(None)  # EOF: the parent is gone, main() returns
+            return
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(req, dict):
+            continue
+        if req.get("cmd") == "tool_result":
+            with _PENDING_LOCK:
+                slot = _PENDING.get(req.get("call_id"))
+            if slot is not None:
+                slot["answer"] = req.get("result") or {}
+                slot["event"].set()
+            continue
+        _REQUESTS.put(req)
 
 
 def emit(obj):
@@ -116,15 +240,13 @@ def display(*objs, **_kwargs):
         rich = [m for m in bundle if m != "text/plain"]
         for mime in rich or ["text/plain"]:
             data, b64 = _encode(mime, bundle[mime])
-            frame = {"type": "display", "id": CUR_ID, "mime": mime, "data": data}
+            frame = {"type": "display", "id": _CUR_CELL[0], "mime": mime, "data": data}
             if b64:
                 frame["enc"] = "base64"
             emit(frame)
 
 
 class _Display:
-    """IPython-compatible no-op shell: `from IPython.display import ...` is
-    common in the wild, but only the prelude display() above is wired."""
 
     def __getattr__(self, _name):
         return display
@@ -161,6 +283,9 @@ def _exec(code_obj, mode):
 
 
 def run_cell(cell_id, code):
+    global _CUR_CELL
+    _CUR_CELL[0] = cell_id
+    _bind_tools(ENV)
     emit({"type": "started", "id": cell_id})
     out, err = _Stream("stdout", cell_id), _Stream("stderr", cell_id)
     real_out, real_err = sys.stdout, sys.stderr
@@ -202,38 +327,26 @@ def run_cell(cell_id, code):
 def reset_env():
     ENV.clear()
     ENV.update({"__name__": "__main__", "__builtins__": __builtins__,
-                "display": display, "get_ipython": lambda: _Display()})
+                "display": display, "get_ipython": lambda: _Display(),
+                "tools": _TOOLS})
 
 
 def main():
-    global CUR_ID
     emit({"type": "started", "python": sys.version.split()[0]})
+    threading.Thread(target=_stdin_loop, daemon=True).start()
     while True:
-        try:
-            line = sys.stdin.readline()
-        except KeyboardInterrupt:
-            continue
-        if not line:
+        req = _REQUESTS.get()
+        if req is None:
             return  # EOF: the parent (xdev) is gone — exit, leave no orphan
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(req, dict):
-            continue
-        CUR_ID = req.get("id") or 0
-        cmd = req.get("cmd") or "exec"
-        if cmd == "reset":
+        cur_id = req.get("id") or 0
+        if req.get("cmd") == "reset":
             reset_env()
-            emit({"type": "done", "id": CUR_ID, "status": "ok"})
+            emit({"type": "done", "id": cur_id, "status": "ok"})
         else:
             try:
-                run_cell(CUR_ID, req.get("code") or "")
+                run_cell(cur_id, req.get("code") or "")
             except KeyboardInterrupt:
-                emit({"type": "done", "id": CUR_ID, "status": "error"})
+                emit({"type": "done", "id": cur_id, "status": "error"})
 
 
 main()

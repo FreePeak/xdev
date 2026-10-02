@@ -18,6 +18,7 @@ type cell struct {
 	text   string
 	style  tcell.Style
 	chrome bool
+	link   string // visible HTTP(S) target; empty for ordinary text
 }
 
 // line is a rendered visual line: styled runs plus a full-row background
@@ -45,10 +46,20 @@ type mdStyle struct {
 	muted        tcell.Style // bullets, quote bars, rules
 	link         tcell.Style // underline, fg link_fg
 	codeBg       tcell.Color
+	code         codeStyle // fenced-code token palette (#501); plain = body
 }
 
+// mdStyle is memoized on the App. The painter reaches it on the frame path
+// (app.go: toolBoxLines, the streaming cursor) and renderMarkdown once per
+// markdown re-render, so at 30fps a live turn rebuilt 14 tcell.Style values
+// plus the whole syntax codeStyle — a slot lookup each and a map iteration
+// over syntaxSlots — dozens of times a second. mdFor is the theme pointer the
+// cache was built from: SetTheme swaps a.th, so the next call rebuilds.
 func (a *App) mdStyle() mdStyle {
-	return mdStyle{
+	if a.mdFor == a.th && a.mdSet {
+		return a.md
+	}
+	ms := mdStyle{
 		h1:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading1))).Bold(true),
 		h2:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading2))).Bold(true),
 		h3:         tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdHeading3))).Bold(true),
@@ -62,7 +73,13 @@ func (a *App) mdStyle() mdStyle {
 		muted:      tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.MdMuted))),
 		link:       tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.LinkFg))).Underline(true),
 		codeBg:     a.cellColor(a.th.Get(theme.MdCodeBg)),
+		code:       a.codeStyleFor(),
 	}
+	// A token the theme does not colour paints in the body ink, so a partial
+	// syntax_* theme degrades instead of dropping a class to terminal white.
+	ms.code.plain = ms.body
+	a.md, a.mdFor, a.mdSet = ms, a.th, true
+	return ms
 }
 
 // renderMarkdown converts markdown source to visual lines of styled runs,
@@ -77,6 +94,7 @@ func (a *App) renderMarkdown(src string, w int) []line {
 	ms := a.mdStyle()
 
 	inCode := false
+	codeLang := ""
 	quoteDepth := 0
 	srcLines := strings.Split(src, "\n")
 	var out []line
@@ -84,13 +102,47 @@ func (a *App) renderMarkdown(src string, w int) []line {
 		raw := srcLines[i]
 		trimmed := strings.TrimSpace(raw)
 
-		// Fenced code blocks: hide the fence, band every content line.
+		// Fenced code blocks: hide the fence, band every content line. A
+		// ```mermaid fence is not a code block though — it is a diagram the
+		// renderer may be able to draw, and the fence's own language tag is
+		// the only thing that says which one it is. So the opening fence is
+		// read for its tag, the body is gathered to the closing fence, and
+		// mermaidLines gets first refusal on it: a block it cannot draw (an
+		// unsupported type, a source it cannot parse, a diagram too wide for
+		// the terminal) returns nil and the same lines are banded as code,
+		// which is what the reader had before. Every other fence keeps its
+		// info string for #501 highlighting: unknown/empty tags and themes
+		// that pin no syntax_* colour still paint one body-ink run.
 		if strings.HasPrefix(trimmed, "```") {
-			inCode = !inCode
+			if inCode {
+				inCode = false
+				codeLang = ""
+				continue
+			}
+			if lang := fenceLang(trimmed); lang == mermaidFenceTag && a.renderMermaid {
+				body, n := fenceBody(srcLines, i+1)
+				if drawn := a.mermaidLines(body, w); drawn != nil {
+					out = append(out, drawn...)
+					i += n
+					continue
+				}
+				// Undrawable: band the source as code, fence included.
+				for j := i; j <= i+n && j < len(srcLines); j++ {
+					out = append(out, line{runs: []cell{{text: srcLines[j], style: ms.body}}, bg: ms.codeBg})
+				}
+				i += n
+				continue
+			}
+			inCode = true
+			codeLang = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
 			continue
 		}
 		if inCode {
-			out = append(out, line{runs: []cell{{text: raw, style: ms.body}}, bg: ms.codeBg})
+			ln := line{runs: []cell{{text: raw, style: ms.body}}, bg: ms.codeBg}
+			if runs := a.highlightCode(raw, codeLang, ms.code); runs != nil {
+				ln.runs = runs
+			}
+			out = append(out, ln)
 			continue
 		}
 
@@ -100,7 +152,8 @@ func (a *App) renderMarkdown(src string, w int) []line {
 			continue
 		}
 
-		// Headings: strip #s, color by level.
+		// Headings: strip #s, color by level, and recognize links while
+		// preserving the historical literal text for ordinary markers.
 		if lvl, rest, ok := splitHeading(trimmed); ok {
 			var st tcell.Style
 			switch {
@@ -117,7 +170,13 @@ func (a *App) renderMarkdown(src string, w int) []line {
 			default:
 				st = ms.h6
 			}
-			out = append(out, textline(rest, st))
+			runs := a.inlineHeadingRuns(rest, ms)
+			for i := range runs {
+				if runs[i].link == "" {
+					runs[i].style = st
+				}
+			}
+			out = append(out, line{runs: runs})
 			continue
 		}
 
@@ -161,23 +220,18 @@ func (a *App) renderMarkdown(src string, w int) []line {
 	return out
 }
 
-// inlineRuns styles inline markdown: **bold** *italic* `code` [text](url)
-// (url hidden, text underlined). Nested markers are not re-parsed; content
-// inside markers renders with the marker style.
+// inlineRuns styles inline markdown: **bold** *italic* `code` [text](url).
+// Markdown hides a link's target, but the target is retained on the rendered
+// run for the TUI's mouse hit table; bare HTTP(S) URLs are styled as links too.
 func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 	var runs []cell
 	var buf strings.Builder
 	flush := func() {
 		if buf.Len() > 0 {
-			runs = append(runs, cell{text: buf.String(), style: ms.body})
+			runs = appendWebURLRuns(runs, buf.String(), ms.body, ms.link)
 			buf.Reset()
 		}
 	}
-	// The scan is linear in the source: jump to the next marker byte and copy
-	// the plain run in one go. Walking rune-at-a-time with
-	// `rest = string([]rune(rest)[1:])` re-decodes the whole remainder on every
-	// character — O(n²) per line, which measured 100 ms to re-render one
-	// 6000-rune streaming paragraph and is how a long session pins a core.
 	for len(s) > 0 {
 		i := strings.IndexAny(s, "`*[")
 		if i < 0 {
@@ -187,9 +241,9 @@ func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 		buf.WriteString(s[:i])
 		s = s[i:]
 		var (
-			content, rest string
-			st            tcell.Style
-			closed        bool
+			content, rest, target string
+			st                    tcell.Style
+			closed, formatted     bool
 		)
 		switch {
 		case strings.HasPrefix(s, "`"):
@@ -199,43 +253,161 @@ func (a *App) inlineRuns(s string, ms mdStyle) []cell {
 		case strings.HasPrefix(s, "**"):
 			after, _ := cutMarker(s, "**")
 			content, rest, closed = cutClosing(after, "**")
-			st = ms.bold
+			st, formatted = ms.bold, true
 		case strings.HasPrefix(s, "["):
-			// [text](url): the url is dropped, the text carries the link style.
 			after, _ := cutMarker(s, "[")
 			if text, mid, ok := cutClosing(after, "]"); ok && strings.HasPrefix(mid, "(") {
-				if _, tail, ok2 := cutClosing(mid[1:], ")"); ok2 {
-					content, rest, closed = text, tail, true
-					st = ms.link
+				var tail string
+				var ok bool
+				target, tail, ok = cutLinkDestination(mid[1:])
+				if ok {
+					content, rest, closed, st = text, tail, true, ms.link
+					if !isWebURL(target) {
+						target = "" // rendered, but never clickable
+					}
 				}
 			}
 		case strings.HasPrefix(s, "*"):
 			after, _ := cutMarker(s, "*")
-			if !strings.HasPrefix(after, "*") { // "**" was bold's turn above
+			if !strings.HasPrefix(after, "*") {
 				content, rest, closed = cutClosing(after, "*")
-				st = ms.italic
+				st, formatted = ms.italic, true
 			}
 		}
 		if !closed {
-			// An unclosed marker is literal text: a lone * in prose must not
-			// swallow the rest of the line. The marker byte is ASCII, so
-			// advancing one byte cannot split a rune.
 			buf.WriteByte(s[0])
 			s = s[1:]
 			continue
 		}
 		flush()
-		runs = append(runs, cell{text: content, style: st})
+		if formatted {
+			nested := a.inlineRuns(content, ms)
+			if hasLink(nested) {
+				for i := range nested {
+					nested[i].style = withEmphasis(nested[i].style, st)
+				}
+				runs = append(runs, nested...)
+				s = rest
+				continue
+			}
+		}
+		runs = append(runs, cell{text: content, style: st, link: target})
 		s = rest
 	}
 	flush()
 	return runs
 }
 
+// inlineHeadingRuns recognizes explicit links and bare URLs while leaving
+// every other heading character literal, including backticks and asterisks.
+func (a *App) inlineHeadingRuns(s string, ms mdStyle) []cell {
+	var runs []cell
+	for len(s) > 0 {
+		if i := strings.Index(s, "["); i >= 0 {
+			after, _ := cutMarker(s[i:], "[")
+			if text, mid, ok := cutClosing(after, "]"); ok && strings.HasPrefix(mid, "(") {
+				if target, tail, ok := cutLinkDestination(mid[1:]); ok && isWebURL(target) {
+					runs = append(runs, cell{text: s[:i], style: ms.body}, cell{text: text, style: ms.link, link: target})
+					s = tail
+					continue
+				}
+			}
+		}
+		start := webURLStart(s)
+		if start < 0 {
+			return append(runs, cell{text: s, style: ms.body})
+		}
+		end := webURLEnd(s[start:])
+		for end > 0 && strings.ContainsRune("`*", rune(s[start+end-1])) {
+			end--
+		}
+		if end <= 0 || !isWebURL(s[start:start+end]) {
+			return append(runs, cell{text: s, style: ms.body})
+		}
+		target := s[start : start+end]
+		runs = append(runs, cell{text: s[:start], style: ms.body}, cell{text: target, style: ms.link, link: target})
+		s = s[start+end:]
+	}
+	return runs
+}
+
+func hasLink(runs []cell) bool {
+	for _, run := range runs {
+		if run.link != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// appendWebURLRuns splits plain prose into ordinary and HTTP(S) URL runs. Code
+// fences and inline-code runs do not use this helper, so URLs in code remain
+// ordinary text.
+func appendWebURLRuns(dst []cell, text string, style, linkStyle tcell.Style) []cell {
+	for len(text) > 0 {
+		start := webURLStart(text)
+		if start < 0 {
+			return append(dst, cell{text: text, style: style})
+		}
+		if start > 0 {
+			dst = append(dst, cell{text: text[:start], style: style})
+		}
+		end := webURLEnd(text[start:])
+		if end <= 0 {
+			return append(dst, cell{text: text[start:], style: style})
+		}
+		target := text[start : start+end]
+		if isWebURL(target) {
+			dst = append(dst, cell{text: target, style: linkStyle, link: target})
+		} else {
+			dst = append(dst, cell{text: target, style: style})
+		}
+		text = text[start+end:]
+	}
+	return dst
+}
+
+// withEmphasis adds an outer bold/italic mark without replacing an inner
+// style's existing attributes.
+func withEmphasis(style, outer tcell.Style) tcell.Style {
+	_, _, attrs := outer.Decompose()
+	if attrs&tcell.AttrBold != 0 {
+		style = style.Bold(true)
+	}
+	if attrs&tcell.AttrItalic != 0 {
+		style = style.Italic(true)
+	}
+	return style
+}
+
 // appendRuns appends wrapped runs, breaking at width w (greedy word wrap).
 func appendRuns(dst []cell, runs []cell, w int) []cell {
 	// Simple approach: concatenate as text; wrapping happens per-line in draw.
 	return append(dst, runs...)
+}
+
+// fenceLang returns a fence line's info string, lowercased — ` ```mermaid `
+// is a diagram request, ` ``` ` and ` ```go ` are code. Only the first word
+// counts, so a model that writes ```mermaid title=flow still gets a diagram.
+func fenceLang(fence string) string {
+	rest := strings.TrimLeft(strings.TrimPrefix(strings.TrimSpace(fence), "```"), " \t")
+	lang, _, _ := strings.Cut(rest, " ")
+	lang, _, _ = strings.Cut(lang, "\t")
+	return strings.ToLower(strings.TrimSpace(lang))
+}
+
+// fenceBody gathers the lines between an opening fence and its close, and
+// reports how many lines it consumed. An unterminated fence runs to the end
+// of the text: the transcript is a render of what the model said, and a
+// missing closing fence is the model's typo, not a reason to paint the rest
+// of the message as a code band.
+func fenceBody(lines []string, from int) (string, int) {
+	for i := from; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+			return strings.Join(lines[from:i], "\n"), i - from + 1
+		}
+	}
+	return strings.Join(lines[from:], "\n"), len(lines) - from
 }
 
 // isHR reports whether s is a thematic break (3+ of -, *, _).
@@ -312,6 +484,98 @@ func cutClosing(s, closer string) (content, after string, ok bool) {
 	return s[:i], s[i+len(closer):], true
 }
 
+// cutLinkDestination parses a CommonMark inline link destination, including
+// balanced parentheses, backslash escapes, and an optional quoted title.
+func cutLinkDestination(s string) (target, rest string, ok bool) {
+	s = strings.TrimLeft(s, " \t\n")
+	if s == "" {
+		return "", "", false
+	}
+	if s[0] == '<' {
+		var b strings.Builder
+		for i := 1; i < len(s); i++ {
+			switch s[i] {
+			case '\\':
+				if i+1 >= len(s) || !isASCIIPunct(s[i+1]) {
+					return "", "", false
+				}
+				b.WriteByte(s[i+1])
+				i++
+			case '\n':
+				return "", "", false
+			case '>':
+				return finishLinkDestination(b.String(), strings.TrimLeft(s[i+1:], " \t\n"))
+			default:
+				b.WriteByte(s[i])
+			}
+		}
+		return "", "", false
+	}
+	depth := 0
+	var b strings.Builder
+	i := 0
+loop:
+	for ; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			if i+1 >= len(s) || !isASCIIPunct(s[i+1]) {
+				return "", "", false
+			}
+			b.WriteByte(s[i+1])
+			i++
+		case '(':
+			depth++
+			b.WriteByte(s[i])
+		case ')':
+			if depth == 0 {
+				break loop
+			}
+			depth--
+			b.WriteByte(s[i])
+		case ' ', '\t', '\n':
+			break loop
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	if depth != 0 {
+		return "", "", false
+	}
+	return finishLinkDestination(b.String(), s[i:])
+}
+
+func finishLinkDestination(target, rest string) (string, string, bool) {
+	rest = strings.TrimLeft(rest, " \t\n")
+	if rest == "" {
+		return "", "", false
+	}
+	if rest[0] == ')' {
+		return target, rest[1:], true
+	}
+	if rest[0] != '"' && rest[0] != '\'' {
+		return "", "", false
+	}
+	quote := rest[0]
+	for i := 1; i < len(rest); i++ {
+		if rest[i] == '\\' {
+			i++
+			continue
+		}
+		if rest[i] == quote {
+			i++
+			if i >= len(rest) || rest[i] != ')' {
+				return "", "", false
+			}
+			return target, rest[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
+func isASCIIPunct(c byte) bool {
+	return strings.ContainsRune("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", rune(c))
+}
+
 // wrapLine wraps one rendered line to width w, returning extra visual lines.
 // Continuation lines repeat their indent (2 spaces per quote level; the
 // bullet indent for lists is approximated by continuing flush).
@@ -356,12 +620,12 @@ func wrapLine(ln line, w int) []line {
 				if cut == 0 {
 					cut = 1
 				}
-				out = append(out, line{runs: []cell{{text: string(runes[:cut]), style: r.style}}, bg: ln.bg})
+				out = append(out, line{runs: []cell{{text: string(runes[:cut]), style: r.style, chrome: r.chrome, link: r.link}}, bg: ln.bg})
 				wd = string(runes[cut:])
 				ww = width(wd)
 			}
 			if ww > 0 {
-				cur = append(cur, cell{text: wd, style: r.style})
+				cur = append(cur, cell{text: wd, style: r.style, chrome: r.chrome, link: r.link})
 				curW += ww
 			}
 		}

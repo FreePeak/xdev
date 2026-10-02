@@ -41,7 +41,12 @@ const goalReminderObjectiveCap = 240
 // typed it, so the transcript skips it on replay.
 const GoalContinuationAttribution = "goal-continuation"
 
-// capObjective trims an objective to the reminder cap.
+// SessionGoalObjective is the placeholder objective every session opens with
+// (the goal that keeps a long run going, #387). cmd registers the tool, so it
+// owns the text; this is the one spelling of it, next to the state every
+// caller reaches through GoalStateOf.
+const SessionGoalObjective = "session goal"
+
 func capObjective(obj string) string {
 	if r := []rune(obj); len(r) > goalReminderObjectiveCap {
 		return string(r[:goalReminderObjectiveCap]) + "…"
@@ -210,7 +215,7 @@ func (g *GoalState) ContinuationPrompt() string {
 func (g *GoalState) Describe() string {
 	v, ok := g.View()
 	if !ok {
-		return "goal: none — start one with /goal create <objective> (or the goal tool, op create)"
+		return "goal: none — start one with /goal <objective> (the model can also use the goal tool, op create)"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "goal: %s\nobjective: %s", v.Status, v.Objective)
@@ -365,6 +370,15 @@ func (g *GoalState) AddUsage(tokens int64) bool {
 		cb(cur)
 	}
 	return true
+}
+
+// IsBudgetExhausted reports whether AddUsage already flipped
+// this goal to budget_exhausted (the goal's own budget is
+// crossed). Used by the loop to hard-stop the run (#2).
+func (g *GoalState) IsBudgetExhausted() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.current != nil && g.current.Status == GoalBudgetExhausted
 }
 
 // mutate runs fn under the state lock and, when it succeeds, persists and

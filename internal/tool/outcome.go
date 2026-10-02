@@ -20,6 +20,11 @@ type Outcome struct {
 	// one. The result's Text stays what the model was shown; this exists so
 	// the frame can say what moved on disk in the theme's diff colours.
 	Diff string
+	// DurationMS is wall time nested in Details (bash durationMs) when the
+	// tool recorded one. Zero when unknown. Prefer Message.DurationMS when
+	// the agent loop stamped the call; this is the fallback for older
+	// sessions and in-memory *bashDetails before a JSON round-trip.
+	DurationMS int64
 }
 
 // OutcomeOf flattens one Result.Details. Tools that record none of these
@@ -34,14 +39,17 @@ func OutcomeOf(details any) Outcome {
 			return Outcome{}
 		}
 		return Outcome{
-			Exit:      d.ExitCode,
-			HasExit:   !d.Killed && d.ExitCode >= 0,
-			Truncated: d.Truncated,
+			Exit:       d.ExitCode,
+			HasExit:    !d.Killed && d.ExitCode >= 0,
+			Truncated:  d.Truncated,
+			DurationMS: d.DurationMs,
 		}
 	case map[string]any:
 		var o Outcome
 		if code, ok := d["exitCode"].(int); ok {
 			o.Exit, o.HasExit = code, true
+		} else if code, ok := d["exitCode"].(float64); ok {
+			o.Exit, o.HasExit = int(code), true
 		}
 		if cut, ok := d["truncated"].(bool); ok {
 			o.Truncated = cut
@@ -49,7 +57,21 @@ func OutcomeOf(details any) Outcome {
 		if diff, ok := d["unifiedDiff"].(string); ok {
 			o.Diff = diff
 		}
+		o.DurationMS = mapDurationMS(d)
 		return o
 	}
 	return Outcome{}
+}
+
+func mapDurationMS(d map[string]any) int64 {
+	switch v := d["durationMs"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	default:
+		return 0
+	}
 }

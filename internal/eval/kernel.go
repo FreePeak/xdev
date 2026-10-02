@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -63,12 +64,46 @@ type Frame struct {
 	Traceback string   `json:"traceback,omitempty"`
 	Status    string   `json:"status,omitempty"`
 	Python    string   `json:"python,omitempty"`
+	// CallID and Args ride a tool_call frame (#268): the kernel's own per-call
+	// id (one cell issues many, so it is not a message index) and the cell's
+	// arguments as raw JSON, forwarded to the bridge byte for byte.
+	CallID int64           `json:"call_id,omitempty"`
+	Args   json.RawMessage `json:"args,omitempty"`
+}
+
+// toolResult is one answer to a cell's tool_call frame (#268).
+type toolResult struct {
+	Text    string `json:"text,omitempty"`
+	Details any    `json:"details,omitempty"`
+	IsError bool   `json:"is_error,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// pendingCall is one call a cell is blocked on. The slot has to be cancellable:
+// a cell interrupted mid-call must raise a Python exception, never hang on a
+// host answer that is never coming. cancelCell answers every outstanding call
+// with an error instead of waiting for the dispatcher.
+type pendingCall struct {
+	cellID int64
+	once   sync.Once
+}
+
+// take claims the slot for one answer. A cancelled call wins; a dispatcher
+// that finishes afterwards is told so and writes nothing. The bool is what
+// keeps a late answer from reaching a cell that has moved on.
+func (p *pendingCall) take() bool {
+	ok := false
+	p.once.Do(func() { ok = true })
+	return ok
 }
 
 type request struct {
 	ID   int64  `json:"id"`
 	Code string `json:"code,omitempty"`
 	Cmd  string `json:"cmd,omitempty"`
+	// CallID and Result answer a tool_call the cell is blocked on.
+	CallID int64       `json:"call_id,omitempty"`
+	Result *toolResult `json:"result,omitempty"`
 }
 
 type displayValue struct {
@@ -82,21 +117,28 @@ type cell struct {
 	id        int64
 	code      string
 	startedAt time.Time
-	out       *tool.OutputSink
-	errOut    *tool.OutputSink
-	displays  []displayValue
-	result    string
-	mimes     []string
-	errFrame  *Frame
-	status    string // "" while running, then "ok" | "error" | "exited"
-	done      chan struct{}
+	// ctx is cancelled with the cell, so a tool the cell is blocked on stops
+	// when the cell stops instead of running to completion in the background.
+	ctx      context.Context
+	cancel   context.CancelFunc
+	out      *tool.OutputSink
+	errOut   *tool.OutputSink
+	displays []displayValue
+	result   string
+	mimes    []string
+	errFrame *Frame
+	status   string // "" while running, then "ok" | "error" | "exited"
+	done     chan struct{}
 }
 
 func newCell(id int64, code string) *cell {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &cell{
 		id:        id,
 		code:      code,
 		startedAt: time.Now(),
+		ctx:       ctx,
+		cancel:    cancel,
 		out:       tool.NewOutputSink(streamHeadLimit, streamTailLimit),
 		errOut:    tool.NewOutputSink(streamHeadLimit, streamTailLimit),
 		done:      make(chan struct{}),
@@ -183,6 +225,27 @@ type Kernel struct {
 	dead    bool
 	closed  bool
 	nextID  int64
+	// pending holds the calls the running cell is blocked on, keyed by the
+	// kernel's call id (#268). route reads it while a cell runs and the
+	// dispatcher writes answers back, so the map is the one piece of shared
+	// state that lives outside k.mu.
+	pending map[int64]*pendingCall
+	// runner executes a tool for a cell on its own goroutine. nil = a cell
+	// calling tools gets the "no runner installed" error, the same refusal
+	// tool.Catalog makes: a bridge that executed tools itself would be a
+	// policy bypass.
+	runner tool.Runner
+}
+
+// SetRunner installs the harness call path for cells (#268). It is tool.Runner
+// itself — the deferred-tool bridge's type — because the two bridges are the
+// same contract: a callback, never direct execution, so the call takes the
+// plan-mode gate, the approval policy and the hook chain. Without one the
+// kernel refuses to run anything.
+func (k *Kernel) SetRunner(r tool.Runner) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.runner = r
 }
 
 // NewKernel returns a kernel whose interpreter runs in dir.
@@ -369,6 +432,9 @@ func (k *Kernel) stopLocked() {
 	}
 	k.cmd = nil
 	k.dead = true
+	if c := k.active; c != nil {
+		c.cancel()
+	}
 }
 
 // cancelCell interrupts the running cell and escalates to SIGKILL after
@@ -377,9 +443,14 @@ func (k *Kernel) cancelCell(c *cell, timedOut bool) Outcome {
 	k.mu.Lock()
 	cmd := k.cmd
 	k.mu.Unlock()
+	c.cancel()
 	if cmd != nil {
 		interruptGroup(cmd)
 	}
+	// Every tool call the cell is blocked on gets its answer before the
+	// interrupt lands: the cell raises KeyboardInterrupt on the next poll, and
+	// a dispatcher that answers later hits once and drops its result (#268).
+	k.failPending(c.id, "the cell was interrupted while waiting for this tool")
 	select {
 	case <-c.done:
 	case <-time.After(KillGrace):
@@ -449,12 +520,23 @@ func (k *Kernel) readLoop(r io.Reader) {
 }
 
 func (k *Kernel) route(fr Frame) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
 	if fr.Type == "started" && fr.ID == 0 {
+		k.mu.Lock()
 		k.version = fr.Python
+		k.mu.Unlock()
 		return
 	}
+	// A tool_call is the one frame route must NOT answer under k.mu: the
+	// answer is a tool run, which re-enters the agent loop (hooks, approval,
+	// persistence, other locks). Dispatching it from here would invert the
+	// lock order with everything the loop holds. So route hands it to a
+	// goroutine and returns, releasing k.mu first (#268).
+	if fr.Type == "tool_call" {
+		k.dispatchToolCall(fr)
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	c := k.active
 	if c == nil || fr.ID != c.id {
 		return
@@ -483,17 +565,112 @@ func (k *Kernel) route(fr Frame) {
 
 func (k *Kernel) markExited() {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if k.dead && k.active == nil {
+		k.mu.Unlock()
 		return
 	}
 	k.dead = true
 	k.cmd = nil
 	k.stdin = nil
-	if k.active != nil {
-		k.active.status = "exited"
-		close(k.active.done)
+	c := k.active
+	if c != nil {
+		c.status = "exited"
+		close(c.done)
 		k.active = nil
+	}
+	k.mu.Unlock()
+	// A kernel that died with the cell blocked on a host answer must not leave
+	// the cell waiting for it. No write is possible (stdin is gone) — taking
+	// the slot is the whole answer: the cell's next poll raises KeyboardInterrupt
+	// or its NameError, never a silent hang.
+	if c != nil {
+		k.failPending(c.id, "the eval kernel exited while the cell waited for this tool")
+	}
+}
+
+// dispatchToolCall answers one cell's tools.x({...}) call (#268). It runs the
+// tool on its own goroutine and writes the answer back on stdin; the kernel
+// lock is never held across either step.
+//
+// The three refusals are the same ones tool.Catalog makes, for the same reason
+// (docs/decisions/programmatic-tool-calling.md §0.5): a refusal is the
+// registry not having the name, where a counter is a number someone will raise.
+func (k *Kernel) dispatchToolCall(fr Frame) {
+	k.mu.Lock()
+	c := k.active
+	if k.closed || c == nil || c.id != fr.ID {
+		k.mu.Unlock()
+		return
+	}
+	run, ctx := k.runner, c.ctx
+	if k.pending == nil {
+		k.pending = map[int64]*pendingCall{}
+	}
+	p := &pendingCall{cellID: fr.ID}
+	k.pending[fr.CallID] = p
+	k.mu.Unlock()
+
+	// No runner, or the bridge tool itself: refuse here rather than after the
+	// cell has waited. eval is the one name that must never come back through
+	// the bridge (a cell that spawns a cell is an unbounded recursion), and
+	// tool_search/tool_describe/tool_call are refused in the catalog for the
+	// same reason.
+	if run == nil {
+		k.reply(fr.CallID, p, toolResult{Error: "no runner installed — the harness must wire the kernel before a cell can call tools"})
+		return
+	}
+	if fr.Name == "eval" || tool.IsBridgeTool(fr.Name) {
+		k.reply(fr.CallID, p, toolResult{Error: fmt.Sprintf("%s cannot be called from a cell", fr.Name)})
+		return
+	}
+
+	go func() {
+		res, err := run(ctx, fr.Name, fr.Args)
+		out := toolResult{Text: res.Text, Details: res.Details, IsError: res.IsError}
+		if err != nil {
+			out.Error = err.Error()
+		}
+		k.reply(fr.CallID, p, out)
+	}()
+}
+
+// reply writes one answer back to the cell and drops the slot. The write takes
+// k.mu, the same lock begin() writes a request under, because the kernel's
+// stdin is one line-oriented stream: two writers would interleave halves of a
+// frame. It is a short write of an already-computed value — no tool ever runs
+// here.
+func (k *Kernel) reply(callID int64, p *pendingCall, res toolResult) {
+	if !p.take() {
+		return // already answered by a cancel: a late answer is not delivered
+	}
+	k.mu.Lock()
+	w, dead := k.stdin, k.dead
+	if w != nil && !dead {
+		if err := writeRequest(w, request{Cmd: "tool_result", CallID: callID, Result: &res}); err != nil {
+			k.dead = true
+			logx.Errorf("eval: kernel write failed: %v", err)
+		}
+	}
+	delete(k.pending, callID)
+	k.mu.Unlock()
+}
+
+// failPending answers every call the given cell is blocked on, so an
+// interrupted cell raises instead of waiting on a host that will not answer.
+func (k *Kernel) failPending(cellID int64, why string) {
+	k.mu.Lock()
+	var live []int64
+	var slots []*pendingCall
+	for id, p := range k.pending {
+		if p.cellID == cellID {
+			live = append(live, id)
+			slots = append(slots, p)
+		}
+	}
+	k.mu.Unlock()
+	errRes := toolResult{Error: why}
+	for i, id := range live {
+		k.reply(id, slots[i], errRes)
 	}
 }
 

@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -35,12 +37,15 @@ func TestToolResultMsgNeverCarriesEmptyText(t *testing.T) {
 		{"details only", tool.Result{Details: map[string]any{"exitCode": 0}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := toolResultMsg(ai.ToolCallBlock{ID: "call_1", Name: "glob"}, tc.res)
+			m := toolResultMsg(ai.ToolCallBlock{ID: "call_1", Name: "glob"}, tc.res, 0)
 			if strings.TrimSpace(m.Text()) != ai.ToolOutputPlaceholder {
 				t.Fatalf("text = %q, want the placeholder", m.Text())
 			}
 			if m.ToolCallID != "call_1" || m.ToolName != "glob" {
 				t.Fatalf("call identity lost: %#v", m)
+			}
+			if m.DurationMS != 0 {
+				t.Fatalf("zero duration leaked onto the message: %d", m.DurationMS)
 			}
 		})
 	}
@@ -48,14 +53,20 @@ func TestToolResultMsgNeverCarriesEmptyText(t *testing.T) {
 
 // TestToolResultMsgKeepsRealText guards the other direction: the placeholder
 // must not overwrite an ordinary result, and error/details survive the guard.
+// DurationMS is stamped from the call's wall time so /trajectory and resume
+// can show the same latency the live tool box already painted.
 func TestToolResultMsgKeepsRealText(t *testing.T) {
 	m := toolResultMsg(ai.ToolCallBlock{ID: "call_2", Name: "bash"},
-		tool.Result{Text: "hello", IsError: true, Details: map[string]any{"exitCode": 1}})
+		tool.Result{Text: "hello", IsError: true, Details: map[string]any{"exitCode": 1}},
+		70*time.Millisecond)
 	if m.Text() != "hello" || !m.IsError || m.ToolCallID != "call_2" || m.ToolName != "bash" {
 		t.Fatalf("toolResult mutated: %#v", m)
 	}
 	if m.Details == nil {
 		t.Fatal("details lost")
+	}
+	if m.DurationMS != 70 {
+		t.Fatalf("DurationMS = %d, want 70 (persisted for /trajectory + resume)", m.DurationMS)
 	}
 }
 
@@ -90,17 +101,90 @@ func TestBadRequestMissingOutputRetriesInsteadOfEndingTheRun(t *testing.T) {
 		t.Fatalf("stream calls = %d, want 2 (the 400 then the retry)", len(p.gotReqs))
 	}
 
-	// The other direction, on the same ladder: a 400 that names nothing
-	// retryable is still terminal, so a genuinely malformed request fails fast
-	// instead of burning the whole budget.
+	// The other direction: a plain 400 (ClassBadRequest) is retried only
+	// within the bounded escalation ladder; retry.infinite does not turn a
+	// provider-rejected request into an outage replay.
 	plain := &ai.HTTPError{API: "openai-completions", Status: 400, Body: `{"error":{"message":"bad model"}}`}
-	p2 := &fakeProvider{calls: []fakeScript{{err: plain}}}
+	p2 := &fakeProvider{calls: []fakeScript{{err: plain}, {err: plain}, {err: plain}}}
 	a2, _, p2 := storeAgent(t, p2, CompactionConfig{})
 	a2.Retry = fastRetry()
-	if _, err := a2.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err == nil {
-		t.Fatal("a plain 400 must still end the run")
+	_, err = a2.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("a plain 400 must surface after bounded retries")
 	}
-	if len(p2.gotReqs) != 1 {
-		t.Fatalf("stream calls = %d, want 1 (no retry for a plain 400)", len(p2.gotReqs))
+	want := 1 + maxEscalationRounds
+	if len(p2.gotReqs) != want {
+		t.Fatalf("stream calls = %d, want %d (initial + escalation retries)", len(p2.gotReqs), want)
+	}
+}
+
+// TestOpaqueBadRequestDoesNotUseAllTargetsDownNotice pins the incident from
+// 2026-09-24: onegw returned a gateway-shaped 400 with no field detail, so
+// ClassBadRequest fell into the default recovery branch and infinite retry
+// kept replaying it. A bad request must surface, not masquerade as an
+// outage. The body here names NO upstream — a genuine shape rejection by the
+// gateway, which no amount of replaying can repair.
+func TestOpaqueBadRequestDoesNotUseAllTargetsDownNotice(t *testing.T) {
+	bad := &ai.HTTPError{API: "openai-completions", Status: 400,
+		Body: `{"error":{"code":"400","message":"invalid request","type":"invalid_request_error"}}`}
+	p := &fakeProvider{calls: []fakeScript{{err: bad}, {err: bad}, {err: bad}}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+	var notices []error
+	a.Hooks = TurnHooksFunc{OnEventF: func(ev ai.Event) {
+		if ev.Type == ai.EventError && strings.Contains(ev.Err.Error(), "all targets down") {
+			notices = append(notices, ev.Err)
+		}
+	}}
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	var httpErr *ai.HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %v, want the provider HTTP error", err)
+	}
+	if httpErr.Status != 400 {
+		t.Fatalf("HTTP error = %+v, want the 400", httpErr)
+	}
+	want := 1 + maxEscalationRounds
+	if len(p.gotReqs) != want {
+		t.Fatalf("stream calls = %d, want %d bounded retries", len(p.gotReqs), want)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("all-targets-down notices = %v, want none for a bad request", notices)
+	}
+}
+
+// TestUpstreamRelayed400RetriesTheWholeLadder is the regression for the
+// reported failure: onegw/OpenCode answered the turn with
+//
+//	agent: stream start: openai-completions: HTTP 400 {"error":{"code":"400",
+//	"message":"Upstream request failed: [invalid_request_error] invalid
+//	request","type":"invalid_request_error"}}
+//
+// and xdev stopped after two quick retries. The body names no provider, so
+// it read as a shape rejection (ClassBadRequest) — whose branch is capped at
+// maxEscalationRounds and ignores retry.infinite — but nothing in it a
+// history rebuild could fix, and the same turn served seconds later
+// succeeds: the gateway relayed an upstream verdict. ClassTransient now puts
+// it on the full ladder, so the turn outlives an upstream hiccup instead of
+// ending the run. The script is longer than ClassBadRequest's bound on
+// purpose: three relays, then the answer.
+func TestUpstreamRelayed400RetriesTheWholeLadder(t *testing.T) {
+	bad := &ai.HTTPError{API: "openai-completions", Status: 400,
+		Body: `{"error":{"code":"400","message":"Upstream request failed: [invalid_request_error] invalid request","type":"invalid_request_error"}}`}
+	p := &fakeProvider{calls: []fakeScript{
+		{err: bad}, {err: bad}, {err: bad},
+		{events: []ai.Event{{Type: ai.EventStart}, textEvent("recovered"), doneEvent("recovered")}},
+	}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("Run: a gateway-relayed upstream 400 must be retried, got %v", err)
+	}
+	if final == nil || final.Text() != "recovered" {
+		t.Fatalf("final = %#v, want the retried turn's answer", final)
+	}
+	if len(p.gotReqs) != 4 {
+		t.Fatalf("stream calls = %d, want 4 (three relays then the retry)", len(p.gotReqs))
 	}
 }

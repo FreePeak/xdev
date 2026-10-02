@@ -29,35 +29,52 @@ func welcomeMenuItems() []welcomeMenu {
 	}
 }
 
-// xdevLogo is the one welcome logo: the "xdev" pixel-grid wordmark — the
-// terminal rendering of the same artwork in assets/brand/xdev-logo.svg.
-// Each letter is a 5-wide matrix of pixels on a 20px grid — x and v are two
-// arms meeting mid-height, d a bowl under a full-height stem, e a closed top
-// eye, a centre crossbar and an open bottom aperture — and here every pixel
-// becomes two cells wide (a cell is about twice as tall as it is wide, so the
-// mark keeps its proportions) with one pixel of air between the letters, so
-// every stroke is a whole number of cells.
+// xdevLogo is the welcome wordmark in Delta Corps Priest 1 — the same
+// FIGlet face Omarchy draws its brand in (github.com/omacom/omarchy
+// logo.txt / omarchy-ascii). Capital XDEV, condensed onto a fixed
+// 41-cell grid (the font's native ~50 needs a 54-column terminal and
+// vanishes in a common ~48-column window — the same problem Omarchy's
+// own about art avoids by shipping a hand-fitted logo.txt).
 //
-// The d owns the ascender (art rows 0-1); x, e and v sit on the baseline band
-// (rows 2-6). Every stem is on one absolute column across all seven rows and
-// the ragged rows are trimmed at the right only — nothing is resampled or
-// centred line by line, so no stroke wobbles. It renders identically at every
-// terminal size; the only size-dependent choice is whether it fits at all
-// (see logoArt).
+// Solid block strokes with ▀▄▌▐ half-block joins — no shaded ░ noise —
+// matching Omarchy logo.txt's clean silhouette. Every stem sits on one
+// absolute column across all eight rows so nothing wobbles. The V is a
+// deliberate taper: the stock face draws v like an open o ("XDeu" at
+// logo size); the taper keeps stroke weight and baseline with the
+// other three glyphs. E keeps three bars on a left stem (legible beside D) with Omarchy-style
+// ▄/▀ soft ends so it stays artful rather than a slab.
+//
+// Same art at every size that fits; below the full mark's fit, the
+// capital-X monogram (see logoArt).
 var xdevLogo = []string{
-	"                  ██",
-	"                  ██",
-	"██      ██    ██████    ██████    ██      ██",
-	"  ██  ██    ██    ██  ██      ██  ██      ██",
-	"    ██      ██    ██  ████████      ██  ██",
-	"  ██  ██    ██    ██  ██            ██  ██",
-	"██      ██    ██████    ██████        ██",
+	"▀███    ▐███▀ ███████▄  ▄███████ █▌    ▐█",
+	"  ██▌   ███▀  ██    ▀██ ██       ██    ██",
+	"   ██  ▐██    ██     ██ ██       ██    ██",
+	"   ▀██▄██▀    ██     ██ ██████   ██    ██",
+	"   ███▀██▄    ██     ██ ██        ██  ██",
+	"  ▐██  ▀██    ██     ██ ██        ██  ██",
+	" ▄██     ██▄  ██    ▄██ ██     ▄   ████",
+	"███       ██▄ ███████▀  ▀███████    ██",
 }
 
-// logoWidth returns the widest art row in cells.
-func logoWidth() int {
+// xdevLogoMono is the capital-X monogram — narrow-pane fallback under
+// the full mark's ~45-cell fit. Same face and stroke weight as the
+// wordmark's leading X.
+var xdevLogoMono = []string{
+	"▀███    ▐███▀",
+	"  ██▌   ███▀",
+	"   ██  ▐██",
+	"   ▀██▄██▀",
+	"   ███▀██▄",
+	"  ▐██  ▀██",
+	" ▄██     ██▄",
+	"███       ██▄",
+}
+
+// artWidth returns the widest art row in cells (runewidth).
+func artWidth(art []string) int {
 	w := 0
-	for _, ln := range xdevLogo {
+	for _, ln := range art {
 		if lw := width(ln); lw > w {
 			w = lw
 		}
@@ -65,16 +82,31 @@ func logoWidth() int {
 	return w
 }
 
-// logoArt returns the xdev logo for the given terminal size, or nil
-// when the terminal can't fit it: content shorter than the 7 art rows
-// plus tagline, gap and menu, or narrower than the 44-cell art plus
-// margins. One logo at every size — no variant swapping, so the
-// artwork never changes shape between terminal sizes.
+// logoWidth returns the full wordmark width in cells (~41).
+func logoWidth() int { return artWidth(xdevLogo) }
+
+// logoArt returns the xdev logo for the given terminal size, or nil when
+// nothing fits. Prefer the full wordmark; below its fit threshold fall back
+// to the X monogram so a narrow pane still brands.
 func logoArt(w, h int) []string {
-	if h < 13 || w < logoWidth()+4 {
+	// 8 art rows + tagline + gap + 4 menu rows.
+	if h < 14 {
 		return nil
 	}
-	return xdevLogo
+	if w >= logoWidth()+4 {
+		return xdevLogo
+	}
+	if mw := artWidth(xdevLogoMono); w >= mw+4 {
+		return xdevLogoMono
+	}
+	return nil
+}
+
+// isFullWordmark reports whether art is the capital-XDEV mark (not the
+// monogram and not empty). Slice identity is enough: logoArt returns the
+// package vars directly.
+func isFullWordmark(art []string) bool {
+	return len(art) > 0 && &art[0] == &xdevLogo[0]
 }
 
 // --- Sheen sweep (welcome-screen logo) ---
@@ -83,8 +115,7 @@ func logoArt(w, h int) []string {
 // two columns per row leans the band to ~45° on screen (a cell is
 // about twice as tall as wide), ±2 columns is its half-width, and the
 // rest pauses the sweep between passes. The phase advances one column
-// per 33ms welcome tick (~30fps, see App.Run), so a pass over the
-// 44-cell mark takes ~2.5s including its rest.
+// per 33ms welcome tick (~30fps, see App.Run) — Omarchy About's cadence.
 const (
 	sheenSlant = 2
 	sheenHalf  = 2
@@ -92,15 +123,12 @@ const (
 )
 
 // sheenInBand reports whether logo cell (row, col) sits under the
-// sheen band at the given phase, for a logo of the given width.
-func sheenInBand(phase, row, col, logoW int) bool {
-	rows := len(xdevLogo)
+// sheen band at the given phase, for a logo of the given width and
+// row count (full wordmark or monogram).
+func sheenInBand(phase, row, col, logoW, rows int) bool {
 	if rows == 0 {
 		return false
 	}
-	// One period: band fully off the left (centre -2*half), across
-	// the art and off the right of the lowest row (+logoW plus the
-	// slant's worth), then the rest.
 	period := logoW + (rows-1)*sheenSlant + 2*sheenHalf + 1 + sheenRest
 	at := phase%period - 2*sheenHalf
 	c := at - row*sheenSlant
@@ -117,11 +145,15 @@ func gitBranch(cwd string) string {
 }
 
 // transcriptTop is the screen row the transcript viewport paints into: the
-// persistent top bar owns row 0 whenever a transcript is on screen. The
+// persistent top bar owns row 0 whenever a transcript is on screen, and the
+// session strip owns row 1 whenever more than one session is open. The
 // selection geometry (anchoring, auto-scroll, row capture) shifts by it.
 func (a *App) transcriptTop() int {
 	if len(a.blocks) == 0 {
 		return 0
+	}
+	if a.tabStripVisible() {
+		return 2
 	}
 	return 1
 }
@@ -171,6 +203,19 @@ func (a *App) topPrompts() (first, last string) {
 		}
 	}
 	return first, last
+}
+
+// firstUserPrompt returns the first user message of the session,
+// unclipped (no byte ceiling): the dock title may be long and only
+// the front-end trims it for display. Caller holds a.mu.
+func (a *App) firstUserPrompt() string {
+	for _, b := range a.blocks {
+		if b.Kind != KindUser {
+			continue
+		}
+		return b.Text
+	}
+	return ""
 }
 
 // topPromptCells is the smallest share of the bar at which one prompt still
@@ -303,7 +348,7 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		c := 0
 		for _, rn := range ln {
 			style := base
-			if sheenInBand(a.sheenPhase, r, c, logoW) {
+			if sheenInBand(a.sheenPhase, r, c, logoW, len(logo)) {
 				style = lit
 			}
 			s.SetContent(logoX+c, y+r, rn, nil, style)
@@ -311,10 +356,14 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 	}
 	y += len(logo)
-	if len(logo) > 0 {
+	// Full wordmark only — monogram is the same row count, so identity is
+	// the art itself (logoArt returns the xdevLogo / xdevLogoMono slice).
+	if isFullWordmark(logo) {
 		tag := "01111000 01100100 01100101 01110110" // "xdev" in binary
 		drawText(s, max(2, (w-width(tag))/2), y, tag, st(grayC, false))
 		y++
+	} else if len(logo) > 0 {
+		y++ // keep the gap under the monogram even without the tagline
 	}
 	y++ // gap between logo and menu
 

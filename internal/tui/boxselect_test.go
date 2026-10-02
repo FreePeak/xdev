@@ -49,8 +49,8 @@ func TestBoxSelectableStripsTheFrame(t *testing.T) {
 // dropped its label fails here.
 func TestToolBoxCopyDropsTheFrame(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
-	app.AddToolBlock("bash", `{"command":"echo hi"}`)
-	app.FinishTool("bash", false, "hello\nworld\n", ToolOutcome{Dur: "5ms"})
+	app.AddToolBlock("", "bash", `{"command":"echo hi"}`)
+	app.FinishTool("", "bash", false, "hello\nworld\n", ToolOutcome{Dur: "5ms"})
 	app.draw()
 
 	app.mu.Lock()

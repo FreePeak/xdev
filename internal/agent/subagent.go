@@ -52,6 +52,48 @@ type SubagentSpec struct {
 	// OnRun (optional) receives the live child Agent just before its run
 	// starts — the hub uses it to expose steering to the parent session.
 	OnRun func(*Agent)
+	// OnEvent (optional) receives the child's progress, for the HUMAN's
+	// view of it. Contract: the callback runs on the CHILD's goroutine,
+	// from inside its tool dispatch, so it must be cheap, must not
+	// block, and must not call back into the spawning tool — the same
+	// seam and the same rule as Hub.SetNotify (hub.go). Additive, like
+	// OnRun: nil leaves the spawn path exactly as it was, and the
+	// parent's context is untouched either way (only the yield is
+	// parent-visible; the contract TestSubagentYieldOnlyIsolation pins).
+	OnEvent func(SubagentEvent)
+}
+
+// SubagentEventKind names one observable moment in a child's run.
+type SubagentEventKind string
+
+const (
+	SubagentStart SubagentEventKind = "start"
+	SubagentTool  SubagentEventKind = "tool"
+	SubagentEnd   SubagentEventKind = "end"
+)
+
+// SubagentEvent is one moment of a child's progress, for the HUMAN's view of
+// the child (the TUI renders it live under the spawning `task` row). It is a
+// display signal only: nothing here is ever added to the parent's context,
+// which still sees exactly what the yield carries (the contract pinned by
+// TestSubagentYieldOnlyIsolation).
+type SubagentEvent struct {
+	Kind SubagentEventKind
+	// Label names the child: the spawn's `name`, or the batch item's label.
+	Label string
+	Agent string // resolved agent type ("" = the default child shape)
+	Model string
+	// Tool is the child's tool name for SubagentTool. The child's own
+	// handoff machinery is not work the user asked to watch, so `yield`
+	// is not reported.
+	Tool string
+	// Args is the child's raw tool-call arguments, unparsed. The display
+	// side runs its own naming-argument extraction over them
+	// (tui.toolDetail), so the precedence rules live in one place — this
+	// package has no opinion about what a `read` is "about".
+	Args   json.RawMessage
+	Status string // SubagentTool: "ok" | "error"; SubagentEnd: the child's result status
+	Dur    time.Duration
 }
 
 // SubagentOutput is the yield payload contract.
@@ -173,6 +215,12 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 	if cwd == "" {
 		cwd = "."
 	}
+	// The child gets the SAME always-loaded conventions its parent does. Until
+	// this line existed the context-file hierarchy reached only the parent
+	// prompt (cmd/xdev/print.go promptFnWithMemory), so a spawn ran with the
+	// bare base prose and none of the standing rules — and a subagent is
+	// exactly the actor handed "just make this one-line fix".
+	spec.System = childSystem(spec, cwd)
 	title := "subagent: " + spec.Name
 	store := session.OpenMem(cwd, title)
 	// A child is user-invisible: titleSource "subagent" marks it so resume
@@ -192,9 +240,42 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 		}
 	}()
 
+	// The child's tool results are its own run's news, and OnEvent is where
+	// a UI learns what a child is doing — one event per finished call,
+	// carrying the arguments the child passed, so a row can say what it is
+	// doing rather than that something ran. `yield` is skipped: it is the
+	// handoff, not work the user asked to watch.
+	var emu sync.Mutex // the loop dispatches tool calls from several goroutines
+	argsByID := map[string]json.RawMessage{}
 	hooks := TurnHooksFunc{
-		OnMessageEndF:    func(m *ai.Message) { _ = store.Append(&session.MessageEntry{Message: *m}) },
-		OnToolResultMsgF: func(m *ai.Message) { _ = store.Append(&session.MessageEntry{Message: *m}) },
+		OnMessageEndF: func(m *ai.Message) {
+			_ = store.Append(&session.MessageEntry{Message: *m})
+			emu.Lock()
+			for _, c := range m.ToolCalls() {
+				if len(c.Arguments) > 0 {
+					argsByID[c.ID] = c.Arguments
+				}
+			}
+			emu.Unlock()
+		},
+		OnToolResultMsgF: func(m *ai.Message) {
+			_ = store.Append(&session.MessageEntry{Message: *m})
+			if spec.OnEvent == nil || m.ToolName == "" || m.ToolName == "yield" {
+				return
+			}
+			emu.Lock()
+			args := argsByID[m.ToolCallID]
+			emu.Unlock()
+			status := "ok"
+			if m.IsError {
+				status = "error"
+			}
+			spec.OnEvent(SubagentEvent{
+				Kind: SubagentTool, Label: spec.Name, Model: spec.Model,
+				Tool: m.ToolName, Args: args, Status: status,
+				Dur: time.Duration(m.DurationMS) * time.Millisecond,
+			})
+		},
 	}
 	mt := spec.MaxTurns
 	if mt <= 0 {
@@ -230,6 +311,24 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 	}
 
 	res := &SubagentResult{SessionID: store.ID()}
+	// The start and end brackets for the human's view. `end` is deferred so
+	// it reports the TERMINAL status — after the yield nudges and the schema
+	// repair have had their say, which is the status the parent renders and
+	// therefore the one a settled row must agree with.
+	started := time.Now()
+	defer func() {
+		if spec.OnEvent != nil {
+			spec.OnEvent(SubagentEvent{
+				Kind: SubagentEnd, Label: spec.Name, Model: spec.Model,
+				Status: res.Status, Dur: time.Since(started),
+			})
+		}
+	}()
+	if spec.OnEvent != nil {
+		spec.OnEvent(SubagentEvent{
+			Kind: SubagentStart, Label: spec.Name, Model: spec.Model, Status: "running",
+		})
+	}
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	yt.mu.Lock()
@@ -370,6 +469,22 @@ func strictRetry(ctx context.Context, ag *Agent, yt *yieldTool, spec SubagentSpe
 	if _, err := ag.Run(cctx, spec.System, hist.Messages); err != nil {
 		logx.Debugf("subagent retry run: %v", err)
 	}
+}
+
+// childSystem is the child's system prompt: whatever the spec (or a named
+// agent definition) supplied, plus the always-loaded context-file hierarchy
+// for the child's working directory. Appending — never replacing — is the
+// point: a definition prompt is authored guidance, the global conventions are
+// policy, and a definition that omits the policy must not be able to drop it.
+//
+// No memory guidance block here: recall is keyed to a session's own history
+// and a child in a fresh session has none, so the parent's accumulated
+// lessons would arrive in a context they were never about.
+func childSystem(spec SubagentSpec, cwd string) string {
+	if files := LoadContextFiles(cwd); files != "" {
+		return spec.System + "\n\n" + ProjectContextBlock(files)
+	}
+	return spec.System
 }
 
 // schema returns the configured output schema (nil-safe).

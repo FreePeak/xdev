@@ -32,6 +32,9 @@ func dockTestApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen, *int) {
 		// The identity the panel's title slot reads. Not counted by runs: the
 		// session's name is not one of the lists whose rebuild this file bounds.
 		Session: func() (string, string) { return "opencode sidebar", "sess1234" },
+		// The block shape cmd builds: a count heading, then one row per enabled
+		// server, marked ○ when nothing has connected to it yet.
+		MCP: func() string { return "MCP · 3\n○ be-kg\n○ db\n○ leankg" },
 	})
 	return app, scr, runs
 }
@@ -129,6 +132,67 @@ func TestDockCycleWalksPolicy(t *testing.T) {
 	}
 }
 
+// TestSidebarCommandTogglesWhatIsOnScreen: /sidebar is the switch form of the
+// Alt+S cycle. Bare, it hides a panel that is actually painted and opens one
+// that is not — the question is the SCREEN, not the policy, so an auto-closed
+// panel is never the thing the human hid — and every flip lands on the same
+// persisted key the cycle writes. A word outside the vocabulary is a usage
+// error, never a silent toggle.
+func TestSidebarCommandTogglesWhatIsOnScreen(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	var saved []string
+	app.SetSettingsOps(&SettingsOps{Path: "/tmp/settings.yml", SetSidebar: func(m string) error {
+		saved = append(saved, m)
+		return nil
+	}})
+
+	// auto at 200 columns: the panel is on screen, so a bare call hides it.
+	if err := app.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockHide {
+		t.Fatalf("bare toggle from a painted panel = %q, want hide", app.DockMode())
+	}
+	// And back: hidden is not on screen, so the same call shows it.
+	if err := app.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockShow {
+		t.Fatalf("bare toggle from a hidden panel = %q, want show", app.DockMode())
+	}
+	if strings.Join(saved, ",") != "hide,show" {
+		t.Fatalf("persisted %v, want hide,show", saved)
+	}
+
+	// A terminal below the auto floor has no panel to hide: the toggle opens
+	// it rather than persisting a hide for one that was never painted.
+	small, _, _ := dockTestApp(t, 100, 40)
+	small.SetSettingsOps(&SettingsOps{Path: "/tmp/settings.yml", SetSidebar: func(string) error { return nil }})
+	if err := small.Sidebar(""); err != nil {
+		t.Fatal(err)
+	}
+	if small.DockMode() != DockShow {
+		t.Fatalf("toggle under the width floor = %q, want show", small.DockMode())
+	}
+
+	// The named forms are the policy itself, and anything else is refused.
+	if err := app.Sidebar("auto"); err != nil {
+		t.Fatal(err)
+	}
+	if app.DockMode() != DockAuto {
+		t.Fatalf("/sidebar auto = %q", app.DockMode())
+	}
+	if err := app.Sidebar("sideways"); err == nil {
+		t.Fatal("an unknown argument must be refused, not toggled")
+	}
+	if err := app.Sidebar("show hide"); err == nil {
+		t.Fatal("two arguments must be refused")
+	}
+	if app.DockMode() != DockAuto {
+		t.Fatalf("a refused call changed the policy to %q", app.DockMode())
+	}
+}
+
 // TestDockFoldKeepsThePlan is Ctrl+T's one promise: the pending document survives
 // every fold state, because folding away the thing the human is being asked to
 // read is worse than no panel at all.
@@ -208,10 +272,130 @@ func TestDockClipsDoNotWrap(t *testing.T) {
 	}
 }
 
-// TestDockRebuildIsEventDriven is the acceptance line: an unchanged frame must not
-// run a single source, while a bump, a resize, or a transcript that grew must.
-// The alternative is a second column rebuilt at 30fps, which is the cost #283 and
-// #284 spent two issues removing from the draw path.
+// TestDockTitleWrapsNotClips is the reported bug: a long session title must be
+// readable in the panel, not cut with "…". The slot wraps across rows, the rows
+// below it shift down by however many it took, and nothing about the name's
+// length decides how many rows it may take — the panel is.
+func TestDockTitleWrapsNotClips(t *testing.T) {
+	long := strings.Repeat("full title ", 6) // 66 cells: two rows of 38, plus a tail
+	app, _, _ := dockTestApp(t, 200, 40)
+	app.SetDockOps(DockOps{
+		Session: func() (string, string) { return long, "sess1234" },
+		Tasks:   func() string { return "TASKS · 0/1 done\ndo the thing" },
+	})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	app.dockBuild()
+	head := app.dock.titleRows()
+	lines := append([]string(nil), app.dock.titleLines...)
+	app.mu.Unlock()
+
+	if head < 2 {
+		t.Fatalf("a 66-cell title took %d row(s): %v", head, lines)
+	}
+	if joined := strings.Join(lines, " "); !strings.Contains(joined, "full title full") {
+		t.Fatalf("title rows lost the text: %v", lines)
+	}
+	if strings.Contains(strings.Join(lines, ""), "…") {
+		t.Fatalf("the whole name fits the panel, so nothing may be cut: %v", lines)
+	}
+	for _, l := range lines {
+		if w := width(l); w > dockInner {
+			t.Fatalf("title row %q is %d cells, the interior is %d", l, w, dockInner)
+		}
+	}
+
+	// The slot's rows are paid for out of the content budget, not painted over
+	// the first section: the transcript's row 1 is still the title's last row.
+	app.draw()
+	scr := app.scr.(tcell.SimulationScreen)
+	left := 200 - dockCols + dockPad
+	top, _ := func() (int, int) { app.mu.Lock(); defer app.mu.Unlock(); return app.dockGrid() }()
+	if got := dockRowText(scr, top+head-1, left); !strings.Contains(got, "full title") {
+		t.Fatalf("title's last row = %q, want the wrapped name", got)
+	}
+	if got := dockRowText(scr, top+head, left); !strings.HasPrefix(got, "TASKS") {
+		t.Fatalf("first section row = %q, want it under the title slot", got)
+	}
+}
+
+// TestDockTitleTakesTheRowsItNeeds is the unbounded half of #434: the name's
+// length no longer picks a row budget, so a 1000-cell name wraps over ~26 rows
+// instead of being cut at 3. The sections keep whatever the band still has
+// after it, and a click resolves against the rows as painted — which start
+// below the slot however many rows it took.
+func TestDockTitleTakesTheRowsItNeeds(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	app.SetDockOps(DockOps{
+		Session: func() (string, string) { return strings.Repeat("word ", 200), "sess1234" },
+		Tasks:   func() string { return "TASKS · 0/1 done\n" + strings.Repeat("z", 30) },
+	})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.dockBuild()
+	head := app.dock.titleRows()
+	_, bandH := app.dockGrid()
+	if head <= 3 {
+		t.Fatalf("a 1000-cell title took %d rows: the 3-row cap is back", head)
+	}
+	// Nothing is cut while the band has rows for it: an "…" here means a cap
+	// crept back in, and the setting would lie about showing the whole name.
+	if strings.Contains(strings.Join(app.dock.titleLines, ""), "…") {
+		t.Fatalf("a 1000-cell title was cut in a %d-row panel: %v", bandH, app.dock.titleLines)
+	}
+	// What the name did not take, the sections have — the panel is shared, not
+	// won outright, until the name has eaten all but the band's floor.
+	if len(app.dock.lines) == 0 {
+		t.Fatalf("a %d-row name left the sections nothing in a %d-row band", head, bandH)
+	}
+	top, _ := app.dockGrid()
+	if _, act := app.dockRowAt(200-dockCols+1, top+head-1); act != "" {
+		t.Fatalf("the title slot must not answer clicks as a row: act %q", act)
+	}
+	if _, act := app.dockRowAt(200-dockCols+1, top+head); act != "" {
+		t.Fatalf("a heading row must not answer clicks: act %q", act)
+	}
+	if path, _ := app.dockRowAt(200-dockCols+1, top+head+1); path != "" {
+		t.Fatalf("a task row must not resolve as a file: %q", path)
+	}
+	app.mu.Unlock()
+	// And the whole name reaches the SCREEN, tail included: a name that fits
+	// the panel must not end in the row the build happened to budget for.
+	app.draw()
+	scr := app.scr.(tcell.SimulationScreen)
+	if got := dockRowText(scr, head-1, 200-dockCols+dockPad); !strings.Contains(got, "word") {
+		t.Fatalf("the title's last row = %q, want the tail of the name", got)
+	}
+	app.mu.Lock()
+}
+
+// The band is the only bound left on the name: one too long for the panel
+// itself is cut, and the cut is admitted rather than silent, so a short
+// terminal does not become a wall of title with no marker that it is one.
+func TestDockTitleLongerThanTheBandIsAdmitted(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 8) // a band of 8: the name wants ~66 rows
+	app.SetDockOps(DockOps{Session: func() (string, string) {
+		return strings.Repeat("word ", 500), "sess1234"
+	}})
+	app.SetDockMode(DockShow)
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.dockBuild()
+	_, bandH := app.dockGrid()
+	head := app.dock.titleRows()
+	if head > bandH-dockTitleFloor {
+		t.Fatalf("a %d-row title in a %d-row band leaves the sections nothing", head, bandH)
+	}
+	if !strings.Contains(app.dock.titleLines[head-1], "…") {
+		t.Fatalf("a title cut at the band must admit it: %q", app.dock.titleLines[head-1])
+	}
+}
+
+// TestDockRebuildIsEventDriven is the acceptance line: an unchanged frame must
+// not run a single source, while a bump, a resize, or a transcript that grew
+// must. The alternative is a second column rebuilt at 30fps, which is the cost
+// #283 and #284 spent two issues removing from the draw path.
 func TestDockRebuildIsEventDriven(t *testing.T) {
 	app, _, runs := dockTestApp(t, 200, 40)
 	app.dockBuild()
@@ -324,8 +508,8 @@ func TestDockPaintsThePanel(t *testing.T) {
 func TestDockAnatomyIsOpencode(t *testing.T) {
 	app, scr, _ := dockTestApp(t, 160, 40)
 	app.SetDockMode(DockShow)
-	app.AddToolBlock("edit", `{"path":"internal/tui/dock.go"}`)
-	app.FinishTool("edit", false, "edited",
+	app.AddToolBlock("", "edit", `{"path":"internal/tui/dock.go"}`)
+	app.FinishTool("", "edit", false, "edited",
 		ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1,2 +1,3 @@\n ctx\n+added\n-removed\n"})
 	app.draw()
 
@@ -374,6 +558,55 @@ func TestDockAnatomyIsOpencode(t *testing.T) {
 	x := left + dockPad + dockInner - width(file.right())
 	if got := dockRowText(scr, y, x); !strings.HasPrefix(got, "+1 -1") {
 		t.Fatalf("counts are not right-aligned at the panel's edge: %q", got)
+	}
+}
+
+// TestDockPaintsEveryMCPName: the section is a list, not a count. The whole
+// point of the block is that a human can read which server is which — and
+// which one is ○, i.e. the one the session could not reach. A heading with a
+// single row under it (or the count alone) fails both, so assert the painted
+// screen, not the fold: what matters is that every name reaches the panel.
+func TestDockPaintsEveryMCPName(t *testing.T) {
+	app, scr, _ := dockTestApp(t, 160, 40)
+	app.SetDockMode(DockShow)
+	app.draw()
+
+	app.mu.Lock()
+	top, _ := app.dockGrid()
+	head := app.dock.titleRows()
+	rows := app.dock.lines
+	app.mu.Unlock()
+
+	// The fold the source produced: a heading plus one row per name, never a
+	// single "3 servers" line.
+	seen, names := 0, 0
+	for _, r := range rows {
+		if r.head && strings.HasPrefix(r.text, "MCP") {
+			seen++
+		}
+		if strings.HasPrefix(r.text, "○ ") {
+			names++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("MCP headings = %d, want 1\n%s", seen, dockLines(rows))
+	}
+	if names != 3 {
+		t.Fatalf("MCP rows = %d, want one per enabled server\n%s", names, dockLines(rows))
+	}
+	// And the screen agrees with the fold: the names are where a reader looks.
+	left := 160 - dockCols + dockPad
+	for _, want := range []string{"MCP", "○ be-kg", "○ db", "○ leankg"} {
+		found := false
+		for i := range rows {
+			if got := dockRowText(scr, top+head+i, left); strings.Contains(got, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%q never reached the panel:\n%s", want, dockLines(rows))
+		}
 	}
 }
 
@@ -451,22 +684,39 @@ func TestDockPinnedCannotEatThePrompt(t *testing.T) {
 	}
 }
 
-// TestDockShortTerminalKeepsItsRows: the panel trades rows for its box only when
-// there are rows to trade. At a height where the band cannot hold anything, the
-// columns stay the transcript's — the reserve is not a fee charged for nothing.
+// TestDockShortTerminalKeepsItsRows: the panel owns the whole column, so the
+// rows it can no longer trade for the transcript's are none of them — an
+// 8-row terminal still has an 8-row sidebar, which is the whole point of the
+// window. Only a terminal too short to hold a title and a section at all
+// refuses to open it, and then it keeps the whole width.
 func TestDockShortTerminalKeepsItsRows(t *testing.T) {
 	app, _ := newTestApp(t, 200, 8)
 	app.AddSystemBlock("hello")
 	app.SetDockMode(DockShow)
 	app.mu.Lock()
-	defer app.mu.Unlock()
-	if _, h := app.dockGrid(); h > 0 {
-		t.Fatalf("an 8-row terminal has a %d-row band?", h)
+	top, h := app.dockGrid()
+	on, edge := app.dockOn(), app.rightEdge()
+	app.mu.Unlock()
+	if top != 0 || h != 8 {
+		t.Fatalf("the sidebar is not full height: top=%d h=%d, want 0/8", top, h)
 	}
-	if app.dockOn() {
+	if !on || edge != 200-dockCols {
+		t.Fatalf("an 8-row terminal: open=%v edge=%d", on, edge)
+	}
+
+	// Shorter than the panel can say anything in, it stays shut.
+	short, _ := newTestApp(t, 200, 3)
+	short.AddSystemBlock("hello")
+	short.SetDockMode(DockShow)
+	short.mu.Lock()
+	defer short.mu.Unlock()
+	if _, h := short.dockGrid(); h > 0 {
+		t.Fatalf("a 3-row terminal has a %d-row band?", h)
+	}
+	if short.dockOn() {
 		t.Fatal("the panel opened with no band to paint into")
 	}
-	if got := app.rightEdge(); got != 200 {
+	if got := short.rightEdge(); got != 200 {
 		t.Fatalf("rightEdge = %d, want the whole terminal", got)
 	}
 }
@@ -477,10 +727,10 @@ func TestDockFilesReadsTheTranscriptDiffs(t *testing.T) {
 	app, _ := newTestApp(t, 200, 40)
 	app.AddSystemBlock("go")
 	diff := "--- a/internal/tui/app.go\n+++ b/internal/tui/app.go\n@@ -1,2 +1,3 @@\n context\n+added\n-removed\n"
-	app.AddToolBlock("edit", `{"path":"internal/tui/app.go"}`)
-	app.FinishTool("edit", false, "edited", ToolOutcome{Diff: diff})
-	app.AddToolBlock("edit", `{"path":"internal/tui/dock.go"}`)
-	app.FinishTool("edit", false, "edited", ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1 +1 @@\n-old\n+new line\n"})
+	app.AddToolBlock("", "edit", `{"path":"internal/tui/app.go"}`)
+	app.FinishTool("", "edit", false, "edited", ToolOutcome{Diff: diff})
+	app.AddToolBlock("", "edit", `{"path":"internal/tui/dock.go"}`)
+	app.FinishTool("", "edit", false, "edited", ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1 +1 @@\n-old\n+new line\n"})
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	f, ok := app.dockChanges()
@@ -612,5 +862,35 @@ func TestDockSettingsCommand(t *testing.T) {
 	}
 	if err := app.SettingsView("nonsense"); err == nil {
 		t.Fatal("an unknown setting must be refused")
+	}
+}
+
+// The version rides the footer: the one section never folded away, so
+// "which build is this" always has an answer on screen. A host that never set
+// one (a test harness, an embedder) must paint no row at all rather than an
+// "xdev" with nothing after it.
+func TestDockFooterCarriesTheVersion(t *testing.T) {
+	app, _, _ := dockTestApp(t, 200, 40)
+	app.SetLocation("/tmp/somewhere")
+	app.SetVersion("0.4.127")
+	app.mu.Lock()
+	f, ok := app.dockFooter()
+	rows := dockLines(f.rows)
+	app.mu.Unlock()
+	if !ok || !strings.Contains(rows, "xdev 0.4.127") {
+		t.Fatalf("footer rows = %q ok=%v", rows, ok)
+	}
+	// The version is the last row: it names the build under everything else.
+	if f.rows[len(f.rows)-1].text != "xdev 0.4.127" {
+		t.Fatalf("version is not the footer's last row: %+v", f.rows)
+	}
+	// No version, no row — never a bare "xdev".
+	app.SetVersion("")
+	app.mu.Lock()
+	f, _ = app.dockFooter()
+	rows = dockLines(f.rows)
+	app.mu.Unlock()
+	if strings.Contains(rows, "xdev") {
+		t.Fatalf("an unset version must paint nothing: %q", rows)
 	}
 }

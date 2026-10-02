@@ -81,7 +81,7 @@ var psSubcommands = map[string]bool{
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
-	"stats": true, "memory": true, "share": true, "ps": true,
+	"stats": true, "memory": true, "share": true, "ps": true, "bg": true,
 	"update": true, "setup": true, "bench": true,
 }
 

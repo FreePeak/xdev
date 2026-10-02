@@ -249,19 +249,49 @@ func writePickerSession(t *testing.T, cwd, id, title, prompt string) string {
 	return path
 }
 
-// TestWorkOfSumsAssistantSpans: the HUD's re-based total is the provider
-// request time the replayed path carries — assistant spans only, missing
-// timings add nothing (an old or imported message must not invent seconds).
-func TestWorkOfSumsAssistantSpans(t *testing.T) {
+// TestWorkOfSumsRunSpans: the HUD's re-based total is the ACTIVE work a
+// rebuilt history banked — provider-request spans AND tool spans, because the
+// live timer (markRun) counts both and a resumed session reading at half what
+// it showed before it closed is the defect. User messages carry no span and
+// add nothing, and neither does a message from before durations were recorded.
+func TestWorkOfSumsRunSpans(t *testing.T) {
 	msgs := []ai.Message{
 		{Role: ai.RoleUser},
 		{Role: ai.RoleAssistant, DurationMS: 4000},
 		{Role: ai.RoleToolResult, DurationMS: 9000},
 		{Role: ai.RoleAssistant, DurationMS: 2500},
-		{Role: ai.RoleAssistant}, // pre-timing history: contributes 0
+		{Role: ai.RoleAssistant},              // pre-timing history: contributes 0
+		{Role: ai.RoleUser, DurationMS: 9999}, // no span of its own: contributes 0
 	}
-	if got := workOf(msgs); got != 6500*time.Millisecond {
-		t.Fatalf("workOf = %v, want 6.5s", got)
+	if got := workOf(msgs); got != 15500*time.Millisecond {
+		t.Fatalf("workOf = %v, want 15.5s", got)
+	}
+}
+
+// TestUsageOfSumsPersistedBuckets: the token pill and /usage's cost line are
+// read off these sums after a resume, so every bucket the wire reported has
+// to land — the split is the point (a session that only summed input+output
+// would read a 65k cached prompt as 479 fresh tokens). Messages with no usage
+// (an older history, a provider that reports none) contribute nothing.
+func TestUsageOfSumsPersistedBuckets(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser},
+		{Role: ai.RoleAssistant, Usage: &ai.Usage{
+			Input: 479, Output: 1770, CacheRead: 64575, CacheWrite: 1100,
+			TotalTokens: 66824, ReasoningTokens: 1264,
+			Cost: &ai.UsageCost{Input: 0.001, Output: 0.011, CacheRead: 0.0003, Total: 0.0123},
+		}},
+		{Role: ai.RoleToolResult}, // no usage: contributes nothing
+		{Role: ai.RoleAssistant, Usage: &ai.Usage{Input: 500, Output: 100, TotalTokens: 600}},
+		{Role: ai.RoleAssistant}, // pre-usage history: contributes 0
+	}
+	in, out, cache, think, cacheWrite, cost := usageOf(msgs)
+	if in != 979 || out != 1870 || cache != 64575 || think != 1264 || cacheWrite != 1100 {
+		t.Fatalf("usageOf buckets = %d/%d/%d/%d/%d, want 979/1870/64575/1264/1100",
+			in, out, cache, think, cacheWrite)
+	}
+	if cost < 0.0123-1e-9 || cost > 0.0123+1e-9 {
+		t.Fatalf("usageOf cost = %v, want 0.0123", cost)
 	}
 }
 

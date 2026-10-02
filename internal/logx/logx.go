@@ -51,6 +51,9 @@ func SetOutput(w io.Writer) {
 	out = w
 }
 
+// SetOutputLocked redirects log output (caller holds mu).
+func SetOutputLocked(w io.Writer) { out = w }
+
 // ParseLevel maps a name to a Level.
 func ParseLevel(s string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {

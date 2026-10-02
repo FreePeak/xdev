@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/FreePeak/xdev/internal/typesafe"
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/browser"
@@ -36,6 +35,7 @@ import (
 	"github.com/FreePeak/xdev/internal/tiny"
 	"github.com/FreePeak/xdev/internal/tool"
 	"github.com/FreePeak/xdev/internal/tts"
+	"github.com/FreePeak/xdev/internal/typesafe"
 )
 
 // printOptions configures one one-shot run.
@@ -247,8 +247,10 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 		return nil
 	}
 	ag.GoalContinuation = interactive
+	ag.PromptContinuation = interactive
 	if reg != nil {
 		ag.WireCatalog(reg.Catalog())
+		ag.WireEvalKernel(reg)
 	}
 	ag.Redactor = redactorFor(cwd)
 	// #83: snapcompact's bitmap only helps a model that can read images.
@@ -263,8 +265,10 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 	if settings != nil {
 		ag.Compaction.IdleAfter = settings.CompactionIdleAfter()
 		ag.Compaction.Async = settings.CompactionAsyncOn()
-		// retry.infinite rides here: every build site (print/tui/rpc/acp)
-		// goes through this function, and none of them set ag.Retry at all.
+		// retry.infinite and retry.retryAllErrors ride here: every
+		// build site (print/tui/rpc/acp) goes through this function,
+		// and none of them set ag.Retry at all.
+		ag.Retry.RetryAllErrors = settings.RetryAllErrors()
 		ag.Retry.Infinite = settings.InfiniteRetry()
 	}
 	// #86: a compaction summary must carry the memories the remote backend
@@ -431,6 +435,9 @@ func resolveInto(refArg string, cfg *config.Config, settings *config.Settings, l
 }
 
 func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
+	// A --bg child records its exit in status.json so `xdev bg list` stays
+	// honest after the process is gone. Foreground runs no-op (no XDEV_BG_ID).
+	defer func() { finalizeBgStatus(exitCode, err) }()
 	cwd, err := os.Getwd()
 	if err != nil {
 		return 2, err
@@ -474,10 +481,15 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 
 	// MCP servers (optional; absent config = nothing happens).
-	mgr := attachMCP(context.Background(), reg, true, nil)
+	mgr := attachMCP(context.Background(), reg, true, nil, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}
+
+	// Rebuild-time interruption notice names the calls that are free to
+	// repeat (tool.Replayer). Wired after attachMCP/attachExtensions so a
+	// registered MCP or extension tool answers from its own declaration.
+	session.ReplaySafety = reg.ReplaySafe
 
 	// --- system prompt ---
 	overrides := agent.LoadSystemPromptOverrides(cwd)
@@ -508,12 +520,29 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
+	if id := os.Getenv(bgEnvID); id != "" {
+		if st, rerr := readBgStatus(id); rerr == nil {
+			st.SessionID = store.ID()
+			_ = writeBgStatus(st)
+		}
+	}
 	defer func() {
 		if cerr := store.Close(); cerr != nil {
 			logx.Errorf("session close: %v", cerr)
 		}
 	}()
 	wireTaskParent(reg, store)
+	// Auto-activate goal mode: every session runs until its goal is
+	// completed or explicitly dropped — no 200-turn stop (#387). The row is
+	// the same one the TUI's /goal <objective> replaces, so the objective
+	// text lives in the agent package, not in each run mode.
+	gs := agent.NewGoalState(store)
+	if v, ok := gs.View(); !ok || v.Status == agent.GoalDropped {
+		if _, err := gs.Create(agent.SessionGoalObjective, 0); err != nil {
+			logx.Errorf("goal: auto-create: %v", err)
+		}
+	}
+	reg.Register(&agent.GoalTool{Goals: gs})
 	// #272: in print mode stderr is the user's surface (stdout is the model's
 	// and a script parses it), so only what needs saying goes there.
 	if notice, warnings, count := taskAgentsAtStartup(cwd); count == 0 || len(warnings) > 0 {
@@ -656,10 +685,20 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			fmt.Fprintf(os.Stderr, "\nxdev: -max-time %s exceeded\n", launch.MaxTime)
+		} else if errors.Is(err, agent.ErrEmptyTurn) {
+			fmt.Fprintln(os.Stderr, "\nxdev: the model produced no answer — retrying from history")
+			ctxRes, rerr := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
+			if rerr == nil {
+				final, err = ag.Run(ctx, hookBus.Context(ctx, buildSys()), ctxRes.Messages)
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
+				exitCode = 1
+			}
 		} else {
 			fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
+			exitCode = 1
 		}
-		exitCode = 1
 	}
 	// Advisor exit drain (T3 #20): a headless run cannot steer a finished
 	// turn, so the last review is taken synchronously (30s cap) and printed.
@@ -877,12 +916,15 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 	return ai.NewInBandProvider(prov, format), nil
 }
 
-// modelWindow resolves the context window for one provider/model pair
-// (0 when the model is undiscovered — compaction stays disabled then).
+// modelWindow resolves the context window for one provider/model pair.
+// A discovered model returns its own window; anything else falls back to
+// agent.ResolveMaxContextTokens() — XDEV_MAX_CONTEXT_TOKENS when set, else
+// MaxContextTokensDefault. Returning 0 here would silently disable
+// compaction for every model the catalog does not pin.
 func modelWindow(cfg *config.Config, provider, model string) int {
 	pc, ok := cfg.Providers[provider]
 	if !ok {
-		return 0
+		return agent.ResolveMaxContextTokens()
 	}
 	// Pinned entries first; discovered ones (a local server's live model
 	// list) fill what models.yml never named, so compaction knows the real
@@ -892,7 +934,7 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 			return m.ContextWindow
 		}
 	}
-	return 0
+	return agent.ResolveMaxContextTokens()
 }
 
 // modelReasoning reports whether the catalog says this model can reason
@@ -1247,15 +1289,21 @@ func mcpConfigPath() string {
 // attachMCP connects configured MCP servers and registers their tools on
 // the parent registry only — children never inherit ambient MCP (PRD M6:
 // subagents run with restricted tool sets). Individual server failures are
-// reported to report (nil = stderr) and skipped, never fatal.
+// reported to report (nil = stderr) and skipped, never fatal. done (nil =
+// nothing) runs once the connect has settled, so a mode with a surface to
+// repaint — the dock's MCP rows fill their marks in — hears the end of it.
 //
-// Async by design: a server that starts but never answers `initialize`
-// would otherwise stall startup for its whole timeout budget. Registration
-// happens whenever it lands; the registry is mutex-guarded, and a prompt
-// sent before then simply carries fewer tools (the next turn has them).
-func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(string)) *mcpclient.Manager {
+// Async by design: a server that starts but never answers `initialize`,
+// and a local server that has to be launched and polled for up to
+// healthTimeoutSec before it answers at all, would otherwise stall startup
+// for their whole timeout budgets. Registration happens whenever it lands;
+// the registry is mutex-guarded, and a prompt sent before then simply
+// carries fewer tools (the next turn has them).
+func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(string), done func()) *mcpclient.Manager {
 	cfg, err := mcpclient.LoadConfig(mcpConfigPath())
 	if err != nil {
+		// A config that does not parse never reaches the dock — there is no
+		// section to repaint — so done stays uncalled here.
 		logx.Errorf("mcp config: %v", err)
 		return nil
 	}
@@ -1263,21 +1311,37 @@ func attachMCP(ctx context.Context, reg *tool.Registry, wait bool, report func(s
 		return nil
 	}
 	mgr := mcpclient.NewManager()
+	// The sidebar's MCP section reads the CONFIG, not the sessions: a server
+	// that failed to connect is exactly the one the human needs to see, and
+	// the manager only knows the ones that answered. The row is marked ○ until
+	// its session lands, so the section shows the enabled list at once and
+	// settles a beat later — and the source is assigned here rather than after
+	// the connect, because the panel reads it on the first paint.
+	reg.MCPBlock = func() string { return mcpDockBlock(cfg, mgr) }
 	if wait {
 		// One-shot modes (print) must have the tools before the first
 		// turn: connect inline, bounded by the per-server init timeout.
 		finishMCP(mgr, reg, ctx, cfg, report)
+		if done != nil {
+			done()
+		}
 		return mgr
 	}
-	go finishMCP(mgr, reg, ctx, cfg, report)
+	go func() {
+		finishMCP(mgr, reg, ctx, cfg, report)
+		if done != nil {
+			done()
+		}
+	}()
 	return mgr
 }
 
 // finishMCP connects and registers, reporting failures non-fatally. report
-// (optional) is where a mode with a UI of its own — the TUI's composer
-// divider — takes the failure; nil keeps stderr, which is the interface for
-// print, rpc and acp.
+// (optional) is where a mode with a UI of its own — the TUI's toast stack —
+// takes the failure; nil keeps stderr, which is the interface for print, rpc
+// and acp.
 func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, cfg *mcpclient.Config, report func(string)) {
+	autostartMCP(cfg)
 	connected, errs := mgr.Connect(ctx, cfg)
 	for _, e := range errs {
 		if report != nil {
@@ -1294,13 +1358,90 @@ func finishMCP(mgr *mcpclient.Manager, reg *tool.Registry, ctx context.Context, 
 	logx.Infof("mcp: %d server(s), %d tool(s)", connected, len(mgr.Tools()))
 }
 
-// mcpUnavailable names the failed server without the launch error's detail.
-// A caller with a one-line slot gets what it can render: mcpclient already
-// logged the full error, and the divider drops a hint wider than the space
-// beside the model name, so a whole fork/exec path would render as nothing.
+// autostartMCP launches any server that ships as a binary rather than an
+// always-on daemon (leankg) when its health probe says it is down, and waits
+// for it to answer. It lives inside finishMCP so a mode with a UI pays the
+// probe and the launch wait off the critical path, not before the screen.
+func autostartMCP(cfg *mcpclient.Config) {
+	for name, sc := range cfg.Servers {
+		if sc.AutoStart == nil {
+			continue
+		}
+		healthy, err := sc.IsHealthy()
+		if err != nil {
+			logx.Errorf("mcp: %s health check: %v", name, err)
+			continue
+		}
+		if healthy {
+			continue
+		}
+		logx.Infof("mcp: %s not running, starting...", name)
+		cmd, err := sc.StartAuto()
+		if err != nil {
+			logx.Errorf("mcp: %s auto-start: %v", name, err)
+			continue
+		}
+		logx.Infof("mcp: %s started (pid %d)", name, cmd.Process.Pid)
+	}
+}
+
+// mcpDockBlock is the sidebar's MCP section: a heading with the count, then one
+// row per ENABLED server, marked ● when the manager holds a live session for it
+// and ○ when it does not. The config is the source of truth for enablement and
+// the manager for reachability, so a server that is enabled but never answered
+// stays on screen instead of being silently dropped — that row is the whole
+// reason the section exists. Sorted, and "" when nothing is configured (MCP
+// off), so the dock omits the section rather than painting an empty one.
+func mcpDockBlock(cfg *mcpclient.Config, mgr *mcpclient.Manager) string {
+	if cfg == nil {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.Servers))
+	for name, sc := range cfg.Servers {
+		if sc == nil || !sc.IsEnabled() {
+			continue
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	live := map[string]bool{}
+	if mgr != nil {
+		for _, n := range mgr.Servers() {
+			live[n] = true
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "MCP · %d", len(names))
+	for _, n := range names {
+		fmt.Fprintf(&b, "\n%s %s", mcpMark(live[n]), n)
+	}
+	return b.String()
+}
+
+// mcpMark is the one glyph that separates a server the session can call from
+// one it cannot. The filled dot is the same marker the status row uses for a
+// running tool, so "●" reads as working everywhere in this UI.
+func mcpMark(on bool) string {
+	if on {
+		return "●"
+	}
+	return "○"
+}
+
+// mcpUnavailable names the failed server without the launch error's
+// detail. A caller with a one-row slot gets what it can render:
+// mcpclient already logged the full error, and the TUI's toast cuts a
+// row wider than the pane, so a whole fork/exec path would render as
+// an ellipsis and a server name.
 func mcpUnavailable(e string) string {
-	name, _, _ := strings.Cut(e, ": ")
-	return "mcp: " + name + " unavailable"
+	name, rest, _ := strings.Cut(e, ": ")
+	if rest == "" {
+		return "mcp: " + name + " unavailable"
+	}
+	return "mcp: " + name + " unavailable — see `xdev mcps` for configured URLs"
 }
 
 // newToolRegistry builds the core four tools plus the parent-facing task
@@ -1742,7 +1883,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		ghTool,
 		// ask is the parent's channel to the user; children (ChildTools
 		// below) deliberately omit it — a scoped subagent has no user.
-		tool.NewAskTool(settings.AskTimeout()),
+		tool.NewAskTool(settings.AskTimeout(), settings.AskAutoAnswerOn()),
 	} {
 		reg.Register(t)
 	}
@@ -1759,8 +1900,8 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M15 #67: security_scan — merges the scanners the host has (go vet,
 	// govulncheck, semgrep, gitleaks); a missing binary is reported, not fatal.
 	reg.Register(tool.NewSecurityScanTool(cwd))
-	// M15: typesafe — System One evaluation (Jev); missing
-	// TYPESAFE_API_KEY lands as an error, not a request.
+	// M15: typesafe — System One evaluation (hosted Jev or local Laya);
+	// TYPESAFE_BASE_URL selects the endpoint and auth is optional.
 	reg.Register(typesafe.NewTool(settings.TypeSafeConfig()))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
@@ -1822,15 +1963,21 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	if stopInbox == nil {
 		stopInbox = startInboxPoller(mailbox)
 	}
-	// M11 #40: goal mode — one session-scoped objective with an optional
-	// token budget. The agent loop reads the same state for the per-turn
-	// reminder and budget accounting; wireTaskParent binds the store.
-	reg.Register(&agent.GoalTool{Goals: agent.NewGoalState(nil)})
+	// M11 #40: goal mode — the tool itself is registered per run mode (runPrint
+	// above, the TUI next to its own store), because the state it carries must
+	// be the one wireTaskParent bound to the live session; a shared builder
+	// cannot know that session.
 	// M13 #51: checkpoint/rewind — named session-tree bookmarks. rewind
 	// re-points the leaf at a checkpoint and records the caller's report as
 	// a branch summary; wireTaskParent binds the live session.
 	reg.Register(&tool.CheckpointTool{})
 	reg.Register(&tool.RewindTool{})
+	// Durable session-local reminders. Single-session modes bind this shared
+	// state to the live store; ACP injects a state per exact session instead.
+	schedules := agent.NewScheduleState(nil)
+	reg.Register(&agent.ScheduleCreateTool{Schedules: schedules})
+	reg.Register(&agent.ScheduleListTool{Schedules: schedules})
+	reg.Register(&agent.ScheduleDeleteTool{Schedules: schedules})
 	registerMemoryTools(reg, buildMemory(settings), settings, cwd)
 	// M13 #52: language-server queries. Servers launch lazily on the first
 	// lsp call (lsp.lazy: false opts into eager warmup).
@@ -2174,7 +2321,30 @@ func taskAgentsAtStartup(cwd string) (notice string, warnings []string, count in
 // tool once the store exists (lineage for post-hoc inspection), and gives
 // the todo tool its session sink (every state change lands as a
 // user_todo_edit entry). Called by print, TUI, and RPC entrypoints.
+
+// bindScheduleState follows the live session on startup, /new, /fork, and
+// /resume. ACP must not call this on its shared registry.
+func bindScheduleState(reg *tool.Registry, store *session.Store) {
+	var state *agent.ScheduleState
+	if t, ok := reg.Get(agent.ScheduleCreateToolName); ok {
+		if st, ok := t.(*agent.ScheduleCreateTool); ok {
+			state = st.Schedules
+		}
+	}
+	if state != nil {
+		state.BindDelivery(store)
+	}
+}
+
+func wireTaskParentWithoutSchedule(reg *tool.Registry, store *session.Store) {
+	wireTaskParentState(reg, store, false)
+}
+
 func wireTaskParent(reg *tool.Registry, store *session.Store) {
+	wireTaskParentState(reg, store, true)
+}
+
+func wireTaskParentState(reg *tool.Registry, store *session.Store, schedule bool) {
 	if t, ok := reg.Get(agent.TaskToolName); ok {
 		if tt, ok := t.(*agent.TaskTool); ok {
 			tt.ParentSessionID = store.ID()
@@ -2200,6 +2370,9 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 			}
 		}
 	}
+	if schedule {
+		bindScheduleState(reg, store)
+	}
 	// M11 #40: bind the goal state to the active session (again on /resume
 	// and session switches — the new session starts with its own goal).
 	if t, ok := reg.Get(agent.GoalToolName); ok {
@@ -2212,6 +2385,13 @@ func wireTaskParent(reg *tool.Registry, store *session.Store) {
 	if t, ok := reg.Get(agent.ContextNotesToolName); ok {
 		if nt, ok := t.(*agent.NotesTool); ok {
 			nt.Notes.Bind(store)
+		}
+	}
+	if t, ok := reg.Get(tool.RewindToolName); ok {
+		if rt, ok := t.(*tool.RewindTool); ok {
+			if st := agent.ScheduleStateOf(reg); st != nil {
+				rt.OnLeafChange = st.RefoldActive
+			}
 		}
 	}
 	// M13 #51: bind checkpoint/rewind to the active session (again on
@@ -2445,6 +2625,10 @@ type printHooks struct {
 	// reviewer needs the run to steer into, and the run needs the hooks at
 	// construction — the same late-assignment the TUI uses.
 	advisorFeed func()
+	// retryCounter tracks consecutive transient stream errors in the
+	// current turn, so repeated "stream error: retrying" lines collapse
+	// into a single "stream error: retrying (xN)".
+	retryCounter int
 }
 
 func (h *printHooks) OnStart(req ai.StreamRequest) {}
@@ -2461,20 +2645,38 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 	case ai.EventToolcallStart:
 		fmt.Fprintf(os.Stderr, "\n⟨%s⟩\n", ev.ToolName)
 	case ai.EventError:
-		// The rounds of an unbounded wait (retry.infinite) are the one
-		// transient worth printing verbatim: once per round, not once per
-		// attempt, and it is the message that says "still waiting" rather
-		// than "hung".
+		// The rounds of an unbounded wait (retry.infinite /
+		// retry.retryAllErrors) and of a retain-and-continue recovery are
+		// the transients worth printing verbatim: once per round, not once
+		// per attempt, and they are the message that says "still waiting"
+		// rather than "hung".
 		var down *agent.AllTargetsDownError
 		if errors.As(ev.Err, &down) {
 			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
 			break
 		}
+		var cont *agent.ContinuationRetryError
+		if errors.As(ev.Err, &cont) {
+			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
+			break
+		}
+		var empty *agent.EmptyTurnRetryError
+		if errors.As(ev.Err, &empty) {
+			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
+			break
+		}
 		// The recovery ladder retries transient wire errors; printing the
-		// full message once per attempt is noise (and alarming). Hard
-		// errors still print verbatim — the turn ends on them.
+		// full message once per attempt is noise (and alarming).
+		// Repeated errors count up: "stream error: retrying", then
+		// "stream error: retrying (x2)", "(x3)" — hard errors still
+		// print verbatim — the turn ends on them.
 		if ai.Classify(ev.Err) == ai.ClassTransient {
-			fmt.Fprintln(os.Stderr, "\n[stream error: retrying]")
+			h.retryCounter++
+			if h.retryCounter == 1 {
+				fmt.Fprintln(os.Stderr, "\n[stream error: retrying]")
+			} else {
+				fmt.Fprintf(os.Stderr, "\n[stream error: retrying (x%d)]\n", h.retryCounter)
+			}
 			break
 		}
 		fmt.Fprintf(os.Stderr, "\n[stream error: %v]\n", ev.Err)

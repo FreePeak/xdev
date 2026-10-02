@@ -51,9 +51,16 @@ const (
 	dockInner   = dockCols - 2*dockPad // paintable cells between the pads
 	dockMinCols = 120                  // below this, auto mode closes the panel
 	dockMin     = 20                   // the transcript's own floor, shared with rightEdge
+	dockMinRows = 5                    // a terminal shorter than this has no band to fill
 	dockListMax = 6                    // rows one list shows before "+N more"
 	dockPlanMax = 18                   // rows the plan document may take: the section is
 	// the reason the panel exists, so it gets the bigger half of the budget.
+	// There is no cap on the session's own name: it is the one string in the
+	// panel a human reads whole, so it takes the rows it needs from the
+	// sections below (dockTitleLines). ponytail: a name long enough to fill
+	// the panel shows the panel and nothing else — that is the trade asked
+	// for; the other one was a "…" in the middle of the name.
+	dockTitleFloor = 4 // rows the sections keep whatever the name takes
 )
 
 // Section ids, in the order the panel paints them: what the session is doing,
@@ -63,6 +70,10 @@ const (
 	dockTaskID  = "tasks"
 	dockFileID  = "files"
 	dockAgentID = "agents"
+	dockMCPID   = "mcp"
+	// dockTrajID is the panel's own action row rather than a source of session
+	// facts: its one row opens the trajectory ledger on a click.
+	dockTrajID = "trajectory"
 )
 
 // dockBumpSeq is the version every source stamps. Package-level and atomic
@@ -95,6 +106,14 @@ type DockOps struct {
 	// A closure rather than a setter because cmd swaps the store on /new, /resume
 	// and /fork: the panel follows the session, not the process.
 	Session func() (title, id string)
+	// MCP is the connected MCP server names. It is the registry's
+	// snapshot; a nil source means MCP is off and the section is omitted.
+	MCP func() string
+	// Trajectory is the panel's one action row: a click opens the ledger
+	// /trajectory opens. A count, not the records — the ledger builds its rows
+	// when it opens, and a source that walked the session on every rebuild is
+	// the per-frame cost the panel's rebuild cap exists to avoid.
+	Trajectory func() string
 }
 
 // dockRow is one painted row. text is the row's own line; add and del are the
@@ -107,6 +126,21 @@ type dockRow struct {
 	del  string // "-12" (diff-removed ink)
 	head bool
 	path string // full file path of a FILES row, so a click resolves it without re-parsing the clipped text
+	act  string // non-file action a click opens ("trajectory"): the panel's own buttons
+}
+
+// dockRowText returns the selectable text of a dock row: the row's
+// own text plus its change counts, as the user should copy it.
+// Separator rows (all empty) copy as nothing, so a drag across
+// two sections does not glue them together.
+func (r dockRow) dockRowText() string {
+	if r.text == "" && r.add == "" && r.del == "" {
+		return ""
+	}
+	if r.add != "" || r.del != "" {
+		return strings.TrimSpace(r.text + " " + r.add + " " + r.del)
+	}
+	return r.text
 }
 
 // right is the fragment a row aligns to the panel's right edge — and so the
@@ -160,6 +194,9 @@ type dockState struct {
 	buildW      int
 	bandH       int // the band the rows were budgeted for
 	buildBlocks int // the transcript's shape when the Files fold was read
+	// titleLines is the title slot as painted: the session's name wrapped to
+	// the interior, one entry per row. The slot is never zero rows.
+	titleLines []string
 }
 
 // --- display policy ---
@@ -196,6 +233,7 @@ func (a *App) SetDockOps(ops DockOps) {
 // SetDockModeFunc wires the persistence of a policy the human changed with Alt+s
 // (settings `sidebarMode`). nil = a session that cannot persist it, which is every
 // non-TUI caller and every test.
+
 func (a *App) SetDockModeFunc(set func(mode string)) {
 	a.dockSetMode = set
 }
@@ -287,6 +325,16 @@ func (a *App) dockCycle() {
 	a.poke()
 }
 
+// dockGridY returns the top screen row of the dock panel, or -1
+// when it is not on. Callers hold a.mu.
+func (a *App) dockGridY() int {
+	if !a.dockOn() {
+		return -1
+	}
+	top, _ := a.dockGrid()
+	return top
+}
+
 // --- build ---
 
 // dockBuild recomputes the panel from its sources. Called from paint() — where the
@@ -324,6 +372,7 @@ func (a *App) dockBuild() {
 	if d.ops.Session != nil {
 		d.title, d.sid = d.ops.Session()
 	}
+	d.titleLines = a.dockTitleLines(bandH)
 	folds := a.collect()
 	// The footer is the session, not the work: the id, the directory, the branch
 	// — the facts the status row carries when it has room and the panel keeps
@@ -361,7 +410,27 @@ func (a *App) collect() []dockFold {
 		out = append(out, f)
 	}
 	add(dockAgentID, ops.Agents)
+	add(dockMCPID, ops.MCP)
+	if f, ok := a.dockTrajFold(); ok {
+		out = append(out, f)
+	}
 	return out
+}
+
+// dockTrajFold is the panel's one button row: the ledger /trajectory opens,
+// wired or omitted. It carries no session facts of its own — the heading comes
+// from the same source the ledger reads — and the row is the panel's only
+// clickable non-file row, so dockRowAt hands its act back to the caller.
+func (a *App) dockTrajFold() (dockFold, bool) {
+	if a.dock.ops.Trajectory == nil {
+		return dockFold{}, false
+	}
+	head := strings.TrimSpace(a.dock.ops.Trajectory())
+	if head == "" {
+		return dockFold{}, false
+	}
+	return dockFold{id: dockTrajID, title: dockClip(head), max: 1,
+		rows: []dockRow{{text: dockClip("click to open the ledger"), act: dockTrajID}}}, true
 }
 
 // dockPlanFold is the §2 surface: the proposed document, with the gesture that
@@ -469,17 +538,37 @@ func dockPath(p string, room int) string {
 // dockFooter is the panel's last section: the session's identity, from state the
 // App already holds. Its heading carries the id that the title slot above shows
 // only while the session has no name yet.
+//
+// The version rides here, under the branch it came from, and not in the title
+// slot: this fold is the one section that is never folded away, and the first
+// question about a session that behaves strangely is "which build is this".
+// A host that never called SetVersion (a test harness, an embedder) paints
+// nothing rather than a bare "xdev" — an empty promise is worse than no row.
 func (a *App) dockFooter() (dockFold, bool) {
 	id := a.dock.sid
 	if id == "" {
 		id = shortID(a.st.SessionID)
 	}
-	f := dockFold{id: "footer", title: dockClip("SESSION · " + id), max: 3}
+	f := dockFold{id: "footer", title: dockClip("SESSION · " + id), max: 4}
 	if a.cwd != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip(pathDisplay(a.cwd, dockInner))})
 	}
 	if a.branch != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
+	}
+	// The model and the reasoning level are one request, so they are one row:
+	// a bare "high" under a path and a branch reads as a name of its own, and
+	// the divider already shows the pair beside each other. The section is the
+	// one never folded away, so the request outlives a busy transcript.
+	if l := a.thinkingLevel(); l != "" {
+		row := l
+		if a.st.Model != "" {
+			row = a.st.Model + " · " + l
+		}
+		f.rows = append(f.rows, dockRow{text: dockClip(row)})
+	}
+	if a.version != "" {
+		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version)})
 	}
 	if len(f.rows) == 0 {
 		return dockFold{}, false
@@ -501,7 +590,7 @@ func (d *dockState) layout(folds []dockFold, bandH int) (rows []dockRow, heads, 
 	if bandH < 5 {
 		return nil, 0, 0
 	}
-	limit := bandH - 1 // the panel's title slot is not ours to paint
+	limit := bandH - d.titleRows() // the panel's title slot is not ours to paint
 	// What each section would show at this fold state, before the band decides.
 	want := make([]int, len(folds))
 	for i, f := range folds {
@@ -633,12 +722,14 @@ func (a *App) dockReserve() int {
 	return dockCols
 }
 
-// rightEdge is the last screen column the transcript band may paint in — its
-// fills, its timestamps, its scrollbar, and the width its rows are wrapped at.
-// The composer, the info divider and the status row deliberately keep the full
-// terminal: the panel lives inside the transcript's rows and nothing else, so
-// opening it never squeezes the surface a human types into. A terminal too narrow
-// to give up the columns keeps its full width — the panel loses that argument.
+// rightEdge is the width the main pane lays out against: the last screen
+// column the transcript band may paint in — its fills, its timestamps, its
+// scrollbar, and the width its rows are wrapped at — and, since the panel
+// became a window of its own, the width the top bar, the composer box and the
+// status row stop at too. The panel used to live inside the transcript's rows
+// and nothing else, which is why the surface a human types into kept the whole
+// terminal; a two-window layout has no such exception. A terminal too narrow to
+// give up the columns keeps its full width — the panel loses that argument.
 func (a *App) rightEdge() int {
 	r := a.width - a.dockReserve()
 	if r < 20 {
@@ -647,15 +738,20 @@ func (a *App) rightEdge() int {
 	return r
 }
 
-// dockGrid returns the band the panel paints into: the transcript's rows, so it
-// starts under the top bar and stops above the composer's box.
+// dockGrid returns the band the panel paints into: every row of the terminal,
+// top to bottom, because the panel is a window beside the stream rather than a
+// band inside it (opencode's sidebar). Nothing is reserved above or below it —
+// the main pane's top bar, composer and status row are what it sits beside. A
+// terminal too short to hold a title and a section reserves nothing. The height
+// is a plain a.height, so a resize that changes the pane's proportions changes
+// the row budget for free — the bandH the build cached is compared against it
+// exactly as the old transcript-shaped band was.
 func (a *App) dockGrid() (top, h int) {
-	top = a.transcriptTop()
-	h = a.height - 2 - a.composerRows() - top
-	if h < 5 {
-		return top, 0
+	h = a.height
+	if h < dockMinRows {
+		return 0, 0
 	}
-	return top, h
+	return 0, h
 }
 
 // --- paint ---
@@ -676,48 +772,111 @@ func dockSplit(title string) (name, count string) {
 	return name, ""
 }
 
+// dockTitle is the prompt the dock title takes when the session has one:
+// the session title names the conversation, the first prompt names
+// what it is about. Tried before the id so a dock with a live session
+// shows its task, not its hash.
+func (a *App) dockTitle() string {
+	if d := a.dock; d != nil && d.title != "" {
+		return d.title
+	}
+	if first := a.firstUserPrompt(); first != "" {
+		return first
+	}
+	return ""
+}
+
+// titleRows is the rows the title slot paints, which is what every geometry
+// below the slot has to shift by: 1 before the first build, the wrapped slot
+// after it. Never zero — the panel's name always has its row.
+func (d *dockState) titleRows() int {
+	if d == nil || len(d.titleLines) == 0 {
+		return 1
+	}
+	return len(d.titleLines)
+}
+
+// dockTitleLines wraps the session's name to the panel's interior instead of
+// clipping it. The name is the one string in the panel a human reads whole, and
+// a "\u2026" at 38 cells turned "showing full title" into a riddle — so it is
+// not capped by row count: it wraps over as many rows as it takes and layout
+// spends those rows out of the content budget. The band is the only bound left,
+// because a title row that is not on screen is not a title. Caller holds a.mu.
+func (a *App) dockTitleLines(bandH int) []string {
+	return wrapCapped(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner,
+		max(1, bandH-dockTitleFloor))
+}
+
+// selDockRowsForPaint returns the dock's rows as selectable rows with their
+// screen y positions: the title slot's lines first, then the rows the build
+// made below it. The title slot belongs in the table for the same reason the
+// rest does — it holds the one string a human reaches for to copy (the
+// session's name, or its first prompt when the session has no title of its
+// own), and a drag across it used to fall through to the transcript rows
+// painted behind the panel, which clipped the cell range to nothing.
+// Callers hold a.mu.
+func (a *App) selDockRowsForPaint() []selRow {
+	if !a.dockOn() {
+		return nil
+	}
+	x0 := a.width - dockCols + dockPad
+	rows := make([]selRow, 0, len(a.dock.lines)+a.dock.titleRows())
+	dg := a.dockGridY()
+	for i, line := range a.dock.titleLines {
+		if line != "" {
+			rows = append(rows, selRow{text: line, x0: x0, y: dg + i})
+		}
+	}
+	for i, r := range a.dock.lines {
+		t := r.dockRowText()
+		if t == "" {
+			continue
+		}
+		rows = append(rows, selRow{text: t, x0: x0, y: dg + a.dock.titleRows() + i})
+	}
+	return rows
+}
+
 // drawDock paints the panel: the surface, the session's own name in the top slot,
 // and the rows the build made for the band they were budgeted for. Caller holds
 // a.mu and has run dockBuild for this frame.
 //
-// There is no box, deliberately. The panel is a surface of its own on the theme's
-// panel background with a two-cell gutter — the shape opencode's sidebar has. A
-// border drawn around a column that already fills its own background is one line
-// of chrome too many, and it costs the interior two columns.
+// There is no box, deliberately. The panel is a surface of its own on the
+// terminal's own background with a two-cell gutter — the shape opencode's
+// sidebar has. A border drawn around a column that already fills its own
+// background is one line of chrome too many, and it costs the interior two
+// columns.
 func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	if h <= 0 {
 		return
 	}
 	d := a.dock
-	bg := tcell.ColorDefault
-	if c, ok := a.th.Slot(theme.BgBase); ok {
-		bg = a.cellColor(c)
-	}
-	body := tcell.StyleDefault.Background(bg)
+	// The panel's field is the terminal's own background, never a colour this
+	// program picked — the same call drawDiffOverlay makes (#466). A themed fill
+	// here (bg_base, #141414) put a grey band beside a black transcript; SGR 49
+	// resolves the panel to whatever the terminal is, which also keeps a light
+	// theme from stranding its dark ink on a black surface.
+	body := tcell.StyleDefault
 	ink := body.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	// The change counts wear the diff's own inks, on the panel's background: a
-	// file's "+N" is the green its diff block already paints with.
+	// file's "+N" is the green its diff block already paints with — the MARKER
+	// ink, since the panel has no band behind a two-character count. Built from
+	// StyleDefault, so it carries the terminal's background and only the
+	// foreground is the diff's own.
 	ds := a.diffStyle()
-	added, removed := ds.added.Background(bg), ds.removed.Background(bg)
+	added, removed := ds.add.mark, ds.del.mark
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
 			s.SetContent(cx, y, ' ', nil, body)
 		}
 	}
-	// The title slot (opencode's sidebar_title): the session's own name, its id
-	// while it has none, and the harness's own id for a caller that wired no
-	// session source at all.
-	title := d.title
-	if title == "" {
-		title = d.sid
+	head := d.titleRows()
+	for i, line := range d.titleLines {
+		drawText(s, x+dockPad, top+i, line, ink.Bold(true))
 	}
-	if title == "" {
-		title = shortID(a.st.SessionID)
-	}
-	drawText(s, x+dockPad, top, dockClip(title), ink.Bold(true))
 	for i, r := range d.lines {
-		y := top + 1 + i
+		y := top + head + i
 		if y >= top+h {
 			break
 		}
@@ -735,6 +894,10 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 			drawText(s, x+dockPad, y, r.text, ink)
 			drawText(s, cx, y, r.add, added)
 			drawText(s, cx+width(r.add)+1, y, r.del, removed)
+		case r.act != "":
+			// A button row: the panel's own action, not a fact about the
+			// session, so it wears the accent the links wear.
+			drawText(s, x+dockPad, y, r.text, body.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
 		default:
 			drawText(s, x+dockPad, y, r.text, ink)
 		}
@@ -745,22 +908,52 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 // the click hit, or "" for everything that is not a changed-file row.
 // Callers hold a.mu.
 func (a *App) dockClick(x, y int) string {
-	if !a.dockOn() {
-		return ""
+	path, _ := a.dockRowAt(x, y)
+	return path
+}
+
+// dockRowAt resolves a screen cell to the row's own action: the file path a
+// FILES row opens, or the act a button row carries ("" on everything else).
+// The column test is here, not at the call sites: a press in the TRANSCRIPT
+// columns that happens to land on a row the panel also paints must stay the
+// transcript's (dockAt's whole job), and both callers — the press branch in
+// selection.go and closeDiffOverlayOnClick — want a cell IN the panel.
+// Callers hold a.mu.
+func (a *App) dockRowAt(x, y int) (path, act string) {
+	// dockAt also answers the column: a cell outside the panel's columns is
+	// the transcript's, whatever row it shares with the panel.
+	if !a.dockAt(x, y) {
+		return "", ""
 	}
 	d := a.dock
 	if d == nil || d.lines == nil {
-		return ""
+		return "", ""
 	}
 	top, h := a.dockGrid()
-	if y < top+1 || y >= top+h {
-		return ""
+	head := d.titleRows() // the title slot's rows, not the transcript's
+	if y < top+head || y >= top+h {
+		return "", ""
 	}
-	i := y - top - 1
+	i := y - top - head
 	if i < 0 || i >= len(d.lines) {
-		return ""
+		return "", ""
 	}
-	return d.lines[i].path
+	return d.lines[i].path, d.lines[i].act
+}
+
+// dockAt reports whether a screen cell is inside the panel's own columns — the
+// window the human clicked into. The panel is chrome, but it is a window: a
+// click on it belongs to it, so the transcript's hit-tests (the user-message
+// menu, the think-box aim, a link) must not reach across and claim a cell the
+// panel painted. A drag still crosses freely — selection reads whatever rows
+// the release covers, and the panel's rows are in that table (selDockRows).
+// Callers hold a.mu.
+func (a *App) dockAt(x, y int) bool {
+	if !a.dockOn() {
+		return false
+	}
+	top, h := a.dockGrid()
+	return x >= a.width-dockCols && y >= top && y < top+h
 }
 
 // dockJumpToBlock walks the transcript for the most recent finished
@@ -768,8 +961,6 @@ func (a *App) dockClick(x, y int) string {
 // and pushes the viewport to its first row; returns whether one was
 // found.
 func (a *App) dockJumpToBlock(path string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
 		if b.Kind != KindToolDone || b.Diff == "" {
@@ -810,9 +1001,13 @@ type diffOverlay struct {
 
 // openDiffOverlay renders the diff for the newest finished tool block
 // that touches path and stores it as the active overlay.
+//
+// A click reaches here with a.mu already held: handleMouse's non-wheel
+// branch in app.go takes it around the whole gesture, and has since the
+// dock's first clickable row (#371, #373). So this takes no lock of its
+// own — every caller holds it — and a second Lock here would wedge the
+// UI thread on the first dock FILES click.
 func (a *App) openDiffOverlay(path string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	for i := len(a.blocks) - 1; i >= 0; i-- {
 		b := a.blocks[i]
 		if b.Kind != KindToolDone || b.Diff == "" {
@@ -825,7 +1020,10 @@ func (a *App) openDiffOverlay(path string) bool {
 		w := a.contentWidth()
 		ov := &diffOverlay{path: path, diff: b.Diff, width: w}
 		ov.lines = a.diffCells(ov.diff, ov.width-4)
-		ov.scrollVp = max(1, len(ov.lines))
+		// scrollVp is the painted body height, not the full line count —
+		// setting it to len(lines) made maxOff always 0 so nothing scrolled.
+		// drawDiffOverlay refreshes this from the real panel each frame.
+		ov.scrollVp = max(1, a.height-a.composerRows()-6)
 		ov.scrollOff = 0
 		a.diffOv = ov
 		return true
@@ -833,12 +1031,22 @@ func (a *App) openDiffOverlay(path string) bool {
 	return false
 }
 
-// closeDiffOverlay dismisses the overlay on the next frame.
+// closeDiffOverlay dismisses the overlay on the next frame. It takes a.mu
+// itself, so it is for callers that do not hold it; a caller inside the
+// lock calls closeDiffOverlayLocked instead. Locking twice in one
+// goroutine is not a deadlock this program recovers from — it is the UI
+// thread, and the freeze it produces is the whole session.
 func (a *App) closeDiffOverlay() {
 	a.mu.Lock()
-	a.diffOv = nil
+	a.closeDiffOverlayLocked()
 	a.mu.Unlock()
 	a.poke()
+}
+
+// closeDiffOverlayLocked clears the overlay. Callers hold a.mu, so they also
+// poke for the frame themselves.
+func (a *App) closeDiffOverlayLocked() {
+	a.diffOv = nil
 }
 
 // drawDiffOverlay renders the full-width diff surface above the composer.
@@ -858,7 +1066,14 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentTool)))
 	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-	bg := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
+	// The panel's field is the terminal's own background, never a colour this
+	// program picked. A themed fill here (bg_base) painted the blank interior
+	// one colour while every text cell kept the default, so the viewer came up
+	// as black bars on a grey band; filling with the default style (SGR 49)
+	// resolves the whole panel alike — the popup is the same black the
+	// transcript and composer already are. It still fills: the transcript is
+	// painted earlier in this frame and must not show through the viewer.
+	bg := tcell.StyleDefault
 	box := a.th.Box()
 	fillPanelRows(s, y0, y0+panelH-1, x, w-x, bg)
 	top := boxTop(box, brdSt, "", w-2*x)
@@ -879,7 +1094,13 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 		s.SetContent(w-x-1, y, vr, nil, brdSt)
 	}
 	drawText(s, x+2, y0+1, "diff "+ov.path, fgSt.Bold(true))
-	ds := a.diffStyle()
+	// Body rows: title at y0+1, footer at y0+panelH-2, bottom border at
+	// y0+panelH-1 → panelH-3 interior lines the viewport can show.
+	ov.scrollVp = max(1, panelH-3)
+	maxOff := max(0, len(ov.lines)-ov.scrollVp)
+	if ov.scrollOff > maxOff {
+		ov.scrollOff = maxOff
+	}
 	start := ov.scrollOff
 	end := start + ov.scrollVp
 	if end > len(ov.lines) {
@@ -890,22 +1111,35 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 		if y >= y0+panelH-1 {
 			break
 		}
-		ln := ov.lines[i]
-		if len(ln.runs) > 0 && strings.HasPrefix(ln.runs[0].text, "+") {
-			for _, r := range ln.runs {
-				drawText(s, x+2, y, r.text, ds.added)
-			}
-		} else if len(ln.runs) > 0 && strings.HasPrefix(ln.runs[0].text, "-") {
-			for _, r := range ln.runs {
-				drawText(s, x+2, y, r.text, ds.removed)
-			}
-		} else {
-			for _, r := range ln.runs {
-				drawText(s, x+2, y, r.text, r.style)
-			}
+		// The rows carry their own styles — diffCells already painted the
+		// marker, the band and the word runs — so the viewer repaints them as
+		// they are. Repainting every +/- row in one ink (which this used to
+		// do) flattened the band and the word emphasis back into plain text.
+		for _, r := range ov.lines[i].runs {
+			drawText(s, x+2, y, r.text, r.style)
 		}
 	}
 	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll", dimSt)
+}
+
+// closeDiffOverlayOnClick dismisses the diff overlay when the human
+// clicks outside it, or re-opens it when clicking a different changed
+// file in the dock. The overlay is a modal surface covering the whole
+// width and hiding the transcript; a dock click re-points it to a
+// different file, anything else closes it, so the overlay is never
+// pinned — fixing "always showing" and "no way to close".
+// Caller holds a.mu (handleMouse press branch).
+func (a *App) closeDiffOverlayOnClick(x, y int) {
+	overlayTop, overlayBot := 1, a.height-1-a.composerRows()
+	inside := x >= 2 && x < a.width-2 && y >= overlayTop && y < overlayBot
+	if inside {
+		if path := a.dockClick(x, y); path != "" {
+			a.openDiffOverlay(path)
+			a.poke()
+			return
+		}
+	}
+	a.closeDiffOverlayLocked()
 }
 
 // diffBodyScroll advances the overlay viewport by n lines (down=true)
@@ -949,6 +1183,21 @@ func (a *App) dockKey(action string) bool {
 	return true
 }
 
+// dockAct runs the panel's own button rows — the surfaces a click opens that
+// are not the diff overlay. The click path already holds a.mu, so every action
+// here must be safe under it: the trajectory ledger opens through its own
+// registry lock, never a.mu.
+// ponytail: one action. The upgrade path is dockKey's action vocabulary if a
+// second button row ever earns its place.
+func (a *App) dockAct(act string) bool {
+	switch act {
+	case dockTrajID:
+		return a.OpenTrajectory()
+	default:
+		return false
+	}
+}
+
 // dockCloseDiff dismisses the overlay on Esc.
 func (a *App) dockCloseDiff() bool {
 	if a.diffOv != nil {
@@ -961,8 +1210,10 @@ func (a *App) dockCloseDiff() bool {
 // dockToggleDiff closes the overlay if open, or re-opens it
 // for the dock's last changed-file row.
 func (a *App) dockToggleDiff() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.diffOv != nil {
-		a.closeDiffOverlay()
+		a.closeDiffOverlayLocked()
 		return true
 	}
 	for i := len(a.dock.lines) - 1; i >= 0; i-- {
@@ -972,7 +1223,6 @@ func (a *App) dockToggleDiff() bool {
 	}
 	return false
 }
-
 
 // pending document shut, and back. The proposal is never folded away — the human
 // is being asked something, and a fold that hides the question has answered it.
@@ -989,4 +1239,47 @@ func (a *App) dockFoldCycle() {
 // by n lines (down=true) or toward older rows (down=false).
 func (a *App) dockOverlayScroll(n int, down bool) {
 	a.diffBodyScroll(n, down)
+}
+
+// handleDiffOverlayKey owns ↑↓ / PgUp/PgDn / Home/End while the diff
+// overlay is open, and Esc closes it. The footer advertises ↑↓ scroll;
+// without the Esc case it fell through to the double-Esc rewind block
+// in handleKey and the overlay could never be dismissed by keyboard —
+// "Esc close" in the footer was a lie. Returns true when the key was consumed.
+func (a *App) handleDiffOverlayKey(key *tcell.EventKey) bool {
+	a.mu.Lock()
+	ov := a.diffOv
+	a.mu.Unlock()
+	if ov == nil {
+		return false
+	}
+	switch key.Key() {
+	case tcell.KeyEsc:
+		a.closeDiffOverlay()
+		return true
+	case tcell.KeyUp:
+		a.diffBodyScroll(1, false)
+	case tcell.KeyDown:
+		a.diffBodyScroll(1, true)
+	case tcell.KeyPgUp:
+		a.diffBodyScroll(max(1, ov.scrollVp-1), false)
+	case tcell.KeyPgDn:
+		a.diffBodyScroll(max(1, ov.scrollVp-1), true)
+	case tcell.KeyHome:
+		a.diffBodyScroll(len(ov.lines), false)
+	case tcell.KeyEnd:
+		a.diffBodyScroll(len(ov.lines), true)
+	default:
+		return false
+	}
+	return true
+}
+
+// diffOverlayOpen reports whether the full-width diff surface is up.
+// Callers that only need the presence check (wheel, scroll actions) use
+// this so they do not race a frame that just closed it.
+func (a *App) diffOverlayOpen() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.diffOv != nil
 }

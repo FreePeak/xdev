@@ -56,6 +56,7 @@ import (
 type selRow struct {
 	text string
 	x0   int
+	y    int // screen row this row lives on; for dock rows only
 }
 
 // selCorner is one corner of a drag. x and y are the screen cell the pointer was
@@ -64,9 +65,6 @@ type selRow struct {
 type selCorner struct {
 	x, y, doc int
 }
-
-// selGrace is how long the copy confirmation stays on the divider.
-const selGrace = 2 * time.Second
 
 // clearClick resets the click-count state after a double/triple-click
 // gesture completes (or when a new gesture begins from a different
@@ -146,14 +144,15 @@ func (a *App) selStartWordSelect(x, y int) {
 }
 
 // selStartLineSelect begins a line-selection gesture at (x, y):
-// selects the full width of the screen row under the pointer.
+// selects the full width of the main pane's row under the pointer — the
+// pane's right edge, so a triple-click does not swallow the sidebar's rows.
 func (a *App) selStartLineSelect(x, y int) {
 	a.selDown = true
 	a.selShown = true
 	a.selCache = map[int]selRow{}
 	a.selDocMode = false
 	a.selAnchor = selCorner{x: 0, y: y, doc: -1}
-	a.selEnd = selCorner{x: a.width - 1, y: y, doc: -1}
+	a.selEnd = selCorner{x: a.rightEdge() - 1, y: y, doc: -1}
 	a.poke()
 }
 
@@ -245,18 +244,56 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.selCache = nil
 			a.poke()
 		}
+		a.linkClick = ""
 		return
 	}
 	x, y := m.Position()
 	btn := m.Buttons()
 	switch {
 	case btn&tcell.Button1 != 0 && (press || (!a.selDown && !a.selThumbDrag)): // press
+		a.linkClick = ""
 		// The rising edge names the press, because a held drag reports Button1
 		// like a press does. A report with no gesture in flight counts too: the
 		// release of a drag whose terminal never reported the button up
 		// (released outside the window) must not leave the app wedged, and a
 		// stale edge would swallow the gesture that should recover it.
 		a.selEdgeStop()
+		a.selEdgeStop()
+		// The diff overlay (opened from a dock click) is dismissed first:
+		// a click anywhere outside it closes it, a click on a dock FILES
+		// row re-opens the diff for that file. Without this the overlay
+		// stays pinned for every subsequent frame — the "always showing"
+		// and "no way to close" symptoms.
+		if a.diffOv != nil {
+			a.closeDiffOverlayOnClick(x, y)
+			break
+		}
+		// The jump-to-latest chip owns its own pixels: a press on it is the
+		// jump, never a selection anchor, so the gesture spends itself on
+		// the button the way it does on the scrollbar. The rect is the one
+		// the painter published, so a chip that is not on screen cannot be
+		// clicked (drawJumpChip clears it every frame).
+		if a.jump.contains(x, y) {
+			a.sm.Bottom()
+			a.selDown, a.selShown, a.selCache = false, false, nil
+			a.linkClick, a.msgArmed = "", false
+			a.clearClick() // this press was not the start of a click sequence
+			a.poke()
+			break
+		}
+		// A status-row pill owns its own pixels the same way: a press on one
+		// opens its breakdown panel, never a selection anchor, and a press
+		// anywhere else on the row is left to the transcript branch below
+		// (the row has no text to copy there). The rects are the ones the
+		// painter published this frame, so a pill that was dropped for width
+		// cannot be clicked.
+		if name := a.statusHitAt(x, y); name != "" {
+			a.selDown, a.selShown, a.selCache = false, false, nil
+			a.linkClick, a.msgArmed = "", false
+			a.clearClick() // this press was not the start of a click sequence
+			a.openStatusPopup(name, x, y)
+			break
+		}
 		// A press on the scrollbar grabs the bar, not the text: the drag that
 		// follows moves the viewport, and the gesture owns no selection at all
 		// — the rows the painter recorded belong to the frame the bar was hit
@@ -273,15 +310,34 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			a.poke()
 			break
 		}
-		// Past the bar: this press is on the transcript, and it aims the wheel.
-		// Pressing a reasoning box focuses it, pressing anywhere else takes the
-		// aim back, so the wheel scrolls the transcript until the human asks for
-		// a box by name. The notch never moves focus (app.go scrollThinkBox),
-		// which is what stops a box from stealing the wheel merely by sliding
-		// under a stationary pointer. thinkBoxAt returns -1 for "no box", which
-		// is exactly the "aim back at the transcript" value.
-		a.thinkFocus = a.thinkBoxAt(y)
+		// Past the bar: this press is on the transcript, and it names the box
+		// the wheel belongs to. Pressing a reasoning box focuses it — which is
+		// also what grows it from its one collapsed row to the scrollable
+		// window (app.go thinkBoxLines) — and pressing anywhere else takes the
+		// aim back, so the wheel scrolls the transcript and the box shrinks
+		// again until the human asks for a box by name. The notch never moves
+		// focus (app.go scrollThinkBox), which is what stops a box from
+		// stealing the wheel merely by sliding under a stationary pointer.
+		// thinkBoxAt returns -1 for "no box", which is exactly the "aim back at
+		// the transcript" value.
+		//
+		// Except inside the dock: that column is a window of its own, so a press
+		// there aims at the panel and never at a row the panel covers — no
+		// think box is focused behind it, and the wheel stays aimed at the
+		// transcript. The press still anchors a selection: the panel's rows are
+		// in the copy table (selDockRows), which is what makes a drag over the
+		// sidebar copy the sidebar's own text.
+		a.thinkFocus = -1
+		if !a.dockAt(x, y) {
+			a.thinkFocus = a.thinkBoxAt(y)
+		}
 		a.selThumbDrag = false
+		// Arm the user-message menu on the user row under this press, but do
+		// not open it yet: the open waits for a no-motion release below, so a
+		// drag that starts on a prompt still selects text. A double/triple
+		// click (handleClick consuming the press) disarms it — those are word
+		// and line selections, not a menu.
+		a.msgArmed = false
 		// handleClick tracks click count from the previous
 		// release and starts a word/line selection on double/triple
 		// click, or a normal drag otherwise.
@@ -292,29 +348,60 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// raw click point would collapse the word/line selection back into a
 		// no-motion click and copy nothing. A single click falls through and
 		// anchors here so a following drag can expand it.
-		// A click on a FILES row jumps the transcript
-		// to that file's diff block: the panel is chrome, so it
-		// takes no keyboard, but a click on a changed file
-		// has to reach the transcript.
-		if path := a.dockClick(x, y); path != "" {
-			a.dockJumpToBlock(path)
+		// A click on a FILES row opens the full-width diff for that file, and a
+		// button row (the trajectory ledger) runs the action it carries: the
+		// panel is chrome, so it takes no keyboard, but a click on one of its
+		// rows has to reach the surface it names. (Jumping to the block without
+		// opening the overlay left the click doing nothing the eye could see —
+		// the file diff view was unreachable.)
+		// dockRowAt does the column test itself, so a press in the transcript
+		// columns on a row the panel also paints stays the transcript's.
+		if path, act := a.dockRowAt(x, y); path != "" {
+			a.openDiffOverlay(path)
+			a.poke()
+			break
+		} else if act != "" && a.dockAct(act) {
 			a.poke()
 			break
 		}
 		if a.handleClick(x, y) {
 			break
 		}
+		// Both click affordances arm from the same press and are cancelled
+		// by the same motion, so they coexist: a link is hit-tested against
+		// the exact painted run, a menu against the user row. Whichever the
+		// release finds decides the click. Neither arms inside the dock: the
+		// panel painted those cells, so it owns the click.
+		if !a.dockAt(x, y) {
+			a.linkClick = a.linkAt(x, y)
+			if _, bi := a.userRowAt(y); bi >= 0 {
+				a.msgArmed = true
+			}
+		}
+		// A press inside the dock anchors on SCREEN rows even when the screen
+		// row is also a transcript row: the panel is painted over the band, so
+		// the cell the finger took holds the panel's text, not the transcript's.
+		// Anchoring on document rows would follow the transcript underneath the
+		// panel and copy the wrong thing the moment the viewport moved.
 		a.selDown, a.selShown = true, true
 		a.selCache = map[int]selRow{}
 		a.selDocMode = false
-		a.selAnchor = a.selCornerAt(x, y)
-		a.selDocMode = a.selAnchor.doc >= 0
+		if !a.dockAt(x, y) {
+			a.selAnchor = a.selCornerAt(x, y)
+			a.selDocMode = a.selAnchor.doc >= 0
+		} else {
+			a.selAnchor = selCorner{x: x, y: a.clampScreen(y), doc: -1}
+		}
 		a.selEnd = a.selCornerAt(x, y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selThumbDrag: // thumb drag on the scrollbar
 		a.selThumbTo(y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selDown: // drag
+		// Motion cancels both armed affordances: this gesture is a text
+		// selection, not a click that should open anything.
+		a.linkClick = ""
+		a.msgArmed = false
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
@@ -335,6 +422,39 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			// No motion: a click. Clear the highlight and leave the
 			// clipboard alone, exactly like every terminal does.
 			a.selShown = false
+			target := a.linkClick
+			a.linkClick = ""
+			// A link outranks the user-prompt menu when both are armed: the
+			// target was revalidated against the very pixels released on, so
+			// the click names a URL, whereas the menu is a row-level fallback
+			// for the prompt as a whole. The two cannot collide today — a
+			// user block is painted as a banded "❯ " prefix plus wrapped plain
+			// text and never goes through the Markdown renderer, so it carries
+			// no link hit — but the arming is shared, and if a user row ever
+			// does gain one, the link is the more specific claim on the click.
+			opened := false
+			if target != "" && a.linkAt(x, y) == target {
+				if err := a.openLink(target); err != nil {
+					a.setError("link: " + err.Error())
+				}
+				opened = true
+			}
+			// A click that landed on a user prompt opens its menu. The
+			// highlight is already off and the drag cache is dropped, so
+			// nothing is selected and nothing is copied — the click spent
+			// itself on the menu. The row is resolved again here rather than
+			// reusing the press's index: the ordinal the session seam needs
+			// comes from the same lookup, and a transcript that re-laid-out
+			// in between must not hand the menu a stale block.
+			if a.msgArmed {
+				a.msgArmed = false
+				if !opened {
+					if ord, bi := a.userRowAt(a.selAnchor.y); bi >= 0 {
+						a.selCache = nil
+						a.openMsgMenu(ord, bi, a.selAnchor.x, a.selAnchor.y)
+					}
+				}
+			}
 		} else {
 			// Resolved while the cache is still alive: the rows an edge
 			// auto-scroll pushed out of the viewport exist nowhere else.
@@ -343,28 +463,13 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			if strings.TrimSpace(text) == "" {
 				a.selShown = false
 			} else if a.copyToClipboard(text) == nil {
-				a.selNotice = "Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars"
-				a.selNoticeUntil = time.Now().Add(selGrace)
+				a.setNotice("Copied " + strconv.Itoa(utf8.RuneCountInString(text)) + " chars")
 			}
 		}
 		a.poke()
 	}
 	// Remaining buttons (right/middle, bare motion) are ignored; wheel was
 	// already handled by the caller.
-}
-
-// copyHint returns the copy confirmation while it is still fresh. Once its
-// deadline passes the notice is dropped here, so no later draw can resurrect it;
-// the caller falls back to the viewport hint.
-func (a *App) copyHint() string {
-	if a.selNotice == "" {
-		return ""
-	}
-	if !time.Now().Before(a.selNoticeUntil) {
-		a.selNotice = ""
-		return ""
-	}
-	return a.selNotice
 }
 
 // --- anchoring --------------------------------------------------------------
@@ -385,11 +490,28 @@ func (a *App) selViewport() (top, vp int) {
 // edge row, which is the one the auto-scroll is about to replace — so the
 // selection tracks the text it grabbed while the viewport moves. A chrome
 // gesture keeps screen rows.
+//
+// A row of the sticky header is the one case where a screen row does not name
+// the document row it shows: the header parks the prompt it pinned, so a corner
+// on one takes THAT prompt's own rows (from wherever the push has clipped it).
+// Every other row keeps the viewport's own arithmetic — the header re-renders
+// rows the viewport already had, so it inserts none.
 func (a *App) selCornerAt(x, y int) selCorner {
 	c := selCorner{x: x, y: a.clampScreen(y), doc: -1}
 	top, vp := a.selViewport()
 	hdr := a.transcriptTop()
-	if vp > 0 && (a.selDocMode || (y >= hdr && y < hdr+vp)) {
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return c
+	}
+	if dy := y - hdr; dy < a.stickyVis && a.stickyBlock >= 0 {
+		// The header's own rows are the pinned prompt's, from wherever the push
+		// has clipped it to (stickyDoc is its first painted row).
+		c.doc = int(a.stickyDoc) + dy
+		return c
+	}
+	if a.selDocMode || y >= hdr {
+		// Below the header the viewport's own arithmetic is unchanged: the
+		// header re-renders rows it already owned rather than inserting any.
 		c.doc = top + min(max(y-hdr, 0), vp-1)
 	}
 	return c
@@ -505,6 +627,10 @@ func (a *App) selEdgeTick() bool {
 // the finger (grip 0, top under the pointer) instead of ignoring the click —
 // what every modern overlay bar does, and the one gesture that reaches a row
 // further away in a single press. Callers hold a.mu.
+//
+// The grip comes back in HALF ROWS, the unit the bar is drawn in: a press is a
+// whole terminal row, so it lands on that row's upper half — the same cell
+// opencode's slider resolves a row-resolution click to.
 func (a *App) selBarAt(x, y int) (int, bool) {
 	// The column is the painter's, not a.width-1: with the context dock open the
 	// transcript's last column sits a panel's width in from the terminal's edge,
@@ -517,7 +643,7 @@ func (a *App) selBarAt(x, y int) (int, bool) {
 	if fy < 0 || fy >= a.selBarVP {
 		return 0, false
 	}
-	if grip := fy - a.selBarPos; grip >= 0 && grip < a.selBarThumb {
+	if grip := 2*fy - a.selBarPos; grip >= 0 && grip < a.selBarEnd-a.selBarPos {
 		return grip, true // grabbed the thumb where it was held
 	}
 	return -1, true // the track: the caller brings the thumb to the finger now
@@ -526,14 +652,16 @@ func (a *App) selBarAt(x, y int) (int, bool) {
 // selThumbTo maps a pointer row on the bar to a viewport offset: the thumb's top
 // sits under the finger minus the grip taken at press, so grabbing the middle of
 // a long thumb and pulling keeps the middle under the pointer. The mapping
-// linearly inverts the painter's placement (scroll.go Scrollbar): row `pos` of
-// the bar's travel is offset maxOff-pos*maxOff/travel.
+// linearly inverts the painter's placement (scroll.go Scrollbar): half row `pos`
+// of the bar's travel is offset maxOff-pos*maxOff/travel.
 func (a *App) selThumbTo(y int) {
-	travel := a.selBarVP - a.selBarThumb
+	track := 2 * a.selBarVP
+	thumb := a.selBarEnd - a.selBarPos
+	travel := track - thumb
 	if travel <= 0 {
 		return
 	}
-	pos := max(0, min(y-a.transcriptTop()-a.selGrab, travel))
+	pos := max(0, min(2*(y-a.transcriptTop())-a.selGrab, travel))
 	maxOff := max(0, a.selBarTotal-a.selBarVP)
 	// Rounded, not truncated: the painter floors pos out of the offset, so a
 	// truncated inverse puts the thumb a row away from the finger after every
@@ -545,13 +673,22 @@ func (a *App) selThumbTo(y int) {
 // selCacheRows records the frame's transcript rows under their document numbers
 // while a drag is held, so a row that scrolls out of sight afterwards is still
 // copyable. Each draw caches the row the last scroll revealed, which is what
-// lets one gesture outgrow the viewport. Callers hold a.mu.
+// lets one gesture outgrow the viewport.
+//
+// The capture is screen-ordered and the header sits at the top of it, so the
+// header's rows are keyed by the pinned prompt's own document rows (stickyDoc+)
+// and everything else by top+i — the header re-renders rows the viewport already
+// had, so it moves none. Callers hold a.mu.
 func (a *App) selCacheRows(top int) {
 	if a.selCache == nil {
 		return
 	}
 	for i, sr := range a.selRows {
-		a.selCache[top+i] = sr
+		doc := top + i
+		if a.stickyVis > 0 && i < a.stickyVis {
+			doc = int(a.stickyDoc) + i
+		}
+		a.selCache[doc] = sr
 	}
 }
 
@@ -612,11 +749,26 @@ func (a *App) selSpan() []selSpanRow {
 // selDocRow resolves one document row: its text from the live capture while it is
 // on screen, from the gesture's cache once it has scrolled away.
 func (a *App) selDocRow(d, top int, b selBounds) selSpanRow {
-	vy := d - top
-	y := vy + a.transcriptTop()
 	sr, have := selRow{}, false
-	if vy >= 0 && vy < len(a.selRows) {
-		sr, have = a.selRows[vy], true
+	// Where the row is on screen, in three cases and no more:
+	//   - it is one the header painted (the pinned prompt's own rows);
+	//   - it is below the header, at the position the viewport's arithmetic
+	//     has always named;
+	//   - it is anywhere else, from the gesture's cache, keyed by document row.
+	// Anything the header is painted OVER is in none of them: reading the grid
+	// there would copy the header's text a second time underneath it, so such a
+	// row copies as the blank line it looks like.
+	y := -1
+	switch {
+	case a.stickyVis > 0 && d >= int(a.stickyDoc) && d < int(a.stickyDoc)+a.stickyVis:
+		y = a.transcriptTop() + d - int(a.stickyDoc)
+	case d < top+a.stickyHdr && d >= top:
+		return spanRow(-1, selRow{text: "", x0: 0}, selBounds{lo: 1, hi: 0})
+	case d >= top:
+		y = d - top + a.transcriptTop()
+	}
+	if sy := y - a.transcriptTop(); y >= 0 && sy >= 0 && sy < len(a.selRows) {
+		sr, have = a.selRows[sy], true
 	} else if c, cached := a.selCache[d]; cached {
 		sr, have = c, true
 	}
@@ -715,6 +867,13 @@ func (a *App) selectionText() string {
 // in (boxSelectable), which is the only way the composer's border can be left
 // out of a copy: its box is painted cell by cell, never as runs.
 func (a *App) selRowAt(y int) selRow {
+	if a.selDockRows != nil {
+		for _, r := range a.selDockRows {
+			if r.y == y {
+				return r
+			}
+		}
+	}
 	if vy := y - a.transcriptTop(); vy >= 0 && vy < len(a.selRows) {
 		return a.selRows[vy]
 	}

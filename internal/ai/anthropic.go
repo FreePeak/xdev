@@ -474,10 +474,10 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 			switch data.ContentBlock.Type {
 			case "text":
 				st.kind = "text"
-				st.text.WriteString(data.ContentBlock.Text)
+				st.text.WriteString(CleanUTF8(data.ContentBlock.Text))
 			case "thinking":
 				st.kind = "thinking"
-				st.text.WriteString(data.ContentBlock.Thinking)
+				st.text.WriteString(CleanUTF8(data.ContentBlock.Thinking))
 			case "tool_use":
 				st.kind = "tool_use"
 				st.id = data.ContentBlock.ID
@@ -493,11 +493,17 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 			}
 			switch data.Delta.Type {
 			case "text_delta":
-				st.text.WriteString(data.Delta.Text)
-				emit(Event{Type: EventTextDelta, Delta: data.Delta.Text, Snapshot: st.text.String(), StreamIndex: st.index})
+				delta := CleanUTF8(data.Delta.Text)
+				if delta != "" {
+					st.text.WriteString(delta)
+					emit(Event{Type: EventTextDelta, Delta: delta, Snapshot: st.text.String(), StreamIndex: st.index})
+				}
 			case "thinking_delta":
-				st.text.WriteString(data.Delta.Thinking)
-				emit(Event{Type: EventThinkingDelta, Delta: data.Delta.Thinking, StreamIndex: st.index})
+				delta := CleanUTF8(data.Delta.Thinking)
+				if delta != "" {
+					st.text.WriteString(delta)
+					emit(Event{Type: EventThinkingDelta, Delta: delta, StreamIndex: st.index})
+				}
 			case "signature_delta":
 				st.sig = data.Delta.Signature
 			case "input_json_delta":
@@ -533,9 +539,9 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 			for _, st := range blocks {
 				switch st.kind {
 				case "text":
-					msg.Content = append(msg.Content, TextBlock{Text: st.text.String()})
+					msg.Content = append(msg.Content, TextBlock{Text: CleanUTF8(st.text.String())})
 				case "thinking":
-					msg.Content = append(msg.Content, ThinkingBlock{Thinking: st.text.String(), ThinkingSignature: st.sig})
+					msg.Content = append(msg.Content, ThinkingBlock{Thinking: CleanUTF8(st.text.String()), ThinkingSignature: st.sig})
 				case "tool_use":
 					args := parseToolArgs(APIAnthropicMessages, st.id, st.args.String())
 					msg.Content = append(msg.Content, ToolCallBlock{

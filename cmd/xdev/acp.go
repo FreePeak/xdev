@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -60,10 +61,12 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	// `xdev acp` in the workspace, which is what session/new also asks for.
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
-	mgr := attachMCP(context.Background(), reg, false, nil)
+	mgr := attachMCP(context.Background(), reg, false, nil, nil)
 	if mgr != nil {
 		defer mgr.Close()
 	}
+	// The rebuild-time interruption notice names the calls free to repeat.
+	session.ReplaySafety = reg.ReplaySafe
 
 	overrides := agent.LoadSystemPromptOverrides(cwd)
 	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
@@ -124,7 +127,6 @@ func (h *acpHandler) NewSession(_ context.Context, cwd string) (string, error) {
 	if cwd == "" {
 		cwd = h.cwd
 	}
-
 	now := time.Now().UTC()
 	if cwd != h.cwd {
 		// read/write/grep resolve against the process working directory, so a
@@ -133,9 +135,11 @@ func (h *acpHandler) NewSession(_ context.Context, cwd string) (string, error) {
 	}
 	store := session.OpenMem(cwd, "acp "+now.Format("2006-01-02 15:04"))
 	store.EnableAutoPersist(session.SessionFilePath(config.DataDir(), cwd, now, store.ID()), session.Options{})
-	wireTaskParent(h.reg, store)
-
-	s := &acpSession{store: store, allowed: map[string]bool{}}
+	schedules := agent.NewScheduleState(store)
+	// The registry is shared by all ACP sessions. Do not rebind its
+	// single-session schedule state here; the per-session context seam owns it.
+	wireTaskParentWithoutSchedule(h.reg, store)
+	s := &acpSession{store: store, schedules: schedules, allowed: map[string]bool{}}
 	s.ag = h.newAgent(s)
 	h.mu.Lock()
 	h.sessions[store.ID()] = s
@@ -155,6 +159,7 @@ func (h *acpHandler) Prompt(ctx context.Context, sessionID string, blocks []acp.
 	if strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("prompt carries no text content")
 	}
+	ctx = agent.WithScheduleState(ctx, s.schedules)
 	s.setTurn(ctx, emit)
 	defer s.setTurn(nil, nil)
 
@@ -170,17 +175,39 @@ func (h *acpHandler) Prompt(ctx context.Context, sessionID string, blocks []acp.
 	// The server turns a cancelled turn into stopReason "cancelled"; any other
 	// error is answered as a JSON-RPC error.
 	msg, err := s.ag.Run(ctx, h.buildSys(), history(s.store))
+	if err != nil && errors.Is(err, agent.ErrEmptyTurn) {
+		// The model answered nothing after every nudge was spent
+		// (a thinking-mode upstream leaving only a reasoning block,
+		// or nothing at all). Rebuild context from the persisted
+		// history and re-run the agent so the session auto-resumes
+		// instead of dying with a dead-end error (#331). Same
+		// recovery print and rpc modes already had; ACP (the
+		// Claude Code / Copilot CLI bridge) was the other gap.
+		ctxRes, rerr := session.BuildContext(s.store.Entries(), s.store.LeafID(), session.SystemPrompt{})
+		if rerr == nil {
+			msg, err = s.ag.Run(ctx, h.buildSys(), ctxRes.Messages)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
 	return stopReason(msg), nil
 }
 
-// close releases every session store.
 func (h *acpHandler) close() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	sessions := make([]*acpSession, 0, len(h.sessions))
 	for _, s := range h.sessions {
+		sessions = append(sessions, s)
+	}
+	h.mu.Unlock()
+	for _, s := range sessions {
+		s.mu.Lock()
+		ctx := s.ctx
+		s.mu.Unlock()
+		if ctx != nil {
+			<-ctx.Done()
+		}
 		if err := s.store.Close(); err != nil {
 			logx.Errorf("acp: session close: %v", err)
 		}
@@ -241,8 +268,9 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 // acpSession is one ACP session: its store, its agent and the turn currently
 // streaming (the emitter the hooks write to).
 type acpSession struct {
-	store *session.Store
-	ag    *agent.Agent
+	store     *session.Store
+	ag        *agent.Agent
+	schedules *agent.ScheduleState
 
 	mu      sync.Mutex
 	ctx     context.Context

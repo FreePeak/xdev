@@ -9,6 +9,9 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
+// mk writes <dir>/.xdev/agent/<name>. The dir is a HOME the caller owns (every
+// test that uses it sets HOME itself), so the file lands where keybindingsPath
+// looks when XDEV_AGENT_DIR is unset.
 func mk(t *testing.T, dir, name, body string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

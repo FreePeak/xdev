@@ -19,8 +19,8 @@ import (
 	"github.com/FreePeak/xdev/internal/tts"
 	"gopkg.in/yaml.v3"
 
-	"github.com/FreePeak/xdev/internal/websearch"
 	"github.com/FreePeak/xdev/internal/typesafe"
+	"github.com/FreePeak/xdev/internal/websearch"
 )
 
 // Settings layering (M9 #10, research parity-session-ux §10): schema
@@ -351,6 +351,17 @@ type Settings struct {
 	// press at every report, and the gesture a user thinks they made
 	// is not always the one that arrives.
 	DebugMouse bool `yaml:"debugMouse"`
+	// RenderMermaid draws a ```mermaid fence in assistant output as an ASCII
+	// diagram instead of a code band (omp parity: tui.renderMermaid, default
+	// on). A *bool for ShowThinking's reason: the zero-skip merge cannot tell
+	// "unset" from "off", and the shipped default here is ON, so only a
+	// pointer expresses a user who turned it off. Display only — the source
+	// text is untouched either way, and a diagram the renderer cannot draw
+	// falls back to the code band.
+	RenderMermaid *bool `yaml:"renderMermaid"`
+	// Tui is the interactive TUI group (tui.*). Nested so `xdev config set
+	// tui.exitDetach` walks a real struct path (settingsKeyOK / KnownFields).
+	Tui TuiSettings `yaml:"tui"`
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
@@ -496,20 +507,21 @@ type Settings struct {
 	// WebSearch configures the web_search provider chain (M13 #48):
 	// ordered providers, per-provider timeout, API keys.
 	WebSearch WebSearchSettings `yaml:"webSearch"`
-	// TypeSafe configures the typesafe tool (M15): the System One model
-	// and request timeout. The API key comes from TYPESAFE_API_KEY at
-	// request time, never from the settings file.
+	// TypeSafe configures the typesafe tool (M15): the System One model,
+	// API root, optional bearer key, and request timeout. The endpoint and
+	// key may also come from TYPESAFE_BASE_URL/TYPESAFE_API_KEY.
 	TypeSafe TypeSafeSettings `yaml:"typesafe"`
 	// Browser configures the browser tool (M13 #50): the CDP discovery
 	// endpoint of a Chrome, and whether xdev may start one on it when
 	// nothing answers. An empty block means "attach to 127.0.0.1:9222,
 	// launching a private-profile Chrome there if nothing is listening".
 	Browser BrowserSettings `yaml:"browser"`
-	// Ask configures the ask tool (M11 #36): ask.timeout bounds how long
-	// a headless run waits for an answer before the recommended option
-	// proceeds.
+	// Ask configures the ask tool (M11 #36): ask.autoAnswer (off by
+	// default) lets an unanswered question be answered by its recommended
+	// option after ask.timeout, instead of waiting for a human.
 	Ask struct {
-		Timeout int `yaml:"timeout"`
+		Timeout    int  `yaml:"timeout"`
+		AutoAnswer bool `yaml:"autoAnswer"`
 	} `yaml:"ask"`
 	// Skills configures SKILL.md discovery (M12 F2): customDirectories
 	// are extra roots scanned after native/user/managed, so an authored
@@ -558,6 +570,18 @@ type SkillsSettings struct {
 	// relative entry resolves against the project cwd; a missing or
 	// unreadable directory is skipped, never fatal.
 	CustomDirectories []string `yaml:"customDirectories"`
+}
+
+// TuiSettings is the `tui` group: interactive-session behaviour that is not
+// a HUD/chrome key. Nested so dotted CLI keys (tui.exitDetach) match the
+// YAML path and the KnownFields schema.
+type TuiSettings struct {
+	// ExitDetach keeps a still-running turn alive when the TUI quits
+	// (opencode's default: the TUI is a client, the run outlives it). The
+	// turn is handed to a detached --bg worker; `xdev bg list` shows it.
+	// Default ON — a *bool so unset stays "on" and an explicit false is the
+	// only way to restore kill-on-exit. `xdev config set tui.exitDetach false`.
+	ExitDetach *bool `yaml:"exitDetach"`
 }
 
 // StatusLineSettings is the `statusLine` group (M12 F5). Segments is the
@@ -786,11 +810,11 @@ type WebSearchSettings = websearch.Settings
 // BrowserSettings is the browser: config block (M13 #50). Same alias rule as
 // WebSearchSettings: the engine (internal/browser) owns the struct.
 type BrowserSettings = browser.Settings
-// TypeSafeSettings is the typesafe config block: the System One model
-// and request timeout (M15). The API key is never a config field — it
-// comes from TYPESAFE_API_KEY at request time, so a leaked settings
-// file never carries a credential. Aliased (not redeclared) for the
-// same import-cycle reason as WebSearchSettings.
+
+// TypeSafeSettings is the typesafe config block: the System One model,
+// API root, optional bearer key, and request timeout (M15). A local Laya
+// server can omit the key; hosted TypeSafe resolves it from the environment.
+// Aliased (not redeclared) for the same import-cycle reason as WebSearchSettings.
 type TypeSafeSettings = typesafe.Settings
 
 // defaultSettings is the schema-defaults layer.
@@ -855,7 +879,7 @@ func defaultSettings() *Settings {
 		Theme:              "auto",
 		ApprovalMode:       "yolo",
 		MemoryLimit:        100 << 20,
-		MaxTurns:           200,
+		MaxTurns:           0,
 		Compaction:         CompactionSettings{MethodOrder: DefaultCompactionMethodOrder},
 		ToolsApproval:      map[string]string{},
 		Hooks:              map[string]any{},
@@ -878,6 +902,22 @@ func defaultSettings() *Settings {
 // unset follows the schema default (on).
 func (s *Settings) ShowThinkingOn() bool {
 	return s == nil || s.ShowThinking == nil || *s.ShowThinking
+}
+
+// RenderMermaidOn reports whether a ```mermaid fence renders as a diagram;
+// unset follows the schema default (on), the same shape as ShowThinkingOn.
+func (s *Settings) RenderMermaidOn() bool {
+	return s == nil || s.RenderMermaid == nil || *s.RenderMermaid
+}
+
+// TuiExitDetachOn reports whether quitting the TUI should detach a live
+// turn instead of killing it. Default ON (opencode parity); an explicit
+// false restores the old kill-on-exit behaviour.
+func (s *Settings) TuiExitDetachOn() bool {
+	if s == nil || s.Tui.ExitDetach == nil {
+		return true
+	}
+	return *s.Tui.ExitDetach
 }
 
 // SidebarModeOn reports the effective context-dock policy: unset follows the
@@ -1011,15 +1051,16 @@ func (s *Settings) ImageGenConfig() imagegen.Settings {
 	}
 	return cfg
 }
-// TypeSafeConfig returns the typesafe block with ${VAR} references in
-// Settings.ApiKey expanded and model/timeout defaulted. Nil-safe: the
-// zero value is a keyless block, which the tool reports as a missing
-// TYPESAFE_API_KEY instead of making a request.
+
+// TypeSafeConfig returns the typesafe block with ${VAR} references expanded
+// and model/timeout defaulted. An empty APIKey remains valid for a local
+// server that does not require bearer authentication.
 func (s *Settings) TypeSafeConfig() typesafe.Settings {
 	if s == nil {
 		return typesafe.Settings{}
 	}
 	cfg := s.TypeSafe
+	cfg.BaseURL = Resolve(cfg.BaseURL)
 	cfg.APIKey = Resolve(cfg.APIKey)
 	return cfg.Config()
 }
@@ -1044,13 +1085,20 @@ func (s *Settings) BrowserConfig() browser.Settings {
 	return cfg
 }
 
-// AskTimeout returns the ask tool's headless wait: ask.timeout seconds,
-// or the tool's schema default when unset.
+// AskTimeout returns how long the ask tool waits before the recommended
+// answer proceeds: ask.timeout seconds, or the tool's default when unset.
+// It only bounds the auto-answer path — ask.autoAnswer must be on.
 func (s *Settings) AskTimeout() time.Duration {
 	if s == nil || s.Ask.Timeout <= 0 {
 		return tool.DefaultAskTimeout
 	}
 	return time.Duration(s.Ask.Timeout) * time.Second
+}
+
+// AskAutoAnswerOn reports whether an unanswered question may be answered by
+// its recommended option (nil-safe: off unless a layer opts in).
+func (s *Settings) AskAutoAnswerOn() bool {
+	return s != nil && s.Ask.AutoAnswer
 }
 
 // ComputerOn reports whether the computer tool is enabled (nil-safe:
@@ -1371,6 +1419,12 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
 	}
+	if layer.RenderMermaid != nil {
+		s.RenderMermaid = layer.RenderMermaid
+	}
+	if layer.Tui.ExitDetach != nil {
+		s.Tui.ExitDetach = layer.Tui.ExitDetach
+	}
 	if layer.SidebarMode != "" {
 		s.SidebarMode = layer.SidebarMode
 	}
@@ -1531,6 +1585,26 @@ func (s *Settings) merge(layer *Settings) error {
 		}
 		s.WebSearch.APIKeys[k] = v
 	}
+	// typesafe: endpoint and credentials are deliberately not repo-safe;
+	// retain trusted-layer values and resolve ${VAR} references later.
+	if layer.TypeSafe.BaseURL != "" {
+		s.TypeSafe.BaseURL = layer.TypeSafe.BaseURL
+		// A later endpoint override must not silently carry the previous
+		// layer's credential. Empty means the new environment/local lookup.
+		s.TypeSafe.APIKey = ""
+	}
+	if layer.TypeSafe.APIKey != "" {
+		s.TypeSafe.APIKey = layer.TypeSafe.APIKey
+	}
+	if layer.TypeSafe.Model != "" {
+		s.TypeSafe.Model = layer.TypeSafe.Model
+	}
+	if layer.TypeSafe.Timeout != 0 {
+		if layer.TypeSafe.Timeout < 0 {
+			return fmt.Errorf("typesafe.timeout must be positive, got %s", layer.TypeSafe.Timeout)
+		}
+		s.TypeSafe.Timeout = layer.TypeSafe.Timeout
+	}
 	// imageProviders: the provider list is replaced wholesale (the same rule
 	// as webSearch — an overlay that names one provider means exactly that
 	// chain), the timeout and the size cap are validated here, and an
@@ -1589,6 +1663,11 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
+	}
+	// Same plain-bool rule as Advisor: the shipped default is off, so only a
+	// layer that turns it ON contributes.
+	if layer.Ask.AutoAnswer {
+		s.Ask.AutoAnswer = true
 	}
 	// computer: desktop control is opt-in (a layer that sets enabled wins,
 	// including an explicit no), and the timeout is validated here so a
@@ -1884,6 +1963,8 @@ func List(s *Settings, globalPath string) []string {
 		"maxTurns " + fmt.Sprint(s.MaxTurns),
 		"memoryLimit " + fmt.Sprint(s.MemoryLimit),
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
+		"renderMermaid " + fmt.Sprint(s.RenderMermaidOn()),
+		"tui.exitDetach " + fmt.Sprint(s.TuiExitDetachOn()),
 		"sidebarMode " + s.SidebarModeOn(),
 		"thinking " + s.ThinkingLevel(),
 		"computer " + fmt.Sprint(s.ComputerOn()),
@@ -1969,6 +2050,9 @@ func List(s *Settings, globalPath string) []string {
 	}
 	if s.Ask.Timeout > 0 {
 		out = append(out, "ask.timeout "+fmt.Sprint(s.Ask.Timeout))
+	}
+	if s.AskAutoAnswerOn() {
+		out = append(out, "ask.autoAnswer true")
 	}
 	if s.TTS.Voice != "" {
 		out = append(out, "tts.voice "+s.TTS.Voice)

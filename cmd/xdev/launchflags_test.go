@@ -702,15 +702,22 @@ func TestStartupIsInteractive(t *testing.T) {
 // The stream-error display follows the recovery ladder's mind: a transient
 // wire error is being retried, so it collapses to a notice instead of
 // flashing the raw provider text once per attempt; a hard error still shows.
+// Repeated transient errors count up: "stream error: retrying", then "(x2)".
 func TestTransientStreamErrorDisplaysAsRetryNotice(t *testing.T) {
 	transient := ai.Event{Type: ai.EventError, Err: errors.New("openai-completions: stream ended without finish_reason")}
 	hard := ai.Event{Type: ai.EventError, Err: errors.New("agent: stream: HTTP 400 invalid_request: bad stuff")}
+	h := &printHooks{}
 
-	out := captureStderr(t, func() { (&printHooks{}).OnEvent(transient) })
+	out := captureStderr(t, func() { h.OnEvent(transient) })
 	if !strings.Contains(out, "retrying") || strings.Contains(out, "finish_reason") {
 		t.Fatalf("transient stream error display = %q, want a retry notice without the raw wire text", out)
 	}
-	out = captureStderr(t, func() { (&printHooks{}).OnEvent(hard) })
+	// A second transient error on the same hooks instance counts up: (x2).
+	out = captureStderr(t, func() { h.OnEvent(transient) })
+	if !strings.Contains(out, "(x2)") {
+		t.Fatalf("repeated transient stream error display = %q, want a counted retry notice (x2)", out)
+	}
+	out = captureStderr(t, func() { h.OnEvent(hard) })
 	if !strings.Contains(out, "bad stuff") {
 		t.Fatalf("hard stream error display = %q, want the raw error", out)
 	}

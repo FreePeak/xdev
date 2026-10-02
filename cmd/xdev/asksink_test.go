@@ -57,9 +57,15 @@ func (s staticSink) Ask(context.Context, tool.AskRequest) (tool.AskResponse, err
 	return tool.AskResponse{Labels: s.labels}, nil
 }
 
+// onTrue is the ask.autoAnswer policy being on, and sinkOf the headless
+// fallback as a factory — the sink reads both per call now, so a test that
+// flips the policy can hand a closure instead of a captured bool.
+func onTrue() bool                              { return true }
+func sinkOf(s tool.AskSink) func() tool.AskSink { return func() tool.AskSink { return s } }
+
 func TestAskCardSinkPrefersTheCard(t *testing.T) {
 	ops := &recordingOps{ans: tui.AskAnswer{Labels: []string{"red"}}, ok: true}
-	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: staticSink{labels: []string{"blue"}}}
+	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: sinkOf(staticSink{labels: []string{"blue"}})}
 	got, err := sink.Ask(context.Background(), tool.AskRequest{
 		Question: "Which color?", Options: []tool.AskOption{{Label: "red"}, {Label: "blue", Description: "cool"}},
 	})
@@ -75,14 +81,14 @@ func TestAskCardSinkPrefersTheCard(t *testing.T) {
 	}
 }
 
-// A skip (or a terminal that cannot fit the card) must still answer from the
-// recommendation, and it must answer NOW: the card already waited out
-// ask.timeout, so falling through to the headless sink would wait it a second
-// time and then report "no answer within" a wait nobody saw. A fallback that
-// blocks forever proves the sink never reaches it.
+// With ask.autoAnswer ON, a skip (or a terminal that cannot fit the card)
+// must still answer from the recommendation, and it must answer NOW: the card
+// already waited out ask.timeout, so falling through to the headless sink
+// would wait it a second time and then report "no answer within" a wait
+// nobody saw. A fallback that blocks forever proves the sink never reaches it.
 func TestAskCardSinkSkipDoesNotWaitAgain(t *testing.T) {
 	ops := &recordingOps{ok: false}
-	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: blockingSink{}}
+	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, auto: onTrue, fallback: sinkOf(blockingSink{})}
 	done := make(chan tool.AskResponse, 1)
 	go func() {
 		got, err := sink.Ask(context.Background(), tool.AskRequest{
@@ -114,16 +120,13 @@ func (blockingSink) Ask(context.Context, tool.AskRequest) (tool.AskResponse, err
 	select {}
 }
 
-// TestAskCardSinkBatchIsOneWait: a batch of questions costs one card and one
-// wait. The recommended option answers a question the human left empty, and a
-// typed note reaches the tool as a note.
 func TestAskCardSinkBatchIsOneWait(t *testing.T) {
 	ops := &recordingBatchOps{ok: true, ans: []tui.AskAnswer{
 		{Labels: []string{"sqlite"}},
 		{Note: "only if it caches"},
 		{}, // left empty: the recommendation answers it, with no second wait
 	}}
-	sink := &askCardSink{ops: ops.ops(), fallback: blockingSink{}}
+	sink := &askCardSink{ops: ops.ops(), auto: onTrue, fallback: sinkOf(blockingSink{})}
 	reqs := []tool.AskRequest{
 		{ID: "db", Question: "Which db?", Options: []tool.AskOption{{Label: "sqlite"}}},
 		{ID: "cache", Question: "Cache?", Options: []tool.AskOption{{Label: "yes"}, {Label: "no"}}},
@@ -160,7 +163,7 @@ func TestAskCardSinkBatchIsOneWait(t *testing.T) {
 // time and then answers for the human — the opposite of what they asked for.
 func TestAskCardSinkChatEscapeIsAnAnswer(t *testing.T) {
 	ops := &recordingOps{ans: tui.AskAnswer{Note: tui.AskChatLabel}, ok: true}
-	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: blockingSink{}}
+	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, auto: onTrue, fallback: sinkOf(blockingSink{})}
 	done := make(chan tool.AskResponse, 1)
 	go func() {
 		got, _ := sink.Ask(context.Background(), tool.AskRequest{
@@ -181,9 +184,69 @@ func TestAskCardSinkChatEscapeIsAnAnswer(t *testing.T) {
 // An unwired card (no ops) keeps the headless path — the tool must never hang
 // or vanish because a host did not provide a UI seam.
 func TestAskCardSinkWithoutOps(t *testing.T) {
-	sink := &askCardSink{fallback: staticSink{labels: []string{"x"}}}
+	sink := &askCardSink{fallback: sinkOf(staticSink{labels: []string{"x"}})}
 	got, err := sink.Ask(context.Background(), tool.AskRequest{Question: "Q", Options: []tool.AskOption{{Label: "x"}}})
 	if err != nil || len(got.Labels) != 1 {
 		t.Fatalf("headless fallback broken: %+v %v", got, err)
+	}
+}
+
+// The default (ask.autoAnswer off): a skipped card is the human saying
+// "not this one", not permission to decide for them. The sink must return
+// nothing, and must still answer NOW — the card already waited out the
+// policy's one wait, so falling to the headless sink would wait again.
+func TestAskCardSinkSkipDoesNotAnswerWithoutAutoAnswer(t *testing.T) {
+	ops := &recordingOps{ok: false}
+	sink := &askCardSink{ops: &tui.AskOps{Show: ops.show}, fallback: sinkOf(blockingSink{})}
+	done := make(chan tool.AskResponse, 1)
+	go func() {
+		got, err := sink.Ask(context.Background(), tool.AskRequest{
+			Question: "Q", Options: []tool.AskOption{{Label: "recommended-label"}},
+			Recommended: []string{"recommended-label"},
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		done <- got
+	}()
+	select {
+	case got := <-done:
+		if len(got.Labels) != 0 || got.Note != "" {
+			t.Fatalf("a skip must not answer: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a skipped card must not wait the headless policy again")
+	}
+	if ops.calls != 1 {
+		t.Fatalf("card consulted %d times", ops.calls)
+	}
+}
+
+// /auto-answer flips the policy MID-SESSION, so the sink must read it per
+// call: one question answered from the recommendation, the flip, then the
+// same skip must answer nothing. A captured bool would answer both — the
+// human is told their card no longer decides, and it decides anyway.
+func TestAskCardSinkReadsAutoAnswerPerCall(t *testing.T) {
+	ops := &recordingOps{ok: false}
+	auto := false
+	sink := &askCardSink{
+		ops:      &tui.AskOps{Show: ops.show},
+		auto:     func() bool { return auto },
+		fallback: sinkOf(blockingSink{}),
+	}
+	req := tool.AskRequest{Question: "Q", Options: []tool.AskOption{{Label: "rec"}}, Recommended: []string{"rec"}}
+	ask := func() tool.AskResponse {
+		got, err := sink.Ask(context.Background(), req)
+		if err != nil {
+			t.Error(err)
+		}
+		return got
+	}
+	if got := ask(); len(got.Labels) != 0 {
+		t.Fatalf("auto-answer off: a skip must not answer, got %+v", got)
+	}
+	auto = true
+	if got := ask(); len(got.Labels) != 1 || got.Labels[0] != "rec" {
+		t.Fatalf("auto-answer on: the recommendation must answer, got %+v", got)
 	}
 }

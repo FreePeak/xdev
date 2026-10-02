@@ -47,18 +47,19 @@ const (
 	AlwaysAsk
 )
 
-// Classify maps a tool name to its approval tier. Unknown tools are an
-// error rather than a default so a registered-but-unmodeled tool cannot
-// silently run without approval. bash arguments are not yet inspected
-// (pattern rules are a later milestone).
+// Classify maps a tool name to its approval tier via the capability
+// manifest (#420). Only the historical core four are "known" here so
+// Decide keeps treating every other name as TierExec (unmodeled →
+// conservative). Plan mode and ConcurrentOK read the full Caps table.
+// bash arguments are not yet inspected (pattern rules are a later milestone).
 func Classify(toolName string, _ json.RawMessage) (Tier, error) {
 	switch toolName {
-	case "read":
-		return TierReadOnly, nil
-	case "write", "edit":
-		return TierWrite, nil
-	case "bash":
-		return TierExec, nil
+	case "read", "write", "edit", "bash":
+		c, ok := CapsByName(toolName)
+		if !ok {
+			return TierReadOnly, fmt.Errorf("tool: unknown tool %q", toolName)
+		}
+		return c.Tier, nil
 	default:
 		return TierReadOnly, fmt.Errorf("tool: unknown tool %q", toolName)
 	}

@@ -16,8 +16,24 @@ import (
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
-// SystemPromptBase is the <1000-token system prompt (pi philosophy: minimal;
-// frontier models are RL-trained to understand coding agents).
+// SystemPromptBase is the base system prompt. It stays inside PRD §1 Goal 4's
+// <1,000-token budget (guarded by maxPromptTokens in cmd/xdev/prompt_test.go),
+// but the earlier 6-line version was smaller than that budget on purpose —
+// "pi philosophy: minimal, frontier models are RL-trained to understand coding
+// agents" — and the measurement in
+// docs/research/2026-09-15-xdev-slow-session-rca.md disproved the assumption it
+// rests on. Two costs, both measured against the omp baseline:
+//
+//   - the single "use read/grep, not cat/sed" line was ignored: bash:read ran
+//     15:1 against omp's 3.9:1, so whole files arrived through the shell and
+//     the context window paid for them;
+//   - nothing at all said when to delegate, so a harness with a working
+//     fan-out engine (maxBatchParallel=8, five agent definitions, depth-2
+//     nesting) was driven one serial call at a time.
+//
+// The rules below are the measured minimum, not a philosophy: each one names a
+// behaviour the session store shows going wrong. They are deliberately short —
+// a prompt nobody reads is a prompt that does not steer.
 const SystemPromptBase = `You are xdev, a coding agent working in the user's repository.
 
 Rules:
@@ -25,8 +41,29 @@ Rules:
 - Prefer minimal, surgical edits; keep the codebase boring and consistent with its conventions.
 - Verify changes: run the relevant build/test command before claiming success.
 - Never invent file contents; read before editing. Never leave placeholders or stubs.
-- Inspect files with the structured tools (read, grep), not bash cat/sed/pipes: they page exactly what you asked for into context; raw shell output dumps whole files in.
-- If blocked by missing information you cannot obtain with tools, say so plainly.`
+- If blocked by missing information you cannot obtain with tools, say so plainly.
+
+Before you act:
+- Confirm the requirement, don't assume it. Restate what you will do in a sentence or two, then
+  start. "Find the root cause and fix" asks for a change; "why is this slow?" asks a question.
+- Ask first when the request is ambiguous, non-trivial, spans repos, or would touch files outside
+  the working directory. Use ask with the readings you actually have. A clear, explicit
+  instruction to do X is its own confirmation — asking anyway is noise.
+- Confirm once, before the first change. That covers the whole run: after go, keep going.
+
+Getting code into context:
+- Search first, then read: grep and glob to find candidates, read only the ranges you need.
+- Use read, not the shell, for file content. read pages the range you ask for; cat, head, sed
+  and pipes dump whole files and burn the context window.
+- Keep bash for work that actually runs: build, test, git, package managers.
+
+Delegating:
+- The task tool runs a subagent in its own session and hands you back one result; its
+  transcript never reaches you. That pays off when the answer means reading a lot of code, and
+  costs more than it saves for a single file read, a quick lookup, or a command you could run.
+- Independent work is parallel work: send independent slices in one batch, and do not wait on
+  a result you do not need to continue.
+- Say what the result must contain. You see that, never the work behind it.`
 
 // SubagentSystemPromptBase is the child's system prompt: same working
 // rules, plus the yield contract that ends the run.
@@ -133,7 +170,49 @@ func (o *SystemPromptOverrides) ApplyPersonalityPreset(preset string) error {
 }
 
 // MaxContextBytes caps the total AGENTS.md content injected into the prompt.
-const MaxContextBytes = 32 << 10
+//
+// The cap was written as a single number, but the budget it actually has to
+// protect is the *system prompt*, and the two are not the same thing. Measured
+// on a real repository (PRD entry 2026-09-30): the injected chain, the
+// discovered rulebook and the skills block together run ~6.8k tokens against
+// PRD §1 Goal 4's 1,000, so a 32 KiB chain alone is most of the blowout.
+//
+// The per-file split exists because a single shared budget silently starves
+// the file that matters most. With one 98 KB global file the chain rendered
+// 32,871 bytes and the repository's own AGENTS.md never appeared at all — no
+// error, no marker, just missing rules. Every file now gets a bounded share
+// instead of competing for one pool, so no single file can consume the chain
+// budget that the other files were counting on.
+const (
+	MaxContextBytes = 32 << 10 // whole chain, unchanged as the outer bound
+	// MaxContextFileKB bounds one ANCESTOR file. The chain is loaded
+	// root→cwd, so an uncapped ancestor can consume the whole pool and the
+	// closest file is never even read — the load pass below stops early, and
+	// the file that carries the rules saying which ancestor rules do not
+	// apply is simply absent. Bounding every ancestor is what guarantees the
+	// closest file is always loaded; the closest file itself is bounded by
+	// the pool (#477's floor), not by a share, so a large project ruleset
+	// still reaches the model.
+	MaxContextFileKB = 8 << 10
+)
+
+// contextBytesForFile returns the slice of the chain budget one file may
+// render, given how much earlier files already took and whether this is the
+// cwd's own file.
+func contextBytesForFile(used, fileSize int, closest bool) int {
+	share := MaxContextFileKB
+	if closest {
+		share = MaxContextBytes
+	}
+	// Never render more of a file than it actually contains.
+	if fileSize < share {
+		share = fileSize
+	}
+	if left := MaxContextBytes - used; share > left {
+		share = left
+	}
+	return share
+}
 
 // maxImportDepth bounds recursive @path expansion (omp parity: <=5).
 const maxImportDepth = 5
@@ -190,6 +269,35 @@ func expandImports(content, baseDir string, budget *int, seen map[string]bool) s
 	return expand(content, baseDir, 1)
 }
 
+// ProjectContextHeader precedes injected AGENTS.md content in the system
+// prompt. The bare "# Project context" heading made the block read as
+// optional background, so the model discounted it: in a 42-run head-to-head
+// xdev satisfied rules that exist only in AGENTS.md in 2 of 3 runs, and the
+// one run that missed a rule was the one run that never opened the file.
+//
+// The wording states what the block is (this repository's binding rules) and
+// bounds it correctly (a direct user instruction still wins). It does not
+// claim more than the file has: a repository rule and a system rule are
+// different things, and saying so keeps the hierarchy honest instead of
+// merely louder.
+const ProjectContextHeader = `# Project rules and conventions
+
+These are the binding rules for this repository, loaded automatically. They
+apply to the work in this session whether or not the task restates them: a
+task prompt that omits a rule below has not cancelled it. Follow them without
+re-reading this file, and read the file itself when you need detail a summary
+would lose. Direct user instructions for this task still take precedence.`
+
+// ProjectContextBlock frames injected context files with ProjectContextHeader.
+// Both injection sites (the parent prompt and a subagent's) call this, so the
+// framing cannot drift apart between them.
+func ProjectContextBlock(contextFiles string) string {
+	if contextFiles == "" {
+		return ""
+	}
+	return ProjectContextHeader + "\n\n" + contextFiles
+}
+
 // BuildSystemPrompt assembles the system prompt: base + project context
 // files + tool descriptions. Tool descriptions come last (they are part of
 // the <1000-token budget).
@@ -197,8 +305,8 @@ func BuildSystemPrompt(base string, contextFiles string, defs []NamedToolDef) st
 	var b strings.Builder
 	b.WriteString(base)
 	if contextFiles != "" {
-		b.WriteString("\n\n# Project context\n")
-		b.WriteString(contextFiles)
+		b.WriteString("\n\n")
+		b.WriteString(ProjectContextBlock(contextFiles))
 	}
 	if len(defs) > 0 {
 		b.WriteString("\n\n# Tools\n")
@@ -303,45 +411,192 @@ func LoadContextFiles(cwd string) string {
 		}
 		dir = parent
 	}
+
 	// chain is cwd→root; reverse for root→cwd ordering.
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
 	files = append(files, chain...)
 
-	var b strings.Builder
-	total := 0
+	// Two passes, because the chain runs root→cwd and precedence runs the
+	// other way: the CWD's own rules override its ancestors, so when the byte
+	// budget cannot hold everything it must cost the broadest file, not the
+	// closest one. The pre-fix loop walked in order and `break`ed when the
+	// budget ran out, which dropped the tail — the most specific rules — and
+	// kept every generic rule above them, so an overflowing chain injected
+	// the least relevant content it had.
+	loaded := make([]contextFile, 0, len(files))
+	used := 0
 	seen := map[string]bool{}
 	for _, p := range files {
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		remaining := MaxContextBytes - total
-		content := expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen)
-		content = strings.TrimSpace(content)
+		// Every file in the chain is read, however full the pool already is.
+		// The pre-merge loop stopped as soon as MaxContextBytes was spent, so
+		// an ancestor that filled the budget meant the CWD's own file was
+		// never read at all — and the fit pass below, whose whole job is to
+		// prefer the most specific rules, had nothing to prefer. Measured on
+		// #477 alone: a 31 KB global file rendered 32,823 bytes with the
+		// repository's rule absent and the budget marker NOT rendered, so the
+		// loss was silent. The budget is spent by the fit pass, which knows
+		// the cost of each file, not by the order files happen to be read in.
+		//
+		// The per-file cap here is only a load guard — it stops one huge file
+		// from being held whole in memory. It is deliberately the whole pool,
+		// because ancestors are never *rendered* truncated: the fit pass keeps
+		// an ancestor whole or drops it entirely, and a half-present broad
+		// rulebook would quietly contradict the specific file that overrides
+		// it.
+		remaining := MaxContextBytes
+		content := strings.TrimSpace(expandImports(strings.TrimSpace(string(raw)), filepath.Dir(p), &remaining, seen))
 		if content == "" {
 			continue
 		}
-		remaining = MaxContextBytes - total
-		if remaining < 256 {
-			break // no useful budget left; skip further files entirely
-		}
-		if len(content) > remaining {
-			content = string([]rune(content)[:len([]rune(strings.TrimSpace(content[:remaining])))]) + "\n… [truncated]"
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n---\n\n")
-		}
-		if !strings.HasPrefix(p, cwd) {
-			fmt.Fprintf(&b, "## Global conventions (%s)\n\n", p)
-		} else {
-			fmt.Fprintf(&b, "## %s\n\n", p)
-		}
-		b.WriteString(content)
-		total += len(content)
+		loaded = append(loaded, contextFile{path: p, content: content})
+		used += len(content)
 	}
-	return b.String()
+
+	// Fit pass, most specific first: keep a file only if it still fits what
+	// the more specific files already claimed. A skipped ancestor does not
+	// end the walk — a small root file that fits is worth more than nothing.
+	keep := make([]bool, len(loaded))
+	kept := 0
+	for i := len(loaded) - 1; i >= 0; i-- {
+		if kept+len(loaded[i].content) > MaxContextBytes {
+			continue
+		}
+		keep[i] = true
+		kept += len(loaded[i].content)
+	}
+	// The closest file is the floor: if it alone overruns the budget it is
+	// still injected, truncated, because dropping it would leave the session
+	// holding only the ancestors' rules — the same inversion one level down.
+	// How much it keeps is settled after rendering, because the budget covers
+	// the whole block (marker, headings and separators included) and those
+	// are not known until the marker text is.
+	truncated := false
+	if n := len(loaded); n > 0 && !keep[n-1] {
+		keep[n-1] = true
+		truncated = true
+	}
+
+	render := func() string {
+		var b strings.Builder
+		// The marker is the contract. The block is headed as the
+		// repository's binding rules, and a silently-shortened list would
+		// make that a lie the model cannot detect; naming the dropped paths
+		// turns an invisible gap into a `read` it can close.
+		var omitted []string
+		for i, f := range loaded {
+			if !keep[i] {
+				omitted = append(omitted, f.path)
+			}
+		}
+		if len(omitted) > 0 || truncated {
+			b.WriteString("## Rules budget reached\n\n")
+			if truncated {
+				fmt.Fprintf(&b, "The closest rules file is over the %d-byte budget and is truncated below. ", MaxContextBytes)
+			}
+			if len(omitted) > 0 {
+				fmt.Fprintf(&b, "%d of %d rules files were dropped to stay within it: %s. ",
+					len(omitted), len(loaded), strings.Join(omitted, ", "))
+			}
+			b.WriteString("The most specific rules present are kept in full and broader ancestors were dropped first, so this list is incomplete — read an omitted path before relying on rules it may carry.\n\n")
+		}
+		// A file cut by the per-file cap is a partial list, and the block is
+		// headed as binding rules: a silent shortening under that heading is
+		// the lie the marker exists to prevent. Name the file and the size of
+		// the cut so the agent can go read what it was not shown.
+		for i, f := range loaded {
+			if keep[i] && f.dropped > 0 {
+				fmt.Fprintf(&b, "[%s: %d characters were left out by the %d KiB per-file cap — read the file if this part matters]\n\n", f.path, f.dropped, MaxContextFileKB>>10)
+			}
+		}
+		rendered := false
+		for i, f := range loaded {
+			if !keep[i] {
+				continue
+			}
+			if rendered {
+				b.WriteString("\n\n---\n\n")
+			}
+			if !strings.HasPrefix(f.path, cwd) {
+				fmt.Fprintf(&b, "## Global conventions (%s)\n\n", f.path)
+			} else {
+				fmt.Fprintf(&b, "## %s\n\n", f.path)
+			}
+			b.WriteString(f.content)
+			rendered = true
+		}
+		return b.String()
+	}
+	out := render()
+	// One correction pass, whenever the block carries a per-file cut: the
+	// per-file cap bounds one file, not the block, so a chain of large files
+	// can still overrun the whole budget. Trim the closest file until it fits
+	// — a rules block that ignores its own budget is worse than no budget.
+	// The cut is recorded on the file, so the marker re-renders with the
+	// final withheld count instead of going stale.
+	if over := len(out) - MaxContextBytes; over > 0 && len(loaded) > 0 {
+		last := &loaded[len(loaded)-1]
+		if !keep[len(loaded)-1] {
+			// #477's floor: the closest file is injected truncated, never
+			// dropped, so a chain that overflows the pool still delivers it.
+			keep[len(loaded)-1] = true
+			truncated = true
+		}
+		last.content = trimToBytes(last.content, len(last.content)-over)
+		last.dropped = over
+		out = render()
+	}
+	return out
+}
+
+// MinContextFileBytes is the budget below which expanding another rules file
+// is pointless: a sliver of a file carries no instruction the model can act
+// on, and a half-sentence rule is worse than a missing one.
+const MinContextFileBytes = 256
+
+// contextFile is one rules file rendered into the prompt. dropped is the
+// number of runes the per-file cap withheld; it is what makes the cut
+// visible in the render pass instead of silent.
+type contextFile struct {
+	path    string
+	content string
+	dropped int
+}
+
+// trimToBytes cuts s to at most n bytes without splitting a rune.
+func trimToBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimRight(s[:cut], " \t\n") + "\n… [truncated]"
+}
+
+// trimToLineBoundary cuts s to about n runes without splitting a rune, then
+// backs up to the last newline so the rendered rule is never a half sentence
+// or a half markdown construct. Unlike trimToBytes it appends nothing: the
+// per-file marker in the render pass is what declares the cut.
+func trimToLineBoundary(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := string(r[:n])
+	if nl := strings.LastIndex(cut, "\n"); nl > 0 {
+		cut = cut[:nl]
+	}
+	return strings.TrimRight(cut, " \t\n")
 }
 
 // Per-rule and total prompt caps for injected rules (issue #31): a

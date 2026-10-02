@@ -461,40 +461,38 @@ func planModeSystemReminder(note string) string {
 	return s
 }
 
-// planReadOnlyTools are the tools a planning agent may use. Explicit
-// names, not Classify: the approval tier table covers only the core four
-// and errors on the rest, which would deny grep/glob — the exact tools
-// planning needs.
-var planReadOnlyTools = map[string]bool{
-	"read": true, "grep": true, "glob": true, "ast_grep": true,
-	"web_search": true, "lsp": true, // read-only research tools (M13)
-}
-
-// planDenyKinds gives friendlier denial text for the common mutators.
-var planDenyKinds = map[string]string{
-	"write":    "a mutating tool",
-	"edit":     "a mutating tool",
-	"bash":     "a state-changing command",
-	"ast_edit": "a mutating tool",
-}
-
-// applyPlanMode wraps one tool call: read-only tools pass, everything
-// else is denied with a pointer to propose. propose itself is the exit.
-func applyPlanMode(pm *PlanMode, call ai.ToolCallBlock) (tool.Result, bool) {
+// applyPlanMode wraps one tool call: capability-declared read-only (or
+// session-scoped) tools pass; everything else is denied with a pointer to
+// propose. propose itself is the exit. Undeclared tools fail closed (#420).
+func applyPlanMode(pm *PlanMode, call ai.ToolCallBlock, reg *tool.Registry) (tool.Result, bool) {
 	if pm == nil || !pm.Active() {
 		return tool.Result{}, false
 	}
 	if call.Name == ProposeToolName {
 		return tool.Result{}, false
 	}
-	if planReadOnlyTools[call.Name] {
+	c, declared := capsForCall(reg, call.Name)
+	if tool.AllowedInPlan(c, declared) {
 		return tool.Result{}, false
 	}
-	what, ok := planDenyKinds[call.Name]
-	if !ok {
-		what = "not read-only"
+	what := "not read-only"
+	if declared && c.Destructive {
+		what = "a mutating tool"
+	}
+	if call.Name == "bash" {
+		what = "a state-changing command"
 	}
 	return tool.Result{Text: planDenyMessage(call.Name, what), IsError: true}, true
+}
+
+// capsForCall resolves Caps from a registered Capser, else the builtin table.
+func capsForCall(reg *tool.Registry, name string) (tool.Caps, bool) {
+	if reg != nil {
+		if t, ok := reg.Get(name); ok {
+			return tool.CapsOf(t)
+		}
+	}
+	return tool.CapsByName(name)
 }
 
 func planDenyMessage(name, what string) string {

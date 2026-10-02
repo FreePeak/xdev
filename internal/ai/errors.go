@@ -49,6 +49,10 @@ const (
 	// ClassContextOverflow: the request exceeded the model's context
 	// window; the compaction engine owns recovery.
 	ClassContextOverflow
+	// ClassEmptyTurn: the model produced no answer and no tool call
+	// (a reasoning-only turn, or nothing at all). The session
+	// layer rebuilds context from the persisted history and retries.
+	ClassEmptyTurn
 	// ClassBadRequest: 400/413/422 without overflow markers — fail fast.
 	ClassBadRequest
 )
@@ -84,6 +88,15 @@ var (
 	// compaction/handoff side requests .../done).
 	prematureCloseRe  = regexp.MustCompile(`(?i)stream closed before a (finish_reason|terminal response event)|(unexpected|premature) EOF|body closed before|stream ended without (finish_reason|response\.completed|message_stop|done)`)
 	connectionResetRe = regexp.MustCompile(`(?i)(connection reset|connection refused|broken pipe|no such host|i/o timeout|context deadline exceeded|tls: handshake failure)`)
+	// serverErrorRe matches a 403 the gateway wraps when the UPSTREAM
+	// served an invalid / non-JSON response. Live bodies look like:
+	//
+	//   Upstream request failed: [server_error] Upstream response was not valid JSON
+	//   {"error":{"code":"server_error","message":"Upstream response was not valid JSON","type":"server_error"}}
+	//
+	// The upstream hiccupped, not xdev's request, so the same turn
+	// retried may succeed. A plain JSON 403 (access denied) stays auth.
+	serverErrorRe = regexp.MustCompile(`(?i)(upstream (request failed.*)?(response )?was not valid json|\[server_error\].*not valid json)`)
 )
 
 // malformedRequestRe matches a 400 whose body names a missing REQUIRED FIELD:
@@ -124,7 +137,32 @@ var malformedRequestRe = regexp.MustCompile(`(?i)missing required field`)
 // any 404 that mentions these words, so a proxy whose error page happens to
 // carry them retries the ladder before surfacing the same 404. The upgrade
 // path is a provider-reported error code on HTTPError instead of body sniffing.
-var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error`)
+var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no provider for model|upstream_error|404 page not found`)
+
+// upstreamRefusalRe matches a 400 the gateway wraps when the UPSTREAM
+// refused the request, not one the gateway itself rejected on shape.
+// Two phrasings of the same relay, both live:
+//
+//	HTTP 400 {"error":{"code":"400","message":"Error from provider (Console Go): Upstream request could not be processed","type":"invalid_request_error"}}
+//	HTTP 400 {"error":{"code":"400","message":"Upstream request failed: [invalid_request_error] invalid request","type":"invalid_request_error"}}
+//
+// The second names no provider and still relays an upstream verdict: the
+// gateway got a non-2xx from upstream and wrapped it with its own 400
+// shape. Left ClassBadRequest it took only the bounded escalation rounds
+// (two quick retries) and ended the run, because there is nothing in the
+// body a rebuild could fix — the same turn served seconds later succeeds.
+// ClassTransient gives it the full ladder instead: backoff in place,
+// failover to the next chain target, then escalation rounds (see the
+// 404 routing verdicts in modelVerdictRe). A gateway 400 that names no
+// upstream at all (bare invalid_request_error) stays ClassBadRequest and
+// fails fast.
+//
+// ponytail: a body regex is a deliberate shortcut with a ceiling — it
+// trusts any body carrying this vocabulary, so a proxy whose error page
+// happens to include it retries before surfacing the same 400. The
+// upgrade path is a provider-reported error code on HTTPError instead of
+// body sniffing.
+var upstreamRefusalRe = regexp.MustCompile(`(?i)upstream (request (failed|could not be processed)|response was not valid json)`)
 
 // toolNameTooLongRe matches a 400 the gateway rejects because a tool
 // name exceeds the provider's 64-character ceiling. Names come from
@@ -140,16 +178,30 @@ func Classify(err error) ErrClass {
 	if err == nil {
 		return ClassUnknown
 	}
+	// Empty turn (#389, #331): a model that produced nothing
+	// is not a transport failure.
+	if strings.Contains(err.Error(), "empty-turn") {
+		return ClassEmptyTurn
+	}
 	var he *HTTPError
 	if errors.As(err, &he) {
 		switch {
-		case he.Status == 401 || he.Status == 403:
+		case he.Status == 401:
+			return ClassAuthFailed
+		case he.Status == 403 && serverErrorRe.MatchString(he.Body):
+			// A 403 whose body says the upstream's response was not
+			// valid JSON / server_error: the gateway/proxy could not
+			// parse the provider's answer, so the provider never
+			// rejected the request itself — retrying may succeed.
+			// A JSON-carrying 403 falls through to ClassAuthFailed.
+			return ClassTransient
+		case he.Status == 403:
 			return ClassAuthFailed
 		case he.Status == 400 || he.Status == 413 || he.Status == 422:
 			if bodyIndicatesOverflow(he.Body) {
 				return ClassContextOverflow
 			}
-			if malformedRequestRe.MatchString(he.Body) || toolNameTooLongRe.MatchString(he.Body) {
+			if malformedRequestRe.MatchString(he.Body) || toolNameTooLongRe.MatchString(he.Body) || upstreamRefusalRe.MatchString(he.Body) {
 				return ClassTransient
 			}
 			return ClassBadRequest

@@ -327,6 +327,13 @@ type GlobTool struct {
 // DefaultGlobMaxResults bounds a glob listing.
 const DefaultGlobMaxResults = 300
 
+// ReplaySafe implements Replayer on grep: it only reads the tree, so a repeat
+// after an interrupted turn returns the same matches (or fresher ones).
+func (t *GrepTool) ReplaySafe() bool { return true }
+
+// ReplaySafe implements Replayer on glob: it only lists paths.
+func (t *GlobTool) ReplaySafe() bool { return true }
+
 func (t *GlobTool) Name() string { return "glob" }
 
 func (t *GlobTool) Description() string {

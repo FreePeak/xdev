@@ -7,8 +7,71 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestEvaluateLocalSidecarWithoutAPIKey(t *testing.T) {
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	t.Setenv("TYPESAFE_API_KEY", "hosted-secret")
+	t.Setenv("LAYA_API_KEY", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/systemone" {
+			t.Errorf("path: want /v1/systemone, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("auth: local sidecar should not need bearer, got %q", got)
+		}
+		var req EvalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if req.Model != "" {
+			t.Errorf("model: want omitted for Laya auto-routing, got %q", req.Model)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "english",
+			"answers": map[string]any{
+				"is_urgent": map[string]any{"type": "noul", "noul": 0.92},
+			},
+			"usage": map[string]any{"local_ms": 12.3},
+		})
+	}))
+	defer srv.Close()
+
+	tl := NewTool(Settings{BaseURL: srv.URL})
+	result, err := tl.Execute(context.Background(), json.RawMessage(`{"state":{"text":"refund now"},"questions":{"is_urgent":{"type":"noul","instructions":"urgent?"}}}`))
+	if err != nil {
+		t.Fatalf("execute local sidecar: %v", err)
+	}
+	if result.IsError || !strings.Contains(result.Text, "is_urgent") {
+		t.Fatalf("local sidecar result = %+v", result)
+	}
+}
+
+func TestResolveBaseURL(t *testing.T) {
+	t.Setenv("TYPESAFE_BASE_URL", "http://env.example")
+	if got := resolveBaseURL("http://config.example/"); got != "http://config.example/" {
+		t.Fatalf("configured base URL: got %q", got)
+	}
+	if got := resolveBaseURL(""); got != "http://env.example" {
+		t.Fatalf("env base URL: got %q", got)
+	}
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	if got := resolveBaseURL(""); got != baseURL {
+		t.Fatalf("default base URL: got %q", got)
+	}
+}
+
+func TestConfigDoesNotForwardHostedKeyToLocalEndpoint(t *testing.T) {
+	t.Setenv("TYPESAFE_BASE_URL", "")
+	t.Setenv("TYPESAFE_API_KEY", "hosted-secret")
+	t.Setenv("LAYA_API_KEY", "")
+	c := Settings{BaseURL: "http://127.0.0.1:8000", Model: "english"}.Config()
+	if c.APIKey != "" {
+		t.Fatalf("hosted key forwarded to local endpoint: %q", c.APIKey)
+	}
+}
 
 func TestEvaluateOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,7 +88,8 @@ func TestEvaluateOK(t *testing.T) {
 		if !bytes.Contains(body, []byte(`"state"`)) {
 			t.Fatalf("body missing state: %s", body)
 		}
-		json.NewEncoder(w).Encode(map[string]any{
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model": "jev-1.13.0",
 			"answers": map[string]any{
 				"is_urgent": map[string]any{"type": "noul", "noul": 0.92},
@@ -39,7 +103,11 @@ func TestEvaluateOK(t *testing.T) {
 	baseURL = srv.URL
 	defer func() { baseURL = saved }()
 
-	e := &Evaluator{client: srv.Client(), model: "jev-latest", key: "test-key"}
+	e := &Evaluator{}
+	e.TestEvaluatorHTTP(srv.Client())
+	e.model = "jev-latest"
+	e.key = "test-key"
+
 	answers, err := e.Evaluate(context.Background(),
 		map[string]any{"ticket": "payouts failing"},
 		map[string]any{"is_urgent": map[string]any{"type": "noul", "instructions": "urgent?"}},
@@ -64,7 +132,11 @@ func TestEvaluateErrorStatus(t *testing.T) {
 	baseURL = srv.URL
 	defer func() { baseURL = saved }()
 
-	e := &Evaluator{client: srv.Client(), model: "jev-latest", key: "bad-key"}
+	e := &Evaluator{}
+	e.TestEvaluatorHTTP(srv.Client())
+	e.model = "jev-latest"
+	e.key = "bad-key"
+
 	_, err := e.Evaluate(context.Background(),
 		map[string]any{"state": "x"}, map[string]any{"q": map[string]any{"type": "noul"}})
 	if err == nil {
@@ -85,7 +157,11 @@ func TestEvaluateMalformed(t *testing.T) {
 	baseURL = srv.URL
 	defer func() { baseURL = saved }()
 
-	e := &Evaluator{client: srv.Client(), model: "jev-latest", key: "k"}
+	e := &Evaluator{}
+	e.TestEvaluatorHTTP(srv.Client())
+	e.model = "jev-latest"
+	e.key = "k"
+
 	_, err := e.Evaluate(context.Background(),
 		map[string]any{"state": "x"}, map[string]any{"q": map[string]any{"type": "noul"}})
 	if err == nil {
@@ -168,6 +244,61 @@ func TestNormalizeState(t *testing.T) {
 	}
 	if got := NormalizeState(42); got["data"] != 42 {
 		t.Fatalf("other: %v", got)
+	}
+}
+
+func TestRetryableStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"detail":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	saved := baseURL
+	baseURL = srv.URL
+	defer func() { baseURL = saved }()
+
+	e := &Evaluator{}
+	e.TestEvaluatorHTTP(srv.Client())
+	e.model = "jev-latest"
+	e.key = "k"
+
+	_, err := e.Evaluate(context.Background(),
+		map[string]any{"state": "x"}, map[string]any{"q": map[string]any{"type": "noul"}})
+	if err == nil {
+		t.Fatal("expected error for 429")
+	}
+	if !contains(err.Error(), "429") {
+		t.Fatalf("error should mention 429: %s", err.Error())
+	}
+}
+
+func TestEvaluateEmptyAnswers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "jev-latest",
+			"answers": json.RawMessage("{}"),
+		})
+	}))
+	defer srv.Close()
+
+	saved := baseURL
+	baseURL = srv.URL
+	defer func() { baseURL = saved }()
+
+	e := &Evaluator{}
+	e.TestEvaluatorHTTP(srv.Client())
+	e.model = "jev-latest"
+	e.key = "k"
+
+	answers, err := e.Evaluate(context.Background(),
+		map[string]any{"state": "x"}, map[string]any{"q": map[string]any{"type": "noul"}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(answers) != 0 {
+		t.Fatalf("want empty answers, got %d", len(answers))
 	}
 }
 

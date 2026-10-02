@@ -115,38 +115,68 @@ func (m *scrollModel) Indicator(total, vp int) (up, down int) {
 	return start, total - end
 }
 
-// Scrollbar computes the thumb region for a right-edge scrollbar. It returns
-// the viewport rows [start,end) — 0-based from the first visible row — that
-// should carry the thumb glyph. ok is false when the whole transcript fits,
-// so no bar is drawn at all.
+// Scrollbar computes the thumb geometry for a right-edge scrollbar in HALF
+// ROWS — the unit opencode's slider works in (two virtual cells per terminal
+// row, so a thumb that lands between two rows paints the upper or lower half
+// block instead of rounding the movement away). It returns the half-row span
+// [start,end) the thumb covers, measured from the first visible row; ok is
+// false when the whole transcript fits, so no bar is drawn at all.
 //
-// The thumb length is proportional to viewport/total (omp's ScrollView:
-// floor(vp*vp/total), never shorter than one row, never longer than the
-// track); its position tracks the current offset, thumb at the bottom means
-// following the tail and at the top means viewing the oldest row.
+// The thumb length is proportional to viewport/total, floored, never shorter
+// than one half row and never longer than the track (omp's ScrollView:
+// floor(vp*vp/total)); its position tracks the current offset, thumb at the
+// bottom means following the tail and at the top means the oldest row.
 func (m *scrollModel) Scrollbar(total, vp int) (start, end int, ok bool) {
 	vp = normVP(vp)
 	if total <= vp {
 		return 0, 0, false
 	}
-	thumb := vp * vp / total
+	// Half rows throughout: a terminal row is two of them, so the track is
+	// 2*vp tall and a thumb only one row long still has a row of travel to
+	// use — the resolution that makes a long transcript drag smoothly instead
+	// of jumping a whole row per move.
+	track := 2 * vp
+	thumb := 2 * vp * vp / total
 	if thumb < 1 {
 		thumb = 1
 	}
-	if thumb > vp {
-		thumb = vp
+	if thumb > track {
+		thumb = track
 	}
 	// offset counts rows above the tail: 0 = tail, maxOff = oldest row.
 	maxOff := total - vp
-	pos := vp - thumb // default: thumb pinned to the bottom (at the tail)
+	pos := track - thumb // default: thumb pinned to the bottom (at the tail)
 	if maxOff > 0 {
-		pos = (maxOff - m.offset) * (vp - thumb) / maxOff
+		pos = (maxOff - m.offset) * (track - thumb) / maxOff
 	}
 	if pos < 0 {
 		pos = 0
 	}
-	if pos > vp-thumb {
-		pos = vp - thumb
+	if pos > track-thumb {
+		pos = track - thumb
 	}
 	return pos, pos + thumb, true
+}
+
+// sbGlyph names the cell that paints one track row of a scrollbar whose thumb
+// covers the half-row span [from,to) of a 2*vp-tall track: a full block where
+// both halves are covered, the upper or lower half block where only one is, and
+// a space for the bare groove. opencode's slider draws the same three states
+// (█ ▀ ▄) over a filled track, which is what makes its bar move by halves
+// instead of rows.
+func sbGlyph(row, from, to int) rune {
+	if to <= from {
+		return ' ' // an empty span is the bare groove, never a half block
+	}
+	hi, lo := 2*row, 2*row+1 // this row's upper and lower half row
+	switch {
+	case to <= hi || from > lo:
+		return ' '
+	case from <= hi && to > lo:
+		return '█'
+	case from <= hi:
+		return '▀'
+	default:
+		return '▄'
+	}
 }

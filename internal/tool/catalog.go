@@ -285,6 +285,12 @@ func isBridgeTool(name string) bool {
 	return false
 }
 
+// IsBridgeTool reports whether name is one of the catalog bridge tools. A cell
+// that could call them would reach the registry twice over (the eval kernel
+// bridge and the deferred-tool bridge), so the kernel refuses them by name
+// rather than counting depth.
+func IsBridgeTool(name string) bool { return isBridgeTool(name) }
+
 // nestedArgs normalizes the nested call payload: models send either a JSON
 // object or a JSON-encoded string of one, and omit it entirely when the tool
 // takes no arguments.

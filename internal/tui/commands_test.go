@@ -13,11 +13,11 @@ import (
 
 // fakeAPI records CommandAPI calls for dispatch tests.
 type fakeAPI struct {
-	newed, freshed, cleared, dropped, quit int
-	blocks                                 []string
-	sent                                   []string
-	dir                                    string
-	fail                                   string // method name that returns an error
+	newed, freshed, cleared, dropped, quit, tabsOpened int
+	blocks                                             []string
+	sent                                               []string
+	dir                                                string
+	fail                                               string // method name that returns an error
 
 	extCalls []string
 	extErr   error
@@ -493,12 +493,13 @@ func TestHelpTextAligned(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "commands:") {
 		t.Fatalf("first line = %q", lines[0])
 	}
-	// Every entry line: two-space indent, command column padded to 12
-	// cells before the description (aligned list).
+	// Every entry line: two-space indent, command column padded to the widest
+	// name-plus-alias entry (now "/auto-answer, /autoanswer") before the
+	// description.
 	want := []string{
-		"  /new      start a new session",
-		"  /fresh    rotate provider state; keep this session",
-		"  /quit, /q quit xdev",
+		"  /new                      start a new session",
+		"  /fresh                    rotate provider state; keep this session",
+		"  /quit, /q                 quit xdev",
 	}
 	for _, w := range want {
 		if !strings.Contains(got, "\n"+w) {
@@ -588,8 +589,9 @@ func TestAppCommandHook(t *testing.T) {
 func (f *fakeAPI) OpenTreeSelector()               {}
 func (f *fakeAPI) BranchSession(args string) error { return nil }
 func (f *fakeAPI) HubRoster() error                { return nil }
-
-func (f *fakeAPI) KeyMap() *KeyMap { return DefaultKeyMap() }
+func (f *fakeAPI) Trajectory() error               { return nil }
+func (f *fakeAPI) Usage() error                    { f.blocks = append(f.blocks, "usage"); return nil }
+func (f *fakeAPI) KeyMap() *KeyMap                 { return DefaultKeyMap() }
 
 func (f *fakeAPI) RunExtensionCommand(name, args string) (string, error) {
 	f.extCalls = append(f.extCalls, name+" "+args)
@@ -610,8 +612,12 @@ func (f *fakeAPI) ShareSession() error {
 	return f.shareErr
 }
 func (f *fakeAPI) ResumeSession(query string) error { return nil }
+func (f *fakeAPI) TabsPicker() error                { f.tabsOpened++; return nil }
 
 func (f *fakeAPI) SettingsView(args string) error { return nil }
+func (f *fakeAPI) SettingsOverlay() error         { return nil }
+
+func (f *fakeAPI) Sidebar(args string) error { return nil }
 
 func (f *fakeAPI) ThinkingLevel(args string) error { return nil }
 
@@ -978,5 +984,17 @@ func TestConnectCommandUnwired(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	if err := app.Connect(""); err == nil {
 		t.Fatal("/connect with no catalog wired must error")
+	}
+}
+
+// TestDispatchTabs: /tabs reaches the App method, not just the registry —
+// a command table entry whose handler never runs is a dead row in /help.
+func TestDispatchTabs(t *testing.T) {
+	f := &fakeAPI{}
+	if !dispatch(f, "/tabs") {
+		t.Fatal("/tabs was not consumed")
+	}
+	if f.tabsOpened != 1 {
+		t.Fatalf("tabsOpened = %d, want 1", f.tabsOpened)
 	}
 }

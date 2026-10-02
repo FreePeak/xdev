@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -9,9 +10,19 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/mcpclient"
 	"github.com/FreePeak/xdev/internal/skills"
 	"github.com/FreePeak/xdev/internal/tool"
 )
+
+// mcpsSeam is the test hook for MCP config loading.
+// When set (in tests), mcpsCommand calls through it.
+var mcpsSeam func() (cfg *mcpclient.Config, err error)
+
+// probeSeam is the test hook for the reachability probe. When set (in
+// tests), mcpsCommand calls through it instead of mcpclient.ServerHealthProbe,
+// so a test can assert states without spinning up real servers.
+var probeSeam func(cfg *mcpclient.Config) ([]mcpclient.ServerStatus, error)
 
 // Command is one slash command: /Name, /Alias... — Fn runs at input-submit
 // time, before a user message is created, so dispatched commands never
@@ -51,6 +62,13 @@ type SessionOps struct {
 	// the new branch). The transcript is restored from the new leaf
 	// before the draft is returned. nil degrades to a notice.
 	NavigateTree func(entryID string, summarize bool) (draft string, err error)
+	// UserEntryID maps the i-th user prompt row of the live transcript to the
+	// store entry that holds it, or "" when the row has no backing entry (a
+	// harness turn, or a session that rewound under the caller). i is the
+	// ordinal the transcript was built with, so cmd and the TUI agree on which
+	// row is which by construction rather than by matching text. It backs the
+	// user-message menu's jump / revert / fork. nil degrades those to notices.
+	UserEntryID func(i int) string
 	// Handoff replaces the live context with a handoff document (M5 #23):
 	// the host generates the document through a side request, commits it as
 	// a compaction entry on this session, and returns the document text.
@@ -100,6 +118,15 @@ type SettingsOps struct {
 	// SetSidebar persists the context dock's display policy (#291 §1), the
 	// sidebarMode key in the same layer Alt+s writes.
 	SetSidebar func(mode string) error
+	// SetMermaid persists the mermaid rendering flag (the renderMermaid key
+	// in the same layer the settings panel writes). Display only: the source
+	// text is untouched, and a diagram the renderer cannot draw falls back to
+	// the code band.
+	SetMermaid func(on bool) error
+	// SetExitDetach persists tui.exitDetach: when true (default), quitting
+	// the TUI with a turn in flight detaches it as a background job instead
+	// of killing it (opencode parity).
+	SetExitDetach func(on bool) error
 }
 
 // PlanOps wires the /plan command to the live plan-mode state (lives in
@@ -123,22 +150,22 @@ type PrewalkOps struct {
 }
 
 // GoalOps wires the /goal command to the live goal state (lives in cmd).
-// View renders the current goal and budget. The verbs mirror the goal tool's
-// ops so an interactive session can drive a goal without asking the model to
-// do it; a nil verb is reported as unwired, never a silent no-op.
+// View renders the current goal and budget. Set points the session at a new
+// objective and starts working on it; a nil op is reported as unwired, never a
+// silent no-op.
 type GoalOps struct {
 	View     func() string
-	Create   func(objective string) (string, error)
-	Resume   func(objective string) (string, error)
-	Evidence func(note string) (string, error)
+	Set      func(objective string) (string, error)
+	Continue func(objective string) (string, error)
 	Complete func(notes []string) (string, error)
 	Drop     func() (string, error)
 }
 
-// Dispatch runs one /goal subcommand and returns the block to display. With
-// no argument (or any read verb) it shows the current goal; an unknown verb is
-// a usage error naming the grammar, because silently viewing made
-// `/goal create …` look like a dead command.
+// Dispatch runs /goal. The argument is the objective — "/goal ship the
+// exporter" sets it and starts the run; a bare /goal shows the current goal
+// and budget; `complete` and `drop` are the two words that close it. There
+// used to be a verb per op (`create`/`resume`/`evidence`), and that grammar
+// made the obvious spelling — "/goal <what I want>" — a usage error.
 func (o *GoalOps) Dispatch(args string) (string, error) {
 	if o == nil || o.View == nil {
 		return "", errors.New("goal not wired")
@@ -148,50 +175,53 @@ func (o *GoalOps) Dispatch(args string) (string, error) {
 	if i := strings.IndexFunc(trimmed, func(r rune) bool { return r == ' ' || r == '\t' }); i >= 0 {
 		verb, rest = trimmed[:i], strings.TrimSpace(trimmed[i+1:])
 	}
+	switch verb {
+	case "":
+		return o.View(), nil
 	// Read intent: every synonym for "show me the goal" routes to view. The
 	// command used to reject `check` / `show` outright while its help named no
 	// verb at all, so a user asking after the goal had only invented words to
 	// try (same class as `/theme list`).
-	switch verb {
-	case "", "view", "get", "status", "show", "check", "list", "info":
+	case "view", "get", "status", "show", "check", "list", "info":
 		return o.View(), nil
-	case "create":
-		if o.Create == nil {
-			return "", errors.New("goal create not wired")
-		}
+	// `create` stays accepted: it is the spelling the tool's own grammar and
+	// the docs use, and a user who read them should not hit a usage error.
+	case "create", "new", "set":
 		if rest == "" {
-			return "", errors.New("usage: /goal create <objective>")
+			return "", errors.New("usage: /goal <objective>")
 		}
-		return o.Create(rest)
-	case "resume":
-		if o.Resume == nil {
-			return "", errors.New("goal resume not wired")
+		return o.set(rest)
+	// `resume` carries an objective only when one follows it: a bare
+	// `/goal resume` re-activates the goal already in this session.
+	case "resume", "continue":
+		if o.Continue == nil {
+			return "", errors.New("goal not wired")
 		}
-		if rest == "" {
-			return "", errors.New("usage: /goal resume <objective>")
-		}
-		return o.Resume(rest)
-	case "evidence":
-		if o.Evidence == nil {
-			return "", errors.New("goal evidence not wired")
-		}
-		if rest == "" {
-			return "", errors.New("usage: /goal evidence <what was verified>")
-		}
-		return o.Evidence(rest)
+		return o.Continue(rest)
 	case "complete":
 		if o.Complete == nil {
-			return "", errors.New("goal complete not wired")
+			return "", errors.New("goal not wired")
 		}
 		return o.Complete(splitGoalNotes(rest))
 	case "drop":
 		if o.Drop == nil {
-			return "", errors.New("goal drop not wired")
+			return "", errors.New("goal not wired")
 		}
 		return o.Drop()
 	default:
-		return "", fmt.Errorf("unknown /goal verb %q (view | create <objective> | resume <objective> | evidence <note> | complete [notes] | drop)", verb)
+		// Anything else IS the objective: the target is the argument, so
+		// "/goal fix the goal error" starts a goal instead of erroring.
+		return o.set(trimmed)
 	}
+}
+
+// set routes an objective through the Set seam, reporting an unwired op the
+// same way every other verb does.
+func (o *GoalOps) set(objective string) (string, error) {
+	if o.Set == nil {
+		return "", errors.New("goal not wired")
+	}
+	return o.Set(objective)
 }
 
 // splitGoalNotes turns "a; b" or "a, b" into separate completion notes; a
@@ -313,6 +343,17 @@ type AdvisorOps struct {
 	Dump    func() string
 }
 
+// AutoAnswerOps wires /auto-answer: the ask card's answer policy
+// (ask.autoAnswer). Current reports the live policy, Set applies it to the
+// running session and persists it. nil ops degrade the command to a notice.
+type AutoAnswerOps struct {
+	Current func() bool
+	Set     func(on bool) error
+	// Path names the settings file a flip was saved to, for the confirmation
+	// line; empty means the session could not persist it.
+	Path string
+}
+
 // CollabOps wires /collab and /join to the live session sharing (the relay
 // lives in cmd). Start begins hosting and returns the join instructions
 // (mode.View publishes a view-only link, mode.Remote binds beyond loopback);
@@ -362,10 +403,22 @@ type CommandAPI interface {
 	ExportSession(path string) error
 	ShareSession() error
 	ResumeSession(query string) error
+	TabsPicker() error
 	SwitchModel(args string) error
 	PlanMode(args string) error
 	Vibe(args string) error
+	// Trajectory is /trajectory: the session's event ledger, opened as a
+	// modal list where a row's inspector shows the record's full body.
+	Trajectory() error
+	// Usage is /usage: the session's token, time and tool-call report, in
+	// the long form the status row has no width for (cache hit rate, an
+	// average TTFT, the tool-call count).
+	Usage() error
+	// AutoAnswer is /auto-answer [yes|no]: the ask card's answer policy,
+	// off by default (an unanswered question waits for the human).
+	AutoAnswer(args string) error
 	Goal(args string) error
+	Schedule(args string) error
 	Advisor(args string) error
 	Memory(args string) error
 	Theme(args string) error
@@ -377,6 +430,11 @@ type CommandAPI interface {
 	Handoff(args string) error
 	HubRoster() error
 	SettingsView(args string) error
+	// Sidebar is /sidebar [show|hide|auto]: the context dock's two-state
+	// toggle, the switch form of the Alt+S cycle.
+	Sidebar(args string) error
+	// SettingsOverlay opens the visual settings panel (grok-style overlay).
+	SettingsOverlay() error
 	// ThinkingLevel is /thinking [level]: bare reports, a level applies and
 	// persists the request-side reasoning level for the next turn.
 	ThinkingLevel(args string) error
@@ -418,10 +476,19 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.ShareSession() }},
 		{Name: "resume", Description: "resume a session by id prefix",
 			Fn: func(app CommandAPI, args string) error { return app.ResumeSession(args) }},
+		{Name: "tabs", Description: "show the open sessions and switch to one",
+			Fn: func(app CommandAPI, args string) error { return app.TabsPicker() }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
-		{Name: "settings", Description: "show settings; toggle showThinking on|off",
-			Fn: func(app CommandAPI, args string) error { return app.SettingsView(args) }},
+		{Name: "settings", Description: "show settings overlay, or toggle: /settings [overlay|showThinking on|off]",
+			Fn: func(app CommandAPI, args string) error {
+				if strings.TrimSpace(args) == "overlay" {
+					return app.SettingsOverlay()
+				}
+				return app.SettingsView(args)
+			}},
+		{Name: "sidebar", Aliases: []string{"dock"}, Description: "show or hide the sidebar: /sidebar [show|hide|auto] (bare toggles; alt+s cycles the policy)",
+			Fn: func(app CommandAPI, args string) error { return app.Sidebar(args) }},
 		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
 			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default: the session model)",
@@ -430,18 +497,26 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Handoff(args) }},
 		{Name: "theme", Description: "show or switch the theme: /theme <name>",
 			Fn: func(app CommandAPI, args string) error { return app.Theme(args) }},
+		{Name: "auto-answer", Aliases: []string{"autoanswer"}, Description: "ask card policy: /auto-answer yes|no (bare toggles; off = an unanswered question waits for you)",
+			Fn: func(app CommandAPI, args string) error { return app.AutoAnswer(args) }},
+		{Name: "usage", Description: "session token, time and tool-call report",
+			Fn: func(app CommandAPI, args string) error { return app.Usage() }},
 		{Name: "memory", Description: "long-term memory: /memory view|stats|clear, plus queue|sync|enqueue (mnemopi) and diagnose|enqueue (hindsight)",
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
-		{Name: "goal", Description: "session objective + token budget: /goal view|create <objective>|resume|evidence <note>|complete [notes]|drop",
+		{Name: "goal", Description: "session objective: /goal <objective> starts it (and resumes on the first turn); /goal shows it, /goal complete|drop closes it",
 			Fn: func(app CommandAPI, args string) error { return app.Goal(args) }},
+		{Name: "schedule", Description: "session-local reminders: /schedule [list|create <seconds|RFC3339> <prompt>|delete <id>]",
+			Fn: func(app CommandAPI, args string) error { return app.Schedule(args) }},
 		{Name: "vibe", Description: "director mode: read + todo + vibe_* worker tools (/vibe [prompt])",
 			Fn: func(app CommandAPI, args string) error { return app.Vibe(args) }},
 		{Name: "connect", Description: "connect a provider from the catalog: /connect [name]",
 			Fn: func(app CommandAPI, args string) error { return app.Connect(args) }},
+		{Name: "trajectory", Aliases: []string{"traj"}, Description: "session event ledger: one row per record, Enter for details",
+			Fn: func(app CommandAPI, args string) error { return app.Trajectory() }},
 		{Name: "hub", Description: "agent hub roster: live status, kill/revive, transcripts",
 			Fn: func(app CommandAPI, args string) error { return app.HubRoster() }},
 		{Name: "hotkeys", Description: "show keybinding map",
@@ -463,14 +538,100 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { app.AddSystemBlock(helpText(app)); return nil }},
 		{Name: "quit", Aliases: []string{"q"}, Description: "quit xdev",
 			Fn: func(app CommandAPI, args string) error { app.Quit(); return nil }},
+		{Name: "mcps", Description: "list configured MCP servers and their status",
+			Fn: func(app CommandAPI, args string) error { return mcpsCommand(app, args) }},
 	}
 }
 
+// mcpsCommand implements /mcps: list configured MCP servers
+// and their status (M6 #7). Absent config → "no MCP servers
+// configured"; errors from the loader surface as an error block.
+// Uses mcpsSeam when set (tests), otherwise mcpclient.LoadConfig.
+func mcpsCommand(app CommandAPI, args string) error {
+	var cfg *mcpclient.Config
+	var err error
+	if mcpsSeam != nil {
+		cfg, err = mcpsSeam()
+	} else {
+		cfg, err = mcpclient.LoadConfig(mcpConfigPath())
+	}
+	if err != nil {
+		return fmt.Errorf("mcp config: %v", err)
+	}
+	if len(cfg.Servers) == 0 {
+		app.AddSystemBlock("no MCP servers configured")
+		return nil
+	}
+	var statuses []mcpclient.ServerStatus
+	if probeSeam != nil {
+		statuses, err = probeSeam(cfg)
+	} else {
+		statuses, err = mcpclient.ServerHealthProbe(context.Background(), cfg)
+	}
+	if err != nil {
+		app.AddSystemBlock("mcp health probe: " + err.Error())
+	}
+	names := make([]string, 0, len(cfg.Servers))
+	for n := range cfg.Servers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("MCP servers:")
+	for _, n := range names {
+		sc := cfg.Servers[n]
+		state := "enabled"
+		if sc.Disabled {
+			state = "disabled"
+		}
+		if sc.Enabled != nil && !*sc.Enabled {
+			state = "disabled"
+		}
+		transport := "stdio"
+		if sc.URL != "" {
+			transport = "http"
+		}
+		// Overlay the live probe: a server that is enabled but
+		// unreachable shows "unreachable" so the user can tell a
+		// broken server from a disabled one.
+		for _, st := range statuses {
+			if st.Name == n && st.State != "disabled" && st.State != "enabled" {
+				state = st.State
+				break
+			}
+		}
+		fmt.Fprintf(&b, "\n  %s  %-11s  %s", n, state, transport)
+	}
+	app.AddSystemBlock(b.String())
+	return nil
+}
+
+// mcpConfigPath is <dataDir>/mcp.yml (absent = MCP off, PRD §2).
+func mcpConfigPath() string {
+	return filepath.Join(config.DataDir(), "mcp.yml")
+}
+
+// serverURL renders the URL for a server config, falling
+// back to the command when it is a stdio server.
+func serverURL(sc *mcpclient.ServerConfig) string {
+	if sc == nil {
+		return "(unknown)"
+	}
+	if sc.URL != "" {
+		return sc.URL
+	}
+	if sc.Command != "" {
+		return sc.Command
+	}
+	return "(no url/command)"
+}
+
 // Handoff implements CommandAPI: /handoff [instruction] hands the live
-// context off to a generated document (M5 #23). The document generation, the
-// compaction-entry commit, and the per-branch reset all live in cmd (the
-// store, the session model, and the advisor are wired there); this surfaces the
-// result — including the document itself, which is the point of the command.
+// context off to a generated document (M5 #23). The document generation,
+// the per-branch reset and the commit all live in cmd (the store,
+// the session model, and the advisor are wired there); this surfaces
+// the result — including the document itself, which is the point of the
+// command.
 func (a *App) Handoff(args string) error {
 	if a.ops == nil || a.ops.Handoff == nil {
 		return fmt.Errorf("handoff not wired")

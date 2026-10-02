@@ -7,8 +7,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -68,6 +70,253 @@ func (echoTool) Execute(_ context.Context, args json.RawMessage) (tool.Result, e
 		return tool.Result{}, err
 	}
 	return tool.Result{Text: a.Text, Details: map[string]any{"echoed": a.Text}}, nil
+}
+
+// scriptedHealthProvider controls the pre-turn liveness probe independently
+// from Stream so a test can keep the API down for several probes and then
+// let the same turn continue.
+type scriptedHealthProvider struct {
+	*fakeProvider
+	healthMu  sync.Mutex
+	health    []error
+	healthPos int
+}
+
+func (p *scriptedHealthProvider) HealthCheck(context.Context) error {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.healthPos >= len(p.health) {
+		return nil
+	}
+	err := p.health[p.healthPos]
+	p.healthPos++
+	return err
+}
+
+func (p *scriptedHealthProvider) healthCalls() int {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.healthPos
+}
+
+// TestInfiniteHealthCheckAnnouncesWait pins the visible-wait contract: each
+// health-check retry raises one AllTargetsDownError notice on the event stream,
+// with the provider failure as its cause.
+func TestInfiniteHealthCheckAnnouncesWait(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{
+			{events: []ai.Event{textEvent("ok"), doneEvent("ok")}},
+		}},
+		health: []error{errors.New("connection refused"), nil},
+	}
+	a, s, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	var mu sync.Mutex
+	var notices []error
+	a.Hooks = TurnHooksFunc{
+		OnEventF: func(ev ai.Event) {
+			if ev.Type == ai.EventError {
+				mu.Lock()
+				notices = append(notices, ev.Err)
+				mu.Unlock()
+			}
+		},
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a.Provider = p
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notices) != 1 {
+		t.Fatalf("health-check notices = %d, want 1", len(notices))
+	}
+	var down *AllTargetsDownError
+	if !errors.As(notices[0], &down) || down.Round != 1 || down.Delay <= 0 || down.LastErr == nil {
+		t.Fatalf("health-check notice = %v, want round/delay/provider failure", notices[0])
+	}
+}
+
+func TestInfiniteHealthCheckWaitsForProviderRecovery(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{
+			{events: []ai.Event{textEvent("back up"), doneEvent("back up")}},
+		}},
+		health: []error{
+			errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"),
+			errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"),
+			nil,
+		},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("health-check recovery must resume the turn: %v", err)
+	}
+	if final.Text() != "back up" {
+		t.Fatalf("final = %q, want recovered response", final.Text())
+	}
+	if got := p.healthCalls(); got != 3 {
+		t.Fatalf("health checks = %d, want 3 (two failures then success)", got)
+	}
+}
+
+func TestHealthCheckBoundedPolicyStillSurfaces(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{},
+		health: []error{
+			errors.New("connection refused"),
+			errors.New("connection refused"),
+			errors.New("connection refused"),
+		},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = oneShotRetry()
+
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("bounded health-check policy must surface the outage")
+	}
+	if !strings.Contains(err.Error(), "health check failed and all targets drained") {
+		t.Fatalf("error = %v, want health-check exhaustion", err)
+	}
+	if len(p.fakeProvider.gotReqs) != 0 {
+		t.Fatalf("stream calls = %d, want none while the provider is down", len(p.fakeProvider.gotReqs))
+	}
+}
+
+func TestHealthCheckEscalationIsSeparateFromStreamEscalation(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{
+			{err: errors.New("transient stream failure")},
+			{err: errors.New("transient stream failure")},
+			{events: []ai.Event{textEvent("ok"), doneEvent("ok")}},
+		}},
+		health: []error{
+			errors.New("connection refused"),
+			errors.New("connection refused"),
+			nil,
+		},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = oneShotRetry()
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("health retries must not consume stream escalation rounds: %v", err)
+	}
+	if final.Text() != "ok" {
+		t.Fatalf("final = %q, want recovered response", final.Text())
+	}
+}
+
+func TestInfiniteHealthCheckRetryIsCancellable(t *testing.T) {
+	p := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{},
+		health:       []error{errors.New("connection refused")},
+	}
+	a, _, _ := storeAgent(t, p.fakeProvider, CompactionConfig{})
+	a.Provider = p
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Hour, MaxDelay: time.Hour, Infinite: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Run(ctx, "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled health-check retry did not stop")
+	}
+}
+
+func TestHealthCheckRevertsPrimaryAfterFallbackCooldown(t *testing.T) {
+	primary := &scriptedHealthProvider{
+		fakeProvider: &fakeProvider{calls: []fakeScript{okScript("primary")}},
+		health:       []error{nil},
+	}
+	var a *Agent
+	fallback := &healthCheckFuncProvider{
+		fakeProvider: &fakeProvider{},
+		check: func(context.Context) error {
+			// Simulate the cooldown expiring while the fallback probe is in flight.
+			a.Fallback.revertAt = time.Now().Add(-time.Second)
+			return errors.New("connection refused")
+		},
+	}
+	reg := tool.NewRegistry()
+	reg.Register(echoTool{})
+	a = &Agent{
+		Provider:   fallback,
+		Model:      "dev",
+		Tools:      reg,
+		Compaction: CompactionConfig{ContextWindow: 64000},
+		Failovers:  []FailoverTarget{{Provider: fallback, Model: "dev"}},
+		Retry:      oneShotRetry(),
+		Fallback:   &FallbackState{Cooldown: time.Hour},
+	}
+	a.Fallback.primary, a.Fallback.primaryModel, a.Fallback.primaryWindow = primary, "free", 200000
+	a.curTarget = 1
+	a.Fallback.switched, a.Fallback.revertAt = true, time.Now().Add(time.Hour)
+	a.Fallback.cooldowns = map[string]time.Time{}
+
+	msg, err := a.Run(context.Background(), "sys", userHistory())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if msg.Text() != "primary" || a.curTarget != 0 {
+		t.Fatalf("final = %q, curTarget = %d; want the restored primary", msg.Text(), a.curTarget)
+	}
+}
+
+type healthCheckFuncProvider struct {
+	*fakeProvider
+	check func(context.Context) error
+}
+
+func (p *healthCheckFuncProvider) HealthCheck(ctx context.Context) error { return p.check(ctx) }
+
+type canceledHealthProvider struct {
+	*fakeProvider
+	cancel context.CancelFunc
+}
+
+func (p *canceledHealthProvider) HealthCheck(ctx context.Context) error {
+	p.cancel()
+	return ctx.Err()
+}
+
+func TestCanceledHealthCheckDoesNotFailOver(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	primary := &canceledHealthProvider{fakeProvider: &fakeProvider{}, cancel: cancel}
+	fallback := named("fallback", &fakeProvider{calls: []fakeScript{okScript("fallback")}})
+	a := &Agent{
+		Provider:  primary,
+		Model:     "m",
+		Failovers: []FailoverTarget{{Provider: fallback, Model: "m"}},
+		Retry:     RetryPolicy{MaxRetries: 1, BaseDelay: time.Hour, MaxDelay: time.Hour, Infinite: true},
+	}
+
+	_, err := a.Run(ctx, "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
+	}
+	if a.Provider != primary {
+		t.Fatal("cancelled health check must not switch provider")
+	}
 }
 
 func runAgent(t *testing.T, p *fakeProvider) (*Agent, *[]*ai.Message, *[]*ai.Message) {
@@ -202,6 +451,50 @@ func TestRunWrapsUpAtTurnLimit(t *testing.T) {
 	}
 }
 
+// TestRunWrapsUpAtPerTurnTokenBudget pins the per-turn cap (RCA #1):
+// a single turn crossing the per-turn token budget wraps up inline and
+// the session keeps going — the run does not end asking the user to
+// say "continue" (the session is not a turn).
+func TestRunWrapsUpAtPerTurnTokenBudget(t *testing.T) {
+	// First turn blows past the per-turn token cap (5M).
+	toolMsg := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ToolCallBlock{ID: "c", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}}
+	toolScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop,
+		&ai.Usage{TotalTokens: 6_000_000}, toolMsg)}}
+	// The inline wrap-up turn reports the status and the run keeps going.
+	wrapped := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "wrapped up"}}}
+	wrapScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, wrapped)}}
+	// A normal next turn returns normally.
+	doneScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil,
+		&ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+			Content: []ai.Block{ai.TextBlock{Text: "done"}}})}}
+	p := &fakeProvider{calls: []fakeScript{toolScript, wrapScript, doneScript}}
+	a, ends, _ := runAgent(t, p)
+	a.TurnTokenBudget = 5_000_000
+
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}}})
+	if err != nil {
+		t.Fatalf("per-turn budget must not fail the run, got %v", err)
+	}
+	if final.Text() != "done" {
+		t.Fatalf("final = %q, want \"done\" — per-turn budget wrapped up inline and run kept going", final.Text())
+	}
+	if n := len(p.gotReqs); n != 3 {
+		t.Fatalf("stream requests = %d, want 3 (turn + inline wrap-up + next turn)", n)
+	}
+	if len(*ends) != 2 {
+		t.Fatalf("message_end hooks = %d, want 2 (wrap-up + done; the turn that crossed the cap is dropped before OnMessageEnd, same as the old session-budget break)", len(*ends))
+	}
+	// The turn that crossed the cap got a wrap-up user message injected
+	// (the TurnBudgetPrompt), not a run-ending stop.
+	req := p.gotReqs[1]
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != ai.RoleUser || last.Text() != TurnBudgetPrompt {
+		t.Fatalf("wrap-up prompt missing from second request: %+v", last)
+	}
+}
+
 // TestEmptyTurnNudgeIsBounded pins #331: a turn with no text and no tool
 // call — the reasoning-only shape a thinking-mode upstream leaves behind —
 // must not end the run, and the nudge that keeps it alive is bounded per run
@@ -297,6 +590,110 @@ func TestEmptyTurnStallSurfacesAsAnError(t *testing.T) {
 	}
 }
 
+// TestEmptyTurnRetryAllErrors pins the retry-all-errors path: with
+// RetryAllErrors on, a model that answers nothing after the nudges
+// are spent keeps going — the loop rebuilds context, waits a
+// backoff, and re-runs until the model answers or the budget fires,
+// instead of surfacing ErrEmptyTurn.
+func TestEmptyTurnRetryAllErrors(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	answered := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "here is the answer"}}}
+	answerScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, answered)}}
+	// Two blank turns (the two nudges) + one recovery attempt that
+	// answers — the flag lifts the empty-turn bound.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, answerScript}}
+	a, _, _ := runAgent(t, p)
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryAllErrors: true}
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "here is the answer" {
+		t.Fatalf("final = %q, want %q", final.Text(), "here is the answer")
+	}
+	// Two blank turns (nudges) + one answer = 3 stream requests.
+	if n := len(p.gotReqs); n != 3 {
+		t.Fatalf("stream requests = %d, want 3", n)
+	}
+}
+
+// TestEmptyTurnRetryAllErrorsStillStalls pins the other side: with
+// RetryAllErrors on but no store to rebuild from, the flag has no
+// recovery path and the run still ends with an error — it burns
+// through the scripted blanks and surfaces "script exhausted"
+// rather than looping forever.
+func TestEmptyTurnRetryAllErrorsStillStalls(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	// 1 initial + 2 nudges = 3 blanks to drain the nudge budget,
+	// then the 4th call exhausts the script. With RetryAllErrors
+	// on and no store, the loop keeps going past the nudges but
+	// still ends — it does not loop forever.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, blankScript, blankScript}}
+	a, _, _ := runAgent(t, p)
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryAllErrors: true}
+	_, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err == nil {
+		t.Fatal("a stalled run with no store must surface an error, got nil")
+	}
+	if errors.Is(err, ErrEmptyTurn) {
+		t.Fatal("with RetryAllErrors on and no store, the run must not surface ErrEmptyTurn — it keeps going until the script exhausts")
+	}
+}
+
+// TestEmptyTurnRetryAllErrorsAnnouncesOnStream pins the freeze fix: with
+// RetryAllErrors on, each empty-turn recovery after the nudge budget is
+// spent raises EmptyTurnRetryError through OnEvent so the TUI/print
+// surfaces "still waiting" instead of looking hung.
+func TestEmptyTurnRetryAllErrorsAnnouncesOnStream(t *testing.T) {
+	blank := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.ThinkingBlock{Thinking: "(context elided)"}}}
+	blankScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, blank)}}
+	answered := &ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "recovered"}}}
+	answerScript := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, answered)}}
+	// 1 initial + 2 nudges drain the budget; 3rd blank triggers the
+	// RetryAllErrors recovery (and its announcement); 4th answers.
+	p := &fakeProvider{calls: []fakeScript{blankScript, blankScript, blankScript, answerScript}}
+	var announced []error
+	a, s, _ := storeAgent(t, p, CompactionConfig{})
+	a.Hooks = TurnHooksFunc{
+		OnEventF: func(ev ai.Event) {
+			if ev.Type != ai.EventError {
+				return
+			}
+			var empty *EmptyTurnRetryError
+			if errors.As(ev.Err, &empty) {
+				announced = append(announced, ev.Err)
+			}
+		},
+		OnMessageEndF:    func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+		OnToolResultMsgF: func(m *ai.Message) { _ = s.Append(&session.MessageEntry{Message: *m}) },
+	}
+	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryAllErrors: true}
+	final, err := a.Run(context.Background(), "sys", submitHistory(t, s, "hi"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Text() != "recovered" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(announced) < 1 {
+		t.Fatal("empty-turn recovery must announce on the event stream")
+	}
+	var empty *EmptyTurnRetryError
+	if !errors.As(announced[0], &empty) || empty.Round < 1 || empty.Delay <= 0 {
+		t.Fatalf("announcement = %v, want round/delay", announced[0])
+	}
+	if !strings.Contains(announced[0].Error(), "empty turn") {
+		t.Fatalf("announcement text = %q", announced[0])
+	}
+}
+
 // TestEmptyTurnNudgeDoesNotFireOnToolCalls guards the other side of #331:
 // a tool-call turn still runs the tools, and a turn that answers in prose
 // still ends the run — the nudge is for the blank turn alone.
@@ -325,17 +722,13 @@ func TestEmptyTurnNudgeDoesNotFireOnToolCalls(t *testing.T) {
 }
 
 func TestEffectiveMaxTurns(t *testing.T) {
-	if DefaultMaxTurns < 100 {
-		t.Fatalf("DefaultMaxTurns = %d, long tasks would be killed", DefaultMaxTurns)
-	}
 	tests := []struct {
 		name string
 		set  int
 		want int
 	}{
-		{"zero means default", 0, DefaultMaxTurns},
+		{"unbounded by default", 0, 0},
 		{"explicit wins", 5, 5},
-		{"negative means default", -1, DefaultMaxTurns},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -374,7 +767,14 @@ func TestRunRunawayToolLoopTerminates(t *testing.T) {
 }
 
 func TestRunStreamError(t *testing.T) {
-	p := &fakeProvider{calls: []fakeScript{{err: errors.New("boom")}}}
+	// Unknown stream-start errors are retried from the current context
+	// (bounded by escalation). Script enough failures to drain the bound
+	// so the original provider error still surfaces.
+	p := &fakeProvider{calls: []fakeScript{
+		{err: errors.New("boom")},
+		{err: errors.New("boom")},
+		{err: errors.New("boom")},
+	}}
 	a, _, _ := runAgent(t, p)
 	_, err := a.Run(context.Background(), "sys", nil)
 	if err == nil || !strings.Contains(err.Error(), "boom") {

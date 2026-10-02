@@ -27,7 +27,18 @@ func TestClassify(t *testing.T) {
 		{"nil", nil, ClassUnknown},
 		{"401 auth", &HTTPError{API: "a", Status: 401, Body: "invalid api key"}, ClassAuthFailed},
 		{"403 auth", &HTTPError{API: "a", Status: 403, Body: "forbidden"}, ClassAuthFailed},
-		{"429 rate limit", &HTTPError{API: "a", Status: 429, Body: "rate limited"}, ClassTransient},
+		// Gateway 403 wrapping a non-JSON upstream body — retry, not auth-fail.
+		{"403 upstream JSON error", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `{"error":{"code":"server_error","message":"Upstream response was not valid JSON","type":"server_error"}}`}, ClassTransient},
+		{"403 upstream plain text", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `Upstream response was not valid JSON`}, ClassTransient},
+		{"403 auth json", &HTTPError{API: "a", Status: 403,
+			Body: `{"error":{"code":"access_denied","message":"Forbidden","type":"auth_error"}}`}, ClassAuthFailed},
+		// A 403 the gateway wraps when the UPSTREAM served an invalid
+		// response — the upstream hiccupped, not xdev's request, so the
+		// same turn retried may succeed.
+		{"403 upstream server_error", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `{"error":{"message":"Error from provider (openai): Upstream request failed: [server_error] Upstream response was not valid JSON","type":"server_error"}}`}, ClassTransient},
 		{"500 server", &HTTPError{API: "a", Status: 500, Body: "boom"}, ClassTransient},
 		{"408 timeout", &HTTPError{API: "a", Status: 408, Body: "slow"}, ClassTransient},
 		{"400 overflow body", &HTTPError{API: "a", Status: 400, Body: "This model's maximum context length is 128000 tokens"}, ClassContextOverflow},
@@ -43,6 +54,19 @@ func TestClassify(t *testing.T) {
 			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` + "`input[185]` missing required field `output`"}, ClassTransient},
 		{"400 invalid_request_error without a field", &HTTPError{API: "a", Status: 400,
 			Body: `{"error":{"type":"invalid_request_error"}}`}, ClassBadRequest},
+		// The reported 400 (2026-10-01): onegw/OpenCode wrapped an upstream
+		// verdict in its own 400 shape, naming no provider. Nothing in the
+		// body a rebuild could fix, but the same turn served seconds later
+		// succeeds — so it must classify transient and take the full ladder
+		// (backoff in place → failover → escalation rounds), not stop after
+		// the two bounded escalation rounds of a ClassBadRequest.
+		{"400 upstream relay with no provider named", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Upstream request failed: [invalid_request_error] invalid request","type":"invalid_request_error"}}`}, ClassTransient},
+		// The guard the other side of that change: a 400 that names no
+		// upstream at all is the gateway rejecting the request's SHAPE, and
+		// replaying it can only replay the same rejection.
+		{"400 gateway shape rejection, no upstream named", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"invalid request","type":"invalid_request_error"}}`}, ClassBadRequest},
 		// A 404 is a dead route unless the body is a gateway relaying an
 		// upstream verdict about the MODEL. Live 2026-09-18: `onegw/xdev`
 		// left its upstream's catalog and every turn ended on
@@ -65,6 +89,14 @@ func TestClassify(t *testing.T) {
 		{"400 tool name too long", &HTTPError{API: "openai-completions", Status: 400,
 			Body: `{"error":{"code":"400","message":"Error","type":"invalid_request_error"}} ` +
 				"`name` must be at most 64 characters, got 73"}, ClassTransient},
+		// A 400 the gateway relays when the UPSTREAM refused the request
+		// ("Error from provider (Console Go): Upstream request could not
+		// be processed") — the same turn served seconds later succeeds,
+		// so the ladder must retry instead of ending the run.
+		{"400 upstream refusal relayed by gateway", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Error from provider (Console Go): Upstream request could not be processed","type":"invalid_request_error"}}`}, ClassTransient},
+		{"400 upstream refusal (other provider)", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"message":"Error from provider (openai): Upstream request failed: Endpoint is unavailable.","type":"invalid_request_error"}}`}, ClassTransient},
 		{"302 unknown", &HTTPError{API: "a", Status: 302, Body: "redir"}, ClassUnknown},
 		{"transport overflow text", errors.New("agent: stream: prompt exceeds the context window of 1000000"), ClassContextOverflow},
 		{"connection reset", errors.New("a: Post \"http://x\": read tcp: connection reset by peer"), ClassTransient},

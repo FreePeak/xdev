@@ -46,18 +46,23 @@ func lastRow(text string) string {
 }
 
 // TestHUDDefaultKeepsTokenCounter pins the shipped layout: with no
-// statusLine.segments the HUD renders the active-work timer, the token
-// counters and the context total, right aligned, and nothing else. The context
-// segment rides on the model window, so the case that shows no ctx is the one
-// where the window is still unknown.
+// statusLine.segments the HUD renders the two dsh pills — the work timer and
+// the session token total — right aligned, and nothing else. The token
+// reading is the PILL (dsh's UsagePill: total, with the cache hit rate
+// beside it once anything was actually served from the cache), not the old
+// ↑⇢↓ split: that is one click away, and one settings entry (`split`) away
+// for a session that wants it inline.
 func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(1200, 340, 1540)
+	app.AddUsage(1200, 340, 0, 0, 1540)
 	app.draw()
 
 	text := screenText(scr)
-	if !strings.Contains(text, "↑1.2k │ ↓340") {
-		t.Fatalf("token counter missing:\n%s", text)
+	if !strings.Contains(text, "1.5k") {
+		t.Fatalf("token pill missing:\n%s", text)
+	}
+	if strings.Contains(text, "↑") || strings.Contains(text, "↓") {
+		t.Fatalf("the default row must be the pill, not the glyph split:\n%s", text)
 	}
 	if !strings.Contains(text, "0s") {
 		t.Fatalf("the work timer must read 0s on a session that never ran:\n%s", text)
@@ -69,13 +74,12 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 		t.Fatalf("unconfigured segments must not render:\n%s", text)
 	}
 
-	// The window is the only thing that was missing: with it known, the
-	// default row shows the session's context against it — no settings,
-	// no statusLine.segments.
+	// The context meter is a popup row now, not a segment: the row stays
+	// two pills wide whatever the window turns out to be.
 	app.SetContextWindow(200000)
 	app.draw()
-	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 1.5k/200k") {
-		t.Fatalf("default layout missing the context total: %q", row)
+	if row := lastRow(screenText(scr)); strings.Contains(row, "ctx ") {
+		t.Fatalf("the context meter left the row: %q", row)
 	}
 }
 
@@ -83,11 +87,13 @@ func TestHUDDefaultKeepsTokenCounter(t *testing.T) {
 // of prompt and answered with 362 tokens, so the whole request costs 101.8k
 // even though only 8272 input tokens were billed at the full rate. The ctx
 // number is the provider's request total — an input+output sum of 8.6k read 90%
-// low, the bug this segment had. The ↑/↓ counters keep tracking billed
-// input+output, which is what the session paid for, not what it occupies.
+// low, the bug this segment had. Both readings are opt-in segments now (the
+// default row is the two dsh pills), so the case configures them by name; the
+// numbers they compute are what the token pill's popup breaks out.
 func TestHUDContextCountsCachedInput(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(8272, 362, 101818)
+	app.SetStatusSegments([]string{"context", "split"})
+	app.AddUsage(101818-93546, 362, 93546, 118, 101818)
 	app.SetContextWindow(200000)
 	app.draw()
 
@@ -98,8 +104,8 @@ func TestHUDContextCountsCachedInput(t *testing.T) {
 	if strings.Contains(row, "ctx 8.6k") {
 		t.Fatalf("the context total must not be the uncached input+output sum: %q", row)
 	}
-	if !strings.Contains(row, "↑8.3k │ ↓362") {
-		t.Fatalf("token counters must keep counting billed input+output: %q", row)
+	if !strings.Contains(row, "↑8.3k ⇢93.5k │ ↓362 ˟118") {
+		t.Fatalf("the counters must show the whole billed split, not input+output alone: %q", row)
 	}
 }
 
@@ -110,7 +116,8 @@ func TestHUDContextCountsCachedInput(t *testing.T) {
 // with the agent's own context count.
 func TestHUDContextTracksTheSession(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(50000, 50000, 100000)
+	app.SetStatusSegments([]string{"context"})
+	app.AddUsage(50000, 50000, 0, 0, 100000)
 	app.SetContextWindow(200000)
 	app.draw()
 	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 100k/200k") {
@@ -133,7 +140,7 @@ func TestHUDContextTracksTheSession(t *testing.T) {
 	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 40k/200k") {
 		t.Fatalf("replayed history must report its context: %q", row)
 	}
-	app.AddUsage(30000, 30000, 60000)
+	app.AddUsage(30000, 30000, 0, 0, 60000)
 	app.SetContextReplay(40000)
 	app.draw()
 	if row := lastRow(screenText(scr)); !strings.Contains(row, "ctx 60k/200k") {
@@ -148,10 +155,10 @@ func TestHUDContextTracksTheSession(t *testing.T) {
 // TestStatusRowShowsPathAndMetrics).
 func TestHUDConfiguredSegments(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
-	app.AddUsage(50000, 50000, 100000)
+	app.AddUsage(50000, 50000, 0, 0, 100000)
 	app.AddCost(0.0123)
 	app.SetContextWindow(200000)
-	app.SetStatusSegments([]string{"theme", "model", "context", "tokens", "cost"})
+	app.SetStatusSegments([]string{"theme", "model", "context", "split", "cost"})
 	app.draw()
 
 	text := screenText(scr)
@@ -174,7 +181,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	// The meter reads the LAST request, not the session total: a second turn
 	// costing 2k re-bases it to 2k/200k, while the cumulative token counters
 	// keep counting up.
-	app.AddUsage(1500, 500, 2000)
+	app.AddUsage(1500, 500, 0, 0, 2000)
 	app.draw()
 	row = lastRow(screenText(scr))
 	if !strings.Contains(row, "ctx 2k/200k") {
@@ -214,14 +221,14 @@ func TestHUDConfiguredSegments(t *testing.T) {
 // agent is idle or parked on a question card.
 func TestHUDTimeSegment(t *testing.T) {
 	app, scr := drawnApp(t, 200, 24)
-	app.SetStatusSegments([]string{"time", "tokens"})
-	app.AddUsage(1200, 340, 1540)
+	app.SetStatusSegments([]string{"time", "split"})
+	app.AddUsage(1200, 340, 0, 0, 1540)
 
 	// Fresh app, nothing has run: the honest reading is 0s, not a clock
 	// inherited from process start. "0s" is a reading, so it renders.
 	app.draw()
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "0s │ ↑1.2k │ ↓340") {
+	if !strings.Contains(row, "0s │ ▤↑1.2k │ ↓340") {
 		t.Fatalf("zero work must render beside the tokens: %q", row)
 	}
 
@@ -298,7 +305,7 @@ func statusCell(scr tcell.SimulationScreen, x int) tcell.SimCell {
 // row, and that a theme leaving it at the terminal default does not.
 func TestHUDStatusLineBackground(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
-	app.AddUsage(10, 20, 30)
+	app.AddUsage(10, 20, 0, 0, 30)
 	app.draw()
 	if _, bg, _ := statusCell(scr, 96).Style.Decompose(); bg != tcell.ColorDefault {
 		t.Fatalf("default theme must leave the status row transparent, got %v", bg)
@@ -355,7 +362,7 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	seededStatusRow := func(t *testing.T, w int) string {
 		app, scr := drawnApp(t, w, 20)
 		app.AddSystemBlock("ready")
-		app.AddUsage(50000, 50000, 100000)
+		app.AddUsage(50000, 50000, 0, 0, 100000)
 		app.SetWork(2*time.Hour + 5*time.Minute)
 		app.SetLocation(deep)
 		app.mu.Lock()
@@ -366,7 +373,7 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	}
 
 	wide := seededStatusRow(t, 160)
-	for _, want := range []string{deep, "2h05m", "↑50k │ ↓50k", "42.5 t/s"} {
+	for _, want := range []string{deep, "2h05m", "100k", "42.5 t/s"} {
 		if !strings.Contains(wide, want) {
 			t.Fatalf("wide row missing %q: %q", want, wide)
 		}
@@ -376,51 +383,23 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	if !strings.Contains(narrow, "2h05m") || !strings.Contains(narrow, "42.5 t/s") {
 		t.Fatalf("rate and total time must share a narrow row, got %q", narrow)
 	}
-	if strings.Contains(narrow, "↑50k") {
-		t.Fatalf("the token counter must drop before the metrics do: %q", narrow)
+	// Both pills are the headline now, so a narrow row gives way on the PATH
+	// rather than on a pill: the drop loop sheds theme, model and the
+	// opt-in refinements first (see statusKeepRank).
+	if !strings.Contains(narrow, "100k") {
+		t.Fatalf("both pills must survive a narrow row: %q", narrow)
 	}
-	// A path too long for the row keeps the components that
-	// identify the project and marks the cut — "…/freepeak/checkout/xdev-feature"
-	// — instead of clipping at the screen edge. The whole deep
-	// path is still what the metrics give way to, so it appears
-	// wider than the row it is reported from.
-	//
-	// deliberate simplification: the path is truncated from the
-	// LEFT when it does not fit the row at all. The wide row (160
-	// columns) keeps the full path because it fits; no truncation
-	// there. The upgrade path, if the absolute directory ever matters
-	// more than the metrics on a 60-column terminal, is truncation
-	// on the OTHER side (keep all components, cut cells off the left).
-	// deliberate simplification: the wide row shows the full path
-	// even at 160 columns because drawStatusRow reserves segments'
-	// space first and the deep path fits the leftover — a regression
-	// here is a path that disappears on a wide row, which the
-	// assertion catches.
-	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
+	// A path too long for the row keeps the components that identify the
+	// project and marks the cut with a leading ellipsis, instead of clipping
+	// at the screen edge. How many components survive is a function of what
+	// the row spent on the metrics — and the two pills are worth more cells
+	// than the old five-segment row, so the 60-column case keeps a shorter
+	// tail. What must not happen is the path disappearing.
+	if !strings.HasPrefix(strings.TrimSpace(narrow), "…/") {
 		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
 	}
-	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
-		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
-	}
-	// A path too long for the row keeps the components that
-	// identify the project and marks the cut — "…/freepeak/checkout/xdev-feature"
-	// — instead of clipping at the screen edge. The whole deep
-	// path is still what the metrics give way to, so it appears
-	// wider than the row it is reported from.
-	//
-	// deliberate simplification: the path is truncated from the
-	// LEFT when it does not fit the row at all. The wide row (160
-	// columns) keeps the full path because it fits; no truncation
-	// there. The upgrade path, if the absolute directory ever matters
-	// more than the metrics on a 60-column terminal, is truncation
-	// on the OTHER side (keep all components, cut cells off the left).
-	// deliberate simplification: the wide row shows the full path
-	// even at 160 columns because drawStatusRow reserves segments'
-	// space first and the deep path fits the leftover — a regression
-	// here is a path that disappears on a wide row, which the
-	// assertion catches.
-	if !strings.Contains(narrow, "…/freepeak/checkout/xdev-feature") {
-		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
+	if !strings.Contains(narrow, "xdev-feature") {
+		t.Fatalf("60-column row must keep the project name: %q", narrow)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if got := pathDisplay(home+"/work/proj", 40); got != "~/work/proj" {
@@ -434,8 +413,8 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 // the outline, and the ascii preset degenerates it to +-| (BRO-614).
 func TestBoxStyleFromTheme(t *testing.T) {
 	app, scr := drawnApp(t, 60, 20)
-	app.AddToolBlock("bash", `{"command":"echo hi"}`)
-	app.FinishTool("bash", false, "done", ToolOutcome{Dur: "1ms"})
+	app.AddToolBlock("", "bash", `{"command":"echo hi"}`)
+	app.FinishTool("", "bash", false, "done", ToolOutcome{Dur: "1ms"})
 	app.draw()
 	if text := screenText(scr); !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
 		t.Fatalf("default round tool box missing:\n%s", text)
@@ -699,7 +678,10 @@ func TestAskCardDrawsQuestionAndOptions(t *testing.T) {
 	waitAsk(t, app, true)
 	app.draw()
 	text := screenText(scr)
-	for _, want := range []string{"storage backend", "sqlite", "postgres", "(recommended)", "1-9 quick pick", "Esc skip"} {
+	// opencode's shape: the mark and title on the header row, the ordinal + box
+	// on every option row, the free-text row under them, and the footer naming
+	// the keys in opencode's wording (lowercase key, then the verb).
+	for _, want := range []string{"◆ ask", "storage backend", "1. [ ] sqlite", "2. [ ] postgres", "3. [ ] mysql", "(recommended)", "4. Type your own answer", "5. Chat about this", "↑↓ select", "enter confirm", "esc skip"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q:\n%s", want, text)
 		}
@@ -720,6 +702,148 @@ func TestAskCardDrawsQuestionAndOptions(t *testing.T) {
 	}
 	if app.AskPending() {
 		t.Fatal("card must close after Esc")
+	}
+}
+
+// TestAskCardIsTheMainPaneNotAFullWidthOverlay: "the ask box has the 100%
+// width overlay to the sidebar". The card is a surface of the main pane in
+// opencode's shape, and three things say so at once: it ends at the pane's
+// right edge instead of the terminal's, it carries one ┃ rail down its left
+// edge rather than a ╭─╮ box, and that rail wears the human's accent, not the
+// dim border slot the framed transcript blocks wear. The box frame is the
+// defect: a thinking block and a tool result are exactly that shape, so a
+// boxed card read as one more of them as well as covering the panel.
+func TestAskCardIsTheMainPaneNotAFullWidthOverlay(t *testing.T) {
+	app, scr := drawnApp(t, 100, 30)
+	app.SetDockMode(DockShow)
+	app.SetDockOps(DockOps{Session: func() (string, string) { return "pane", "sess1234" }})
+	app.AddUserBlock("a prompt so the panel is on screen")
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.AskCard(context.Background(), askOptions(), 5*time.Second)
+		close(done)
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+	rows := strings.Split(screenText(scr), "\n")
+	box := app.th.Box()
+	app.mu.Lock()
+	edge := app.rightEdge()
+	app.mu.Unlock()
+	if edge >= 100 {
+		t.Fatalf("the panel is not reserving columns (rightEdge=%d), nothing to prove", edge)
+	}
+	// The rail: one ┃ on the pane's gutter column, on every row the card
+	// paints, in the human's accent. Its first row is the header — the ◆ mark
+	// and the title — and its last is the key footer.
+	top := -1
+	for y, ln := range rows {
+		if strings.Contains(ln, "◆ ask") {
+			top = y
+			break
+		}
+	}
+	if top < 0 {
+		t.Fatalf("the card is not on screen:\n%s", screenText(scr))
+	}
+	accent := app.cellColor(app.th.Get(theme.AccentUser))
+	bottom := top
+	for y := top; y < len(rows); y++ {
+		got, _, st, _ := scr.GetContent(1, y)
+		if got != '┃' {
+			break
+		}
+		if fg, _, _ := st.Decompose(); fg != accent {
+			t.Fatalf("row %d rail is %v, want the human's accent %v", y, fg, accent)
+		}
+		// No frame anywhere in the card: a ╭ or ╰ in a row is the old box
+		// back, and the rail is the whole of the card's chrome.
+		if strings.ContainsAny(rows[y], box.TopLeft+box.TopRight+box.BottomLeft+box.BottomRight) {
+			t.Fatalf("row %d paints a box corner: %q", y, rows[y])
+		}
+		bottom = y
+	}
+	if bottom <= top {
+		t.Fatalf("the rail spans one row only (top=%d bottom=%d):\n%s", top, bottom, screenText(scr))
+	}
+	// And the card stops at the pane's edge: nothing it paints reaches the
+	// panel's columns, which is the whole of the report.
+	for y := top; y <= bottom; y++ {
+		for x := edge; x < 100; x++ {
+			if ch, _, _, _ := scr.GetContent(x, y); ch != ' ' {
+				t.Fatalf("the card painted %q at x=%d y=%d, inside the panel", string(ch), x, y)
+			}
+		}
+	}
+	pressKey(app, tcell.KeyEsc)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Esc must close the card")
+	}
+}
+
+// TestAskCardPaintsTheOpencodeLayout: the report this restyle answers is "make
+// the ask box look exactly like opencode's", so the card's own shape is pinned
+// here, on a live frame, one assertion per thing opencode's form does that the
+// card could drift on: the header's ◆ mark and title, the ordinal + checkbox on
+// every row, the free-text and chat rows under the options, the cursor's band
+// as a background (never a ❯ in the layout), and the footer in opencode's
+// "key + verb" wording. A regression in any of them fails here, and no other
+// test in the package reads these glyphs.
+func TestAskCardPaintsTheOpencodeLayout(t *testing.T) {
+	app, scr := drawnApp(t, 90, 26)
+	req := askOptions()
+	req.Multi = true
+	req.Recommended = []string{"postgres"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.AskCard(context.Background(), req, 5*time.Second)
+		close(done)
+	}()
+	waitAsk(t, app, true)
+	app.draw()
+	text := screenText(scr)
+	for _, want := range []string{
+		"◆ ask",                          // the header: mark, then title
+		"Which storage backend",          // the question, plain, no bullet
+		"1. [ ] sqlite",                  // ordinal + checkbox, then the label
+		"2. [✓] postgres  (recommended)", // a pre-toggled box on a multi card
+		"3. [ ] mysql",
+		"4. Type your own answer", // opencode's custom row, last option + 1
+		"5. Chat about this",      // xdev's prose escape, on the row after it
+		"↑↓ select   space toggle   enter done   1-9 pick", // the footer, in order
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the card is not opencode's shape, missing %q:\n%s", want, text)
+		}
+	}
+	// The cursor is a background band on the row, not a ❯ glyph: opencode's
+	// option box has no cursor column, and a card that grows one shifts every
+	// label a cell right of where opencode puts it.
+	if strings.Contains(text, "❯ 1. ") {
+		t.Fatalf("the rows carry a cursor column again:\n%s", text)
+	}
+	band := app.cellColor(app.th.Get(theme.BgHighlight))
+	// The band covers the row it marks: a cursor the card paints only behind the
+	// glyphs it happens to write stops mid-row and reads as a stray highlight.
+	cells := 0
+	for y := 0; y < app.height; y++ {
+		for x := 0; x < app.width; x++ {
+			_, _, st, _ := scr.GetContent(x, y)
+			if _, bg, _ := st.Decompose(); bg == band {
+				cells++
+			}
+		}
+	}
+	if cells < 20 {
+		t.Fatalf("the selected row has no band across the pane (%d cells):\n%s", cells, text)
+	}
+	pressKey(app, tcell.KeyEsc)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Esc must close the card")
 	}
 }
 
@@ -760,7 +884,7 @@ func TestAskCardWrapsLongOptionText(t *testing.T) {
 	for _, want := range []string{
 		"which nobody on the team currently owns or patches",
 		"rotate on the schedule the platform team agreed to",
-		"1-9 quick pick", // and the footer still fits beside them
+		"1-9 pick", // and the footer still fits beside them
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q:\n%s", want, text)
@@ -792,7 +916,11 @@ func TestAskCardWrapsLongOptionText(t *testing.T) {
 	}
 	col := width(row[:at])
 	for _, ln := range []string{cont, desc1, desc2} {
-		if ind := width(ln) - width(strings.TrimLeft(ln, " ")); ind != col {
+		// The rail is frame, not indentation, so a wrapped line's start is the
+		// first cell after it — trimming spaces alone would stop at the rail and
+		// measure the frame as content.
+		ind := width(ln) - width(strings.TrimLeft(ln, " ┃"))
+		if ind != col {
 			t.Fatalf("wrapped line %.40q starts at cell %d, want %d:\n%s", ln, ind, col, text)
 		}
 	}
@@ -877,7 +1005,7 @@ func TestAskCardNilSafe(t *testing.T) {
 // card with the timeout the host configured.
 func TestAskOpsSeam(t *testing.T) {
 	app, _ := drawnApp(t, 100, 30)
-	ops := app.NewAskOps(30 * time.Millisecond)
+	ops := app.NewAskOps(func() time.Duration { return 30 * time.Millisecond })
 	if ops == nil || ops.Show == nil {
 		t.Fatal("seam must carry Show")
 	}
@@ -898,6 +1026,58 @@ func TestAskOpsSeam(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("seam did not resolve")
+	}
+}
+
+// TestAskOpsSeamWithoutTimeout: with ask.autoAnswer off cmd hands the seam a
+// zero timeout, and the card must WAIT for the human — no timer resolves it
+// and answers for them. Only a pick or a canceled turn may end it.
+func TestAskOpsSeamWithoutTimeout(t *testing.T) {
+	app, _ := drawnApp(t, 100, 30)
+	ops := app.NewAskOps(func() time.Duration { return 0 })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct {
+		ans AskAnswer
+		ok  bool
+	}, 1)
+	go func() {
+		ans, ok := ops.Show(ctx, askOptions(), 0)
+		done <- struct {
+			ans AskAnswer
+			ok  bool
+		}{ans, ok}
+	}()
+	waitAsk(t, app, true)
+	pressRune(app, '2')
+	select {
+	case got := <-done:
+		if !got.ok || len(got.ans.Labels) != 1 || got.ans.Labels[0] != "postgres" {
+			t.Fatalf("waiting card answer = %+v ok=%v", got.ans, got.ok)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a zero-timeout card must still resolve on a pick")
+	}
+
+	// Left alone it must not resolve on its own.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	pending := make(chan struct{}, 1)
+	go func() {
+		ops.Show(ctx2, askOptions(), 0)
+		pending <- struct{}{}
+	}()
+	waitAsk(t, app, true)
+	select {
+	case <-pending:
+		t.Fatal("a card with no timeout must not answer by itself")
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel2()
+	select {
+	case <-pending:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a canceled turn must release the waiting card")
 	}
 }
 
@@ -1011,9 +1191,11 @@ func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
 	}
 	// The transcript starts below the bar: the bar is chrome, content rows
 	// belong to the scrollback — and at the tail of a 60-row block the bar
-	// still names the last prompt.
-	if !strings.Contains(rows[1], "line") {
-		t.Fatalf("first transcript row lost to the top bar: %q", rows[1])
+	// still names the last prompt. A row the sticky header pinned sits above
+	// the scrollback, so the check looks at the first CONTENT row.
+	body := strings.Join(rows[1:], "\n")
+	if !strings.Contains(body, "line") {
+		t.Fatalf("transcript content lost to the top bar: %q", rows[1])
 	}
 }
 

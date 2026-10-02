@@ -79,6 +79,12 @@ type TaskTool struct {
 	// model, an explicit value is a model reference. Additive: nil leaves
 	// the spawn path exactly as it was.
 	ChildAdvisor func() *Advisor
+	// OnEvent receives every foreground child's progress (start, one per
+	// tool call, end), so a host can show a user what the children are
+	// doing while the call blocks. Set by the TUI (cmd/xdev/tui.go);
+	// nil in print/rpc/acp leaves the path exactly as it was. Display
+	// only: the parent's context is unaffected.
+	OnEvent func(SubagentEvent)
 }
 
 // TaskToolName is the tool name the model calls.
@@ -86,10 +92,25 @@ const TaskToolName = "task"
 
 func (t *TaskTool) Name() string { return TaskToolName }
 
+// Description is the task tool's whole behavioural contract. The capability
+// has been here since M11, but this text was a bare capability statement
+// ("spawn a subagent for one focused job"), so nothing told the model when a
+// fan-out was the cheaper path or when it was pure overhead — and the session
+// stores show serial delegation as the default. The constraints are the ones
+// that measurably change behaviour: a cheap job handed to a subagent costs a
+// full model round trip to say nothing, and a batch left implicit is a batch
+// that never gets sent.
 func (t *TaskTool) Description() string {
 	desc := "spawn a subagent for one focused job (search, batch edits, a self-contained question); " +
 		"it runs with a restricted tool set in its own session and returns only its final result — " +
-		"its transcript never enters this conversation"
+		"its transcript never enters this conversation.\n\n" +
+		"Reach for it when the answer means reading a lot of code, or when independent slices can " +
+		"run at once. Skip it for a single file read, a quick lookup, or a command you could just " +
+		"run — handing those off costs more than doing them. Do not use one subagent to check on " +
+		"another.\n\n" +
+		"Send independent jobs as one batch (context + tasks[]); they run concurrently, up to 8. " +
+		"State in each prompt exactly what the result must contain, because that result is all you " +
+		"get. A child that reaches max_turns returns whatever it has, so scope a job to what fits."
 	if agents := t.advertiseAgents(); agents != "" {
 		// #272: while nothing named the legal values, guessing an agent was
 		// the expected outcome — so the whole feature read as broken.
@@ -170,19 +191,42 @@ func agentsFingerprint(cwd string) string {
 	return b.String()
 }
 
+// Parameters advertises both call shapes. The batch shape ({context, tasks[]})
+// has been parsed since parity finding T3 #1 but was absent from this schema,
+// so a model reading the tool contract could not see it and the concurrency the
+// engine implements was unreachable from the model's side. `required` is
+// deliberately absent: one spawn needs prompt, a batch needs tasks, and Execute
+// picks between them. Pinning required:["prompt"] also made the batch shape
+// unsendable on providers that validate strictly.
 func (t *TaskTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
     "agent": {"type": "string", "description": "named agent type to dispatch; the available definitions and their descriptions are listed at the end of this tool description (omit for the default shape)"},
-    "prompt": {"type": "string", "description": "the task, self-contained: state the goal, the files/paths involved, and the expected result"},
+    "prompt": {"type": "string", "description": "the task, self-contained: state the goal, the files/paths involved, and the expected result. Use this for one job, or tasks[] for independent jobs that can run at once."},
+    "context": {"type": "string", "description": "batch only: shared framing prepended to every item in tasks[]"},
+    "tasks": {
+      "type": "array",
+      "description": "batch of independent jobs, run concurrently (max 8). Use instead of prompt when the jobs do not depend on each other.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task": {"type": "string", "description": "this item's assignment, self-contained (alias: prompt)"},
+          "agent": {"type": "string", "description": "named agent type for this item"},
+          "name": {"type": "string", "description": "short label for this item's child session"},
+          "schema": {"type": "object", "description": "JSON Schema this item's result must satisfy"},
+          "strict": {"type": "boolean", "description": "grant this item one correction turn on schema mismatch"},
+          "max_turns": {"type": "integer", "description": "turn cap for this item's child"}
+        },
+        "required": ["task"]
+      }
+    },
     "name": {"type": "string", "description": "short label for the child session (optional)"},
     "schema": {"type": "object", "description": "JSON Schema the result must satisfy (optional)"},
     "strict": {"type": "boolean", "description": "with schema: grant the child one correction turn on mismatch (default false = accept with a note)"},
     "max_turns": {"type": "integer", "description": "turn cap for the child (default 30)"},
     "background": {"type": "boolean", "description": "start the child in the background and return a job id immediately (default false = wait for the result)"}
-  },
-  "required": ["prompt"]
+  }
 }`)
 }
 
@@ -191,6 +235,16 @@ func (t *TaskTool) Parameters() json.RawMessage {
 // RSS) is what an unbounded batch would actually break.
 const maxBatchParallel = 8
 
+// maxBatchItems bounds the SIZE of one batch, where maxBatchParallel bounds
+// how many of its items run at once. Both are needed: the semaphore alone
+// admits a batch of any length, and a length unbounded batch is the one
+// fan-out that can break the process rather than merely slow it down.
+//
+// ponytail: a fixed ceiling rather than a per-model token/cost budget. It
+// bounds the worst case, not the spend. Upgrade path if it shows up: refuse
+// on the batch's own `max_turns` sum instead of a constant.
+const maxBatchItems = 32
+
 // executeBatch runs omp's `{context, tasks[]}` shape. Each item is dispatched
 // through the single-spawn path (so agent resolution, the spawn policy, the
 // depth guard and the child advisor are identical between the two shapes) and
@@ -198,6 +252,16 @@ const maxBatchParallel = 8
 func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, error) {
 	if t.Provider == nil {
 		return tool.Result{Text: "task: no provider configured for subagents", IsError: true}, nil
+	}
+	// The semaphore below bounds how many run at once, not how many the model
+	// asked for: a 200-item batch spawns 200 child loops that each hold a
+	// session, a provider stream and their share of the <100 MB RSS budget,
+	// then hands the parent 200 results to read. maxBatchItems refuses the
+	// oversize request instead, naming the fix — split it and run the halves.
+	if n := len(a.Tasks); n > maxBatchItems {
+		return tool.Result{Text: fmt.Sprintf(
+			"task: batch of %d exceeds the %d-item limit (up to %d run at once) — send it as separate batches",
+			n, maxBatchItems, maxBatchParallel), IsError: true}, nil
 	}
 	type slot struct {
 		text string
@@ -222,7 +286,12 @@ func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, e
 			prompt = a.Context + "\n\n" + prompt
 		}
 		sub, err := json.Marshal(taskArgs{
-			Prompt: prompt, Agent: item.Agent, Name: item.Name,
+			Prompt: prompt, Agent: item.Agent,
+			// A batch item with no `name` is still a child a user is
+			// watching, so it is labelled the way its own report
+			// section already is (`batchItemLabel`) instead of
+			// arriving nameless.
+			Name:   childLabel(item.Name, item.Agent, i),
 			Schema: item.Schema, Strict: item.Strict, MaxTurns: item.MaxTurns,
 			Background: a.Background,
 		})
@@ -258,16 +327,23 @@ func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, e
 	return tool.Result{Text: head + "\n\n" + strings.TrimRight(sb.String(), "\n") + "\n"}, nil
 }
 
+// childLabel names one batch child — the label a user sees on its live row.
+// It is batchItemLabel without the report's `· ` bullet: the bullet belongs
+// to the report section, not to a child's name.
+func childLabel(name, agent string, i int) string {
+	switch {
+	case name != "":
+		return name
+	case agent != "":
+		return agent
+	default:
+		return fmt.Sprintf("task #%d", i+1)
+	}
+}
+
 // batchItemLabel names one batch section for the parent's report.
 func batchItemLabel(i int, item taskItem) string {
-	switch {
-	case item.Name != "":
-		return "· " + item.Name
-	case item.Agent != "":
-		return "· " + item.Agent
-	default:
-		return fmt.Sprintf("· task #%d", i+1)
-	}
+	return "· " + childLabel(item.Name, item.Agent, i)
 }
 
 // taskArgs is one spawn request. Tasks/Context carry omp's batch shape
@@ -458,6 +534,14 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		Policy:          t.Policy,
 		Approve:         t.Approve,
 		Thinking:        agentThinking,
+	}
+
+	// A foreground spawn is the one a user is watching: the TUI learns what
+	// the child is doing through this callback. The hub composes its own
+	// OnEvent additively (launchLocked, the way it does for OnRun), and
+	// neither is the parent's context — that still sees only the yield.
+	if t.OnEvent != nil {
+		spec.OnEvent = t.OnEvent
 	}
 
 	// task.agentAdvisor (M11 #39): give the child its own reviewer, wired

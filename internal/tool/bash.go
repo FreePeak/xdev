@@ -269,7 +269,10 @@ func (b *BashTool) Execute(ctx context.Context, args json.RawMessage) (Result, e
 		defer cancel()
 	}
 
-	res, execErr := runShell(ctx, runCtx, a.Command, workdir, childEnv, b.jobs(), timeout)
+	// A live observer on the call context rides along so the transcript can
+	// paint the command while it runs. It observes; it never changes what the
+	// sinks keep or what the model is shown.
+	res, execErr := runShell(ctx, runCtx, a.Command, workdir, childEnv, b.jobs(), timeout, OutputObserverOf(ctx))
 	if execErr != nil {
 		return Result{}, fmt.Errorf("bash: %w", execErr)
 	}
@@ -461,7 +464,11 @@ type runOutcome struct {
 // cancellation (agent stop, Ctrl+C) kills the process group; a runCtx
 // timeout does not — the live process is handed to the job registry with an
 // explicit notice, and its remaining output tees into a temp file.
-func runShell(abortCtx, runCtx context.Context, command, workdir string, env []string, jobs *BashJobs, timeout time.Duration) (runOutcome, error) {
+//
+// obs, when set, is notified with each chunk the pipes deliver (see
+// OutputObserver). It is called on the copier goroutines AFTER the sink write,
+// so a slow observer can only delay the transcript, never the child.
+func runShell(abortCtx, runCtx context.Context, command, workdir string, env []string, jobs *BashJobs, timeout time.Duration, obs OutputObserver) (runOutcome, error) {
 	start := time.Now()
 
 	name, argv := shellCommand(command)
@@ -492,6 +499,12 @@ func runShell(abortCtx, runCtx context.Context, command, workdir string, env []s
 	// into a file while the sinks hold what the model already got.
 	stdoutW := &switchWriter{w: stdoutSink}
 	stderrW := &switchWriter{w: stderrSink}
+	// The live observer is a tap on the same bytes the sinks window, and it
+	// is unswitchable: a run handed off to the registry keeps streaming, and
+	// the caller watching that call keeps watching it.
+	if obs != nil {
+		stdoutW.tap, stderrW.tap = obs, obs
+	}
 
 	// Watchdog: abort only. A timeout is not a kill anymore (see below).
 	watch := make(chan struct{})
@@ -610,7 +623,7 @@ func backgroundRun(jobs *BashJobs, cmd *exec.Cmd, stdoutW, stderrW *switchWriter
 		<-done
 		close(watch)
 		waitErr := cmd.Wait()
-		f.Close()
+		f.Close() // release the fd; the process has been reaped
 		code, killed := exitStatus(waitErr)
 		job.finish(code, killed)
 	}()
@@ -643,16 +656,24 @@ func joinShellText(outText, errText string) string {
 }
 
 // switchWriter forwards writes to a swappable target (sink → sink+file when
-// a timed-out run is backgrounded).
+// a timed-out run is backgrounded) and, when one is attached, taps the same
+// bytes for a live observer. The tap runs AFTER the write, under the lock:
+// the sink gets the bytes first, so a slow observer can only delay the
+// transcript, never the child whose pipe would otherwise back up.
 type switchWriter struct {
-	mu sync.Mutex
-	w  io.Writer
+	mu  sync.Mutex
+	w   io.Writer
+	tap OutputObserver
 }
 
 func (s *switchWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.w.Write(p)
+	n, err := s.w.Write(p)
+	if s.tap != nil {
+		s.tap.OnOutput(string(p))
+	}
+	return n, err
 }
 
 func (s *switchWriter) set(w io.Writer) {

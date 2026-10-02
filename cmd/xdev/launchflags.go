@@ -93,6 +93,11 @@ type launchFlags struct {
 	// plugin discovery.
 	Extensions []string
 	PluginDirs []string
+	// LogFile is --log: write a transcript of every TUI screen
+	// (paint frame as a text dump) to this path after each frame.
+	// Empty (default) keeps it off. Absolute paths are used as
+	// given; relative ones resolve under config.DataDir().
+	LogFile string
 }
 
 // absClean is filepath.Abs + Clean: the canonical form the workspace roots

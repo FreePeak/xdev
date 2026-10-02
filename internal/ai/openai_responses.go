@@ -342,14 +342,14 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 	closeText := func() {
 		if inText {
 			inText = false
-			msg.Content = append(msg.Content, TextBlock{Text: text.String()})
+			msg.Content = append(msg.Content, TextBlock{Text: CleanUTF8(text.String())})
 			emit(Event{Type: EventTextEnd})
 		}
 	}
 	closeThink := func() {
 		if inThink {
 			inThink = false
-			msg.Content = append(msg.Content, ThinkingBlock{Thinking: think.String(), ThinkingSignature: "reasoning_content"})
+			msg.Content = append(msg.Content, ThinkingBlock{Thinking: CleanUTF8(think.String()), ThinkingSignature: "reasoning_content"})
 			emit(Event{Type: EventThinkingEnd})
 		}
 	}
@@ -448,27 +448,35 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 		}
 		switch name {
 		case "response.output_text.delta":
+			delta := CleanUTF8(data.Delta)
+			if delta == "" {
+				continue
+			}
 			if !inText {
 				closeThink()
 				inText = true
 				emit(Event{Type: EventTextStart})
 			}
-			text.WriteString(data.Delta)
-			snap := data.Snapshot
+			text.WriteString(delta)
+			snap := CleanUTF8(data.Snapshot)
 			if snap == "" {
 				snap = text.String()
 			}
-			emit(Event{Type: EventTextDelta, Delta: data.Delta, Snapshot: snap})
+			emit(Event{Type: EventTextDelta, Delta: delta, Snapshot: snap})
 		case "response.output_text.done":
 			closeText()
 		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			delta := CleanUTF8(data.Delta)
+			if delta == "" {
+				continue
+			}
 			if !inThink {
 				closeText()
 				inThink = true
 				emit(Event{Type: EventThinkingStart})
 			}
-			think.WriteString(data.Delta)
-			emit(Event{Type: EventThinkingDelta, Delta: data.Delta})
+			think.WriteString(delta)
+			emit(Event{Type: EventThinkingDelta, Delta: delta})
 		case "response.reasoning_summary_text.done", "response.reasoning_text.done":
 			closeThink()
 		case "response.output_item.added":

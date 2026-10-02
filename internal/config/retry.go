@@ -60,6 +60,16 @@ type RetrySettings struct {
 	// FallbackCooldown is a Go duration ("5m") bounding how long a
 	// fallback stays active before the primary is restored.
 	FallbackCooldown string `yaml:"fallbackCooldown"`
+	// RetryAllErrors makes every error class — including
+	// empty turns (ErrEmptyTurn, "the model produced no answer")
+	// — retryable: Run rebuilds context from history and
+	// re-runs the ladder instead of ending the session, so a
+	// transient upstream stall never looks like a silent death
+	// (#331 follow-up: keep going until the goal is done).
+	// Off by default — an empty turn is usually the model being
+	// done, and retrying it forever burns tokens on a hard stop.
+	// -retry-all-errors forces it on for one run.
+	RetryAllErrors *bool `yaml:"retryAllErrors"`
 	// Infinite is "always retry": once the whole fallback chain has
 	// drained, the recovery ladder keeps re-running it instead of
 	// surfacing the error, so an outage (a gateway that answers
@@ -86,6 +96,18 @@ func (s *Settings) InfiniteRetry() bool {
 		return true
 	}
 	return *s.Retry.Infinite
+}
+
+// RetryAllErrors reports whether retry.retryAllErrors is on. It is
+// default-on: an empty turn is usually the model being done, and
+// retrying it forever burns tokens on a hard stop. An explicit
+// false bounds the ladder again (a one-way merge can never
+// express "I want the bounded ladder").
+func (s *Settings) RetryAllErrors() bool {
+	if s == nil || s.Retry.RetryAllErrors == nil {
+		return true
+	}
+	return *s.Retry.RetryAllErrors
 }
 
 // ReservePolicy returns the normalized retry.reserveThreshold value.
@@ -170,10 +192,13 @@ func (s *Settings) mergeRetry(layer *Settings) error {
 		}
 		s.Retry.FallbackCooldown = layer.Retry.FallbackCooldown
 	}
-	// One-way: a later layer may only turn "always retry" on,
-	// never off — the shipped default stays the bounded ladder.
+	// One-way: a later layer may only turn these on,
+	// never off — the shipped defaults stay the bounded ladder.
 	if layer.Retry.Infinite != nil && *layer.Retry.Infinite {
 		s.Retry.Infinite = layer.Retry.Infinite
+	}
+	if layer.Retry.RetryAllErrors != nil && *layer.Retry.RetryAllErrors {
+		s.Retry.RetryAllErrors = layer.Retry.RetryAllErrors
 	}
 	return validateRetryChains(s.Retry.FallbackChains)
 }

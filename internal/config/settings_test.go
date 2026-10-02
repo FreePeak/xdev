@@ -182,6 +182,48 @@ func TestSettingsShowThinking(t *testing.T) {
 	}
 }
 
+// renderMermaid is the same pointer-bool shape as showThinking and for the
+// same reason: the shipped default is ON, so only a *bool can carry a user's
+// explicit `false` through the zero-skip layer merge. Every assertion below
+// is one a plain bool would have failed.
+
+func TestRenderMermaidDefaultsOnAndHonoursExplicitFalse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.RenderMermaidOn() {
+		t.Fatal("renderMermaid must default to on")
+	}
+	// A repo may set the display key (it is on the repo-safe list), and a
+	// later layer still wins over the global one.
+	writeFile(t, GlobalSettingsPath(), "renderMermaid: false\n")
+	writeFile(t, projectSettingsPath(cwd), "renderMermaid: true\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.RenderMermaidOn() {
+		t.Fatal("project layer must win renderMermaid: true")
+	}
+	writeFile(t, projectSettingsPath(cwd), "renderMermaid: false\n")
+	s, err = LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.RenderMermaidOn() {
+		t.Fatal("explicit false must survive the merge")
+	}
+	// `xdev config set renderMermaid off` has to reach the same key, or the
+	// command reports success and the next start ignores it.
+	if err := Set(GlobalSettingsPath(), "renderMermaid", "true"); err != nil {
+		t.Fatalf("config set renderMermaid: %v", err)
+	}
+}
+
 func TestSettingsUnknownKeyIsRejected(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -275,7 +317,7 @@ func TestSettingsAbsentFilesAreNotErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing layers must be skipped: %v", err)
 	}
-	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 200 {
+	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 0 {
 		t.Fatalf("defaults lost: %+v", s)
 	}
 }
@@ -619,5 +661,58 @@ func TestListRendersTheEnforcedSurface(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTuiExitDetachDefaultsOn(t *testing.T) {
+	var s *Settings
+	if !s.TuiExitDetachOn() {
+		t.Fatal("nil settings must default detach-on-quit ON")
+	}
+	s = &Settings{}
+	if !s.TuiExitDetachOn() {
+		t.Fatal("unset must default ON")
+	}
+	off := false
+	s.Tui.ExitDetach = &off
+	if s.TuiExitDetachOn() {
+		t.Fatal("explicit false must turn it off")
+	}
+	on := true
+	s.Tui.ExitDetach = &on
+	if !s.TuiExitDetachOn() {
+		t.Fatal("explicit true must stay on")
+	}
+}
+
+func TestSetTuiExitDetachRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := Set(path, "tui.exitDetach", "false"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "exitDetach") {
+		t.Fatalf("file missing exitDetach: %s", raw)
+	}
+	var s Settings
+	if err := yaml.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.TuiExitDetachOn() {
+		t.Fatal("loaded settings still on after set false")
+	}
+	if err := Set(path, "tui.exitDetach", "true"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(path)
+	if err := yaml.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.TuiExitDetachOn() {
+		t.Fatal("set true did not stick")
 	}
 }

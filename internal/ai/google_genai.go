@@ -125,16 +125,52 @@ type googleResponse struct {
 		FinishReason string         `json:"finishReason,omitempty"`
 		Index        int            `json:"index,omitempty"`
 	} `json:"candidates"`
-	UsageMetadata *struct {
-		PromptTokenCount     int64 `json:"promptTokenCount"`
-		CandidatesTokenCount int64 `json:"candidatesTokenCount"`
-		TotalTokenCount      int64 `json:"totalTokenCount"`
-		ThoughtsTokenCount   int64 `json:"thoughtsTokenCount,omitempty"`
-	} `json:"usageMetadata,omitempty"`
-	Error *struct {
+	UsageMetadata *googleUsage `json:"usageMetadata,omitempty"`
+	Error         *struct {
 		Message string `json:"message"`
 		Status  string `json:"status"`
 	} `json:"error,omitempty"`
+}
+
+// googleUsage is Gemini's usageMetadata. Three fields, three traps the
+// unified Usage has to absorb (the same shape Anthropic and OpenAI already
+// present):
+//
+//   - promptTokenCount INCLUDES cachedContentTokenCount ("this is still the
+//     total effective prompt size meaning this includes the number of tokens
+//     in the cached content"), so Input must be netted down or every HUD
+//     counter reads the whole cached prefix as fresh input.
+//   - totalTokenCount is prompt + thoughts + candidates: reasoning is billed
+//     output, so Output has to carry thoughtsTokenCount or the ↓ counter (and
+//     the decode rate built on it) silently omits the thinking.
+//   - totalTokenCount is not always reported; the sum is the floor.
+type googleUsage struct {
+	PromptTokenCount        int64 `json:"promptTokenCount"`
+	CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
+	CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
+	TotalTokenCount         int64 `json:"totalTokenCount"`
+	ThoughtsTokenCount      int64 `json:"thoughtsTokenCount,omitempty"`
+}
+
+// toUsage normalizes Gemini's counters onto the unified contract the other
+// providers already keep: Input exclusive of cache reads, Output inclusive of
+// reasoning, TotalTokens = input + cache + output, ReasoningTokens reported
+// separately so the trajectory line can still show the thinking on its own.
+func (g *googleUsage) toUsage() *Usage {
+	if g == nil {
+		return nil
+	}
+	u := &Usage{
+		Input:           g.PromptTokenCount - g.CachedContentTokenCount,
+		CacheRead:       g.CachedContentTokenCount,
+		Output:          g.CandidatesTokenCount + g.ThoughtsTokenCount,
+		ReasoningTokens: g.ThoughtsTokenCount,
+	}
+	if u.Input < 0 {
+		u.Input = 0
+	}
+	u.TotalTokens = u.Input + u.Output + u.CacheRead
+	return u
 }
 
 // buildRequest converts a unified request to the Gemini shape. Roles map:
@@ -352,7 +388,7 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 		closeText()
 		content := make([]Block, 0, len(order)+1)
 		if text.Len() > 0 {
-			content = append(content, TextBlock{Text: text.String()})
+			content = append(content, TextBlock{Text: CleanUTF8(text.String())})
 		}
 		for _, idx := range order {
 			content = append(content, *toolCalls[idx])
@@ -394,12 +430,7 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 			return
 		}
 		if gr.UsageMetadata != nil {
-			usage = &Usage{
-				Input:           gr.UsageMetadata.PromptTokenCount,
-				Output:          gr.UsageMetadata.CandidatesTokenCount,
-				TotalTokens:     gr.UsageMetadata.TotalTokenCount,
-				ReasoningTokens: gr.UsageMetadata.ThoughtsTokenCount,
-			}
+			usage = gr.UsageMetadata.toUsage()
 		}
 		if len(gr.Candidates) == 0 {
 			continue
@@ -436,12 +467,16 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 
 				case part.Text != "":
 					if part.Thought {
+						delta := CleanUTF8(part.Text)
+						if delta == "" {
+							continue
+						}
 						closeText()
 						if !inThinking {
 							inThinking = true
 							emit(Event{Type: EventThinkingStart})
 						}
-						emit(Event{Type: EventThinkingDelta, Delta: part.Text})
+						emit(Event{Type: EventThinkingDelta, Delta: delta})
 						continue
 					}
 					closeThinking()
@@ -449,8 +484,11 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 						inText = true
 						emit(Event{Type: EventTextStart})
 					}
-					text.WriteString(part.Text)
-					emit(Event{Type: EventTextDelta, Delta: part.Text, Snapshot: text.String()})
+					delta := CleanUTF8(part.Text)
+					if delta != "" {
+						text.WriteString(delta)
+						emit(Event{Type: EventTextDelta, Delta: delta, Snapshot: text.String()})
+					}
 				}
 			}
 		}
