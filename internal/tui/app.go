@@ -3373,7 +3373,12 @@ func (a *App) handleKey(ev tcell.Event) {
 	// runs, so a remapped chord (keybindings.yml) works rather than being
 	// decorative. Editor-adjacent actions are handled here; everything
 	// else falls through to the editor's own key handling.
-	if action := a.keyMap.Resolve(key); action != "" {
+	//
+	// `action` is the value Resolve already computed above — this switch does
+	// NOT call Resolve again. A two-chord prefix is consumed by the first
+	// call, so a second call on the same event disarms what it just armed:
+	// Ctrl+X then L resolved as "l" alone and the pair never fired.
+	if action != "" {
 		switch action {
 		case "submit":
 			// Fall through to the editor: Enter also completes an open
