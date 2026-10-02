@@ -279,6 +279,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if lastSettings().ColorBlindMode {
 		th = theme.ApplyColorBlindMode(th)
 	}
+	// The settings the shell had before tcell took the tty, captured here so
+	// the restore has a path that does NOT go through tcell's screen mutex: a
+	// UI loop wedged in a write holds that mutex for the whole flush, so
+	// scr.Fini — the normal restore — is unreachable exactly when it is most
+	// needed. Armed before Init, the first thing that makes the tty raw, and
+	// released on the same defer stack as scr.Fini below so an early return
+	// cannot leak the fd.
+	captureTerminal()
+	// Registered before the screen's own defers so it runs LAST: the fallback
+	// restore needs this fd still open while scr.Fini is trying, and it must
+	// also survive the NewScreen/Init failures above returning early.
+	defer releaseTerminal()
 	// A frame write must not be able to stop the UI loop: an unbounded write
 	// to a pane whose reader stopped drains blocks the loop for as long as
 	// the pty stays full, which is the session-dying stall in
