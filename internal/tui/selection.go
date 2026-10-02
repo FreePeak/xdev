@@ -490,11 +490,28 @@ func (a *App) selViewport() (top, vp int) {
 // edge row, which is the one the auto-scroll is about to replace — so the
 // selection tracks the text it grabbed while the viewport moves. A chrome
 // gesture keeps screen rows.
+//
+// A row of the sticky header is the one case where a screen row does not name
+// the document row it shows: the header parks the prompt it pinned, so a corner
+// on one takes THAT prompt's own rows (from wherever the push has clipped it).
+// Every other row keeps the viewport's own arithmetic — the header re-renders
+// rows the viewport already had, so it inserts none.
 func (a *App) selCornerAt(x, y int) selCorner {
 	c := selCorner{x: x, y: a.clampScreen(y), doc: -1}
 	top, vp := a.selViewport()
 	hdr := a.transcriptTop()
-	if vp > 0 && (a.selDocMode || (y >= hdr && y < hdr+vp)) {
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return c
+	}
+	if dy := y - hdr; dy < a.stickyVis && a.stickyBlock >= 0 {
+		// The header's own rows are the pinned prompt's, from wherever the push
+		// has clipped it to (stickyDoc is its first painted row).
+		c.doc = int(a.stickyDoc) + dy
+		return c
+	}
+	if a.selDocMode || y >= hdr {
+		// Below the header the viewport's own arithmetic is unchanged: the
+		// header re-renders rows it already owned rather than inserting any.
 		c.doc = top + min(max(y-hdr, 0), vp-1)
 	}
 	return c
@@ -656,13 +673,22 @@ func (a *App) selThumbTo(y int) {
 // selCacheRows records the frame's transcript rows under their document numbers
 // while a drag is held, so a row that scrolls out of sight afterwards is still
 // copyable. Each draw caches the row the last scroll revealed, which is what
-// lets one gesture outgrow the viewport. Callers hold a.mu.
+// lets one gesture outgrow the viewport.
+//
+// The capture is screen-ordered and the header sits at the top of it, so the
+// header's rows are keyed by the pinned prompt's own document rows (stickyDoc+)
+// and everything else by top+i — the header re-renders rows the viewport already
+// had, so it moves none. Callers hold a.mu.
 func (a *App) selCacheRows(top int) {
 	if a.selCache == nil {
 		return
 	}
 	for i, sr := range a.selRows {
-		a.selCache[top+i] = sr
+		doc := top + i
+		if a.stickyVis > 0 && i < a.stickyVis {
+			doc = int(a.stickyDoc) + i
+		}
+		a.selCache[doc] = sr
 	}
 }
 
@@ -723,11 +749,26 @@ func (a *App) selSpan() []selSpanRow {
 // selDocRow resolves one document row: its text from the live capture while it is
 // on screen, from the gesture's cache once it has scrolled away.
 func (a *App) selDocRow(d, top int, b selBounds) selSpanRow {
-	vy := d - top
-	y := vy + a.transcriptTop()
 	sr, have := selRow{}, false
-	if vy >= 0 && vy < len(a.selRows) {
-		sr, have = a.selRows[vy], true
+	// Where the row is on screen, in three cases and no more:
+	//   - it is one the header painted (the pinned prompt's own rows);
+	//   - it is below the header, at the position the viewport's arithmetic
+	//     has always named;
+	//   - it is anywhere else, from the gesture's cache, keyed by document row.
+	// Anything the header is painted OVER is in none of them: reading the grid
+	// there would copy the header's text a second time underneath it, so such a
+	// row copies as the blank line it looks like.
+	y := -1
+	switch {
+	case a.stickyVis > 0 && d >= int(a.stickyDoc) && d < int(a.stickyDoc)+a.stickyVis:
+		y = a.transcriptTop() + d - int(a.stickyDoc)
+	case d < top+a.stickyHdr && d >= top:
+		return spanRow(-1, selRow{text: "", x0: 0}, selBounds{lo: 1, hi: 0})
+	case d >= top:
+		y = d - top + a.transcriptTop()
+	}
+	if sy := y - a.transcriptTop(); y >= 0 && sy >= 0 && sy < len(a.selRows) {
+		sr, have = a.selRows[sy], true
 	} else if c, cached := a.selCache[d]; cached {
 		sr, have = c, true
 	}
