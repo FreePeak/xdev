@@ -145,11 +145,15 @@ func gitBranch(cwd string) string {
 }
 
 // transcriptTop is the screen row the transcript viewport paints into: the
-// persistent top bar owns row 0 whenever a transcript is on screen. The
+// persistent top bar owns row 0 whenever a transcript is on screen, and the
+// session strip owns row 1 whenever more than one session is open. The
 // selection geometry (anchoring, auto-scroll, row capture) shifts by it.
 func (a *App) transcriptTop() int {
 	if len(a.blocks) == 0 {
 		return 0
+	}
+	if a.tabStripVisible() {
+		return 2
 	}
 	return 1
 }

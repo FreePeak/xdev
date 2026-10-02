@@ -816,6 +816,36 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return nil
 	}
 
+	// closeTabByID is what the session.delete chord and the tab strip's ×
+	// both call. Closing the CURRENT tab focuses the neighbour tabs.close
+	// already picked; closing a parked one leaves the view where it is, so
+	// nothing has to be rebuilt. The session FILE survives — closing a tab is
+	// closing a tab, and /drop is still how one is deleted.
+	closeTabByID := func(id string) error {
+		sessMu.Lock()
+		defer sessMu.Unlock()
+		cur := tabs.current()
+		if cur == nil || cur.id != id {
+			if tabs.close(id) == nil && len(tabs.snapshot()) == 0 {
+				return fmt.Errorf("that session is no longer open")
+			}
+			app.SetTabs(tabInfos(tabs))
+			app.AddSystemBlock("· closed session " + shortSessionID(id))
+			return nil
+		}
+		next := tabs.close(id) // aborts a live turn, closes the store
+		if next == nil {
+			return nil // the last tab went: the App turns that into a quit
+		}
+		focusTab(next)
+		label := next.title
+		if label == "" {
+			label = shortSessionID(next.id)
+		}
+		app.AddSystemBlock("· closed a session · now " + label)
+		return nil
+	}
+
 	// Session lifecycle (issue #11): /new swaps in a fresh session file,
 	// /clear resets in place (durable reset_boundary, history kept on
 	// disk), /drop deletes the file and starts fresh.
@@ -2597,6 +2627,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// keybindings.yml can move them.
 	app.SetTabCycle(func(dir int, onlyUnread bool) { cycleTab(dir, onlyUnread) })
 	app.SetTabPick(focusTabByID)
+	app.SetTabClose(closeTabByID)
 	app.SetTabs(tabInfos(tabs))
 	app.SetVision(func() bool {
 		modelMu.Lock()
