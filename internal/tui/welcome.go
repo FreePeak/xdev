@@ -171,23 +171,23 @@ func (a *App) firstUserPrompt() string {
 	return ""
 }
 
-// drawTopBar paints row 0 (grok top_bar.rs): the git branch left, and while a
-// turn is in flight the running spinner beside it — the same theme frames and
+// drawTopBar paints row 0 (grok top_bar.rs): while a turn is in flight the
+// running spinner leads, then the git branch — the same theme frames and
 // accent the tool rows and the composer's divider spin, so the indicator reads
-// the same wherever it appears. Nothing else lives on this bar: the session's
-// prompts used to ride it and were dropped (user request), leaving the branch
-// and the spinner. Caller holds a.mu.
+// the same wherever it appears. The spinner leads because it is the bar's one
+// thing that MOVES, and at the right end of a static branch it read as part
+// of the branch name. Nothing else lives on this bar: the session's prompts
+// used to ride it and were dropped (user request). Caller holds a.mu.
 func (a *App) drawTopBar(s tcell.Screen) {
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	x := 1
+	if a.st.Running {
+		drawText(s, x, 0, a.spinFrame(),
+			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning))))
+		x += 2 // the frame and the space after it
+	}
 	if a.branch != "" {
 		drawText(s, x, 0, "❯ "+a.branch, dim)
-		x += width("❯ ") + width(a.branch)
-	}
-	if a.st.Running {
-		frames := a.th.SpinnerFrames() // theme frames, braille by default
-		st := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning)))
-		drawText(s, x+1, 0, frames[a.st.spinnerIdx%len(frames)], st)
 	}
 }
 
