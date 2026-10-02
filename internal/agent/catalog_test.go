@@ -120,3 +120,24 @@ func TestDeferredToolIsIndexedNotSchemaed(t *testing.T) {
 		t.Fatal("bridge tools missing from the registry")
 	}
 }
+
+// TestHubToolAcceptsTheLiveFailureShapes is the end-to-end pin: the hub
+// tool's own decoder, fed the exact argument shape that failed seven times in
+// the field (2026-10-02 — a flattened array plus a quoted number), must now
+// run the wait instead of refusing it. It drives runOneTool rather than
+// calling the tool directly, so it fails without the agent-loop call site —
+// which is the point: it proves the chokepoint is wired.
+func TestHubToolAcceptsTheLiveFailureShapes(t *testing.T) {
+	h := NewHub()
+	defer h.Close()
+	reg := tool.NewRegistry()
+	reg.Register(&HubTool{Hub: h})
+	a := &Agent{Tools: reg, Hooks: &hookLog{}, Model: "m"}
+	msg := a.runOneTool(context.Background(), ai.ToolCallBlock{
+		Name:      HubToolName,
+		Arguments: json.RawMessage(`{"op":"wait","ids":{"item":["hub-1"]},"timeout":"1"}`),
+	})
+	if msg.IsError {
+		t.Fatalf("the live failure shape must now run, not refuse: %s", msg.Text())
+	}
+}
