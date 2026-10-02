@@ -305,3 +305,38 @@ func TestEvaluateEmptyAnswers(t *testing.T) {
 func contains(s, sub string) bool {
 	return bytes.Contains([]byte(s), []byte(sub))
 }
+
+// TestFormatResultKeepsTheGatingNumber pins the two properties the `ask`
+// confidence gate and the memory pre-filter depend on, against the answer
+// shape a real local Laya server returned (POST /v1/systemone, english
+// checkpoint, MPS, 2026-09-30): the score answer renders at 227 chars, which
+// the old 200 limit cut mid-`probabilities`, and the header tells the model
+// which confidence field is calibrated.
+func TestFormatResultKeepsTheGatingNumber(t *testing.T) {
+	answers := map[string]any{
+		"urgency": map[string]any{
+			"type":              "score",
+			"score":             1.8983,
+			"legend":            map[string]any{"0": "no deadline mentioned", "1": "days", "2": "today or cancellation"},
+			"probabilities":     map[string]any{"0": 0.0182, "1": 0.0654, "2": 0.9164},
+			"confidence":        0.6986,
+			"answer_confidence": 0.9164,
+			"action":            map[string]any{"act_probability": 1.0},
+		},
+	}
+	got := FormatResult(answers)
+	if !contains(got, "answer_confidence") {
+		t.Errorf("header does not name the calibrated field: %q", got)
+	}
+	if !contains(got, "0.9164") {
+		t.Errorf("answer_confidence value lost to truncation: %q", got)
+	}
+	for _, tail := range []string{"today or cancellation", "0.0654"} {
+		if !contains(got, tail) {
+			t.Errorf("tail %q cut off: %q", tail, got)
+		}
+	}
+	if contains(got, "…") {
+		t.Errorf("a real answer was truncated: %q", got)
+	}
+}

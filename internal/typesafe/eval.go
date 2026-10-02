@@ -148,22 +148,31 @@ func parseAnswers(raw json.RawMessage) (map[string]any, error) {
 }
 
 // FormatResult renders typed answers for the model context —
-// one line per question with its value, truncated to 200 chars.
+// one line per question with its value, bounded by truncateLimit.
 func FormatResult(answers map[string]any) string {
 	if len(answers) == 0 {
 		return "(typesafe: no answers)"
 	}
 	var buf bytes.Buffer
-	buf.WriteString("TypeSafe answers:\n")
+	// Gate on answer_confidence, never on confidence: on choice and score,
+	// `confidence` is one minus normalised entropy — how concentrated the
+	// distribution is — and carries no calibration guarantee, so a threshold
+	// read off it does not mean what it appears to mean.
+	buf.WriteString("TypeSafe answers (gate on answer_confidence, not confidence):\n")
 	for k, v := range answers {
 		line := fmt.Sprintf("  %s: %v", k, v)
-		buf.WriteString(truncate(line, 200))
+		buf.WriteString(truncate(line, truncateLimit))
 		buf.WriteString("\n")
 	}
 	return buf.String()
 }
 
-const truncateLimit = 200
+// truncateLimit bounds one answer line so a pathological payload cannot eat the
+// window. 200 was short enough to cut a real three-option Laya answer at 227
+// chars, and the tail is where answer_confidence and the probabilities sit, so
+// the number a caller is meant to gate on was the number that vanished. 1024
+// holds a twenty-option choice answer whole.
+const truncateLimit = 1024
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
