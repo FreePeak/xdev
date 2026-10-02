@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -117,5 +118,89 @@ func TestFadeBucketSeparatesEveryTickStep(t *testing.T) {
 	}
 	if got := fadeBucket(1); got != 8 {
 		t.Errorf("fadeBucket(1) = %d, want 8", got)
+	}
+}
+
+// firstThinkBoxRow paints the transcript and returns the screen row the first
+// reasoning box's top border lands on, so a test can press the real mouse at
+// the real coordinate instead of poking thinkFocus directly — the tween is
+// armed in selection.go, and only a real press exercises that wiring.
+func firstThinkBoxRow(t *testing.T, app *App, scr tcell.SimulationScreen) int {
+	t.Helper()
+	app.width, app.height = scr.Size() // paint reads the App's size, not the screen's
+	app.paint()
+	scr.Show() // Show flushes the back buffer into the simulation's cells
+	cells, w, h := scr.GetContents()
+	if cells == nil {
+		t.Fatal("simulation screen has no cells")
+	}
+	for y := 0; y < h; y++ {
+		var b strings.Builder
+		for x := 0; x < w; x++ {
+			if r := cells[y*w+x].Runes; len(r) > 0 {
+				b.WriteString(string(r))
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+		// Match the state's own word, not the glyph, so the probe survives a
+		// symbol preset that redraws the frame.
+		if strings.Contains(b.String(), "Thought") {
+			return y
+		}
+	}
+	return -1
+}
+
+// TestMousePressArmsTheFocusTween drives the real press path: a click that
+// names a reasoning box must reset focusFade to 0, which is the only wiring
+// that starts the ease. A unit test that assigns thinkFocus itself would stay
+// green with selection.go never arming anything.
+func TestMousePressArmsTheFocusTween(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	app.BeginThinking()
+	app.AppendThinking(thinkLines(40))
+	app.EndThinking()
+
+	y := firstThinkBoxRow(t, app, scr)
+	if y < 0 {
+		t.Skip("no painted reasoning box in this geometry")
+	}
+
+	app.mu.Lock()
+	app.focusFade = 0.5 // mid-fade from some earlier focus
+	app.mu.Unlock()
+
+	app.handleMouse(tcell.NewEventMouse(5, y, tcell.Button1, tcell.ModNone), true)
+
+	app.mu.Lock()
+	focus, fade := app.thinkFocus, app.focusFade
+	app.mu.Unlock()
+	if focus != 0 {
+		t.Fatalf("press on the box's top border (row %d): thinkFocus = %d, want 0", y, focus)
+	}
+	if fade != 0 {
+		t.Errorf("focus change left focusFade = %v, want 0 — the ease must start from the dim end, not resume", fade)
+	}
+}
+
+// TestMousePressOffBoxLeavesTheTweenAlone is the cost guard on the other side:
+// a press that lands on plain transcript is not a focus change, so it must not
+// arm a border ease nobody asked for.
+func TestMousePressOffBoxLeavesTheTweenAlone(t *testing.T) {
+	app, scr := newTestApp(t, 80, 24)
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	app.width, app.height = scr.Size()
+	app.AddSystemBlock("ready")
+	app.paint()
+
+	app.handleMouse(tcell.NewEventMouse(5, 2, tcell.Button1, tcell.ModNone), true)
+
+	app.mu.Lock()
+	fade := app.focusFade
+	app.mu.Unlock()
+	if fade >= 0 {
+		t.Errorf("press on plain transcript armed focusFade = %v, want the -1 sentinel", fade)
 	}
 }
