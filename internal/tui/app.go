@@ -159,6 +159,13 @@ type App struct {
 	tabs           []TabInfo // open sessions (cmd owns the set; App paints)
 	onTabCycle     func(dir int, onlyUnread bool)
 	onTabPick      func(id string) error // /tabs row: focus that open session
+	// onTabClose closes one open session (opencode session_delete): the
+	// session.delete chord and a click on a tab's × both land here, and a
+	// nil degrades both to a notice.
+	onTabClose func(id string) error
+	// tabHits is the tab strip's clickable geometry, published each frame by
+	// the painter (tabstrip.go).
+	tabHits []tabHit
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
 	// BeginMessage (one EventStart) discards one a dead turn left open, so
@@ -1441,6 +1448,11 @@ func (a *App) SetTabs(tabs []TabInfo) {
 func (a *App) SetTabCycle(fn func(dir int, onlyUnread bool)) {
 	a.onTabCycle = fn
 }
+
+// SetTabClose wires what "close this session" means. cmd owns the tabset, so
+// the chord and the tab strip's × both name a session id and let it decide
+// (park, abort, close the store, focus a neighbour).
+func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
 
 // SetTabPick wires what Enter on a /tabs row does. nil degrades /tabs to
 // a notice.
@@ -2760,6 +2772,13 @@ func (a *App) Run() {
 			if a.selEdgeTick() {
 				animate = true
 			}
+			// An armed leader prefix is the same kind of timer: the pair has
+			// to stop waiting on its own, because Resolve alone would keep it
+			// armed until the next keystroke (keymap.go). Checked under the
+			// lock this tick already holds.
+			if a.keyMap.ExpirePending(time.Now()) {
+				animate = true
+			}
 			a.mu.Unlock()
 			// The whole-cwd file index landing (pathindex.go): re-query an
 			// OPEN @-dropdown so the recursive hits appear without another
@@ -2862,6 +2881,13 @@ func (a *App) handleKey(ev tcell.Event) {
 				// it runs here, unlocked.
 				a.runPendingMsgAction()
 				return // the UI loop repaints after handleKey
+			}
+			// The tab strip is chrome under the top bar: a click there names a
+			// session, never a transcript row, so it is asked after every
+			// modal (a picker owns its own screen) and before the queue and
+			// the transcript selection below.
+			if a.handleTabStripMouse(m, press) {
+				return
 			}
 			// The mid-turn queue (#157) sits above the composer, over the
 			// transcript's tail. It is a surface, not content, so a click on a
@@ -3251,6 +3277,42 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.AddSystemBlock("session tabs are not wired in this build")
 		}
 		return
+	case "session.delete":
+		// C-d / A-w / <leader>w. Close the CURRENT tab — or, on the last one,
+		// quit: "close this" with nothing left to close has to mean "exit",
+		// or a user who learned C-d quits from xdev still has to learn C-c.
+		a.mu.Lock()
+		tabs := append([]TabInfo(nil), a.tabs...)
+		a.mu.Unlock()
+		if len(tabs) <= 1 {
+			// Nothing left to close, so the chord still exits — and it is
+			// checked BEFORE the wiring test, so C-d keeps meaning "exit"
+			// on a host with no tabset to close into.
+			a.quitOrCancel(running)
+			return
+		}
+		if a.onTabClose == nil {
+			a.AddSystemBlock("session tabs are not wired in this build")
+			return
+		}
+		a.closeTab(currentTabID(tabs))
+		return
+	case "session.list":
+		// <leader>l — the open-session set as a modal list (opencode's
+		// session_list). It reads the snapshot the status row already has.
+		if err := a.TabsPicker(); err != nil {
+			a.AddSystemBlock(err.Error())
+			a.poke()
+		}
+		return
+	case "session.new":
+		// <leader>n — /new from the keyboard: a fresh session file, the
+		// previous one parked in the tabset rather than dropped.
+		if err := a.NewSession(); err != nil {
+			a.AddSystemBlock(err.Error())
+			a.poke()
+		}
+		return
 	case "thinking-toggle":
 		// Shift-Tab. Like the dock chords this runs after every modal
 		// handler, so an open picker keeps first claim on the key (the model
@@ -3311,7 +3373,12 @@ func (a *App) handleKey(ev tcell.Event) {
 	// runs, so a remapped chord (keybindings.yml) works rather than being
 	// decorative. Editor-adjacent actions are handled here; everything
 	// else falls through to the editor's own key handling.
-	if action := a.keyMap.Resolve(key); action != "" {
+	//
+	// `action` is the value Resolve already computed above — this switch does
+	// NOT call Resolve again. A two-chord prefix is consumed by the first
+	// call, so a second call on the same event disarms what it just armed:
+	// Ctrl+X then L resolved as "l" alone and the pair never fired.
+	if action != "" {
 		switch action {
 		case "submit":
 			// Fall through to the editor: Enter also completes an open
@@ -4198,6 +4265,8 @@ func (a *App) paint() {
 	// last frame's rectangle live, or a click would open a popup for a
 	// reading that is no longer on screen.
 	a.statusHits = nil
+	// The tab strip's rectangles are a per-frame fact for the same reason.
+	a.tabHits = nil
 	// selection capture — rows recorded before /clear would copy text that is
 	// no longer on screen.
 	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
@@ -4208,6 +4277,11 @@ func (a *App) paint() {
 	// menu, shortcuts) instead of a blank void.
 	if len(a.blocks) == 0 {
 		composerTop := h - 1 - a.composerRows()
+		// Top bar, then the session strip under it, then the welcome body —
+		// the strip owns its row whether or not the transcript exists, so the
+		// two screens cannot disagree about what is open.
+		a.drawTopBar(s, w, false)
+		a.drawTabStrip(s, w)
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
 		a.drawHubRoster(composerTop)
@@ -4245,6 +4319,11 @@ func (a *App) paint() {
 	// and a bar running the terminal's full width would print them under the
 	// panel's own surface.
 	a.drawTopBar(s, a.rightEdge(), true)
+	// The session strip owns the row under the top bar (opencode's tab row),
+	// so the transcript's first row shifts with it — transcriptTop() is the
+	// single place that offset is computed, so the strip cannot desync the
+	// scroll math by being drawn without being counted.
+	a.drawTabStrip(s, a.rightEdge())
 	// The panel is built before the transcript's width is computed: with it open
 	// the lines wrap at its left edge, and a frame that painted the transcript
 	// first would have to redo every render cache entry it drew.
