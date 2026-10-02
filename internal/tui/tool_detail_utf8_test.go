@@ -52,9 +52,9 @@ func TestToolDetailNeverReturnsTornUTF8(t *testing.T) {
 }
 
 // The headline: a long command is no longer shortened. It used to stop at 400
-// bytes and then at the row width, both with an ellipsis, which meant the one
-// thing a user opens the transcript to read was the one thing it hid.
-func TestToolDetailReturnsTheWholeFirstLine(t *testing.T) {
+// bytes and then at the first newline with a " …", which meant the one thing a
+// user opens the transcript to read was the one thing it hid.
+func TestToolDetailReturnsTheWholeCommand(t *testing.T) {
 	cmd := strings.Repeat("a", 5000)
 	raw := `{"command":"` + cmd + `"}`
 	if got := toolDetail(raw); got != cmd {
@@ -62,14 +62,29 @@ func TestToolDetailReturnsTheWholeFirstLine(t *testing.T) {
 	}
 }
 
-// First line only, still: a `write` body or a heredoc does not become the row.
-func TestToolDetailKeepsOnlyTheFirstLine(t *testing.T) {
+// Every line of it, and the lines stay lines: a heredoc's body is where a
+// command says what it is doing, and flattening it to one row lost that. The
+// row WRAPS this (blockLines, case KindTool), so a second line costs a row, not
+// its text — and the row budget belongs to the transcript, not to the tool.
+func TestToolDetailKeepsEveryLine(t *testing.T) {
 	raw, _ := json.Marshal(map[string]string{"command": "cat <<'EOF'\nline one\nline two\nEOF"})
 	got := toolDetail(string(raw))
-	if !strings.HasPrefix(got, "cat <<'EOF' …") {
-		t.Fatalf("detail = %q, want the first line and an ellipsis", got)
+	if got != "cat <<'EOF'\nline one\nline two\nEOF" {
+		t.Fatalf("detail = %q, want the command whole, lines and all", got)
 	}
-	if strings.Contains(got, "line two") {
-		t.Fatalf("a multi-line argument leaked past its first line: %q", got)
+	if strings.Contains(got, "…") {
+		t.Fatalf("a command that fits the row must not be cut: %q", got)
+	}
+
+	// And the row it paints carries every line, not just the first.
+	app, _ := newTestApp(t, 200, 40)
+	app.AddToolBlock("", "bash", string(raw))
+	app.mu.Lock()
+	painted := joinedLines(app.blockLines(0, app.blocks[0], 160))
+	app.mu.Unlock()
+	for _, want := range []string{"cat <<'EOF'", "line one", "line two", "EOF"} {
+		if !strings.Contains(painted, want) {
+			t.Fatalf("the call row lost %q:\n%s", want, painted)
+		}
 	}
 }

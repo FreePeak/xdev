@@ -55,9 +55,12 @@ const (
 	dockListMax = 6                    // rows one list shows before "+N more"
 	dockPlanMax = 18                   // rows the plan document may take: the section is
 	// the reason the panel exists, so it gets the bigger half of the budget.
-	// dockTitleMax bounds the rows the session's own name may take: a name is read
-	// whole, but not at the price of the work it names.
-	dockTitleMax = 3
+	// There is no cap on the session's own name: it is the one string in the
+	// panel a human reads whole, so it takes the rows it needs from the
+	// sections below (dockTitleLines). ponytail: a name long enough to fill
+	// the panel shows the panel and nothing else — that is the trade asked
+	// for; the other one was a "…" in the middle of the name.
+	dockTitleFloor = 4 // rows the sections keep whatever the name takes
 )
 
 // Section ids, in the order the panel paints them: what the session is doing,
@@ -795,14 +798,13 @@ func (d *dockState) titleRows() int {
 
 // dockTitleLines wraps the session's name to the panel's interior instead of
 // clipping it. The name is the one string in the panel a human reads whole, and
-// a "\u2026" at 38 cells turned "showing full title" into a riddle. The rows are
-// not free: layout spends them out of the content budget, and dockTitleMax
-// bounds what the name may take from the work it names — the same
-// wrap-and-cap the session pickers give their titles (wrapCapped). Caller
-// holds a.mu.
+// a "\u2026" at 38 cells turned "showing full title" into a riddle — so it is
+// not capped by row count: it wraps over as many rows as it takes and layout
+// spends those rows out of the content budget. The band is the only bound left,
+// because a title row that is not on screen is not a title. Caller holds a.mu.
 func (a *App) dockTitleLines(bandH int) []string {
 	return wrapCapped(strings.TrimSpace(sanitizeOutput(a.dockTitle())), dockInner,
-		min(dockTitleMax, max(1, bandH-4)))
+		max(1, bandH-dockTitleFloor))
 }
 
 // selDockRowsForPaint returns the dock's rows as selectable rows with their
