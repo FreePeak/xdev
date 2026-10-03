@@ -327,3 +327,32 @@ func TestTabsetCurrentIDPinsASession(t *testing.T) {
 		t.Fatal("currentAgent on an empty set returned an agent")
 	}
 }
+
+// TestTabsetReopenRestoresTheLastClosed: C-shift-T (opencode
+// session_tab_reopen) is the inverse of close, so the closed stack has to
+// hand back the newest session that is not already on screen — a stack that
+// returned an open tab would silently do nothing, and an empty path (a
+// memory-only session) must not be offered at all.
+func TestTabsetReopenRestoresTheLastClosed(t *testing.T) {
+	const path = "/tmp/xdev-tabset-fixture/2026-10-04T00-00-00.000Z_abc12345-6789-4abc-8def-0123456789ab.jsonl"
+	id := sessionIDOfPath(path)
+	if id != "abc12345-6789-4abc-8def-0123456789ab" {
+		t.Fatalf("sessionIDOfPath(%q) = %q; the closed stack dedupes on it", path, id)
+	}
+	ts := newTabset(memStore(t))
+	ts.pushClosedLocked(path)
+	ts.pushClosedLocked("")
+	if got := ts.takeClosed(); got != path {
+		t.Fatalf("takeClosed = %q, want %q", got, path)
+	}
+	if got := ts.takeClosed(); got != "" {
+		t.Fatalf("takeClosed on a drained stack = %q, want empty", got)
+	}
+	// A file that is open again is skipped, so C-shift-T never re-opens a tab
+	// the user is already looking at.
+	ts2 := &tabset{tabs: []*tab{{id: id, store: memStore(t)}}}
+	ts2.closed = []string{path}
+	if got := ts2.takeClosed(); got != "" {
+		t.Fatalf("takeClosed returned an already-open tab: %q", got)
+	}
+}
