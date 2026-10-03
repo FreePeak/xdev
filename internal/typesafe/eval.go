@@ -60,12 +60,38 @@ type EvalRequest struct {
 	Questions map[string]any `json:"questions"`
 }
 
-// EvalResponse is the shape returned by the API; answers
-// arrive as an opaque JSON object keyed by question id.
+// EvalResponse is the shape returned by the API; answers arrive as an opaque
+// JSON object keyed by question id. Model and Usage are the backend's own
+// account of the call and are read, not parsed-and-dropped: with a lazy
+// router a cold checkpoint load costs tens of seconds, so "which checkpoint
+// answered, and how long did it take" is the difference between a 40ms answer
+// and a 42s one.
 type EvalResponse struct {
 	Model   string          `json:"model"`
 	Answers json.RawMessage `json:"answers"`
-	Usage   map[string]any  `json:"usage,omitempty"`
+	Usage   Usage           `json:"usage,omitempty"`
+}
+
+// Usage is the backend's own cost report. Every field is optional: the hosted
+// API reports tokens, a local sidecar reports local_ms and zeroes the tokens,
+// and an older backend may report nothing at all.
+type Usage struct {
+	InputTokens  int     `json:"input_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
+	LocalMS      float64 `json:"local_ms,omitempty"`
+}
+
+// empty reports whether the backend said nothing about cost.
+func (u Usage) empty() bool { return u == Usage{} }
+
+// Info is what the backend said about the call itself, as opposed to its
+// answers. Kept beside the answer map so a caller can report the backend that
+// actually answered rather than the one it asked for: a Laya router routes on
+// the input's script, so the requested model (empty, by design) and the
+// answering checkpoint routinely differ.
+type Info struct {
+	Model string
+	Usage Usage
 }
 
 // Evaluator talks to the TypeSafe System One endpoint.
@@ -96,6 +122,14 @@ func (e *Evaluator) TestEvaluatorHTTP(c *http.Client) { e.httpClient = c }
 // map. State is normalized here rather than at the tool boundary so every
 // caller — the tool, a future agent-loop gate — sends the same wire.
 func (e *Evaluator) Evaluate(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+	answers, _, err := e.EvaluateWithInfo(ctx, state, questions)
+	return answers, err
+}
+
+// EvaluateWithInfo is Evaluate plus the backend's own account of the call.
+// Use it when you need to name the checkpoint that answered or report what the
+// call cost; use Evaluate when you only want the answers.
+func (e *Evaluator) EvaluateWithInfo(ctx context.Context, state any, questions map[string]any) (map[string]any, Info, error) {
 	payload := EvalRequest{
 		State:     NormalizeState(state),
 		Model:     e.model,
@@ -103,7 +137,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, state any, questions map[strin
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
+		return nil, Info{}, fmt.Errorf("typesafe: marshal request: %w", err)
 	}
 
 	root := e.baseURL
@@ -112,11 +146,11 @@ func (e *Evaluator) Evaluate(ctx context.Context, state any, questions map[strin
 	}
 	endpoint, err := url.JoinPath(root, systemOnePath)
 	if err != nil {
-		return nil, fmt.Errorf("typesafe: build URL: %w", err)
+		return nil, Info{}, fmt.Errorf("typesafe: build URL: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("typesafe: build request: %w", err)
+		return nil, Info{}, fmt.Errorf("typesafe: build request: %w", err)
 	}
 	if e.key != "" {
 		req.Header.Set("Authorization", "Bearer "+e.key)
@@ -129,21 +163,25 @@ func (e *Evaluator) Evaluate(ctx context.Context, state any, questions map[strin
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("typesafe: request failed: %w", err)
+		return nil, Info{}, fmt.Errorf("typesafe: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("typesafe: %d %s — %s", resp.StatusCode, resp.Status, string(b))
+		return nil, Info{}, fmt.Errorf("typesafe: %d %s — %s", resp.StatusCode, resp.Status, string(b))
 	}
 
 	var result EvalResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("typesafe: decode response: %w", err)
+		return nil, Info{}, fmt.Errorf("typesafe: decode response: %w", err)
 	}
 
-	return parseAnswers(result.Answers)
+	answers, err := parseAnswers(result.Answers)
+	if err != nil {
+		return nil, Info{}, err
+	}
+	return answers, Info{Model: result.Model, Usage: result.Usage}, nil
 }
 
 // parseAnswers extracts the answer map from a raw JSON value.
@@ -159,9 +197,18 @@ func parseAnswers(raw json.RawMessage) (map[string]any, error) {
 	return out, nil
 }
 
-// FormatResult renders typed answers for the model context —
-// one line per question with its value, bounded by truncateLimit.
+// FormatResult renders typed answers for the model context — one line per
+// question with its value, bounded by truncateLimit.
 func FormatResult(answers map[string]any) string {
+	return FormatResultWithInfo(answers, Info{})
+}
+
+// FormatResultWithInfo appends the backend's own account of the call, when it
+// gave one. It is a footer rather than part of any answer line because it is a
+// fact about the call, not about a question: with a lazy router the same
+// request costs 40ms from a resident checkpoint and tens of seconds on a cold
+// one, and the model cannot tell those apart from the answers alone.
+func FormatResultWithInfo(answers map[string]any, info Info) string {
 	if len(answers) == 0 {
 		return "(typesafe: no answers)"
 	}
@@ -172,7 +219,34 @@ func FormatResult(answers map[string]any) string {
 		buf.WriteString(truncate(line, truncateLimit))
 		buf.WriteString("\n")
 	}
+	buf.WriteString(formatInfo(info))
 	return buf.String()
+}
+
+// formatInfo renders the backend footer, or nothing when the backend reported
+// nothing. A missing model and a missing cost are both absent, not zero, so an
+// absent field produces no line rather than a misleading one.
+func formatInfo(info Info) string {
+	var parts []string
+	if m := strings.TrimSpace(info.Model); m != "" {
+		parts = append(parts, "answered by "+m)
+	}
+	if !info.Usage.empty() {
+		var bits []string
+		if info.Usage.LocalMS > 0 {
+			bits = append(bits, fmt.Sprintf("%.0fms", info.Usage.LocalMS))
+		}
+		if n := info.Usage.InputTokens + info.Usage.OutputTokens; n > 0 {
+			bits = append(bits, fmt.Sprintf("%d tokens", n))
+		}
+		if len(bits) > 0 {
+			parts = append(parts, strings.Join(bits, " / "))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  (" + strings.Join(parts, ", ") + ")\n"
 }
 
 // gateHint names the field to gate on, and only says so when this answer

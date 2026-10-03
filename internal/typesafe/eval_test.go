@@ -448,3 +448,83 @@ func TestGateHintFollowsThePayload(t *testing.T) {
 		t.Errorf("a payload carrying answer_confidence must name it: %q", mixed)
 	}
 }
+
+// TestEvaluateWithInfoReportsTheAnsweringBackend pins the two fields the
+// envelope carried and nothing read: with a lazy router the requested model is
+// empty on purpose and the answering checkpoint is whatever the script routed
+// to, so "which backend answered" and "what did the call cost" cannot be
+// reconstructed from the answers. Verbatim from a live local sidecar.
+func TestEvaluateWithInfoReportsTheAnsweringBackend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+			"usage":   map[string]any{"input_tokens": 0, "output_tokens": 0, "local_ms": 116.5},
+		})
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL})
+	answers, info, err := ev.EvaluateWithInfo(context.Background(), "cancel today",
+		map[string]any{"q": map[string]any{"type": "noul", "instructions": "urgent?"}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(answers) != 1 {
+		t.Fatalf("answers = %v", answers)
+	}
+	if info.Model != "english" {
+		t.Errorf("answering model = %q", info.Model)
+	}
+	if info.Usage.LocalMS != 116.5 {
+		t.Errorf("local_ms = %v", info.Usage.LocalMS)
+	}
+
+	out := FormatResultWithInfo(answers, info)
+	for _, want := range []string{"answered by english", "116ms"} {
+		if !contains(out, want) {
+			t.Errorf("result missing %q: %q", want, out)
+		}
+	}
+	// The zeroed token counters a local backend sends must not render as "0
+	// tokens" — that reads as a cost, not as an absent one.
+	if contains(out, "0 tokens") {
+		t.Errorf("absent cost rendered as zero: %q", out)
+	}
+}
+
+// TestToolSurfacesTheBackendThatAnswered is the tool-level half: a caller of
+// the tool sees the footer, not just the answers. Fails on a build where the
+// tool drops the Info the evaluator returned.
+func TestToolSurfacesTheBackendThatAnswered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+			"usage":   map[string]any{"input_tokens": 0, "output_tokens": 0, "local_ms": 116.5},
+		})
+	}))
+	defer srv.Close()
+
+	res, err := NewTool(Settings{BaseURL: srv.URL}).Execute(context.Background(),
+		json.RawMessage(`{"state":"cancel today","questions":{"q":{"type":"noul","instructions":"urgent?"}}}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool failed: %s", res.Text)
+	}
+	if !contains(res.Text, "answered by english") {
+		t.Errorf("tool dropped the answering checkpoint: %q", res.Text)
+	}
+}
+
+// TestFormatInfoOmittedWhenTheBackendSaysNothing keeps the footer absent rather
+// than empty-looking, so an answer from a backend that reports no model and no
+// cost reads exactly as it did before.
+func TestFormatInfoOmittedWhenTheBackendSaysNothing(t *testing.T) {
+	answers := map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}}
+	if got, want := FormatResultWithInfo(answers, Info{}), FormatResult(answers); got != want {
+		t.Errorf("no info changed the rendering:\n got %q\nwant %q", got, want)
+	}
+}

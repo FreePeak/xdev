@@ -79,11 +79,11 @@ func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (tool.Result, 
 		s.Model = a.Model
 	}
 	ev := NewEvaluator(s)
-	answers, err := ev.Evaluate(ctx, a.State, a.Questions)
+	answers, info, err := ev.EvaluateWithInfo(ctx, a.State, a.Questions)
 	if err != nil {
 		return tool.Result{Text: err.Error(), IsError: true}, nil
 	}
-	return tool.Result{Text: FormatResult(answers)}, nil
+	return tool.Result{Text: FormatResultWithInfo(answers, info)}, nil
 }
 
 // NormalizeState coerces the tool argument (which the model may send as a
