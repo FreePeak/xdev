@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -110,6 +111,36 @@ func TestThinkBoxIsOneRowUntilClicked(t *testing.T) {
 	app.ToggleBoxExpand()
 	if got := renderBox(app, 0, 80); len(got) != 3 {
 		t.Fatalf("box rows = %d after the focus dropped, want 3:\n%s", len(got), strings.Join(got, "\n"))
+	}
+}
+
+// TestStreamingThinkBoxSpinsWithTheThemeFrames pins the one running indicator
+// the reasoning box used to fake: its header was a literal "⠹" that never
+// moved, so a turn in flight read as static next to a tool bullet that turned.
+// It cycles the theme's frames, and the box's stamp has to follow — a cached
+// render keyed on the block alone would keep whichever frame it drew first.
+func TestStreamingThinkBoxSpinsWithTheThemeFrames(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	th := theme.Load("groknight")
+	th.Symbols = theme.Symbols{Status: []string{"X", "Y"}}
+	app.SetTheme(th)
+	app.BeginThinking()
+	app.AppendThinking("reasoning")
+
+	for i, want := range th.SpinnerFrames() {
+		app.mu.Lock()
+		app.st.spinnerIdx = i
+		app.mu.Unlock()
+		got := renderBox(app, 0, 80)[0]
+		if !strings.Contains(got, want+" Thinking…") {
+			t.Fatalf("frame %d: streaming header = %q, want the theme frame %q", i, got, want)
+		}
+	}
+
+	// Settled: the state stops claiming to run.
+	app.EndThinking()
+	if got := renderBox(app, 0, 80)[0]; !strings.Contains(got, "Thought for") {
+		t.Fatalf("settled header = %q, want the settled state", got)
 	}
 }
 

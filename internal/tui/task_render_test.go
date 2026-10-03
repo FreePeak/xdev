@@ -35,26 +35,39 @@ func TestSubagentRowShowsEachChild(t *testing.T) {
 	}
 }
 
-// A dim continuation must not read as a sibling call: exactly one row in the
-// block carries a call bullet, and the child row hangs under it, indented.
+// A running child takes the parent's spinning frame; a settled one keeps the
+// dim `⎿` tick. That is what makes "which of these is still going" a glance
+// down the rows instead of a read of the elapsed clocks — and the child row
+// still hangs under the call row rather than reading as a sibling call.
 func TestSubagentRowUsesTheSameGlyphAsTheCallRow(t *testing.T) {
 	app, text := subScreen(t)
 	app.AddToolBlock("c1", "task", `{"prompt":"x"}`)
 	app.AddTaskChild("c1", "reader", "", "m")
 	out := text()
-	if !strings.Contains(out, "⎿ reader") {
-		t.Fatalf("child row missing its marker:\n%s", out)
-	}
-	// The call row is the only one the spinner paints, and the child row
-	// hangs below it: the transcript's own row order is the shape.
+	// The call row is the anchor: the child row hangs below it.
 	call := strings.Index(out, "task")
-	child := strings.Index(out, "⎿")
+	child := strings.Index(out, "reader")
 	if call < 0 || child < call {
 		t.Fatalf("the child row is not under the call row:\n%s", out)
 	}
-	if !strings.Contains(out, "  ⠋ task") && !strings.Contains(out, "  ⠙ task") &&
-		!strings.Contains(out, "  ◈ task") && !strings.Contains(out, "  ⠹ task") {
+	frames := app.th.SpinnerFrames()
+	running := false
+	for _, f := range frames {
+		if strings.Contains(out, "  "+f+" reader") {
+			running = true
+		}
+	}
+	if !running {
+		t.Fatalf("a running child painted no spinner frame:\n%s", out)
+	}
+	if !strings.Contains(out, "  ◈ task") && !strings.Contains(out, "  "+frames[0]+" task") {
 		t.Fatalf("the call row lost its state bullet:\n%s", out)
+	}
+
+	// Settled: the tick comes back and the row stops spinning.
+	app.FinishTaskChild("c1", "reader", "yielded", 2*time.Minute)
+	if out = text(); !strings.Contains(out, "⎿ reader") {
+		t.Fatalf("a settled child lost its tick:\n%s", out)
 	}
 }
 

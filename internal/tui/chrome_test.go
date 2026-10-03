@@ -324,7 +324,9 @@ func TestHUDStatusLineBackground(t *testing.T) {
 }
 
 // TestSpinnerFramesFromTheme: the running indicator cycles the frames the
-// theme names, not the built-in braille list.
+// theme names, not the built-in braille list, and it LEADS the divider's
+// model pair (it used to trail "model · level", where the moving glyph read
+// as part of the static reasoning label).
 func TestSpinnerFramesFromTheme(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
 	th := theme.Load("groknight")
@@ -336,16 +338,16 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 	app.st.spinnerIdx = 0
 	app.mu.Unlock()
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "test/free · X") {
-		t.Fatalf("theme frame 0 not drawn:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "X · test/free") {
+		t.Fatalf("theme frame 0 not drawn ahead of the model:\n%s", text)
 	}
 
 	app.mu.Lock()
 	app.st.spinnerIdx = 1
 	app.mu.Unlock()
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "test/free · Y") {
-		t.Fatalf("theme frame 1 not drawn:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "Y · test/free") {
+		t.Fatalf("theme frame 1 not drawn ahead of the model:\n%s", text)
 	}
 }
 
@@ -1153,9 +1155,9 @@ func TestAskCardTimeoutNotices(t *testing.T) {
 }
 
 // TestTopBarCarriesBranchAndSpinner pins the header's contract: row 0 is the
-// git branch, the running spinner rides beside it while a turn is in flight,
-// and nothing else — the session's prompts used to share this bar and were
-// dropped (user request), so they must not creep back onto it. The spinner
+// git branch, the running spinner LEADS it at the far left while a turn is in
+// flight, and nothing else — the session's prompts used to share this bar and
+// were dropped (user request), so they must not creep back onto it. The spinner
 // uses the theme's own frames, so a theme restyles it like every other
 // indicator, and it leaves with the run.
 func TestTopBarCarriesBranchAndSpinner(t *testing.T) {
@@ -1193,7 +1195,9 @@ func TestTopBarCarriesBranchAndSpinner(t *testing.T) {
 		t.Fatalf("transcript content lost to the top bar: %q", rows[1])
 	}
 
-	// Running: a frame of the theme's spinner sits just past the branch.
+	// Running: a frame of the theme's spinner LEADS the branch, at the far
+	// left — it is the bar's one thing that moves, and trailing it read as
+	// part of the branch name.
 	th := theme.Load("groknight")
 	th.Symbols = theme.Symbols{Status: []string{"X", "Y"}}
 	app.SetTheme(th)
@@ -1203,8 +1207,8 @@ func TestTopBarCarriesBranchAndSpinner(t *testing.T) {
 		app.st.spinnerIdx = i
 		app.mu.Unlock()
 		app.draw()
-		if got := bar(); !strings.Contains(got, "❯ fix/boxes "+want) {
-			t.Fatalf("frame %d: top bar %q must carry %q beside the branch", i, got, want)
+		if got := bar(); !strings.Contains(got, want+" ❯ fix/boxes") {
+			t.Fatalf("frame %d: top bar %q must carry %q ahead of the branch", i, got, want)
 		}
 	}
 

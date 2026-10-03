@@ -999,6 +999,10 @@ type diffOverlay struct {
 	lines     []line
 	scrollVp  int
 	scrollOff int
+	// split is the layout question the width mostly decides: side by side
+	// when the columns fit, unified when they do not, and `s` overrides both
+	// for as long as the overlay is up.
+	split bool
 }
 
 // diffPad is the overlay's own margin: two cells on each side, so the box has
@@ -1039,8 +1043,8 @@ func (a *App) openDiffOverlay(path string) bool {
 		// sanitizeOutput for the tab: the transcript's diff goes through it
 		// (app.go) and a raw \t is a zero-width cell, so an indented Go diff
 		// opened here lost its indentation and column-aligned columns.
-		ov := &diffOverlay{path: path, diff: sanitizeOutput(b.Diff), inner: a.diffOverlayInner()}
-		ov.lines = a.diffCells(ov.diff, ov.inner)
+		ov := &diffOverlay{path: path, diff: sanitizeOutput(b.Diff)}
+		ov.build(a)
 		// scrollVp is the painted body height, not the full line count —
 		// setting it to len(lines) made maxOff always 0 so nothing scrolled.
 		// drawDiffOverlay refreshes this from the real panel each frame.
@@ -1070,6 +1074,52 @@ func (a *App) closeDiffOverlayLocked() {
 	a.diffOv = nil
 }
 
+// build lays the diff out for the viewer's current width and picks the layout
+// it can actually show: the pair when the columns fit, the unified list when
+// they do not.
+//
+// The width is the PANEL's (diffOverlayInner), not contentWidth()'s: the
+// transcript's budget shrinks when the dock is open and the overlay paints
+// over the dock, so laying out against the transcript's width left the rows
+// short of the border. diffOverlayInner is the one source of that width.
+func (ov *diffOverlay) build(a *App) {
+	ov.inner = a.diffOverlayInner()
+	ov.split = splitFits(ov.inner, classifyMarkedDiff(ov.diff))
+	ov.renderLocked(a)
+}
+
+// renderLocked lays the diff out in the layout ov.split already names. It is
+// separate from build so `s` can swap the layout without re-deciding it: a
+// reader who asked for the pair at 90 columns keeps the pair, which is the
+// whole point of an override. Callers hold a.mu.
+func (ov *diffOverlay) renderLocked(a *App) {
+	rows := classifyMarkedDiff(ov.diff)
+	if ov.split {
+		ov.lines = a.splitRows(rows, ov.inner)
+		return
+	}
+	ov.lines = diffRowsCells(rows, a.diffStyle(), ov.inner)
+}
+
+// reflow rebuilds the layout when the terminal was resized under an open
+// overlay. The width is the whole decision, so a resize re-decides it — a
+// window dragged past the threshold changes the layout under the reader's
+// hands, which is the honest outcome, and the reverse drag brings it back.
+// The scroll offset is kept in proportion: the same row is not on screen
+// afterwards, but the same PLACE in the diff is. Callers hold a.mu.
+func (ov *diffOverlay) reflow(a *App) {
+	w := a.diffOverlayInner()
+	if w == ov.inner {
+		return
+	}
+	keep := 0
+	if len(ov.lines) > 0 {
+		keep = ov.scrollOff * w / ov.inner
+	}
+	ov.build(a)
+	ov.scrollOff = keep
+}
+
 // drawDiffOverlay renders the full-width diff surface above the composer.
 func (a *App) drawDiffOverlay(yComposerTop int) {
 	ov := a.diffOv
@@ -1088,13 +1138,13 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	// A resize is the one thing that changes what a row fits in, so the rows
-	// are re-wrapped for the width the popup has now. Built once at open, they
-	// kept the budget they arrived with and either overflowed the border or
-	// left a gap after a window drag. Only the wrap changes; scrollOff is
+	// are re-laid for the width the popup has now — and the LAYOUT is re-decided
+	// with them, because the layout is the width. Built once at open, they kept
+	// the budget they arrived with and either overflowed the border, left a gap
+	// after a window drag, or kept a pair whose halves were built for a
+	// half-width the terminal no longer has. Only the wrap changes; scrollOff is
 	// clamped below as usual.
-	if inner := a.diffOverlayInner(); inner != ov.inner {
-		ov.inner, ov.lines = inner, a.diffCells(ov.diff, inner)
-	}
+	ov.reflow(a)
 	// The panel's field is the terminal's own background, never a colour this
 	// program picked. A themed fill here (bg_base) painted the blank interior
 	// one colour while every text cell kept the default, so the viewer came up
@@ -1152,7 +1202,7 @@ func (a *App) drawDiffOverlay(yComposerTop int) {
 			cx += paintedWidth(r.text)
 		}
 	}
-	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll", dimSt)
+	drawText(s, x+2, y0+panelH-2, "Esc close · ↑↓ scroll · s "+diffModeName(ov.split), dimSt)
 }
 
 // closeDiffOverlayOnClick dismisses the diff overlay when the human
@@ -1279,17 +1329,28 @@ func (a *App) dockOverlayScroll(n int, down bool) {
 }
 
 // handleDiffOverlayKey owns ↑↓ / PgUp/PgDn / Home/End while the diff
-// overlay is open, and Esc closes it. The footer advertises ↑↓ scroll;
-// without the Esc case it fell through to the double-Esc rewind block
-// in handleKey and the overlay could never be dismissed by keyboard —
-// "Esc close" in the footer was a lie. Returns true when the key was consumed.
+// overlay is open, Esc closes it, and `s` swaps the layout. The footer
+// advertises all three; without the Esc case it fell through to the
+// double-Esc rewind block in handleKey and the overlay could never be
+// dismissed by keyboard. Returns true when the key was consumed.
 func (a *App) handleDiffOverlayKey(key *tcell.EventKey) bool {
 	a.mu.Lock()
 	ov := a.diffOv
-	a.mu.Unlock()
 	if ov == nil {
+		a.mu.Unlock()
 		return false
 	}
+	// `s` is the viewer's own chord, not a letter for the composer: the
+	// overlay is modal, so nothing under it types. KeyRune with no modifier
+	// only, so a Ctrl+S still reaches the keymap (dock-cycle) below.
+	if key.Key() == tcell.KeyRune && key.Rune() == 's' && key.Modifiers() == tcell.ModNone {
+		ov.split = !ov.split
+		ov.renderLocked(a)
+		a.mu.Unlock()
+		a.poke()
+		return true
+	}
+	a.mu.Unlock()
 	switch key.Key() {
 	case tcell.KeyEsc:
 		a.closeDiffOverlay()
