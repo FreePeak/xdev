@@ -131,7 +131,7 @@ func (t *WriteTool) Execute(ctx context.Context, args json.RawMessage) (Result, 
 		}
 	}
 	text := fmt.Sprintf("Wrote %s (%d bytes, %d lines)", a.Path, len(data), writeContentLines(a.Content))
-	if note := verifyGoSyntax(resolved, data); note != "" {
+	if note := t.reg.VerifyAfterWrite(ctx, resolved); note != "" {
 		text += "\n" + note
 		details["syntaxWarning"] = note
 	}

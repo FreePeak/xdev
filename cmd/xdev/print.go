@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/browser"
+	"github.com/FreePeak/xdev/internal/codegraph"
 	"github.com/FreePeak/xdev/internal/computer"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dap"
@@ -1987,6 +1989,32 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		lspTool := lsp.NewTool(cwd, settings)
 		reg.Register(lspTool)
 		lspTool.Prewarm()
+		// #263: hand the registry the same warm server the lsp tool owns, so
+		// edit/write can report type errors on the result instead of a turn
+		// later. It only answers for servers that are already running.
+		reg.SetDiagnosticsProvider(lspTool)
+	}
+	// #543: the `impact` tool — "what else does this edit touch?" — backed by
+	// an out-of-process LeanKG graph. Gated on a configured server so a run
+	// without one never advertises a tool it cannot answer.
+	if cgSettings := settings.CodeGraphConfig(); cgSettings.BaseURL != "" {
+		cgCfg := codegraph.Config{
+			BaseURL:   cgSettings.BaseURL,
+			Project:   cgSettings.Project,
+			ExpectDir: codeGraphExpectDir(cgSettings, cwd),
+		}
+		if cgSettings.Timeout != "" {
+			d, err := time.ParseDuration(cgSettings.Timeout)
+			if err != nil {
+				logx.Errorf("codeGraph.timeout: %v", err)
+			} else {
+				cgCfg.Timeout = d
+			}
+		}
+		reg.Register(&tool.ImpactTool{Graph: codegraph.New(cgCfg), CWD: cwd})
+		reg.Register(&tool.CodeQueryTool{Graph: codegraph.New(cgCfg), CWD: cwd})
+		reg.Defer(tool.ImpactToolName, tool.ImpactIndex, "code", "graph", "impact")
+		reg.Defer(tool.CodeQueryToolName, tool.CodeQueryIndex, "code", "graph", "search")
 	}
 	// M15 #68: local speech synthesis (macOS say, Linux spd-say/espeak-ng,
 	// Windows PowerShell SAPI), voice/rate from the tts: settings group. A
@@ -2046,6 +2074,23 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	}
 
 	return reg
+}
+
+// codeGraphExpectDir is the repository directory the LeanKG project selector
+// is expected to resolve to, which the client then verifies before trusting
+// any answer (see internal/codegraph). A configured expectDir wins; otherwise
+// it is the session's git root, and empty when git cannot say — an unset
+// expectation disables the check, which is the honest default for a directory
+// that is not a repository at all.
+func codeGraphExpectDir(s config.CodeGraphSettings, cwd string) string {
+	if s.ExpectDir != "" {
+		return s.ExpectDir
+	}
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // sharedHub is the session's agent hub (one per process, like

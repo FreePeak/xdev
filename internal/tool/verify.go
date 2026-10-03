@@ -1,12 +1,154 @@
 package tool
 
 import (
+	"context"
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// The post-write verification ladder.
+//
+// Tier 0 (verifyTier0 below): a standard-library parse, so the cheapest
+// possible answer to "did the bytes you just wrote stop parsing" costs no
+// subprocess, no language server, and microseconds.
+//
+// Tier 1 (DiagnosticsProvider, installed by the lsp package): a language
+// server that is ALREADY running. This is #263's rich end -- LSP
+// publishDiagnostics carries type errors a parser structurally cannot see --
+// and it is deliberately warm-only: the write path must never be the thing
+// that pays a 30-second language-server handshake.
+//
+// The interface lives here rather than in internal/lsp because internal/lsp
+// imports this package, and the reverse edge would be an import cycle. That
+// constraint is also why the provider is a one-method seam over a flattened
+// Problem type: any backend can fill it without the tool package growing a
+// dependency.
+
+// Problem is one diagnostic flattened for the model-facing note. LSP's
+// severity 1..4 is the provider's convention, not the harness's, so only the
+// error/warning distinction crosses the seam.
+type Problem struct {
+	Severity string
+	// Location is an already-formatted position ("a.go:12:3"); the provider
+	// owns the path shape because only it knows the display rules.
+	Location string
+	Message  string
+}
+
+// DiagnosticsProvider reports what a language server says about a file the
+// harness has just written. ok=false means "nothing to report, or nothing
+// running" -- never an error: a provider that cannot answer must not make a
+// successful write look broken.
+type DiagnosticsProvider interface {
+	DiagnosticsFor(ctx context.Context, path string, wait time.Duration) ([]Problem, bool)
+}
+
+// SetDiagnosticsProvider installs the tier-1 provider for this registry's
+// edit/write tools. Passing nil restores the pre-#263 behavior.
+func (r *Registry) SetDiagnosticsProvider(p DiagnosticsProvider) { r.diagProvider = p }
+
+// verifyWait bounds tier 1: long enough for a warm server to re-analyze one
+// file, short enough that the model is not left holding its turn open while a
+// language server thinks.
+// verifyWait bounds tier 1.
+//
+// Measured against a real gopls on 2026-10-03: a warm server answers in
+// ~30-40ms for a brand-new file, and a clean file publishes an empty set just
+// as fast, so this ceiling is a backstop rather than a budget that is normally
+// spent. It matches the wait the pre-existing `lsp diagnostics` call uses, so
+// the write path is never stricter than the tool the model could have called
+// itself.
+const verifyWait = 2 * time.Second
+
+// verifyMaxProblems caps how many diagnostics reach the model. A broken file
+// can produce hundreds; the model needs to know it is broken and where to look
+// first, not a compiler log it pays for on every following read.
+const verifyMaxProblems = 5
+
+// VerifyAfterWrite returns one advisory line describing what is wrong with the
+// file a write or edit just produced, or "" when nothing is wrong.
+//
+// It never fails or blocks the write -- the bytes are on disk before this
+// runs, and the point is telling the model, not refusing -- and it never
+// invents a problem.
+func (r *Registry) VerifyAfterWrite(ctx context.Context, path string) string {
+	if note := verifyTier0(path); note != "" {
+		// A file that does not parse cannot produce meaningful type
+		// diagnostics, and the parse error is the more actionable line.
+		return note
+	}
+	if r == nil || r.diagProvider == nil {
+		return ""
+	}
+	problems, ok := r.diagProvider.DiagnosticsFor(ctx, path, verifyWait)
+	if !ok || len(problems) == 0 {
+		return ""
+	}
+	return renderProblems(problems)
+}
+
+// renderProblems renders the leading problems as one actionable line, errors
+// first so a fatal one is never truncated away behind five warnings.
+func renderProblems(problems []Problem) string {
+	ordered := make([]Problem, 0, len(problems))
+	for _, p := range problems {
+		if strings.EqualFold(strings.TrimSpace(p.Severity), "error") {
+			ordered = append(ordered, p)
+		}
+	}
+	for _, p := range problems {
+		if !strings.EqualFold(strings.TrimSpace(p.Severity), "error") {
+			ordered = append(ordered, p)
+		}
+	}
+	more := len(ordered) - verifyMaxProblems
+	if more > 0 {
+		ordered = ordered[:verifyMaxProblems]
+	}
+	var b strings.Builder
+	b.WriteString("language server reports ")
+	for i, p := range ordered {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(p.Message)
+		if p.Location != "" {
+			b.WriteString(" (")
+			b.WriteString(p.Location)
+			b.WriteString(")")
+		}
+	}
+	if more > 0 {
+		b.WriteString(" (+")
+		b.WriteString(itoa(more))
+		b.WriteString(" more)")
+	}
+	b.WriteString(" -- fix these before the next build")
+	return capVerifyMessage(b.String())
+}
+
+// verifyTier0 parses the file on disk with the standard library. It reports ""
+// for a non-Go file, an unreadable file, or one too large to be the product of
+// an edit.
+func verifyTier0(path string) string {
+	if !strings.EqualFold(filepath.Ext(path), ".go") {
+		return ""
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.Size() == 0 || st.Size() > verifyMaxBytes {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return verifyGoSyntax(path, data)
+}
 
 // Post-write syntax verification for Go files.
 //
