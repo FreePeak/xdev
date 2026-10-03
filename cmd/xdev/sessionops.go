@@ -111,6 +111,13 @@ func resumeProg(argv0 string) string {
 
 // resolveResumeID finds a session by case-insensitive id prefix (mtime
 // desc, omp parity). "" query returns the most recent in cwd.
+//
+// A session whose file holds no message at all is not a resume target
+// (session.StatusEmpty): resuming one opens a TUI with a blank transcript
+// beside a title naming nothing, and --continue lands on it precisely because
+// it is the newest file, so the empty session shadows every real conversation
+// in the directory. Both forms skip it, and naming one by prefix is an error
+// that says why rather than a silent blank screen.
 func resolveResumeID(cwd, query string) (string, error) {
 	metas, err := session.List(sessionDataDir())
 	if err != nil {
@@ -126,6 +133,12 @@ func resolveResumeID(cwd, query string) (string, error) {
 		// The "" (newest) form must resolve a user session, never a
 		// subagent child; an explicit prefix may still address one.
 		if q == "" && m.TitleSource == session.TitleSourceSubagent {
+			continue
+		}
+		if m.Status == session.StatusEmpty {
+			if q != "" && strings.HasPrefix(strings.ToLower(m.ID), q) {
+				return "", fmt.Errorf("session %s has no messages — there is nothing to resume", m.ID[:8])
+			}
 			continue
 		}
 		if q == "" || strings.HasPrefix(strings.ToLower(m.ID), q) {

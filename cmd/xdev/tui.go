@@ -1233,9 +1233,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
 			// Fork parks the source and opens the child as current.
-			// A fresh session lives memory-only until its first
-			// assistant message — materialize it so the fork has a
-			// source file to copy.
+			// A fresh session lives memory-only until its first assistant
+			// message — materialize it so the fork has a source file to
+			// copy. But a session that never received a prompt has no
+			// history to copy: forking it just writes a SECOND empty file,
+			// which then shadows every real conversation on the next
+			// --continue (the empty-resume defect). Say so instead.
+			if !sessionHasMessages(storeOf()) {
+				return fmt.Errorf("nothing to fork yet — send a prompt first")
+			}
 			if storeOf().Path() == "" {
 				if _, err := storeOf().EnsureOnDisk(
 					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()), session.Options{}); err != nil {
@@ -3595,10 +3601,11 @@ func sameModelRef(a, b string) bool {
 }
 
 // recentResumeOptions lists this folder's resumable sessions for the
-// no-argument /resume picker: subagent children and the live session are
-// filtered out (nothing to resume onto), newest first. No row cap — the
-// picker windows and scrolls its own list, so a cap here was the list's
-// real length (12 was the whole of it).
+// no-argument /resume picker: subagent children, the live session, and
+// EMPTY sessions (session.StatusEmpty — a row that restores a blank
+// transcript is not a session to resume) are filtered out, newest first. No
+// row cap — the picker windows and scrolls its own list, so a cap here was
+// the list's real length (12 was the whole of it).
 func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 	metas, err := session.List(sessionDataDir())
 	if err != nil {
@@ -3607,6 +3614,9 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 	out := make([]tui.ResumeOption, 0, len(metas))
 	for _, m := range metas {
 		if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent || m.ID == currentID {
+			continue
+		}
+		if m.Status == session.StatusEmpty {
 			continue
 		}
 		// The status closes the detail so the row says what happened to
@@ -3621,9 +3631,12 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 }
 
 // resumePickerItems lists resumable sessions as picker rows across ALL
-// projects (session.List already scans every bucket): subagent children
-// are filtered out (same rules as the text listing); session.List is
-// newest-first. Rows carry InCwd so the TUI can window the
+// projects (session.List already scans every bucket): subagent children and
+// EMPTY sessions (session.StatusEmpty) are filtered out (same rules as the
+// text listing); session.List is newest-first. Rows carry InCwd so the TUI
+// can window the current-folder scope without a second scan, and Pinned from
+// the session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
+// browsing while the picker windows to 8 visible rows.
 // current-folder scope without a second scan, and Pinned from the
 // session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
 // browsing while the picker windows to 8 visible rows.
@@ -3636,6 +3649,9 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 	var out []tui.SessionPickerItem
 	for _, m := range metas {
 		if m.TitleSource == "subagent" || len(m.ID) < 8 {
+			continue
+		}
+		if m.Status == session.StatusEmpty {
 			continue
 		}
 		out = append(out, tui.SessionPickerItem{
