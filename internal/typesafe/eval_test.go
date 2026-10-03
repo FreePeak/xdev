@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEvaluateLocalSidecarWithoutAPIKey(t *testing.T) {
@@ -232,45 +233,213 @@ func TestParseAnswersNull(t *testing.T) {
 	}
 }
 
-func TestNormalizeState(t *testing.T) {
-	if got := NormalizeState(nil); len(got) != 0 {
+// TestNormalizeStateKeepsAStringAString pins the wire shape, with the two live
+// answers the wrapping used to change. The local backend json.dumps a dict
+// before tokenizing, so {"text": "…"} is scored as a JSON blob rather than as
+// the prose it carries.
+func TestNormalizeStateKeepsAStringAString(t *testing.T) {
+	if got := NormalizeState(nil); got != "" {
 		t.Fatalf("nil: %v", got)
 	}
-	if got := NormalizeState("hello"); got["text"] != "hello" {
-		t.Fatalf("string: %v", got)
+	if got := NormalizeState("hello"); got != "hello" {
+		t.Fatalf("a string must not be wrapped: %v", got)
 	}
 	m := map[string]any{"x": 1}
-	if got := NormalizeState(m); got["x"] != 1 {
+	if got := NormalizeState(m); got.(map[string]any)["x"] != 1 {
 		t.Fatalf("map: %v", got)
 	}
-	if got := NormalizeState(42); got["data"] != 42 {
-		t.Fatalf("other: %v", got)
+	if got := NormalizeState([]any{"a", "b"}); len(got.([]any)) != 2 {
+		t.Fatalf("list: %v", got)
 	}
 }
 
-func TestRetryableStatus(t *testing.T) {
+// TestEvaluateSendsStringStateUnwrapped is the same property at the wire: the
+// body a real call posts must carry the bare string, because the two shapes do
+// not produce the same answer on the local backend.
+func TestEvaluateSendsStringStateUnwrapped(t *testing.T) {
+	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			State any `json:"state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		s, ok := req.State.(string)
+		if !ok {
+			t.Errorf("state is %T, want the bare string", req.State)
+		}
+		got = s
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+		})
+	}))
+	defer srv.Close()
+
+	e := NewEvaluator(Settings{BaseURL: srv.URL, Model: "english"})
+	if _, err := e.Evaluate(context.Background(),
+		"The customer wants to cancel their subscription today and get a full refund.",
+		map[string]any{"q": map[string]any{"type": "noul", "instructions": "urgent?"}}); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got != "The customer wants to cancel their subscription today and get a full refund." {
+		t.Fatalf("state on the wire = %q", got)
+	}
+}
+
+// TestRateLimitIsRetriedThenReported pins the whole ladder: a 429 costs three
+// attempts before the caller sees an error. It used to cost one, so a quota
+// window became a hard tool failure in the middle of an agent turn.
+func TestRateLimitIsRetriedThenReported(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"detail":"rate limited"}`))
 	}))
 	defer srv.Close()
 
-	saved := baseURL
-	baseURL = srv.URL
-	defer func() { baseURL = saved }()
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Model: "jev-latest", APIKey: "k", Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
 
-	e := &Evaluator{}
-	e.TestEvaluatorHTTP(srv.Client())
-	e.model = "jev-latest"
-	e.key = "k"
-
-	_, err := e.Evaluate(context.Background(),
-		map[string]any{"state": "x"}, map[string]any{"q": map[string]any{"type": "noul"}})
+	start := time.Now()
+	_, err := ev.Evaluate(context.Background(), "x",
+		map[string]any{"q": map[string]any{"type": "noul"}})
 	if err == nil {
-		t.Fatal("expected error for 429")
+		t.Fatal("a backend that never stops rate-limiting must still fail the call")
 	}
 	if !contains(err.Error(), "429") {
-		t.Fatalf("error should mention 429: %s", err.Error())
+		t.Fatalf("error should mention 429: %s", err)
+	}
+	if calls != maxAttempts {
+		t.Errorf("attempts = %d, want %d", calls, maxAttempts)
+	}
+	// The two backoffs (250ms + 500ms) must actually be waited out; a retry
+	// that returns instantly is a hammer, not a backoff.
+	if elapsed := time.Since(start); elapsed < retryBaseDelay+retryBaseDelay {
+		t.Errorf("returned after %s, faster than the backoff", elapsed)
+	}
+}
+
+// TestRateLimitThenSuccess answers the case the retry exists for: the second
+// attempt goes through and the caller gets an answer, not an error.
+func TestRateLimitThenSuccess(t *testing.T) {
+	var calls int
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"detail":"rate limited"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+			"usage":   map[string]any{"local_ms": 42.0},
+		})
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
+
+	answers, info, err := ev.EvaluateWithInfo(context.Background(), "cancel today",
+		map[string]any{"q": map[string]any{"type": "noul", "instructions": "urgent?"}})
+	if err != nil {
+		t.Fatalf("a rate-limited call that succeeds on retry must not be an error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("attempts = %d, want 2", calls)
+	}
+	if _, ok := answers["q"]; !ok {
+		t.Errorf("answers = %v", answers)
+	}
+	if info.Model != "english" || info.Usage.LocalMS != 42 {
+		t.Errorf("info from the successful attempt lost: %+v", info)
+	}
+	// The retried request must carry the SAME body. A consumed Request body is
+	// the classic way a retry silently becomes an empty request.
+	for i, b := range bodies {
+		if !contains(b, `"cancel today"`) {
+			t.Errorf("attempt %d posted %q, state missing", i+1, b)
+		}
+	}
+}
+
+// TestRetryAfterIsHonouredAndCapped: the server names its own wait, so use it
+// — but a Retry-After longer than the cap must not become a tool call that
+// outlives the agent turn asking for it.
+func TestRetryAfterIsHonouredAndCapped(t *testing.T) {
+	// The cap is 5s, so a 3s Retry-After is honoured and a 7s one is clamped.
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {"3"}}}, 1); got != 3*time.Second {
+		t.Errorf("Retry-After seconds ignored: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {"7"}}}, 1); got != retryMaxDelay {
+		t.Errorf("Retry-After past the cap not clamped: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {"3600"}}}, 1); got != retryMaxDelay {
+		t.Errorf("Retry-After not capped: %s", got)
+	}
+	when := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {when}}}, 1); got < 0 || got > 2*time.Second {
+		t.Errorf("Retry-After as a date: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{}}, 3); got != 4*retryBaseDelay {
+		t.Errorf("fallback backoff: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{}}, 9); got != retryMaxDelay {
+		t.Errorf("fallback backoff not capped: %s", got)
+	}
+}
+
+// TestOnlyRateLimitsAreRetried: a 500 is the caller's ladder to run, and
+// duplicating it here would double the cost of every failure.
+func TestOnlyRateLimitsAreRetried(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
+
+	if _, err := ev.Evaluate(context.Background(), "x",
+		map[string]any{"q": map[string]any{"type": "noul"}}); err == nil {
+		t.Fatal("a 500 must fail the call")
+	}
+	if calls != 1 {
+		t.Errorf("a 500 was retried %d times", calls)
+	}
+}
+
+// TestRateLimitRetryHonoursContext: a caller that gives up mid-backoff stops
+// immediately rather than finishing the ladder against a dead context.
+func TestRateLimitRetryHonoursContext(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := ev.Evaluate(ctx, "x",
+		map[string]any{"q": map[string]any{"type": "noul"}}); err == nil {
+		t.Fatal("expected an error once the context expired")
+	}
+	if calls > 2 {
+		t.Errorf("kept retrying past the deadline: %d attempts", calls)
 	}
 }
 
@@ -367,5 +536,125 @@ func TestFormatResultKeepsTheGatingNumber(t *testing.T) {
 	}
 	if contains(got, "…") || contains(wide, "…") {
 		t.Errorf("a real answer was truncated: %q %q", got, wide)
+	}
+}
+
+// TestFormatResultDoesNotNameAMissingField pins the Laya-shaped case, verbatim
+// from a live local sidecar (laya 0.3.23, english checkpoint, POST
+// /v1/systemone): the payload carries `confidence` and no `answer_confidence`.
+// Naming the calibrated field anyway is a confident wrong answer — the model
+// looks for a key that is not there — so the header must say the answer is
+// uncalibrated instead.
+func TestFormatResultDoesNotNameAMissingField(t *testing.T) {
+	got := FormatResult(map[string]any{
+		"urgency": map[string]any{
+			"type":          "score",
+			"score":         1.9436,
+			"legend":        map[string]any{"0": "no deadline mentioned", "1": "days", "2": "today or cancellation"},
+			"probabilities": map[string]any{"0": 0.0201, "1": 0.0161, "2": 0.9637},
+			"confidence":    0.8355,
+			"action":        map[string]any{"act_probability": 1.0},
+		},
+	})
+	if contains(got, "gate on answer_confidence") {
+		t.Errorf("header points at a field this backend never sent: %q", got)
+	}
+	for _, want := range []string{"uncalibrated", "0.9637", "today or cancellation"} {
+		if !contains(got, want) {
+			t.Errorf("result missing %q: %q", want, got)
+		}
+	}
+}
+
+// TestGateHintFollowsThePayload keeps the hint tied to the data, not to a
+// constant: one answer carries the calibrated field and the hint follows it
+// even though the sibling answer does not.
+func TestGateHintFollowsThePayload(t *testing.T) {
+	mixed := FormatResult(map[string]any{
+		"a": map[string]any{"type": "noul", "noul": 0.5, "answer_confidence": 0.5},
+		"b": map[string]any{"type": "noul", "noul": 0.5, "confidence": 0.5},
+	})
+	if !contains(mixed, "gate on answer_confidence") {
+		t.Errorf("a payload carrying answer_confidence must name it: %q", mixed)
+	}
+}
+
+// TestEvaluateWithInfoReportsTheAnsweringBackend pins the two fields the
+// envelope carried and nothing read: with a lazy router the requested model is
+// empty on purpose and the answering checkpoint is whatever the script routed
+// to, so "which backend answered" and "what did the call cost" cannot be
+// reconstructed from the answers. Verbatim from a live local sidecar.
+func TestEvaluateWithInfoReportsTheAnsweringBackend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+			"usage":   map[string]any{"input_tokens": 0, "output_tokens": 0, "local_ms": 116.5},
+		})
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL})
+	answers, info, err := ev.EvaluateWithInfo(context.Background(), "cancel today",
+		map[string]any{"q": map[string]any{"type": "noul", "instructions": "urgent?"}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(answers) != 1 {
+		t.Fatalf("answers = %v", answers)
+	}
+	if info.Model != "english" {
+		t.Errorf("answering model = %q", info.Model)
+	}
+	if info.Usage.LocalMS != 116.5 {
+		t.Errorf("local_ms = %v", info.Usage.LocalMS)
+	}
+
+	out := FormatResultWithInfo(answers, info)
+	for _, want := range []string{"answered by english", "116ms"} {
+		if !contains(out, want) {
+			t.Errorf("result missing %q: %q", want, out)
+		}
+	}
+	// The zeroed token counters a local backend sends must not render as "0
+	// tokens" — that reads as a cost, not as an absent one.
+	if contains(out, "0 tokens") {
+		t.Errorf("absent cost rendered as zero: %q", out)
+	}
+}
+
+// TestToolSurfacesTheBackendThatAnswered is the tool-level half: a caller of
+// the tool sees the footer, not just the answers. Fails on a build where the
+// tool drops the Info the evaluator returned.
+func TestToolSurfacesTheBackendThatAnswered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+			"usage":   map[string]any{"input_tokens": 0, "output_tokens": 0, "local_ms": 116.5},
+		})
+	}))
+	defer srv.Close()
+
+	res, err := NewTool(Settings{BaseURL: srv.URL}).Execute(context.Background(),
+		json.RawMessage(`{"state":"cancel today","questions":{"q":{"type":"noul","instructions":"urgent?"}}}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool failed: %s", res.Text)
+	}
+	if !contains(res.Text, "answered by english") {
+		t.Errorf("tool dropped the answering checkpoint: %q", res.Text)
+	}
+}
+
+// TestFormatInfoOmittedWhenTheBackendSaysNothing keeps the footer absent rather
+// than empty-looking, so an answer from a backend that reports no model and no
+// cost reads exactly as it did before.
+func TestFormatInfoOmittedWhenTheBackendSaysNothing(t *testing.T) {
+	answers := map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}}
+	if got, want := FormatResultWithInfo(answers, Info{}), FormatResult(answers); got != want {
+		t.Errorf("no info changed the rendering:\n got %q\nwant %q", got, want)
 	}
 }
