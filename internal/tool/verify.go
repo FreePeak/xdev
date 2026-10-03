@@ -55,7 +55,15 @@ func (r *Registry) SetDiagnosticsProvider(p DiagnosticsProvider) { r.diagProvide
 // verifyWait bounds tier 1: long enough for a warm server to re-analyze one
 // file, short enough that the model is not left holding its turn open while a
 // language server thinks.
-const verifyWait = 600 * time.Millisecond
+// verifyWait bounds tier 1.
+//
+// Measured against a real gopls on 2026-10-03: a warm server answers in
+// ~30-40ms for a brand-new file, and a clean file publishes an empty set just
+// as fast, so this ceiling is a backstop rather than a budget that is normally
+// spent. It matches the wait the pre-existing `lsp diagnostics` call uses, so
+// the write path is never stricter than the tool the model could have called
+// itself.
+const verifyWait = 2 * time.Second
 
 // verifyMaxProblems caps how many diagnostics reach the model. A broken file
 // can produce hundreds; the model needs to know it is broken and where to look

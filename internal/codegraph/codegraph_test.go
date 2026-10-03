@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -198,5 +200,27 @@ func TestQueryDoesNotHangPastItsTimeout(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatalf("the client waited %s past its 100ms budget", time.Since(start))
+	}
+}
+
+// TestVerifyAcceptsTwoSpellingsOfOneDirectory covers the same hazard the lsp
+// side hit in production: macOS answers /tmp/x for /private/tmp/x, and a
+// symlinked working directory does the same in reverse. A server bound to the
+// real directory must still be recognized when the caller expects the linked
+// spelling — otherwise the guard refuses a healthy server and blames the
+// user's configuration.
+func TestVerifyAcceptsTwoSpellingsOfOneDirectory(t *testing.T) {
+	f, srv := newFake(t)
+	real := t.TempDir()
+	f.projectDir = real
+
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	c := New(Config{BaseURL: srv.URL, Project: "xdev", ExpectDir: link})
+	if err := c.Verify(context.Background()); err != nil {
+		t.Fatalf("a linked spelling of the bound directory must verify, got: %v", err)
 	}
 }
