@@ -124,7 +124,16 @@ type mmMessage struct {
 	spansTwo bool
 }
 
-type mmNode struct{ id, label string }
+type mmNode struct {
+	id, label string
+	group     int // subgraph index, -1 for a node that is in no subgraph
+}
+
+// mmGroup is one `subgraph`. A group is a frame around the nodes it holds, so
+// it costs the drawing a box and a title, not a layout pass of its own.
+type mmGroup struct {
+	id, label string
+}
 
 type mmEdge struct {
 	from, to int
@@ -134,13 +143,14 @@ type mmEdge struct {
 
 // mmGraph is a parsed flowchart: nodes in declaration order and its edges.
 type mmGraph struct {
-	nodes []mmNode
-	edges []mmEdge
+	nodes  []mmNode
+	edges  []mmEdge
+	groups []mmGroup
 }
 
-// mermaidBlock is a parsed diagram, either kind. parseMermaid returns nil for
-// anything it does not fully understand — that nil is the caller's signal to
-// keep the code band.
+// mermaidBlock is a parsed diagram, in one of the kinds drawFlow draws. parseMermaid
+// returns nil for anything it does not fully understand — that nil is the
+// caller's signal to keep the code band.
 type mermaidBlock struct {
 	seq      bool
 	parts    []mmNode
@@ -159,10 +169,86 @@ func parseMermaid(src string) *mermaidBlock {
 	switch head := strings.TrimSpace(lines[0]); {
 	case strings.HasPrefix(head, "sequenceDiagram"):
 		return parseSequence(lines)
+	case strings.HasPrefix(head, "stateDiagram"):
+		return parseState(lines)
 	case strings.HasPrefix(head, "flowchart"), strings.HasPrefix(head, "graph"):
 		return parseFlowchart(lines)
 	}
 	return nil
+}
+
+// parseState reads a `stateDiagram-v2`. A state diagram is a flowchart spelled
+// with different punctuation: a transition is `A --> B: event` rather than
+// `A -->|event| B`, `[*]` is the start marker, `state "Long" as id` names a
+// state, and `state id { ... }` frames its members as a subgraph does. So each
+// line is translated to the flow spelling and handed to the flow reader — one
+// graph, one layout, one drawer.
+func parseState(lines []string) *mermaidBlock {
+	out := []string{"flowchart TD"}
+	open := 0 // unclosed `state id {` frames, closed at the end
+	for _, raw := range lines[1:] {
+		ln := strings.TrimSpace(raw)
+		switch {
+		case ln == "" || strings.HasPrefix(ln, "%%"):
+		case strings.HasPrefix(ln, "direction "):
+			if d := strings.ToUpper(afterSpace(ln)); d == "LR" || d == "TD" {
+				out = append(out, "direction "+d)
+			}
+		case hasAnyPrefix(ln, "classDef ", "class ", "note "):
+			// Styling has no terminal rendering; the shape does.
+		case strings.HasPrefix(ln, "state "):
+			rest := afterSpace(ln)
+			if i := strings.IndexByte(rest, '{'); i >= 0 {
+				if id := strings.TrimSpace(rest[:i]); validName(id) {
+					out = append(out, "subgraph "+id)
+					open++
+				}
+				continue
+			}
+			// `state "Long name" as id` names a state. A bare `state id`
+			// says what a node reference already says, so it is dropped.
+			i := strings.Index(strings.ToLower(rest), " as ")
+			if i < 0 {
+				continue
+			}
+			id := strings.TrimSpace(rest[i+4:])
+			if !validName(id) {
+				return nil
+			}
+			out = append(out, id+"["+mermaidText(strings.Trim(strings.TrimSpace(rest[:i]), `"`))+"]")
+		case ln == "}" && open > 0:
+			open--
+			out = append(out, "end")
+		default:
+			ln = stateMarker(ln)
+			if findFlowArrow(ln) < 0 {
+				if !validName(ln) {
+					return nil
+				}
+				out = append(out, ln)
+				continue
+			}
+			// The text after the colon is the event that fires the
+			// transition, so it becomes the edge label: `A --> B: start`
+			// is the flow spelling `A -->|start| B`.
+			ev := ""
+			if i := strings.IndexByte(ln, ':'); i >= 0 {
+				ev = mermaidText(ln[i+1:])
+				ln = strings.TrimSpace(ln[:i])
+			}
+			at, end, _, ok := nextArrow(ln)
+			if !ok {
+				return nil
+			}
+			arrow := ln[at:end]
+			ln = strings.TrimSpace(ln[:at]) + arrow + "|" + ev + "| " + strings.TrimSpace(ln[end:])
+			out = append(out, ln)
+		}
+	}
+	for ; open > 0; open-- {
+		out = append(out, "end")
+	}
+	return parseFlowchart(out)
 }
 
 // mermaidBody strips the fence, drops `%%` comments, and trims leading blank
@@ -223,9 +309,18 @@ func parseSequence(lines []string) *mermaidBlock {
 			if label != "" {
 				b.parts[participant(name)].label = label
 			}
-		case hasAnyPrefix(ln, "autonumber", "activate ", "deactivate ", "box "):
+		case hasAnyPrefix(ln, "autonumber", "activate ", "deactivate ", "box ", "end", "else", "opt ", "par ", "and ", "critical ", "break "):
 			// Display directives with no terminal rendering; the messages
 			// they wrap still render.
+		case hasAnyPrefix(ln, "loop ", "alt ", "rect "):
+			// A control block is a labelled frame around the messages it
+			// wraps, and the renderer draws a label row rather than a frame.
+			// The `end` that closes it costs nothing: the rows already carry
+			// the messages in source order, so the block is legible as its
+			// header plus its rows.
+			b.messages = append(b.messages, mmMessage{
+				note: true, from: -1, to: -1, label: mermaidText(afterSpace(ln)),
+			})
 		case hasPrefixFold(ln, "note "):
 			b.messages = append(b.messages, parseNote(ln, participant))
 		default:
@@ -373,14 +468,15 @@ func parseSeqMessage(ln string, participant func(string) int) (mmMessage, bool) 
 	// dashes and the extra head glyph. Stripping only the arrow punctuation
 	// keeps a name that itself ends in a dash readable.
 	from := strings.TrimRight(ln[:h], " \t")
-	from = strings.TrimRight(from, "->x)0123456789")
+	// The `+` of `A->>+B` opens an activation and the `-` of `B-->>-A` closes
+	// one. There is no activation bar to draw in a terminal, so the marker is
+	// dropped rather than taken for part of a participant name.
+	from = strings.TrimRight(from, "->x+)0123456789")
 	// The right token is `>B: text`: the head glyph, the participant, and the
 	// label after the first colon. Cutting at the first colon is what keeps a
 	// colon inside the label itself from splitting the participant name.
 	to, label := cutColon(ln[h+1:])
-	for strings.HasPrefix(to, ">") || strings.HasPrefix(to, "-") {
-		to = to[1:]
-	}
+	to = strings.TrimLeft(to, ">-+")
 	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
 	if from == "" || to == "" || !validName(from) || !validName(to) {
 		return mmMessage{}, false
@@ -391,21 +487,45 @@ func parseSeqMessage(ln string, participant func(string) int) (mmMessage, bool) 
 	}, true
 }
 
+// stateMarker rewrites the `[*]` marker — the diagram's start state, or its
+// end state when it sits at the end of a transition — into a plain node id:
+// `[*] --> A` opens at START, `A --> [*]` closes at DONE. Only an endpoint is
+// rewritten, so a `[*]` written inside a state name is left alone.
+func stateMarker(ln string) string {
+	if rest := strings.TrimPrefix(ln, "[*]"); rest != ln {
+		return "START" + rest
+	}
+	if rest := strings.TrimSuffix(ln, "[*]"); rest != ln {
+		return rest + "DONE"
+	}
+	return ln
+}
+
 // parseFlowchart reads a flowchart/graph: `direction`, node declarations
 // (`A[Label]`, `A(Label)`, `A((Label))`, `A{Label}`, `A>Label]`, bare `A`) and
 // edges (`-->`, `---`, `-.->`, `==>`, `--x`) that may carry `|label|` or an
-// inline `-- label -->`. A subgraph is the one construct that needs a real
-// layout engine to draw honestly, so a source that opens one is refused whole.
+// inline `-- label -->`. A `subgraph` is a frame around its own members, so
+// one is drawn rather than refused.
 func parseFlowchart(lines []string) *mermaidBlock {
 	b := &mermaidBlock{graph: mmGraph{}, dir: "TD"}
 	idx := map[string]int{}
+	// The group stack: `subgraph` pushes, `end` pops. Nesting is tracked so
+	// `end` closes the group it opened and an unclosed one costs nothing —
+	// the frame is drawn around whatever landed in it.
+	var stack []int
+	cur := func() int {
+		if len(stack) == 0 {
+			return -1
+		}
+		return stack[len(stack)-1]
+	}
 	node := func(id string) int {
 		if i, ok := idx[id]; ok {
 			return i
 		}
 		i := len(b.graph.nodes)
 		idx[id] = i
-		b.graph.nodes = append(b.graph.nodes, mmNode{id: id})
+		b.graph.nodes = append(b.graph.nodes, mmNode{id: id, group: cur()})
 		return i
 	}
 	relabel := func(i int, text string) {
@@ -417,8 +537,24 @@ func parseFlowchart(lines []string) *mermaidBlock {
 		ln := strings.TrimSpace(raw)
 		switch {
 		case ln == "":
-		case hasAnyPrefix(ln, "subgraph "), ln == "end":
-			return nil
+		case hasAnyPrefix(ln, "subgraph ", "subgraph["):
+			// The header is `subgraph id`, `subgraph [Label]` or
+			// `subgraph id[Label]`, and the label may be quoted and hold
+			// brackets of its own — so the shape is read with splitNodeDecl,
+			// which is the reader that already handles those.
+			id, label := afterSpace(ln), ""
+			if name, text, ok := splitNodeDecl(id); ok {
+				id, label = name, text
+			} else if text, name := splitDecl(id); text == "" {
+				id, label = name, text
+			}
+			if id == "" {
+				return nil
+			}
+			stack = append(stack, len(b.graph.groups))
+			b.graph.groups = append(b.graph.groups, mmGroup{id: id, label: firstNonEmpty(label, id)})
+		case ln == "end" && len(stack) > 0:
+			stack = stack[:len(stack)-1]
 		case strings.HasPrefix(ln, "direction "):
 			if d := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(ln, "direction "))); d == "LR" || d == "TD" {
 				b.dir = d
@@ -439,117 +575,254 @@ func parseFlowchart(lines []string) *mermaidBlock {
 	return b
 }
 
-// addFlowStmt adds one flowchart statement (one node, or one edge chain such
-// as `A --> B --> C`). It reports false for a statement it could not read,
-// which the caller turns into a whole-block fallback.
+// firstNonEmpty returns s when it is non-empty, else alt.
+func firstNonEmpty(s, alt string) string {
+	if strings.TrimSpace(s) != "" {
+		return s
+	}
+	return alt
+}
+
+// addFlowStmt adds one flowchart statement: an edge chain (`A --> B --> C`,
+// with `|label|` or `-- label -->` on any hop), a node on its own (`A[Label]`),
+// or a declaration trailing an edge (`A --> B` then `C[D]`). It reports false
+// for a statement it could not read, which the caller turns into a whole-block
+// fallback.
 func (b *mermaidBlock) addFlowStmt(stmt string, node func(string) int, relabel func(int, string)) bool {
 	stmt = strings.TrimSpace(stmt)
 	if stmt == "" {
 		return true
 	}
-	if !b.addFlowChain(stmt, node, relabel) {
-		return false
-	}
-	// Trailing declarations on the same line: `A --> B` then `C[D]`.
-	for _, part := range strings.Split(stmt, ",") {
-		part = strings.TrimSpace(part)
-		if findFlowArrow(part) >= 0 || part == "" {
-			continue // an edge: the chain walk already consumed it
-		}
-		id, text, ok := splitNodeDecl(part)
+	if findFlowArrow(stmt) < 0 {
+		// No arrow: the statement is one or more bare declarations. Splitting
+		// on `;` already happened in the caller, so what is left is a single
+		// reference such as `A` or `B[Build request]`.
+		id, text, ok := splitNodeDecl(stmt)
 		if !ok {
 			return false
 		}
 		relabel(node(id), text)
+		return true
 	}
-	return true
+	return b.addFlowChain(stmt, node, relabel)
 }
 
-// addFlowChain walks an edge chain, splitting it at each arrow token: the
-// head (left of the first arrow) becomes an edge source, then every
-// `arrow label? target` pair becomes one edge.
+// addFlowChain walks an edge chain, splitting it at each arrow: every hop is
+// `head arrow label? target`, and a target that is itself followed by an arrow
+// is the next hop's head. So `A --> B --> C` is two edges off three nodes.
 func (b *mermaidBlock) addFlowChain(stmt string, node func(string) int, relabel func(int, string)) bool {
-	at := findFlowArrow(stmt)
-	if at < 0 {
-		return false
-	}
-	fromID, fromLabel, ok := splitNodeDecl(stmt[:at])
-	if !ok {
-		return false
-	}
-	src := node(fromID)
-	relabel(src, fromLabel)
-
-	rest := stmt[at:]
+	rest := strings.TrimSpace(stmt)
+	hopped := false
 	for {
-		tok := flowArrow(rest)
-		rest = strings.TrimPrefix(rest, tok)
-		edgeLabel, rest := flowEdgeLabel(rest)
-		// An inline label is written `-- text -->`: the dashes that close it
-		// are the next arrow token, so the arrow walk already stripped them.
-		nxt := findFlowArrow(rest)
-		target := rest
-		if nxt >= 0 {
-			target = rest[:nxt]
+		at, end, arrowLabel, ok := nextArrow(rest)
+		if !ok {
+			if rest == "" {
+				return hopped // the last hop already consumed everything
+			}
+			// A trailing declaration with no arrow of its own (`A --> B`
+			// then `C[D]`). With nothing hopped before it, the statement
+			// held no edge at all.
+			if !hopped {
+				return false
+			}
+			id, text, ok := splitNodeDecl(rest)
+			if !ok {
+				return false
+			}
+			relabel(node(id), text)
+			return true
 		}
-		toID, toLabel, ok := splitNodeDecl(target)
+		dotted := flowDotted(rest[at:end])
+		// `A -- yes --> B` hangs the label off the head side. A bare `-->`
+		// leaves nothing there but whitespace, and a `--` inside a node label
+		// (`A[pre-trade]`) is not a delimiter — flowLabelDelim decides.
+		headText := strings.TrimSpace(rest[:at])
+		if i := flowLabelDelim(headText); i >= 0 {
+			if lab := flowLabelText(headText[i:]); lab != "" {
+				arrowLabel = lab
+			}
+			headText = strings.TrimSpace(headText[:i])
+		}
+		id, text, ok := splitNodeDecl(headText)
 		if !ok {
 			return false
 		}
-		dst := node(toID)
-		relabel(dst, toLabel)
+		src := node(id)
+		relabel(src, text)
+		rest = strings.TrimSpace(rest[end:])
+		// `A -->|yes| B` writes the label after the arrow instead.
+		if strings.HasPrefix(rest, "|") {
+			j := strings.IndexByte(rest[1:], '|')
+			if j < 0 {
+				return false
+			}
+			arrowLabel = mermaidText(rest[1 : 1+j])
+			rest = strings.TrimSpace(rest[2+j:])
+		}
+		// The target is what sits between this arrow and the next one, so
+		// that offset is what splits `A --> B --> C` into its hops. `rest`
+		// is left alone, because the next pass has to find that same arrow
+		// again with the target as its head.
+		target := rest
+		if next, _, _, more := nextArrow(rest); more {
+			target = strings.TrimSpace(rest[:next])
+		}
+		id, text, ok = splitNodeDecl(target)
+		if !ok {
+			return false
+		}
+		dst := node(id)
+		relabel(dst, text)
 		b.graph.edges = append(b.graph.edges, mmEdge{
-			from: src, to: dst, label: edgeLabel,
-			dotted: strings.Contains(tok, ".") || strings.Contains(tok, "x") || strings.Contains(tok, "o"),
+			from: src, to: dst, label: arrowLabel, dotted: dotted,
 		})
 		if len(b.graph.edges) > mermaidMaxNodes*2 {
 			return false
 		}
-		if nxt < 0 {
+		hopped = true
+	}
+}
+
+// nextArrow returns the byte range of the first edge arrow in s that sits
+// outside every bracket and quote, plus the label written inside it. It
+// reports false when there is no arrow, which is what tells the caller a
+// statement is a bare node declaration rather than an edge.
+//
+// The labelled dotted form is the reason this is a scan and not a token list:
+// `A -. isolated .-> B` has its closing `.->` as far away as the label is long,
+// so the run of dots after the label is what ends the arrow.
+func nextArrow(s string) (at, end int, label string, ok bool) {
+	top := flowTop(s)
+	for i := 0; i < len(s); i++ {
+		if !top[i] {
+			continue
+		}
+		if s[i] == '.' {
+			// `.->` is the short form of `-.->`: dotted line, solid head.
+			if strings.HasPrefix(s[i:], ".->") {
+				return i, i + 3, "", true
+			}
+			continue
+		}
+		if s[i] != '-' {
+			continue
+		}
+		// The unlabelled tokens, longest first so `-.->` wins over `-.` and
+		// `---` over `--`.
+		for _, tok := range []string{"-.->", "-->", "==>", "---", "--x", "--o"} {
+			if strings.HasPrefix(s[i:], tok) {
+				return i, i + len(tok), "", true
+			}
+		}
+		// `-. label .->` opens on a dash-dot and closes on the next top-level
+		// `.->`, so the label is whatever sits between them.
+		if strings.HasPrefix(s[i:], "-.") {
+			if close, width := nextClose(s, i+2, top); close > 0 {
+				return i, close + width, mermaidText(s[i+2 : close]), true
+			}
+		}
+		// `-- label -->` opens on a run of dashes and closes on the next
+		// top-level `-->`.
+		if close, width := nextClose(s, i+2, top); close > 0 {
+			return i, close + width, mermaidText(s[i+2 : close]), true
+		}
+	}
+	return 0, 0, "", false
+}
+
+// nextClose returns the offset of the next top-level `.->` or `-->` at or
+// after from, and its width, or (0, 0). Both spellings open on their own
+// character — `.->` on a dot, `-->` on a dash — so both are probed at every
+// top-level byte rather than one.
+func nextClose(s string, from int, top []bool) (int, int) {
+	for i := from; i < len(s); i++ {
+		if !top[i] {
+			continue
+		}
+		for _, tok := range []string{".->", "-->"} {
+			if strings.HasPrefix(s[i:], tok) {
+				return i, len(tok)
+			}
+		}
+	}
+	return 0, 0
+}
+
+// flowLabelDelim returns the offset of the last `--`, `-.` or `==` run in an
+// edge head, or -1. A run inside a node label (`A[pre-trade]`) does not
+// delimit anything, so the scan tracks bracket depth; and a single `-` is an
+// id character (`pre-trade`), so only a run of two or more opens a label.
+func flowLabelDelim(s string) int {
+	at, depth := -1, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[', '(', '{':
+			depth++
+		case ']', ')', '}':
+			depth--
+		case '-', '.', '=':
+			if depth == 0 && i+1 < len(s) && s[i+1] == s[i] {
+				at = i
+				i++ // a run of three is one delimiter
+			}
+		}
+	}
+	return at
+}
+
+// flowDotted reports whether an arrow token draws as a dotted line. It looks
+// at the token's closing head, not at its whole text: an inline label brings
+// its own letters with it, and the `o` in `A -- go --> B` is not a dotted head.
+func flowDotted(arrow string) bool {
+	for _, tok := range []string{".->", "--x", "--o", "x--", "o--"} {
+		if strings.HasSuffix(arrow, tok) {
 			return true
 		}
-		src = dst
-		rest = rest[nxt:]
 	}
+	return false
 }
 
-// flowEdgeLabel reads the label a source put on an edge, in either spelling:
-// `A -->|yes| B` and `A -- yes --> B`. What it returns is the text and the
-// remainder to keep walking from.
-func flowEdgeLabel(s string) (label, rest string) {
-	if strings.HasPrefix(s, "|") {
-		if j := strings.IndexByte(s[1:], '|'); j >= 0 {
-			return mermaidText(s[1 : 1+j]), s[2+j:]
-		}
-	}
-	trimmed := strings.TrimLeft(s, "-. ")
-	if trimmed != s {
-		if j := findFlowArrow(trimmed); j > 0 {
-			return mermaidText(strings.Trim(strings.TrimSpace(trimmed[:j]), " -.|")), trimmed[j:]
-		}
-	}
-	return "", s
+// flowLabelText reads the label off the closing dashes of an inline edge
+// (`A -- yes --> B` has `yes ` left at the head). The dashes and dots are the
+// arrow the scan already consumed, so they are trimmed off the tail.
+func flowLabelText(s string) string {
+	return mermaidText(strings.TrimRight(strings.TrimLeft(s, " 	-."), " 	-."))
 }
 
-// flowArrow returns the edge token s starts with, longest first, or "".
-func flowArrow(s string) string {
-	for _, tok := range []string{"<-->", "<--->", "-.->", "-.-->", "--x", "--o", "-->", "---", "==>", "==="} {
-		if strings.HasPrefix(s, tok) {
-			return tok
+// flowTop marks each byte of a statement that sits outside every bracket and
+// quote. The arrow scan consults it so a `->` inside a node label is never
+// taken for an edge.
+func flowTop(s string) []bool {
+	top := make([]bool, len(s))
+	depth := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '[' || c == '(' || c == '{':
+			depth++
+		case c == ']' || c == ')' || c == '}':
+			depth--
+		default:
+			top[i] = depth == 0
 		}
 	}
-	return ""
+	return top
 }
 
-// findFlowArrow returns the byte offset of the first edge token in s, or -1.
+// findFlowArrow reports whether s holds an edge, by asking nextArrow.
 func findFlowArrow(s string) int {
-	best := -1
-	for _, tok := range []string{"<-->", "<--->", "-.->", "-.-->", "--x", "--o", "-->", "---", "==>", "==="} {
-		if i := strings.Index(s, tok); i >= 0 && (best < 0 || i < best) {
-			best = i
-		}
+	at, _, _, ok := nextArrow(s)
+	if !ok {
+		return -1
 	}
-	return best
+	return at
 }
 
 // splitNodeDecl reads a node reference: `A`, `A[Label]`, `A(Label)`,
@@ -586,6 +859,12 @@ func splitNodeDecl(s string) (id, label string, ok bool) {
 
 // splitTopLevel splits a flowchart line on `;`, ignoring separators inside
 // brackets or quotes — `A[x;y] --> B` is one statement.
+//
+// The depth guard tracks the brackets a label may actually use: mermaid writes
+// a label as `[text]`, `(text)`, `((text))` or `{text}`, and `>`/]` close
+// those. Arrowheads are consumed before this runs, so a `>` left over from
+// `-->` can only belong to a shape — counting it as an opener is what made
+// every label after an arrow swallow the rest of the line.
 func splitTopLevel(s string) []string {
 	var out []string
 	depth, quote, start := 0, byte(0), 0
@@ -597,9 +876,9 @@ func splitTopLevel(s string) []string {
 			}
 		case c == '"' || c == '\'':
 			quote = c
-		case c == '[' || c == '(' || c == '{' || c == '<':
+		case c == '[' || c == '(' || c == '{':
 			depth++
-		case c == ']' || c == ')' || c == '}' || c == '>':
+		case c == ']' || c == ')' || c == '}':
 			depth--
 		case c == ';' && depth <= 0:
 			out = append(out, s[start:i])

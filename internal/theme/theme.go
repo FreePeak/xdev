@@ -56,6 +56,31 @@ func (c Color) RGBA() (uint32, uint32, uint32, uint32) {
 	return uint32(c.R) | uint32(c.R)<<8, uint32(c.G) | uint32(c.G)<<8, uint32(c.B) | uint32(c.B)<<8, 0xffff
 }
 
+// Lerp blends a→b by t, clamping t to [0,1]. It is the one primitive every
+// xdev animation is built from: a focus border that eases toward its active
+// ink, a status line that breathes, a toast that fades into the canvas. t is
+// a float because the ease is the point — callers pass a sine or a
+// per-frame fraction, not a step count.
+//
+// Interpolation is linear in sRGB, not gamma-correct: for a 6-step or
+// 20-step tween between two inks a terminal already quantizes, the
+// difference is not visible and the gamma form is 4 lines longer.
+func Lerp(a, b Color, t float64) Color {
+	if t <= 0 {
+		return a
+	}
+	if t >= 1 {
+		return b
+	}
+	// Round rather than truncate: truncating biases every mid-blend toward
+	// the darker end, which over a fade reads as the fade going muddy.
+	return Color{
+		R: uint8(float64(a.R) + (float64(b.R)-float64(a.R))*t + 0.5),
+		G: uint8(float64(a.G) + (float64(b.G)-float64(a.G))*t + 0.5),
+		B: uint8(float64(a.B) + (float64(b.B)-float64(a.B))*t + 0.5),
+	}
+}
+
 // Slot names. The second block is xdev's own vocabulary (PRD §3.5), the
 // first block is the omp token contract xdev adopted in M12 (research F4):
 // every token omp requires is required here too, so an imported theme is

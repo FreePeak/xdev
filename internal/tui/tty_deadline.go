@@ -84,9 +84,27 @@ func NewDeadlineScreen() (tcell.Screen, *atomic.Bool, error) {
 // Write is the fix: a deadline on the frame write. The error is returned, not
 // swallowed, because tcell ignores it at every flush site and a caller that
 // wants to know the terminal is behind reads dropped instead.
+//
+// A terminal that cannot carry a deadline still gets its frame. macOS's
+// /dev/tty is a character device and answers SetWriteDeadline with
+// os.ErrNoDeadline (measured, 2026-10-02), so the bound this method exists for
+// is unavailable there — and returning that error instead of writing is what
+// made the whole TUI blank on macOS: the screen never entered the alt screen,
+// 14 bytes of output total, no frame ever landed, and a turn that really did
+// run its bash call and finish was invisible. That is both reports at once.
+// A missing bound is the older behaviour this file replaced; a missing frame
+// is worse than both, so the deadline is best-effort and the write always
+// happens.
+//
+// ponytail: on a tty that accepts no deadline the wedge this bounds is
+// unbounded again — the stall watchdog (stall.go, 90s) is the backstop there,
+// and the upgrade path is a write that can be cancelled at the fd rather than
+// timed. Ceiling: a pane that stops draining costs a session on such a tty,
+// not a frame.
 func (d *deadlineTty) Write(p []byte) (int, error) {
 	if err := d.w.SetWriteDeadline(time.Now().Add(frameWriteTimeout)); err != nil {
-		return 0, err
+		// No deadline on this fd: write unbounded, as stock tcell does.
+		return d.w.Write(p)
 	}
 	n, err := d.w.Write(p)
 	if err != nil {

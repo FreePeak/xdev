@@ -302,7 +302,11 @@ type App struct {
 	// other replaces it — and a host that wires only the first must still be
 	// able to say "send now is not wired in this build" rather than silently
 	// queueing something the user asked to have sent.
-	onSendNow func(text string)
+	//
+	// It takes the owning session id as well as the text: the chord and the
+	// row button both name a message, and with several sessions open only the
+	// owning id says which conversation to deliver it to (#157).
+	onSendNow func(sid, text string)
 	// queue holds the pending mid-turn submits in delivery order and queueSeq
 	// is the append counter (queue.go). queueHits is the last painted frame's
 	// geometry — the mouse hit-tests against what was on screen, not against
@@ -434,6 +438,14 @@ type App struct {
 	// the transcript by default instead of whatever box happens to sit under the
 	// pointer. -1 = no box focused (app.go scrollThinkBox, selection.go press).
 	thinkFocus int
+	// focusFade is the 0→1 progress of the reasoning box's focus transition:
+	// 1 once focused (a tween that overshoots its target is a bug, so it
+	// clamps), 0 once not. Set by selection.go on a focus change and advanced
+	// one step per UI tick (app.go tick), so the border eases into its
+	// brightened ink instead of snapping — the same ~300ms ease an animated
+	// border gets elsewhere. -1 means "no transition in flight", which is the
+	// steady state, so an idle transcript spends nothing on it.
+	focusFade float64
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
@@ -500,6 +512,12 @@ type blockKey struct {
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// fade quantizes App.focusFade for the render cache: the tween changes the
+	// border's colour without changing a row's text or length, so a stamp that
+	// did not carry it would repaint the same cached border for the whole fade
+	// and the box would jump at the end. Eight buckets is 12.5% steps — finer
+	// than the 1/6 per tick the tween actually advances, so no step is skipped.
+	fade int8
 	// mermaid stamps whether a ```mermaid fence in this block drew as a
 	// diagram. Flipping the setting changes every block's rows without any of
 	// them changing length, so the stamp has to say which way it rendered or
@@ -535,6 +553,9 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		// No box is focused until a click names one: the wheel is the
 		// transcript's from the first frame.
 		thinkFocus: -1,
+		// -1 = no tween in flight. A box that has never been focused never
+		// animates, so the welcome screen and an idle transcript cost nothing.
+		focusFade: -1,
 	}
 }
 
@@ -633,8 +654,22 @@ func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 // variation on sending. A host that wires only onQueue still gets the queue;
 // a host that wires neither keeps the pre-queue behavior, so the submit is
 // refused with a reason instead of vanishing.
-func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(text string)) {
+func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(sid, text string)) {
 	a.onQueue, a.onSendNow = onQueue, onSendNow
+}
+
+// OnSendNow is the chord's named send-now: the session on screen and its oldest
+// pending message, or (sid, "") when it has nothing queued. It is the same rule
+// the row's button follows — oldest first — so the chord and the button can
+// never disagree about which message "now" means, and the session is captured
+// with the message so a tab switch before the host delivers cannot redirect it.
+func (a *App) OnSendNow() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.queueForLocked(a.st.SessionID) {
+		return a.st.SessionID, e.text
+	}
+	return a.st.SessionID, ""
 }
 
 // SetVision wires "can the live model take an image?", which cmd answers from
@@ -1486,6 +1521,15 @@ func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
 // a notice.
 func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
 
+// SessionID names the session the transcript currently shows. It is the key
+// every session-owned piece of App state reads: the queue (#157) reads it to
+// decide which rows to paint, take back, flush, and retire.
+func (a *App) SessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.st.SessionID
+}
+
 // SetSessionID updates the status-row / dock identity after a switch.
 func (a *App) SetSessionID(id string) {
 	a.mu.Lock()
@@ -1504,10 +1548,13 @@ func (a *App) SetRunning(r bool) {
 	a.poke()
 }
 
-// AddTurn counts one finished run — the turn a dsh TimePill reports beside
-// its step count. SetRunning's falling edge is the seam: the run that
-// actually ended is the turn, whatever it ended with, and an idle re-render
-// never counts.
+// AddTurn counts one accepted user prompt — the turn a dsh TimePill reports
+// beside its step count. The seam is ACCEPTANCE, not the run's end: a prompt
+// the model is still working on has already been accepted, so a session's first
+// turn reads 1 while the work is in flight rather than 0, and three prompts
+// steered into one run count as three turns because three user messages went
+// into the conversation (#157). A refused or undelivered prompt never reaches
+// the seam, so the count only moves for words the model really got.
 func (a *App) AddTurn() {
 	a.mu.Lock()
 	a.st.Turns++
@@ -2085,6 +2132,7 @@ func (a *App) Reset() {
 	a.closeWindow()
 	a.blocks = nil
 	a.thinkFocus = -1  // the focused box went with them
+	a.focusFade = -1   // no tween: the box that was fading is gone with its blocks
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
 	a.msgv = nil       // likewise the read-only surface naming one
@@ -2370,6 +2418,7 @@ func (a *App) SetShowThinking(on bool) {
 		}
 		a.blocks = kept
 		a.thinkFocus = -1 // a dropped box cannot stay the wheel's target
+		a.focusFade = -1  // nor its half-drawn border
 	}
 	a.clearRenderCache()
 	a.mu.Unlock()
@@ -2820,6 +2869,17 @@ func (a *App) Run() {
 			// (selection.go selEdgeTick).
 			if a.selEdgeTick() {
 				animate = true
+				// The reasoning box's focus tween advances one step per tick and
+				// keeps asking for a frame until it lands. -1 is the steady state
+				// (no box was ever focused), so an idle transcript stays at zero
+				// repaint cost — the same discipline as the sheen above it.
+				if a.focusFade >= 0 {
+					a.focusFade += focusFadeStep
+					if a.focusFade >= 1 {
+						a.focusFade = 1 // clamp: an overshoot is a stuck mid-fade
+					}
+					animate = true
+				}
 			}
 			// An armed leader prefix is the same kind of timer: the pair has
 			// to stop waiting on its own, because Resolve alone would keep it
@@ -3286,13 +3346,13 @@ func (a *App) handleKey(ev tcell.Event) {
 		// With nothing queued it is a notice, never a silent no-op: a chord
 		// that does nothing when pressed is a bug report waiting to happen.
 		if a.onSendNow != nil {
-			text := a.oldestQueued()
+			sid, text := a.OnSendNow()
 			if text == "" {
 				a.AddSystemBlock("nothing queued — type a prompt and Enter while a turn runs, or click a queued row")
 				a.poke()
 				return
 			}
-			a.onSendNow(text)
+			a.onSendNow(sid, text)
 			a.poke()
 			return
 		}
@@ -3544,8 +3604,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// Attachments make this the multimodal path's alone. A declined
 			// or unwired send returns the draft to the composer: the text-only
 			// handler cannot carry the bytes, and sending the chip as a word
-			// would let a model answer a picture it never received.
+			// would let a model answer a picture it never received. A declined
+			// send took no words, so it counts no turn.
 			if a.onSendImages != nil && a.onSendImages(text, imgs) {
+				a.AddTurn()
 				a.poke()
 				return
 			}
@@ -3553,6 +3615,14 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		if a.onSend != nil {
+			// The prompt was ACCEPTED here, so this is the turn seam (#157):
+			// the count moves for words the host really took, whether or not
+			// the run that answers them has finished — a session's first turn
+			// reads 1 while the work is in flight rather than 0. A queued
+			// prompt is counted at its own delivery (RetireDelivered) instead,
+			// so no prompt is counted twice, and an unwired or refused send
+			// never reaches this line at all.
+			a.AddTurn()
 			a.onSend(text)
 		}
 	}
@@ -3965,6 +4035,12 @@ func thinkWindow(n, off, rows int) (start, end int) {
 	return max(0, end-rows), end
 }
 
+// focusFadeStep is one tick's worth of the focus tween. The UI runs at ~30fps
+// (app.go tick), so 1/6 lands in ~200ms — an eased border, not a slide. The
+// step is a constant rather than a duration so the ease has a fixed cost per
+// frame whatever the tick happens to be doing.
+const focusFadeStep = 1.0 / 6.0
+
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
 // "Thought for Xs" once it settles) and the body shows a fixed window of it.
@@ -3982,9 +4058,23 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	box := a.th.Box()
 	focused := i == a.thinkFocus
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
+	if fade := a.focusFade; fade >= 0 {
+		// During the tween the border sits BETWEEN the dim and the focused
+		// ink rather than between two identical ones: the base is already the
+		// thinking accent, so the eased colour is that accent walked back
+		// toward the body gray and forward again. At fade=1 it lands exactly on
+		// AccentThinking, so a settled box is the same cell it always was.
+		base := a.th.Get(theme.GrayDim)
+		if fade < 1 {
+			border = tcell.StyleDefault.Foreground(
+				a.cellColor(theme.Lerp(base, a.th.Get(theme.AccentThinking), fade)))
+		}
+	}
 	if focused {
 		// Bold is the terminal's own bright variant: the aim reads as the same
-		// hue turned up, not as a second colour with its own meaning.
+		// hue turned up, not as a second colour with its own meaning. Applied
+		// on top of the tween so the settled focused box is byte-for-byte the
+		// style it always was.
 		border = border.Bold(true)
 	}
 	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
@@ -4384,7 +4474,7 @@ func (a *App) paint() {
 		// Top bar, then the session strip under it, then the welcome body —
 		// the strip owns its row whether or not the transcript exists, so the
 		// two screens cannot disagree about what is open.
-		a.drawTopBar(s, w, false)
+		a.drawTopBar(s)
 		a.drawTabStrip(s, w)
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
@@ -4419,10 +4509,9 @@ func (a *App) paint() {
 	if vp < 1 {
 		vp = 1
 	}
-	// The top bar belongs to the main pane: its prompts get the pane's width,
-	// and a bar running the terminal's full width would print them under the
-	// panel's own surface.
-	a.drawTopBar(s, a.rightEdge(), true)
+	// The top bar belongs to the main pane: the branch is chrome and must not
+	// paint under the panel's own surface.
+	a.drawTopBar(s)
 	// The session strip owns the row under the top bar (opencode's tab row),
 	// so the transcript's first row shifts with it — transcriptTop() is the
 	// single place that offset is computed, so the strip cannot desync the

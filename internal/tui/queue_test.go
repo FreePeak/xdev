@@ -40,7 +40,7 @@ func queueApp(t *testing.T) (*App, *[]string, *[]string) {
 	app.SetQueueHandlers(func(text string) bool {
 		queued = append(queued, text)
 		return true
-	}, func(text string) { queued = append(queued, "now:"+text) })
+	}, func(_, text string) { queued = append(queued, "now:"+text) })
 	app.SetRunning(true)
 	return app, &sent, &queued
 }
@@ -50,7 +50,7 @@ func queueApp(t *testing.T) (*App, *[]string, *[]string) {
 // is enough for a paint/geometry test that never inspects the delivery.
 func queueWired(app *App) {
 	app.SetHandlers(func(string) {}, func() {}, func() {})
-	app.SetQueueHandlers(func(string) bool { return true }, func(string) {})
+	app.SetQueueHandlers(func(string) bool { return true }, func(string, string) {})
 	app.SetRunning(true)
 }
 
@@ -145,7 +145,7 @@ func TestRetireDeliveredRemovesTheRowItNames(t *testing.T) {
 		enter(app)
 	}
 
-	app.RetireDelivered([]string{"one"})
+	app.RetireDelivered(app.SessionID(), []string{"one"})
 
 	got := app.PendingTexts()
 	if len(got) != 2 || got[0] != "two" || got[1] != "three" {
@@ -153,7 +153,7 @@ func TestRetireDeliveredRemovesTheRowItNames(t *testing.T) {
 	}
 	// A message that never had a row (an extension steer, a mailbox push) is a
 	// no-op, not a corruption.
-	app.RetireDelivered([]string{"from an extension"})
+	app.RetireDelivered(app.SessionID(), []string{"from an extension"})
 	if n := app.QueuedCount(); n != 2 {
 		t.Fatalf("a foreign delivery changed the queue: %d rows left", n)
 	}
@@ -161,10 +161,133 @@ func TestRetireDeliveredRemovesTheRowItNames(t *testing.T) {
 	// twice, so there are two entries and two deliveries.
 	typeText(app, "two")
 	enter(app)
-	app.RetireDelivered([]string{"two"})
-	app.RetireDelivered([]string{"two"})
+	app.RetireDelivered(app.SessionID(), []string{"two"})
+	app.RetireDelivered(app.SessionID(), []string{"two"})
 	if n := app.QueuedCount(); n != 1 || app.PendingTexts()[0] != "three" {
 		t.Fatalf("duplicate delivery retirement = %v, want [three]", app.PendingTexts())
+	}
+}
+
+// TestRetireDeliveredBecomesATranscriptRowAndATurn: a delivered queued prompt
+// used to leave NO trace — the pending row was removed and nothing took its
+// place, so the transcript showed a run that had begun answering a question
+// the person could not see. The delivery is where a queued prompt becomes an
+// ordinary user turn, and both the ❯ row and the turn count have to appear
+// there (#157).
+func TestRetireDeliveredBecomesATranscriptRowAndATurn(t *testing.T) {
+	app, _, _ := queueApp(t)
+	typeText(app, "queued while working")
+	enter(app)
+	if app.turnCount() != 0 {
+		t.Fatalf("a queued prompt counted a turn before it was delivered: %d", app.turnCount())
+	}
+
+	app.RetireDelivered(app.SessionID(), []string{"queued while working"})
+
+	if got := app.userTexts(); len(got) != 1 || got[0] != "queued while working" {
+		t.Fatalf("transcript after delivery = %v, want the delivered prompt", got)
+	}
+	if n := app.QueuedCount(); n != 0 {
+		t.Fatalf("the delivered row is still pending: %v", app.PendingTexts())
+	}
+	if got := app.turnCount(); got != 1 {
+		t.Fatalf("turn count after one delivered prompt = %d, want 1", got)
+	}
+	// A steering message from an extension or the mailbox never had a row: it
+	// is not a turn the person typed, so it must not print or count.
+	app.RetireDelivered(app.SessionID(), []string{"from an extension"})
+	if got := app.userTexts(); len(got) != 1 {
+		t.Fatalf("an unqueued steer printed a transcript row: %v", got)
+	}
+	if got := app.turnCount(); got != 1 {
+		t.Fatalf("an unqueued steer counted a turn: %d", got)
+	}
+}
+
+// TestOneRunWithThreeQueuedPromptsCountsThreeTurns: the count used to move
+// once per FINISHED run, so three prompts steered into a single run read as
+// one turn while a /resume of the same conversation would replay three (#157).
+// Each delivered row is one accepted user turn.
+func TestOneRunWithThreeQueuedPromptsCountsThreeTurns(t *testing.T) {
+	app, _, _ := queueApp(t)
+	for _, s := range []string{"first", "second", "third"} {
+		typeText(app, s)
+		enter(app)
+	}
+	if got := app.turnCount(); got != 0 {
+		t.Fatalf("queued prompts counted turns before delivery: %d", got)
+	}
+	app.RetireDelivered(app.SessionID(), []string{"first", "second", "third"})
+	if got := app.turnCount(); got != 3 {
+		t.Fatalf("turn count after three delivered prompts = %d, want 3", got)
+	}
+}
+
+// TestQueueRowsBelongToTheSessionOnScreen: the App is one transcript over
+// several open sessions, so a row painted over a session that never typed it
+// is a message the person believes they sent somewhere they were not. Paints,
+// reads, take-back and delivery all filter on the session (#157).
+func TestQueueRowsBelongToTheSessionOnScreen(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	app.SetQueueHandlers(func(string) bool { return true }, func(string, string) {})
+	app.SetRunning(true)
+
+	app.SetSessionID("sess-a")
+	typeText(app, "prompt for A")
+	enter(app)
+	app.SetSessionID("sess-b")
+	typeText(app, "prompt for B")
+	enter(app)
+
+	if got := app.PendingTexts(); len(got) != 1 || got[0] != "prompt for B" {
+		t.Fatalf("session B pending = %v, want only its own row", got)
+	}
+	if n := app.QueuedCount(); n != 1 {
+		t.Fatalf("session B sees %d rows, want 1", n)
+	}
+	app.draw()
+	if s := screenText(scr); !strings.Contains(s, "prompt for B") || strings.Contains(s, "prompt for A") {
+		t.Fatalf("session B's screen painted the wrong session's queue:\n%s", s)
+	}
+	// Session A's row is still there, untouched, under its own key.
+	app.SetSessionID("sess-a")
+	if got := app.PendingTexts(); len(got) != 1 || got[0] != "prompt for A" {
+		t.Fatalf("session A pending = %v, want its own row intact", got)
+	}
+	// B's delivery must not touch A's row even though the texts are equal.
+	app.SetSessionID("sess-b")
+	app.RetireDelivered("sess-b", []string{"prompt for A"})
+	if n := app.QueuedCount(); n != 1 {
+		t.Fatalf("another session's delivery retired this session's row: %d left", n)
+	}
+	app.RetireDelivered("sess-b", []string{"prompt for B"})
+	if n := app.QueuedCount(); n != 0 {
+		t.Fatalf("own delivery left a row: %v", app.PendingTexts())
+	}
+	app.SetSessionID("sess-a")
+	if got := app.PendingTexts(); len(got) != 1 || got[0] != "prompt for A" {
+		t.Fatalf("session A's row was taken by session B's delivery: %v", got)
+	}
+}
+
+// TestAcceptedPromptCountsATurnImmediately: the first turn of a session used
+// to sit at 0 for as long as the model worked, because the count moved when a
+// RUN ended. A prompt the host took is a turn the moment it is taken (#157).
+func TestAcceptedPromptCountsATurnImmediately(t *testing.T) {
+	app, _, _ := queueApp(t)
+	app.SetRunning(false) // an idle composer takes an ordinary prompt
+	typeText(app, "the first thing I asked")
+	enter(app)
+	if got := app.turnCount(); got != 1 {
+		t.Fatalf("turn count with the first prompt still in flight = %d, want 1", got)
+	}
+	// A REFUSED prompt is not a turn: nothing the model can answer.
+	app.SetHandlers(nil, func() {}, func() {})
+	typeText(app, "nobody is listening")
+	enter(app)
+	if got := app.turnCount(); got != 1 {
+		t.Fatalf("an unwired send counted a turn: %d", got)
 	}
 }
 
@@ -174,7 +297,7 @@ func TestRetireDeliveredRemovesTheRowItNames(t *testing.T) {
 // border, and they carry the [send now] button.
 func TestQueuePaintsAboveTheComposer(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
-	app.SetQueueHandlers(func(string) bool { return true }, func(string) {})
+	app.SetQueueHandlers(func(string) bool { return true }, func(string, string) {})
 	app.SetRunning(true)
 	app.AddUserBlock("a prompt that is on screen")
 	typeText(app, "queued message")
@@ -276,6 +399,98 @@ func TestSendNowChordTakesTheOldest(t *testing.T) {
 	}
 }
 
+// TestSendNowCarriesTheOwningSession: the row is painted by one transcript
+// over several sessions, so "send this now" has to name the session that
+// queued it, not whatever is on screen when the host runs. A click after a tab
+// switch used to interrupt the wrong run and persist the message into the
+// wrong conversation (#157).
+func TestSendNowCarriesTheOwningSession(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	var got []string
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	app.SetQueueHandlers(func(string) bool { return true },
+		func(sid, text string) { got = append(got, sid+"/"+text) })
+	app.SetRunning(true)
+
+	app.SetSessionID("sess-a")
+	typeText(app, "for A")
+	enter(app)
+	// The switch happens AFTER the chord captures the row, which is the
+	// window in which the old signature delivered A's message into B.
+	app.handleKey(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone))
+	app.SetSessionID("sess-b")
+
+	if len(got) != 1 || got[0] != "sess-a/for A" {
+		t.Fatalf("F6 delivered %v, want the owning session's row", got)
+	}
+	// A's row is still tracked: the host owns delivery, and it drops the row
+	// only once it has really persisted the message.
+	app.SetSessionID("sess-a")
+	if n := app.QueuedCount(); n != 1 {
+		t.Fatalf("another session's send-now took the row: %d left", n)
+	}
+}
+
+// TestSendNowWithNothingQueuedOnThisSession: a session with no rows says so
+// rather than reaching for another session's message. F6 is a question about
+// the conversation on screen.
+func TestSendNowWithNothingQueuedOnThisSession(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	var got []string
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	app.SetQueueHandlers(func(string) bool { return true },
+		func(sid, text string) { got = append(got, sid+"/"+text) })
+	app.SetRunning(true)
+
+	app.SetSessionID("sess-a")
+	typeText(app, "for A")
+	enter(app)
+	app.SetSessionID("sess-b")
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone))
+
+	if len(got) != 0 {
+		t.Fatalf("F6 on an idle session delivered %v", got)
+	}
+	if !strings.Contains(app.noticeText(), "nothing queued") {
+		t.Fatalf("no notice for an empty send-now:\n%s", app.noticeText())
+	}
+}
+
+// TestTakeBackOnlyTouchesThisSession: the click that takes a row back is a
+// screen coordinate, so it must resolve against the rows that session painted.
+// A shared list would put another session's text into this composer.
+func TestTakeBackOnlyTouchesThisSession(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	app.SetHandlers(func(string) {}, func() {}, func() {})
+	app.SetQueueHandlers(func(string) bool { return true }, func(string, string) {})
+	app.SetRunning(true)
+
+	app.SetSessionID("sess-a")
+	typeText(app, "A's message")
+	enter(app)
+	app.SetSessionID("sess-b")
+	typeText(app, "B's message")
+	enter(app)
+	app.draw()
+
+	app.mu.Lock()
+	row := app.queueHits[0].row
+	app.mu.Unlock()
+	app.handleKey(tcell.NewEventMouse(row.x+row.w/3, row.y, tcell.Button1, tcell.ModNone))
+
+	if got := app.ed.Text(); got != "B's message" {
+		t.Fatalf("composer after take-back = %q, want B's own row", got)
+	}
+	if n := app.QueuedCount(); n != 0 {
+		t.Fatalf("B's row is still queued: %v", app.PendingTexts())
+	}
+	app.SetSessionID("sess-a")
+	if got := app.PendingTexts(); len(got) != 1 || got[0] != "A's message" {
+		t.Fatalf("A's row = %v, want it untouched", got)
+	}
+}
+
 // TestSendNowWithNothingQueuedSaysSo: a chord that silently does nothing is a
 // bug report waiting to happen. The notice is the contract.
 func TestSendNowWithNothingQueuedSaysSo(t *testing.T) {
@@ -373,7 +588,7 @@ func newTestAppWithDeclinedQueue(t *testing.T) (*App, *[]string, *[]string) {
 	app.SetQueueHandlers(func(text string) bool {
 		queued = append(queued, text)
 		return false
-	}, func(text string) {})
+	}, func(string, string) {})
 	app.SetRunning(true)
 	return app, &sent, &queued
 }
@@ -391,4 +606,60 @@ func (a *App) noticeText() string {
 		}
 	}
 	return b.String()
+}
+
+// turnCount is the pill's turn figure.
+func (a *App) turnCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.st.Turns
+}
+
+// userTexts is every ❯ row's text in order — the transcript's own account of
+// what the person was told they said.
+func (a *App) userTexts() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for _, blk := range a.blocks {
+		if blk.Kind == KindUser {
+			out = append(out, blk.Text)
+		}
+	}
+	return out
+}
+
+// TestSendNowTakesTheRowBeforeTheInterrupt: send-now's row must be GONE from
+// the queue by the time the interrupted run unwinds. It used to stay until the
+// delivery landed, so the interrupted run's own end-of-run flush found it and
+// started the same message a second time — the model saw it twice, the
+// transcript printed two ACK rows, and the pill counted two turns for one
+// message (#157). TakeQueued is therefore the FIRST thing the path does.
+func TestSendNowTakesTheRowBeforeTheInterrupt(t *testing.T) {
+	app, _, _ := queueApp(t)
+	typeText(app, "this must go now")
+	enter(app)
+	if app.QueuedCount() != 1 {
+		t.Fatalf("the prompt did not queue: %v", app.PendingTexts())
+	}
+	sid := app.SessionID()
+
+	// The host's first move: claim the message, exactly as cmd does before
+	// touching the turn. Nothing else has run yet, so a row still visible here
+	// is a row the interrupted run's flush would also deliver.
+	if _, ok := app.TakeQueued(sid, "this must go now"); !ok {
+		t.Fatal("the host could not take the row it was asked to deliver")
+	}
+	if n := app.QueuedCount(); n != 0 {
+		t.Fatalf("a taken row is still pending, so a flush would deliver it twice: %v", app.PendingTexts())
+	}
+	// And the flush's own take now finds nothing — which is the whole point.
+	if got := app.TakeOldestQueued(sid); got != "" {
+		t.Fatalf("the run-end flush still got %q from a row already delivered", got)
+	}
+	// A host that fails to deliver puts it back, and only then.
+	app.QueueAgain("this must go now", sid)
+	if got := app.PendingTexts(); len(got) != 1 || got[0] != "this must go now" {
+		t.Fatalf("requeue after a failed delivery = %v, want the message back", got)
+	}
 }

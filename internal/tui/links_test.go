@@ -139,7 +139,7 @@ func TestOverlaySuppressesTranscriptLinkHits(t *testing.T) {
 	app.EndAssistant()
 	app.draw()
 	hit := app.linkHits[0]
-	app.diffOv = &diffOverlay{path: "internal/tui/dock.go", diff: "+added", width: app.width}
+	app.diffOv = &diffOverlay{path: "internal/tui/dock.go", diff: "+added"}
 	if got := app.linkAt(hit.x0, hit.y); got != "" {
 		t.Fatalf("overlay click opened hidden transcript link %q", got)
 	}
