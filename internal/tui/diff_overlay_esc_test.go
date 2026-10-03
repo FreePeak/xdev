@@ -15,7 +15,7 @@ func TestDiffOverlayEscClose(t *testing.T) {
 	defer scr.Fini()
 
 	app.mu.Lock()
-	app.diffOv = &diffOverlay{path: "internal/tui/dock.go", diff: "+added\n-removed", width: app.width}
+	app.diffOv = &diffOverlay{path: "internal/tui/dock.go", diff: "+added\n-removed"}
 	app.mu.Unlock()
 	app.poke()
 
