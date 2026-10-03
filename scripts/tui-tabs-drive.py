@@ -42,6 +42,12 @@ KEYS = {
     "ctrl-1": "\x1b[49;5u",
     "ctrl-2": "\x1b[50;5u",
     "ctrl-3": "\x1b[51;5u",
+    # Alt+Shift+Down / Alt+Shift+Up — opencode's "next/previous unread tab",
+    # now bound as S-A-Down / S-A-Up (verified through tcell's own input
+    # processor, which is why these are ESC[1;4B / ESC[1;4A).
+    "alt-shift-down": "\x1b[1;4B",
+    "alt-shift-up": "\x1b[1;4A",
+    "alt-down": "\x1b[1;3B",
     "leader-1": "\x18\x1b[49;5u",
     "leader-2": "\x18\x1b[50;5u",
     "leader-n": "\x18n",
@@ -62,8 +68,8 @@ def snapshot(screen, cols, rows):
     ]
 
 
-def render(buf, rows=8):
-    """The chrome rows, with the strip's underline extent marked beneath."""
+def render(buf, rows=30):
+    """Every chrome/notice row, with the strip's underline extent marked beneath."""
     out = []
     for y in range(min(rows, len(buf))):
         line = "".join(data for data, _ in buf[y]).rstrip()
@@ -154,7 +160,12 @@ def main():
 
         if args.full:
             print("=== final frame (%s) ===" % (args.label or args.binary))
-            print("\n".join(line.rstrip() for line in screen.display))
+            # The welcome screen is ~25 rows of logo and filler; the notices
+            # are what a driven run answers with, so keep the head and the tail.
+            disp = [l.rstrip() for l in screen.display]
+            print("\n".join(disp[:6]))
+            print("   … (%d rows of welcome body) …" % max(0, len(disp) - 12))
+            print("\n".join(l for l in disp[-6:] if l.strip()))
         else:
             print("=== chrome after each key (%s) ===" % (args.label or args.binary))
             for key, buf in frames:

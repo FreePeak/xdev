@@ -201,6 +201,17 @@ func DefaultKeyMap() *KeyMap {
 			"A-[": "session.tab.previous",
 			"A-}": "session.tab.next_unread", // Shift+] with Alt
 			"A-{": "session.tab.previous_unread",
+			// opencode's other two spellings of the same pairs, and the ones
+			// that survive a config pasted from its tui.json: ESC[1;3B /
+			// ESC[1;3A reach tcell as KeyDown/KeyUp + ModAlt ("A-Down" /
+			// "A-Up"), and ESC[1;4B / ESC[1;4A carry Shift as well, which
+			// chordOf writes before Alt ("S-A-Down" / "S-A-Up"). Those four
+			// strings were read out of tcell's own input processor, not
+			// guessed — spelled any other way, the binding is listed and dead.
+			"A-Down":   "session.tab.next",
+			"A-Up":     "session.tab.previous",
+			"S-A-Down": "session.tab.next_unread",
+			"S-A-Up":   "session.tab.previous_unread",
 			// Ctrl+Tab / Ctrl+Shift+Tab are opencode's PRIMARY tab chords
 			// ("switch to next open tab" / previous); Alt+] / Alt+[ stay bound
 			// because Ctrl+Tab needs a terminal that speaks CSI-u/kitty or
@@ -313,28 +324,80 @@ func (m *KeyMap) expandChord(chord string) string {
 }
 
 // normalizeChord accepts opencode's spelling of the same key: opencode writes
-// "ctrl+d" / "alt+w" / "<leader>w", the table stores "C-d" / "A-w" / "C-x w".
+// "ctrl+d" / "alt+w" / "ctrl+shift+tab" / "f5" / "<leader>w"; the table stores
+// the form chordOf renders — "C-d" / "A-w" / "C-Shift-Tab" / "F5" / "C-x w".
 // A config pasted from an opencode tui.json must resolve without being
-// hand-edited, so the modifiers are folded here — once, at load.
+// hand-edited, so BOTH halves are folded here — once, at load.
 func normalizeChord(chord string) string {
-	mods, rest, ok := strings.Cut(chord, "+")
-	if !ok {
+	// Split on the LAST "+": every modifier precedes the key, and Cut's
+	// first-plus split read "shift+ctrl+down" as ONE unknown modifier, so the
+	// chord was stored verbatim — loaded without complaint, bound to nothing.
+	cut := strings.LastIndex(chord, "+")
+	if cut < 0 {
+		// No modifier. The KEY still needs the table's spelling, or a bare
+		// "f5" (opencode writes it that way) sits in the table as "f5" while
+		// every event renders "F5". A letter, a digit and punctuation are
+		// already spelled the way chordOf writes them.
+		if v, ok := writtenKeyNames[strings.ToLower(chord)]; ok {
+			return v
+		}
 		return chord
 	}
-	prefix := ""
-	for _, mod := range strings.Split(mods, "+") {
+	var c, a, s bool
+	for _, mod := range strings.Split(chord[:cut], "+") {
 		switch strings.ToLower(mod) {
 		case "ctrl", "c":
-			prefix += "C-"
+			c = true
 		case "alt", "a", "meta":
-			prefix += "A-"
+			a = true
 		case "shift", "s":
-			prefix += "S-"
+			s = true
 		default:
 			return chord // not a modifier we know: leave the chord alone
 		}
 	}
-	return prefix + rest
+	// The KEY half is spelled opencode's way too, and the table's spelling is
+	// not a lowercasing: chordOf writes Tab as "Tab", Backtab as "Shift-Tab",
+	// an arrow as "Down". Folding only the modifiers left "ctrl+shift+tab" in
+	// the table as "C-shift+tab" — a keybindings.yml line that loads without
+	// complaint and binds nothing.
+	key := chord[cut+1:]
+	if v, ok := writtenKeyNames[strings.ToLower(key)]; ok {
+		key = v
+	}
+	// Shift+Tab arrives as Backtab, whose rendered name ALREADY carries the
+	// Shift: the chord is "Shift-Tab" (or "C-Shift-Tab"), never "S-Tab".
+	if key == "Tab" && s {
+		key, s = "Shift-Tab", false
+	}
+	// Modifiers are emitted in chordOf's own C, S, A order, so the order they
+	// were written in stops mattering: "alt+ctrl+down" and "ctrl+alt+down"
+	// are the same chord and normalize to the same key.
+	out := ""
+	if c {
+		out += "C-"
+	}
+	if s {
+		out += "S-"
+	}
+	if a {
+		out += "A-"
+	}
+	return out + key
+}
+
+// writtenKeyNames maps a written key name to the spelling chordOf renders, so
+// opencode's lowercase config reaches the chord an event actually delivers.
+// "backtab" is deliberately absent: it resolves through "shift+tab", and an
+// entry of its own would let "alt+backtab" ask for "A-Shift-Tab".
+var writtenKeyNames = map[string]string{
+	"tab": "Tab", "enter": "Enter", "return": "Enter", "escape": "Escape", "esc": "Escape",
+	"backspace": "Backspace", "delete": "Delete", "del": "Delete",
+	"home": "Home", "end": "End", "pgup": "PgUp", "pageup": "PgUp",
+	"pgdown": "PgDn", "pagedown": "PgDn",
+	"up": "Up", "down": "Down", "left": "Left", "right": "Right",
+	"f1": "F1", "f2": "F2", "f3": "F3", "f4": "F4", "f5": "F5", "f6": "F6",
+	"f7": "F7", "f8": "F8", "f9": "F9", "f10": "F10", "f11": "F11", "f12": "F12",
 }
 
 func isKnownAction(name string) bool {
