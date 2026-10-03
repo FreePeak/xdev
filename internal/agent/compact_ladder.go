@@ -164,13 +164,20 @@ func (a *Agent) hasExplicitProduct() bool {
 }
 
 // methodHandoffRun is the provider summarize: one streaming call compresses
-// the discarded span into the retained context.
+// the discarded span into the retained context. The call's usage rides on
+// the summary message, which is the one place a resume can read it back:
+// the tokens the compaction read and wrote are part of the session's bill,
+// and dropping them is how a compacted session showed $0.00 for the very
+// call that replaced its history.
 func methodHandoffRun(a *Agent, ctx context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
-	summary, err := a.summarize(ctx, span.msgs[:span.cut])
+	summary, usage, err := a.summarize(ctx, span.msgs[:span.cut])
 	if err != nil {
 		return nil, err
 	}
-	return compactEntry(span, textSummary(summary)), nil
+	msg := textSummary(summary)
+	msg.Usage = usage
+	msg.Model = a.Model
+	return compactEntry(span, msg), nil
 }
 
 // methodRemoteRun is provider-native streaming compaction (omp's remote v2):

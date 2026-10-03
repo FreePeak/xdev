@@ -3131,9 +3131,19 @@ func countsOf(msgs []ai.Message) (turns, steps int) {
 // same numbers the session had before it was closed. Every figure comes off
 // the persisted per-message Usage, which is the only record of the split —
 // an older message written before a bucket was tracked simply adds zero.
+//
+// A compaction summary's usage counts too, and not because of its role: the
+// summarize and handoff-document calls are billed requests whose tokens live
+// on the summary message (a handoff's wears the user role). It is counted by
+// carrying the usage, not by the role, so the two paths agree: an
+// un-attributed usage on a user message still counts, and a summary without
+// one contributes zero exactly as before.
 func usageOf(msgs []ai.Message) (in, out, cache, think, cacheWrite int64, cost float64) {
 	for _, m := range msgs {
-		if m.Role != ai.RoleAssistant || m.Usage == nil {
+		if m.Usage == nil {
+			continue
+		}
+		if m.Role != ai.RoleAssistant && m.Attribution != agent.HandoffAttribution {
 			continue
 		}
 		u := m.Usage
@@ -3325,6 +3335,33 @@ func (h *tuiHooks) OnContinuation(text string) {
 // just stops (#331).
 func (h *tuiHooks) OnEmptyTurn(text string) {
 	h.ts.paint(func() { h.ts.app.AddSystemBlock("· the model answered with nothing — asked again") })
+}
+
+// OnCompactionUsage implements agent.CompactionUsageHook: the summarize or
+// handoff document call is a provider request the user was billed for, so it
+// banks into the same counters a turn does. Without it the token pill, the
+// cache-hit rate and /usage's cost line all silently excluded every compaction
+// — a session that compacted ten times read as if it had spent nothing.
+func (h *tuiHooks) OnCompactionUsage(u *ai.Usage) {
+	if u == nil {
+		return
+	}
+	// CacheWrite is NOT added here: AddUsage's total argument is the provider's
+	// own whole-request count, and mixing a cache-write bucket into the four
+	// AddUsage takes would double it. A compaction that wrote cache is a
+	// side request whose markers stop at the last completed tool round, so
+	// the write is rare; the counter that matters is the spend.
+	if u.Input > 0 || u.Output > 0 || u.CacheRead > 0 {
+		h.ts.paint(func() {
+			h.ts.app.AddUsage(u.Input, u.Output, u.CacheRead, u.ReasoningTokens, 0)
+		})
+	}
+	if u.CacheWrite > 0 {
+		h.ts.paint(func() { h.ts.app.AddCacheWrite(u.CacheWrite) })
+	}
+	if u.Cost != nil {
+		h.ts.paint(func() { h.ts.app.AddCost(u.Cost.Total) })
+	}
 }
 
 func (h *tuiHooks) OnCompaction(tokensBefore int64) {

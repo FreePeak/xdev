@@ -148,14 +148,14 @@ func (a *Agent) handoff(ctx context.Context, system, instruction string, planRes
 		return "", fmt.Errorf("handoff: nothing to hand off")
 	}
 
-	doc, err := a.handoffDoc(ctx, system, res.Messages, instruction)
+	doc, docUsage, err := a.handoffDoc(ctx, system, res.Messages, instruction)
 	if err != nil {
 		return "", fmt.Errorf("handoff: %w", err)
 	}
 
 	firstKept, kept := a.handoffCut(res)
 	tokensBefore := contextTokens(res.Messages)
-	entry := &session.CompactionEntry{
+	summary := ai.Message{
 		// The document is a briefing the fresh context continues from, so it
 		// is emitted as a USER message. Two reasons: that is omp's shape
 		// (compaction summaries are a non-assistant role on the wire), and a
@@ -164,22 +164,31 @@ func (a *Agent) handoff(ctx context.Context, system, instruction string, planRes
 		// assistant summary with no reasoning echo is rejected outright
 		// ("the reasoning_content in the thinking mode must be passed back
 		// to the API", onegw Console Go, reproduced live).
-		Summary: ai.Message{
-			Role:        ai.RoleUser,
-			Attribution: HandoffAttribution,
-			Content:     []ai.Block{ai.TextBlock{Text: handoffOpenTag + doc + handoffCloseTag}},
-		},
+		Role:        ai.RoleUser,
+		Attribution: HandoffAttribution,
+		Content:     []ai.Block{ai.TextBlock{Text: handoffOpenTag + doc + handoffCloseTag}},
+		// The document's own tokens. The summary is the only persisted
+		// record of what the side call cost, so it rides here whatever the
+		// message's role (a handoff's document is a user-role message by
+		// the wire contract above); the replay counts it through the
+		// compaction usage hook rather than by role.
+		Usage: docUsage,
+		Model: a.handoffModel(),
+	}
+	entry := &session.CompactionEntry{
+		Summary:          summary,
 		FirstKeptEntryID: firstKept,
 		TokensBefore:     tokensBefore,
+		Method:           MethodHandoff,
 	}
 	if err := a.Store.Append(entry); err != nil {
 		return "", fmt.Errorf("handoff: persist: %w", err)
 	}
-	// Same emission point as compact(): a handoff IS a compaction, so the
-	// bus sees session_compact and the UI can explain the cache miss.
-	if a.Hooks != nil {
-		a.Hooks.OnCompaction(tokensBefore)
-	}
+	// A handoff IS a compaction: it persists one, so it goes through the same
+	// emission point — the bus sees session_compact (and the UI can explain the
+	// cache miss), and the document call's tokens are charged like any
+	// summarize's.
+	a.notifyCompaction(entry)
 	a.resetHandoffState(ctx, kept, planReset)
 	if a.Handoff.SaveDir != "" {
 		if path, werr := writeHandoffDoc(a.Handoff.SaveDir, a.Store.ID(), doc); werr != nil {
@@ -249,8 +258,11 @@ func (a *Agent) handoffCut(res *session.ContextResult) (*string, []ai.Message) {
 
 // handoffDoc runs the side request: the live transform over the full history
 // plus the trailing instruction, tools omitted (toolChoice none), on the
-// handoff target, with its own transient-error retry.
-func (a *Agent) handoffDoc(ctx context.Context, system string, msgs []ai.Message, instruction string) (string, error) {
+// handoff target, with its own transient-error retry. It returns the
+// document and the side call's own usage — the document was billed for, so
+// the entry that persists it carries the tokens (a failed attempt's usage
+// is dropped with the attempt: it bought nothing the session kept).
+func (a *Agent) handoffDoc(ctx context.Context, system string, msgs []ai.Message, instruction string) (string, *ai.Usage, error) {
 	prov, model := a.Provider, a.Model
 	if a.Handoff.Target.Provider != nil {
 		prov, model = a.Handoff.Target.Provider, a.Handoff.Target.Model
@@ -277,12 +289,12 @@ func (a *Agent) handoffDoc(ctx context.Context, system string, msgs []ai.Message
 	for attempt := range HandoffMaxAttempts {
 		if attempt > 0 {
 			if err := sleepBackoff(ctx, policy.delay(attempt)); err != nil {
-				return "", err
+				return "", nil, err
 			}
 		}
-		doc, err := streamOneshot(ctx, prov, req)
+		doc, usage, err := streamOneshot(ctx, prov, req)
 		if err == nil && strings.TrimSpace(doc) != "" {
-			return strings.TrimSpace(doc), nil
+			return strings.TrimSpace(doc), usage, nil
 		}
 		if err == nil {
 			err = fmt.Errorf("provider returned an empty document")
@@ -294,14 +306,26 @@ func (a *Agent) handoffDoc(ctx context.Context, system string, msgs []ai.Message
 			break
 		}
 	}
-	return "", lastErr
+	return "", nil, lastErr
 }
 
-// streamOneshot runs one completion and returns its text.
-func streamOneshot(ctx context.Context, prov ai.Provider, req ai.StreamRequest) (string, error) {
+// handoffModel is the model the side request actually ran on: the target
+// override when one is configured, else the live model. Recorded on the
+// summary so a replayed session attributes the document's tokens to the
+// model that was billed for them.
+func (a *Agent) handoffModel() string {
+	if a.Handoff.Target.Provider != nil {
+		return a.Handoff.Target.Model
+	}
+	return a.Model
+}
+
+// streamOneshot runs one completion and returns its text plus the usage the
+// provider reported for that call.
+func streamOneshot(ctx context.Context, prov ai.Provider, req ai.StreamRequest) (string, *ai.Usage, error) {
 	ch, err := prov.Stream(ctx, req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var text strings.Builder
 	for ev := range ch {
@@ -309,15 +333,16 @@ func streamOneshot(ctx context.Context, prov ai.Provider, req ai.StreamRequest) 
 		case ai.EventTextDelta:
 			text.WriteString(ev.Delta)
 		case ai.EventDone:
+			out := text.String()
 			if ev.Message != nil && ev.Message.Text() != "" {
-				return ev.Message.Text(), nil
+				out = ev.Message.Text()
 			}
-			return text.String(), nil
+			return out, ev.Usage, nil
 		case ai.EventError:
-			return "", ev.Err
+			return "", nil, ev.Err
 		}
 	}
-	return "", fmt.Errorf("handoff: stream ended without done")
+	return "", nil, fmt.Errorf("handoff: stream ended without done")
 }
 
 // handoffPrompt is the trailing user instruction: the document contract plus
