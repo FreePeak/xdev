@@ -1,6 +1,10 @@
 package tui
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/FreePeak/xdev/internal/theme"
@@ -175,4 +179,48 @@ func (a *App) closeTab(id string) {
 		a.AddSystemBlock("error: " + err.Error())
 	}
 	a.poke()
+}
+
+// tabSelectIndex reads the N out of a "session.tab.select.N" action id,
+// reporting false for anything else. The default dispatch arm calls it, so an
+// action that is not a tab jump falls through untouched.
+func tabSelectIndex(action string) (int, bool) {
+	rest, ok := strings.CutPrefix(action, tabSelectPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 1 || n > len(tabSelectDigits) {
+		return 0, false
+	}
+	return n, true
+}
+
+// selectTab focuses the Nth open session (opencode's session_tab_select_N:
+// Ctrl+1..9, with 0 the tenth). It goes through onTabPick — the same
+// callback a strip click and a /tabs row use — so all three ways of naming a
+// session reach one owner of the tabset, and the host's rebuild runs off the
+// UI loop exactly as the click path runs it. A chord aimed at a slot that is
+// not open says so; it never no-ops.
+func (a *App) selectTab(n int) {
+	a.mu.Lock()
+	tabs := append([]TabInfo(nil), a.tabs...)
+	pick := a.onTabPick
+	a.mu.Unlock()
+	if pick == nil {
+		a.AddSystemBlock("session tabs are not wired in this build")
+		return
+	}
+	if n > len(tabs) {
+		a.AddSystemBlock(fmt.Sprintf("only %d sessions open", len(tabs)))
+		a.poke()
+		return
+	}
+	id := tabs[n-1].ID
+	go func() {
+		if err := pick(id); err != nil {
+			a.AddSystemBlock("error: " + err.Error())
+		}
+		a.poke()
+	}()
 }
