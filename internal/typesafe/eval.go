@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,8 +40,24 @@ const systemOnePath = "/v1/systemone"
 // "typed-decisions"; the hosted Jev API accepts "jev-latest".
 const DefaultModel = "jev-latest"
 
-// DefaultTimeout bounds a single request to the API.
+// DefaultTimeout bounds one request to the API.
 const DefaultTimeout = 10 * time.Second
+
+// Retry policy for a rate-limited backend. A 429 is the one failure a
+// judgment call should wait out rather than report: the request is valid, the
+// answer is unchanged by the delay, and the alternative is a tool error in the
+// middle of an agent turn that the model then has to reason about. Three
+// attempts is the ceiling — long enough to ride out a short quota window, short
+// enough that a hard-limited key fails inside the request timeout rather than
+// hanging the turn.
+const (
+	maxAttempts    = 3
+	retryBaseDelay = 250 * time.Millisecond
+	// retryMaxDelay caps the backoff, and also bounds how long a server's own
+	// Retry-After can park this call: a Retry-After of an hour must not become
+	// an hour-long tool call.
+	retryMaxDelay = 5 * time.Second
+)
 
 // EvalRequest is the payload POST /v1/systemone expects.
 //
@@ -161,16 +178,11 @@ func (e *Evaluator) EvaluateWithInfo(ctx context.Context, state any, questions m
 	if e.httpClient != nil {
 		client = e.httpClient
 	}
-	resp, err := client.Do(req)
+	resp, err := do(client, req, body, maxAttempts)
 	if err != nil {
-		return nil, Info{}, fmt.Errorf("typesafe: request failed: %w", err)
+		return nil, Info{}, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, Info{}, fmt.Errorf("typesafe: %d %s — %s", resp.StatusCode, resp.Status, string(b))
-	}
 
 	var result EvalResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -195,6 +207,59 @@ func parseAnswers(raw json.RawMessage) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// do sends the request, re-sending on a 429 with a bounded backoff. body is
+// kept so each attempt gets a fresh reader: a consumed Request body is the
+// classic way a retry silently becomes an empty request.
+//
+// Only 429 is retried. A 5xx or a transport error is retried by the caller's
+// own layer if it wants to — the agent loop already has a ladder for that, and
+// duplicating it here would double every failure's cost. A 429 is different:
+// it is the one status that names its own wait, and honouring it is cheaper
+// than failing the turn.
+func do(client *http.Client, req *http.Request, body []byte, attempts int) (*http.Response, error) {
+	for attempt := 1; ; attempt++ {
+		if attempt > 1 {
+			req.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("typesafe: request failed: %w", err)
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= attempts {
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				return nil, fmt.Errorf("typesafe: %d %s — %s", resp.StatusCode, resp.Status, string(b))
+			}
+			return resp, nil
+		}
+		delay := retryDelay(resp, attempt)
+		resp.Body.Close()
+		select {
+		case <-req.Context().Done():
+			return nil, fmt.Errorf("typesafe: request failed: %w", req.Context().Err())
+		case <-time.After(delay):
+		}
+	}
+}
+
+// retryDelay prefers the server's own Retry-After, since it knows the quota
+// window, and falls back to exponential backoff. Retry-After may be seconds or
+// an HTTP date; either way the result is capped, because a server that asks
+// for an hour must not become an hour-long tool call.
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return min(time.Duration(secs)*time.Second, retryMaxDelay)
+		}
+		if t, err := http.ParseTime(v); err == nil {
+			return min(time.Until(t), retryMaxDelay)
+		}
+	}
+	d := retryBaseDelay << (attempt - 1)
+	return min(d, retryMaxDelay)
 }
 
 // FormatResult renders typed answers for the model context — one line per
