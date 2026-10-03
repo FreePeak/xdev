@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-03 · **Subject:** the terminal UI of [Empryo](https://empryo.com) (`npm @proxysoul/soulforge` v2.20.25, BUSL-1.1), read as a *reference implementation* for xdev's `internal/tui`.
 **Question this answers:** which parts of Empryo's TUI are worth adopting into xdev, which xdev already exceeds, and which must be rejected.
-**Companion:** [PRD.md §3.5](../PRD.md) (xdev's TUI contract), [QA-TUI-INTERACTIVE.md](../QA-TUI-INTERACTIVE.md) (the real-pty mouse/keyboard audit), [2026-09-28-deepseek-harness-gap.md](2026-09-28-deepseek-harness-gap.md) (the same gap-table shape, against a different harness).
+**Companion:** [empryo-internals.md](empryo-internals.md) is the *other* Empryo read -- how it makes the agent understand a codebase, and what xdev adopted (impact/code_query over LeanKG, the post-write diagnostics ladder); this document covers the terminal UI only. [PRD.md §3.5](../PRD.md) (xdev's TUI contract), [QA-TUI-INTERACTIVE.md](../QA-TUI-INTERACTIVE.md) (the real-pty mouse/keyboard audit), [2026-09-28-deepseek-harness-gap.md](2026-09-28-deepseek-harness-gap.md) (the same gap-table shape, against a different harness).
 
 ## 0. Verdict
 

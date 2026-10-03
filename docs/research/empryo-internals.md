@@ -6,6 +6,9 @@ shipped** (disposition in
 [decisions/code-graph-via-leankg-not-soulmap.md](../decisions/code-graph-via-leankg-not-soulmap.md)
 and PRD §5)*
 
+**Companion:** [2026-10-03-empryo-tui-parity.md](2026-10-03-empryo-tui-parity.md)
+covers the other half of the same peer -- Empryo's terminal UI as a TUI reference.
+
 ## What was read
 
 The tree at `Empryo/` is the **public SoulForge v2 core**, not Empryo v3. v3's
