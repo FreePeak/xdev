@@ -1,6 +1,6 @@
 # How xdev compares to other harnesses
 
-Seven harnesses were read from primary sources — installed binaries and
+Eight harnesses were read from primary sources — installed binaries and
 bundles, full clones, SQLite stores, live request dumps — and each
 produced a written adopt / verify / **reject** verdict in [docs/PRD.md](https://github.com/FreePeak/xdev/blob/main/docs/PRD.md) §5
 instead of imitation. Teardowns: [pi](docs/research/parity-pi-internals.md),
@@ -8,6 +8,7 @@ instead of imitation. Teardowns: [pi](docs/research/parity-pi-internals.md),
 [Claude Code](docs/research/claude-code-internals.md),
 [OpenCode](docs/research/opencode-internals.md),
 [DeepSeek Harness](docs/research/dsh-internals.md),
+[Empryo / SoulForge](empryo-internals.md),
 [fx](docs/research/fx-internals.md), [hermes](docs/research/hermes-internals.md);
 the dispositioned cross-check is
 [docs/parity/harness-cross-check-2026-09-14.md](docs/parity/harness-cross-check-2026-09-14.md).
@@ -31,6 +32,7 @@ the dispositioned cross-check is
      Landlock, bwrap and Windows ACL/restricted token behind one canonical writable-root derivation
      (packages/sandbox/sandbox/src/roots.ts:52-55) — which is the one dimension where xdev is
      behind rather than differently shaped. -->
+| **Empryo / SoulForge** (v2 public core, Bun + TypeScript) | A live code graph *as the agent's first-class context*: SQLite `files`/`symbols`/`edges`/`calls`/`cochanges`, personalized PageRank, blast-radius badges, and a **frozen snapshot + `<soul_map_update>` delta** protocol so the map stays fresh without busting the prompt cache | The **protocol**, not the engine: orient-from-a-map, confirm-before-asserting (the prompt says the map is orientation, not ground truth), impact before high-fanout edits (#543), the #263 diagnostics ladder, and free structured working state at compaction | The engine itself — tree-sitter/ts-morph in-process, a second store against the <100 MB RSS gate, CGO/JS-runtime against one static binary, and a multi-thousand-token always-on map against the <1,000-token prompt goal. LeanKG is that graph, out of process ([decision](../decisions/code-graph-via-leankg-not-soulmap.md)) |
 | **fx** (Vercel Labs, Zig) | A tiny native binary that publishes enforceable budgets: 6.17 MiB, a 2 ms boot gate, a 7.800 MiB ceiling, compaction ratios as exact integers | The enforce-the-promise discipline (see the open tickets below), plus the durable-write set and use-time credential verification (#122, #123, closed) and a repo-safe config allowlist stricter than fx's three keys | A linear lo…[+158b] |
 | **hermes** (Nous Research) | A self-improving loop in a `uv` venv: 45+ tools, a 61,810-char three-tier cache, skills grown from experience, one process serving six chat platforms | Progressive disclosure: the deferred catalog — `tool_search` → `tool_describe` → `tool_call` — is the seam that keeps a wide surface off a small prompt | The venv (one static binary instead), the chat gat…[+40b] |
 
