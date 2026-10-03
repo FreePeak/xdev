@@ -33,10 +33,12 @@ func currentTabID(tabs []TabInfo) string {
 	return ""
 }
 
-// tabStripVisible reports whether the strip owns its row. One open session
-// does not earn a permanent row: the status row already says everything it
-// could, and a line spent on one word is a line the transcript loses.
-func (a *App) tabStripVisible() bool { return len(a.tabs) >= 2 }
+// tabStripVisible reports whether the strip owns its row. Two gates, both
+// named: tui.tabs.mode off hides it (the chords and /tabs keep working — the
+// strip is a view), and one open session does not earn a permanent row: the
+// status row already says everything it could, and a line spent on one word
+// is a line the transcript loses.
+func (a *App) tabStripVisible() bool { return a.tabsStrip && len(a.tabs) >= 2 }
 
 // tabStripRow is the row the strip owns — row 0, the top row of the screen.
 // It is drawn only when more than one session is open: with a single session
@@ -50,7 +52,7 @@ const tabStripRow = 0
 // holds a.mu.
 func (a *App) drawTabStrip(s tcell.Screen, w int) {
 	a.tabHits = nil
-	if len(a.tabs) < 2 {
+	if !a.tabStripVisible() {
 		return
 	}
 	y := tabStripRow
@@ -60,7 +62,7 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 	closeSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 
 	x := 0
-	for _, t := range a.tabs {
+	for i, t := range a.tabs {
 		label := t.Title
 		if label == "" {
 			label = shortID(t.ID)
@@ -69,8 +71,15 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 		// claims 40 cells squeezes every other tab off the row, and the set
 		// you cannot see is the set you cannot switch to.
 		label = truncateCells(label, 24, "…")
+		// The badge is the tab's number under tui.tabs.indicators: numbers,
+		// and its status glyph otherwise (opencode's own default). The number
+		// is what the C-1..9 chords name, so it is not decoration: it is the
+		// legend for the keys.
 		badge := " "
-		if t.Running {
+		switch {
+		case a.tabsNumbered:
+			badge = fmt.Sprintf("%d", i+1)
+		case t.Running:
 			badge = "✦"
 		}
 		st := labelSt

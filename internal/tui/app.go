@@ -166,6 +166,17 @@ type App struct {
 	// tabHits is the tab strip's clickable geometry, published each frame by
 	// the painter (tabstrip.go).
 	tabHits []tabHit
+	// tabsStrip is the user's tab-strip policy (tui.tabs.mode): false hides
+	// the strip and frees its row, and every tab chord still works — the strip
+	// is a view, the tabset is not. Set from cmd at startup and again by a
+	// /settings write, so the policy takes effect without a restart.
+	tabsStrip bool
+	// tabsNumbered paints each tab's index instead of a status glyph
+	// (tui.tabs.indicators: numbers).
+	tabsNumbered bool
+	// onTabReopen reopens the most recently closed session (opencode
+	// session_tab_reopen). nil degrades the chord to a notice.
+	onTabReopen func() error
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
 	// BeginMessage (one EventStart) discards one a dead turn left open, so
@@ -551,10 +562,15 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		showThinking:  true,
 		renderMermaid: true,
 		width:         w, height: h,
-		keyq:   make(chan tcell.Event, 64),
-		dirty:  make(chan struct{}, 1),
-		quitCh: make(chan struct{}),
-		sm:     newScrollModel(),
+		// tabsStrip defaults ON. The policy (tui.tabs.mode) is a config value
+		// cmd only applies AFTER New, so a zero-value App — and every test
+		// that builds one without cmd — must still paint the strip the
+		// shipped way. SetTabPolicy turns it off from there.
+		tabsStrip: true,
+		keyq:      make(chan tcell.Event, 64),
+		dirty:     make(chan struct{}, 1),
+		quitCh:    make(chan struct{}),
+		sm:        newScrollModel(),
 		// No box is focused until a click names one: the wheel is the
 		// transcript's from the first frame.
 		thinkFocus: -1,
@@ -1548,6 +1564,23 @@ func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
 // SetTabPick wires what Enter on a /tabs row does. nil degrades /tabs to
 // a notice.
 func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
+
+// SetTabPolicy applies the tab-strip policy from settings (tui.tabs.mode and
+// tui.tabs.indicators). cmd calls it at startup and after a /settings write, so
+// turning the strip off does not need a restart. Caller holds no lock.
+func (a *App) SetTabPolicy(on, numbered bool) {
+	a.mu.Lock()
+	if a.tabsStrip != on || a.tabsNumbered != numbered {
+		a.clearRenderCache()
+	}
+	a.tabsStrip, a.tabsNumbered = on, numbered
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetTabReopen wires "reopen the last closed session" (opencode
+// session_tab_reopen, ctrl+shift+t). nil degrades the chord to a notice.
+func (a *App) SetTabReopen(fn func() error) { a.onTabReopen = fn }
 
 // SessionID names the session the transcript currently shows. It is the key
 // every session-owned piece of App state reads: the queue (#157) reads it to
@@ -3454,6 +3487,21 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		a.closeTab(currentTabID(tabs))
+		return
+	case "session.tab.reopen":
+		// C-shift-T — reopen the last closed session (opencode
+		// session_tab_reopen). The host owns the closed stack, so the chord
+		// only asks; an unwired host says so rather than swallowing the key.
+		if a.onTabReopen == nil {
+			a.AddSystemBlock("reopening a closed session is not wired in this build")
+			return
+		}
+		go func() {
+			if err := a.onTabReopen(); err != nil {
+				a.AddSystemBlock("error: " + err.Error())
+			}
+			a.poke()
+		}()
 		return
 	case "session.list":
 		// <leader>l — the open-session set as a modal list (opencode's
