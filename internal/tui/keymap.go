@@ -72,8 +72,9 @@ var BuiltinActions = []string{
 	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
 	"session.tab.next", "session.tab.previous",
 	"session.tab.next_unread", "session.tab.previous_unread",
-	"app.settings", // Alt+,: the settings overlay (grok settings panel)
-	"send-now",     // F6: interrupt the live turn and run a queued message now (#157)
+	"session.tab.reopen", // C-shift-T: reopen the last closed session
+	"app.settings",       // Alt+,: the settings overlay (grok settings panel)
+	"send-now",           // F6: interrupt the live turn and run a queued message now (#157)
 	// Session lifecycle (opencode session_new / session_list / session_delete),
 	// reachable single-key or behind the leader prefix.
 	"session.list", "session.new", "session.delete",
@@ -222,6 +223,17 @@ func DefaultKeyMap() *KeyMap {
 			// chords are spelled exactly as chordOf renders them.
 			"C-Tab":       "session.tab.next",
 			"C-Shift-Tab": "session.tab.previous",
+			// C-Shift-T is opencode's session_tab_reopen ("reopen last
+			// closed tab"). Shift+letter reaches tcell as KeyCtrlT with
+			// ModShift, and chordOf writes the letter as lower case with
+			// ModShift DROPPED for non-nav keys — so the chord an event
+			// renders is exactly the same string C-T already owns. That is
+			// why the binding is spelled C-S-t, and it is the same trap
+			// TestWrittenChordsReachTheDeliveredChord guards: spelled
+			// "C-Shift-T" it would be listed in /hotkeys and never fire.
+			// (tcell's CSI-u decoder does report C-Shift-T as its own
+			// sequence, which chordOf renders "C-S-t" too.)
+			"C-S-t": "session.tab.reopen",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.

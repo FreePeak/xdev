@@ -480,10 +480,19 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.TabsPicker() }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
-		{Name: "settings", Description: "show settings overlay, or toggle: /settings [overlay|showThinking on|off]",
+		// Bare /settings opens the panel, because that is the surface that can
+		// UPDATE a setting — the dump it replaced answers "what is configured"
+		// by printing a wall of read-only transcript lines, which is the
+		// reason "my /settings will not update" was reportable at all. The
+		// dump survives as `/settings list`, and the toggles keep their own
+		// words (/settings showThinking on|off, sidebarMode, renderMermaid).
+		{Name: "settings", Description: "open the settings panel: /settings [list|showThinking on|off]",
 			Fn: func(app CommandAPI, args string) error {
-				if strings.TrimSpace(args) == "overlay" {
+				switch strings.TrimSpace(args) {
+				case "overlay", "":
 					return app.SettingsOverlay()
+				case "list", "show":
+					return app.SettingsView("")
 				}
 				return app.SettingsView(args)
 			}},
