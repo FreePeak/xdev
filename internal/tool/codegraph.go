@@ -222,6 +222,18 @@ func impactFailure(err error) Result {
 
 // renderGraphAnswer keeps the server's own guidance and rows, dropping the
 // bookkeeping fields that mean nothing to the model.
+//
+// The three graph verbs do NOT share one row shape, which the unit tests with
+// a uniform stub could not have shown -- measured against a live server on
+// 2026-10-03:
+//
+//	callers / callees : ["internal/tool/verify.go::renderProblems", ...]
+//	impact            : [{"qn": "...", "depth": 1}, ...]
+//	hits (ladder)     : [{"name":..., "qualified_name":..., "file_path":...}]
+//
+// A renderer that only understood objects printed the right COUNT and a row
+// of "?" for every real answer, which is worse than saying nothing: the model
+// sees a confident summary and cannot tell it is empty.
 func renderGraphAnswer(head string, body []byte) string {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
@@ -243,16 +255,16 @@ func renderGraphAnswer(head string, body []byte) string {
 			continue
 		}
 		fmt.Fprintf(&b, "\n%d %s:", len(items), key)
-		for i, it := range items {
-			if i >= maxImpactRows {
-				fmt.Fprintf(&b, "\n  (+%d more)", len(items)-maxImpactRows)
+		shown := 0
+		for _, it := range items {
+			if shown >= maxImpactRows {
+				fmt.Fprintf(&b, "\n  (+%d more)", len(items)-shown)
 				break
 			}
-			row, _ := it.(map[string]any)
-			if row == nil {
-				continue
+			if line := renderRow(it); line != "" {
+				fmt.Fprintf(&b, "\n  %s", line)
+				shown++
 			}
-			fmt.Fprintf(&b, "\n  %v", firstString(row, "qualified_name", "name", "content", "callee", "caller"))
 		}
 		rows += len(items)
 	}
@@ -262,20 +274,29 @@ func renderGraphAnswer(head string, body []byte) string {
 	return b.String()
 }
 
+// renderRow renders one graph row, whatever shape it arrived in.
+func renderRow(it any) string {
+	switch v := it.(type) {
+	case string:
+		return v
+	case map[string]any:
+		for _, k := range []string{"qn", "qualified_name", "name", "content"} {
+			if s, ok := v[k].(string); ok && s != "" {
+				if d, ok := v["depth"]; ok {
+					return fmt.Sprintf("%s (depth %v)", s, d)
+				}
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 func where(file string, line int) string {
 	if line <= 0 {
 		return file
 	}
 	return fmt.Sprintf("%s:%d", file, line)
-}
-
-func firstString(row map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if s, ok := row[k].(string); ok && s != "" {
-			return s
-		}
-	}
-	return "?"
 }
 
 func looksLikePath(s string) bool {
