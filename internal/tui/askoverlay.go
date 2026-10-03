@@ -880,8 +880,8 @@ func clamp(v, lo, hi int) int {
 // terminal's full width, so the context panel cut straight through the middle
 // of the question the human was answering — and a box frame is the transcript's
 // own look, since thinking blocks and tool results are exactly that. Width comes
-// from rightEdge(), so the card ends where the composer, the top bar and the
-// status row end.
+// from rightEdge(), so the card ends where the composer and the status row
+// end.
 func (a *App) drawAskCard(yComposerTop int) {
 	st := a.ask
 	if st == nil || st.dead {

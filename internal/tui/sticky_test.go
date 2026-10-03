@@ -135,8 +135,8 @@ func TestStickyPromptsAreUserBlocksOnly(t *testing.T) {
 
 // TestStickyHeaderPinsPromptAtTopOfViewport is the end-to-end shape: scroll up
 // past a prompt and it is on screen at the top of the transcript, above the
-// answer that scrolled under it. The top bar is untouched — it carries its own
-// prompt line, which is why the count below skips row 0.
+// answer that scrolled under it. The pinned copy is the only one on screen, so
+// the count starts at transcriptTop().
 func TestStickyHeaderPinsPromptAtTopOfViewport(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddUserBlock("port the sticky header")
@@ -173,16 +173,15 @@ func TestStickyHeaderPinsPromptAtTopOfViewport(t *testing.T) {
 
 // TestStickyHeaderAbsentAtTail: at the live tail the prompt is inline content,
 // not a pinned header — the top of the transcript must not duplicate a row the
-// viewport already shows. (The top bar's own prompt line is the one copy above
-// it, so the count starts below it.)
+// viewport already shows. (With the top bar gone that means exactly one copy
+// on the whole screen, counted from row 0.)
 func TestStickyHeaderAbsentAtTail(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddUserBlock("inline at the tail")
 	app.AddAssistantBlock(strings.Repeat("prose\n", 20))
 	app.draw()
-	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
-	if got := strings.Count(strings.Join(rows[1:], "\n"), "inline at the tail"); got != 1 {
-		t.Fatalf("tail prompt painted %d times below the top bar", got)
+	if got := strings.Count(screenText(scr), "inline at the tail"); got != 1 {
+		t.Fatalf("tail prompt painted %d times on screen", got)
 	}
 }
 
@@ -204,8 +203,8 @@ func TestStickyHeaderRowResolvesToItsPrompt(t *testing.T) {
 	h := computeSticky(int32(app.sm.Start(app.totalLinesLocked(), app.viewportLinesLocked())), app.viewportLinesLocked(), app.stickyPrompts())
 	hdr, rows := app.transcriptTop(), app.stickyHdr
 	app.mu.Unlock()
-	if h.block < 0 || hdr <= 0 {
-		t.Fatalf("nothing pinned (header rows = %d)", hdr)
+	if h.block < 0 || rows <= 0 {
+		t.Fatalf("nothing pinned (header rows = %d)", rows)
 	}
 	if ord, bi := app.userRowAt(hdr); bi != h.block || ord != 0 {
 		t.Fatalf("the top header row resolves to block %d (ordinal %d), want the pinned block %d", bi, ord, h.block)
@@ -569,7 +568,7 @@ func TestStickyHeaderPaintsOnce(t *testing.T) {
 	// And the prompt appears exactly once on screen.
 	body := strings.Join(rows[hdr:], "\n")
 	if got := strings.Count(body, "❯ HEADPROMPT"); got != 1 {
-		t.Fatalf("the pinned prompt paints its ❯ band %d times below the top bar", got)
+		t.Fatalf("the pinned prompt paints its ❯ band %d times", got)
 	}
 }
 

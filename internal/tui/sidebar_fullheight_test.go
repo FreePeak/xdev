@@ -13,7 +13,7 @@ import (
 // is still 100% width"). Four rows of the old layout are the whole defect, and
 // each is pinned below: the panel's own band is every row of the terminal, the
 // prompt box and its text stop at the panel's left edge, the status row's
-// metrics stay in the main pane, and the top bar does not run under the panel.
+// metrics stay in the main pane, and no main-pane row runs under the panel.
 
 // twoWindowApp is a drawn app with the panel pinned open, a transcript, a draft
 // in the composer and metrics on the status row — the four surfaces the split
@@ -34,9 +34,9 @@ func twoWindowApp(t *testing.T, w, h int) (*App, tcell.SimulationScreen) {
 }
 
 // TestSidebarIsFullHeight is the headline: with the panel open it owns every
-// row of the terminal, so its background is unbroken from the top bar down to
-// the status row. Before this the band stopped above the composer and started
-// under the top bar, which read as a box floating in the transcript.
+// row of the terminal, so its background is unbroken from the top down to the
+// status row. Before this the band stopped above the composer, which read as a
+// box floating in the transcript.
 func TestSidebarIsFullHeight(t *testing.T) {
 	app, scr := twoWindowApp(t, 160, 40)
 	app.mu.Lock()
@@ -50,8 +50,8 @@ func TestSidebarIsFullHeight(t *testing.T) {
 		t.Fatalf("the panel starts at column %d, want %d", edge, 160-dockCols)
 	}
 	// The surface, not a box: no cell of the panel's columns carries box chrome,
-	// and row 0 — the row the top bar shares with the panel's title slot — is
-	// the panel's, which its own title is the witness for. (Its background can
+	// and row 0 — the row the pane's transcript shares with the panel's title
+	// slot — is the panel's, which its own title is the witness for. (Its bg can
 	// no longer witness it: the panel's field is the terminal's own.)
 	for y := range 40 {
 		for x := edge; x < 160; x++ {
@@ -101,11 +101,11 @@ func TestComposerStopsAtTheSidebar(t *testing.T) {
 	}
 }
 
-// TestStatusRowAndTopBarStayInTheMainPane: the two remaining full-width rows.
+// TestStatusRowAndTopRowStayInTheMainPane: the two remaining full-width rows.
 // The metrics are the loudest failure (they right-align to the terminal's
-// edge, so with the panel open they slid under it), and the top bar's prompts
-// take w for the same reason.
-func TestStatusRowAndTopBarStayInTheMainPane(t *testing.T) {
+// edge, so with the panel open they slid under it), and the top transcript row
+// takes w for the same reason.
+func TestStatusRowAndTopRowStayInTheMainPane(t *testing.T) {
 	app, scr := twoWindowApp(t, 160, 40)
 	edge := app.width - dockCols
 	row := lastRow(screenText(scr))
@@ -119,19 +119,19 @@ func TestStatusRowAndTopBarStayInTheMainPane(t *testing.T) {
 			t.Fatalf("the status row painted %q at x=%d, inside the panel", ch, x)
 		}
 	}
-	// The top bar stops at the pane's edge too. Row 0 is the one row both
-	// windows share a surface on — the pane's prompts on the left, the panel's
-	// title on the right — so the check is the panel's own gutter: the bar's
-	// text may not cross the boundary to reach the panel's text.
+	// Row 0 is the one row both windows share a surface on — the pane's
+	// transcript on the left, the panel's title on the right — so the check is
+	// the panel's own gutter: the pane's text may not cross the boundary to
+	// reach the panel's text.
 	first := strings.SplitN(screenText(scr), "\n", 2)[0]
 	if strings.TrimSpace(first[edge:edge+dockPad]) != "" {
-		t.Fatalf("the top bar runs into the panel's gutter: %q", first[edge:edge+dockPad])
+		t.Fatalf("the transcript runs into the panel's gutter: %q", first[edge:edge+dockPad])
 	}
 }
 
 // TestTwoWindowShapeUnchangedWhenClosed: the layout is the shipped one whenever
 // the panel is shut — rightEdge is the whole terminal, so the box, the status
-// row and the top bar are exactly as wide as they were before the split.
+// row are exactly as wide as they were before the split.
 func TestTwoWindowShapeUnchangedWhenClosed(t *testing.T) {
 	app, scr := newTestApp(t, 160, 40)
 	app.SetDockMode(DockHide)

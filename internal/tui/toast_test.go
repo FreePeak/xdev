@@ -19,15 +19,14 @@ func TestToastPaintsInTheCornerAndOffTheComposer(t *testing.T) {
 	app.Toast(ToastError, msg, time.Minute)
 	app.draw()
 
-	// Row 1 is the first transcript row under the top bar, and the corner is
-	// the right end of it: not row 0 (the bar is the session's own header) and
-	// not the composer's row.
+	// Row 0 is the first transcript row (there is no top bar) and the corner
+	// is the right end of it — not the composer's row.
 	rows := rowsOf(scr)
-	if !strings.Contains(rows[1], "playwright unavailable") {
-		t.Fatalf("row 1 = %q, want the toast in the corner of the first transcript row", rows[1])
+	if !strings.Contains(rows[0], "playwright unavailable") {
+		t.Fatalf("row 0 = %q, want the toast in the corner of the first transcript row", rows[0])
 	}
-	if strings.Contains(rows[1], "test/free") {
-		t.Fatalf("row 1 = %q, want the toast clear of the composer's divider", rows[1])
+	if strings.Contains(rows[0], "test/free") {
+		t.Fatalf("row 0 = %q, want the toast clear of the composer's divider", rows[0])
 	}
 	for i, ln := range rows {
 		if strings.Contains(ln, "playwright") && strings.Contains(ln, "test/free") {
@@ -48,11 +47,11 @@ func TestToastStackPutsTheNewestFirst(t *testing.T) {
 	app.draw()
 
 	rows := rowsOf(scr)
-	if !strings.Contains(rows[1], "newest failure") {
-		t.Fatalf("row 1 = %q, want the newest toast on top", rows[1])
+	if !strings.Contains(rows[0], "newest failure") {
+		t.Fatalf("row 0 = %q, want the newest toast on top", rows[0])
 	}
-	if !strings.Contains(rows[2], "oldest failure") {
-		t.Fatalf("row 2 = %q, want the older toast below it", rows[2])
+	if !strings.Contains(rows[1], "oldest failure") {
+		t.Fatalf("row 1 = %q, want the older toast below it", rows[1])
 	}
 }
 
@@ -82,10 +81,10 @@ func TestToastIsOneRow(t *testing.T) {
 	app.draw()
 
 	rows := rowsOf(scr)
-	if !strings.Contains(rows[1], "first line second line and a tab") {
-		t.Fatalf("row 1 = %q, want the notice collapsed onto one row", rows[1])
+	if !strings.Contains(rows[0], "first line second line and a tab") {
+		t.Fatalf("row 0 = %q, want the notice collapsed onto one row", rows[0])
 	}
-	if strings.Contains(strings.Join(rows[2:], "\n"), "second line") {
+	if strings.Contains(strings.Join(rows[1:], "\n"), "second line") {
 		t.Fatal("the notice wrapped onto a second row")
 	}
 }

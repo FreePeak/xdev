@@ -145,15 +145,13 @@ func gitBranch(cwd string) string {
 }
 
 // transcriptTop is the screen row the transcript viewport paints into: the
-// persistent top bar owns row 0 whenever a transcript is on screen, and the
-// session strip owns row 1 whenever more than one session is open. The
-// selection geometry (anchoring, auto-scroll, row capture) shifts by it.
+// session strip owns row 0 whenever more than one session is open, and with
+// the top bar gone there is nothing above it, so a transcript with no strip
+// starts at row 0 too. The selection geometry (anchoring, auto-scroll, row
+// capture) shifts by it.
 func (a *App) transcriptTop() int {
-	if len(a.blocks) == 0 {
+	if len(a.blocks) == 0 || !a.tabStripVisible() {
 		return 0
-	}
-	if a.tabStripVisible() {
-		return 2
 	}
 	return 1
 }
@@ -171,29 +169,9 @@ func (a *App) firstUserPrompt() string {
 	return ""
 }
 
-// drawTopBar paints row 0 (grok top_bar.rs): while a turn is in flight the
-// running spinner leads, then the git branch — the same theme frames and
-// accent the tool rows and the composer's divider spin, so the indicator reads
-// the same wherever it appears. The spinner leads because it is the bar's one
-// thing that MOVES, and at the right end of a static branch it read as part
-// of the branch name. Nothing else lives on this bar: the session's prompts
-// used to ride it and were dropped (user request). Caller holds a.mu.
-func (a *App) drawTopBar(s tcell.Screen) {
-	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-	x := 1
-	if a.st.Running {
-		drawText(s, x, 0, a.spinFrame(),
-			tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning))))
-		x += 2 // the frame and the space after it
-	}
-	if a.branch != "" {
-		drawText(s, x, 0, "❯ "+a.branch, dim)
-	}
-}
-
-// drawWelcome renders the start screen (grok welcome/mod.rs anatomy):
-// top bar (git branch left), vertically centered logo + menu; the composer
-// and status rows are drawn by the caller.
+// drawWelcome renders the start screen (grok welcome/mod.rs anatomy): a
+// vertically centered logo + menu. The session strip, when it has one to
+// show, owns row 0; the composer and status rows are drawn by the caller.
 func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	st := func(c theme.Color, bold bool) tcell.Style {
 		st := tcell.StyleDefault.Foreground(a.cellColor(c))
@@ -202,8 +180,6 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 		}
 		return st
 	}
-
-	a.drawTopBar(s)
 
 	// Monochrome like grok's welcome: white text, gray grue.
 	whiteC, grayC := a.th.Get(theme.TextPrimary), a.th.Get(theme.Gray)

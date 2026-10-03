@@ -868,8 +868,9 @@ func (a *App) selectionText() string {
 // selRowAt returns the selectable content of screen row y. Rows the transcript
 // painter recorded come from that capture, which leaves out the accent rail, its
 // padding and every run the frame builders marked chrome, so a copied line is
-// the text and not the decoration; the capture is viewport-relative, so the top
-// bar's row is subtracted. Every other row — the top bar itself, welcome, the
+// the text and not the decoration; the capture is viewport-relative, so the
+// session strip's row is subtracted. Every other row — the session strip,
+// welcome, the
 // composer, status row, an open overlay, or blank space under a short
 // transcript — is read back from the painted grid, trimmed of the trailing
 // cells that only exist to fill the width and of the frame the row was drawn

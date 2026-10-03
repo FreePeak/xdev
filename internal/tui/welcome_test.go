@@ -203,13 +203,14 @@ func TestWelcomeStartupNotice(t *testing.T) {
 // welcome content on screen; after a block, it's gone.
 func TestAppWelcomeDrawnWhenEmpty(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
+	app.SetLocation("/tmp/some-checkout")
 	app.mu.Lock()
 	app.branch = "main"
 	app.mu.Unlock()
 	app.draw()
-	prim, _, _ := scr.GetContents()
-	if len(prim) < 4 || string(prim[1].Runes) != "❯" || string(prim[3].Runes) != "m" {
-		t.Fatalf("welcome top bar missing the branch")
+	// The branch is on the status row beside the directory, not on a top bar.
+	if got := lastRow(screenText(scr)); !strings.Contains(got, "main") {
+		t.Fatalf("welcome status row %q missing the branch", got)
 	}
 	found := gridContains(scr, "New session")
 	if !found {

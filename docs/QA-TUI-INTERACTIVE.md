@@ -164,7 +164,7 @@ the quit path.
 ### 8. Terminals narrower than ~3 rows collapse to a single garbled line
 
 Resizing to 20x6 and then 30x1 (both while a turn was streaming): at 2 rows the
-composer, the top bar and the transcript all vanish; at 1 row the frame is
+composer, the status row and the transcript all vanish; at 1 row the frame is
 `❯/tmp/x…q18s │ ⚡ 111.9 t/s` — status-row fragments painted over the composer.
 The app survives (typing still works once restored), but the degraded frames are
 unreadable and there is no `resize` guard like the one `drawPicker` has
