@@ -289,3 +289,38 @@ func TestResumedSessionKeepsStatusMetrics(t *testing.T) {
 		t.Fatalf("the report lost the resumed session's spend:\n%s", report)
 	}
 }
+
+// TestCompactionUsageReachesTheStatusRow is the TUI half of the
+// compaction-billing fix. The summarize call is a provider request the user
+// was billed for; before the fix its tokens reached no counter, so the token
+// pill, the cache-hit rate and the spend segment all read as if compaction
+// were free. The row is the surface a user actually reads, so it is what this
+// drives — a unit test of App alone would pass with the hook unwired, which is
+// exactly how the tool-delta case shipped.
+func TestCompactionUsageReachesTheStatusRow(t *testing.T) {
+	app, scr := metricTestApp(t, 120, 24)
+	h := &tuiHooks{ts: &tuiSession{app: app}}
+	h.OnCompaction(9_000)
+	h.OnCompactionUsage(&ai.Usage{
+		Input: 900, Output: 120, CacheRead: 40_000, TotalTokens: 41_020,
+		Cost: &ai.UsageCost{Total: 0.0187},
+	})
+
+	row := awaitHUD(t, scr, "41k")
+	if !strings.Contains(row, "41k") {
+		t.Fatalf("the summarize call's tokens are not on the row: %q", row)
+	}
+	// 40_000 of the 40_900 prompt tokens came from cache.
+	if !strings.Contains(row, "97%") {
+		t.Fatalf("the cache-hit rate ignored the summarize: %q", row)
+	}
+	// The long form is where a human reconciles a bill, and its cache-hit
+	// rate is the same ratio the row shows: 40_000 of 40_900 prompt tokens.
+	report := app.UsageReport()
+	if !strings.Contains(report, "$0.0187") {
+		t.Fatalf("the report lost the compaction's spend:\n%s", report)
+	}
+	if !strings.Contains(report, "cache hit 97%") {
+		t.Fatalf("the report's cache-hit rate ignored the summarize:\n%s", report)
+	}
+}
