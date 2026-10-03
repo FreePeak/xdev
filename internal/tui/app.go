@@ -2956,6 +2956,16 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Lock()
 			a.width, a.height = r.Size()
 			a.clearRenderCache()
+			// The diff viewer's LAYOUT is its width (the pair below the
+			// threshold, the list above it), so a resize under an open overlay
+			// has to re-decide it here — the width has already moved, and the
+			// frame that would notice it is the next paint, by which time a
+			// frame drawn at the old budget has already shown. drawDiffOverlay
+			// re-checks the same fact each frame, so a resize that reaches it
+			// another way is still covered.
+			if a.diffOv != nil {
+				a.diffOv.reflow(a)
+			}
 			a.mu.Unlock()
 		}
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise let
