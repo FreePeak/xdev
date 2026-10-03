@@ -204,6 +204,28 @@ func mergeMnemopi(dst, layer MnemopiSettings) MnemopiSettings {
 // HindsightSettings is the `hindsight` group (memory: hindsight). Every key
 // is optional; an unset key takes the built-in default, then the
 // HINDSIGHT_* environment override.
+// CodeGraphSettings points the `impact` tool at a LeanKG server.
+//
+// The graph is a second process on purpose: it can be down without breaking a
+// session, and xdev stays one bounded binary. Every field is optional; with
+// no BaseURL the tool is not registered at all.
+type CodeGraphSettings struct {
+	// BaseURL is the LeanKG REST listener (e.g. http://127.0.0.1:9700).
+	// Empty = no code graph in this session.
+	BaseURL string `yaml:"baseUrl"`
+	// Project is the LeanKG project selector, sent as ?project=. Empty sends
+	// no selector, which is only safe on a server bound to this repository.
+	Project string `yaml:"project"`
+	// Timeout bounds one graph request in Go duration syntax ("3s").
+	Timeout string `yaml:"timeout"`
+	// ExpectDir is the repository directory Project should resolve to. When
+	// empty it is derived from the session's git root, and the client then
+	// REFUSES answers from a server bound elsewhere: a single-project server
+	// silently ignores ?project=, and a confident answer from another
+	// repository's graph is worse than no answer.
+	ExpectDir string `yaml:"expectDir"`
+}
+
 type HindsightSettings struct {
 	// APIURL is the server base URL (default http://localhost:8888).
 	APIURL string `yaml:"apiUrl"`
@@ -436,6 +458,11 @@ type Settings struct {
 	// environment variables override them at the backend (see
 	// internal/memory/hindsight.go for the precedence table).
 	Hindsight HindsightSettings `yaml:"hindsight"`
+	// CodeGraph points at a LeanKG code-graph server so the `impact` tool
+	// can answer "what depends on this" before an edit. Empty BaseURL leaves
+	// the tool unregistered: a run without a graph must not advertise one.
+	// See docs/decisions/code-graph-via-leankg-not-soulmap.md.
+	CodeGraph CodeGraphSettings `yaml:"codeGraph"`
 	// Advisor runs a background reviewer on the session (M11, research §6).
 	// The reviewer model comes from advisorModel (else the run model);
 	// without either the flag warns and starts disarmed.
@@ -562,6 +589,16 @@ func (s *Settings) TTSConfig() tts.Settings {
 		return tts.Settings{}
 	}
 	return s.TTS
+}
+
+// CodeGraphConfig returns the code-graph group, nil-safe the same way every
+// other group accessor is: callers in the registry builder must not have to
+// know whether a test handed them a Settings.
+func (s *Settings) CodeGraphConfig() CodeGraphSettings {
+	if s == nil {
+		return CodeGraphSettings{}
+	}
+	return s.CodeGraph
 }
 
 // SkillsSettings is the `skills` group.
