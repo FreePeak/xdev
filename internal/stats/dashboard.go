@@ -239,8 +239,8 @@ var fragmentTemplate = template.Must(template.New("frag").Funcs(tmplFuncs).Parse
 <div>
 <h2>by model</h2>
 {{if .Models}}<table>
-<thead><tr><th>model</th><th>turns</th><th>tokens</th><th>cost</th></tr></thead>
-<tbody>{{range .Models}}<tr><td>{{.Model}}</td><td>{{.Turns}}</td><td>{{tok .TotalTokens}}</td><td>{{money .CostUSD}}</td></tr>
+<thead><tr><th>model</th><th>turns</th><th>tokens</th><th>cache r/w</th><th>cost</th></tr></thead>
+<tbody>{{range .Models}}<tr><td>{{.Model}}</td><td>{{.Turns}}</td><td>{{tok .TotalTokens}}</td><td>{{tok .CacheRead}} / {{tok .CacheWrite}}</td><td>{{money .CostUSD}}</td></tr>
 {{end}}</tbody></table>
 {{else}}<div class="quiet">no turns recorded</div>{{end}}
 </div>
