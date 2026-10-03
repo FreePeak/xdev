@@ -2840,3 +2840,24 @@ Five items are ranked in §5. **R-USE-2 is the one to take on sight:** xdev's co
 Two Empryo artefacts are rejected rather than copied: the no-USD-stored design above, and `StatusDashboard.tsx:777-779`, which sorts cost rows through `computeModelCost("", …)` so every row resolves to `DEFAULT_PRICING` and the column is ordered by token count rather than cost.
 
 Not implemented by this document; no `internal/` file was touched.
+
+---
+
+*Last updated: 2026-10-04 (`fix/discovered-window-zero` — user request: "find the root causes most of my xdev session is running so slow").* **Compaction was switched OFF, not merely unconfigured, for the model this host uses every day.** `modelWindow` (`cmd/xdev/print.go`) returned a catalog entry's `ContextWindow` verbatim, so a model the catalog LISTED but that stated no window resolved to `0` — and every entry point on the ladder gates on `ContextWindow > 0` (`internal/agent/compact.go` `maybeCompact`, `internal/agent/handoff.go` `HandoffDue`). Nothing bounded the session's context until a real provider 400 forced `recoverOverflow`.
+
+This is the common case, not an edge. A gateway's `/v1/models` answers with bare `{id, object, owned_by}` — nothing declares a window — so `internal/config/discovery.go:131` builds every model reached through discovery with `ContextWindow: 0`. Measured on this host from the `usage` recorded in `~/.xdev/agent/sessions/*/*.jsonl`:
+
+| model | calls | compactions | max `totalTokens` |
+|---|---|---|---|
+| `opencode/space-bunny-free` (discovered) | 50,288 | 36 | 1,045,076 |
+| `free` (pinned, 200k) | 63,228 | 355 | 234,152 |
+
+One session ran **1,339 consecutive turns above the 160k threshold** before its only two compactions, both `recoverOverflow` reacting to an actual 400, peaking at 771,907 tokens. `xdev models --json` reported 106 catalog rows of which 2 carried a window — both pinned.
+
+The same fault made `XDEV_MAX_CONTEXT_TOKENS` a no-op for exactly this model class: `modelWindow` only reached `ResolveMaxContextTokens()` when the catalog did NOT list the model, and this one is listed.
+
+What landed: `modelWindow` returns a stated window as-is and treats a listed-but-windowless entry as UNKNOWN, falling through to `ResolveMaxContextTokens()` — the same shape `discovery.go:132` already uses for a windowless catalog response (it borrows `MaxTokens`). One condition, `&& m.ContextWindow > 0`.
+
+Verified: `cmd/xdev/modelwindow_budget_test.go` `TestModelWindowListedButWindowless` fails on stock source (`window = 0, want default 200000`) and passes here. `go test ./cmd/xdev/ ./internal/agent/ ./internal/config/` green. A scratch end-to-end probe confirmed `XDEV_MAX_CONTEXT_TOKENS=123456` now reaches `opencode/space-bunny-free` (stock returned 0); the probe was deleted, not committed.
+
+Residual, measured separately and NOT addressed here: the `⌚ ttft` status segment overstates by a median 10.4s because `a.requestStart` (`internal/agent/loop.go:1534`) is only reset in `flushTTFT` at **Run** end, so a turn with tool calls measures from the run's first request (2,739 of 2,739 sampled records show `ttft > duration`). Real per-turn provider time is 1.4–2.4s.
