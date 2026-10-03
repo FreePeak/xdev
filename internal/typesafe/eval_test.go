@@ -369,3 +369,43 @@ func TestFormatResultKeepsTheGatingNumber(t *testing.T) {
 		t.Errorf("a real answer was truncated: %q %q", got, wide)
 	}
 }
+
+// TestFormatResultDoesNotNameAMissingField pins the Laya-shaped case, verbatim
+// from a live local sidecar (laya 0.3.23, english checkpoint, POST
+// /v1/systemone): the payload carries `confidence` and no `answer_confidence`.
+// Naming the calibrated field anyway is a confident wrong answer — the model
+// looks for a key that is not there — so the header must say the answer is
+// uncalibrated instead.
+func TestFormatResultDoesNotNameAMissingField(t *testing.T) {
+	got := FormatResult(map[string]any{
+		"urgency": map[string]any{
+			"type":          "score",
+			"score":         1.9436,
+			"legend":        map[string]any{"0": "no deadline mentioned", "1": "days", "2": "today or cancellation"},
+			"probabilities": map[string]any{"0": 0.0201, "1": 0.0161, "2": 0.9637},
+			"confidence":    0.8355,
+			"action":        map[string]any{"act_probability": 1.0},
+		},
+	})
+	if contains(got, "gate on answer_confidence") {
+		t.Errorf("header points at a field this backend never sent: %q", got)
+	}
+	for _, want := range []string{"uncalibrated", "0.9637", "today or cancellation"} {
+		if !contains(got, want) {
+			t.Errorf("result missing %q: %q", want, got)
+		}
+	}
+}
+
+// TestGateHintFollowsThePayload keeps the hint tied to the data, not to a
+// constant: one answer carries the calibrated field and the hint follows it
+// even though the sibling answer does not.
+func TestGateHintFollowsThePayload(t *testing.T) {
+	mixed := FormatResult(map[string]any{
+		"a": map[string]any{"type": "noul", "noul": 0.5, "answer_confidence": 0.5},
+		"b": map[string]any{"type": "noul", "noul": 0.5, "confidence": 0.5},
+	})
+	if !contains(mixed, "gate on answer_confidence") {
+		t.Errorf("a payload carrying answer_confidence must name it: %q", mixed)
+	}
+}

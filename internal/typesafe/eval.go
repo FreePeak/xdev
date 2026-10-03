@@ -154,17 +154,34 @@ func FormatResult(answers map[string]any) string {
 		return "(typesafe: no answers)"
 	}
 	var buf bytes.Buffer
-	// Gate on answer_confidence, never on confidence: on choice and score,
-	// `confidence` is one minus normalised entropy — how concentrated the
-	// distribution is — and carries no calibration guarantee, so a threshold
-	// read off it does not mean what it appears to mean.
-	buf.WriteString("TypeSafe answers (gate on answer_confidence, not confidence):\n")
+	buf.WriteString(gateHint(answers))
 	for k, v := range answers {
 		line := fmt.Sprintf("  %s: %v", k, v)
 		buf.WriteString(truncate(line, truncateLimit))
 		buf.WriteString("\n")
 	}
 	return buf.String()
+}
+
+// gateHint names the field to gate on, and only says so when this answer
+// actually carries it. `confidence` on choice and score is one minus
+// normalised entropy — how concentrated the distribution is — and carries no
+// calibration guarantee, so a threshold read off it does not mean what it
+// appears to mean. But Laya 0.3.23 returns only `confidence`, and telling a
+// model to gate on a field that is not in the payload is a confident wrong
+// answer, not a useful hint; there, say plainly that there is nothing to gate
+// on rather than naming a missing key.
+func gateHint(answers map[string]any) string {
+	for _, v := range answers {
+		a, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := a["answer_confidence"]; ok {
+			return "TypeSafe answers (gate on answer_confidence, not confidence):\n"
+		}
+	}
+	return "TypeSafe answers (this backend returned no answer_confidence — only confidence, which is NOT calibrated; treat every answer as uncalibrated):\n"
 }
 
 // truncateLimit bounds one answer line so a pathological payload cannot eat the
