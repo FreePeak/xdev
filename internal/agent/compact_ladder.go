@@ -135,6 +135,21 @@ func (a *Agent) runCompactLadder(ctx context.Context, span *compactionSpan) (*se
 		entry, err := fn(a, ctx, span)
 		if err == nil {
 			entry.Method = name
+			// The mechanical working-state block is prepended here, at the
+			// one place every member passes through, so a rung cannot forget
+			// it. It is extracted from the discarded span because that is the
+			// only point where the facts still exist in full: once a member
+			// has rendered, it has already decided what to keep.
+			//
+			// Only for the summarizing rung. A model asked to compress the
+			// span drops exactly these facts -- which files, which commands --
+			// because they look like detail. The deterministic members do not
+			// need help: shake and soft keep structure by construction, and
+			// adding a file list to shake would re-introduce the argument
+			// values its whole contract is to delete.
+			if name == MethodHandoff {
+				entry.Summary = withWorkingState(entry.Summary, extractWorkingState(span.msgs[:span.cut]))
+			}
 			return entry, nil
 		}
 		if errors.Is(err, errMethodUnavailable) {
