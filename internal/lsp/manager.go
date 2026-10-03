@@ -190,6 +190,46 @@ func (m *Manager) ClientFor(ctx context.Context, file string) (*Client, string, 
 	return c, langID, err
 }
 
+// WarmClientFor returns the already-running server handling file, WITHOUT
+// launching one. It is the write-verification ladder's peek (#263): the
+// edit/write path asks on every write, and starting a language server from
+// there would put a 30-second handshake on the critical path of the tool the
+// model trusts most.
+//
+// ok=false is the normal answer and means "nothing warm for this file" — the
+// caller degrades to the cheap tier (verify.go's own parser) rather than
+// paying for a launch.
+func (m *Manager) WarmClientFor(file string) (*Client, string, bool) {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return nil, "", false
+	}
+	name, spec, langID, err := m.resolve(abs)
+	if err != nil {
+		return nil, "", false
+	}
+	root := detectRoot(filepath.Dir(abs), m.cwd, spec.RootMarkers)
+	key := name + "\x00" + root
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, "", false
+	}
+	e, ok := m.servers[key]
+	if !ok {
+		return nil, "", false
+	}
+	select {
+	case <-e.c.Done():
+		// Dead entry: it is dropped by the next launching call. Reporting it
+		// as warm would hand back a client that cannot answer.
+		return nil, "", false
+	default:
+		m.touch(e)
+		return e.c, langID, true
+	}
+}
+
 // clientAt returns (or launches) the server for (name, root) and touches its
 // idle timer.
 func (m *Manager) clientAt(ctx context.Context, name string, spec ServerSpec, root string) (*Client, error) {
