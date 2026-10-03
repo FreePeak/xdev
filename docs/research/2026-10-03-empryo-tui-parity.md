@@ -42,7 +42,7 @@ Two facts worth stating up front so no reader over-reads the comparison:
 | Right panel | optional Neovim PTY (split 40/50/60/70) + per-tab 20% changes+terminals, `TabInstance.tsx:848-853`, `stores/ui.ts:151` | context dock, 42 cols, `auto\|show\|hide`, opens ≥120 cols, `dock.go:40-64`, `:273-281` |
 | Composer | OpenTUI `<textarea>`, grows to `max(4, 40% rows)`, `InputBox.tsx:846`, `:997-1022` | `[]rune` + cursor, `editor.go:13-28`, grows with wrapped rows |
 | Status | header center segments + a 3-tier shortcut footer, `Footer.tsx:21-32`, `:276-301` | one right-aligned segment row, `app.go:5204`, `:5239` |
-| Overlays | 32-name boolean map + a `ModalLayer` + ~28 App-level modals + a LIFO dialog store, `stores/ui.ts:7-42`, `:155-162`, `stores/dialog.ts:39-54` | 10-surface precedence ladder on one screen, `app.go:3012-3067` |
+| Overlays | 32-name boolean map + a `SimpleModalLayer` (`ModalLayer.tsx:23`) + ~28 App-level modals + a LIFO dialog store, `stores/ui.ts:7-42`, `:155-162`, `stores/dialog.ts:39-54` | 10-surface precedence ladder on one screen, `app.go:3012-3067` |
 
 ## 3. Gap tables by surface
 
@@ -91,7 +91,7 @@ Legend: **HAVE** = already there · **PART** = partially · **GAP** = absent · 
 | I1 | Draft survives tab/session switch (restored + consumed on mount) | `InputBox.tsx:202-219` | **single `Editor`**; only the Esc stash (`app.go:126-132`, `:3080-3105`) | **GAP** → R-IN-1 |
 | I2 | Draft stash on demand (`Alt+S`/`Alt+P`) | `InputBox.tsx:727-737`, `:740-755` | Esc stash only | **PART** → folded into R-IN-1 |
 | I3 | Fuzzy history recall (`Ctrl+R`, full-input capture, 500 items) | `InputBox.tsx:655-712`, `:232` | `C-r` = `history-prev` only (`keymap.go:140`) | **GAP** → R-IN-2 |
-| I4 | Large paste collapses to one placeholder line, expands at submit | ≥4 lines → `<pasted (first-30-chars… +N lines)>` (`InputBox.tsx:568-577`), expanded `InputBox.tsx:428-434` | no collapse; a big paste inflates the box to its `maxRows` (`paste.go:252-270`) | **GAP** → R-IN-3 |
+| I4 | Large paste collapses to one placeholder line, expands at submit | ≥4 lines → `<pasted (first-30-chars… +N lines)>` (`InputBox.tsx:568-577`), expanded `InputBox.tsx:428-434` | no collapse; the paste lands whole and the box pages to the cursor past `composerBudget` (`paste.go:252-270`, `app.go:5106-5129`) | **GAP** → R-IN-3 |
 | I5 | Code-looking paste wrapped in a fence | (n/a) | `looksLikeCode` → fenced (`paste.go:265-267`, `:377-`) | **AHEAD** |
 | I6 | Rotating placeholder tips | `InputBox.tsx:164-173` | one dim literal, `"Type a message…"` (`app.go:5074-5083`) | **PART** → R-IN-5 (Could) |
 | I7 | Ctrl+C clears-or-exits; never exits on Shift | `useGlobalKeyboard.ts:88-99`, `InputBox.tsx:714-722` | `quit` → `quitOrCancel(running)` (`app.go:3214-3216`) | **HAVE** |
@@ -116,7 +116,7 @@ Legend: **HAVE** = already there · **PART** = partially · **GAP** = absent · 
 
 | # | Capability | Empryo evidence | xdev today | Verdict |
 |---|---|---|---|---|
-| T1 | Built-in palettes | **36** (`tokens.ts:1879-1916`), 45 tokens (`:19-70`), `_extends` inheritance | **2** (`theme.go:418-423`) + custom JSON + 2 s-poll live reload (`custom.go:466-497`) | **GAP** → R-THEME-1 (Should; content is mechanical) |
+| T1 | Built-in palettes | **36** (`tokens.ts:1879-1916`), 45 tokens (`:19-70`), `_extends` inheritance (`loader.ts:87`) | **2** (`theme.go:418-423`) + custom JSON + 2 s-poll live reload (`custom.go:466-497`) | **GAP** → R-THEME-1 (Should; content is mechanical) |
 | T2 | Per-element opacity + true terminal transparency | `loader.ts:134-171`, `"transparent"` as `bgApp` | transparency only via an explicit `""` slot (`theme.go:256-262`); opacity blending is a documented off-by-default non-goal (PRD §3.5) | **REJECT** — runtime colour generation is exactly what PRD §3.5 declined |
 | T3 | `NO_COLOR` / non-truecolor degradation in the TUI | **absent** — 24-bit SGR regardless; `NO_COLOR` only set on child processes | honoured (`theme.go:548`) + quantization (`:483`, `:501`, `:527`) | **AHEAD** — do not regress |
 | T4 | Frame budget / dirty tracking | 60 fps cap + memo comparators; `externalOutputMode:"passthrough"`, `useKittyKeyboard`, `targetFps:60` (`index.tsx:367-385`) | ~30 fps tick + coalescing `dirty` channel, frame-write deadline, `Sync()` self-heal (`app.go:2745`, `:2733-2738`, `:4350-4361`) | **PARITY** |
@@ -136,13 +136,13 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 
 **R-CONV-1 — Consecutive tool calls collapse into one grouped block.**
 *Why:* a 12-read turn paints 12 boxes today. Empryo folds them into one file tree (`tool-grouping.ts:3-89`, `MessageList.tsx:980-1140`). This is the biggest reading gap in the comparison.
-*Do:* add a `toolGroup` block kind that owns an ordered run of call/result pairs; group breaks on a kind change, on an assistant text segment, or on a non-adjacent `CallID` (`blocks.go:36` already exists for that reason); a collapsed group is one line with `✓ N calls · +A/−D`; expanded it lists each child under it with its own result window. **Reuse `Sub []*SubActivity` (`blocks.go:59-67`) for the shape rather than inventing a second child model** — it already carries `{Label, Tool, Status, Calls, Dur}` and already has a paint cap.
+*Do:* add a `toolGroup` block kind (a name this doc proposes — nothing named that exists yet) that owns an ordered run of call/result pairs; group breaks on a kind change, on an assistant text segment, or on a non-adjacent `CallID` (`blocks.go:36` already exists for that reason); a collapsed group is one line with `✓ N calls · +A/−D`; expanded it lists each child under it with its own result window. **Reuse `Sub []*SubActivity` (`blocks.go:59-67`) for the shape rather than inventing a second child model** — it already carries `{Label, Tool, Status, Calls, Dur}` and already has a paint cap.
 *Acceptance:* `read read read edit bash read` paints as one group + one group + one lone call (3 boxes, not 6); `Ctrl+O` on the group expands every child and each child still honours its own head/tail window; `CallID` pairing still holds when two same-name calls run concurrently.
 *Effort:* **L**. *Test:* one synthetic transcript exercising the break conditions plus one concurrent-same-name pairing case.
 
 **R-CONV-2 — Inline image rendering in the transcript.**
 *Why:* xdev reads a clipboard image and shows `[Image 256x128 #3]` (`clipboard_image.go:30-55`, `paste.go:83`); the model sees the bytes, the human sees a chip. stdlib `image/png` is already imported for dimension probing (`paste.go:34-36`).
-*Do:* a `KindImage` block; render by capability — half-block ANSI art (universal) or Kitty graphics when the terminal is confirmed capable. Follow Empryo's documented gate shape (`core/terminal/image.ts:95-114`: iTerm2/Warp/WezTerm/Konsole excluded; Kitty ≤ 0.37 because 0.38+ grapheme clustering breaks placeholder placement) rather than probing optimistically.
+*Do:* a `KindImage` block (proposed name; `blocks.go:14-23` has no such kind today); render by capability — half-block ANSI art (universal) or Kitty graphics when the terminal is confirmed capable. Follow Empryo's documented gate shape (`core/terminal/image.ts:95-114`: iTerm2/Warp/WezTerm/Konsole excluded; Kitty ≤ 0.37 because 0.38+ grapheme clustering breaks placeholder placement) rather than probing optimistically.
 *Ceiling:* Kitty only, plus half-block fallback — **no sixel** (Empryo has none either) and **no image *upload* path** beyond paste. Upgrade path: `show-image` tool results reuse the same block once that tool exists.
 *Acceptance:* pasting a PNG shows the image under the composer turn in half-block art; on a Kitty-capable terminal it renders as a Kitty image; a corrupt or unsupported file falls back to the existing chip with an honest error, never a blank block; a 12 MB image is refused at the existing cap (`paste.go:57`).
 *Effort:* **L**. *Test:* golden-cell comparison of half-block art against a fixed synthetic PNG; capability-gate table test.
@@ -158,7 +158,7 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 
 **R-CHR-2 — Dirty/staged/untracked in the status row.** Branch and `*` (Empryo `App.tsx:1586-1594`) plus the four already-declared-but-unused `status_line_git_*` tokens (`theme.go:170-176`). Do: one 5 s `git status --porcelain` poll behind a version stamp, the way the row index already stamps. Ceiling: counts, not per-file lists. **M.**
 
-**R-IN-2 — Fuzzy history recall.** `Ctrl+R` opens a full-input capture over the last 500 entries with subsequence scoring; `Enter` loads, `Esc` cancels; `Up`/`Down` keep today's behaviour. Reuse `fuzzyScore` (`suggest.go:127`) — the matcher already exists. **M.**
+**R-IN-2 — Fuzzy history recall.** `Ctrl+R` opens a full-input capture over the last 500 entries with scored matching; `Enter` loads the selection, `Esc` cancels; the arrow keys keep today's behaviour. Reuse `fuzzyScore` (`suggest.go:127-157`) — it already scores prefix, word-start, consecutive and sparse-gap matches. **M.**
 
 **R-IN-3 — Large paste collapses to one line.** ≥ N lines pastes render as `‹ pasted: 142 lines ›`, expanded at submit so the model still receives the full text (Empryo `InputBox.tsx:568-577`, `:428-434`). xdev's fence-wrapping (`paste.go:265-267`) stays orthogonal. Ceiling: threshold by line count, not bytes. **S.**
 
@@ -180,7 +180,7 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 
 **R-CONV-4 — Hide a failure that was later retried on the same path.** **S.**
 
-**R-CONV-5 — Denial as a neutral state.** Add a `denied` `Status` alongside `running|ok|error` (`blocks.go:31`) with a skip glyph in the neutral ink. **S.**
+**R-CONV-5 — Denial as a neutral state.** Add a `denied` `Status` value alongside `running|ok|error` (`blocks.go:31`) with a skip glyph in the neutral ink. **S.**
 
 **R-CONV-6 — Strip `<system-reminder>` from rendered assistant text.** Providers echo them and they are noise in a transcript. **S.**
 
@@ -198,7 +198,7 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 |---|---|---|
 | X1 | No transcript virtualization; a 40-message render cap plus hand-written per-row memo comparators (`MessageList.tsx:1563-1587`, `TabInstance.tsx:88`) | xdev's row index charges O(viewport) and is what makes a 50k-entry session interactive (`rowindex.go:12-38`). A cap would be a regression. |
 | X2 | Raw 24-bit SGR with no truecolor gate; `NO_COLOR` honoured only on child processes | xdev quantizes and honours `NO_COLOR` (`theme.go:483-548`). Keep it. |
-| X3 | Runtime colour generation (`blendBgOpacity`, `brighten`, opacity knobs — `loader.ts:100-117`) | PRD §3.5 turned `bg_blend` off deliberately: every colour comes from a declared slot. |
+| X3 | Runtime colour generation (`blendBgOpacity`, `brighten`, opacity knobs — `loader.ts:100-117`) | PRD §3.5 turned runtime background blending off deliberately (`bg_blend` is the Grok-CLI knob's name, not an xdev identifier): every colour comes from a declared slot. |
 | X4 | Embedded Neovim + a floating ghostty terminal | Needs a PTY dep (absent from `go.mod`) and a native terminal emulator. Empryo itself disables its ghostty renderer on Windows for dlopen segfaults (`core/platform/index.ts:126-130`) — a native surface xdev's single-binary CGO-free promise cannot carry. Take `$EDITOR` (R-IN-6) instead. |
 | X5 | Unconditional animation, no reduced-motion path (wordmark recolour at 10 Hz, cross-fades, glitch) | xdev animates only while something is actually moving (`app.go:2818-2869`). |
 | X6 | A first-run wizard that collects an API key | `xdev login` / `xdev setup` already do it headlessly (`cmd/xdev/main.go:537-568`). |
@@ -214,3 +214,14 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 
 ---
 *Last updated: 2026-10-03 (Empryo/SoulForge TUI parity pass):* first full source-level comparison of Empryo's terminal UI against `internal/tui`. Eight recon passes over both trees, every claim carrying `file:line`. Verdict: xdev leads on rendering budget, terminal-capability honesty and mouse/input plumbing; the actionable gaps are tool-call grouping (R-CONV-1), inline images (R-CONV-4), per-tab composer drafts (R-IN-1), and default context/cost segments (R-CHR-1) — four Musts, ten Shoulds, eight Coulds, and an eight-row reject list. Nothing is implemented by this document.
+
+---
+
+*Last updated: 2026-10-03 (same day, second pass — an audit of this document against its own claims).* The existence/range check I ran covered only that a cited line **exists**, not that it **says what the sentence claims**. A second script matched every backticked identifier in a citation cell against the cited file (±8 lines, then whole-file fallback), and 6 rows failed it:
+
+- **I4 named a function that does not exist.** I wrote that a big paste "inflates the box to its `maxRows`". There is no `maxRows` in xdev — the box pages to the cursor past `composerBudget` (`app.go:5106-5129`), which is a different mechanism and a better one. Corrected.
+- **The overlays row credited `ModalLayer`** where the export is `SimpleModalLayer` (`ModalLayer.tsx:23`). Corrected, and now cited to the line.
+- **T1 attributed `_extends` to `tokens.ts`**; it is parsed in `loader.ts:87`. Corrected with the cite.
+- **Three rows backticked names this document proposes** (`toolGroup`, `KindImage`, `denied`) as if they were existing code, and one (`bg_blend`) named a Grok-CLI knob as if it were an xdev identifier. All four are now marked as proposed/external. A reader grepping `toolGroup` in xdev should get nothing and now the document says so.
+
+Re-run: 90 citation-bearing rows, **85 fully anchored**; the 5 remaining flags are all the deliberately-labelled proposed names above. Range check: **197/197** in range. No requirement, verdict, priority or effort rating changed — every edit was a citation or a naming correction. The audit is a throwaway script (`/tmp`), not a committed tool: the value was finding six wrong claims, not leaving a linter behind.
