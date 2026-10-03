@@ -17,10 +17,10 @@
 
 1. **Consecutive tool calls are not grouped** (R-CONV-1). xdev paints one box per call; Empryo folds a 12-read turn into one file tree. This is the single largest reading-experience gap in the comparison.
 2. **No inline image rendering** (R-CONV-2). xdev pastes images and shows a `[Image 256x128 #3]` chip — the model gets the bytes, the human sees nothing. Stdlib `image/png` already decodes them.
-3. **Composer draft does not survive a tab switch** (R-IN-1). Empirical: this session's worktree collision was caused by an in-flight agent writing into another worktree.
+3. **The composer draft crosses session boundaries** (R-IN-1). Measured on the built binary: a draft typed in session one is still in the composer after `C-x n` opens session two, so a prompt written for one context can be sent into another.
 4. **Context occupancy and spend are not on the status row by default** (R-CHR-1), so context pressure and cost are one click away instead of one glance.
 
-Everything else is Should/Could, plus a short reject list (§5).
+Everything else is Should/Could, plus a short reject list (§5). **All four Musts were then driven on the built binary in a real pty (§6b) — three held as written, and the fourth turned out to be a worse bug than the code reading suggested.**
 
 ## 1. Method and evidence standard
 
@@ -147,12 +147,14 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 *Acceptance:* pasting a PNG shows the image under the composer turn in half-block art; on a Kitty-capable terminal it renders as a Kitty image; a corrupt or unsupported file falls back to the existing chip with an honest error, never a blank block; a 12 MB image is refused at the existing cap (`paste.go:57`).
 *Effort:* **L**. *Test:* golden-cell comparison of half-block art against a fixed synthetic PNG; capability-gate table test.
 
-**R-IN-1 — Composer draft is per tab and survives a switch.**
-*Why:* one `Editor` serves every tab (`editor.go:13-28`); the only stash is Esc's (`app.go:126-132`). Switching tabs silently discards a typed prompt. This session's worktree collision is the concrete cost.
-*Do:* a `map[tabID][]rune` on `App`, saved on tab change and restored on arrival, with the Esc stash layered on top (Esc clears-and-stashes, a second Esc restores) rather than replaced.
+**R-IN-1 — Composer draft is per session, and never leaks across one.**
+*Why:* one `Editor` serves the whole app (`editor.go:13-28`); the only stash is Esc's (`app.go:126-132`). **Measured on the built binary (2026-10-03, §6b): a draft typed in session one is still sitting in the composer after `C-x n` opens session two.** Two consequences, and the second is the worse one:
+  - switching sessions and back loses nothing, because the text never left — but
+  - **a draft crosses a session boundary it was never meant to cross**, so a prompt written for one context can be sent into another. That is a correctness bug wearing a UX gap's clothes, and it is why this is a Must.
+*Do:* a `map[sessionID][]rune` on `App`, saved on session switch and restored on arrival, with the Esc stash layered on top (Esc clears-and-stashes, a second Esc restores) rather than replaced. Switching to a session with no entry **clears** the composer — that half is what stops the leak.
 *Ceiling:* in-memory only — a process restart still loses drafts. Upgrade path: persist to the session dir when a crash-recovery story exists.
-*Acceptance:* type a prompt, `Alt+]` to another tab, `Alt+[` back — the prompt is intact; the same holds across `/resume`; a send clears the entry for that tab only.
-*Effort:* **S**. *Test:* two-tab round-trip plus a send-clears-one-tab case.
+*Acceptance:* type in session one, `C-x n`, type nothing — the composer is empty and the old text is restored verbatim when you switch back; the same holds across `/resume` and `/fork`; a send clears the entry for that session only; a draft from a deleted session cannot reappear.
+*Effort:* **S**. *Test:* two-session round trip, a switch-to-clean-session assertion (the leak case above), and a send-clears-one-session case — all three fail against the current shape.
 
 ### Should
 
@@ -209,7 +211,22 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 
 - **Overlay internals beyond their call sites.** For xdev, `drawSessionPicker`, `drawAskCard`, `drawSettingsOverlay`, `drawHubRoster`, `drawTrajectory`, `drawTreeSelector`, `drawQueue`, `drawToasts` were read by signature and call site only; their internal geometry is unverified.
 - **Empryo's renderer internals.** `node_modules/@opentui/core` is not installed in that checkout, so every renderer claim here is either Empryo app code, its own comments, or the dependency shape in `package.json` — never the renderer source.
-- **Empryo files not read in full:** `tool-formatters.ts`, `highlighted-result.tsx`, `dispatch-display.ts`, `multi-agent-display.ts`, `core/memory/manager.ts`, `stores/statusbar.ts` internals, `core/intelligence/router.ts`, `src/core/platform/archive.ts`, the ten `components/settings/**` popups, and `src/hearth/**`.
+- **Mouse and every keyboard claim** still rest on code reading plus the earlier pty audit in [QA-TUI-INTERACTIVE.md](../QA-TUI-INTERACTIVE.md); they were not re-driven for this document. Any row that changes input or rendering should be verified the same way before it is called done.
+
+## 6b. Live verification of the four Musts (2026-10-03, added after this doc's first draft)
+
+The four Musts are claims about what a user sees, so they were driven on the **built binary** through a forked pty with `pyte` rendering the grid — the method [QA-TUI-INTERACTIVE.md](../QA-TUI-INTERACTIVE.md) used. Setup: the branch binary, an isolated `XDEV_AGENT_DIR`, a scripted chat-completions SSE mock, 140×44, `groknight`, and a **synthetic fixture** (a fictional `Widget` API; the files the mock asks for do not exist, so the reads fail and the transcript is cheap and deterministic). The harness lives under `/tmp/xdev-556/` and is not committed.
+
+| Must | Measured | Verdict |
+|---|---|---|
+| **R-CHR-1** | the status row paints `0s · 1t·3g`; no `ctx`, no `$` | **confirmed** — the segments exist and ship off |
+| **R-CONV-1** | one assistant message with 4 `read` calls → **4 separate `╭─ read ─╮` boxes**, each naming its own file, no group row | **confirmed** — and worse than the doc said: a 4-call turn is 4 call boxes *plus* 4 result boxes |
+| **R-IN-3** | a 40-line bracketed paste → **39 lines painted in the composer**, no collapsed placeholder | **confirmed** |
+| **R-IN-1** | type in session one, `C-x n` → **the draft is still in the composer on session two** | **confirmed, and the finding changed** |
+
+**R-IN-1 is not the gap this document first described.** Reading the code said "a draft dies on a session switch". Driving the binary says the opposite: nothing is lost, because the single `Editor` is never cleared — **so the draft leaks into the next session.** A prompt written for one context sits in the composer of another, waiting for `Enter`. That is a correctness bug, not a comfort gap, and §4's requirement was rewritten around it: drafts are per session, and switching to a session with no entry must **clear** the composer, which is the half that stops the leak.
+
+The other three held exactly as written. The value of the run was the one row it overturned.
 - **No live pty run of either binary was done for this document.** The xdev-side statements about mouse and keys rest on the code plus the earlier pty audit in [QA-TUI-INTERACTIVE.md](../QA-TUI-INTERACTIVE.md); any row that changes input or rendering should be verified the same way before it is called done.
 
 ---
@@ -225,3 +242,13 @@ Effort: **S** ≤ 1 day · **M** 2–4 days · **L** 1–2 weeks. "Ceiling" line
 - **Three rows backticked names this document proposes** (`toolGroup`, `KindImage`, `denied`) as if they were existing code, and one (`bg_blend`) named a Grok-CLI knob as if it were an xdev identifier. All four are now marked as proposed/external. A reader grepping `toolGroup` in xdev should get nothing and now the document says so.
 
 Re-run: 90 citation-bearing rows, **85 fully anchored**; the 5 remaining flags are all the deliberately-labelled proposed names above. Range check: **197/197** in range. No requirement, verdict, priority or effort rating changed — every edit was a citation or a naming correction. The audit is a throwaway script (`/tmp`), not a committed tool: the value was finding six wrong claims, not leaving a linter behind.
+
+---
+
+*Last updated: 2026-10-03 (same day, third pass — §6b: the four Musts driven on the built binary).* The four Must claims are claims about pixels, so they were run through a forked pty with `pyte` rendering the grid, against the branch binary, an isolated `XDEV_AGENT_DIR` and a scripted SSE mock (synthetic fixture: a fictional `Widget` API whose files do not exist, so the reads fail cheaply and deterministically). Harness under `/tmp/xdev-556/`, not committed.
+
+**Three held as written.** The status row ships without `ctx`/`cost`; a 4-`read` turn paints four call boxes *plus* four result boxes with no grouping; a 40-line bracketed paste paints 39 composer lines with no collapsed placeholder.
+
+**The fourth was wrong, and the way it was wrong is the point.** Code reading said the draft "dies on a tab switch". It does not — nothing is lost, because the single `Editor` is never cleared, so **the draft leaks into the next session** and waits there for `Enter`. That is a correctness bug (a prompt written for one context can be sent into another) wearing a UX gap's clothes. R-IN-1 is rewritten: drafts become per-session, and a switch to a session with no entry must CLEAR the composer, which is the half that stops the leak. The §0 summary and the acceptance criteria were updated with it.
+
+Re-verified after the edits: 200/200 `file:line` refs in range, 87/93 citation rows content-anchored (the 6 flags are the deliberately-labelled proposed names), no broken relative links. §6's blanket "no live pty run was done" line is narrowed to what is actually still unverified (mouse and the keyboard set).
