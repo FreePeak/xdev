@@ -165,10 +165,16 @@ func formatStatsReport(rep *stats.Report) string {
 		stats.HumanTokens(d.TokensP90), stats.HumanTokens(d.TokensMax))
 
 	if len(rep.Models) > 0 {
-		fmt.Fprintf(&b, "\n  by model\n  %-28s %8s %8s %10s %10s\n", "MODEL", "SESSIONS", "TURNS", "TOKENS", "COST")
+		// The two cache buckets, because "which model writes the cache" is a
+		// different question from "which model reads it": the write side is
+		// what a cache-marker budget is spent on, and a model whose writes
+		// dwarf its reads is re-paying for a prefix it never reuses.
+		fmt.Fprintf(&b, "\n  by model\n  %-28s %8s %8s %10s %9s %9s %10s\n",
+			"MODEL", "SESSIONS", "TURNS", "TOKENS", "CACHE R", "CACHE W", "COST")
 		for _, m := range rep.Models {
-			fmt.Fprintf(&b, "  %-28s %8d %8d %10s %10s\n", truncate(m.Model, 28), m.Sessions, m.Turns,
-				stats.HumanTokens(m.TotalTokens), stats.HumanMoney(m.CostUSD))
+			fmt.Fprintf(&b, "  %-28s %8d %8d %10s %9s %9s %10s\n", truncate(m.Model, 28), m.Sessions, m.Turns,
+				stats.HumanTokens(m.TotalTokens), stats.HumanTokens(m.CacheRead), stats.HumanTokens(m.CacheWrite),
+				stats.HumanMoney(m.CostUSD))
 		}
 	}
 	if len(rep.Tools) > 0 {
