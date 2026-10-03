@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -51,6 +52,14 @@ type tab struct {
 	// cancel publishes the in-flight turn's cancel, so Esc aborts the session
 	// on screen and never a parked one.
 	cancel context.CancelFunc
+	// liveAgent is the session's in-flight turn agent. startTurn publishes it
+	// BEFORE the UI says "running" and clears it before the UI says "not
+	// running", so a mid-turn submit can never find a live turn with no agent
+	// to steer — the window in which the queue used to refuse the prompt and
+	// withdraw its row (#157). It was one process-wide pointer, so with two
+	// sessions working whichever turn registered last also took every steer
+	// meant for the other one.
+	liveAgent *agent.Agent
 
 	// unread is the badge: a parked session produced output nobody has looked
 	// at. Cleared when the tab becomes current.
@@ -330,6 +339,76 @@ func (ts *tabset) clear(id string) {
 	if i := ts.indexOfLocked(id); i >= 0 {
 		ts.tabs[i].cancel = nil
 	}
+}
+
+// setAgent publishes a turn's agent against the session it runs for. It is the
+// turn's READY edge and must be called BEFORE the UI is told a turn is running.
+func (ts *tabset) setAgent(id string, ag *agent.Agent) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if i := ts.indexOfLocked(id); i >= 0 {
+		ts.tabs[i].liveAgent = ag
+	}
+}
+
+// clearAgent drops a registration, but only while it still names that agent:
+// the pointer check is what keeps an older turn's teardown from unregistering
+// the newer turn that replaced it on the same session.
+func (ts *tabset) clearAgent(id string, ag *agent.Agent) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if i := ts.indexOfLocked(id); i >= 0 && ts.tabs[i].liveAgent == ag {
+		ts.tabs[i].liveAgent = nil
+	}
+}
+
+// agentOf is one session's live agent, nil when that session is idle.
+func (ts *tabset) agentOf(id string) *agent.Agent {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	i := ts.indexOfLocked(id)
+	if i < 0 {
+		return nil
+	}
+	return ts.tabs[i].liveAgent
+}
+
+// currentAgent is the agent of the session on screen. Every steer seam — the
+// mid-turn queue, extensions, the mailbox — routes through this, so a prompt
+// reaches the run the person is actually looking at.
+func (ts *tabset) currentAgent() *agent.Agent {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.cur < 0 || ts.cur >= len(ts.tabs) {
+		return nil
+	}
+	return ts.tabs[ts.cur].liveAgent
+}
+
+// liveAgents is every registered agent, for the exit path's one-shot session
+// shutdown notice: any session may be mid-turn when the TUI quits.
+func (ts *tabset) liveAgents() []*agent.Agent {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	out := make([]*agent.Agent, 0, len(ts.tabs))
+	for _, t := range ts.tabs {
+		if t.liveAgent != nil {
+			out = append(out, t.liveAgent)
+		}
+	}
+	return out
+}
+
+// currentID names the session on screen, or "" on an empty set. Send-now pins
+// it at the keystroke so a tab switch before the host delivers cannot send the
+// message to a different conversation (#157).
+func (ts *tabset) currentID() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.cur < 0 || ts.cur >= len(ts.tabs) {
+		return ""
+	}
+	return ts.tabs[ts.cur].id
 }
 
 // note marks a parked session as having produced output the user has not seen.

@@ -302,7 +302,11 @@ type App struct {
 	// other replaces it — and a host that wires only the first must still be
 	// able to say "send now is not wired in this build" rather than silently
 	// queueing something the user asked to have sent.
-	onSendNow func(text string)
+	//
+	// It takes the owning session id as well as the text: the chord and the
+	// row button both name a message, and with several sessions open only the
+	// owning id says which conversation to deliver it to (#157).
+	onSendNow func(sid, text string)
 	// queue holds the pending mid-turn submits in delivery order and queueSeq
 	// is the append counter (queue.go). queueHits is the last painted frame's
 	// geometry — the mouse hit-tests against what was on screen, not against
@@ -655,8 +659,22 @@ func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 // variation on sending. A host that wires only onQueue still gets the queue;
 // a host that wires neither keeps the pre-queue behavior, so the submit is
 // refused with a reason instead of vanishing.
-func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(text string)) {
+func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(sid, text string)) {
 	a.onQueue, a.onSendNow = onQueue, onSendNow
+}
+
+// OnSendNow is the chord's named send-now: the session on screen and its oldest
+// pending message, or (sid, "") when it has nothing queued. It is the same rule
+// the row's button follows — oldest first — so the chord and the button can
+// never disagree about which message "now" means, and the session is captured
+// with the message so a tab switch before the host delivers cannot redirect it.
+func (a *App) OnSendNow() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.queueForLocked(a.st.SessionID) {
+		return a.st.SessionID, e.text
+	}
+	return a.st.SessionID, ""
 }
 
 // SetVision wires "can the live model take an image?", which cmd answers from
@@ -1531,6 +1549,15 @@ func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
 // a notice.
 func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
 
+// SessionID names the session the transcript currently shows. It is the key
+// every session-owned piece of App state reads: the queue (#157) reads it to
+// decide which rows to paint, take back, flush, and retire.
+func (a *App) SessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.st.SessionID
+}
+
 // SetSessionID updates the status-row / dock identity after a switch.
 func (a *App) SetSessionID(id string) {
 	a.mu.Lock()
@@ -1549,10 +1576,13 @@ func (a *App) SetRunning(r bool) {
 	a.poke()
 }
 
-// AddTurn counts one finished run — the turn a dsh TimePill reports beside
-// its step count. SetRunning's falling edge is the seam: the run that
-// actually ended is the turn, whatever it ended with, and an idle re-render
-// never counts.
+// AddTurn counts one accepted user prompt — the turn a dsh TimePill reports
+// beside its step count. The seam is ACCEPTANCE, not the run's end: a prompt
+// the model is still working on has already been accepted, so a session's first
+// turn reads 1 while the work is in flight rather than 0, and three prompts
+// steered into one run count as three turns because three user messages went
+// into the conversation (#157). A refused or undelivered prompt never reaches
+// the seam, so the count only moves for words the model really got.
 func (a *App) AddTurn() {
 	a.mu.Lock()
 	a.st.Turns++
@@ -2954,6 +2984,16 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Lock()
 			a.width, a.height = r.Size()
 			a.clearRenderCache()
+			// The diff viewer's LAYOUT is its width (the pair below the
+			// threshold, the list above it), so a resize under an open overlay
+			// has to re-decide it here — the width has already moved, and the
+			// frame that would notice it is the next paint, by which time a
+			// frame drawn at the old budget has already shown. drawDiffOverlay
+			// re-checks the same fact each frame, so a resize that reaches it
+			// another way is still covered.
+			if a.diffOv != nil {
+				a.diffOv.reflow(a)
+			}
 			a.mu.Unlock()
 		}
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise let
@@ -3344,13 +3384,13 @@ func (a *App) handleKey(ev tcell.Event) {
 		// With nothing queued it is a notice, never a silent no-op: a chord
 		// that does nothing when pressed is a bug report waiting to happen.
 		if a.onSendNow != nil {
-			text := a.oldestQueued()
+			sid, text := a.OnSendNow()
 			if text == "" {
 				a.AddSystemBlock("nothing queued — type a prompt and Enter while a turn runs, or click a queued row")
 				a.poke()
 				return
 			}
-			a.onSendNow(text)
+			a.onSendNow(sid, text)
 			a.poke()
 			return
 		}
@@ -3602,8 +3642,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// Attachments make this the multimodal path's alone. A declined
 			// or unwired send returns the draft to the composer: the text-only
 			// handler cannot carry the bytes, and sending the chip as a word
-			// would let a model answer a picture it never received.
+			// would let a model answer a picture it never received. A declined
+			// send took no words, so it counts no turn.
 			if a.onSendImages != nil && a.onSendImages(text, imgs) {
+				a.AddTurn()
 				a.poke()
 				return
 			}
@@ -3611,6 +3653,14 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		if a.onSend != nil {
+			// The prompt was ACCEPTED here, so this is the turn seam (#157):
+			// the count moves for words the host really took, whether or not
+			// the run that answers them has finished — a session's first turn
+			// reads 1 while the work is in flight rather than 0. A queued
+			// prompt is counted at its own delivery (RetireDelivered) instead,
+			// so no prompt is counted twice, and an unwired or refused send
+			// never reaches this line at all.
+			a.AddTurn()
 			a.onSend(text)
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
+
+	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -78,6 +80,25 @@ func sawUserMessage(p *fakeProvider, text string) bool {
 			if m.Role == ai.RoleUser && m.Text() == text {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// storedUserText reports whether the session store holds a user message with
+// this text. The announcement's contract is "this is in the store now", so a
+// delivery test asserts both the injection and the persist.
+func storedUserText(s *session.Store, text string) bool {
+	if s == nil {
+		return false
+	}
+	for _, e := range s.Entries() {
+		me, ok := e.(*session.MessageEntry)
+		if !ok || me.Message.Role != ai.RoleUser {
+			continue
+		}
+		if me.Message.Text() == text {
+			return true
 		}
 	}
 	return false
@@ -191,5 +212,81 @@ func TestSteeringDeliveredAnnouncesWhatTheRunInjected(t *testing.T) {
 	}
 	if !sawUserMessage(p, "late correction") {
 		t.Fatalf("the late steer never reached the provider:\n%s", strings.Join(got.flat(), ","))
+	}
+}
+
+// TestSteeringDeliveredAnnouncesOnlyWhatWasPersisted: a message that DOES
+// reach the conversation is announced exactly once, and after its persist —
+// the order that makes the callback mean "this is in the store now" rather
+// than "this reached a channel".
+func TestSteeringDeliveredAnnouncesOnlyWhatWasPersisted(t *testing.T) {
+	p := toolCallScript()
+	var got deliveredBatch
+	s := session.OpenMem(t.TempDir(), "steering delivery")
+	t.Cleanup(func() { _ = s.Close() })
+	a := announceAgent(p)
+	a.Store = s
+	a.SteeringDelivered = got.record
+	a.Steer("a message that does arrive")
+
+	if _, err := a.Run(context.Background(), "sys", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	flat := got.flat()
+	if len(flat) != 1 || flat[0] != "a message that does arrive" {
+		t.Fatalf("announced %v, want the delivered message once", flat)
+	}
+	if !sawUserMessage(p, "a message that does arrive") {
+		t.Fatal("the announced message never reached the provider request")
+	}
+	if !storedUserText(s, "a message that does arrive") {
+		t.Fatal("the message was announced but never persisted")
+	}
+}
+
+// TestSteeringDeliveredAnnouncesOnceAndOnlyAfterThePersist: the final-turn
+// drain announced its messages TWICE — once at the drain, then again after the
+// persist — which for the TUI meant the delivered prompt printed two ❯ rows and
+// counted two turns for one message. It is announced exactly once, and only
+// once the message is in the store, so the callback can honestly mean "this is
+// in the conversation now" rather than "this reached a channel" (#157).
+func TestSteeringDeliveredAnnouncesOnceAndOnlyAfterThePersist(t *testing.T) {
+	p := toolCallScript()
+	s := session.OpenMem(t.TempDir(), "late steering")
+	t.Cleanup(func() { _ = s.Close() })
+	var mu sync.Mutex
+	var announced []string
+	var durableAtAnnounce []bool
+	a := announceAgent(p)
+	a.Store = s
+	a.SteeringDelivered = func(texts []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, t := range texts {
+			announced = append(announced, t)
+			durableAtAnnounce = append(durableAtAnnounce, storedUserText(s, t))
+		}
+	}
+	// Steer from the tool-end hook: the run has finished its tool calls, so this
+	// lands on the final-turn drain rather than a step boundary.
+	steerAt := true
+	a.Hooks = TurnHooksFunc{OnToolEndF: func(ai.ToolCallBlock, tool.Result, time.Duration) {
+		if steerAt {
+			steerAt = false
+			a.Steer("late correction")
+		}
+	}}
+
+	if _, err := a.Run(context.Background(), "sys", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(announced) != 1 || announced[0] != "late correction" {
+		t.Fatalf("announced %v, want the delivered message exactly once", announced)
+	}
+	if !durableAtAnnounce[0] {
+		t.Fatal("the announcement led its persist, so a crash between them loses a message the UI already showed")
+	}
+	if !sawUserMessage(p, "late correction") {
+		t.Fatal("the announced message never reached the provider request")
 	}
 }
