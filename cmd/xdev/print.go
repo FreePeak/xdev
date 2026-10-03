@@ -1987,6 +1987,10 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		lspTool := lsp.NewTool(cwd, settings)
 		reg.Register(lspTool)
 		lspTool.Prewarm()
+		// #263: hand the registry the same warm server the lsp tool owns, so
+		// edit/write can report type errors on the result instead of a turn
+		// later. It only answers for servers that are already running.
+		reg.SetDiagnosticsProvider(lspTool)
 	}
 	// M15 #68: local speech synthesis (macOS say, Linux spd-say/espeak-ng,
 	// Windows PowerShell SAPI), voice/rate from the tts: settings group. A
