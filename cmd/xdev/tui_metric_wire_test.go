@@ -8,6 +8,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/FreePeak/xdev/internal/tui"
@@ -322,5 +323,46 @@ func TestCompactionUsageReachesTheStatusRow(t *testing.T) {
 	}
 	if !strings.Contains(report, "cache hit 97%") {
 		t.Fatalf("the report's cache-hit rate ignored the summarize:\n%s", report)
+	}
+}
+
+// TestResumedSessionBanksCompactionUsage pins the resume half of the fix: the
+// summarize/handoff tokens live on the compaction summary, so a session that
+// compacted and was then resumed must still show them. The summary of a
+// deterministic member (shake, soft, snapcompact) carries no usage and must
+// add nothing — otherwise every offline compaction moves the number.
+func TestResumedSessionBanksCompactionUsage(t *testing.T) {
+	app, scr := metricTestApp(t, 120, 24)
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "go"}}},
+		{Role: ai.RoleAssistant, DurationMS: 900, Usage: &ai.Usage{
+			Input: 400, Output: 90, TotalTokens: 490,
+			Cost: &ai.UsageCost{Total: 0.001},
+		}},
+		// The summarize that replaced the history before it.
+		{Role: ai.RoleAssistant, Usage: &ai.Usage{
+			Input: 900, Output: 120, CacheRead: 40_000, TotalTokens: 41_020,
+			Cost: &ai.UsageCost{Total: 0.0187},
+		}},
+		// An offline compaction: no provider call, no usage, nothing to add.
+		{Role: ai.RoleAssistant},
+		// A handoff document wears the USER role but is still a billed call.
+		{Role: ai.RoleUser, Attribution: agent.HandoffAttribution, Usage: &ai.Usage{
+			Input: 200, Output: 60, TotalTokens: 260,
+			Cost: &ai.UsageCost{Total: 0.004},
+		}},
+	}
+	app.Reset()
+	replaySession(app, msgs)
+
+	// 490 + 41_020 + 260 = 41_770 tokens; the usage-less summary adds nothing.
+	row := awaitHUD(t, scr, "41.8k")
+	if !strings.Contains(row, "41.8k") {
+		t.Fatalf("the resumed session lost the compaction's tokens: %q", row)
+	}
+	report := app.UsageReport()
+	// 0.001 + 0.0187 + 0.004 — every billed request, on every surface.
+	if !strings.Contains(report, "$0.0237") {
+		t.Fatalf("the resumed session lost the side calls' spend:\n%s", report)
 	}
 }
