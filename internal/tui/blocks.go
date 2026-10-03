@@ -65,6 +65,11 @@ type Block struct {
 	// subVisible's answer; the block keeps them all, so a late settle
 	// still lands on the child it belongs to.
 	Sub []*SubActivity
+	// subSeq moves every time a child's row changes (spawn, progress, settle).
+	// The rows paint the running frame, which advances on the clock, so a
+	// settled child has to be able to pull its parent out of the render cache:
+	// without this stamp the tick waited a whole tick to come back.
+	subSeq uint64
 	// Live marks a result box a running call is still filling: the tool's own
 	// text is absent until it finishes, so without it a running command paints
 	// a spinner and nothing else. A live box renders a bounded TAIL window

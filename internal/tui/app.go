@@ -508,6 +508,7 @@ type blockKey struct {
 	stream   bool
 	expanded bool // box rows: the Ctrl+O state changed the row set
 	age      int64
+	spin     int  // the running frame this row paints: -1 when it paints none
 	trim     int8 // bounded middle trim: this block's render-window tier
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
@@ -518,6 +519,10 @@ type blockKey struct {
 	// and the box would jump at the end. Eight buckets is 12.5% steps — finer
 	// than the 1/6 per tick the tween actually advances, so no step is skipped.
 	fade int8
+	// sub stamps a `task` call's child rows: they carry the running frame, so a
+	// settle has to pull the parent out of the render cache on its own, not
+	// wait for the next frame index to move.
+	sub uint64
 	// mermaid stamps whether a ```mermaid fence in this block drew as a
 	// diagram. Flipping the setting changes every block's rows without any of
 	// them changing length, so the stamp has to say which way it rendered or
@@ -1136,11 +1141,11 @@ const taskToolName = "task"
 // whatever call came next.
 func (a *App) AddTaskChild(callID, label, agent, model string) {
 	a.mu.Lock()
-	b := a.runningToolLocked(callID, taskToolName)
-	if b != nil {
+	if b := a.runningToolLocked(callID, taskToolName); b != nil {
 		b.Sub = append(b.Sub, &SubActivity{
 			Label: label, Agent: agent, Model: model, Status: "running", Ts: time.Now(),
 		})
+		b.subSeq++
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1160,6 +1165,7 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		}
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
+		b.subSeq++
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1172,6 +1178,7 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 	if b != nil {
 		if c := findSubLocked(b, label); c != nil {
 			c.Status, c.Dur = status, d
+			b.subSeq++
 		}
 	}
 	a.mu.Unlock()
@@ -1231,10 +1238,23 @@ func (a *App) RunningTaskCallID() string {
 	return ""
 }
 
+// spinFrame is the one running indicator's current glyph: the theme's frames at
+// the shared index. Every surface that says "still working" — the top bar, the
+// composer divider, a tool call row, a reasoning box, a subagent's child row —
+// paints this, so they move in step and a theme restyles them together. One
+// helper because they were not one indicator: the reasoning box was a frozen
+// "⠹" and the child rows a static "⎿", so the same state read three ways.
+// Caller holds a.mu.
+func (a *App) spinFrame() string {
+	frames := a.th.SpinnerFrames()
+	return frames[a.st.spinnerIdx%len(frames)]
+}
+
 // subLines renders a `task` call's children as continuation rows under the
-// call row. Each row is `⎿ <label> · <what it last did>`, dim: it is
-// narration inside someone else's call, not a call of its own, and it must
-// not compete with the parent row for attention.
+// call row. A child still working takes the parent's spinning frame in place
+// of the `⎿` tick; a settled one keeps that tick, dim: the row is narration
+// inside someone else's call, not a call of its own, and it must not compete
+// with the parent for attention.
 //
 // The naming argument comes from toolDetail — the SAME precedence the
 // parent's own call rows use — so a child row and a call row read alike and
@@ -1246,10 +1266,18 @@ func (a *App) subLines(b *Block, w int) []line {
 	}
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))).Bold(true)
+	runSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning)))
 	var out []line
-	emit := func(text string) {
-		ln := textline("  ⎿ ", dim)
-		ln.runs = append(ln.runs, cell{text: text, style: nameSt})
+	// A child still working spins with the parent's bullet; a settled one keeps
+	// the dim tick it always had, so "which of these is still going" is one
+	// glance down the rows instead of a read of the elapsed clocks.
+	emit := func(text string, running bool) {
+		mark, st := "⎿", dim
+		if running {
+			mark, st = a.spinFrame(), runSt
+		}
+		ln := textline("  ", dim)
+		ln.runs = append(ln.runs, cell{text: mark, style: st}, cell{text: " ", style: dim}, cell{text: text, style: nameSt})
 		out = append(out, ln)
 	}
 	for _, c := range rows {
@@ -1271,10 +1299,10 @@ func (a *App) subLines(b *Block, w int) []line {
 		if budget := subRow(w); width(row) > budget {
 			row = truncateCells(row, budget, "…")
 		}
-		emit(row)
+		emit(row, c.Status == "running")
 	}
 	if more > 0 {
-		emit(fmt.Sprintf("+%d more running", more))
+		emit(fmt.Sprintf("+%d more running", more), true)
 	}
 	return out
 }
@@ -3830,8 +3858,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
-			frames := a.th.SpinnerFrames()
-			bullet, fg = frames[a.st.spinnerIdx%len(frames)], theme.AccentRunning
+			bullet, fg = a.spinFrame(), theme.AccentRunning
 		case "error":
 			bullet, fg = "✗", theme.AccentError
 		case "ok":
@@ -4093,7 +4120,10 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	hdr := "Thought"
 	switch {
 	case b.stream:
-		hdr = "⠹ Thinking…"
+		// The theme's own frames, so a reasoning box spins in step with every
+		// other indicator. It was a frozen "⠹": the glyph said "running" and
+		// never moved, next to a tool bullet that did.
+		hdr = a.spinFrame() + " Thinking…"
 	case b.thinkDur > 0:
 		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
 	}
@@ -5136,9 +5166,17 @@ func (a *App) drawComposer(yTop int) {
 		}
 	}
 
-	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
+	// Info divider bottom border: ╰─ ⠋ model · high ─────── ▲n▼n ─╯
 	yBottom := yTop + len(lines)
-	info := " " + a.st.Model
+	info := " "
+	// The run indicator LEADS the pair. Trailing it put the one thing on the
+	// row that moves at the far end of a static "model · high", where it read
+	// as another segment of the reasoning label instead of as the state of the
+	// turn.
+	if a.st.Running {
+		info += a.spinFrame() + " · "
+	}
+	info += a.st.Model
 	// The reasoning level beside the model it applies to: the two are one
 	// request, and "which model" alone left the other half of it invisible.
 	// The bare rung, not "thinking <level>" — the model it sits beside says
@@ -5148,11 +5186,6 @@ func (a *App) drawComposer(yTop int) {
 	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		info += " · Vibe"
-	}
-	if a.st.Running {
-		frames := a.th.SpinnerFrames() // theme frames, braille by default
-		a.st.spinnerIdx = a.st.spinnerIdx % len(frames)
-		info += " · " + frames[a.st.spinnerIdx]
 	}
 	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
 	for x := 2; x < w-2; x++ {
