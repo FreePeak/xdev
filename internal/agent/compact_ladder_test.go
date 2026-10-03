@@ -269,7 +269,11 @@ func TestLadderFallsThroughOnFailure(t *testing.T) {
 	if entries[0].Method != MethodHandoff {
 		t.Fatalf("method = %q, want the fallback %q", entries[0].Method, MethodHandoff)
 	}
-	if got := entries[0].Summary.Text(); got != "SUMMARY" {
+	// The retained context is the provider's answer, not something this
+	// member invented -- with the mechanical working-state block in front of
+	// it when the span touched files (runCompactLadder prepends one), so the
+	// assertion is containment rather than equality.
+	if got := entries[0].Summary.Text(); !strings.Contains(got, "SUMMARY") {
 		t.Fatalf("summary = %q, want the provider's answer", got)
 	}
 	if len(p.gotReqs) != 1 || p.gotReqs[0].System != compactionPrompt {
