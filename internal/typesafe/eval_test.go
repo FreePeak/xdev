@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEvaluateLocalSidecarWithoutAPIKey(t *testing.T) {
@@ -287,29 +288,158 @@ func TestEvaluateSendsStringStateUnwrapped(t *testing.T) {
 	}
 }
 
-func TestRetryableStatus(t *testing.T) {
+// TestRateLimitIsRetriedThenReported pins the whole ladder: a 429 costs three
+// attempts before the caller sees an error. It used to cost one, so a quota
+// window became a hard tool failure in the middle of an agent turn.
+func TestRateLimitIsRetriedThenReported(t *testing.T) {
+	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"detail":"rate limited"}`))
 	}))
 	defer srv.Close()
 
-	saved := baseURL
-	baseURL = srv.URL
-	defer func() { baseURL = saved }()
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Model: "jev-latest", APIKey: "k", Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
 
-	e := &Evaluator{}
-	e.TestEvaluatorHTTP(srv.Client())
-	e.model = "jev-latest"
-	e.key = "k"
-
-	_, err := e.Evaluate(context.Background(),
-		map[string]any{"state": "x"}, map[string]any{"q": map[string]any{"type": "noul"}})
+	start := time.Now()
+	_, err := ev.Evaluate(context.Background(), "x",
+		map[string]any{"q": map[string]any{"type": "noul"}})
 	if err == nil {
-		t.Fatal("expected error for 429")
+		t.Fatal("a backend that never stops rate-limiting must still fail the call")
 	}
 	if !contains(err.Error(), "429") {
-		t.Fatalf("error should mention 429: %s", err.Error())
+		t.Fatalf("error should mention 429: %s", err)
+	}
+	if calls != maxAttempts {
+		t.Errorf("attempts = %d, want %d", calls, maxAttempts)
+	}
+	// The two backoffs (250ms + 500ms) must actually be waited out; a retry
+	// that returns instantly is a hammer, not a backoff.
+	if elapsed := time.Since(start); elapsed < retryBaseDelay+retryBaseDelay {
+		t.Errorf("returned after %s, faster than the backoff", elapsed)
+	}
+}
+
+// TestRateLimitThenSuccess answers the case the retry exists for: the second
+// attempt goes through and the caller gets an answer, not an error.
+func TestRateLimitThenSuccess(t *testing.T) {
+	var calls int
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"detail":"rate limited"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+			"usage":   map[string]any{"local_ms": 42.0},
+		})
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
+
+	answers, info, err := ev.EvaluateWithInfo(context.Background(), "cancel today",
+		map[string]any{"q": map[string]any{"type": "noul", "instructions": "urgent?"}})
+	if err != nil {
+		t.Fatalf("a rate-limited call that succeeds on retry must not be an error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("attempts = %d, want 2", calls)
+	}
+	if _, ok := answers["q"]; !ok {
+		t.Errorf("answers = %v", answers)
+	}
+	if info.Model != "english" || info.Usage.LocalMS != 42 {
+		t.Errorf("info from the successful attempt lost: %+v", info)
+	}
+	// The retried request must carry the SAME body. A consumed Request body is
+	// the classic way a retry silently becomes an empty request.
+	for i, b := range bodies {
+		if !contains(b, `"cancel today"`) {
+			t.Errorf("attempt %d posted %q, state missing", i+1, b)
+		}
+	}
+}
+
+// TestRetryAfterIsHonouredAndCapped: the server names its own wait, so use it
+// — but a Retry-After longer than the cap must not become a tool call that
+// outlives the agent turn asking for it.
+func TestRetryAfterIsHonouredAndCapped(t *testing.T) {
+	// The cap is 5s, so a 3s Retry-After is honoured and a 7s one is clamped.
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {"3"}}}, 1); got != 3*time.Second {
+		t.Errorf("Retry-After seconds ignored: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {"7"}}}, 1); got != retryMaxDelay {
+		t.Errorf("Retry-After past the cap not clamped: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {"3600"}}}, 1); got != retryMaxDelay {
+		t.Errorf("Retry-After not capped: %s", got)
+	}
+	when := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
+	if got := retryDelay(&http.Response{Header: http.Header{"Retry-After": {when}}}, 1); got < 0 || got > 2*time.Second {
+		t.Errorf("Retry-After as a date: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{}}, 3); got != 4*retryBaseDelay {
+		t.Errorf("fallback backoff: %s", got)
+	}
+	if got := retryDelay(&http.Response{Header: http.Header{}}, 9); got != retryMaxDelay {
+		t.Errorf("fallback backoff not capped: %s", got)
+	}
+}
+
+// TestOnlyRateLimitsAreRetried: a 500 is the caller's ladder to run, and
+// duplicating it here would double the cost of every failure.
+func TestOnlyRateLimitsAreRetried(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
+
+	if _, err := ev.Evaluate(context.Background(), "x",
+		map[string]any{"q": map[string]any{"type": "noul"}}); err == nil {
+		t.Fatal("a 500 must fail the call")
+	}
+	if calls != 1 {
+		t.Errorf("a 500 was retried %d times", calls)
+	}
+}
+
+// TestRateLimitRetryHonoursContext: a caller that gives up mid-backoff stops
+// immediately rather than finishing the ladder against a dead context.
+func TestRateLimitRetryHonoursContext(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	ev := NewEvaluator(Settings{BaseURL: srv.URL, Timeout: time.Minute})
+	ev.TestEvaluatorHTTP(srv.Client())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := ev.Evaluate(ctx, "x",
+		map[string]any{"q": map[string]any{"type": "noul"}}); err == nil {
+		t.Fatal("expected an error once the context expired")
+	}
+	if calls > 2 {
+		t.Errorf("kept retrying past the deadline: %d attempts", calls)
 	}
 }
 
