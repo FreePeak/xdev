@@ -87,12 +87,30 @@ func pathFromURI(uri string) string {
 }
 
 func uriFromPath(path string) string {
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(canonicalPath(path))}
+	return u.String()
+}
+
+// canonicalPath is the one spelling of a path, so one file always has one
+// identity. EvalSymlinks matters more than it looks: on macOS a path under
+// /tmp arrives as /private/tmp, and any symlinked working directory has the
+// same problem in reverse. Without this, a file's URI, its detected project
+// root, and the manager's client key can each be derived from a different
+// spelling of the same file -- which is how a running language server ends up
+// unreachable from the code that is trying to reuse it.
+//
+// A path that cannot be resolved (a file that does not exist yet, a virtual
+// document) is returned as-is: the best identity available is the one the
+// caller gave.
+func canonicalPath(path string) string {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
-	return u.String()
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
 }
 
 // uriToPath is the inverse; a URI of another scheme (a virtual document, say)

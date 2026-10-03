@@ -177,10 +177,7 @@ func NewManager(cfg Config, cwd string) *Manager {
 // ClientFor returns the server handling file, launching it lazily on first
 // use. Concurrent first calls share one launch.
 func (m *Manager) ClientFor(ctx context.Context, file string) (*Client, string, error) {
-	abs, err := filepath.Abs(file)
-	if err != nil {
-		return nil, "", fmt.Errorf("lsp: %w", err)
-	}
+	abs := canonicalPath(file)
 	name, spec, langID, err := m.resolve(abs)
 	if err != nil {
 		return nil, "", err
@@ -200,10 +197,10 @@ func (m *Manager) ClientFor(ctx context.Context, file string) (*Client, string, 
 // caller degrades to the cheap tier (verify.go's own parser) rather than
 // paying for a launch.
 func (m *Manager) WarmClientFor(file string) (*Client, string, bool) {
-	abs, err := filepath.Abs(file)
-	if err != nil {
-		return nil, "", false
-	}
+	// canonicalPath, not filepath.Abs: a client started for /tmp/x and looked
+	// up as /private/tmp/x is the SAME server, and a peek that misses it makes
+	// the write path silently drop to the parser tier for the whole session.
+	abs := canonicalPath(file)
 	name, spec, langID, err := m.resolve(abs)
 	if err != nil {
 		return nil, "", false

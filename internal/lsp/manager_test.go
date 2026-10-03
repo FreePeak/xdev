@@ -118,7 +118,11 @@ func TestRootDetectionUsesMarkers(t *testing.T) {
 	if _, _, err := mgr.ClientFor(context.Background(), filepath.Join(dir, "sub", "pkg", "a.go")); err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	if want := "go@" + dir; st.calls[0] != want {
+	// The root is the canonical spelling: t.TempDir() hands back /tmp/... on
+	// macOS while the real directory is /private/tmp/..., and a server keyed
+	// under one spelling is unreachable from the other.
+	want := "go@" + canonicalPath(dir)
+	if st.calls[0] != want {
 		t.Fatalf("launch root = %q, want %q (go.mod marks the root)", st.calls[0], want)
 	}
 }

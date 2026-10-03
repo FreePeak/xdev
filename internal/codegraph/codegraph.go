@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -265,11 +266,26 @@ func (c *Client) verifyOnce(ctx context.Context) error {
 	return nil
 }
 
-// sameDir compares two paths, tolerating a trailing separator and symlinked
-// temp dirs (macOS t.TempDir is a symlink into /var, which is why the
-// caller-side path is resolved before the comparison).
+// sameDir reports whether two paths name the same directory.
+//
+// Symlinks are resolved, not just trailing separators trimmed. The lsp side
+// learned this the hard way on 2026-10-03: macOS answers /tmp/x for
+// /private/tmp/x, and a string comparison of two spellings of one directory
+// says "different" when it means "same" -- which there silently disabled a
+// feature, and here would refuse a perfectly good server with a message
+// blaming the user's configuration. The comparison resolves both sides and
+// still falls back to the raw strings when a path cannot be resolved, so a
+// missing directory is never mistaken for a mismatch.
 func sameDir(a, b string) bool {
-	return trimDir(a) == trimDir(b)
+	return resolveDir(a) == resolveDir(b)
+}
+
+func resolveDir(s string) string {
+	s = trimDir(s)
+	if real, err := filepath.EvalSymlinks(s); err == nil {
+		return trimDir(real)
+	}
+	return s
 }
 
 func trimDir(s string) string {

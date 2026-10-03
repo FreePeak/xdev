@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,5 +105,53 @@ func TestWarmClientForIsAPeek(t *testing.T) {
 	}
 	if st.count() != 0 {
 		t.Fatalf("an unroutable file launched %d servers", st.count())
+	}
+}
+
+// TestWarmClientForSurvivesASecondSpellingOfTheSameFile is a regression
+// guard for a bug found by running the real thing, not by reading it.
+//
+// A file can be named two ways: macOS answers /tmp/x when asked about
+// /private/tmp/x, and a symlinked working directory does the same in reverse.
+// When a client was started under one spelling and looked up under the other,
+// the peek missed and the post-write diagnostics silently dropped to the
+// parser tier for the whole session -- the write looked "fine" because the
+// report never ran, which is the worst way for this feature to fail.
+//
+// Both spellings must find the SAME running server.
+func TestWarmClientForSurvivesASecondSpellingOfTheSameFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	realFile := filepath.Join(dir, "a.go")
+	writeFile(t, realFile, "package x\n")
+
+	// A symlink is the portable way to produce a second spelling; macOS /tmp
+	// is the same hazard without one.
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	spelled := filepath.Join(link, "a.go")
+
+	mgr := NewManager(Config{Lazy: true, IdleTimeout: time.Minute, Servers: DefaultServers()}, dir)
+	defer mgr.Close()
+	st := &starter{client: newFakeLSP(t, nil).client}
+	mgr.start = st.start
+
+	// Start the server the way a real session does: with the real spelling.
+	if _, _, err := mgr.ClientFor(context.Background(), realFile); err != nil {
+		t.Fatalf("ClientFor: %v", err)
+	}
+	if _, _, ok := mgr.WarmClientFor(realFile); !ok {
+		t.Fatal("the same spelling that started the server must find it")
+	}
+	// The one that used to fail.
+	if _, _, ok := mgr.WarmClientFor(spelled); !ok {
+		t.Fatalf("WarmClientFor(%s) missed a running server started for %s; "+
+			"one file must have one identity", spelled, realFile)
+	}
+	// And it must be the very same client, not a second launch.
+	if st.count() != 1 {
+		t.Fatalf("the second spelling launched %d servers; it must reuse the running one", st.count())
 	}
 }
