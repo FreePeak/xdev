@@ -56,10 +56,30 @@ func runUsage(args []string) int {
 	// message for a bad value, so an unparseable --since fails there before
 	// this closure is ever called.
 	since, _ := usageSinceArg(args)
+	pricer := usageLocalPricer(cfg)
 	scan := func() (*stats.Report, error) {
-		return stats.Scan(stats.Options{DataDir: config.DataDir(), Since: since, NoRollup: true})
+		return stats.Scan(stats.Options{
+			DataDir: config.DataDir(), Since: since, NoRollup: true, Pricer: pricer,
+		})
 	}
 	return usageCmd(args, cfg, lastSettings(), scan, os.Stdout, os.Stderr)
+}
+
+// usageLocalPricer is the loaded models.yml as a stats price lookup. cfg is
+// already loaded (and already tolerated as broken) by the caller, so there is
+// no second read and no second failure mode: a model with no `pricing:` in
+// models.yml keeps the honest $0 a gateway that reports tokens alone produces.
+func usageLocalPricer(cfg *config.Config) func(string) stats.Pricer {
+	if cfg == nil {
+		return nil
+	}
+	return func(model string) stats.Pricer {
+		p := cfg.Pricing(model)
+		if p.Zero() {
+			return nil
+		}
+		return p
+	}
 }
 
 // usageCmd renders the per-provider account table plus the locally observed
@@ -434,7 +454,7 @@ func usageObservedText(b *strings.Builder, o usageObserved) {
 	if o.Since != "" {
 		fmt.Fprintf(b, "  %-12s %s (as passed to --since)\n", "window", o.Since)
 	}
-	fmt.Fprintf(b, "  %-12s %d (%d priced)\n", "turns", t.Turns, t.PricedTurns)
+	fmt.Fprintf(b, "  %-12s %d (%d priced requests)\n", "turns", t.Turns, t.PricedRequests)
 	fmt.Fprintf(b, "  %-12s %d (harness-injected, not user input)\n", "injected", t.InjectedTurns)
 	fmt.Fprintf(b, "  %-12s total %s (in %s · out %s · cache read %s · cache write %s)\n", "tokens",
 		stats.HumanTokens(t.TotalTokens), stats.HumanTokens(t.Input), stats.HumanTokens(t.Output),
@@ -447,9 +467,13 @@ func usageObservedText(b *strings.Builder, o usageObserved) {
 			100*float64(t.CacheRead)/float64(prompt), stats.HumanTokens(prompt))
 	}
 	fmt.Fprintf(b, "  %-12s %s\n", "cost", stats.HumanMoney(t.CostUSD))
-	if t.PricedTurns < t.Turns {
-		fmt.Fprintf(b, "  %-12s %d of %d turns carried no provider price (counted as 0)\n", "",
-			t.Turns-t.PricedTurns, t.Turns)
+	if t.CostEstimated > 0 {
+		fmt.Fprintf(b, "  %-12s %s of it estimated from models.yml prices (%s reported)\n", "",
+			stats.HumanMoney(t.CostEstimated), stats.HumanMoney(t.CostReported))
+	}
+	if t.PricedRequests < t.BilledRequests {
+		fmt.Fprintf(b, "  %-12s %d of %d requests carried no price at all (counted as 0)\n", "",
+			t.BilledRequests-t.PricedRequests, t.BilledRequests)
 	}
 	if len(o.Models) == 0 {
 		fmt.Fprintf(b, "  %-12s none recorded under %s\n", "by model", usageOrDefault(o.DataDir, "(unknown data dir)"))

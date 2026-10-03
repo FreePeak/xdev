@@ -20,11 +20,53 @@ type DiscoveryConfig struct {
 	InjectV1 bool   `yaml:"injectV1,omitempty"`
 }
 
+// ModelPricing is a model's per-million-token rates in USD. It exists because
+// a provider is not required to report cost: a gateway, a proxy or a local
+// server reports tokens and nothing else, so a store read by one shows $0.00
+// for work that was genuinely paid for. Declaring the rates locally turns that
+// $0.00 into an estimate, and only for the requests the provider left
+// unpriced — a provider that reports its own cost is always believed
+// (internal/stats reads usage.cost.total first and this only fills the gap).
+//
+// Cache read and cache write are separate fields because they are separate
+// rates, not multipliers of input: Anthropic's cache read is a tenth of input
+// while DeepSeek's is a fiftieth, so a shared multiplier cannot express both.
+type ModelPricing struct {
+	Input      float64 `yaml:"input,omitempty"`
+	Output     float64 `yaml:"output,omitempty"`
+	CacheRead  float64 `yaml:"cacheRead,omitempty"`
+	CacheWrite float64 `yaml:"cacheWrite,omitempty"`
+}
+
+// Zero reports whether no rate is declared: a pricing block that names no
+// number prices nothing, so an empty `pricing:` in models.yml is inert rather
+// than a $0 estimate.
+func (p ModelPricing) Zero() bool {
+	return p == ModelPricing{}
+}
+
+// USD prices one billed request. A request with no total of its own is priced
+// as the sum of its buckets, which is the same normalization every wire
+// adapter already applies.
+func (p ModelPricing) USD(input, output, cacheRead, cacheWrite, total int64) float64 {
+	if total <= 0 {
+		total = input + output + cacheRead + cacheWrite
+	}
+	return (float64(input)/1e6)*p.Input +
+		(float64(output)/1e6)*p.Output +
+		(float64(cacheRead)/1e6)*p.CacheRead +
+		(float64(cacheWrite)/1e6)*p.CacheWrite
+}
+
 // ModelConfig is one statically pinned model entry.
 type ModelConfig struct {
 	ID        string `yaml:"id"`
 	Name      string `yaml:"name,omitempty"`
 	Reasoning bool   `yaml:"reasoning,omitempty"`
+	// Pricing is the model's per-million-token rates in USD, used to estimate
+	// the cost of a request the provider reported no cost for. Absent = the
+	// model is priced by whatever the provider says, and nothing else.
+	Pricing *ModelPricing `yaml:"pricing,omitempty"`
 	// Vision marks a model that accepts image input. snapcompact's bitmap is
 	// only useful to such a model (#83); without the flag the dropped text
 	// would ride along as bytes nothing can read.
@@ -282,6 +324,60 @@ func (c *Config) IgnoredProjectKeys() []string {
 		return nil
 	}
 	return c.ignoredProject
+}
+
+// Pricing returns the declared rates for one model id, matching pinned
+// entries by suffix so "onegw/claude-sonnet-4-6" finds a "claude-sonnet-4-6"
+// entry whatever the provider block calls it. The empty ModelPricing means
+// "no local price", which is the zero value callers can test with Zero.
+//
+// Two rules decide which entry wins, in this order:
+//
+//  1. The provider named by the model's own prefix. "router/claude-x" is
+//     priced by the `router` block even when another provider pins the same
+//     model id at a different rate — a gateway's price and the vendor's are
+//     both real and only one of them was billed.
+//  2. Otherwise the longest matching id, so a pinned "gpt-5.4-mini" is not
+//     shadowed by "gpt-5.4".
+func (c *Config) Pricing(modelID string) ModelPricing {
+	if c == nil || modelID == "" {
+		return ModelPricing{}
+	}
+	keys := sortedKeys(c.Providers)
+	if prefix, _, ok := strings.Cut(modelID, "/"); ok {
+		if _, isProvider := c.Providers[prefix]; isProvider {
+			keys = []string{prefix}
+		}
+	}
+	var best *ModelConfig
+	for _, key := range keys {
+		for i := range c.Providers[key].Models {
+			m := &c.Providers[key].Models[i]
+			if m.Pricing == nil || !modelMatches(m.ID, modelID) {
+				continue
+			}
+			if best == nil || len(m.ID) > len(best.ID) {
+				best = m
+			}
+		}
+	}
+	if best == nil {
+		return ModelPricing{}
+	}
+	return *best.Pricing
+}
+
+// modelMatches reports whether a request for modelID is served by the pinned
+// entry id. Exact first, then a suffix match on a "/" boundary, because a
+// gateway prefixes its own namespace ("openrouter/anthropic/claude-x").
+func modelMatches(pinned, modelID string) bool {
+	if pinned == "" {
+		return false
+	}
+	if pinned == modelID {
+		return true
+	}
+	return strings.HasSuffix(modelID, "/"+pinned)
 }
 
 // ParseModelRef splits "provider/model" into its two halves.
