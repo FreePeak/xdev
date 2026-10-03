@@ -2793,3 +2793,17 @@ Verified against the real binary, not the render functions: a forked pty with `p
 Tests: `internal/tui/chrome_test.go` `TestNoTopBarAndBranchOnTheStatusRow` (row 0 is transcript content; the branch sits on the status row after the path; a spinner frame leaks to neither row and belongs to the divider) and `TestStatusRowKeepsBranchAndTruncatesThePath` (a long path truncates around the branch; an over-wide branch leaves whole); `internal/tui/leaderkeys_test.go` `TestTranscriptTopAccountsForStrip` (0 without a strip, 1 with one); the toast, sticky, scroll-hint, selection and sidebar tests moved their row indices with the geometry.
 
 Supersedes: the 2026-09-15 "top bar is permanent, user-requested" entries and `TestTopBarCarriesBranchAndSpinner`, which pinned row 0 as chrome.
+
+---
+
+## Screenshot refreshed on the current colors (2026-10-03)
+
+*Last updated: 2026-10-03 (`docs/tui-color-shot` — user request: "create PR for me with the screenshot, new TUI color updated").* `assets/screenshots/welcome.png` — the one image the README embeds (`README.md:18`) — was still the frame captured on 2026-09-16 (`9b35b07`). It showed the top bar that **#558 removed the same day it retired**: the still carried ` ❯ branch` chrome, and the status row ended in the path with no branch beside it. Every color the shot proved was current; every layout it proved was two months stale.
+
+Regenerated with the repo's own generator, not a screen grab: `scripts/tui-shot.py` runs the built `./xdev tui` in a throwaway tmux session, asks tmux for the pane **with** its SGR runs (`capture-pane -p -e`), and repaints that cell grid as an SVG it rasterizes with `rsvg-convert`. Child started `env -u NO_COLOR COLORTERM=truecolor` because `NO_COLOR` flattens the theme to monochrome (§3.5). Width 1680 px to match the committed file's pixel dimensions so the README's `width="860"` keeps the same rendered size.
+
+**What actually changed in the image.** The top bar is gone and row 0 belongs to the transcript again; the status row now reads `~/work/harvey/freepeak/xdev/.worktrees/tui-color-shot · docs/tui-color-shot` with the branch on the row; the welcome menu lists the four session commands with their `/`-keyed hints; the composer carries the model caption in its bottom border. The **palette is unchanged** — the frame's distinct colors are the seven GrokNight slots it always was, verified by counting `fill=` in the regenerated SVG: `#6c6c6c` ×259, `#505058` ×159, `#bb9af7` ×158, `#585858` ×49, `#e1e1e1` ×39, `#c8c8c8`, `#141414`. `#bb9af7` is `accent_assistant` (TokyoNight MAGENTA, §3.5) and `#141414` is `bg_base` — the same two the September shot carried.
+
+Method note for the next regeneration: `sheen_score` returns 0 only when the wordmark's sheen sweep is off the art, so a shot with a nonzero cost catches the mark half-inverted and unreadable. This run hit 0 on the second sampled frame.
+
+No `internal/` file touched; this is the image, not the renderer.
