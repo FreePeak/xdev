@@ -41,15 +41,24 @@ import (
 // diffCells renders a unified diff as styled rows for a box interior of
 // width inner, wrapped to the same budget wrap() uses for plain bodies.
 func (a *App) diffCells(text string, inner int) []line {
-	ds := a.diffStyle()
-	src := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	rows := classifyDiff(src)
-	markWordDiff(rows)
+	return diffRowsCells(classifyMarkedDiff(text), a.diffStyle(), inner)
+}
 
+// classifyMarkedDiff is the whole per-diff analysis pass: label every source
+// row, then pair the adjacent -/+ rows once. Splitting it from the paint lets
+// the viewer keep the analysis and re-lay the same rows out for whichever
+// shape (and width) the frame calls for, with no second word-diff.
+func classifyMarkedDiff(text string) []diffRow {
+	rows := classifyDiff(strings.Split(strings.TrimRight(text, "\n"), "\n"))
+	markWordDiff(rows)
+	return rows
+}
+
+// diffRowsCells paints already-classified rows into one column of inner width.
+func diffRowsCells(rows []diffRow, ds diffStyle, inner int) []line {
 	out := make([]line, 0, len(rows))
 	for _, r := range rows {
-		wrapped := wrapCells(ds.row(r), inner)
-		for _, ln := range wrapped {
+		for _, ln := range wrapCells(ds.row(r), inner) {
 			out = append(out, padBand(ln, inner))
 		}
 	}

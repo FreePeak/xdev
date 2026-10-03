@@ -302,7 +302,11 @@ type App struct {
 	// other replaces it — and a host that wires only the first must still be
 	// able to say "send now is not wired in this build" rather than silently
 	// queueing something the user asked to have sent.
-	onSendNow func(text string)
+	//
+	// It takes the owning session id as well as the text: the chord and the
+	// row button both name a message, and with several sessions open only the
+	// owning id says which conversation to deliver it to (#157).
+	onSendNow func(sid, text string)
 	// queue holds the pending mid-turn submits in delivery order and queueSeq
 	// is the append counter (queue.go). queueHits is the last painted frame's
 	// geometry — the mouse hit-tests against what was on screen, not against
@@ -504,6 +508,7 @@ type blockKey struct {
 	stream   bool
 	expanded bool // box rows: the Ctrl+O state changed the row set
 	age      int64
+	spin     int  // the running frame this row paints: -1 when it paints none
 	trim     int8 // bounded middle trim: this block's render-window tier
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
@@ -514,6 +519,10 @@ type blockKey struct {
 	// and the box would jump at the end. Eight buckets is 12.5% steps — finer
 	// than the 1/6 per tick the tween actually advances, so no step is skipped.
 	fade int8
+	// sub stamps a `task` call's child rows: they carry the running frame, so a
+	// settle has to pull the parent out of the render cache on its own, not
+	// wait for the next frame index to move.
+	sub uint64
 	// mermaid stamps whether a ```mermaid fence in this block drew as a
 	// diagram. Flipping the setting changes every block's rows without any of
 	// them changing length, so the stamp has to say which way it rendered or
@@ -650,8 +659,22 @@ func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 // variation on sending. A host that wires only onQueue still gets the queue;
 // a host that wires neither keeps the pre-queue behavior, so the submit is
 // refused with a reason instead of vanishing.
-func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(text string)) {
+func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(sid, text string)) {
 	a.onQueue, a.onSendNow = onQueue, onSendNow
+}
+
+// OnSendNow is the chord's named send-now: the session on screen and its oldest
+// pending message, or (sid, "") when it has nothing queued. It is the same rule
+// the row's button follows — oldest first — so the chord and the button can
+// never disagree about which message "now" means, and the session is captured
+// with the message so a tab switch before the host delivers cannot redirect it.
+func (a *App) OnSendNow() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.queueForLocked(a.st.SessionID) {
+		return a.st.SessionID, e.text
+	}
+	return a.st.SessionID, ""
 }
 
 // SetVision wires "can the live model take an image?", which cmd answers from
@@ -1118,11 +1141,11 @@ const taskToolName = "task"
 // whatever call came next.
 func (a *App) AddTaskChild(callID, label, agent, model string) {
 	a.mu.Lock()
-	b := a.runningToolLocked(callID, taskToolName)
-	if b != nil {
+	if b := a.runningToolLocked(callID, taskToolName); b != nil {
 		b.Sub = append(b.Sub, &SubActivity{
 			Label: label, Agent: agent, Model: model, Status: "running", Ts: time.Now(),
 		})
+		b.subSeq++
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1142,6 +1165,7 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		}
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
+		b.subSeq++
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1154,6 +1178,7 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 	if b != nil {
 		if c := findSubLocked(b, label); c != nil {
 			c.Status, c.Dur = status, d
+			b.subSeq++
 		}
 	}
 	a.mu.Unlock()
@@ -1213,10 +1238,23 @@ func (a *App) RunningTaskCallID() string {
 	return ""
 }
 
+// spinFrame is the one running indicator's current glyph: the theme's frames at
+// the shared index. Every surface that says "still working" — the top bar, the
+// composer divider, a tool call row, a reasoning box, a subagent's child row —
+// paints this, so they move in step and a theme restyles them together. One
+// helper because they were not one indicator: the reasoning box was a frozen
+// "⠹" and the child rows a static "⎿", so the same state read three ways.
+// Caller holds a.mu.
+func (a *App) spinFrame() string {
+	frames := a.th.SpinnerFrames()
+	return frames[a.st.spinnerIdx%len(frames)]
+}
+
 // subLines renders a `task` call's children as continuation rows under the
-// call row. Each row is `⎿ <label> · <what it last did>`, dim: it is
-// narration inside someone else's call, not a call of its own, and it must
-// not compete with the parent row for attention.
+// call row. A child still working takes the parent's spinning frame in place
+// of the `⎿` tick; a settled one keeps that tick, dim: the row is narration
+// inside someone else's call, not a call of its own, and it must not compete
+// with the parent for attention.
 //
 // The naming argument comes from toolDetail — the SAME precedence the
 // parent's own call rows use — so a child row and a call row read alike and
@@ -1228,10 +1266,18 @@ func (a *App) subLines(b *Block, w int) []line {
 	}
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))).Bold(true)
+	runSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning)))
 	var out []line
-	emit := func(text string) {
-		ln := textline("  ⎿ ", dim)
-		ln.runs = append(ln.runs, cell{text: text, style: nameSt})
+	// A child still working spins with the parent's bullet; a settled one keeps
+	// the dim tick it always had, so "which of these is still going" is one
+	// glance down the rows instead of a read of the elapsed clocks.
+	emit := func(text string, running bool) {
+		mark, st := "⎿", dim
+		if running {
+			mark, st = a.spinFrame(), runSt
+		}
+		ln := textline("  ", dim)
+		ln.runs = append(ln.runs, cell{text: mark, style: st}, cell{text: " ", style: dim}, cell{text: text, style: nameSt})
 		out = append(out, ln)
 	}
 	for _, c := range rows {
@@ -1253,10 +1299,10 @@ func (a *App) subLines(b *Block, w int) []line {
 		if budget := subRow(w); width(row) > budget {
 			row = truncateCells(row, budget, "…")
 		}
-		emit(row)
+		emit(row, c.Status == "running")
 	}
 	if more > 0 {
-		emit(fmt.Sprintf("+%d more running", more))
+		emit(fmt.Sprintf("+%d more running", more), true)
 	}
 	return out
 }
@@ -1503,6 +1549,15 @@ func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
 // a notice.
 func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
 
+// SessionID names the session the transcript currently shows. It is the key
+// every session-owned piece of App state reads: the queue (#157) reads it to
+// decide which rows to paint, take back, flush, and retire.
+func (a *App) SessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.st.SessionID
+}
+
 // SetSessionID updates the status-row / dock identity after a switch.
 func (a *App) SetSessionID(id string) {
 	a.mu.Lock()
@@ -1521,10 +1576,13 @@ func (a *App) SetRunning(r bool) {
 	a.poke()
 }
 
-// AddTurn counts one finished run — the turn a dsh TimePill reports beside
-// its step count. SetRunning's falling edge is the seam: the run that
-// actually ended is the turn, whatever it ended with, and an idle re-render
-// never counts.
+// AddTurn counts one accepted user prompt — the turn a dsh TimePill reports
+// beside its step count. The seam is ACCEPTANCE, not the run's end: a prompt
+// the model is still working on has already been accepted, so a session's first
+// turn reads 1 while the work is in flight rather than 0, and three prompts
+// steered into one run count as three turns because three user messages went
+// into the conversation (#157). A refused or undelivered prompt never reaches
+// the seam, so the count only moves for words the model really got.
 func (a *App) AddTurn() {
 	a.mu.Lock()
 	a.st.Turns++
@@ -2926,6 +2984,16 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Lock()
 			a.width, a.height = r.Size()
 			a.clearRenderCache()
+			// The diff viewer's LAYOUT is its width (the pair below the
+			// threshold, the list above it), so a resize under an open overlay
+			// has to re-decide it here — the width has already moved, and the
+			// frame that would notice it is the next paint, by which time a
+			// frame drawn at the old budget has already shown. drawDiffOverlay
+			// re-checks the same fact each frame, so a resize that reaches it
+			// another way is still covered.
+			if a.diffOv != nil {
+				a.diffOv.reflow(a)
+			}
 			a.mu.Unlock()
 		}
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise let
@@ -3316,13 +3384,13 @@ func (a *App) handleKey(ev tcell.Event) {
 		// With nothing queued it is a notice, never a silent no-op: a chord
 		// that does nothing when pressed is a bug report waiting to happen.
 		if a.onSendNow != nil {
-			text := a.oldestQueued()
+			sid, text := a.OnSendNow()
 			if text == "" {
 				a.AddSystemBlock("nothing queued — type a prompt and Enter while a turn runs, or click a queued row")
 				a.poke()
 				return
 			}
-			a.onSendNow(text)
+			a.onSendNow(sid, text)
 			a.poke()
 			return
 		}
@@ -3574,8 +3642,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// Attachments make this the multimodal path's alone. A declined
 			// or unwired send returns the draft to the composer: the text-only
 			// handler cannot carry the bytes, and sending the chip as a word
-			// would let a model answer a picture it never received.
+			// would let a model answer a picture it never received. A declined
+			// send took no words, so it counts no turn.
 			if a.onSendImages != nil && a.onSendImages(text, imgs) {
+				a.AddTurn()
 				a.poke()
 				return
 			}
@@ -3583,6 +3653,14 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		if a.onSend != nil {
+			// The prompt was ACCEPTED here, so this is the turn seam (#157):
+			// the count moves for words the host really took, whether or not
+			// the run that answers them has finished — a session's first turn
+			// reads 1 while the work is in flight rather than 0. A queued
+			// prompt is counted at its own delivery (RetireDelivered) instead,
+			// so no prompt is counted twice, and an unwired or refused send
+			// never reaches this line at all.
+			a.AddTurn()
 			a.onSend(text)
 		}
 	}
@@ -3780,8 +3858,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
-			frames := a.th.SpinnerFrames()
-			bullet, fg = frames[a.st.spinnerIdx%len(frames)], theme.AccentRunning
+			bullet, fg = a.spinFrame(), theme.AccentRunning
 		case "error":
 			bullet, fg = "✗", theme.AccentError
 		case "ok":
@@ -4043,7 +4120,10 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	hdr := "Thought"
 	switch {
 	case b.stream:
-		hdr = "⠹ Thinking…"
+		// The theme's own frames, so a reasoning box spins in step with every
+		// other indicator. It was a frozen "⠹": the glyph said "running" and
+		// never moved, next to a tool bullet that did.
+		hdr = a.spinFrame() + " Thinking…"
 	case b.thinkDur > 0:
 		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
 	}
@@ -4349,6 +4429,17 @@ func isWindowRow(s string) bool {
 // whole session.
 func (a *App) draw() {
 	a.paint()
+	// The prompt box's rows are sent WHOLE, every frame, even though paint()
+	// fills them with the content they already hold: tcell writes only a cell
+	// whose content changed, so the spaces that did not change ride on no frame
+	// at all (measured: 16 of 120 columns carried a glyph). A terminal keeps
+	// what it was sent and renders "Type a message…" correctly; a pane that
+	// re-renders from its own grid — a reattach, a cleared terminal, a resize
+	// that re-clears — keeps ITS value in the columns xdev never addressed, and
+	// the box reads "TypeXaXmessage…XXXXXX" (composer_wire_test.go reproduces
+	// it through such a pane). Unconditional, because the pane's reset is
+	// silent by definition: no event announces it, so a trigger cannot cover it.
+	a.markComposerDirty()
 	a.scr.Show()
 	// A frame the terminal never took is not self-healing: tcell marks each
 	// cell clean before the write, so a dropped frame leaves a partial screen
@@ -4360,7 +4451,35 @@ func (a *App) draw() {
 	}
 }
 
-// logFrameAfterDraw is called once per frame after draw()
+// markComposerDirty forces the prompt box's rows dirty so the next flush
+// carries them whole. It must run after paint() and before Show(): paint
+// decides the cells' content, Show() decides which of them travel.
+//
+// The box is the composer's rows plus its top border and its info divider —
+// every row from yTop-1 up to the row the status line takes — because the
+// border and the divider are as unchanged as the spaces are, and a pane
+// showing its own fill inside the box reads as a broken prompt, not a blank
+// one. The columns are the main pane's (rightEdge): the context dock owns the
+// rest and paints its own rows, so marking them would only make this fix
+// repaint the panel.
+//
+// Caller holds a.mu, as paint() does.
+func (a *App) markComposerDirty() {
+	cells, ok := a.scr.(interface{ GetCells() *tcell.CellBuffer })
+	if !ok {
+		return // a screen that keeps its cells private cannot be asked
+	}
+	buf := cells.GetCells()
+	bw, bh := buf.Size()
+	cols := min(a.rightEdge(), bw)
+	top := a.height - 1 - a.composerRows()
+	for y := max(top-1, 0); y < min(a.height-1, bh); y++ {
+		for x := range cols {
+			buf.SetDirty(x, y, true)
+		}
+	}
+}
+
 // to snapshot the screen buffer to the log file when --log is active.
 func (a *App) logFrameAfterDraw() { a.logFrame() }
 
@@ -5086,9 +5205,17 @@ func (a *App) drawComposer(yTop int) {
 		}
 	}
 
-	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
+	// Info divider bottom border: ╰─ ⠋ model · high ─────── ▲n▼n ─╯
 	yBottom := yTop + len(lines)
-	info := " " + a.st.Model
+	info := " "
+	// The run indicator LEADS the pair. Trailing it put the one thing on the
+	// row that moves at the far end of a static "model · high", where it read
+	// as another segment of the reasoning label instead of as the state of the
+	// turn.
+	if a.st.Running {
+		info += a.spinFrame() + " · "
+	}
+	info += a.st.Model
 	// The reasoning level beside the model it applies to: the two are one
 	// request, and "which model" alone left the other half of it invisible.
 	// The bare rung, not "thinking <level>" — the model it sits beside says
@@ -5098,11 +5225,6 @@ func (a *App) drawComposer(yTop int) {
 	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		info += " · Vibe"
-	}
-	if a.st.Running {
-		frames := a.th.SpinnerFrames() // theme frames, braille by default
-		a.st.spinnerIdx = a.st.spinnerIdx % len(frames)
-		info += " · " + frames[a.st.spinnerIdx]
 	}
 	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
 	for x := 2; x < w-2; x++ {
