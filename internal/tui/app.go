@@ -3424,6 +3424,17 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.AddSystemBlock("session tabs are not wired in this build")
 		}
 		return
+	default:
+		// The ten "switch to tab N" ids, opencode's
+		// session_tab_select_N. They resolve through the SAME
+		// onTabPick /tabs uses, so a jump and a click cannot diverge:
+		// one callback, one owner of the tabset. out-of-range N and a
+		// chord aimed at a tab that is not open are notices, never a
+		// silent no-op.
+		if n, ok := tabSelectIndex(action); ok {
+			a.selectTab(n)
+			return
+		}
 	case "session.delete":
 		// C-d / A-w / <leader>w. Close the CURRENT tab — or, on the last one,
 		// quit: "close this" with nothing left to close has to mean "exit",

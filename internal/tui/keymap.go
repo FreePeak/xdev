@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -78,6 +79,29 @@ var BuiltinActions = []string{
 	"session.list", "session.new", "session.delete",
 
 	// (contextual: the chord is menu-prev while the slash dropdown is open)
+}
+
+// tabSelectDigits are the keys tab 1..10 answer to — 1..9 then 0, exactly
+// as opencode spells it (ctrl+1..9, <leader>1..9, ctrl+0 for the tenth).
+// init() appends the ten "switch to tab N" ids to BuiltinActions: only the
+// digit differs, so a literal ten-line list would be a table something could
+// disagree with.
+const tabSelectDigits = "1234567890"
+
+// tabSelectPrefix is the action-id prefix for "switch to tab N"; the App's
+// dispatch arm cuts the N back off it (tabSelectIndex, tabstrip.go).
+const tabSelectPrefix = "session.tab.select."
+
+// tabSelectAction is the action id for "switch to tab N", opencode's
+// session_tab_select_N.
+func tabSelectAction(n int) string {
+	return tabSelectPrefix + strconv.Itoa(n)
+}
+
+func init() {
+	for i := range len(tabSelectDigits) {
+		BuiltinActions = append(BuiltinActions, tabSelectAction(i+1))
+	}
 }
 
 // DefaultKeyMap is the factory chord table.
@@ -177,6 +201,16 @@ func DefaultKeyMap() *KeyMap {
 			"A-[": "session.tab.previous",
 			"A-}": "session.tab.next_unread", // Shift+] with Alt
 			"A-{": "session.tab.previous_unread",
+			// Ctrl+Tab / Ctrl+Shift+Tab are opencode's PRIMARY tab chords
+			// ("switch to next open tab" / previous); Alt+] / Alt+[ stay bound
+			// because Ctrl+Tab needs a terminal that speaks CSI-u/kitty or
+			// modifyOtherKeys to report at all, and a binding the terminal
+			// cannot send is a dead key. tcell delivers the pair as
+			// KeyTab+ModCtrl and KeyTab+ModCtrl+ModShift (it normalizes
+			// Tab+Shift to KeyBacktab only when Ctrl is absent), so the
+			// chords are spelled exactly as chordOf renders them.
+			"C-Tab":       "session.tab.next",
+			"C-Shift-Tab": "session.tab.previous",
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
@@ -201,6 +235,15 @@ func DefaultKeyMap() *KeyMap {
 	m.bindings[m.leader+" w"] = "session.delete"
 	m.bindings[m.leader+" d"] = "session.delete"
 	m.bindings[m.leader+" q"] = "quit"
+	// <leader>1..9 / <leader>0 are opencode's other spelling of the same
+	// jump ("switch to tab N", alongside ctrl+1..9). Both exist there, so
+	// both exist here: a remap replaces each action's chords wholesale, and
+	// losing the ctrl half would make the action unreachable from a
+	// keybindings.yml that only names the leader pair.
+	for i := range len(tabSelectDigits) {
+		m.bindings[m.leader+" "+string(tabSelectDigits[i])] = tabSelectAction(i + 1)
+		m.bindings["C-"+string(tabSelectDigits[i])] = tabSelectAction(i + 1)
+	}
 	return m
 }
 
@@ -527,7 +570,11 @@ func keyName(ev *tcell.EventKey) string {
 		if r >= 'a' && r <= 'z' {
 			return string(r)
 		}
-		if r >= 'A' && r <= 'Z' {
+		if r >= '0' && r <= '9' {
+			// Digits are bindable for the same reason punctuation is:
+			// opencode's "switch to tab N" chords are Ctrl+1..9 and
+			// <leader>1..9, and a keyName that returned "" left every one
+			// of them a listed chord the runtime silently ignored.
 			return string(r)
 		}
 		// Punctuation is bindable too: a chord like Alt+, (the settings
