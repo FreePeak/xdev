@@ -12,27 +12,29 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// A frame is a DELTA, not a screen.
+// A frame is a DELTA, and the prompt box is the one place xdev overrides it.
 //
-// tcell only writes a cell whose content differs from what it last sent, so a
-// frame during a turn carries the transcript tail, the spinner and the clock —
-// and carries the prompt box's row only where one of ITS cells moved. paint()
-// fills the whole composer row with spaces, but a space that was already a
-// space is not a change, so the frame's own row keeps those columns unwritten:
-// measured below, the 56 columns right of "Type a message…" and the 42 columns
-// past the box's right border arrive in no frame at all.
+// tcell writes only a cell whose content changed, so a frame during a turn
+// carries the transcript tail, the spinner and the clock — and carries the
+// prompt box's row only where one of ITS cells moved. paint() fills the whole
+// row with spaces, but a space that was already a space is not a change, so
+// those columns arrive in no frame at all: measured below, 56 of them right of
+// "Type a message…" reach no frame during a streaming turn.
 //
-// A terminal keeps what it was sent, so that is correct there and has been for
-// as long as xdev has existed. A pane renderer that re-renders from its own
-// last-known grid instead — treating a frame as "here is the region that
-// changed" — shows the untouched columns as whatever IT had there, and on a
-// pane whose clear pattern is X, the prompt box reads
-// "TypeXaXmessage…XXXXXX". That is the reported symptom, and the fix belongs
-// in the pane: xdev's contract (a delta frame) is the contract every terminal
-// honours and is not the defect.
+// A terminal keeps what it was sent, so the delta is correct there and always
+// has been. A pane that re-renders from its own grid — treating a frame as
+// "here is the region that changed" — keeps ITS value in the columns xdev
+// never addressed, and on a pane whose clear pattern is X the box reads
+// "TypeXaXmessage…XXXXXX": the reported symptom. The pane's reset is silent —
+// a reattach, a cleared terminal, a resize that re-clears announces nothing —
+// so xdev cannot wait for an event to repair it. draw() therefore marks the
+// box's own rows dirty every frame (markComposerDirty), which sends them whole
+// for ~10% more bytes; composer_pane_test.go is the end-to-end proof.
 //
-// This pins the measurement, so a change that STARTS writing the whole row (or
-// stops) is visible in the test output instead of in a user's pane.
+// So the delta survives everywhere EXCEPT the box: the columns past the
+// context dock's edge still arrive only when they change, which is what this
+// pins. A change that starts writing the whole screen, or stops sending the
+// box's rows whole, is visible in this output instead of in a user's pane.
 type frameTty struct {
 	mu    sync.Mutex
 	frame []byte
@@ -171,8 +173,10 @@ func spanLen(spans [][2]int) int {
 	return n
 }
 
-// The measurement: over a streaming turn, how much of the prompt box's row does
-// the frame actually carry, and what does it leave to the terminal?
+// The measurement: over a streaming turn, which columns of the prompt box's
+// row the frame carries, and which the terminal is left to keep. With the
+// context dock open the box stops at rightEdge, so the panel's own columns
+// past it are the delta this still relies on.
 func TestComposerRowIsCarriedAsADelta(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	const W, H = 120, 40
@@ -187,6 +191,7 @@ func TestComposerRowIsCarriedAsADelta(t *testing.T) {
 	defer scr.Fini()
 	app := New(scr, theme.Load("groknight"), "test/free", "sess1234")
 	app.width, app.height = W, H
+	app.SetDockMode(DockShow) // the box stops short of the panel, so the delta has somewhere to live
 	app.AddUserBlock("hi")
 	app.SetRunning(true)
 	app.draw()
@@ -211,10 +216,13 @@ func TestComposerRowIsCarriedAsADelta(t *testing.T) {
 	}
 	t.Logf("streaming frames carrying the composer row: %d, omitting it: %d", carried, idle)
 
-	// A frame that does carry it, measured column by column.
+	// A frame measured column by column.
 	app.AddSystemBlock("gap probe " + strings.Repeat("g", 50))
 	app.draw()
 	cells := frameCells(ft.take(), W, H)
+	// The box's own columns are sent whole every frame (markComposerDirty);
+	// what the delta still leaves alone is everything RIGHT of the box, which
+	// belongs to the context dock or off-screen when the dock is hidden.
 	spans := unwritten(cells[row], W)
 	cols := map[int]bool{}
 	for x := range cells[row] {
@@ -224,15 +232,23 @@ func TestComposerRowIsCarriedAsADelta(t *testing.T) {
 	t.Logf("composer row %d: %d of %d columns carry a glyph; %d columns arrive in no frame (spans %v)",
 		row, len(cols), W, gaps, spans)
 
-	// The contract, asserted rather than described: the row is a delta, so it
-	// is never whole. A terminal that keeps what it was sent renders
-	// "Type a message…" correctly; a pane renderer that re-renders only the
-	// delivered columns does not.
+	// Both halves are the contract, asserted rather than described: the box's
+	// own columns travel every frame, and the columns past its right edge
+	// still arrive only when they change. A pane that re-renders from its own
+	// grid renders the box correctly and leaves the rest alone.
+	if got, want := len(cols), app.rightEdge(); got != want {
+		t.Fatalf("the box carried %d of its own %d columns — markComposerDirty is not covering the box", got, want)
+	}
 	if len(cols) >= W {
-		t.Fatalf("the composer row arrived whole (%d columns) — the delta contract changed", len(cols))
+		t.Fatalf("the whole screen was sent (%d columns) — the delta contract changed", len(cols))
+	}
+	for _, s := range spans {
+		if s[0] <= app.rightEdge() {
+			t.Fatalf("columns %d..%d are inside the box but arrived in no frame: spans %v", s[0], s[1], spans)
+		}
 	}
 	if gaps == 0 {
-		t.Fatalf("the composer row carried every column — the delta contract changed")
+		t.Fatalf("the frame carried every column — the delta contract changed")
 	}
 }
 
