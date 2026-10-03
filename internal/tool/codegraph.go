@@ -282,3 +282,88 @@ func looksLikePath(s string) bool {
 	return strings.Contains(s, "/") || strings.HasSuffix(s, ".go") ||
 		strings.HasSuffix(s, ".ts") || strings.HasSuffix(s, ".py")
 }
+
+// CodeQueryToolName is the model-facing name of the ranked finder.
+const CodeQueryToolName = "code_query"
+
+// CodeQueryIndex is the catalog line. It leads with the difference from grep,
+// because that is the reason to reach for it: results are ranked by the
+// graph, not by text order.
+const CodeQueryIndex = "ranked symbol/file search over the code graph — use when you don't know the path"
+
+// CodeQueryTool finds code by name through the graph's own ladder
+// (exact -> fuzzy -> semantic) instead of by text order.
+//
+// It exists because grep answers "which lines contain this string" and not
+// "where is this concept defined": a concept's definition rarely repeats its
+// own name, and when it does it competes with every import of it. The graph
+// has the structural answer, already ranked.
+type CodeQueryTool struct {
+	Graph *codegraph.Client
+	CWD   string
+}
+
+var _ Tool = (*CodeQueryTool)(nil)
+
+func (t *CodeQueryTool) Name() string { return CodeQueryToolName }
+
+func (t *CodeQueryTool) Description() string {
+	return "Find symbols or files in the code graph by name or concept, ranked by graph importance (exact -> fuzzy -> semantic). Use when the file path is unknown."
+}
+
+func (t *CodeQueryTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": {"type": "string", "description": "Symbol name, concept, or file path fragment."},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}
+  }
+}`)
+}
+
+func (t *CodeQueryTool) Execute(ctx context.Context, raw json.RawMessage) (Result, error) {
+	var a struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return Result{}, fmt.Errorf("code_query: invalid arguments: %w", err)
+	}
+	if strings.TrimSpace(a.Query) == "" {
+		return Result{IsError: true, Text: "code_query: query is required"}, nil
+	}
+	if t.Graph == nil {
+		return Result{IsError: true, Text: "code_query: code graph is not configured — continue with grep/ast_grep"}, nil
+	}
+	limit := a.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > maxImpactRows {
+		limit = maxImpactRows
+	}
+	hits, err := t.Graph.Locate(ctx, a.Query, limit)
+	if err != nil {
+		return impactFailure(err), nil
+	}
+	if len(hits) == 0 {
+		return Result{Text: fmt.Sprintf("code graph: nothing indexed matching %q — try a shorter identifier or grep", a.Query)}, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "code graph matches for %q (%d):", a.Query, len(hits))
+	for _, h := range hits {
+		name := h.QualifiedName
+		if name == "" {
+			name = h.Name
+		}
+		fmt.Fprintf(&b, "\n  %s", name)
+		if h.Type != "" {
+			fmt.Fprintf(&b, " (%s)", h.Type)
+		}
+		if h.File != "" {
+			fmt.Fprintf(&b, "  %s", where(h.File, h.Line))
+		}
+	}
+	return Result{Text: b.String()}, nil
+}

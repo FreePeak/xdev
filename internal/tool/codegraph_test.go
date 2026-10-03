@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -57,12 +56,7 @@ func newImpactTool(t *testing.T, base string) *ImpactTool {
 
 func runImpact(t *testing.T, it *ImpactTool, args map[string]any) Result {
 	t.Helper()
-	raw, _ := json.Marshal(args)
-	res, err := it.Execute(context.Background(), raw)
-	if err != nil {
-		t.Fatalf("impact: %v", err)
-	}
-	return res
+	return runTool(t, it, args)
 }
 
 func TestImpactResolvesThenAsksForCallers(t *testing.T) {
@@ -162,5 +156,40 @@ func TestImpactRequiresASymbol(t *testing.T) {
 	res := runImpact(t, it, map[string]any{})
 	if !res.IsError || !strings.Contains(res.Text, "symbol is required") {
 		t.Fatalf("got: %+v", res)
+	}
+}
+
+// --- code_query ------------------------------------------------------------
+
+func TestCodeQueryRendersRankedCandidates(t *testing.T) {
+	var calls []any
+	q := &CodeQueryTool{
+		Graph: codegraph.New(codegraph.Config{BaseURL: impactServer(t, true, &calls).URL, Project: "xdev", ExpectDir: "/repo"}),
+		CWD:   "/repo",
+	}
+	res := runTool(t, q, map[string]any{"query": "Target"})
+	if res.IsError {
+		t.Fatalf("code_query failed: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "pkg/target.go::Target") {
+		t.Fatalf("the qualified name must be returned so impact can follow it:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "pkg/target.go:12") {
+		t.Fatalf("the file position must be returned:\n%s", res.Text)
+	}
+}
+
+func TestCodeQueryOnEmptyResultNamesTheFallback(t *testing.T) {
+	var calls []any
+	q := &CodeQueryTool{
+		Graph: codegraph.New(codegraph.Config{BaseURL: impactServer(t, false, &calls).URL, Project: "xdev", ExpectDir: "/repo"}),
+		CWD:   "/repo",
+	}
+	res := runTool(t, q, map[string]any{"query": "nothing-here"})
+	if res.IsError {
+		t.Fatalf("an empty answer is normal: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "grep") {
+		t.Fatalf("it must name the fallback:\n%s", res.Text)
 	}
 }
