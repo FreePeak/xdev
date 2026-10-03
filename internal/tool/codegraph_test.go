@@ -193,3 +193,63 @@ func TestCodeQueryOnEmptyResultNamesTheFallback(t *testing.T) {
 		t.Fatalf("it must name the fallback:\n%s", res.Text)
 	}
 }
+
+// TestImpactRendersTheServerRowShapes is the guard for a bug the unit tests
+// could not have found: the fake server answered `callers` with objects, and
+// the real server answers with plain strings. The renderer printed the right
+// COUNT and then a row of "?" for every real answer, which is worse than
+// silence -- the model gets a confident summary with nothing in it.
+//
+// The three shapes are copied from a live leankg (2026-10-03):
+//
+//	callers / callees : ["pkg/x.go::f", ...]
+//	impact            : [{"qn": "pkg/x.go::f", "depth": 1}, ...]
+func TestImpactRendersTheServerRowShapes(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.URL.Path == "/api/v1/status" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"project_dir": "/repo"})
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		action, _ := body["action"].(string)
+		switch action {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]any{"hits": []any{
+				map[string]any{"qualified_name": "pkg/x.go::Target"}},
+			})
+		case "callers":
+			// strings, as the real server sends them
+			_ = json.NewEncoder(w).Encode(map[string]any{"callers": []any{"pkg/a.go::c1"}})
+		case "impact":
+			// objects keyed qn+depth
+			_ = json.NewEncoder(w).Encode(map[string]any{"hits": []any{
+				map[string]any{"qn": "pkg/x.go::Target", "depth": float64(1)},
+			}})
+		}
+	}))
+	defer srv.Close()
+
+	it := &ImpactTool{
+		Graph: codegraph.New(codegraph.Config{BaseURL: srv.URL, Project: "xdev", ExpectDir: "/repo"}),
+		CWD:   "/repo",
+	}
+
+	res := runTool(t, it, map[string]any{"symbol": "Target", "relation": "callers"})
+	if !strings.Contains(res.Text, "pkg/a.go::c1") {
+		t.Fatalf("a string-shaped caller row was dropped:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "?") {
+		t.Fatalf("an empty row was rendered as \"?\":\n%s", res.Text)
+	}
+
+	res = runTool(t, it, map[string]any{"symbol": "Target", "relation": "impact", "depth": 2})
+	if !strings.Contains(res.Text, "pkg/x.go::Target") {
+		t.Fatalf("a qn-shaped impact row was dropped:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "depth 1") {
+		t.Fatalf("the impact depth must survive:\n%s", res.Text)
+	}
+}
