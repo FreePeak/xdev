@@ -91,12 +91,20 @@ type Totals struct {
 
 // ModelStat is one model's share of the scan.
 type ModelStat struct {
-	Model       string  `json:"model"`
-	Sessions    int     `json:"sessions"`
-	Turns       int     `json:"turns"`
-	Input       int64   `json:"input"`
-	Output      int64   `json:"output"`
+	Model string `json:"model"`
+	// Sessions counts session FILES this model appeared in, so a subagent
+	// session folds into its parent's row without inflating Turns.
+	Sessions int   `json:"sessions"`
+	Turns    int   `json:"turns"`
+	Input    int64 `json:"input"`
+	Output   int64 `json:"output"`
+	// CacheRead and CacheWrite are the model's own shares of the two
+	// prompt-cache buckets. CacheWrite was missing here while the
+	// whole-store Totals carried it, so "which model writes the cache"
+	// — the expensive half, at 1.25x the input rate — had no answer, and
+	// the model's tokens did not add up to its own buckets.
 	CacheRead   int64   `json:"cacheRead"`
+	CacheWrite  int64   `json:"cacheWrite"`
 	TotalTokens int64   `json:"totalTokens"`
 	CostUSD     float64 `json:"costUsd"`
 }
@@ -267,6 +275,7 @@ func (r *Report) fold(m session.SessionMeta, c counters) {
 			st.Input += mc.Input
 			st.Output += mc.Output
 			st.CacheRead += mc.CacheRead
+			st.CacheWrite += mc.CacheWrite
 			st.TotalTokens += mc.TotalTokens
 			st.CostUSD += mc.CostUSD
 		}
@@ -446,6 +455,7 @@ func (c *counters) addUsage(m *wireMessage, turns bool) (turnTokens, turnCost fl
 	mc.Input += u.Input
 	mc.Output += u.Output
 	mc.CacheRead += u.CacheRead
+	mc.CacheWrite += u.CacheWrite
 	mc.TotalTokens += total
 	c.Models[name] = mc
 	turnTokens = float64(total)
@@ -499,11 +509,16 @@ type counters struct {
 	Days   map[string]dayCounters   `json:"days,omitempty"`
 }
 
+// modelCounters is one model's share of ONE file's rollup. It is cached on
+// disk (rollup.go), so a field added here without bumping rollupVersion is
+// read back as zero from every session scanned before the change — the
+// rollupVersion comment names that requirement.
 type modelCounters struct {
 	Turns       int     `json:"turns,omitempty"`
 	Input       int64   `json:"input,omitempty"`
 	Output      int64   `json:"output,omitempty"`
 	CacheRead   int64   `json:"cacheRead,omitempty"`
+	CacheWrite  int64   `json:"cacheWrite,omitempty"`
 	TotalTokens int64   `json:"totalTokens,omitempty"`
 	CostUSD     float64 `json:"costUsd,omitempty"`
 }

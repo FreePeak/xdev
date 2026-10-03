@@ -21,9 +21,16 @@ type rollupEntry struct {
 	C    counters `json:"c"`
 }
 
-// rollupVersion 2: counters gained `injected` (#283); v1 caches would
-// under-report it as 0, so the whole cache is invalidated once.
-const rollupVersion = 2
+// rollupVersion is the cache schema, bumped whenever a CACHED counter gains a
+// field: a v2 cache would decode the new field as absent, so every session
+// scanned before the change would under-report it as 0 forever (the cache is
+// keyed on file size+mtime, and those files do not change). Bumping it
+// invalidates the whole cache once, which is the only correct move.
+//
+//	2: counters gained `injected` (#283).
+//	3: modelCounters gained `cacheWrite` — a model's share of the cache-write
+//	   bucket, which the whole-store totals already carried.
+const rollupVersion = 3
 
 // rollupPath is <dataDir>/stats/rollup.json.
 func rollupPath(dataDir string) string {
