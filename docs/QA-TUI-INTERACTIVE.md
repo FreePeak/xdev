@@ -194,7 +194,7 @@ the tail — a one-sided gap in a mechanism that works at the top), **6**
 - **Message menu** — a click on a user row opens it; `jump` → the read-only surface, `copy` → the real clipboard, `revert`/`fork` → the tree rewind.
 - **Trajectory ledger** — click on the sidebar row opens it, the wheel moves the selection, a click opens the inspector.
 - **Thinking box focus** — clicking a box aims the wheel at it, the border goes bold, the wheel scrolls its own window.
-- **Keyboard:** `Enter`, `C-j` (0x0A newline), `C-u`, `C-l`, `C-o` (expand), `F5` (retry, does not clobber a draft), `A-m`, `A-a`, `A-t`, `A-s`, `S-Up`/`S-Down`, `PgUp`/`PgDn`, `Home`/`End`, `Shift-Tab` (persists `thinking: auto`/`off`), `Esc` double-tap rewind, `C-c` cancel-then-quit.
+- **Keyboard:** `Enter`, `C-j` (0x0A newline), `C-u`, `C-l`, `C-o` (expand), `F5` (retry, does not clobber a draft), `A-m`, `A-a`, `A-t`, `A-s`, `S-Up`/`S-Down`, `PgUp`/`PgDn`, `Home`/`End`, `Shift-Tab` (cycles the session mode `default` → `auto` → `plan`; the reasoning toggle that used to hold the chord is now `thinking-toggle`, user-bindable), `Esc` double-tap rewind, `C-c` cancel-then-quit.
 - **Resize** at 46x24 and 60x8 recovers cleanly; overlays do not trap the keyboard at 20x6.
 - **Slash menu** `/trajectory` as the working keyboard route to the ledger.
 

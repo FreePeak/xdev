@@ -275,19 +275,24 @@ var legacyOrder = []string{
 	// addLine/addWord per polarity), and a theme written for omp has never
 	// heard of them.
 	ToolDiffAddedBg, ToolDiffRemovedBg, ToolDiffAddedWordBg, ToolDiffRemovedWordBg,
+	// The mode ink, for the same reason: xdev's own vocabulary (omp has no
+	// mode surface), optional, and derived from Accent when a theme names no
+	// colour of its own.
+	StatusLineMode,
 }
 
 // extraChains: the optional legacy slots omp has no equivalent for, with
 // the derivation each falls back to. "export.*" reads the export block;
 // anything else is an already-parsed slot. Empty chain = Get falls back.
 var extraChains = map[string][]string{
-	BgBase:        {"export.pageBg", SelectedBg},
-	BgTerminal:    {"export.pageBg"},
-	AccentRunning: {Accent},
-	Gray:          {Muted},
-	GrayBright:    {Gray, Muted},
-	MdHeading2:    {MdHeading, MdHeading1},
-	MdHeading3:    {MdHeading, MdHeading1},
+	BgBase:         {"export.pageBg", SelectedBg},
+	BgTerminal:     {"export.pageBg"},
+	AccentRunning:  {Accent},
+	Gray:           {Muted},
+	GrayBright:     {Gray, Muted},
+	MdHeading2:     {MdHeading, MdHeading1},
+	MdHeading3:     {MdHeading, MdHeading1},
+	StatusLineMode: {Accent},
 }
 
 // lookupSlot returns the raw color for a canonical slot, accepting the

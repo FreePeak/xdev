@@ -402,10 +402,13 @@ type CommandAPI interface {
 	RenameSession(title string) error
 	ExportSession(path string) error
 	ShareSession() error
+	PlanMode(args string) error
+	// Mode is /mode: the one mode vocabulary over plan mode and the approval
+	// policy (mode.go).
+	Mode(args string) error
 	ResumeSession(query string) error
 	TabsPicker() error
 	SwitchModel(args string) error
-	PlanMode(args string) error
 	Vibe(args string) error
 	// Trajectory is /trajectory: the session's event ledger, opened as a
 	// modal list where a row's inspector shows the record's full body.
@@ -505,6 +508,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
+		{Name: "mode", Description: "session mode: /mode [default|auto|plan|bypass] (bare reports; shift+tab cycles default→auto→plan)",
+			Fn: func(app CommandAPI, args string) error { return app.Mode(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "goal", Description: "session objective: /goal <objective> starts it (and resumes on the first turn); /goal shows it, /goal complete|drop closes it",

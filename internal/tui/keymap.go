@@ -69,7 +69,8 @@ var BuiltinActions = []string{
 	"retry",           // F5: re-run the current session's last turn (omp's retry)
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
-	"thinking-toggle", // Shift-Tab: request-side reasoning off ⇄ auto (omp alt+t)
+	"mode-cycle",      // Shift-Tab: default → auto → plan → default (Claude Code's cycle)
+	"thinking-toggle", // request-side reasoning off ⇄ auto (omp alt+t; no default chord)
 	"session.tab.next", "session.tab.previous",
 	"session.tab.next_unread", "session.tab.previous_unread",
 	"app.settings", // Alt+,: the settings overlay (grok settings panel)
@@ -188,12 +189,15 @@ func DefaultKeyMap() *KeyMap {
 			"A-,": "app.settings",
 			"C-t": "dock-fold",
 
-			// The request-side reasoning toggle (omp's alt+t, Claude Code's
-			// Alt+T). Every terminal sends Shift-Tab as KeyBacktab, which
-			// chordOf renders "Shift-Tab" — so that is the chord to bind, not
-			// the "S-Tab" spelling chordOf can never emit. keybindings.yml can
-			// move it like any other action.
-			"Shift-Tab": "thinking-toggle",
+			// Shift-Tab cycles the session MODE (Claude Code's own use of
+			// the chord: default ⇄ acceptEdits ⇄ plan). Every terminal sends
+			// it as KeyBacktab, which chordOf renders "Shift-Tab" — so that
+			// is the chord to bind, not the "S-Tab" spelling chordOf can
+			// never emit. The request-side reasoning toggle keeps its action
+			// (omp's alt+t) and simply has no default chord any more; one
+			// chord cannot mean two things, and the mode is the one a user
+			// reaches for mid-turn. keybindings.yml can put the toggle back.
+			"Shift-Tab": "mode-cycle",
 			// Session tabs (opencode session.tab.next / .previous). Alt+letter
 			// class matches model-select / hub / dock; ] and [ are the natural
 			// "next / prev" pair and reach every terminal we target.
@@ -225,12 +229,11 @@ func DefaultKeyMap() *KeyMap {
 			// history-next, abort and complete share chords with menu/history
 			// actions or have no default: context disambiguates at dispatch.
 			// They remain settable from keybindings.yml.
-			// Actions with no default chord (listed so /hotkeys shows them).
 			// "abort" → C-c (shared with quit); "complete" → Tab (shared with
 			// menu-accept). These share chords because context disambiguates.
 			// history-next has no default (Up/Down already recall when the
-			// editor is in history mode); it stays settable from
-			// keybindings.yml.
+			// editor is in history mode); "thinking-toggle" lost Shift-Tab
+			// to mode-cycle above. Both stay settable from keybindings.yml.
 		},
 		actions: append([]string(nil), BuiltinActions...),
 	}
