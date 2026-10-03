@@ -1,6 +1,8 @@
 package mcpclient
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -206,5 +208,63 @@ servers:
 	}
 	if sc.AutoStart.Cwd != "/tmp" {
 		t.Fatalf("autoStart.cwd = %q, want /tmp", sc.AutoStart.Cwd)
+	}
+}
+
+// TestStartAutoDetachesStdio pins the rule that broke the composer's cells: an
+// auto-started server's stdout/stderr are NOT the parent's terminal. The TUI
+// owns the alt screen by the time autostartMCP runs, so a banner the child
+// prints lands in a screen tcell paints — and because tcell only re-emits the
+// cells the app changed, the damage survives every repaint. That is the
+// "Type a message…XXXX" input box on a long-running session.
+//
+// Real pipes, not a mock: os.Stdout/stderr are pointed at them, so a child that
+// inherits them writes bytes this test can read. It is the same wiring the TUI
+// had, and on the pre-fix code the banner comes back.
+func TestStartAutoDetachesStdio(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer outR.Close()
+	origOut := os.Stdout
+	os.Stdout = outW
+	t.Cleanup(func() {
+		os.Stdout = origOut
+		outW.Close()
+	})
+
+	sc := &ServerConfig{
+		URL: srv.URL + "/mcp",
+		AutoStart: &AutoStartConfig{
+			Command:   "/bin/sh",
+			Args:      []string{"-c", "echo BANNER-OUT; echo BANNER-ERR 1>&2; sleep 0.2"},
+			HealthURL: srv.URL,
+		},
+	}
+	cmd, err := sc.StartAuto()
+	if err != nil {
+		t.Fatalf("StartAuto: %v", err)
+	}
+	wait := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(wait) }()
+	select {
+	case <-wait:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("auto-started process did not exit")
+	}
+
+	// The pipe is still open (ours), so a read returns what arrived rather
+	// than blocking forever; the child is gone, so nothing more is coming.
+	outW.Close()
+	leaked, _ := io.ReadAll(outR)
+	if bytes.Contains(leaked, []byte("BANNER")) {
+		t.Fatalf("auto-started server wrote %q to the parent's terminal", leaked)
 	}
 }

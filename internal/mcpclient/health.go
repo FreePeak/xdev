@@ -13,6 +13,17 @@ import (
 	"time"
 )
 
+// detachedStdio returns a handle every std stream of an auto-started server
+// can sit on, or nil when the platform has no null device (exec then wires
+// the streams to the device it opens for a child with no files 0-2).
+func detachedStdio() *os.File {
+	f, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
 // probeHTTP GETs the health endpoint and reports whether the server
 // answered 200. A connection failure is a clean "down" — the caller
 // decides whether to start it.
@@ -79,8 +90,21 @@ func (sc *ServerConfig) StartAuto() (*exec.Cmd, error) {
 	for k, v := range sc.AutoStart.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// The child's output is NOT the parent's terminal. An auto-started server
+	// is a detached daemon (its own session, it outlives xdev) and it prints a
+	// banner of its own on stdout. The TUI has already put the terminal in the
+	// alt screen by the time autostartMCP runs (finishMCP is called on a
+	// goroutine from attachMCP's async branch), so those bytes land in a screen
+	// tcell owns: they overwrite the composer's cells, and the damage survives
+	// every repaint because tcell only re-emits the cells the app changed. That
+	// is the "Type a message…XXXX" composer a long-running session shows, and
+	// it only appears when a health probe finds a server DOWN — which is why a
+	// fresh session never sees it. internal/dist/proc_unix.go's
+	// detachedCommand already follows this rule for the same kind of child, and
+	// #272 applied it to finishMCP's own stderr: under the alt screen a write is
+	// not a notice, it is damage.
+	devNull := detachedStdio()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
 	cmd.SysProcAttr = setProcAttr()
 
 	if err := cmd.Start(); err != nil {
