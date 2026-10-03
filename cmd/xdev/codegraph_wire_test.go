@@ -71,3 +71,49 @@ func TestCodeGraphExpectDirFallsBackToGitRoot(t *testing.T) {
 		t.Fatalf("configured expectDir = %q, want /x", got)
 	}
 }
+
+// The map-first guidance rides in the deferred catalog line rather than in the
+// base system prompt. That is not a stylistic choice: the bundled prompt was
+// measured at ~993 tokens against the PRD's 1,000-token goal
+// (TestBundledPromptStaysUnderBudget), so there is no room for a rule block,
+// and a rule block would be the first thing to push the default over.
+
+// TestNoGraphMeansNoGraphProse keeps the default honest: a run without a code
+// graph is not told about one, and stays inside the budget the
+// pi-minimalism goal is measured against.
+func TestNoGraphMeansNoGraphProse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", &config.Settings{}, nil, nil)
+	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
+	if strings.Contains(got, "impact") {
+		t.Fatalf("a run without a code graph must not mention the tool:\n%s", got)
+	}
+	if tokens := len([]rune(got)) / 4; tokens >= maxPromptTokens {
+		t.Fatalf("default prompt is ~%d tokens (budget %d)", tokens, maxPromptTokens)
+	}
+}
+
+// TestGraphPromptCarriesTheGuidanceAndStaysBounded pins what enabling the
+// graph actually costs. The opt-in integration puts the prompt a little past
+// the bundled goal, and that drift must stay bounded rather than grow with
+// every deferred tool added after it.
+func TestGraphPromptCarriesTheGuidanceAndStaysBounded(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", &config.Settings{
+		CodeGraph: config.CodeGraphSettings{BaseURL: "http://127.0.0.1:9700", Project: "xdev"},
+	}, nil, nil)
+	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
+	if !strings.Contains(got, "impact") {
+		t.Fatal("a configured graph must be discoverable in the prompt")
+	}
+	// The line has to teach the when, or the model will not reach for the
+	// tool before the edit it exists to precede.
+	if !strings.Contains(got, "before editing shared code") {
+		t.Fatalf("the catalog line lost its guidance:\n%s", got)
+	}
+	const graphPromptCeiling = 1100
+	if tokens := len([]rune(got)) / 4; tokens > graphPromptCeiling {
+		t.Fatalf("graph-enabled prompt is ~%d tokens (ceiling %d): trim the catalog line",
+			tokens, graphPromptCeiling)
+	}
+}

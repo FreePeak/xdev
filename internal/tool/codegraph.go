@@ -17,7 +17,12 @@ const ImpactToolName = "impact"
 // ImpactIndex is the one-line catalog entry. It teaches the *when*, not just
 // the what: a model that only knows the tool exists will not reach for it
 // before the edit it is meant to precede.
-const ImpactIndex = "who depends on this symbol or file (callers/callees/blast radius) — check before editing widely-used code"
+//
+// It is deliberately short. The deferred index is appended to the system
+// prompt, and measured on 2026-10-02 the bundled prompt already sits at ~993
+// of the PRD's 1,000-token goal, so each catalog line competes for the last
+// few tokens.
+const ImpactIndex = "callers/callees/impact of a symbol — check before editing shared code"
 
 // maxImpactRows caps one answer. A hub symbol has hundreds of callers; the
 // model needs the shape of the blast radius and a count, not the file.
