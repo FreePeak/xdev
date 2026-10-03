@@ -66,13 +66,17 @@ func TestScanChargesCompactionUsage(t *testing.T) {
 	if math.Abs(tot.CostUSD-0.0016) > 1e-9 {
 		t.Errorf("cost = %v, want 0.0016", tot.CostUSD)
 	}
-	// PricedTurns counts PRICED BILLED REQUESTS, so the side call counts here
-	// — but Turns must not, or "turns" would claim the compaction was work.
+	// BilledRequests counts every request with usage, so the side call counts
+	// here — but Turns must not, or "turns" would claim the compaction was
+	// work. PricedRequests is the subset carrying a price.
 	if tot.Turns != 1 {
 		t.Errorf("turns = %d, want 1 — a summarize is not a turn", tot.Turns)
 	}
-	if tot.PricedTurns != 2 {
-		t.Errorf("pricedTurns = %d, want 2", tot.PricedTurns)
+	if tot.BilledRequests != 2 {
+		t.Errorf("billedRequests = %d, want 2", tot.BilledRequests)
+	}
+	if tot.PricedRequests != 2 {
+		t.Errorf("pricedRequests = %d, want 2", tot.PricedRequests)
 	}
 	// The per-model row carries the tokens under the model that was billed,
 	// with its turn count unmoved.
@@ -116,8 +120,8 @@ func TestScanIgnoresCompactionWithoutUsage(t *testing.T) {
 	if rep.Totals.TotalTokens != 115 {
 		t.Errorf("totalTokens = %d, want 115 (an offline compaction costs nothing)", rep.Totals.TotalTokens)
 	}
-	if rep.Totals.PricedTurns != 1 || rep.Totals.Turns != 1 {
-		t.Errorf("turns/priced = %d/%d, want 1/1", rep.Totals.Turns, rep.Totals.PricedTurns)
+	if rep.Totals.PricedRequests != 1 || rep.Totals.Turns != 1 {
+		t.Errorf("turns/priced = %d/%d, want 1/1", rep.Totals.Turns, rep.Totals.PricedRequests)
 	}
 }
 
