@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -227,5 +228,102 @@ func TestTabsetFocusByID(t *testing.T) {
 	}
 	if got := ts.focus("nope"); got != nil {
 		t.Fatalf("focus of an unopened id = %+v, want nil", got)
+	}
+}
+
+// TestTabsetLiveAgentIsPerSession: the mid-turn queue steers "the live agent",
+// and it used to be ONE process-wide pointer every turn overwrote. With two
+// sessions working, whichever turn registered most recently also took every
+// steer meant for the other one — a prompt typed into the foreground tab was
+// injected into the background run, and its row retired off the wrong
+// conversation (#157). Registration is per session, and currentAgent is the
+// only one a steer seam may reach.
+func TestTabsetLiveAgentIsPerSession(t *testing.T) {
+	a, b := memStore(t), memStore(t)
+	ts := newTabset(a)
+	if _, err := ts.open(b); err != nil {
+		t.Fatal(err)
+	}
+	agA, agB := &agent.Agent{}, &agent.Agent{}
+
+	ts.setAgent(a.ID(), agA)
+	if got := ts.currentAgent(); got != agA {
+		t.Fatalf("currentAgent with only A live = %v, want A's agent", got)
+	}
+	ts.setAgent(b.ID(), agB)
+
+	// Foreground is still A, so a mid-turn submit there must reach A's run.
+	if got := ts.currentAgent(); got != agA {
+		t.Fatalf("currentAgent = %v, want A's agent (B registering last must not win)", got)
+	}
+	if got := ts.agentOf(b.ID()); got != agB {
+		t.Fatalf("agentOf(b) = %v, want B's agent", got)
+	}
+
+	// Switch to B: the same seam now reaches B's run.
+	ts.focus(b.ID())
+	if got := ts.currentAgent(); got != agB {
+		t.Fatalf("currentAgent after switching to B = %v, want B's agent", got)
+	}
+
+	// Tearing A's turn down leaves B's registration alone.
+	ts.clearAgent(a.ID(), agA)
+	if got := ts.agentOf(a.ID()); got != nil {
+		t.Fatal("A's turn left its agent registered after the run ended")
+	}
+	if got := ts.agentOf(b.ID()); got != agB {
+		t.Fatal("clearing A unregistered B")
+	}
+	// Every live agent is named for the exit notice: a parked session may be
+	// mid-turn when the TUI quits.
+	if all := ts.liveAgents(); len(all) != 1 || all[0] != agB {
+		t.Fatalf("liveAgents = %v, want just B's agent", all)
+	}
+}
+
+// TestTabsetClearAgentIgnoresAStaleTurn: a turn that finished late must not
+// unregister the NEWER turn that already replaced it on the same session. The
+// pointer check is the whole point of passing the agent back in.
+func TestTabsetClearAgentIgnoresAStaleTurn(t *testing.T) {
+	a := memStore(t)
+	ts := newTabset(a)
+	old, cur := &agent.Agent{}, &agent.Agent{}
+
+	ts.setAgent(a.ID(), old)
+	ts.setAgent(a.ID(), cur) // a retry started before the old turn unwound
+	ts.clearAgent(a.ID(), old)
+
+	if got := ts.agentOf(a.ID()); got != cur {
+		t.Fatalf("a stale turn's teardown unregistered the live one: %v", got)
+	}
+	ts.clearAgent(a.ID(), cur)
+	if got := ts.agentOf(a.ID()); got != nil {
+		t.Fatal("the live turn's teardown left its agent registered")
+	}
+}
+
+// TestTabsetCurrentIDPinsASession: send-now captures the id at the keystroke
+// and delivers against it, so a tab switch in between cannot send the message
+// to whichever session happens to be on screen when the host acts (#157).
+func TestTabsetCurrentIDPinsASession(t *testing.T) {
+	a, b := memStore(t), memStore(t)
+	ts := newTabset(a)
+	if _, err := ts.open(b); err != nil {
+		t.Fatal(err)
+	}
+	pinned := ts.currentID()
+	if pinned != a.ID() {
+		t.Fatalf("currentID = %q, want A", pinned)
+	}
+	ts.focus(b.ID())
+	if ts.currentID() == pinned {
+		t.Fatal("currentID did not follow the switch, so a pinned id proves nothing")
+	}
+	empty := &tabset{}
+	if got := empty.currentID(); got != "" {
+		t.Fatalf("currentID on an empty set = %q, want empty", got)
+	}
+	if got := empty.currentAgent(); got != nil {
+		t.Fatal("currentAgent on an empty set returned an agent")
 	}
 }
