@@ -228,7 +228,8 @@ var fragmentTemplate = template.Must(template.New("frag").Funcs(tmplFuncs).Parse
 <tr><td>tokens in / out</td><td>{{tok .Totals.Input}} / {{tok .Totals.Output}}</td></tr>
 <tr><td>cache read / write</td><td>{{tok .Totals.CacheRead}} / {{tok .Totals.CacheWrite}}</td></tr>
 <tr><td>total tokens</td><td>{{tok .Totals.TotalTokens}}</td></tr>
-<tr><td>cost (reported)</td><td>{{money .Totals.CostUSD}} over {{.Totals.PricedTurns}} priced turns</td></tr>
+<tr><td>cost</td><td>{{money .Totals.CostUSD}} over {{.Totals.PricedRequests}} priced requests</td></tr>
+{{if .Totals.CostEstimated}}<tr><td>&nbsp;&nbsp;estimated locally</td><td>{{money .Totals.CostEstimated}} ({{money .Totals.CostReported}} reported)</td></tr>{{end}}
 <tr><td>window</td><td>{{stamp .Totals.FirstSession}} &rarr; {{stamp .Totals.LastSession}}</td></tr>
 <tr><td>per session</td><td>turns p50 {{.Distribution.TurnsP50}} · p90 {{.Distribution.TurnsP90}} · max {{.Distribution.TurnsMax}}</td></tr>
 <tr><td>per session</td><td>tokens p50 {{tok .Distribution.TokensP50}} · p90 {{tok .Distribution.TokensP90}} · max {{tok .Distribution.TokensMax}}</td></tr>

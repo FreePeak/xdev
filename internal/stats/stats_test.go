@@ -142,8 +142,8 @@ func TestScanAggregatesSessionsTurnsTokensModelsTools(t *testing.T) {
 		t.Errorf("tokens = in %d out %d read %d total %d, want 1500/150/75/1725",
 			tt.Input, tt.Output, tt.CacheRead, tt.TotalTokens)
 	}
-	if tt.PricedTurns != 15 || math.Abs(tt.CostUSD-0.015) > 1e-9 {
-		t.Errorf("cost = %v over %d priced turns, want 0.015/15", tt.CostUSD, tt.PricedTurns)
+	if tt.PricedRequests != 15 || math.Abs(tt.CostUSD-0.015) > 1e-9 {
+		t.Errorf("cost = %v over %d priced requests, want 0.015/15", tt.CostUSD, tt.PricedRequests)
 	}
 	if tt.FirstSession.IsZero() || tt.LastSession.IsZero() || !tt.LastSession.After(tt.FirstSession) {
 		t.Errorf("window = %v → %v", tt.FirstSession, tt.LastSession)

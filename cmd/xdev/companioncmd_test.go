@@ -236,8 +236,8 @@ func TestStatsCmdSummaryAndJSON(t *testing.T) {
 	if rep.Totals.Sessions != 2 || rep.Totals.Turns != 3 || rep.Totals.ToolCalls != 3 {
 		t.Errorf("totals = %+v", rep.Totals)
 	}
-	if rep.Totals.TotalTokens != 3300 || rep.Totals.PricedTurns != 3 {
-		t.Errorf("tokens = %d priced = %d, want 3300/3", rep.Totals.TotalTokens, rep.Totals.PricedTurns)
+	if rep.Totals.TotalTokens != 3300 || rep.Totals.PricedRequests != 3 {
+		t.Errorf("tokens = %d priced = %d, want 3300/3", rep.Totals.TotalTokens, rep.Totals.PricedRequests)
 	}
 	if len(rep.Models) != 1 || rep.Models[0].Model != "test-model" || rep.Models[0].Turns != 3 {
 		t.Errorf("models = %+v", rep.Models)
