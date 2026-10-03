@@ -96,6 +96,30 @@ func (h TurnHooksFunc) OnTurnEnd(s ai.StopReason, err error) {
 	}
 }
 
+// CompactionUsageHook is the optional TurnHooks extension for the token
+// usage a compaction's side call cost: the summarize or handoff document call
+// that read the discarded history and wrote the summary. Separate from
+// TurnHooks (the GoalHook shape) so a hooks implementation that only wants
+// the notification stays valid — one that does not implement this counts no
+// side calls, which is the old behaviour, not an error.
+//
+// Why not a second argument on OnCompaction: that number is the context size
+// BEFORE the compaction, which is what the UI narrates, and no counter should
+// be able to read it as tokens billed.
+type CompactionUsageHook interface{ OnCompactionUsage(*ai.Usage) }
+
+// CompactionUsageNotify adapts a TurnHooks to a compaction-usage callback
+// (nil when the hooks do not implement CompactionUsageHook).
+func CompactionUsageNotify(h TurnHooks) func(*ai.Usage) {
+	if h == nil {
+		return nil
+	}
+	if ch, ok := h.(CompactionUsageHook); ok {
+		return ch.OnCompactionUsage
+	}
+	return nil
+}
+
 // compactionNotifier bridges the compaction call path onto the hook bus:
 // compact.go invokes TurnHooks.OnCompaction after persisting the summary
 // (that file is owned elsewhere this wave, so the seam lives here).

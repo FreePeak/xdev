@@ -95,11 +95,13 @@ func (p *CompactPlan) Compact(ctx context.Context, method string, provider ai.Pr
 		if provider == nil {
 			return ai.Message{}, fmt.Errorf("method handoff needs a reachable provider; use --method shake for an offline compaction")
 		}
-		text, err := summarizeWith(ctx, provider, model, span.msgs[:span.cut], "")
+		text, usage, err := summarizeWith(ctx, provider, model, span.msgs[:span.cut], "")
 		if err != nil {
 			return ai.Message{}, fmt.Errorf("compaction: handoff: %w", err)
 		}
-		return textSummary(text), nil
+		msg := textSummary(text)
+		msg.Usage, msg.Model = usage, model
+		return msg, nil
 	case methodRemote:
 		// Same honest verdict a live boundary reaches: nothing wired here
 		// speaks provider-native streaming compaction, so the member is a

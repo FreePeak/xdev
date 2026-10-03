@@ -917,10 +917,20 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 }
 
 // modelWindow resolves the context window for one provider/model pair.
-// A discovered model returns its own window; anything else falls back to
+// A window the catalog states is returned as-is; anything else falls back to
 // agent.ResolveMaxContextTokens() — XDEV_MAX_CONTEXT_TOKENS when set, else
 // MaxContextTokensDefault. Returning 0 here would silently disable
-// compaction for every model the catalog does not pin.
+// compaction for the model, since every entry point on the ladder
+// (maybeCompact, HandoffDue) gates on ContextWindow > 0.
+//
+// "The catalog lists the model but states no window" is UNKNOWN, not zero,
+// and it is the common case: a gateway's /v1/models answers with bare
+// {id, object, owned_by} (nothing declares a window), so every model reached
+// through discovery arrives with ContextWindow 0. Returning that 0 is what
+// made a long session on a discovered model ride 1339 consecutive turns above
+// the compaction threshold and reach 771,907 tokens before an actual provider
+// overflow forced the emergency recovery — while the same box's pinned
+// models compacted 355 times and peaked at 234,152.
 func modelWindow(cfg *config.Config, provider, model string) int {
 	pc, ok := cfg.Providers[provider]
 	if !ok {
@@ -930,7 +940,7 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 	// list) fill what models.yml never named, so compaction knows the real
 	// window instead of silently disabling itself.
 	for _, m := range providerModels(provider, pc) {
-		if m.ID == model {
+		if m.ID == model && m.ContextWindow > 0 {
 			return m.ContextWindow
 		}
 	}

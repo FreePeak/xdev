@@ -388,6 +388,10 @@ type wireEntry struct {
 	Type      string       `json:"type"`
 	Timestamp time.Time    `json:"timestamp"`
 	Message   *wireMessage `json:"message"`
+	// Summary is a compaction entry's retained-context message. Its usage is
+	// what the summarize / handoff-document call cost, so it is token and
+	// cost the session paid but which used to land in no counter at all.
+	Summary *wireMessage `json:"summary"`
 }
 
 type wireMessage struct {
@@ -403,6 +407,75 @@ type wireMessage struct {
 type wireBlock struct {
 	Type string `json:"type"`
 	Name string `json:"name"`
+}
+
+// addUsage folds one billed request's usage into the totals and its model's
+// row, and returns what the caller owes the day rollup (tokens, USD). Every
+// figure comes off the persisted per-message Usage: a provider that reports no
+// usage contributes nothing, which PricedTurns exposes.
+//
+// turns says whether this request counts as a TURN in the model's row: a
+// compaction summary is a billed request the session paid for, but it is not
+// the model advancing the work, so it contributes tokens and cost and not a
+// turn. Keeping the flag here is what stops the two callers from drifting.
+func (c *counters) addUsage(m *wireMessage, turns bool) (turnTokens, turnCost float64) {
+	u := m.Usage
+	if u == nil {
+		return 0, 0
+	}
+	name := m.Model
+	if name == "" {
+		name = "unknown"
+	}
+	if c.Models == nil {
+		c.Models = map[string]modelCounters{}
+	}
+	mc := c.Models[name]
+	if turns {
+		mc.Turns++
+	}
+	c.Input += u.Input
+	c.Output += u.Output
+	c.CacheRead += u.CacheRead
+	c.CacheWrite += u.CacheWrite
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.Input + u.Output + u.CacheRead + u.CacheWrite
+	}
+	c.TotalTokens += total
+	mc.Input += u.Input
+	mc.Output += u.Output
+	mc.CacheRead += u.CacheRead
+	mc.TotalTokens += total
+	c.Models[name] = mc
+	turnTokens = float64(total)
+	if u.Cost != nil {
+		c.CostUSD += u.Cost.Total
+		mc.CostUSD += u.Cost.Total
+		c.PricedTurns++
+		turnCost = u.Cost.Total
+	}
+	return turnTokens, turnCost
+}
+
+// addDay books one billed request against its UTC day: tokens and spend move
+// the day's totals, and only a TURN moves its turn count — a compaction
+// summary is spend without work.
+func (c *counters) addDay(e *wireEntry, turn bool, tokens, usd float64) {
+	if e.Timestamp.IsZero() {
+		return
+	}
+	if c.Days == nil {
+		c.Days = map[string]dayCounters{}
+	}
+	day := e.Timestamp.UTC().Format("2006-01-02")
+	d := c.Days[day]
+	if turn {
+		d.Turns++
+	}
+	d.TotalTokens += int64(tokens)
+	d.CostUSD += usd
+	c.Days[day] = d
 }
 
 // counters is the per-file rollup: everything the report needs from one
@@ -476,6 +549,14 @@ func readFileCounters(path string) (counters, error) {
 }
 
 func (c *counters) addEntry(e *wireEntry) {
+	// A compaction entry's summary carries a billed request's usage. It is
+	// folded as tokens and cost but is NOT a turn: the turn count is what
+	// "how many times the model was asked", and a summarize call asks
+	// something different (it compresses, it does not advance the work).
+	if e.Type == "compaction" && e.Summary != nil && e.Summary.Usage != nil {
+		tokens, usd := c.addUsage(e.Summary, false)
+		c.addDay(e, false, tokens, usd)
+	}
 	if e.Type != "message" || e.Message == nil {
 		return
 	}
@@ -496,35 +577,7 @@ func (c *counters) addEntry(e *wireEntry) {
 		if name == "" {
 			name = "unknown"
 		}
-		if c.Models == nil {
-			c.Models = map[string]modelCounters{}
-		}
-		mc := c.Models[name]
-		mc.Turns++
-		var turnTokens, turnCost float64
-		if u := m.Usage; u != nil {
-			c.Input += u.Input
-			c.Output += u.Output
-			c.CacheRead += u.CacheRead
-			c.CacheWrite += u.CacheWrite
-			total := u.TotalTokens
-			if total == 0 {
-				total = u.Input + u.Output + u.CacheRead + u.CacheWrite
-			}
-			c.TotalTokens += total
-			mc.Input += u.Input
-			mc.Output += u.Output
-			mc.CacheRead += u.CacheRead
-			mc.TotalTokens += total
-			turnTokens = float64(total)
-			if u.Cost != nil {
-				c.CostUSD += u.Cost.Total
-				mc.CostUSD += u.Cost.Total
-				c.PricedTurns++
-				turnCost = u.Cost.Total
-			}
-		}
-		c.Models[name] = mc
+		turnTokens, turnCost := c.addUsage(m, true)
 		for _, b := range m.Content {
 			if b.Type != "toolCall" {
 				continue
@@ -537,17 +590,7 @@ func (c *counters) addEntry(e *wireEntry) {
 			t.Calls++
 			c.Tools[b.Name] = t
 		}
-		if !e.Timestamp.IsZero() {
-			if c.Days == nil {
-				c.Days = map[string]dayCounters{}
-			}
-			day := e.Timestamp.UTC().Format("2006-01-02")
-			d := c.Days[day]
-			d.Turns++
-			d.TotalTokens += int64(turnTokens)
-			d.CostUSD += turnCost
-			c.Days[day] = d
-		}
+		c.addDay(e, true, turnTokens, turnCost)
 	case "toolResult":
 		if m.IsError {
 			c.ToolErrors++
