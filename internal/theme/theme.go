@@ -185,6 +185,11 @@ const (
 	StatusLineOutput    = "status_line_output"
 	StatusLineCost      = "status_line_cost"
 	StatusLineSubagents = "status_line_subagents"
+	// StatusLineMode paints the session mode (mode.go: /mode, the Shift-Tab
+	// cycle). Optional like the diff bands — NOT in the omp 66-token
+	// contract, because omp has no mode surface — so a theme that omits it
+	// derives it from Accent (extraChains) rather than failing to load.
+	StatusLineMode = "status_line_mode"
 
 	// Legacy xdev slot names (PRD §3.5): still what the TUI passes to Get,
 	// mirrored from the canonical tokens at parse time.
