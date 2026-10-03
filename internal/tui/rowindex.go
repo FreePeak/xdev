@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -165,6 +166,12 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 		tool: b.ToolName, status: b.Status, stream: b.stream,
 		expanded: b.Expanded, age: age, trim: a.trimTier(i),
 		dlen: len(b.Diff), thinkOff: b.ThinkOff, focused: i == a.thinkFocus,
+		// fade quantizes the focus tween so the box re-renders as it eases. It
+		// changes a border's colour without changing any row's text or length,
+		// so a stamp that omitted it would paint the same cached border for the
+		// whole fade and the box would snap at the end. The in-flight sentinel
+		// (focusFade < 0) is stamped as -1, which no settled bucket reaches.
+		fade: fadeBucket(a.focusFade),
 		live: b.liveSeq, mermaid: a.renderMermaid,
 	}
 }
@@ -177,6 +184,17 @@ func (a *App) trimTier(i int) int8 {
 		return tierRecent
 	}
 	return a.rowIdx.tier[i]
+}
+
+// fadeBucket maps a focus tween's progress onto the render cache's stamp:
+// -1 for "no tween", 0..8 for the steps a live fade passes through. Eight
+// buckets is 12.5% — finer than the 1/6 per tick the tween advances, so no
+// visible step is ever coalesced into one repaint.
+func fadeBucket(fade float64) int8 {
+	if fade < 0 {
+		return -1
+	}
+	return int8(math.Round(fade * 8))
 }
 
 // toolWindow is a finished result's collapsed render window for a tier.

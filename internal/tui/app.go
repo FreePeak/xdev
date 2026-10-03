@@ -438,6 +438,14 @@ type App struct {
 	// the transcript by default instead of whatever box happens to sit under the
 	// pointer. -1 = no box focused (app.go scrollThinkBox, selection.go press).
 	thinkFocus int
+	// focusFade is the 0→1 progress of the reasoning box's focus transition:
+	// 1 once focused (a tween that overshoots its target is a bug, so it
+	// clamps), 0 once not. Set by selection.go on a focus change and advanced
+	// one step per UI tick (app.go tick), so the border eases into its
+	// brightened ink instead of snapping — the same ~300ms ease an animated
+	// border gets elsewhere. -1 means "no transition in flight", which is the
+	// steady state, so an idle transcript spends nothing on it.
+	focusFade float64
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
@@ -504,6 +512,12 @@ type blockKey struct {
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// fade quantizes App.focusFade for the render cache: the tween changes the
+	// border's colour without changing a row's text or length, so a stamp that
+	// did not carry it would repaint the same cached border for the whole fade
+	// and the box would jump at the end. Eight buckets is 12.5% steps — finer
+	// than the 1/6 per tick the tween actually advances, so no step is skipped.
+	fade int8
 	// mermaid stamps whether a ```mermaid fence in this block drew as a
 	// diagram. Flipping the setting changes every block's rows without any of
 	// them changing length, so the stamp has to say which way it rendered or
@@ -539,6 +553,9 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		// No box is focused until a click names one: the wheel is the
 		// transcript's from the first frame.
 		thinkFocus: -1,
+		// -1 = no tween in flight. A box that has never been focused never
+		// animates, so the welcome screen and an idle transcript cost nothing.
+		focusFade: -1,
 	}
 }
 
@@ -2115,6 +2132,7 @@ func (a *App) Reset() {
 	a.closeWindow()
 	a.blocks = nil
 	a.thinkFocus = -1  // the focused box went with them
+	a.focusFade = -1   // no tween: the box that was fading is gone with its blocks
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
 	a.msgv = nil       // likewise the read-only surface naming one
@@ -2400,6 +2418,7 @@ func (a *App) SetShowThinking(on bool) {
 		}
 		a.blocks = kept
 		a.thinkFocus = -1 // a dropped box cannot stay the wheel's target
+		a.focusFade = -1  // nor its half-drawn border
 	}
 	a.clearRenderCache()
 	a.mu.Unlock()
@@ -2850,6 +2869,17 @@ func (a *App) Run() {
 			// (selection.go selEdgeTick).
 			if a.selEdgeTick() {
 				animate = true
+				// The reasoning box's focus tween advances one step per tick and
+				// keeps asking for a frame until it lands. -1 is the steady state
+				// (no box was ever focused), so an idle transcript stays at zero
+				// repaint cost — the same discipline as the sheen above it.
+				if a.focusFade >= 0 {
+					a.focusFade += focusFadeStep
+					if a.focusFade >= 1 {
+						a.focusFade = 1 // clamp: an overshoot is a stuck mid-fade
+					}
+					animate = true
+				}
 			}
 			// An armed leader prefix is the same kind of timer: the pair has
 			// to stop waiting on its own, because Resolve alone would keep it
@@ -4005,6 +4035,12 @@ func thinkWindow(n, off, rows int) (start, end int) {
 	return max(0, end-rows), end
 }
 
+// focusFadeStep is one tick's worth of the focus tween. The UI runs at ~30fps
+// (app.go tick), so 1/6 lands in ~200ms — an eased border, not a slide. The
+// step is a constant rather than a duration so the ease has a fixed cost per
+// frame whatever the tick happens to be doing.
+const focusFadeStep = 1.0 / 6.0
+
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
 // "Thought for Xs" once it settles) and the body shows a fixed window of it.
@@ -4022,9 +4058,23 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	box := a.th.Box()
 	focused := i == a.thinkFocus
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
+	if fade := a.focusFade; fade >= 0 {
+		// During the tween the border sits BETWEEN the dim and the focused
+		// ink rather than between two identical ones: the base is already the
+		// thinking accent, so the eased colour is that accent walked back
+		// toward the body gray and forward again. At fade=1 it lands exactly on
+		// AccentThinking, so a settled box is the same cell it always was.
+		base := a.th.Get(theme.GrayDim)
+		if fade < 1 {
+			border = tcell.StyleDefault.Foreground(
+				a.cellColor(theme.Lerp(base, a.th.Get(theme.AccentThinking), fade)))
+		}
+	}
 	if focused {
 		// Bold is the terminal's own bright variant: the aim reads as the same
-		// hue turned up, not as a second colour with its own meaning.
+		// hue turned up, not as a second colour with its own meaning. Applied
+		// on top of the tween so the settled focused box is byte-for-byte the
+		// style it always was.
 		border = border.Bold(true)
 	}
 	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
