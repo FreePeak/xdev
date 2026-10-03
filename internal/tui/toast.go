@@ -166,7 +166,8 @@ func (a *App) toastsExpiring() bool {
 //
 // Caller holds a.mu. The corner is the main pane's (rightEdge), so a toast
 // with the context dock open stops at the panel's edge instead of painting
-// over it, and the top bar is row 0, so the stack starts under it.
+// over it, and the stack starts at transcriptTop() so it clears the session
+// strip when that row is showing.
 func (a *App) drawToasts(s tcell.Screen) {
 	live := a.liveToasts()
 	edge := a.rightEdge()

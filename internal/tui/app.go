@@ -255,7 +255,7 @@ type App struct {
 	settingsOverlayOps *SettingsOverlayOps      // /settings overlay, wired by cmd (nil → disabled)
 	thinkingOps        *ThinkingOps             // /thinking, wired by cmd (nil → notices)
 	cwd                string                   // working directory (the status row's left side)
-	branch             string                   // git branch for the top bar ("" when none)
+	branch             string                   // git branch for the status row ("" when none)
 	commandDir         string                   // markdown command discovery root
 	pathRoot           string                   // @-completion root (empty disables the menu)
 	pathList           func(string) []PathEntry // one directory's entries (the only source)
@@ -564,8 +564,8 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 	}
 }
 
-// SetLocation wires the working directory: the status row's left side, and
-// the top bar's git branch.
+// SetLocation wires the working directory and its git branch: both land on
+// the status row's left side.
 func (a *App) SetLocation(cwd string) {
 	a.mu.Lock()
 	a.cwd = cwd
@@ -1239,8 +1239,8 @@ func (a *App) RunningTaskCallID() string {
 }
 
 // spinFrame is the one running indicator's current glyph: the theme's frames at
-// the shared index. Every surface that says "still working" — the top bar, the
-// composer divider, a tool call row, a reasoning box, a subagent's child row —
+// the shared index. Every surface that says "still working" — the composer
+// divider, a tool call row, a reasoning box, a subagent's child row —
 // paints this, so they move in step and a theme restyles them together. One
 // helper because they were not one indicator: the reasoning box was a frozen
 // "⠹" and the child rows a static "⎿", so the same state read three ways.
@@ -3029,8 +3029,8 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.runPendingMsgAction()
 				return // the UI loop repaints after handleKey
 			}
-			// The tab strip is chrome under the top bar: a click there names a
-			// session, never a transcript row, so it is asked after every
+			// The tab strip is chrome above the transcript: a click there names
+			// a session, never a transcript row, so it is asked after every
 			// modal (a picker owns its own screen) and before the queue and
 			// the transcript selection below.
 			if a.handleTabStripMouse(m, press) {
@@ -3768,8 +3768,8 @@ func (a *App) totalLinesLocked() int {
 }
 
 func (a *App) viewportLinesLocked() int {
-	// top bar (transcript only) + scrollback + blank + composer (grows with
-	// the draft) + status row.
+	// session strip (transcript only) + scrollback + blank + composer (grows
+	// with the draft) + status row.
 	return a.height - a.composerRows() - 2 - a.transcriptTop()
 }
 
@@ -4472,10 +4472,9 @@ func (a *App) paint() {
 	// menu, shortcuts) instead of a blank void.
 	if len(a.blocks) == 0 {
 		composerTop := h - 1 - a.composerRows()
-		// Top bar, then the session strip under it, then the welcome body —
-		// the strip owns its row whether or not the transcript exists, so the
-		// two screens cannot disagree about what is open.
-		a.drawTopBar(s)
+		// The session strip at row 0, then the welcome body — the strip owns
+		// its row whether or not the transcript exists, so the two screens
+		// cannot disagree about what is open.
 		a.drawTabStrip(s, w)
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
@@ -4501,21 +4500,19 @@ func (a *App) paint() {
 		return
 	}
 
-	// Grok layout: top bar, scrollback, blank row, composer box (grows
-	// with the draft's wrapped line count), status row at the bottom.
-	// The top bar is chrome: the transcript viewport starts below it.
+	// Grok layout: scrollback, blank row, composer box (grows with the
+	// draft's wrapped line count), status row at the bottom. The transcript
+	// viewport starts at transcriptTop(), which is 0 unless the session
+	// strip claims a row.
 	top := a.transcriptTop()
 	cRows := a.composerRows()
 	vp := h - cRows - 2 - top
 	if vp < 1 {
 		vp = 1
 	}
-	// The top bar belongs to the main pane: the branch is chrome and must not
-	// paint under the panel's own surface.
-	a.drawTopBar(s)
-	// The session strip owns the row under the top bar (opencode's tab row),
-	// so the transcript's first row shifts with it — transcriptTop() is the
-	// single place that offset is computed, so the strip cannot desync the
+	// The session strip owns row 0 (opencode's tab row), so the transcript's
+	// first row shifts with it — transcriptTop() is the single place that
+	// offset is computed, so the strip cannot desync the
 	// scroll math by being drawn without being counted.
 	a.drawTabStrip(s, a.rightEdge())
 	// The panel is built before the transcript's width is computed: with it open
@@ -5058,8 +5055,8 @@ func (a *App) composerAvail() int {
 }
 
 // composerBudget is the most input rows the box may paint: the screen minus
-// everything else it shares the terminal with (top bar, one transcript row,
-// the box's own borders, the status row) — draw()'s viewport arithmetic
+// everything else it shares the terminal with (one transcript row, the box's
+// own borders, the status row) — draw()'s viewport arithmetic
 // solved for the composer. Without a ceiling the box grew past the screen:
 // its top edge climbed above row 0, drawComposer bailed on yTop < 1, and a
 // large paste showed NOTHING while the full draft sat in the buffer — the
@@ -5277,8 +5274,9 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 	a.jump = panelRect{x: x, y: y, w: w, h: 1}
 }
 
-// drawStatusRow renders the bottom row: the working directory on the left,
-// the configured HUD segments (settings statusLine.segments) right-aligned
+// drawStatusRow renders the bottom row: the working directory and its git
+// branch on the left (statusLocation), the configured HUD segments
+// (settings statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
 // on a small terminal. The row belongs to the main pane: its budget and its
@@ -5287,11 +5285,12 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
 	w := a.rightEdge()
-	// The running tool call leads the row: "● <name> · cd <cwd>" on
-	// the left, the configured segments right-aligned.
+	// The running tool call leads the row on the left ("● <name>", with the
+	// room it needs reserved), then the location; the configured segments
+	// stay right-aligned.
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		pathLbl := pathDisplay(a.cwd, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
+		pathLbl := a.statusLocation(w - 2 - width(cmdLabel) - 2 - hudEssentialWidth(parts) - 1)
 		if pathLbl != "" {
 			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			drawText(a.scr, 2, y, pathLbl, pathSt)
@@ -5300,14 +5299,33 @@ func (a *App) drawStatusRow(y int) {
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
-	// run, so they claim the space first: the path is what shrinks.
-	budget := w - 2 - hudEssentialWidth(parts) - 1
-	lbl := pathDisplay(a.cwd, budget-2)
+	// run, so they claim the space first: the location is what shrinks.
+	lbl := a.statusLocation(w - 2 - hudEssentialWidth(parts) - 1)
 	if lbl != "" {
 		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		drawText(a.scr, 2, y, lbl, pathSt)
 	}
 	a.drawHUD(y, w, 2+width(lbl), parts)
+}
+
+// statusLocation is the left side of the status row within budget cells: the
+// working directory, then the git branch. The branch rides here because the
+// top bar that used to carry it is gone, so a checkout and its branch read as
+// one location instead of two surfaces.
+//
+// The branch claims its cells FIRST, because pathDisplay tail-truncates a long
+// path gracefully ("…/checkout/xdev-feature") while the branch has nothing to
+// degrade into — a deep worktree path spent the whole row, and the branch
+// disappeared exactly when the HUD pills joined it and the row was busiest.
+// It still yields whole: a branch too wide for the row leaves instead of
+// printing half of itself. Caller holds a.mu.
+func (a *App) statusLocation(budget int) string {
+	if a.branch != "" && budget-3-width(a.branch) >= 4 {
+		if p := pathDisplay(a.cwd, budget-3-width(a.branch)); p != "" {
+			return p + " · " + a.branch
+		}
+	}
+	return pathDisplay(a.cwd, budget-2)
 }
 
 // drawHUD renders the configured status segments right-aligned on the

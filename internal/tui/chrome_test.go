@@ -482,9 +482,9 @@ func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 	prim, w, _ := scr.GetContents()
 	x0, y0 := -1, -1
 	for i := range prim {
-		// The top bar also leads with ❯ at (0,0); the band row is a
-		// transcript row, so below the bar and flush left.
-		if i%w == 0 && i >= w && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
+		// The band row is a transcript row, and with no top bar it can be
+		// row 0; what identifies it is the leading ❯ and flush left.
+		if i%w == 0 && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
 			x0, y0 = i%w, i/w
 			break
 		}
@@ -1154,16 +1154,14 @@ func TestAskCardTimeoutNotices(t *testing.T) {
 	}
 }
 
-// TestTopBarCarriesBranchAndSpinner pins the header's contract: row 0 is the
-// git branch, the running spinner LEADS it at the far left while a turn is in
-// flight, and nothing else — the session's prompts used to share this bar and
-// were dropped (user request), so they must not creep back onto it. The spinner
-// uses the theme's own frames, so a theme restyles it like every other
-// indicator, and it leaves with the run.
-func TestTopBarCarriesBranchAndSpinner(t *testing.T) {
+// TestNoTopBarAndBranchOnTheStatusRow pins the chrome contract after the top
+// bar was dropped: row 0 belongs to the transcript, and the git branch rides
+// the status row beside the working directory — one surface that reads as a
+// single location. The running spinner never comes back to that row either;
+// it lives in the composer's divider (TestSpinnerFramesFromTheme).
+func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
-	dir := t.TempDir()
-	app.SetLocation(dir)
+	app.SetLocation(t.TempDir())
 	app.mu.Lock()
 	app.branch = "fix/boxes"
 	app.st.Model = "some-model"
@@ -1172,52 +1170,80 @@ func TestTopBarCarriesBranchAndSpinner(t *testing.T) {
 	app.AddSystemBlock(strings.Repeat("line\n", 60)) // guarantees hidden rows
 	app.draw()
 
-	bar := func() string {
-		return strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0]
-	}
-	if got := bar(); !strings.Contains(got, "❯ fix/boxes") {
-		t.Fatalf("top bar %q missing the branch", got)
-	}
-	// No prompts, no directory, no model: the branch is the whole bar.
-	if got := bar(); strings.Contains(got, "fix the tool") {
-		t.Fatalf("the prompt text is back on the top bar: %q", got)
-	}
-	if dirName := dir[strings.LastIndex(dir, "/")+1:]; strings.Contains(bar(), dirName) {
-		t.Fatalf("top bar still carries the directory path: %q", bar())
-	}
-	if got := bar(); strings.Contains(got, "some-model") {
-		t.Fatalf("top bar %q must not carry the model name", got)
-	}
-	// The transcript starts below the bar: the bar is chrome, content rows
-	// belong to the scrollback.
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
-	if !strings.Contains(strings.Join(rows[1:], "\n"), "line") {
-		t.Fatalf("transcript content lost to the top bar: %q", rows[1])
+	// Row 0 is the session's own first prompt, not a header: no branch on it,
+	// and the prompt text is where it has always been.
+	if top := rows[0]; strings.Contains(top, "fix/boxes") || !strings.Contains(top, "fix the") {
+		t.Fatalf("row 0 %q must be transcript content, not a header", top)
 	}
 
-	// Running: a frame of the theme's spinner LEADS the branch, at the far
-	// left — it is the bar's one thing that moves, and trailing it read as
-	// part of the branch name.
+	// The branch is on the status row, next to the path, in that order.
+	status := lastRow(screenText(scr))
+	pathAt := strings.Index(status, "·")
+	branchAt := strings.Index(status, "fix/boxes")
+	if branchAt < 0 || pathAt < 0 || pathAt > branchAt {
+		t.Fatalf("status row %q must carry the directory then the branch", status)
+	}
+
+	// Running: the spinner belongs to the divider, not to row 0 or the
+	// status row.
 	th := theme.Load("groknight")
 	th.Symbols = theme.Symbols{Status: []string{"X", "Y"}}
 	app.SetTheme(th)
-	for i, want := range th.SpinnerFrames() {
-		app.mu.Lock()
-		app.st.Running = true
-		app.st.spinnerIdx = i
-		app.mu.Unlock()
-		app.draw()
-		if got := bar(); !strings.Contains(got, want+" ❯ fix/boxes") {
-			t.Fatalf("frame %d: top bar %q must carry %q ahead of the branch", i, got, want)
-		}
-	}
-
-	// Idle: no frame left behind.
+	app.SetRunning(true)
 	app.mu.Lock()
-	app.st.Running = false
+	app.st.spinnerIdx = 0
 	app.mu.Unlock()
 	app.draw()
-	if got := strings.TrimRight(bar(), " "); got != " ❯ fix/boxes" {
-		t.Fatalf("idle top bar %q must be the branch alone", got)
+	text := screenText(scr)
+	first := strings.Split(strings.TrimRight(text, "\n"), "\n")[0]
+	for _, where := range []struct {
+		what string
+		ln   string
+	}{{"row 0", first}, {"the status row", lastRow(text)}} {
+		if strings.Contains(where.ln, "X ") || strings.Contains(where.ln, "Y ") {
+			t.Fatalf("a spinner frame leaked onto %s: %q", where.what, where.ln)
+		}
+	}
+	if !strings.Contains(text, "X · some-model") {
+		t.Fatalf("the spinner belongs in the divider, not on a chrome row:\n%s", text)
+	}
+}
+
+// TestStatusRowKeepsBranchAndTruncatesThePath pins the two halves of the
+// location's width argument: the branch claims cells first and a long path
+// gives way around it, while a branch too wide for the row leaves whole rather
+// than printing half of itself.
+func TestStatusRowKeepsBranchAndTruncatesThePath(t *testing.T) {
+	app, scr := newTestApp(t, 100, 20)
+	app.AddSystemBlock("ready")
+	app.SetLocation("/Volumes/work/harvey/freepeak/checkout/xdev-feature/deep/nested/subdir")
+	app.mu.Lock()
+	app.branch = "feat/branch-in-status-row"
+	app.mu.Unlock()
+	app.draw()
+
+	// A path longer than the row: the tail that identifies the project and the
+	// branch both survive, with the cut marked at the front.
+	row := lastRow(screenText(scr))
+	if !strings.Contains(row, "xdev-feature") || !strings.Contains(row, "feat/branch-in-status-row") {
+		t.Fatalf("a long path must truncate around the branch, not swallow it: %q", row)
+	}
+	if !strings.Contains(row, "…") {
+		t.Fatalf("a truncated path must mark its cut: %q", row)
+	}
+
+	// A branch with no room at all leaves the row entirely — clipped in the
+	// middle it would read as a longer branch name than it is.
+	app.mu.Lock()
+	app.branch = strings.Repeat("long-branch-name-", 6)
+	app.mu.Unlock()
+	app.draw()
+	row = lastRow(screenText(scr))
+	if strings.Contains(row, "long-branch-name") {
+		t.Fatalf("a branch with no room must be dropped whole, not clipped: %q", row)
+	}
+	if !strings.Contains(row, "xdev-feature") {
+		t.Fatalf("the path is what the row keeps: %q", row)
 	}
 }

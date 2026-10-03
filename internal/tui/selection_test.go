@@ -51,8 +51,7 @@ func drag(app *App, x0, y0, x1, y1 int) {
 }
 
 // contentRow returns the SCREEN row that rendered transcript text sits on:
-// the capture is viewport-relative, and the top bar owns whatever rows sit
-// above the transcript.
+// the capture is viewport-relative, so the session strip's row is added back.
 func contentRow(t *testing.T, app *App, text string) int {
 	t.Helper()
 	for i, sr := range app.selRows {
@@ -258,9 +257,11 @@ func TestCopyConfirmationIsAToast(t *testing.T) {
 	app.mu.Unlock()
 	app.draw()
 
+	// The corner is the right end of the first transcript row, which is row 0
+	// now that the top bar is gone.
 	ty, _ := rowWith(t, scr, "Copied 7 chars")
-	if ty == 0 {
-		t.Fatal("the copy confirmation is not in the corner; it painted somewhere else")
+	if ty != 0 {
+		t.Fatalf("copy confirmation on row %d, want the top corner (row 0)", ty)
 	}
 	if line := rowContaining(scr, "Copied 7 chars"); strings.Contains(line, "test/free") {
 		t.Fatalf("confirmation row = %q, want it off the model's divider", line)
@@ -366,10 +367,9 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	}
 	app.mu.Unlock()
 
-	// Press on the top transcript row (below the top bar — a press on the
-	// bar is a chrome gesture), then pull the pointer down past the last
-	// transcript row: each event scrolls one row, exactly like a terminal's
-	// edge drag.
+	// Press on the first transcript row (a press on the session strip is a
+	// chrome gesture), then pull the pointer down past the last transcript
+	// row: each event scrolls one row, exactly like a terminal's edge drag.
 	hdr := app.transcriptTop()
 	app.mu.Lock()
 	press(app, 3, hdr)

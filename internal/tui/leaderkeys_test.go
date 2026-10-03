@@ -196,18 +196,19 @@ func TestTabStripHiddenForOneSession(t *testing.T) {
 	}
 }
 
-// The strip owns the row under the top bar, so the transcript must start
-// below it — otherwise the strip paints over the first line of output.
+// There is no top bar, so a single session's transcript starts at row 0; a
+// visible strip owns row 0 and pushes it down — otherwise the strip paints
+// over the first line of output.
 func TestTranscriptTopAccountsForStrip(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	app.AddUserBlock("hi")
 	app.SetTabs([]TabInfo{{ID: "aaa", Current: true}})
-	if got := app.transcriptTop(); got != 1 {
-		t.Fatalf("transcriptTop with one tab = %d, want 1", got)
+	if got := app.transcriptTop(); got != 0 {
+		t.Fatalf("transcriptTop with one tab = %d, want 0", got)
 	}
 	app.SetTabs([]TabInfo{{ID: "aaa"}, {ID: "bbb", Current: true}})
-	if got := app.transcriptTop(); got != 2 {
-		t.Fatalf("transcriptTop with a strip = %d, want 2", got)
+	if got := app.transcriptTop(); got != 1 {
+		t.Fatalf("transcriptTop with a strip = %d, want 1", got)
 	}
 }
 

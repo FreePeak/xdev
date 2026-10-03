@@ -34,11 +34,11 @@ func currentTabID(tabs []TabInfo) string {
 // could, and a line spent on one word is a line the transcript loses.
 func (a *App) tabStripVisible() bool { return len(a.tabs) >= 2 }
 
-// tabStripRow is the row the strip owns, directly under the top bar. It is
-// drawn only when more than one session is open — with a single session the
-// status row already says everything the strip could, and a permanent row
+// tabStripRow is the row the strip owns — row 0, the top row of the screen.
+// It is drawn only when more than one session is open: with a single session
+// the status row already says everything the strip could, and a permanent row
 // spent on one word costs the transcript a line for nothing.
-const tabStripRow = 1
+const tabStripRow = 0
 
 // drawTabStrip paints the open-session strip on row tabStripRow: one cell per
 // session, the running one wearing ✦, an unread one dim-bright with a ✦, and

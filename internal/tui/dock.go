@@ -553,13 +553,14 @@ func (a *App) dockFooter() (dockFold, bool) {
 	if a.cwd != "" {
 		f.rows = append(f.rows, dockRow{text: dockClip(pathDisplay(a.cwd, dockInner))})
 	}
-	if a.branch != "" {
-		f.rows = append(f.rows, dockRow{text: dockClip("on " + a.branch)})
-	}
+	// No branch row: it moved to the status row's left beside the path when the
+	// top bar came off, and a panel that repeats it just spends a row saying
+	// what the row under the composer already says.
+	//
 	// The model and the reasoning level are one request, so they are one row:
-	// a bare "high" under a path and a branch reads as a name of its own, and
-	// the divider already shows the pair beside each other. The section is the
-	// one never folded away, so the request outlives a busy transcript.
+	// a bare "high" under a path reads as a name of its own, and the divider
+	// already shows the pair beside each other. The section is the one never
+	// folded away, so the request outlives a busy transcript.
 	if l := a.thinkingLevel(); l != "" {
 		row := l
 		if a.st.Model != "" {
@@ -725,8 +726,8 @@ func (a *App) dockReserve() int {
 // rightEdge is the width the main pane lays out against: the last screen
 // column the transcript band may paint in — its fills, its timestamps, its
 // scrollbar, and the width its rows are wrapped at — and, since the panel
-// became a window of its own, the width the top bar, the composer box and the
-// status row stop at too. The panel used to live inside the transcript's rows
+// became a window of its own, the width the composer box and the status row
+// stop at too. The panel used to live inside the transcript's rows
 // and nothing else, which is why the surface a human types into kept the whole
 // terminal; a two-window layout has no such exception. A terminal too narrow to
 // give up the columns keeps its full width — the panel loses that argument.
@@ -741,7 +742,7 @@ func (a *App) rightEdge() int {
 // dockGrid returns the band the panel paints into: every row of the terminal,
 // top to bottom, because the panel is a window beside the stream rather than a
 // band inside it (opencode's sidebar). Nothing is reserved above or below it —
-// the main pane's top bar, composer and status row are what it sits beside. A
+// the main pane's composer and status row are what it sits beside. A
 // terminal too short to hold a title and a section reserves nothing. The height
 // is a plain a.height, so a resize that changes the pane's proportions changes
 // the row budget for free — the bandH the build cached is compared against it
