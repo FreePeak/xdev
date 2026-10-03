@@ -4429,6 +4429,17 @@ func isWindowRow(s string) bool {
 // whole session.
 func (a *App) draw() {
 	a.paint()
+	// The prompt box's rows are sent WHOLE, every frame, even though paint()
+	// fills them with the content they already hold: tcell writes only a cell
+	// whose content changed, so the spaces that did not change ride on no frame
+	// at all (measured: 16 of 120 columns carried a glyph). A terminal keeps
+	// what it was sent and renders "Type a message…" correctly; a pane that
+	// re-renders from its own grid — a reattach, a cleared terminal, a resize
+	// that re-clears — keeps ITS value in the columns xdev never addressed, and
+	// the box reads "TypeXaXmessage…XXXXXX" (composer_wire_test.go reproduces
+	// it through such a pane). Unconditional, because the pane's reset is
+	// silent by definition: no event announces it, so a trigger cannot cover it.
+	a.markComposerDirty()
 	a.scr.Show()
 	// A frame the terminal never took is not self-healing: tcell marks each
 	// cell clean before the write, so a dropped frame leaves a partial screen
@@ -4440,7 +4451,35 @@ func (a *App) draw() {
 	}
 }
 
-// logFrameAfterDraw is called once per frame after draw()
+// markComposerDirty forces the prompt box's rows dirty so the next flush
+// carries them whole. It must run after paint() and before Show(): paint
+// decides the cells' content, Show() decides which of them travel.
+//
+// The box is the composer's rows plus its top border and its info divider —
+// every row from yTop-1 up to the row the status line takes — because the
+// border and the divider are as unchanged as the spaces are, and a pane
+// showing its own fill inside the box reads as a broken prompt, not a blank
+// one. The columns are the main pane's (rightEdge): the context dock owns the
+// rest and paints its own rows, so marking them would only make this fix
+// repaint the panel.
+//
+// Caller holds a.mu, as paint() does.
+func (a *App) markComposerDirty() {
+	cells, ok := a.scr.(interface{ GetCells() *tcell.CellBuffer })
+	if !ok {
+		return // a screen that keeps its cells private cannot be asked
+	}
+	buf := cells.GetCells()
+	bw, bh := buf.Size()
+	cols := min(a.rightEdge(), bw)
+	top := a.height - 1 - a.composerRows()
+	for y := max(top-1, 0); y < min(a.height-1, bh); y++ {
+		for x := range cols {
+			buf.SetDirty(x, y, true)
+		}
+	}
+}
+
 // to snapshot the screen buffer to the log file when --log is active.
 func (a *App) logFrameAfterDraw() { a.logFrame() }
 
