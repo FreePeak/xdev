@@ -46,3 +46,39 @@ func TestModelWindowFallbackHonoursEnv(t *testing.T) {
 		t.Fatalf("env fallback window = %d, want 64000", got)
 	}
 }
+
+// TestModelWindowListedButWindowless pins the defect this file's other cases
+// cannot see: a model the catalog DOES list, with no window stated. That is
+// what a gateway's /v1/models produces — bare {id, object, owned_by}, so every
+// discovered model arrives with ContextWindow 0 — and returning that 0 reached
+// the ladder's own `ContextWindow <= 0` guard, switching compaction off for
+// that model entirely. A listed id with no window is UNKNOWN, not zero.
+func TestModelWindowListedButWindowless(t *testing.T) {
+	t.Setenv(agent.MaxContextTokensEnv, "")
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"gw": {API: "openai-completions", BaseURL: "http://127.0.0.1:1",
+			// Exactly what discovery builds from a bare model list.
+			Models: []config.ModelConfig{
+				{ID: "pinned", ContextWindow: 200000},
+				{ID: "listed-no-window"},
+				{ID: "also-listed-no-window", MaxTokens: 4096},
+			}},
+	}}
+	for _, id := range []string{"listed-no-window", "also-listed-no-window"} {
+		got := modelWindow(cfg, "gw", id)
+		if got != agent.MaxContextTokensDefault {
+			t.Fatalf("windowless catalog entry %q window = %d, want default %d (0 disables compaction)",
+				id, got, agent.MaxContextTokensDefault)
+		}
+		// The ladder's own gate is `ContextWindow <= 0` (compact.go
+		// maybeCompact, handoff.go HandoffDue), so a positive window is
+		// exactly the condition that leaves context maintenance on.
+		if got <= 0 {
+			t.Fatalf("window %d disables context maintenance", got)
+		}
+	}
+	// A stated window is still honoured over the fallback.
+	if got := modelWindow(cfg, "gw", "pinned"); got != 200000 {
+		t.Fatalf("pinned window = %d, want 200000", got)
+	}
+}
