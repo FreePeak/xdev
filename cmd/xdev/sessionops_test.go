@@ -64,7 +64,20 @@ func TestResolveResumeID(t *testing.T) {
 		b.Write(session.MarshalHeader(session.SessionHeader{
 			Version: 3, ID: c.id, Timestamp: c.ts, CWD: cwd, Title: "t", TitleSource: session.TitleSourceAuto,
 		}))
-		b.WriteString("\n")
+		// A real message, not just the header: a session holding only its
+		// title slot and header reads StatusEmpty and is not a resume target
+		// (see resolveResumeID), so a header-only fixture tests nothing.
+		line, merr := session.MarshalEntry(&session.MessageEntry{
+			Env: session.Envelope{ID: "m1", ParentID: "", Timestamp: c.ts},
+			Message: ai.Message{
+				Role:    ai.RoleUser,
+				Content: []ai.Block{ai.TextBlock{Text: "the prompt that made this session"}},
+			},
+		})
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		b.Write(line)
 		if err := os.WriteFile(session.SessionFilePath(dir, cwd, c.ts, c.id), []byte(b.String()), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -83,6 +96,66 @@ func TestResolveResumeID(t *testing.T) {
 	got, err = resolveResumeID(cwd, "")
 	if err != nil || !strings.HasSuffix(got, "BBBB2222-0000-0000-0000-000000000000.jsonl") {
 		t.Fatalf("empty query should resolve newest, got %q err=%v", got, err)
+	}
+}
+
+// TestEmptySessionIsNotAResumeTarget is the guard on the empty-resume defect.
+// A session file holding only its title slot and header — what /fork and the
+// detach path write when a session never received a prompt — used to be the
+// newest file in the directory, so --continue landed on it and every resume
+// opened a blank transcript. Two assertions, both from the real on-disk shape:
+// the newest-empty is skipped in favour of the older session that has a
+// conversation, and naming it by prefix says why instead of resuming it.
+func TestEmptySessionIsNotAResumeTarget(t *testing.T) {
+	sandbox(t)
+	cwd := t.TempDir()
+	now := time.Now()
+	withConversation := "CCCC3333-0000-0000-0000-000000000000"
+	empty := "DDDD4444-0000-0000-0000-000000000000"
+	for _, c := range []struct {
+		ts  time.Time
+		id  string
+		msg bool
+	}{
+		{now.Add(-time.Hour), withConversation, true}, // an hour older
+		{now, empty, false},                           // and the newest file
+	} {
+		var b strings.Builder
+		b.Write(session.MarshalTitleSlot("sess "+c.id[:4], session.TitleSourceAuto, now))
+		b.Write(session.MarshalHeader(session.SessionHeader{
+			Version: 3, ID: c.id, Timestamp: c.ts, CWD: cwd, Title: "t", TitleSource: session.TitleSourceAuto,
+		}))
+		if c.msg {
+			line, err := session.MarshalEntry(&session.MessageEntry{
+				Env:     session.Envelope{ID: "m1", Timestamp: c.ts},
+				Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "real work"}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Write(line)
+		}
+		p := session.SessionFilePath(sessionDataDir(), cwd, c.ts, c.id)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The newest session in cwd is the empty one; --continue must not pick it.
+	got, err := resolveResumeID(cwd, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, withConversation) {
+		t.Fatalf("--continue resolved %s, want the session that has a conversation (%s)", got, withConversation)
+	}
+
+	// Naming it explicitly is an error that says why, not a blank transcript.
+	if _, err := resolveResumeID(cwd, "dddd"); err == nil || !strings.Contains(err.Error(), "nothing to resume") {
+		t.Fatalf("explicit --resume of an empty session = %v, want a nothing-to-resume error", err)
 	}
 }
 
@@ -822,5 +895,83 @@ func TestRecentResumeOptionsUncapped(t *testing.T) {
 		if !seen[id] {
 			t.Fatalf("row %s missing from the picker", id)
 		}
+	}
+}
+
+// TestEmptySessionsAreNotPickerRows: an empty session is not a row in either
+// picker. /resume drew one, resuming it produced a blank transcript, and a
+// newest-empty row is what made --continue and /resume look broken in a
+// folder whose last run was a session that never received a prompt.
+func TestEmptySessionsAreNotPickerRows(t *testing.T) {
+	sandbox(t)
+	cwd := "/tmp/empty-picker"
+	now := time.Now().UTC()
+	withConversation := "REAL0001-0000-0000-0000-000000000000"
+	emptyRoot := "EMPTY001-0000-0000-0000-000000000000"
+	emptyFork := "EMPTY002-0000-0000-0000-000000000000"
+
+	line, err := session.MarshalEntry(&session.MessageEntry{
+		Env:     session.Envelope{ID: "m1", Timestamp: now},
+		Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "real work"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(ts time.Time, id, title string, withMsg bool) {
+		t.Helper()
+		var b strings.Builder
+		b.Write(session.MarshalTitleSlot(title, session.TitleSourceAuto, ts))
+		b.Write(session.MarshalHeader(session.SessionHeader{
+			Version: 3, ID: id, Timestamp: ts, CWD: cwd, Title: title, TitleSource: session.TitleSourceAuto,
+		}))
+		if withMsg {
+			b.Write(line)
+		}
+		p := session.SessionFilePath(sessionDataDir(), cwd, ts, id)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(now.Add(-time.Hour), withConversation, "the real one", true)
+	write(now.Add(-time.Minute), emptyRoot, "empty root", false)
+	write(now, emptyFork, "empty fork", false) // newest, as a fresh /fork leaves it
+
+	for _, it := range resumePickerItems(cwd) {
+		if it.ID == emptyRoot[:8] || it.ID == emptyFork[:8] {
+			t.Fatalf("empty session %s was offered as a resume row", it.ID)
+		}
+	}
+	rows := recentResumeOptions(cwd, "")
+	if len(rows) != 1 || rows[0].ID != withConversation {
+		t.Fatalf("recentResumeOptions = %+v, want only the session with a conversation", rows)
+	}
+}
+
+// TestSessionHasMessagesIsTheForkGuard: /fork refuses a session that never
+// received a prompt, because forking it wrote a second empty file — which then
+// became the newest file and hijacked --continue. The predicate is MESSAGE
+// entries, not entries: a fresh store already carries a goal_updated entry.
+func TestSessionHasMessagesIsTheForkGuard(t *testing.T) {
+	sandbox(t)
+	s := session.OpenMem("/proj", "fresh")
+	if sessionHasMessages(s) {
+		t.Fatal("a fresh session must not read as forkable")
+	}
+	if err := s.Append(&session.GoalUpdatedEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if sessionHasMessages(s) {
+		t.Fatal("bookkeeping is not a conversation — /fork would write an empty file")
+	}
+	if err := s.Append(&session.MessageEntry{Message: ai.Message{
+		Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do the thing"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if !sessionHasMessages(s) {
+		t.Fatal("a session with a prompt must read as forkable")
 	}
 }
