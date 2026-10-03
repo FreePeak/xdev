@@ -79,29 +79,33 @@ func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (tool.Result, 
 		s.Model = a.Model
 	}
 	ev := NewEvaluator(s)
-	answers, err := ev.Evaluate(ctx, NormalizeState(a.State), a.Questions)
+	answers, err := ev.Evaluate(ctx, a.State, a.Questions)
 	if err != nil {
 		return tool.Result{Text: err.Error(), IsError: true}, nil
 	}
 	return tool.Result{Text: FormatResult(answers)}, nil
 }
 
-// NormalizeState coerces the tool argument (which the model
-// may send as a plain string, JSON object, or JSON array of
-// text) into the `map[string]any` shape POST /v1/systemone
-// expects. A string becomes `{"text": state}`; a map is
-// returned as-is; anything else is wrapped under "data".
-func NormalizeState(s any) map[string]any {
-	switch v := s.(type) {
-	case nil:
-		return map[string]any{}
-	case string:
-		return map[string]any{"text": v}
-	case map[string]any:
-		return v
-	default:
-		return map[string]any{"data": v}
+// NormalizeState coerces the tool argument (which the model may send as a
+// plain string, a JSON object, or an array of text) into the shape
+// POST /v1/systemone expects.
+//
+// A string travels as itself. It used to be wrapped as {"text": …}, on the
+// assumption that System One wants a state object — but the local backend
+// serialises a dict with json.dumps before tokenizing, so the model reads the
+// JSON blob instead of the prose and answers a different question. Measured
+// against a live sidecar, same text and same score question:
+//
+//	state as string          {0: 0.0369, 1: 0.0261, 2: 0.9369}  confidence 0.7468
+//	state as {"text": …}     {0: 0.0201, 1: 0.0161, 2: 0.9637}  confidence 0.8355
+//
+// A map stays a map (a multi-part state is what an object is for), and so does
+// a list; only nil collapses, because there is nothing to judge.
+func NormalizeState(s any) any {
+	if s == nil {
+		return ""
 	}
+	return s
 }
 
 // compile-time interface assertion.

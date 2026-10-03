@@ -232,19 +232,58 @@ func TestParseAnswersNull(t *testing.T) {
 	}
 }
 
-func TestNormalizeState(t *testing.T) {
-	if got := NormalizeState(nil); len(got) != 0 {
+// TestNormalizeStateKeepsAStringAString pins the wire shape, with the two live
+// answers the wrapping used to change. The local backend json.dumps a dict
+// before tokenizing, so {"text": "…"} is scored as a JSON blob rather than as
+// the prose it carries.
+func TestNormalizeStateKeepsAStringAString(t *testing.T) {
+	if got := NormalizeState(nil); got != "" {
 		t.Fatalf("nil: %v", got)
 	}
-	if got := NormalizeState("hello"); got["text"] != "hello" {
-		t.Fatalf("string: %v", got)
+	if got := NormalizeState("hello"); got != "hello" {
+		t.Fatalf("a string must not be wrapped: %v", got)
 	}
 	m := map[string]any{"x": 1}
-	if got := NormalizeState(m); got["x"] != 1 {
+	if got := NormalizeState(m); got.(map[string]any)["x"] != 1 {
 		t.Fatalf("map: %v", got)
 	}
-	if got := NormalizeState(42); got["data"] != 42 {
-		t.Fatalf("other: %v", got)
+	if got := NormalizeState([]any{"a", "b"}); len(got.([]any)) != 2 {
+		t.Fatalf("list: %v", got)
+	}
+}
+
+// TestEvaluateSendsStringStateUnwrapped is the same property at the wire: the
+// body a real call posts must carry the bare string, because the two shapes do
+// not produce the same answer on the local backend.
+func TestEvaluateSendsStringStateUnwrapped(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			State any `json:"state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		s, ok := req.State.(string)
+		if !ok {
+			t.Errorf("state is %T, want the bare string", req.State)
+		}
+		got = s
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "english",
+			"answers": map[string]any{"q": map[string]any{"type": "noul", "noul": 0.9}},
+		})
+	}))
+	defer srv.Close()
+
+	e := NewEvaluator(Settings{BaseURL: srv.URL, Model: "english"})
+	if _, err := e.Evaluate(context.Background(),
+		"The customer wants to cancel their subscription today and get a full refund.",
+		map[string]any{"q": map[string]any{"type": "noul", "instructions": "urgent?"}}); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got != "The customer wants to cancel their subscription today and get a full refund." {
+		t.Fatalf("state on the wire = %q", got)
 	}
 }
 

@@ -43,8 +43,19 @@ const DefaultModel = "jev-latest"
 const DefaultTimeout = 10 * time.Second
 
 // EvalRequest is the payload POST /v1/systemone expects.
+//
+// State is `any`, not a map, because a single string of text is the one state
+// that must travel as itself. Every other System One caller — agentloop's
+// guardrail battery, agent-decision-mcp's router, the local Laya sidecar's
+// own docstring — posts a bare string, and a bare string is what the local
+// backend scores as prose. Wrapping it in an object makes the model read
+// `{"text": "..."}` instead, which is a different input and a different
+// answer: the same question against the same live sidecar returned
+// {0: 0.0369, 1: 0.0261, 2: 0.9369} for a string and
+// {0: 0.0201, 1: 0.0161, 2: 0.9637} for the same text wrapped in one key.
+// A genuinely multi-part state stays an object, which is what it is for.
 type EvalRequest struct {
-	State     map[string]any `json:"state"`
+	State     any            `json:"state"`
 	Model     string         `json:"model"`
 	Questions map[string]any `json:"questions"`
 }
@@ -81,11 +92,12 @@ func NewEvaluator(s Settings) *Evaluator {
 // Tests build a request through Evaluate without touching baseURL.
 func (e *Evaluator) TestEvaluatorHTTP(c *http.Client) { e.httpClient = c }
 
-// Evaluate sends state + questions to System One and returns the
-// parsed answer map. An empty or unparseable body returns an empty map.
-func (e *Evaluator) Evaluate(ctx context.Context, state map[string]any, questions map[string]any) (map[string]any, error) {
+// Evaluate sends state + questions to System One and returns the parsed answer
+// map. State is normalized here rather than at the tool boundary so every
+// caller — the tool, a future agent-loop gate — sends the same wire.
+func (e *Evaluator) Evaluate(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
 	payload := EvalRequest{
-		State:     state,
+		State:     NormalizeState(state),
 		Model:     e.model,
 		Questions: questions,
 	}
