@@ -191,9 +191,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Extension processes: loaded ONCE (handshakes are expensive), their
 	// tools join the live registry so the lazy prompt picks them up, and
 	// each per-submit agent gets the same fail-closed Interceptor.
-	// lastTurnFailed marks whether the previous turn ended badly (aborted or
-	// provider error), so a failure-retain can fire on the turn boundary.
-	var lastTurnFailed atomic.Bool
 
 	// Session.
 	store, err := openStartupSession(cwd, opts)
@@ -2276,7 +2273,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// picker lists, and they are the ones stuck with "tui
 			// <timestamp>". Async on purpose: the user's next keystroke
 			// must not wait on a title request.
-			lastTurnFailed.Store(err != nil)
 			if err == nil && finalMsg != nil && !launch.NoTitle && !launch.NoSession {
 				// The bump after the title lands is what repaints the panel's
 				// title slot: the cascade rewrites the store's title on a
