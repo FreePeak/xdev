@@ -400,8 +400,20 @@ func groknightSlots() map[string]Color {
 	}
 }
 
-// grokdaySlots — exact GrokDay palette from grok-build
-// (crates/codegen/xai-grok-pager-render/src/theme/grokday.rs, 2026-09-09 sync).
+// grokdaySlots — the launch LIGHT theme: Rosé Pine Dawn's own groups (MIT,
+// github.com/rose-pine/rose-pine-theme) over GrokDay's neutral structure, the
+// exact twin of groknightSlots. The same split, the same reasoning: the canvas,
+// the borders and the muted greys stay GrokDay's because the terminal's own
+// background already supplies the canvas, and every INK a reader reads text
+// with is the palette's.
+//
+// Why the light twin matters less and is still here: `theme: auto` only picks
+// it for an explicit `light`/`day`, XDEV_THEME, or a terminal that answers the
+// OSC 11 / COLORFGBG light-background probe — so most sessions never see it. It
+// is also the twin a reader on a light terminal gets by DEFAULT, and "the dark
+// theme is Rosé Pine but the light one is One Light" is exactly the split a
+// palette migration is supposed to remove. The cost is one table; the mapping
+// is Dawn's, slot for slot.
 func grokdaySlots() map[string]Color {
 	return map[string]Color{
 		BgBase:             Hex("#eeeeee"),
@@ -455,28 +467,52 @@ func grokdaySlots() map[string]Color {
 		ThinkingHigh:    Hex("#a6a6d4"),
 		ThinkingXhigh:   Hex("#b0a2dc"),
 		ThinkingMax:     Hex("#7D4BC6"),
-		// Diff rows — see groknightSlots. The bands are CC's day tints
-		// (addLine rgb(220,255,220), addWord rgb(178,255,178) and the two
-		// red equivalents): near-white, so the day canvas shows through.
-		ToolDiffAdded:         Hex("#378E23"),
-		ToolDiffRemoved:       Hex("#cd3048"),
-		ToolDiffContext:       Hex("#767676"),
+		// Diff rows — the day twin of groknightSlots, same shape: Claude
+		// Code's model keeps the +/-, the bands are CC's day tints (addLine
+		// rgb(220,255,220), addWord rgb(178,255,178) and the two red
+		// equivalents, near-white so the day canvas shows through), and the
+		// inks are Dawn's own git groups.
+		//
+		// Pine for the added marker, where the dark twin uses foam — the one
+		// place the two variants do NOT pick the same token, and a
+		// measurement rather than a preference. On a near-white band the
+		// darker ink is the readable one: pine reads 5.6:1 on the added band
+		// and 5.3:1 on the day canvas, foam 3.2:1 and 3.0:1 — barely over the
+		// 3:1 floor for non-body text. The dark twin's foam reads 9.4:1 on
+		// ITS band, so each variant takes the end of the palette that carries
+		// its own polarity. Love reads 3.3:1 on the removed band, the
+		// weakest marker in the theme and still ahead of the pine it replaced
+		// at 2.9:1.
+		ToolDiffAdded:         Hex("#286983"), // pine, upstream git_add
+		ToolDiffRemoved:       Hex("#b4637a"), // love, upstream git_delete
+		ToolDiffContext:       Hex("#797593"), // subtle, the unchanged rows
 		ToolDiffAddedBg:       Hex("#dcffdc"),
 		ToolDiffRemovedBg:     Hex("#ffdcdc"),
 		ToolDiffAddedWordBg:   Hex("#b2ffb2"),
 		ToolDiffRemovedWordBg: Hex("#ffc7c7"),
-		// Fenced-code tokens (#501) — see groknightSlots: the same 9 roles on
-		// Claude Code's light scope map (v2.1.287 — One Light), whose inks
-		// hold contrast on the light code band.
-		SyntaxComment:     Hex("#969896"), // comment/meta
-		SyntaxKeyword:     Hex("#a71d5d"), // keyword/operator
-		SyntaxString:      Hex("#183691"), // string/regexp
-		SyntaxNumber:      Hex("#0086b3"), // literal/number
-		SyntaxType:        Hex("#0086b3"), // built_in/type
-		SyntaxVariable:    Hex("#333333"), // variable/property (body text)
-		SyntaxFunction:    Hex("#795da3"), // title.function
-		SyntaxOperator:    Hex("#a71d5d"), // operator
-		SyntaxPunctuation: Hex("#333333"), // punctuation
+		// Fenced-code and tool-output tokens (#501, #582) — the day twin of
+		// groknightSlots, from Dawn's own syntax groups (vscode
+		// themes/rose-pine-dawn-color-theme.json).
+		//
+		// Comment is `muted` (#9893a5), which VS Code gives
+		// punctuation.definition.tag, rather than `subtle`: grokday paints a
+		// tool body's flat rows in TextSecondary (#444444 here), and a comment
+		// in that same ink is a comment that vanished — the same failure
+		// TestFencedBlockInToolOutputIsNotColoured caught on the dark twin.
+		// `muted` reads 3.3:1 against that body against the old comment's
+		// 3.4:1, so the choice costs nothing.
+		//
+		// Number is `rose` (#d7827e) — VS Code's own constant.numeric for
+		// Dawn — and distinct from String (`gold`), as the nine slots require.
+		SyntaxComment:     Hex("#9893a5"), // muted
+		SyntaxKeyword:     Hex("#286983"), // Keyword
+		SyntaxString:      Hex("#ea9d34"), // String
+		SyntaxNumber:      Hex("#d7827e"), // constant.numeric
+		SyntaxType:        Hex("#56949f"), // Type
+		SyntaxVariable:    Hex("#575279"), // Identifier (body text)
+		SyntaxFunction:    Hex("#d7827e"), // Function
+		SyntaxOperator:    Hex("#797593"), // Operator
+		SyntaxPunctuation: Hex("#797593"), // @punctuation
 	}
 }
 

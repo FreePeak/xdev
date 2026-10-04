@@ -20,11 +20,12 @@ package tui
 // unified-diff and go grammars, not harvested from anything.
 //
 // SCOPE, deliberately: this file pins the DIFF inks and the SYNTAX inks —
-// the tool-output and code surfaces the request named — and nothing else. The
-// chrome, the body ink, the accent and the status row are still GrokNight's,
-// on purpose: the terminal's own background already supplies the canvas, and
-// moving chrome onto the palette is a different change with a different blast
-// radius (every chrome test in the suite compares against those greys).
+// the tool-output and code surfaces the request named — on BOTH launch themes,
+// and nothing else. The chrome, the body ink, the accent and the status row are
+// still GrokNight's / GrokDay's, on purpose: the terminal's own background
+// already supplies the canvas, and moving chrome onto the palette is a different
+// change with a different blast radius (every chrome test in the suite compares
+// against those greys).
 
 import (
 	"strings"
@@ -35,9 +36,12 @@ import (
 	"github.com/FreePeak/xdev/internal/theme"
 )
 
-// Rosé Pine main, by token name. One block so a palette change is one edit
-// here and one comment update in theme.go, and so no test can name a colour
-// the theme does not carry.
+// Rosé Pine, by token name and variant. Two blocks, one per launch theme, so a
+// palette change is one edit here and one comment update in theme.go — and so no
+// test can name a colour the theme does not carry. The `rp` prefix is the MAIN
+// (dark) variant; `dawn` is the light one. Dawn is NOT main's values darkened:
+// on a near-white canvas the darker end of each pair is the readable one, which
+// is why the added marker is pine here and foam in main.
 const (
 	rpText   = "#e0def4" // text
 	rpSubtle = "#908caa" // subtle
@@ -47,6 +51,15 @@ const (
 	rpRose   = "#ebbcba" // rose
 	rpPine   = "#31748f" // pine
 	rpFoam   = "#9ccfd8" // foam
+
+	dawnText   = "#575279" // text
+	dawnSubtle = "#797593" // subtle
+	dawnMuted  = "#9893a5" // muted — the comment ink (see theme.go)
+	dawnLove   = "#b4637a" // love
+	dawnGold   = "#ea9d34" // gold
+	dawnRose   = "#d7827e" // rose
+	dawnPine   = "#286983" // pine
+	dawnFoam   = "#56949f" // foam
 )
 
 // TestLaunchDarkThemeIsRosePine pins every readable ink the launch theme owns.
@@ -89,36 +102,42 @@ func TestLaunchDarkThemeIsRosePine(t *testing.T) {
 }
 
 // The nine syntax roles collapse onto six colours on purpose — a comment, an
-// operator and punctuation are all `subtle` in Rosé Pine — so the contract is
-// not "every role distinct" but "the classes a reader tells apart are apart":
-// a comment, a string, a number and a keyword must be four different inks, or
-// the highlighting says nothing. This is the same claim
-// TestFencedGoBlockColorsItsTokens makes about the renderer; this one is about
-// the palette underneath it, so it names the palette's own values.
-func TestLaunchDarkThemeKeepsTokenClassesApart(t *testing.T) {
-	th := theme.Load("groknight")
-	distinct := []string{
-		theme.SyntaxComment, theme.SyntaxKeyword,
-		theme.SyntaxString, theme.SyntaxNumber, theme.SyntaxType,
-	}
-	seen := map[theme.Color]string{}
-	for _, slot := range distinct {
-		c, ok := th.Slot(slot)
-		if !ok {
-			t.Errorf("%s is unset", slot)
-			continue
+// operator and punctuation share one ink in Rosé Pine, and a function shares
+// another's — so the contract is not "every role distinct" but "the classes a
+// reader tells apart are apart": a comment, a string, a number and a keyword
+// must be four different inks, or the highlighting says nothing. This is the
+// same claim TestFencedGoBlockColorsItsTokens makes about the renderer; this one
+// is about the palette underneath it, so it names the palette's own values.
+//
+// Table over BOTH launch themes: the dark twin and the light one are separate
+// tables that separate drift, and a distinctness contract that holds for only
+// one of them is half a contract.
+func TestLaunchThemesKeepTokenClassesApart(t *testing.T) {
+	for _, name := range []string{"groknight", "grokday"} {
+		th := theme.Load(name)
+		distinct := []string{
+			theme.SyntaxComment, theme.SyntaxKeyword,
+			theme.SyntaxString, theme.SyntaxNumber, theme.SyntaxType,
 		}
-		if prev, dup := seen[c]; dup {
-			t.Errorf("%s collapsed onto %s at %+v: two token classes a reader tells apart wear one ink", slot, prev, c)
+		seen := map[theme.Color]string{}
+		for _, slot := range distinct {
+			c, ok := th.Slot(slot)
+			if !ok {
+				t.Errorf("%s: %s is unset", name, slot)
+				continue
+			}
+			if prev, dup := seen[c]; dup {
+				t.Errorf("%s: %s collapsed onto %s at %+v: two token classes a reader tells apart wear one ink", name, slot, prev, c)
+			}
+			seen[c] = slot
 		}
-		seen[c] = slot
-	}
-	// The diff's polarity pair must be two different inks for the same reason,
-	// even though neither is a green or a red any more.
-	add, _ := th.Slot(theme.ToolDiffAdded)
-	rem, _ := th.Slot(theme.ToolDiffRemoved)
-	if add == rem {
-		t.Errorf("added and removed markers collapsed onto %+v", add)
+		// The diff's polarity pair must be two different inks for the same
+		// reason, even though neither is a green or a red any more.
+		add, _ := th.Slot(theme.ToolDiffAdded)
+		rem, _ := th.Slot(theme.ToolDiffRemoved)
+		if add == rem {
+			t.Errorf("%s: added and removed markers collapsed onto %+v", name, add)
+		}
 	}
 }
 
@@ -126,51 +145,66 @@ func TestLaunchDarkThemeKeepsTokenClassesApart(t *testing.T) {
 // surface #582 built and the palette the user asked to see. This is the
 // end-to-end half: the renderer resolves the theme's slots, so it fails if a
 // slot stops being read, not only if its value changes.
-func TestDefaultThemePaintsToolOutputInRosePine(t *testing.T) {
+//
+// Table over both launch themes. The fixture is identical and only the palette
+// differs, so a renderer path that quietly resolved ONE theme's slots — or a
+// token table filled in from the dark twin's values — fails here rather than
+// shipping.
+func TestLaunchThemesPaintToolOutputInRosePine(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	app, _ := newTestApp(t, 100, 40)
-	app.AddToolBlock("c1", "read", `{"path":"a.go"}`)
-	app.FinishTool("c1", "read", false,
-		"[pkg/a.go#1a2b]\n1:package main\n2:\n3:// note\n4:func main() { s := \"hi\"; _ = 42 }",
-		ToolOutcome{})
+	for _, tc := range []struct {
+		name string
+		want map[string]string
+	}{
+		{"groknight", map[string]string{
+			"package": rpPine, "_": rpText, "// note": rpMuted,
+			"\"hi\"": rpGold, "42": rpRose,
+		}},
+		{"grokday", map[string]string{
+			"package": dawnPine, "_": dawnText, "// note": dawnMuted,
+			"\"hi\"": dawnGold, "42": dawnRose,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _ := newTestApp(t, 100, 40)
+			app.SetTheme(theme.Load(tc.name))
+			app.AddToolBlock("c1", "read", `{"path":"a.go"}`)
+			app.FinishTool("c1", "read", false,
+				"[pkg/a.go#1a2b]\n1:package main\n2:\n3:// note\n4:func main() { s := \"hi\"; _ = 42 }",
+				ToolOutcome{})
 
-	rows, text := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
-	if !strings.Contains(text, "func main() {") {
-		t.Fatalf("the source did not survive the render:\n%s", text)
-	}
-	// Keyed by the run's own text, which is the only honest key here: "main" is
-	// not one of them because the lexer paints that word in two roles on this
-	// fixture (`package main` an identifier, `func main` a function), and a
-	// substring match records whichever came last — a fixture trap that reads
-	// as a palette bug.
-	want := map[string]string{
-		"package": rpPine,
-		"_":       rpText,
-		"// note": rpMuted,
-		"\"hi\"":  rpGold,
-		"42":      rpRose,
-	}
-	got := map[string]tcell.Color{}
-	for _, ln := range bodyRows(rows) {
-		for _, r := range ln.runs {
-			if r.chrome {
-				continue
+			rows, text := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
+			if !strings.Contains(text, "func main() {") {
+				t.Fatalf("the source did not survive the render:\n%s", text)
 			}
-			if _, wanted := want[r.text]; wanted {
-				fg, _, _ := r.style.Decompose()
-				got[r.text] = fg
+			// Keyed by the run's own text, which is the only honest key here:
+			// "main" is not one of them because the lexer paints that word in
+			// two roles on this fixture (`package main` an identifier, `func
+			// main` a function), and a substring match records whichever came
+			// last — a fixture trap that reads as a palette bug.
+			got := map[string]tcell.Color{}
+			for _, ln := range bodyRows(rows) {
+				for _, r := range ln.runs {
+					if r.chrome {
+						continue
+					}
+					if _, wanted := tc.want[r.text]; wanted {
+						fg, _, _ := r.style.Decompose()
+						got[r.text] = fg
+					}
+				}
 			}
-		}
-	}
-	for _, sub := range []string{"package", "_", "// note", "\"hi\"", "42"} {
-		ink, ok := got[sub]
-		if !ok {
-			t.Errorf("%q never reached the screen as its own run; highlighting did nothing:\n%s", sub, text)
-			continue
-		}
-		if c := app.cellColor(theme.Hex(want[sub])); ink != c {
-			t.Errorf("%q painted %v, want Rosé Pine %s", sub, ink, want[sub])
-		}
+			for _, sub := range []string{"package", "_", "// note", "\"hi\"", "42"} {
+				ink, ok := got[sub]
+				if !ok {
+					t.Errorf("%q never reached the screen as its own run; highlighting did nothing:\n%s", sub, text)
+					continue
+				}
+				if c := app.cellColor(theme.Hex(tc.want[sub])); ink != c {
+					t.Errorf("%q painted %v, want Rosé Pine %s", sub, ink, tc.want[sub])
+				}
+			}
+		})
 	}
 }
 
@@ -178,37 +212,53 @@ func TestDefaultThemePaintsToolOutputInRosePine(t *testing.T) {
 // of its row; a palette whose word band equalled its row band would leave the
 // whole word-diff pass invisible. Pinned as literals for the same reason as the
 // inks above: this must fail if the bands move, not describe where they are.
-func TestDefaultThemeWordBandBeatsItsRowBand(t *testing.T) {
+func TestLaunchThemesWordBandBeatsItsRowBand(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	th := theme.Load("groknight")
-	row, ok := th.Slot(theme.ToolDiffAddedBg)
-	if !ok {
-		t.Fatal("the launch theme must pin the added row band")
-	}
-	word, ok := th.Slot(theme.ToolDiffAddedWordBg)
-	if !ok {
-		t.Fatal("the launch theme must pin the added word band")
-	}
-	remRow, _ := th.Slot(theme.ToolDiffRemovedBg)
-	remWord, _ := th.Slot(theme.ToolDiffRemovedWordBg)
-	if row == word || remRow == remWord {
-		t.Fatalf("a word band equals its row band (%+v / %+v)", row, word)
-	}
-	if row == remRow {
-		t.Fatalf("added and removed collapsed onto one band (%+v)", row)
-	}
-	// Claude Code's near-black tints, which are a stripe rather than a palette
-	// identity — pinned so a "harmonise the band with the palette" tweak has to
-	// argue with this line.
-	for slot, hex := range map[string]string{
-		theme.ToolDiffAddedBg:       "#022800",
-		theme.ToolDiffRemovedBg:     "#3d0100",
-		theme.ToolDiffAddedWordBg:   "#044700",
-		theme.ToolDiffRemovedWordBg: "#5c0200",
+	for _, tc := range []struct {
+		name  string
+		tints map[string]string
+	}{
+		// Claude Code's near-black tints on the dark canvas, its near-white
+		// ones on the light one. Pinned so a "harmonise the band with the
+		// palette" tweak has to argue with this table: the bands are a stripe,
+		// not an identity.
+		{"groknight", map[string]string{
+			theme.ToolDiffAddedBg:       "#022800",
+			theme.ToolDiffRemovedBg:     "#3d0100",
+			theme.ToolDiffAddedWordBg:   "#044700",
+			theme.ToolDiffRemovedWordBg: "#5c0200",
+		}},
+		{"grokday", map[string]string{
+			theme.ToolDiffAddedBg:       "#dcffdc",
+			theme.ToolDiffRemovedBg:     "#ffdcdc",
+			theme.ToolDiffAddedWordBg:   "#b2ffb2",
+			theme.ToolDiffRemovedWordBg: "#ffc7c7",
+		}},
 	} {
-		if c, _ := th.Slot(slot); c != theme.Hex(hex) {
-			t.Errorf("%s = %+v, want the Claude Code tint %s", slot, c, hex)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			th := theme.Load(tc.name)
+			row, ok := th.Slot(theme.ToolDiffAddedBg)
+			if !ok {
+				t.Fatal("the launch theme must pin the added row band")
+			}
+			word, ok := th.Slot(theme.ToolDiffAddedWordBg)
+			if !ok {
+				t.Fatal("the launch theme must pin the added word band")
+			}
+			remRow, _ := th.Slot(theme.ToolDiffRemovedBg)
+			remWord, _ := th.Slot(theme.ToolDiffRemovedWordBg)
+			if row == word || remRow == remWord {
+				t.Fatalf("a word band equals its row band (%+v / %+v)", row, word)
+			}
+			if row == remRow {
+				t.Fatalf("added and removed collapsed onto one band (%+v)", row)
+			}
+			for slot, hex := range tc.tints {
+				if c, _ := th.Slot(slot); c != theme.Hex(hex) {
+					t.Errorf("%s = %+v, want the Claude Code tint %s", slot, c, hex)
+				}
+			}
+		})
 	}
 }
 
@@ -218,48 +268,59 @@ func TestDefaultThemeWordBandBeatsItsRowBand(t *testing.T) {
 // the surface a sidebar click opens — and asks for the same two inks the
 // transcript's box already wears. Asserted against the literals, for the same
 // reason as everything above.
-func TestDefaultThemePaintsTheSidebarOverlayDiffInRosePine(t *testing.T) {
+func TestLaunchThemesPaintTheSidebarOverlayDiffInRosePine(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	app, scr := newTestApp(t, 120, 30)
+	for _, tc := range []struct {
+		name    string
+		markers map[rune]string // the palette's two diff inks
+	}{
+		{"groknight", map[rune]string{'+': rpFoam, '-': rpLove}},
+		{"grokday", map[rune]string{'+': dawnPine, '-': dawnLove}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, scr := newTestApp(t, 120, 30)
+			app.SetTheme(theme.Load(tc.name))
 
-	app.mu.Lock()
-	_, _, path := withDockRows(app)
-	app.mu.Unlock()
-	if path == "" {
-		t.Skip("dock layout doesn't expose a clickable row")
-	}
-	app.mu.Lock()
-	opened := app.openDiffOverlay(path)
-	app.mu.Unlock()
-	if !opened {
-		t.Fatal("no diff overlay for the changed file")
-	}
-	app.draw()
+			app.mu.Lock()
+			_, _, path := withDockRows(app)
+			app.mu.Unlock()
+			if path == "" {
+				t.Skip("dock layout doesn't expose a clickable row")
+			}
+			app.mu.Lock()
+			opened := app.openDiffOverlay(path)
+			app.mu.Unlock()
+			if !opened {
+				t.Fatal("no diff overlay for the changed file")
+			}
+			app.draw()
 
-	markers := map[rune]string{'+': rpFoam, '-': rpLove}
-	seen := map[rune]bool{}
-	for y := 0; y < app.height; y++ {
-		for x := 0; x < app.width; x++ {
-			ch, _, st, _ := scr.GetContent(x, y)
-			hex, isMarker := markers[ch]
-			if !isMarker {
-				continue
+			seen := map[rune]bool{}
+			for y := 0; y < app.height; y++ {
+				for x := 0; x < app.width; x++ {
+					ch, _, st, _ := scr.GetContent(x, y)
+					hex, isMarker := tc.markers[ch]
+					if !isMarker {
+						continue
+					}
+					fg, _, _ := st.Decompose()
+					switch fg {
+					case app.cellColor(theme.Hex(hex)):
+						seen[ch] = true
+					case app.cellColor(theme.Hex(dawnPine)), app.cellColor(theme.Hex(dawnLove)):
+						// The OTHER variant's pair: the overlay wearing the
+						// wrong launch theme's inks is exactly the drift this
+						// subtest exists to catch.
+						t.Errorf("overlay marker %q painted the other variant's ink %v, want %s",
+							string(ch), fg, hex)
+					}
+				}
 			}
-			fg, _, _ := st.Decompose()
-			switch fg {
-			case app.cellColor(theme.Hex(hex)):
-				seen[ch] = true
-			case app.cellColor(theme.Hex(rpFoam)), app.cellColor(theme.Hex(rpLove)),
-				app.cellColor(theme.Hex(rpPine)), app.cellColor(theme.Hex(rpRose)),
-				app.cellColor(theme.Hex(rpGold)):
-				t.Errorf("overlay marker %q painted %v, which is neither Rosé Pine's %s nor the terminal default",
-					string(ch), fg, hex)
+			for ch, hex := range tc.markers {
+				if !seen[ch] {
+					t.Errorf("no %q marker painted %s anywhere in the overlay: the popup is not wearing the theme's diff inks", string(ch), hex)
+				}
 			}
-		}
-	}
-	for ch, hex := range markers {
-		if !seen[ch] {
-			t.Errorf("no %q marker painted %s anywhere in the overlay: the popup is not wearing the theme's diff inks", string(ch), hex)
-		}
+		})
 	}
 }
