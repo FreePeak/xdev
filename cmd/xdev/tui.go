@@ -24,7 +24,6 @@ import (
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dist"
 	"github.com/FreePeak/xdev/internal/logx"
-	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -193,8 +192,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// tools join the live registry so the lazy prompt picks them up, and
 	// each per-submit agent gets the same fail-closed Interceptor.
 	// lastTurnFailed marks whether the previous turn ended badly (aborted or
-	// provider error): the instruction that follows a failure is a friction
-	// signal for the sharpshooter backend (#89).
+	// provider error), so a failure-retain can fire on the turn boundary.
 	var lastTurnFailed atomic.Bool
 
 	// Session.
@@ -250,10 +248,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}
 
 	overrides := agent.LoadSystemPromptOverrides(cwd)
-	// ONE memory backend for the whole session. buildMemory was called at
-	// each of the three sites below, so a cadence-tracking backend (Hindsight
-	// retains every N turns; mnemopi counts turns) reset on every call and
-	// never reached its threshold (#86).
+	// ONE memory backend for the whole session. buildMemory reset a
+	// cadence-tracking backend on every call and never reached its threshold
+	// (#86): the prompt path, the turn boundary and the tool registry share
+	// this one instance.
 	sessionMemory := buildMemory(lastSettings())
 	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
 		tailSystemPrompt(overrides, opts.AppendSystem), sessionMemory)
@@ -2145,7 +2143,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// feedAdvisor is assigned after the agent exists, so go
 				// through an indirection: a direct field copy would
 				// capture the nil func at literal time.
-				Hooks:      memoryTurnHooks(&tuiHooks{ts: turnTS, feed: func() { feedAdvisor() }}, lastSettings()),
+				Hooks:      &tuiHooks{ts: turnTS, feed: func() { feedAdvisor() }},
 				TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 				MaxTokens:  opts.MaxTokens,
 				MaxTurns:   opts.MaxTurns,
@@ -2381,14 +2379,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if err := s.Append(&session.MessageEntry{Message: msg}); err != nil {
 			logx.Errorf("persist user message: %v", err)
 		}
-		// #86: the memory turn boundary. print mode counted turns for the
-		// remote backend; the TUI — where sessions are actually long —
-		// never fed it, so retainEveryNTurns could not fire and queued
-		// retains sat until exit.
+		// The memory turn boundary: the remote backend counts this run's
+		// new user turn (autoRetain cadence) and flushes queued retains off
+		// the critical path.
 		noteMemoryTurn(sessionMemory, []ai.Message{msg})
-		// #89: the friction detector had no TUI feed at all, so decision
-		// files only ever accumulated in print runs.
-		observeFriction(sessionMemory, text, lastTurnFailed.Swap(false))
 		startTurn()
 		return true
 	}
@@ -2835,9 +2829,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			logx.Debugf("memory: hindsight session end: %v", err)
 		}
 	}
-	if mm := mnemopiFrom(lastSettings()); mm != nil {
-		mm.Drain(context.Background())
-	}
 	return 0, nil
 }
 
@@ -2860,34 +2851,10 @@ func memoryOps(mem memoryBackend) *tui.MemoryOps {
 			}
 			return out + "\n\n  " + summary + "\n  " + lessons
 		},
-		Stats: mem.Stats,
-		Clear: mem.Clear,
-	}
-	if mm, ok := mem.(*memory.Mnemopi); ok {
-		ops.Queue = mm.QueueStats
-		ops.Sync = func() (string, error) {
-			res, err := mm.Sync(context.Background(), 0)
-			if err != nil {
-				return "", err
-			}
-			return mnemopiSyncReport(res), nil
-		}
-		ops.Enqueue = func(text string) (string, error) {
-			if _, err := mm.Enqueue(text, "user"); err != nil {
-				return "", err
-			}
-			// /memory enqueue is explicit: queue the retain and apply it now,
-			// inside the same bounded drain the exit path uses.
-			res, err := mm.Sync(context.Background(), 0)
-			if err != nil {
-				return "", err
-			}
-			return "queued: " + mnemopiSyncReport(res), nil
-		}
-	}
-	if h, ok := mem.(*memory.Hindsight); ok {
-		ops.Diagnose = h.Diagnose
-		ops.Enqueue = func(string) (string, error) { return h.Enqueue() }
+		Stats:    mem.Stats,
+		Clear:    mem.Clear,
+		Diagnose: func() string { s, _ := mem.Diagnose(); return s },
+		Enqueue:  func(string) (string, error) { return mem.FlushQueue() },
 	}
 	return ops
 }
