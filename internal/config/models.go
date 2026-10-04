@@ -98,6 +98,16 @@ type ProviderConfig struct {
 	Headers   map[string]string `yaml:"headers,omitempty"`
 	Discovery *DiscoveryConfig  `yaml:"discovery,omitempty"`
 	Models    []ModelConfig     `yaml:"models,omitempty"`
+	// ContextWindow is this provider's window for every model whose own
+	// window nothing stated — the gateway's uniform answer, stated once
+	// instead of per model. It is the rung below a per-model
+	// `contextWindow` and above the compiled 200000 default, so a gateway
+	// that serves one window behind a dozen model ids (onegw's opencode
+	// lane, measured 2026-10-04: a live bisect served 1,048,349 prompt
+	// tokens and refused 1,048,400) is configured once, and a model that
+	// really differs keeps its own pin. Absent = a stated window wins,
+	// else ResolveMaxContextTokens().
+	ContextWindow int `yaml:"contextWindow,omitempty"`
 	// OAuth configures the browser login flow for this provider (xdev login
 	// <provider>). Absent = not an OAuth provider.
 	OAuth *OAuthConfig `yaml:"oauth,omitempty"`
