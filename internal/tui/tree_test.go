@@ -676,7 +676,7 @@ func TestTreeSelectorPaintsNewestRowsUnderATallComposer(t *testing.T) {
 	app.SetTreeData(func() []TreeEntry { return entries })
 	app.OpenTreeSelector()
 	// A multi-line draft eats the screen the panel used to demand: eight
-	// hard-newline rows put composerRows at 10 of the 20.
+	// hard-newline rows put composerRows at 12 of the 20.
 	for _, para := range []string{"one", "two", "three", "four", "five", "six", "seven", "eight"} {
 		app.ed.HandleKey(tcell.NewEventKey(tcell.KeyCtrlJ, 0, tcell.ModNone))
 		for _, r := range para {
