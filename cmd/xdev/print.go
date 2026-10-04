@@ -1075,6 +1075,9 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 				sys += "\n\n" + gb
 			}
 		}
+		if fg := agent.BuildFanoutGuidance(lastSettings().TypeSafe.Fanout); fg != "" {
+			sys += fg
+		}
 		if appendSystem != "" {
 			sys += "\n\n" + appendSystem
 		}

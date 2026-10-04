@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/agent"
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -259,5 +260,36 @@ func TestPersonalityPresetReachesThePrompt(t *testing.T) {
 	// An unknown preset never reaches a run.
 	if err := (&agent.SystemPromptOverrides{}).ApplyPersonalityPreset("moody"); err == nil {
 		t.Fatal("unknown preset must error")
+	}
+}
+
+// TestFanoutGuidanceIsOptIn pins the toggle's whole contract: the block
+// appears in the rendered prompt only when typesafe.fanout is on, and the
+// ON case still leaves it inside PRD §1 Goal 4's budget.
+func TestFanoutGuidanceIsOptIn(t *testing.T) {
+	loadedSettings = nil
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	build := func(on bool) string {
+		t.Helper()
+		loadedSettings = &config.Settings{}
+		loadedSettings.TypeSafe.Fanout = on
+		return promptFn("BASE", t.TempDir(), reg, "")()
+	}
+	t.Cleanup(func() { loadedSettings = nil })
+
+	off := build(false)
+	if strings.Contains(off, agent.FanoutGuidance) {
+		t.Fatal("fanout block present with typesafe.fanout unset")
+	}
+	on := build(true)
+	if !strings.Contains(on, agent.FanoutGuidance) {
+		t.Fatal("fanout block missing with typesafe.fanout: true")
+	}
+	// The block plus its blank-line separator, and nothing else.
+	if got, want := len([]rune(on))-len([]rune(off)), len([]rune("\n\n"+agent.FanoutGuidance)); got != want {
+		t.Fatalf("fanout block changed the prompt by %d chars, block is %d", got, want)
+	}
+	if tokens := len([]rune(on)) / 4; tokens >= maxPromptTokens {
+		t.Fatalf("fanout-on prompt is ~%d tokens (budget %d): trim the block", tokens, maxPromptTokens)
 	}
 }
