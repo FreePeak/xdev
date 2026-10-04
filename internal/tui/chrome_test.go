@@ -453,8 +453,8 @@ func TestComposerIsBoxed(t *testing.T) {
 	app, scr := drawnApp(t, 60, 14)
 	setDraft(&app.ed, "hello there", 11)
 	app.draw()
-	if got := app.composerRows(); got != 5 { // one draft row + two pads + two borders
-		t.Fatalf("one-row composer = %d rows, want 5", got)
+	if got := app.composerRows(); got != 3 { // one draft row + two borders
+		t.Fatalf("one-row composer = %d rows, want 3", got)
 	}
 
 	text := screenText(scr)
@@ -466,35 +466,6 @@ func TestComposerIsBoxed(t *testing.T) {
 	}
 	if !strings.Contains(text, "╰ test/free") {
 		t.Fatalf("model name left the bottom border:\n%s", text)
-	}
-}
-
-// TestComposerPadsTheDraft pins the padding itself: the box paints a blank
-// row above and below the draft, and the cell before the right border stays
-// blank too. A draft touching the frame made the prompt read as a table row
-// instead of a field, and only the painted rows show it — the row COUNT
-// (TestComposerIsBoxed) passes with the pads in the wrong place.
-func TestComposerPadsTheDraft(t *testing.T) {
-	app, scr := drawnApp(t, 60, 14)
-	setDraft(&app.ed, "hello there", 11)
-	app.draw()
-
-	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
-	yTop := app.height - 1 - app.composerRows()
-	for _, y := range []int{yTop, yTop + 2} {
-		if strings.Contains(rows[y], "hello") || strings.Contains(rows[y], "❯") {
-			t.Fatalf("pad row %d carries the draft: %q", y, rows[y])
-		}
-	}
-	if !strings.Contains(rows[yTop+1], "❯ hello there") {
-		t.Fatalf("the draft left its padded row: %q", rows[yTop+1])
-	}
-	if !strings.Contains(rows[yTop+3], "╰") {
-		t.Fatalf("the divider no longer closes the box: %q", rows[yTop+3])
-	}
-	// The trailing pad: every draft row leaves the cell before │ blank.
-	if ch, _, _, _ := scr.GetContent(app.rightEdge()-3, yTop+1); ch != ' ' {
-		t.Fatalf("the draft runs into the border: %q at the cell before │", ch)
 	}
 }
 

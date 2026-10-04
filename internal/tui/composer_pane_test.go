@@ -138,7 +138,7 @@ func TestComposerBoxSurvivesAPaneReset(t *testing.T) {
 
 	grid := newPaneGrid(W, H)
 	grid.apply(ft.take())
-	row := app.height - app.composerRows() // the draft row: the pads sit above it
+	row := app.height - 1 - app.composerRows()
 
 	// The pane's grid is reset: a reattach, a cleared terminal, a resize that
 	// re-clears. xdev hears nothing, so the next frames are deltas.
@@ -247,10 +247,7 @@ func TestComposerCostIsBounded(t *testing.T) {
 	if withFix <= withoutFix {
 		t.Fatalf("the fix should cost bytes: %d with, %d without", withFix, withoutFix)
 	}
-	// The price scales with the box's height — it is its own rows that get
-	// marked, and the padding rows made the box 5 rows tall instead of 3. The
-	// ceiling moved with it; a change that marked the SCREEN still fails here.
-	if withFix > withoutFix*13/10 {
+	if withFix > withoutFix*12/10 {
 		t.Fatalf("the fix costs %d vs %d bytes — wider than the box's own rows",
 			withFix, withoutFix)
 	}

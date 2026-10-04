@@ -80,8 +80,8 @@ func TestComposerStopsAtTheSidebar(t *testing.T) {
 	app.mu.Lock()
 	avail, cRows := app.composerAvail(), app.composerRows()
 	app.mu.Unlock()
-	if avail != edge-8 {
-		t.Fatalf("the editor wraps at %d, want the pane's %d", avail, edge-8)
+	if avail != edge-7 {
+		t.Fatalf("the editor wraps at %d, want the pane's %d", avail, edge-7)
 	}
 	// The box's top border, its right edge and its divider all stop inside the
 	// pane (the border sits two cells in); nothing paints a composer border
@@ -142,7 +142,7 @@ func TestTwoWindowShapeUnchangedWhenClosed(t *testing.T) {
 	app.mu.Lock()
 	edge, avail := app.rightEdge(), app.composerAvail()
 	app.mu.Unlock()
-	if edge != 160 || avail != 160-8 {
+	if edge != 160 || avail != 160-7 {
 		t.Fatalf("closed: rightEdge=%d avail=%d, want the whole terminal", edge, avail)
 	}
 	if !strings.Contains(lastRow(screenText(scr)), "1.5k") {

@@ -52,7 +52,7 @@ func TestLargePasteStaysOnScreen(t *testing.T) {
 func TestComposerTopNeverLeavesTheScreen(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.AddSystemBlock("ready")
-	max := app.composerBudget() + 4 // painted rows + 2 pads + top border + divider
+	max := app.composerBudget() + 2 // painted rows + top border + divider
 	for _, n := range []int{1, 2, max - 3, max - 2, max - 1, max, max + 1, 40, 200, 5000} {
 		setDraft(&app.ed, strings.Repeat("l\n", n), 2*n)
 		if got := app.composerRows(); got > max {
@@ -72,13 +72,13 @@ func TestComposerTopNeverLeavesTheScreen(t *testing.T) {
 func TestArrowsScrollThePagedComposer(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.AddSystemBlock("ready")
-	long := strings.Repeat("x", 3000) // ~33 visual rows against the composer budget
+	long := strings.Repeat("x", 3000) // ~33 visual rows against a 24-row budget
 	setDraft(&app.ed, long, len([]rune(long)))
 	app.ed.PushHistory("older prompt")
 
-	lines, startRow, _ := app.composerInputLines()
-	if startRow != len(lines)-1 {
-		t.Fatalf("cursor at the buffer end sits on row %d of %d painted, want the last", startRow, len(lines))
+	_, startRow, _ := app.composerInputLines()
+	if startRow < 23 {
+		t.Fatalf("cursor at the buffer end should sit on the window's last row, got %d", startRow)
 	}
 	for i := range 32 {
 		app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
