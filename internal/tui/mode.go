@@ -145,6 +145,46 @@ func (a *App) drawStatusMode(y, x int) int {
 		return x
 	}
 	txt := " · " + lbl
-	drawText(a.scr, x, y, txt, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineMode))))
+	drawText(a.scr, x, y, txt, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(a.modeToken()))))
 	return x + width(txt)
+}
+
+// modeToken is the ink for the mode in force. One colour for all four modes
+// said nothing about the one fact they differ ON — how much they let the
+// agent do without asking — so the map follows Claude Code's mode inks
+// (default → inactive, plan → planMode, acceptEdits → autoAccept,
+// bypassPermissions → error) on top of the theme slots that mean the same
+// thing. Two deliberate departures:
+//
+//   - auto wears SUCCESS, not autoAccept. Claude's autoAccept is a violet
+//     one cell from the accent, and the model name on this same divider now
+//     wears the accent (omp's rule, and 43 of its 98 themes agree): auto in
+//     the same ink would collapse "model · auto" back into one flat phrase,
+//     which is the split this map exists to win.
+//   - plan wears the theme's HEADING teal rather than a new token. It is a
+//     role a palette already has and omp already requires, so an imported
+//     theme paints it without knowing xdev has a mode surface at all.
+//
+// The slot NAMES are the legacy xdev spellings on purpose: the built-in
+// palettes carry those, and ParseTheme mirrors legacy onto canonical on the
+// way in, so one name resolves in a built-in and in an imported theme alike.
+// Asking for the canonical Error/Success/Muted would resolve in neither — no
+// built-in defines them, and Get would hand all four the same body grey.
+//
+// An unwired seam and a name nobody defines both fall back to
+// StatusLineMode, so a mode is never invisible and never borrows another
+// mode's ink.
+func (a *App) modeToken() string {
+	switch a.modeLabel() {
+	case ModeDefault:
+		return theme.Gray
+	case ModeAuto:
+		return theme.AccentSuccess
+	case ModePlan:
+		return theme.MdHeading1
+	case ModeBypass:
+		return theme.AccentError
+	default:
+		return theme.StatusLineMode
+	}
 }

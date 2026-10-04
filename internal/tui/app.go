@@ -5875,7 +5875,7 @@ func (a *App) dividerParts() []hudPart {
 	// The bare rung, not "thinking <level>" — the model it sits beside says
 	// what the pair is, and the word only added width.
 	add(a.thinkingLevel(), a.thinkingToken())
-	add(a.modeLabel(), theme.StatusLineMode)
+	add(a.modeLabel(), a.modeToken())
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		add("Vibe", theme.StatusLineMode)
 	}

@@ -157,10 +157,11 @@ func TestModeRidesBothChromeSurfaces(t *testing.T) {
 	}
 }
 
-// TestModeWearsItsOwnInk pins the colour half: the mode paints in the mode
-// token, not the grey the model and the location wear, because the three parts
-// of that row answer three different questions and one grey answers none of
-// them. The status-row mode is the same ink the divider uses.
+// TestModeWearsItsOwnInk pins the colour half: each mode paints in its own
+// ink — grey, green, teal, red — and none of them in the accent the model name
+// beside them wears, because "model · auto" is a sentence about two different
+// facts and one ink would collapse it back into a single phrase. The
+// status-row mode is the same ink the divider uses.
 func TestModeWearsItsOwnInk(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	cur := ModePlan
@@ -172,13 +173,10 @@ func TestModeWearsItsOwnInk(t *testing.T) {
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	divY := rowOf(t, rows, "╰")
 	stY := rowOf(t, rows, "· plan")
-	modeInk := app.cellColor(app.th.Get(theme.StatusLineMode))
+	modeInk := app.cellColor(app.th.Get(app.modeToken()))
 	modelInk := app.cellColor(app.th.Get(theme.StatusLineModel))
-	// The slot is optional in a theme, so on a theme that omits it the mode
-	// derives from accent; what must hold is that it is not the model grey —
-	// otherwise the mode would read as a fourth word of the model name.
 	if modeInk == modelInk {
-		t.Fatalf("the mode ink must differ from the model ink (both %v)", modeInk)
+		t.Fatalf("the mode ink must differ from the model ink (both %v)", modelInk)
 	}
 	for _, tc := range []struct {
 		name string
@@ -192,11 +190,37 @@ func TestModeWearsItsOwnInk(t *testing.T) {
 			t.Fatalf("%s: the mode is painted in %v, want the mode ink %v", tc.name, got, modeInk)
 		}
 	}
-	// The model beside it keeps the model grey — the whole point of the split.
+	// The model beside it keeps the model ink — the whole point of the split.
 	if x := strings.Index(rows[divY], "test/free"); x >= 0 {
 		if got, _, _ := cellStyle(scr, x, divY).Decompose(); got != modelInk {
 			t.Fatalf("the model is painted in %v, want the model ink %v", got, modelInk)
 		}
+	}
+}
+
+// TestEveryModeHasItsOwnInk pins the map itself: the four modes disagree on
+// the one thing they actually differ ON — how much the agent may do without
+// asking — so four modes painted in fewer than four inks would hide exactly
+// that. The rungs share no colour with each other or with the model name.
+func TestEveryModeHasItsOwnInk(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	cur := ModeDefault
+	app.SetModeOps(modeWired(&cur))
+
+	seen := map[theme.Color]string{} // ink → the first mode that wore it
+	for _, mode := range modeAll {
+		cur = mode
+		ink := app.th.Get(app.modeToken())
+		if ink == (theme.Color{}) {
+			t.Fatalf("%s paints no colour", mode)
+		}
+		if other, dup := seen[ink]; dup {
+			t.Fatalf("%s and %s share the ink %v", other, mode, ink)
+		}
+		if ink == app.th.Get(theme.StatusLineModel) {
+			t.Fatalf("%s wears the model ink, so the two read as one phrase", mode)
+		}
+		seen[ink] = mode
 	}
 }
 
