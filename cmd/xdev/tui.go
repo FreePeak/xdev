@@ -54,6 +54,22 @@ func tabInfos(ts *tabset) []tui.TabInfo {
 	return o
 }
 
+// tabsModeOn is the config value the settings row SHOWS, which is not the
+// boolean the App needs: opencode spells the strip's policy auto|on|off, and
+// an unset layer is "auto", not "on" — a panel that opened on "on" would write
+// a different value than the user had and the next start would keep it.
+func tabsModeOn(s *config.Settings) string {
+	if s == nil {
+		return "auto"
+	}
+	switch v := strings.ToLower(strings.TrimSpace(s.Tui.Tabs.Mode)); v {
+	case "on", "off":
+		return v
+	default:
+		return "auto"
+	}
+}
+
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -471,6 +487,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
+	// The tab-strip policy (tui.tabs.mode / tui.tabs.indicators) is applied
+	// through one closure, declared before the overlay's Write can name it: a
+	// `tui.tabs.*` write must move the strip on the next frame, not the next
+	// process.
+	applyTabPolicy := func() {
+		s := lastSettings()
+		app.SetTabPolicy(s.TabsModeOn(), s.TabsIndicatorsOn())
+	}
 	// Settings overlay (Alt+,): the settings this session already has a live
 	// seam for. The panel owns its key handling and rendering; what is wired
 	// here is the two things only cmd can do — read the layered values the
@@ -498,6 +522,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ThinkingLevels...)},
 				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
 					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
+				// The tab strip is a view of the tabset, not the tabset: the
+				// chords and /tabs keep working with it hidden. So both
+				// spellings are opencode's own values, so a config pasted from
+				// its tui.json lands unchanged.
+				{Key: "tui.tabs.mode", Label: "Session tabs", Value: tabsModeOn(s),
+					Editable: true, Kind: "select", Options: []string{"auto", "on", "off"}},
+				{Key: "tui.tabs.indicators", Label: "Tab badges", Value: s.TabsIndicators(),
+					Editable: true, Kind: "select", Options: []string{"status", "numbers"}},
 				{Key: "theme", Label: "Theme", Value: s.Theme, Editable: false, Kind: "text"},
 				{Key: "approvalMode", Label: "Approval mode", Value: s.ApprovalMode, Editable: false, Kind: "text"},
 				{Key: "defaultModel", Label: "Model", Value: s.DefaultModel, Editable: false, Kind: "text"},
@@ -532,6 +564,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			case "tui.exitDetach":
 				v := value == "true"
 				lastSettings().Tui.ExitDetach = &v
+			case "tui.tabs.mode":
+				lastSettings().Tui.Tabs.Mode = value
+				// The strip is the only thing mode moves, and the App owns
+				// that flag, so a write takes effect on the next frame
+				// rather than the next process.
+				applyTabPolicy()
+			case "tui.tabs.indicators":
+				lastSettings().Tui.Tabs.Indicators = value
+				applyTabPolicy()
 			case "thinking":
 				lastSettings().Thinking = value
 			case "sidebarMode":
@@ -869,6 +910,27 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			label = shortSessionID(next.id)
 		}
 		app.AddSystemBlock("· closed a session · now " + label)
+		return nil
+	}
+
+	// reopenLastTab is C-shift-T (opencode session_tab_reopen): re-open the
+	// most recently closed session. The tabset owns the closed stack; this
+	// only opens the file it names and reuses the /resume path, so a reopen
+	// is the same act as typing `/resume <id>` — one code path, no second
+	// way for a session to come back.
+	reopenLastTab := func() error {
+		path := tabs.takeClosed()
+		if path == "" {
+			return fmt.Errorf("no closed session to reopen")
+		}
+		ns, err := session.Open(path)
+		if err != nil {
+			return fmt.Errorf("reopen %s: %w", shortSessionID(sessionIDOfPath(path)), err)
+		}
+		if err := swapStoreTo(ns); err != nil {
+			_ = ns.Close()
+			return err
+		}
 		return nil
 	}
 
@@ -2738,14 +2800,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	// Vision is the live model's property, not the launch model's: /model
 	// mid-session changes whether an attachment can be read at all.
-	// Session tabs (opencode session.tab.next / .previous). Alt+] / Alt+[
-	// cycle the open set without aborting a parked turn; Alt+Shift+] jumps
-	// to the next unread one. Wired through the keybinding table so
+	// Session tabs (opencode session.tab.next / .previous / .reopen).
+	// Alt+] / Alt+[ and Ctrl+Tab cycle the open set without aborting a parked
+	// turn; Alt+Shift+] jumps to the next unread one; C-Shift-T reopens the
+	// last closed session. Wired through the keybinding table so
 	// keybindings.yml can move them.
 	app.SetTabCycle(func(dir int, onlyUnread bool) { cycleTab(dir, onlyUnread) })
 	app.SetTabPick(focusTabByID)
 	app.SetTabClose(closeTabByID)
+	app.SetTabReopen(reopenLastTab)
 	app.SetTabs(tabInfos(tabs))
+	// The strip's policy at startup: the layered config, so a session that
+	// says mode: off never paints it (applyTabPolicy, declared with the
+	// overlay above, is the one place the App hears about it).
+	applyTabPolicy()
 	app.SetVision(func() bool {
 		modelMu.Lock()
 		defer modelMu.Unlock()
