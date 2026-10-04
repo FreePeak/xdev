@@ -970,18 +970,30 @@ func (a *Agent) goalSystem(system string) string {
 	return system
 }
 
-// turnError marks a failed turn and whether any content event already
-// reached the hooks — replaying such a turn would double-emit it.
-// partial carries the accumulated text/thinking when the stream died
-// mid-content: the retain-and-continue path persists it and resumes the
-// turn instead of replaying (M5 tail). Tool calls are never captured as
-// a partial — an unpaired call would make the continuation request
-// invalid — but they are COUNTED (orphanToolCalls), because a turn that
-// died on a call and rendered nothing is the one post-content failure a
-// whole-turn replay can still repair.
+// turnError marks a failed turn and what recovery can do about it. Exactly
+// one of the two fields is ever set, and which one says what the failed turn
+// left behind:
+//
+//   - partial — the stream died with flushed text/thinking behind it. The
+//     retain-and-continue path persists that and resumes the turn instead of
+//     replaying (M5 tail), because replaying would double-emit it.
+//   - orphanToolCalls — the stream died on tool calls it never paired, with
+//     no text behind them. Tool calls are never captured as a partial (an
+//     unpaired call would make the continuation request invalid), and nothing
+//     of them was rendered, so the whole turn is replayable.
+//
+// There is deliberately no "content was emitted" flag. A content event
+// reaching the hooks is not the same fact as a partial existing: a text block
+// that opened and flushed no delta rendered nothing and kept nothing, yet it
+// used to set that flag, sent the ladder down the post-content branch, found
+// no partial — and ended the run raw. Retained partial IS the criterion.
+// ponytail: the criterion is deliberately coarse — a stream whose only text
+// was pure whitespace counts as a partial and is retained, not replayed,
+// because CleanUTF8 leaves whitespace alone and the two outcomes differ only
+// by an invisible assistant block. Splitting that out later needs a real "is
+// this text visible" signal from the TUI layer, which does not exist.
 type turnError struct {
 	err             error
-	contentEmitted  bool
 	partial         *ai.Message
 	orphanToolCalls int
 }
@@ -989,14 +1001,6 @@ type turnError struct {
 func (e *turnError) Error() string { return e.err.Error() }
 
 func (e *turnError) Unwrap() error { return e.err }
-
-// contentEmitted reports whether the (stream) error fired after visible
-// content. Errors that aren't turnErrors (e.g. stream-start failures)
-// count as pre-content.
-func turnContentEmitted(err error) bool {
-	var te *turnError
-	return errors.As(err, &te) && te.contentEmitted
-}
 
 // orphanToolCalls reports the tool calls a failed turn left unpaired — a
 // stream that died mid-call, with no text behind it. The adapters emit
@@ -1124,27 +1128,31 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		}
 		switch ai.Classify(err) {
 		case ai.ClassTransient:
-			// A turn that died on a tool call with no text behind it has no
-			// partial to continue from and an unpaired call nothing can
-			// consume — but nothing was rendered either, so the whole turn
-			// is replayable. It takes the pre-content ladder below instead
-			// of surfacing the error, which is how a "stream ended without
-			// finish_reason" cut mid-tool-call used to end the session
-			// (orphanToolCalls).
+			// What recovery can do depends on what the failed turn left
+			// behind — a partial to continue from, an unpaired tool call,
+			// or neither — not on whether a content event fired. A turn
+			// with neither rendered nothing and kept nothing, so it is
+			// replayable and takes the ladder below. That is the shape
+			// "stream ended without finish_reason" used to end the
+			// session on: a text block that opened and flushed no delta
+			// set the old "content emitted" flag, so the post-content
+			// branch below ran, found no partial, and returned the error
+			// raw.
 			orphans := orphanToolCalls(err)
 			if orphans > 0 {
 				logx.Errorf("recovery: stream died on %d unpaired tool call(s) — replaying the turn", orphans)
 			}
-			if turnContentEmitted(err) && orphans == 0 {
+			var te *turnError
+			if errors.As(err, &te) && te.partial != nil && orphans == 0 {
 				// Retain-and-continue (M5 tail): persist the partial, follow
 				// with a continuation prompt, resume. A bounded ladder keeps
 				// its one-shot budget; retry.infinite now gets a real
 				// ceiling too (it used to get none at all). Only
 				// text/thinking partials qualify: a tool call without its
 				// result is not a request a provider would accept.
-				var te *turnError
-				canRetain := errors.As(err, &te) && te.partial != nil
-				if canRetain && continued < continuationBudget(policy) {
+				// Out of budget: surface rather than resume from a message
+				// that is already half on screen.
+				if continued < continuationBudget(policy) {
 					history = append(history, *te.partial)
 					a.persist(*te.partial)
 					cont := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: ContinuationPrompt}}, Attribution: ContinuationAttribution}
@@ -1581,7 +1589,6 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		usage               *ai.Usage
 		stop                ai.StopReason
 		textOpen, thinkOpen bool
-		emitted             bool // any content event reached the hooks
 	)
 	closeBlock := func() {
 		if thinkOpen {
@@ -1621,29 +1628,23 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 			msg.Provider, msg.API, msg.Model = ev.Provider, ev.API, ev.Model
 		case ai.EventTextStart:
 			textOpen = true
-			emitted = true
 		case ai.EventTextDelta:
 			text.WriteString(ev.Delta)
-			emitted = true
 			if m := a.ttsrObserve(ctx, ttsrProse, ev.Delta, ev.StreamIndex); m != nil {
 				return ttsrAbort(m)
 			}
 		case ai.EventThinkingStart:
 			thinkOpen = true
-			emitted = true
 		case ai.EventThinkingDelta:
 			thinking.WriteString(ev.Delta)
-			emitted = true
 			if m := a.ttsrObserve(ctx, ttsrThinking, ev.Delta, ev.StreamIndex); m != nil {
 				return ttsrAbort(m)
 			}
 		case ai.EventToolcallStart:
 			closeBlock()
-			emitted = true
 			toolCalls[ev.StreamIndex] = &ai.ToolCallBlock{ID: ev.ToolCallID, Name: ev.ToolName, StreamIndex: ev.StreamIndex}
 			order = append(order, ev.StreamIndex)
 		case ai.EventToolcallDelta:
-			emitted = true
 			if tc := toolCalls[ev.StreamIndex]; tc != nil {
 				tc.PartialArgs = ev.PartialJSON
 			}
@@ -1664,11 +1665,17 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 			}
 		case ai.EventError:
 			closeBlock() // flush any open text/thinking into msg.Content
-			te := &turnError{err: fmt.Errorf("agent: stream: %w", ev.Err), contentEmitted: emitted}
+			te := &turnError{err: fmt.Errorf("agent: stream: %w", ev.Err)}
 			// Retain-and-continue candidate: accumulated text/thinking
 			// only (tool calls stay out — an unpaired call would make
-			// the continuation request invalid at the provider).
-			if emitted && len(msg.Content) > 0 {
+			// the continuation request invalid at the provider). The test
+			// is the flushed content, not "a content event fired":
+			// closeBlock flushes nothing when every delta was empty or
+			// mojibake, and such a turn rendered nothing and kept
+			// nothing, so it is replayable. The opened-but-empty text
+			// block used to count as "content emitted" instead and ended
+			// the run raw.
+			if len(msg.Content) > 0 {
 				partial := msg
 				if partial.Role == "" {
 					partial.Role = ai.RoleAssistant
