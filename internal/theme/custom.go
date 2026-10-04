@@ -457,8 +457,10 @@ func AvailableThemes(dir string) []string {
 	return append(out, customNames...)
 }
 
-// LoadNamed resolves a theme by name for rendering: built-ins first,
-// then the custom directory. Errors fall back to the auto default so a
+// LoadNamed resolves a theme by name for rendering: the custom directory
+// first, so a file in ~/.xdev/agent/themes/ overrides a shipped theme of the
+// same name (AvailableThemes collapses the two into one entry for exactly
+// that reason), then the built-ins. Errors fall back to the auto default so a
 // broken custom theme never blocks startup.
 func LoadNamed(name, dir string) *Theme {
 	if t, err := LoadCustom(dir, name); err == nil && t != nil {
