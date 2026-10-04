@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/theme"
 )
 
@@ -62,5 +64,33 @@ func TestValidateKeyTheme(t *testing.T) {
 				t.Fatalf("validateKey(theme, %q) = %v, want %s", tc.value, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestFanoutConfigKeyIsComplete pins the three doors the toggle has to
+// pass: `config set` accepts only the two booleans, `config get` answers
+// the effective value when the key is absent from the file, and
+// `config list` names it. A bool key that any other setting already
+// validates is a one-case edit; a missing one leaves the user editing
+// YAML by hand to discover a flag they cannot see.
+func TestFanoutConfigKeyIsComplete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+
+	if err := validateKey("typesafe.fanout", "true"); err != nil {
+		t.Fatalf("true rejected: %v", err)
+	}
+	err := validateKey("typesafe.fanout", "yes")
+	if err == nil || !strings.Contains(err.Error(), "true|false") {
+		t.Fatalf("non-boolean accepted: %v", err)
+	}
+
+	s := &config.Settings{}
+	if got := fallbackValue(s, "typesafe.fanout"); got != "false" {
+		t.Fatalf("fallbackValue(unset) = %q, want false", got)
+	}
+	s.TypeSafe.Fanout = true
+	if got := fallbackValue(s, "typesafe.fanout"); got != "true" {
+		t.Fatalf("fallbackValue(on) = %q, want true", got)
 	}
 }

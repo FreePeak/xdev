@@ -2137,6 +2137,7 @@ func List(s *Settings, globalPath string) []string {
 		"compaction.async " + fmt.Sprint(s.CompactionAsyncOn()),
 		"compaction.contextWindow " + s.CompactionContextWindowOn(),
 		"retry.infinite " + fmt.Sprint(s.InfiniteRetry()),
+		"typesafe.fanout " + fmt.Sprint(s.TypeSafe.Fanout),
 	}
 	if segs := s.StatusLineSegments(); segs != nil {
 		out = append(out, "statusLine.segments "+strings.Join(segs, ","))
