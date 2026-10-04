@@ -555,7 +555,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
 	hooks := agent.TurnHooks(ph)
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: pinnedWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -905,6 +905,10 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 // the compaction threshold and reach 771,907 tokens before an actual provider
 // overflow forced the emergency recovery — while the same box's pinned
 // models compacted 355 times and peaked at 234,152.
+//
+// The compaction.contextWindow pin is NOT folded in here, so an agent's
+// literal keeps the window its catalog stated and `/context auto` can hand a
+// live agent straight back to it. pinnedWindow adds the pin.
 func modelWindow(cfg *config.Config, provider, model string) int {
 	pc, ok := cfg.Providers[provider]
 	if !ok {
@@ -927,6 +931,17 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		return pc.ContextWindow
 	}
 	return agent.ResolveMaxContextTokens()
+}
+
+// pinnedWindow is modelWindow with the compaction.contextWindow pin on top:
+// the window an agent is BUILT with (the per-turn literal) and the window the
+// HUD measures against. A 0 pin is auto, so it never reaches the "0 disables
+// compaction" state modelWindow is careful to avoid.
+func pinnedWindow(cfg *config.Config, provider, model string) int {
+	if w := lastSettings().CompactionContextWindow(); w > 0 {
+		return w
+	}
+	return modelWindow(cfg, provider, model)
 }
 
 // modelReasoning reports whether the catalog says this model can reason

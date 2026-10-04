@@ -89,6 +89,10 @@ type CompactionSettings struct {
 	// at the next step boundary instead of blocking the turn; nil (unset)
 	// keeps the synchronous ladder.
 	Async *bool `yaml:"async"`
+	// ContextWindow pins the session's context window for EVERY model, in
+	// place of the window its catalog states: "auto" (or empty) hands each
+	// model back its own declared window. Vocabulary: ContextWindowChoices.
+	ContextWindow string `yaml:"contextWindow"`
 }
 
 // HandoffSettings holds the handoff-document knobs (M5 #23).
@@ -1050,7 +1054,7 @@ func (s *Settings) CompactionMethodOrder() string {
 
 // CompactionIdleAfter reports the idle-compaction gap; 0 disables the
 // trigger (nil-safe; a malformed value never reaches storage — merge rejects
-// it — so this only guards hand-built Settings).
+// it).
 func (s *Settings) CompactionIdleAfter() time.Duration {
 	if s == nil {
 		return 0
@@ -1066,6 +1070,62 @@ func (s *Settings) CompactionIdleAfter() time.Duration {
 // shipped default is synchronous).
 func (s *Settings) CompactionAsyncOn() bool {
 	return s != nil && s.Compaction.Async != nil && *s.Compaction.Async
+}
+
+// ContextWindowChoices is the compaction.contextWindow vocabulary, in
+// ascending order so a select row walks it the way a number does. "auto" is
+// the shipped default: each model uses the window its catalog states.
+var ContextWindowChoices = []string{"auto", "200k", "300k", "500k", "1m"}
+
+// contextWindowTokens maps the vocabulary to a token count. "auto" is absent
+// on purpose: 0 reads as "compaction off", so auto is spelled by the caller,
+// never by a number.
+var contextWindowTokens = map[string]int{
+	"200k": 200_000,
+	"300k": 300_000,
+	"500k": 500_000,
+	"1m":   1_000_000,
+}
+
+// NormalizeContextWindow canonicalizes a compaction.contextWindow value to
+// the vocabulary's own spelling ("1M" → "1m", "" → "auto") and reports
+// whether it was one the vocabulary accepts. Case is the only near-miss a
+// human makes here; anything else fails rather than guessing a window the
+// user never asked for.
+func NormalizeContextWindow(v string) (string, bool) {
+	s := strings.ToLower(strings.TrimSpace(v))
+	// Empty and "auto" are the same rung: the key is a pin, and nothing
+	// pinned is every model on its own declared window.
+	if s == "" || s == "auto" {
+		return "auto", true
+	}
+	if _, ok := contextWindowTokens[s]; ok {
+		return s, true
+	}
+	return s, false
+}
+
+// CompactionContextWindow returns the pinned window in tokens, or 0 for auto
+// (nil-safe: an absent layer means "each model keeps its own window").
+func (s *Settings) CompactionContextWindow() int {
+	if s == nil {
+		return 0
+	}
+	v, ok := NormalizeContextWindow(s.Compaction.ContextWindow)
+	if !ok {
+		return 0
+	}
+	return contextWindowTokens[v]
+}
+
+// CompactionContextWindowOn is the value a select row displays: the pin in
+// the vocabulary's own spelling, so a row never shows a raw file value.
+func (s *Settings) CompactionContextWindowOn() string {
+	if s == nil {
+		return "auto"
+	}
+	v, _ := NormalizeContextWindow(s.Compaction.ContextWindow)
+	return v
 }
 
 // idleAfterOrDefault renders the idle-compaction gap for the settings list
@@ -1422,6 +1482,19 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.Compaction.Async != nil {
 		s.Compaction.Async = layer.Compaction.Async
+	}
+	// compaction.contextWindow is validated here for the same reason
+	// idleAfter is: a window the user never asked for silently raising the
+	// compaction threshold is worse than a failed start. The canonical
+	// spelling is stored, so "1M" and "1m" cannot disagree downstream.
+	// An explicit "auto" is a LAYER like any other — it is how a project
+	// layer hands the models back their own windows over a machine-wide pin.
+	if v := strings.TrimSpace(layer.Compaction.ContextWindow); v != "" {
+		norm, ok := NormalizeContextWindow(v)
+		if !ok {
+			return fmt.Errorf("compaction.contextWindow %q: want %s", v, strings.Join(ContextWindowChoices, "|"))
+		}
+		s.Compaction.ContextWindow = norm
 	}
 	for k, v := range layer.ToolsApproval {
 		s.ToolsApproval[k] = v
@@ -1874,6 +1947,17 @@ func Set(path, key, value string) error {
 	if !settingsKeyOK(key) {
 		return fmt.Errorf("config: unknown key %q in %s: the next start would reject the file, move it aside as *.broken-* and come up on defaults. `xdev config list` shows the schema; modelRoles.<name>, modelRolesEffort.<name>, toolsApproval.<tool> and hooks.* take any name", key, path)
 	}
+	// A closed-vocabulary key is checked HERE, not only at load: Set is the
+	// trust boundary every writer goes through (CLI, /settings overlay,
+	// /context), and a typo that only fails on the next start is a typo the
+	// user finds tomorrow. Canonicalize so the stored spelling is stable.
+	if key == "compaction.contextWindow" {
+		canon, ok := NormalizeContextWindow(value)
+		if !ok {
+			return fmt.Errorf("config: compaction.contextWindow must be %s, got %q", strings.Join(ContextWindowChoices, "|"), value)
+		}
+		value = canon
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -2046,6 +2130,7 @@ func List(s *Settings, globalPath string) []string {
 		"compaction.methodOrder " + s.CompactionMethodOrder(),
 		"compaction.idleAfter " + idleAfterOrDefault(s.Compaction.IdleAfter),
 		"compaction.async " + fmt.Sprint(s.CompactionAsyncOn()),
+		"compaction.contextWindow " + s.CompactionContextWindowOn(),
 		"retry.infinite " + fmt.Sprint(s.InfiniteRetry()),
 	}
 	if segs := s.StatusLineSegments(); segs != nil {

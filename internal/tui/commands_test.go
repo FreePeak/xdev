@@ -22,15 +22,16 @@ type fakeAPI struct {
 	extCalls []string
 	extErr   error
 
-	setModel string
-	plan     string
-	mode     string
-	vibe     string
-	advisor  string
-	mem      string
-	theme    string
-	prewalk  string
-	handoff  string
+	setModel  string
+	plan      string
+	mode      string
+	vibe      string
+	advisor   string
+	mem       string
+	theme     string
+	prewalk   string
+	handoff   string
+	ctxWindow string
 
 	exported  string
 	exportErr error
@@ -621,6 +622,17 @@ func (f *fakeAPI) SettingsOverlay() error         { return nil }
 func (f *fakeAPI) Sidebar(args string) error { return nil }
 
 func (f *fakeAPI) ThinkingLevel(args string) error { return nil }
+
+// ContextWindow mirrors /context: bare reports the pin in force, a size
+// records it so the tests can assert what a write reached.
+func (f *fakeAPI) ContextWindow(args string) error {
+	if strings.TrimSpace(args) == "" {
+		f.blocks = append(f.blocks, "context window "+f.ctxWindow)
+		return nil
+	}
+	f.ctxWindow = args
+	return nil
+}
 
 // TestExtensionCommandDispatch routes "/server:cmd args" to the extension
 // runner and prints its output as a system block — the consumer that makes

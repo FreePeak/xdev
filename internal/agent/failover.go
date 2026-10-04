@@ -32,7 +32,7 @@ func (a *Agent) currentWindow() int {
 	if a.curTarget > 0 {
 		return a.Failovers[a.curTarget-1].ContextWindow
 	}
-	return a.Compaction.ContextWindow
+	return a.compaction().ContextWindow
 }
 
 // promotionTarget returns the chain index of the smallest-window target

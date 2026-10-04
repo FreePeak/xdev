@@ -114,7 +114,7 @@ func (c CompactionConfig) products() []string {
 // the ladder would pick — the only member whose round trip is worth
 // backgrounding (see the async trigger in compact_async.go).
 func (a *Agent) firstProductIsHandoff() bool {
-	p := a.Compaction.products()
+	p := a.compaction().products()
 	return len(p) > 0 && p[0] == MethodHandoff
 }
 
@@ -125,7 +125,7 @@ func (a *Agent) firstProductIsHandoff() bool {
 // pre-compaction behavior instead of persisting a half-result.
 func (a *Agent) runCompactLadder(ctx context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
 	var lastErr error
-	for _, name := range a.Compaction.products() {
+	for _, name := range a.compaction().products() {
 		fn := lookupCompactMethod(name)
 		if fn == nil {
 			lastErr = fmt.Errorf("compaction: %s: unknown method", name)
@@ -155,7 +155,7 @@ func (a *Agent) runCompactLadder(ctx context.Context, span *compactionSpan) (*se
 // trigger (see compactionDue) — without that, an omp-style order such as
 // `remote,snapcompact,handoff,shake,soft` would never compact on tokens.
 func (a *Agent) hasExplicitProduct() bool {
-	for _, m := range a.Compaction.methods() {
+	for _, m := range a.compaction().methods() {
 		if !slices.Contains(compactTriggers, m) {
 			return true
 		}

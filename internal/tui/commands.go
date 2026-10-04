@@ -442,6 +442,9 @@ type CommandAPI interface {
 	// ThinkingLevel is /thinking [level]: bare reports, a level applies and
 	// persists the request-side reasoning level for the next turn.
 	ThinkingLevel(args string) error
+	// ContextWindow is /context [auto|200k|300k|500k|1m]: bare reports, a
+	// size pins the window for every model, live and persisted.
+	ContextWindow(args string) error
 	// ExtensionCommands exposes the "/server:cmd" roster for /help; nil
 	// when no extensions are loaded.
 	ExtensionCommands() map[string]string
@@ -504,6 +507,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Sidebar(args) }},
 		{Name: "thinking", Description: "request-side reasoning: /thinking [off|auto|minimal|low|medium|high] (bare reports)",
 			Fn: func(app CommandAPI, args string) error { return app.ThinkingLevel(args) }},
+		{Name: "context", Description: "context window for every model: /context [auto|200k|300k|500k|1m] (bare reports)",
+			Fn: func(app CommandAPI, args string) error { return app.ContextWindow(args) }},
 		{Name: "prewalk", Description: "one-shot model handoff: /prewalk [on|off|into <ref>] (default: the session model)",
 			Fn: func(app CommandAPI, args string) error { return app.Prewalk(args) }},
 		{Name: "handoff", Description: "replace the context with a handoff document (continues from it)",
@@ -1127,4 +1132,13 @@ func collapseLine(s string) string {
 type ThinkingOps struct {
 	Current func() string
 	Set     func(level string) error
+}
+
+// ContextOps wires /context to the live context window (lives in cmd, which
+// owns the settings write and the running agents). Current reports the pin in
+// force; Set applies and persists one, reaching the turn already running. nil
+// ops degrade the command to a notice.
+type ContextOps struct {
+	Current func() string
+	Set     func(window string) error
 }

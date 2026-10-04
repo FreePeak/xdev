@@ -245,7 +245,7 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 		Provider: h.prov, Tools: h.reg, Store: s.store, Model: h.modelName,
 		MaxTokens: h.maxTokens, MaxTurns: h.maxTurns, Hooks: s.hooks(),
 		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
-		Compaction: agent.CompactionConfig{ContextWindow: modelWindow(h.cfg, h.provName, h.modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
+		Compaction: agent.CompactionConfig{ContextWindow: pinnedWindow(h.cfg, h.provName, h.modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(h.cfg, lastSettings(), h.provName, h.modelName),
 		Thinking:   h.thinking,

@@ -208,19 +208,19 @@ func (a *Agent) handoff(ctx context.Context, system, instruction string, planRes
 // backstop maybeCompact applies), and the context window guard matches
 // maybeCompact — ContextWindow 0 disables context maintenance entirely.
 func (a *Agent) HandoffDue(history []ai.Message) bool {
-	if a.Store == nil || a.Compaction.ContextWindow <= 0 {
+	if a.Store == nil || a.compaction().ContextWindow <= 0 {
 		return false
 	}
-	if !slices.Contains(a.Compaction.methods(), MethodHandoff) {
+	if !slices.Contains(a.compaction().methods(), MethodHandoff) {
 		return false
 	}
 	if p := memPressure(); p >= memlimit.HighPressure {
 		return true
 	}
-	if a.Compaction.threshold() <= 0 {
+	if a.compaction().threshold() <= 0 {
 		return false
 	}
-	return contextTokens(history) > a.Compaction.threshold()
+	return contextTokens(history) > a.compaction().threshold()
 }
 
 // HandoffRung is the ladder's handoff method at a step boundary: when due,
@@ -248,7 +248,7 @@ func (a *Agent) HandoffRung(ctx context.Context, system string, history []ai.Mes
 // document (nil firstKeptEntryId = only the document survives), because an
 // explicit /handoff must never fail for being short.
 func (a *Agent) handoffCut(res *session.ContextResult) (*string, []ai.Message) {
-	cut := findCutPoint(res.Messages, a.Compaction.keepRecent())
+	cut := findCutPoint(res.Messages, a.compaction().keepRecent())
 	if cut < 1 || cut >= len(res.EntryIDs) || res.EntryIDs[cut] == "" {
 		return nil, nil
 	}
