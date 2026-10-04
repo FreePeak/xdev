@@ -342,36 +342,61 @@ func groknightSlots() map[string]Color {
 		// (App.modeToken), so this slot is only what an unrecognised mode
 		// name falls back to; it keeps the accent for that case.
 		StatusLineMode: Hex("#bb9af7"),
-		// Diff rows, Claude Code's model (v2.1.287, the diff renderer): the
-		// +/- marker wears the palette's own green/red — the pair the status
-		// line paints a clean/dirty tree in, so one system owns both — and
-		// the change itself is read from a BAND, not from coloured text.
-		// The bands are CC's own tints (addLine rgb(2,40,0), addWord
-		// rgb(4,71,0) and the two red equivalents): near-black, so they
-		// carry no palette identity and cannot land on the canvas.
-		ToolDiffAdded:         Hex("#9ece6a"),
-		ToolDiffRemoved:       Hex("#f7768e"),
-		ToolDiffContext:       Hex("#6c6c6c"),
+		// Diff rows. Claude Code's model (v2.1.287, the diff renderer) keeps
+		// the SHAPE — the +/- marker is the only coloured text on a changed
+		// row, and the change itself is read from a flat band — while the INKS
+		// are Rosé Pine's own git groups, the two upstream hands its diff
+		// signs (nvim lua/rose-pine/config.lua: git_add = "foam",
+		// git_delete = "love"). Foam rather than pine for the added marker:
+		// pine reads 4.0:1 on this canvas and 3.1:1 on the added band, so a
+		// pine "+" is a marker the reader has to squint at, which defeats the
+		// claim the band is making. Love reads 5.5:1 on the removed band.
+		ToolDiffAdded:   Hex("#9ccfd8"), // foam, upstream git_add
+		ToolDiffRemoved: Hex("#eb6f92"), // love, upstream git_delete
+		ToolDiffContext: Hex("#908caa"), // subtle, the unchanged rows
+		// The bands stay Claude Code's own near-black tints (addLine
+		// rgb(2,40,0), addWord rgb(4,71,0) and the two red equivalents). They
+		// are a near-black STRIPE, not a palette identity: the only ink that
+		// ever sits on one is the row's own body text, so re-tinting them to a
+		// palette hue would repaint the whole diff panel — the transcript box
+		// AND the sidebar's popup, which share these four slots — to buy no
+		// legibility. (The shipped rose-pine.json palette does use its own
+		// pine/foam tints here; a launch theme deliberately does not.)
 		ToolDiffAddedBg:       Hex("#022800"), // CC addLine
 		ToolDiffRemovedBg:     Hex("#3d0100"), // CC deleteLine
 		ToolDiffAddedWordBg:   Hex("#044700"), // CC addWord
 		ToolDiffRemovedWordBg: Hex("#5c0200"), // CC deleteWord
-		// Fenced-code tokens (#501), on Claude Code's dark scope map
-		// (v2.1.287, the hljs emitter's `scopes` table — One Dark). The 9
-		// roles map one-to-one onto its scopes, so a code block reads like a
-		// code block there. They DO paint (unlike the diff's old slots): an
-		// unpainted token class would leave the model's own code ambiguous,
-		// and the risk is a block that is harder to skim, not a change
-		// rendered in the reader's own green/red.
-		SyntaxComment:     Hex("#75715e"), // comment/meta
-		SyntaxKeyword:     Hex("#f92672"), // keyword/operator
-		SyntaxString:      Hex("#e6db74"), // string/regexp
-		SyntaxNumber:      Hex("#be84ff"), // literal/number
-		SyntaxType:        Hex("#a6e22e"), // built_in/type
-		SyntaxVariable:    Hex("#e6e6e6"), // variable/property (body text)
-		SyntaxFunction:    Hex("#a6e22e"), // title.function
-		SyntaxOperator:    Hex("#f92672"), // operator
-		SyntaxPunctuation: Hex("#f8f8f2"), // punctuation
+		// Tool output and fenced-code tokens (#501, #582) wear Rosé Pine's own
+		// syntax groups, mapped role-for-role onto its token table (vscode
+		// themes/rose-pine-color-theme.json). A `read` preview, an `edit`
+		// result and a bash command then read as ONE palette with the diff
+		// above them, instead of a Grok-coloured frame around a One-Dark
+		// block.
+		//
+		// Two of the nine are NOT upstream's own assignment, both forced by
+		// slots xdev has that Rosé Pine has no counterpart for:
+		//
+		//   Comment is `muted`, not nvim's `subtle`. xdev paints a tool body's
+		//   flat rows in TextSecondary (#c8c8c8 here), and a comment in the
+		//   same ink as the body is a comment that vanished — that is exactly
+		//   the regression TestFencedBlockInToolOutputIsNotColoured caught.
+		//   `muted` is one step quieter than `subtle`, still a Rosé Pine token,
+		//   and reads 3.3:1 on the code band against the old comment's 3.5:1.
+		//
+		//   Number is `rose`, not nvim's `gold`: upstream paints String and
+		//   Number the same ink, and two classes a reader tells apart wearing
+		//   one ink is the ambiguity these nine slots exist to remove
+		//   (TestFencedGoBlockColorsItsTokens). VS Code's own rose-pine gives
+		//   constant.numeric #ebbcba — rose — which stays in the palette.
+		SyntaxComment:     Hex("#6e6a86"), // muted, one step below subtle
+		SyntaxKeyword:     Hex("#31748f"), // Keyword
+		SyntaxString:      Hex("#f6c177"), // String
+		SyntaxNumber:      Hex("#ebbcba"), // constant.numeric, not nvim's gold
+		SyntaxType:        Hex("#9ccfd8"), // Type
+		SyntaxVariable:    Hex("#e0def4"), // Identifier (the brightest token)
+		SyntaxFunction:    Hex("#ebbcba"), // Function
+		SyntaxOperator:    Hex("#908caa"), // Operator
+		SyntaxPunctuation: Hex("#908caa"), // @punctuation
 	}
 }
 
