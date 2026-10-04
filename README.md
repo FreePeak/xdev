@@ -88,6 +88,30 @@ providers:
 defaultModel: xdev-server/free
 ```
 
+A gateway, a proxy or a local server reports tokens but usually no cost, so
+`xdev stats` and `xdev usage` would read `$0.00` for work that was paid for.
+Pin the rates per million tokens and the two commands estimate it — only for
+the requests that carried no price of their own:
+
+```yaml
+    models:
+      - id: free
+        name: Free
+        contextWindow: 200000
+        pricing:                       # USD per 1M tokens
+          input: 3
+          output: 15
+          cacheRead: 0.3
+          cacheWrite: 3.75
+```
+
+Cache read and write are their own rates, not multipliers of `input`: Anthropic
+reads cache at a tenth of input while DeepSeek reads it at a fiftieth.
+
+Omit `pricing` and nothing changes: a provider that reports its own cost is
+always believed, and the report keeps the reported and estimated halves
+separable so an estimate is never mistaken for a bill.
+
 Or: `export XDEV_SERVER_URL=http://<gateway-host>:8080`, then
 `xdev connect xdev-server --set-default` and `export XDEV_SERVER_KEY=...`.
 

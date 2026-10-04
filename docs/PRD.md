@@ -2912,3 +2912,15 @@ Verified on the binary, not only the tests: seeded a directory whose newest file
 
 Tests: `TestClassifyStatus` gains the empty-file, slot-and-header-only, and bookkeeping-only cases; `TestEmptySessionIsNotAResumeTarget` (cmd/xdev) is the end-to-end guard — newest file is empty, `--continue` must resolve the older session with a conversation and an explicit prefix must error; `TestEmptySessionsAreNotPickerRows` covers both pickers; `TestSessionHasMessagesIsTheForkGuard` pins the predicate against a `GoalUpdatedEntry`-only store, which is the shape a fresh session actually has. `go test ./...` green.
 
+
+---
+
+*Last updated: 2026-10-03 (**R-USE-1 shipped** — a local price table in `models.yml`, so a store behind a gateway reads a real number instead of `$0.00`).* A gateway, a proxy or a local server reports tokens but usually no cost, and `internal/stats` had exactly one honest answer to that: `CostUSD` counted what providers said and `PricedTurns < Turns` exposed the gap. The gap is now fillable from configuration: `ModelConfig.pricing` (USD per 1M tokens — `input`, `output`, `cacheRead`, `cacheWrite`) plus `Config.Pricing(model)`, which matches pinned entries by provider-prefix first and then by longest id, so a gateway's rate wins over a vendor's and `gpt-5.4-mini` is never shadowed by `gpt-5.4`.
+
+**A price table only ever fills a gap; it never overrides a bill.** The scan keeps the reported and unpriced requests in separate counters (`CostUSD`/`PricedTurns` and the new `Unpriced` per model), and the estimate is applied when those fold into a report — so editing `models.yml` between two scans changes the number without a rescan, and one rollup cache serves both a priced and an unpriced scan. `Totals` gained `CostReported`, `CostEstimated`, `BilledRequests` and `PricedRequests`: the two halves are always separable, and `PricedRequests < BilledRequests` says exactly how much of the history is unknown instead of hiding it. A model with no `pricing:` keeps the old honest zero.
+
+Note the rename behind it: `PricedTurns` counted turns, but R-USE-2 made a compaction's summarize call a priced request that is *not* a turn, so the field would have lied. `BilledRequests` is the denominator and `PricedRequests` the priced subset.
+
+Verified on the failure: removing the fold-time estimate fails `TestScanTrustsTheProviderOverTheTable` and `TestRollupCacheSurvivesAPriceChange`; `internal/config/models_pricing_test.go` covers the decode, the provider-prefix precedence, the longest-id rule and the nil-safe lookup. `go test ./...` green (37 packages), `go vet` and `gofmt` clean.
+
+Still open from §5: **R-USE-3** (per-model rows — the scan already has the buckets, this PR only prices them), **R-USE-4** (a live context delta so the bar is not a step behind the last provider count), **R-USE-5** (per-dispatch subagent totals).

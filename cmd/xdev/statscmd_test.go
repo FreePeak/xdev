@@ -14,7 +14,7 @@ import (
 // charges it at 1.25× the input rate — so hiding it is hiding the cost.
 func TestStatsByModelShowsBothCacheBuckets(t *testing.T) {
 	rep := stats.Report{
-		Totals: stats.Totals{Turns: 2, PricedTurns: 2},
+		Totals: stats.Totals{Turns: 2, PricedRequests: 2},
 		Models: []stats.ModelStat{
 			{Model: "writer", Sessions: 1, Turns: 1, Input: 300, Output: 60,
 				CacheRead: 900, CacheWrite: 1_200, TotalTokens: 2_460, CostUSD: 0.0021},

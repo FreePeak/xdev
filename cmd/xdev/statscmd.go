@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/stats"
 )
 
@@ -76,6 +77,7 @@ scans cheap. Cost is what the providers reported, not a bill.
 		fmt.Fprintln(errOut, "xdev stats:", err)
 		return 2
 	}
+	opts.Pricer = localPricer()
 
 	if *serve {
 		if *asJSON {
@@ -105,6 +107,24 @@ scans cheap. Cost is what the providers reported, not a bill.
 	}
 	fmt.Fprint(out, formatStatsReport(rep))
 	return 0
+}
+
+// localPricer is the models.yml price table as a stats lookup, or nil when
+// models.yml cannot be read. A broken models.yml must not hide the rest of the
+// report: without prices every request a provider priced in tokens alone
+// reads as $0.00, which is exactly what the reported half still shows.
+func localPricer() func(string) stats.Pricer {
+	cfg, err := config.LoadModelsLayered()
+	if err != nil || cfg == nil {
+		return nil
+	}
+	return func(model string) stats.Pricer {
+		p := cfg.Pricing(model)
+		if p.Zero() {
+			return nil // no local price for this model: it keeps the honest $0
+		}
+		return p
+	}
 }
 
 // statsOptions converts the flags into a scan bound.
@@ -155,9 +175,17 @@ func formatStatsReport(rep *stats.Report) string {
 	fmt.Fprintf(&b, "  %-14s in %s · out %s · cache read %s · cache write %s · total %s\n", "tokens",
 		stats.HumanTokens(t.Input), stats.HumanTokens(t.Output), stats.HumanTokens(t.CacheRead),
 		stats.HumanTokens(t.CacheWrite), stats.HumanTokens(t.TotalTokens))
-	fmt.Fprintf(&b, "  %-14s %s reported over %d priced turns\n", "cost", stats.HumanMoney(t.CostUSD), t.PricedTurns)
-	if t.PricedTurns < t.Turns {
-		fmt.Fprintf(&b, "  %-14s %d of %d turns carried no provider price (counted as 0)\n", "", t.Turns-t.PricedTurns, t.Turns)
+	fmt.Fprintf(&b, "  %-14s %s over %d priced requests\n", "cost", stats.HumanMoney(t.CostUSD), t.PricedRequests)
+	// What the total is made of: a provider's own number, a local estimate, or
+	// both. "cost $0.00" with no priced request is the honest zero of a
+	// gateway that reports tokens only — and the reason the price table exists.
+	if t.CostEstimated > 0 {
+		fmt.Fprintf(&b, "  %-14s %s of it estimated locally (%s reported)\n", "",
+			stats.HumanMoney(t.CostEstimated), stats.HumanMoney(t.CostReported))
+	}
+	if t.PricedRequests < t.BilledRequests {
+		fmt.Fprintf(&b, "  %-14s %d of %d requests carried no price at all (counted as 0)\n", "",
+			t.BilledRequests-t.PricedRequests, t.BilledRequests)
 	}
 	d := rep.Distribution
 	fmt.Fprintf(&b, "  %-14s turns p50 %d · p90 %d · max %d\n", "per session", d.TurnsP50, d.TurnsP90, d.TurnsMax)
