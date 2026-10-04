@@ -5196,12 +5196,14 @@ func clip(s string, maxCells int) string {
 }
 
 // composerAvail is the editor's text width in cells inside the prompt box
-// (border+pad+prefix+right pad+border). It is measured against rightEdge, not
-// the terminal: with the sidebar open the box sits inside the main pane, so a
-// draft must wrap where the box ends — text the box cannot show is a wrap the
-// editor has to know about, or the prompt grows rows the box will not paint.
+// (border + pad + prefix + pad + the trailing pad the box paints on every
+// input row). It is measured against rightEdge, not the terminal: with the
+// sidebar open the box sits inside the main pane, so a draft must wrap where
+// the box ends — text the box cannot show is a wrap the editor has to know
+// about, or the prompt grows rows the box will not paint. The trailing pad is
+// what keeps a full row's last cell off the border.
 func (a *App) composerAvail() int {
-	avail := a.rightEdge() - 7
+	avail := a.rightEdge() - 8
 	if avail < 4 {
 		avail = 4
 	}
@@ -5210,13 +5212,13 @@ func (a *App) composerAvail() int {
 
 // composerBudget is the most input rows the box may paint: the screen minus
 // everything else it shares the terminal with (one transcript row, the box's
-// own borders, the status row) — draw()'s viewport arithmetic
-// solved for the composer. Without a ceiling the box grew past the screen:
-// its top edge climbed above row 0, drawComposer bailed on yTop < 1, and a
-// large paste showed NOTHING while the full draft sat in the buffer — the
-// "composer is empty but Enter sends it all" bug.
+// own borders AND the two padding rows it paints inside them, the status row)
+// — draw()'s viewport arithmetic solved for the composer. Without a ceiling
+// the box grew past the screen: its top edge climbed above row 0, drawComposer
+// bailed on yTop < 1, and a large paste showed NOTHING while the full draft sat
+// in the buffer — the "composer is empty but Enter sends it all" bug.
 func (a *App) composerBudget() int {
-	n := a.height - 5 - a.transcriptTop()
+	n := a.height - 7 - a.transcriptTop()
 	if n < 1 {
 		n = 1
 	}
@@ -5247,11 +5249,14 @@ func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
 	return
 }
 
-// composerRows is the total height of the prompt box (top border, painted
-// input rows, bottom divider).
+// composerRows is the total height of the prompt box: top border, the blank
+// pad above the draft, the painted input rows, the blank pad below them, and
+// the bottom divider. The pads belong to the BOX, not to the draft, so every
+// consumer that sizes itself from this one number — the viewport, the
+// overlays' top edge, the pane's dirty region — grows with it.
 func (a *App) composerRows() int {
 	lines, _, _, _, _ := a.composerView()
-	return len(lines) + 2
+	return len(lines) + 4
 }
 
 // drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
@@ -5283,14 +5288,28 @@ func (a *App) drawComposer(yTop int) {
 	}
 	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
-	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
-	// above/below count the draft rows the window hides, and decide both
-	// where the ❯ prefix belongs and what the divider's hint says.
+	// Input rows: a blank pad, then │ ❯ first…│ and continuation rows
+	// aligned under the text, then a second blank pad. The pads are what make
+	// the box a field rather than a table row — the draft breathes inside the
+	// frame instead of touching it — and they are part of composerRows(), so
+	// the viewport and the overlays above already account for them.
 	lines, curRow, curCol, above, below := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	vert := boxRune(box.Vertical)
+	// yDraft is the first input row: one row below yTop, under the pad.
+	yDraft := yTop + 1
+	// padRow is one of the blank interior rows: side borders, no glyphs, and
+	// every cell filled so a previous frame's text cannot survive underneath.
+	padRow := func(y int) {
+		a.scr.SetContent(1, y, vert, nil, bs)
+		a.scr.SetContent(w-2, y, vert, nil, bs)
+		for x := 2; x < w-2; x++ {
+			a.scr.SetContent(x, y, ' ', nil, ms.body)
+		}
+	}
+	padRow(yTop)
 	for i, ln := range lines {
-		y := yTop + i
+		y := yDraft + i
 		a.scr.SetContent(1, y, vert, nil, bs)
 		a.scr.SetContent(w-2, y, vert, nil, bs)
 		if i == 0 && above == 0 {
@@ -5301,21 +5320,25 @@ func (a *App) drawComposer(yTop int) {
 		drawText(a.scr, 5, y, ln, ms.body)
 	}
 	// Blank the space between the last text row and the right border so a
-	// short line cannot leave stale cells from a previous longer draft.
+	// short line cannot leave stale cells from a previous longer draft. The
+	// fill stops one cell short of the border (x < w-3): that cell is the
+	// trailing pad composerAvail() reserves, so a full row's last rune never
+	// touches the frame.
 	for i, ln := range lines {
+		y := yDraft + i
 		x := 5 + width(ln)
 		if x == 5 && a.ed.Text() == "" {
-			// grok's "Type a message…": an empty prompt is not a blank void.
 			// Drawn here, after the text row, because the fill below would
 			// otherwise blank it back to spaces.
 			ph := "Type a message…"
-			drawText(a.scr, 5, yTop+i, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+			drawText(a.scr, 5, y, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
 			x += width(ph)
 		}
-		for ; x < w-2; x++ {
-			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
+		for ; x < w-3; x++ {
+			a.scr.SetContent(x, y, ' ', nil, ms.body)
 		}
 	}
+	padRow(yDraft + len(lines))
 
 	// Info divider bottom border: ╰─ ⠋ model · high · plan ─────── ▲n▼n ─╯
 	//
@@ -5324,7 +5347,7 @@ func (a *App) drawComposer(yTop int) {
 	// allowed to do), and one status_line_model grey over all three answered
 	// none of them by colour. They stay one phrase with " · " between, so the
 	// row's geometry — and the hint's budget below — is unchanged.
-	yBottom := yTop + len(lines)
+	yBottom := yDraft + len(lines) + 1
 	infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
 	if hasInfoBg {
 		infoSt = infoSt.Background(a.cellColor(infoBg))
@@ -5407,7 +5430,7 @@ func (a *App) drawComposer(yTop int) {
 
 	// Cursor: blinking block at the editor position inside the painted window.
 	cx := 5 + curCol
-	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
+	a.scr.ShowCursor(min(cx, w-3), yDraft+curRow)
 }
 
 // draftHint names the composer rows the window hides, if any.
