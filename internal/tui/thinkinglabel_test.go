@@ -68,6 +68,37 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 	}
 }
 
+// TestNarrowDividerKeepsTheModelLeaf pins the divider's degradation: the
+// model is the one part that shortens instead of leaving, because its
+// "provider/" prefix is routing the /model menu already shows — on a narrow
+// row the name is worth the level and the mode beside it.
+func TestNarrowDividerKeepsTheModelLeaf(t *testing.T) {
+	app, scr := newTestApp(t, 40, 24)
+	app.AddSystemBlock("ready")
+	level := "high"
+	app.SetThinkingOps(thinkWired(&level))
+	cur := ModePlan
+	app.SetModeOps(modeWired(&cur))
+	app.SetStatusModel("onegw/opencode/space-bunny-free")
+	app.draw()
+	div := dividerRow(t, scr)
+	if strings.Contains(div, "onegw") {
+		t.Fatalf("a narrow row must drop the provider prefix: %q", div)
+	}
+	if !strings.Contains(div, "space-bunny-free · high · plan") {
+		t.Fatalf("the leaf name must buy the level and the mode their cells: %q", div)
+	}
+
+	// Wide enough for the whole id: the prefix is not a permanent omission.
+	app2, scr2 := newTestApp(t, 100, 24)
+	app2.AddSystemBlock("ready")
+	app2.SetStatusModel("onegw/opencode/space-bunny-free")
+	app2.draw()
+	if d := dividerRow(t, scr2); !strings.Contains(d, "onegw/opencode/space-bunny-free") {
+		t.Fatalf("a wide row must keep the whole model id: %q", d)
+	}
+}
+
 // TestThinkingLevelRidesTheDockFooter pins the sidebar's half: the request is a
 // row in the SESSION section — the one never folded away — so it outlives a
 // transcript that fills the band. The model rides the same row, because a bare
