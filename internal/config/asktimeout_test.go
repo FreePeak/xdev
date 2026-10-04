@@ -8,6 +8,30 @@ import (
 	"time"
 )
 
+// Both ask tests below assert the ask DEFAULTS, so they must not see the
+// developer's own ~/.xdev/agent/config.yml — LoadSettings layers the user
+// file in, and a user who set `ask.timeout: 300` or `ask.autoAnswer: true`
+// (a perfectly legal config) failed two tests that only ever run on a
+// developer machine. Every other settings test in this package isolates
+// HOME for exactly this reason; these two were the only ones that did not,
+// which is why `go test ./internal/config` failed here and passed in CI.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "config-test-home")
+	if err != nil {
+		panic(err)
+	}
+	// HOME is the lever (GlobalSettingsPath falls back to
+	// $HOME/.xdev/agent), and a test that wants its own directory still
+	// wins by calling t.Setenv — which restores whatever is set here.
+	os.Setenv("HOME", dir)
+	// XDEV_AGENT_DIR overrides HOME outright, so a developer who exports
+	// one would otherwise keep reading their real config through it.
+	os.Unsetenv("XDEV_AGENT_DIR")
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // ask.timeout is a layered scalar: absent → the ask tool's default
 // headless wait (60s), overlay → that many seconds. The strict decoder
 // must accept the new key (an unknown key is an error), and the default
