@@ -22,10 +22,12 @@ type cell struct {
 }
 
 // line is a rendered visual line: styled runs plus a full-row background
-// (zero = transparent/terminal bg).
+// (zero = transparent/terminal bg) and the column its runs start at, which
+// only a band that carries its own margin (a sent message) sets.
 type line struct {
-	runs []cell
-	bg   tcell.Color
+	runs  []cell
+	bg    tcell.Color
+	inset int
 }
 
 // textline builds a single-run line.

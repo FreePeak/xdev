@@ -156,12 +156,11 @@ func TestSelectionStaysHighlightedAfterRelease(t *testing.T) {
 	}
 }
 
-// composerRow is the screen row of the composer's first input row — one below
-// the blank pad the box paints under its top border. It is the surface a user
-// drags over before anything has been sent, and the one the transcript painter
-// never records in selRows.
+// composerRow is the screen row of the composer's first input row: the surface
+// a user drags over before anything has been sent, and the one the transcript
+// painter never records in selRows.
 func composerRow(app *App) int {
-	return app.height - app.composerRows()
+	return app.height - 1 - app.composerRows()
 }
 
 // TestSelectionHighlightsTheComposer pins the half of the mouse contract the

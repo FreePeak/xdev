@@ -142,7 +142,11 @@ func TestStickyHeaderPinsPromptAtTopOfViewport(t *testing.T) {
 	app.AddUserBlock("port the sticky header")
 	app.AddAssistantBlock(strings.Repeat("assistant prose line\n", 20))
 	app.mu.Lock()
-	app.sm.ScrollUp(6, app.totalLinesLocked(), app.viewportLinesLocked())
+	// Three rows, not six: the transcript is only four rows taller than the
+	// viewport, so a six-row scroll clamps to the oldest row and leaves the
+	// viewport at row 0 — where nothing has scrolled past and there is no
+	// header to pin (the prompt is simply the first thing on screen).
+	app.sm.ScrollUp(3, app.totalLinesLocked(), app.viewportLinesLocked())
 	app.mu.Unlock()
 	app.draw()
 

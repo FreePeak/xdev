@@ -36,8 +36,8 @@ func TestCtrlJInsertsNewlineAndComposerRendersRows(t *testing.T) {
 	if curRow != 1 || curCol != len("second line") {
 		t.Fatalf("cursor = (%d,%d)", curRow, curCol)
 	}
-	if app.composerRows() != 6 { // 2 input rows + 2 pads + top border + divider
-		t.Fatalf("composerRows = %d, want 6", app.composerRows())
+	if app.composerRows() != 4 { // 2 input rows + top border + divider
+		t.Fatalf("composerRows = %d, want 4", app.composerRows())
 	}
 }
 

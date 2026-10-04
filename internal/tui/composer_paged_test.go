@@ -42,8 +42,15 @@ func TestLargePasteStaysOnScreen(t *testing.T) {
 	if !strings.Contains(text, "pasted line") {
 		t.Fatalf("pasted draft is not on screen:\n%s", text)
 	}
-	if !strings.Contains(text, "draft ▲") {
-		t.Fatalf("a paged composer must say rows are hidden:\n%s", text)
+	// The box windows the draft, but it no longer SAYS so: the count used to
+	// ride the divider's right end and it duplicated what the "↓ n new" chip
+	// over the transcript already reports. What must survive is the window
+	// itself — the box never grows past the screen.
+	if strings.Contains(text, "draft ▲") {
+		t.Fatalf("the divider carries a draft count again:\n%s", text)
+	}
+	if got := app.composerRows(); got > app.composerBudget()+2 {
+		t.Fatalf("the box is %d rows against a %d budget: it grew past the screen", got, app.composerBudget())
 	}
 }
 
@@ -52,7 +59,7 @@ func TestLargePasteStaysOnScreen(t *testing.T) {
 func TestComposerTopNeverLeavesTheScreen(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.AddSystemBlock("ready")
-	max := app.composerBudget() + 4 // painted rows + 2 pads + top border + divider
+	max := app.composerBudget() + 2 // painted rows + top border + divider
 	for _, n := range []int{1, 2, max - 3, max - 2, max - 1, max, max + 1, 40, 200, 5000} {
 		setDraft(&app.ed, strings.Repeat("l\n", n), 2*n)
 		if got := app.composerRows(); got > max {
@@ -72,13 +79,13 @@ func TestComposerTopNeverLeavesTheScreen(t *testing.T) {
 func TestArrowsScrollThePagedComposer(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.AddSystemBlock("ready")
-	long := strings.Repeat("x", 3000) // ~33 visual rows against the composer budget
+	long := strings.Repeat("x", 3000) // ~33 visual rows against a 24-row budget
 	setDraft(&app.ed, long, len([]rune(long)))
 	app.ed.PushHistory("older prompt")
 
-	lines, startRow, _ := app.composerInputLines()
-	if startRow != len(lines)-1 {
-		t.Fatalf("cursor at the buffer end sits on row %d of %d painted, want the last", startRow, len(lines))
+	_, startRow, _ := app.composerInputLines()
+	if startRow < 23 {
+		t.Fatalf("cursor at the buffer end should sit on the window's last row, got %d", startRow)
 	}
 	for i := range 32 {
 		app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
@@ -129,20 +136,6 @@ func TestRowWindowGeometry(t *testing.T) {
 		if hi-lo > max(c.budget, 1) || lo < 0 || hi > c.n {
 			t.Errorf("rowWindow(%d,%d,%d) = (%d,%d): window out of bounds",
 				c.n, c.cur, c.budget, lo, hi)
-		}
-	}
-}
-
-// draftHint is the only proof a paged box holds more than it paints.
-func TestDraftHint(t *testing.T) {
-	for c, want := range map[[2]int]string{
-		{0, 0}: "",
-		{3, 0}: "draft ▲3",
-		{0, 7}: "draft ▼7",
-		{3, 2}: "draft ▲3 ▼2",
-	} {
-		if got := draftHint(c[0], c[1]); got != want {
-			t.Errorf("draftHint(%d,%d) = %q, want %q", c[0], c[1], got, want)
 		}
 	}
 }
