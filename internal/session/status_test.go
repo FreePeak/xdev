@@ -48,8 +48,14 @@ func TestClassifyStatus(t *testing.T) {
 		// so a user-last transcript IS the signature of the interruption.
 		{"unanswered user prompt", user, StatusInterrupted},
 		{"user prompt after a finished turn", asstStop + "\n" + user, StatusInterrupted},
-		{"empty file", "", StatusInterrupted},
-		{"header only (no message yet)", `{"type":"session","id":"e0"}`, StatusInterrupted},
+		// A file holding nothing but its slot and header has no conversation to
+		// continue, so it reads "empty" and a resume path skips it instead of
+		// restoring a blank transcript. Bookkeeping lines mean the transcript
+		// sits behind the status window — interrupted, not empty.
+		{"empty file", "", StatusEmpty},
+		{"header only (no message yet)", `{"type":"session","id":"e0"}`, StatusEmpty},
+		{"title slot and header only", `{"type":"title","v":1}` + "\n" + `{"type":"session","id":"e0"}`, StatusEmpty},
+		{"bookkeeping only means the window missed the transcript", exit, StatusInterrupted},
 		{"truncated first line is skipped", "...truncated\n" + asstStop, StatusDone},
 		{"garbage lines are skipped", "not json\n" + asstStop + "\n{oops", StatusDone},
 	} {

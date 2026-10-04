@@ -2528,6 +2528,51 @@ func sessionRepairNotice(s *session.Store) string {
 	return s.RepairNotice()
 }
 
+// sessionHasMessages reports whether a store holds anything a resume can show
+// the user or replay to the model. It counts MESSAGE entries, not entries: a
+// file carrying only bookkeeping (a goal entry, a model change, a
+// session_exit) rebuilds an empty context, which is the empty-resume symptom.
+func sessionHasMessages(s *session.Store) bool {
+	if s == nil {
+		return false
+	}
+	for _, e := range s.Entries() {
+		if _, ok := e.(*session.MessageEntry); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// openMostRecentWithHistory is the --continue fallback: the newest session in
+// cwd that actually holds a conversation (session.StatusEmpty files are
+// skipped — they are the blank-transcript trap). nil means this directory has
+// none, and the caller starts a fresh session.
+func openMostRecentWithHistory(cwd string) *session.Store {
+	metas, err := session.List(sessionDataDir())
+	if err != nil {
+		return nil
+	}
+	for _, m := range metas {
+		if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
+			continue // subagent children are never user continuations
+		}
+		if m.Status == session.StatusEmpty {
+			continue
+		}
+		s, err := session.Open(m.Path)
+		if err != nil {
+			continue
+		}
+		if !sessionHasMessages(s) {
+			_ = s.Close()
+			continue
+		}
+		return s
+	}
+	return nil
+}
+
 // resolveSession is the layering itself: explicit --resume prefix, then
 // breadcrumb-first --continue, then a fresh auto-persisting session.
 func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
@@ -2543,24 +2588,24 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 	}
 	if cont {
 		// Breadcrumb-first resume (omp parity): the pane's last session wins.
+		// An EMPTY session is not a continuation — resuming one restores a
+		// blank transcript, and because it is the newest file --continue
+		// lands on it again and again, shadowing every real conversation in
+		// the directory (session.StatusEmpty).
 		if crumb := readBreadcrumb(); crumb != "" {
 			if _, err := os.Stat(crumb); err == nil {
-				if st, err := session.Open(crumb); err == nil {
+				st, serr := session.Open(crumb)
+				if serr == nil && sessionHasMessages(st) {
 					return st, nil
+				}
+				if serr == nil {
+					_ = st.Close()
 				}
 			}
 		}
 
-		metas, err := session.List(sessionDataDir())
-		if err == nil {
-			for _, m := range metas {
-				if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
-					continue // subagent children are never user continuations
-				}
-				if s, err := session.Open(m.Path); err == nil {
-					return s, nil
-				}
-			}
+		if s := openMostRecentWithHistory(cwd); s != nil {
+			return s, nil
 		}
 	}
 	// Titles are mechanical (M10 #32): no ai-title call exists yet, so

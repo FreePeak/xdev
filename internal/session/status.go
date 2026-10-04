@@ -49,13 +49,23 @@ type statusMessageWire struct {
 	} `json:"message"`
 }
 
+// StatusEmpty marks a session whose file carries no message at all: a title
+// slot, a session header, and nothing else. It is its own badge rather than a
+// flavour of "interrupted" because the two mean opposite things to a resume —
+// an interrupted session has a conversation to continue, an empty one has
+// nothing to show and nothing for the model to read back.
+const StatusEmpty SessionStatus = "empty"
+
 // ClassifyStatus derives the badge from a slice of the file's tail: the last
 // message-bearing entry decides. The window may begin mid-line or on a torn
 // write; a fragment fails the decode and is skipped, so no line-boundary
-// search is needed. A file with no message at all (a session materialized
-// before its first turn) never finished one, so it is interrupted too.
+// search is needed. A window holding no message but at least one bookkeeping
+// line (a goal entry, a model change, a session_exit) means the transcript
+// sits behind the window — that is interrupted, not empty. Only a file with
+// nothing but its slot and header is StatusEmpty.
 func ClassifyStatus(tail []byte) SessionStatus {
 	lines := strings.Split(string(tail), "\n")
+	bookkeeping := false
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
 		if line == "" || line[0] != '{' {
@@ -66,11 +76,32 @@ func ClassifyStatus(tail []byte) SessionStatus {
 			continue
 		}
 		if w.Type != TypeMessage || w.Message == nil {
+			if !isHeaderLine(line) {
+				bookkeeping = true
+			}
 			continue
 		}
 		return classifyTerminal(w.Message.Role, w.Message.StopReason, w.Message.Content)
 	}
-	return StatusInterrupted
+	if bookkeeping {
+		return StatusInterrupted
+	}
+	return StatusEmpty
+}
+
+// isHeaderLine reports whether a non-message line is one of the two every
+// session file opens with — the title slot and the session header. Those are
+// not entries, so a file holding only them has no conversation and is empty;
+// every other non-message line is bookkeeping and implies the transcript is
+// behind this window.
+func isHeaderLine(line string) bool {
+	var w struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(line), &w) != nil {
+		return false
+	}
+	return w.Type == "title" || w.Type == "session"
 }
 
 // classifyTerminal maps the last message onto the row's two words. Anything
