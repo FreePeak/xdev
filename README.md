@@ -271,6 +271,7 @@ hides the sidebar and brings it back.
 | `/model [ref]` `/connect [name]` `/theme <name>` `/settings [overlay]` `/hotkeys` | model, provider catalog, theme and display control (`/settings overlay` — or `Alt+,` — opens the settings panel; `/settings sidebarMode auto\|show\|hide` pins the dock) |
 | `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
+| `/context [auto\|200k\|300k\|500k\|1m]` | the context window for every model (bare reports; pins it live and persisted — `auto` hands each model back the window its catalog states) |
 | `/mode [default\|auto\|plan\|bypass]` | the session mode (bare reports; `Shift+Tab` cycles the first three — `bypass` is by name only) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |

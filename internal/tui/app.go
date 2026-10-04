@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -267,6 +268,7 @@ type App struct {
 	settingsOps        *SettingsOps             // /settings, wired by cmd (nil → notices)
 	settingsOverlayOps *SettingsOverlayOps      // /settings overlay, wired by cmd (nil → disabled)
 	thinkingOps        *ThinkingOps             // /thinking, wired by cmd (nil → notices)
+	contextOps         *ContextOps              // /context, wired by cmd (nil → notices)
 	cwd                string                   // working directory (the status row's left side)
 	branch             string                   // git branch for the status row ("" when none)
 	branchDirty        bool                     // the branch's tree has uncommitted changes (its ink)
@@ -2563,6 +2565,49 @@ func (a *App) SetSettingsOps(ops *SettingsOps) { a.settingsOps = ops }
 // live request-side level (cmd owns the provider holder and the settings
 // write). nil ops leave the toggle reporting that it is unwired.
 func (a *App) SetThinkingOps(ops *ThinkingOps) { a.thinkingOps = ops }
+
+// SetContextOps wires /context to the live context window (cmd owns the
+// settings write and the running agents). nil ops leave the command reporting
+// that it is unwired.
+func (a *App) SetContextOps(ops *ContextOps) { a.contextOps = ops }
+
+// ContextWindow implements CommandAPI /context: bare reports the pin in force
+// and the window it resolves to, a size in config.ContextWindowChoices pins
+// that window for EVERY model (live and persisted), and "auto" hands each model
+// back the window its catalog states.
+func (a *App) ContextWindow(args string) error {
+	usage := "usage: /context [" + strings.Join(config.ContextWindowChoices, "|") + "]"
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		a.AddSystemBlock("context window " + a.currentContextWindow() + " — /context " + strings.Join(config.ContextWindowChoices, "|"))
+		return nil
+	}
+	// One vocabulary, checked before the seam: an unknown size must never
+	// reach the ops, or /context would persist something /settings would then
+	// refuse to list.
+	want, ok := config.NormalizeContextWindow(args)
+	if len(fields) > 1 || !ok {
+		return errors.New(usage)
+	}
+	if a.contextOps == nil || a.contextOps.Set == nil {
+		return errors.New("context window is not wired in this build")
+	}
+	if err := a.contextOps.Set(want); err != nil {
+		return err
+	}
+	a.AddSystemBlock("context window " + want + " for every model")
+	return nil
+}
+
+// currentContextWindow is the pin as the chrome shows it: the bare rung
+// /context takes. Empty when the seam is unwired, same rule as the thinking
+// readout — a host that wired nothing has no pin to name.
+func (a *App) currentContextWindow() string {
+	if a.contextOps == nil || a.contextOps.Current == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.contextOps.Current())
+}
 
 // ThinkingLevel implements CommandAPI /thinking: bare reports the level in
 // force, "on" is the alias for "auto" (the Shift-Tab toggle's other half), and

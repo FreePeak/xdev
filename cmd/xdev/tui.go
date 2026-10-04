@@ -490,6 +490,39 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		s := lastSettings()
 		app.SetTabPolicy(s.TabsModeOn(), s.TabsIndicatorsOn())
 	}
+	// /context: the context window for every model. cmd owns both halves —
+	// the settings write and the live agents — so the command, the Alt+, row
+	// and the status row all resolve through applyContextPin.
+	applyContextPin := func() {
+		modelMu.Lock()
+		lpn, lm := live.provName, live.model
+		modelMu.Unlock()
+		// Every registered agent, not just the next turn: the window is read
+		// at each compaction boundary, so a pin has to reach the run already
+		// going. SetContextWindow(0) is the clear.
+		for _, ag := range tabs.liveAgents() {
+			ag.SetContextWindow(lastSettings().CompactionContextWindow())
+		}
+		app.SetContextWindow(int64(pinnedWindow(cfg, lpn, lm)))
+	}
+	app.SetContextOps(&tui.ContextOps{
+		Current: func() string { return lastSettings().CompactionContextWindowOn() },
+		Set: func(window string) error {
+			// NormalizeContextWindow is the one vocabulary check: config.Set
+			// round-trips the file, and the merge rejects anything outside it,
+			// so a typo fails here instead of quarantining the config later.
+			if _, ok := config.NormalizeContextWindow(window); !ok {
+				return fmt.Errorf("unknown context window %q (want %s)", window, strings.Join(config.ContextWindowChoices, "|"))
+			}
+			if err := config.Set(config.GlobalSettingsPath(), "compaction.contextWindow", window); err != nil {
+				return err
+			}
+			lastSettings().Compaction.ContextWindow = window
+			applyContextPin()
+			return nil
+		},
+	})
+
 	// Settings overlay (Alt+,): the settings this session already has a live
 	// seam for. The panel owns its key handling and rendering; what is wired
 	// here is the two things only cmd can do — read the layered values the
@@ -515,6 +548,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// disagree about the wire.
 				{Key: "thinking", Label: "Thinking level", Value: s.ThinkingLevel(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ThinkingLevels...)},
+				// The context window is a select for the same reason thinking
+				// is: the vocabulary is the ladder of sizes, and /context
+				// writes the same key through the same door, so the panel and
+				// the command cannot disagree about the value in force.
+				{Key: "compaction.contextWindow", Label: "Context window", Value: s.CompactionContextWindowOn(),
+					Editable: true, Kind: "select", Options: append([]string(nil), config.ContextWindowChoices...)},
 				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
 					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
 				// The tab strip is a view of the tabset, not the tabset: the
@@ -572,6 +611,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				lastSettings().Thinking = value
 			case "sidebarMode":
 				lastSettings().SidebarMode = value
+			case "compaction.contextWindow":
+				// config.Set already rejected a value outside the vocabulary,
+				// so this fold only ever sees a canonical one.
+				lastSettings().Compaction.ContextWindow = value
+				applyContextPin()
 			case "debugMouse":
 				lastSettings().DebugMouse = value == "true"
 			}
@@ -703,6 +747,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			PlanMode:   planMode,
 			Handoff:    handoffSettings(),
 		}
+		ag.SetContextWindow(lastSettings().CompactionContextWindow())
 		wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
@@ -1491,7 +1536,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		app.SetStatusModel(nprovName + "/" + nmodelName)
 		// The HUD context segment measures against the new window.
-		app.SetContextWindow(int64(modelWindow(cfg, nprovName, nmodelName)))
+		app.SetContextWindow(int64(pinnedWindow(cfg, nprovName, nmodelName)))
 		persistDefaultModel(nprovName + "/" + nmodelName)
 		return nil
 	}
@@ -2176,9 +2221,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					}
 				}
 			}
+			// The pin (compaction.contextWindow) rides the agent's own field,
+			// not the literal: /context auto then hands this turn back the
+			// window the catalog states.
+			ag.SetContextWindow(lastSettings().CompactionContextWindow())
 			// The HUD context segment measures against this window.
 			if turnTS.isFocused() {
-				app.SetContextWindow(int64(modelWindow(cfg, lpn, lm)))
+				app.SetContextWindow(int64(pinnedWindow(cfg, lpn, lm)))
 			}
 			prewalkMu.Lock()
 			pwOn, pwT := prewalkOn, *prewalkTarget

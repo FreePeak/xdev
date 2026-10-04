@@ -233,7 +233,7 @@ func (a *Agent) compactionSpan() (*compactionSpan, error) {
 	if len(res.Messages) < 2 {
 		return nil, fmt.Errorf("compaction: nothing to summarize")
 	}
-	cut := findCutPoint(res.Messages, a.Compaction.keepRecent())
+	cut := findCutPoint(res.Messages, a.compaction().keepRecent())
 	if cut < 1 {
 		return nil, fmt.Errorf("compaction: no droppable prefix")
 	}
@@ -384,7 +384,7 @@ func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs
 // applies it. Silent on failure (logged, never fatal): a failed compaction
 // degrades to the pre-compaction behavior, and the overflow path re-tries it.
 func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Message {
-	if a.Store == nil || a.Compaction.ContextWindow <= 0 {
+	if a.Store == nil || a.compaction().ContextWindow <= 0 {
 		return history
 	}
 	// A background summarize that finished since the last boundary applies
@@ -399,7 +399,7 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 	// Async hands the provider round-trip to a goroutine; the deterministic
 	// members are already cheap, so they stay on this goroutine. Memory
 	// pressure never defers: the OOM backstop must act now.
-	if a.Compaction.Async && a.firstProductIsHandoff() && memPressure() < memlimit.HighPressure {
+	if a.compaction().Async && a.firstProductIsHandoff() && memPressure() < memlimit.HighPressure {
 		if a.compactAsync != nil {
 			// One job at a time: it lands at a later boundary, and blocking
 			// here on a second summarize would defeat the whole trigger.
@@ -438,10 +438,10 @@ func (a *Agent) compactionDue(history []ai.Message) bool {
 	// shipped default names exactly those) keeps the historical rule:
 	// whether a boundary compacts on the token budget is the threshold
 	// member's business.
-	if !slices.Contains(a.Compaction.methods(), methodThreshold) && !a.hasExplicitProduct() {
+	if !slices.Contains(a.compaction().methods(), methodThreshold) && !a.hasExplicitProduct() {
 		return false
 	}
-	return contextTokens(history) > a.Compaction.threshold()
+	return contextTokens(history) > a.compaction().threshold()
 }
 
 // idleDue reports — and closes — the idle trigger: the session sat between
@@ -454,13 +454,13 @@ func (a *Agent) idleDue() bool {
 	now := compactionNow()
 	last := a.compactIdle
 	a.compactIdle = now
-	if a.Compaction.IdleAfter <= 0 || last.IsZero() {
+	if a.compaction().IdleAfter <= 0 || last.IsZero() {
 		return false
 	}
-	if now.Sub(last) < a.Compaction.IdleAfter {
+	if now.Sub(last) < a.compaction().IdleAfter {
 		return false
 	}
 	logx.Infof("compaction: session idle %s (≥ %s) — compacting",
-		now.Sub(last).Round(time.Second), a.Compaction.IdleAfter)
+		now.Sub(last).Round(time.Second), a.compaction().IdleAfter)
 	return true
 }

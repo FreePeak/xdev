@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
@@ -470,6 +471,11 @@ type Agent struct {
 
 	steerMu  sync.Mutex
 	steering []Steering
+	// windowPin is the live /context override (compaction.contextWindow),
+	// applied by compaction() to every window decision. An atomic because it
+	// is written from the TUI's key thread while Run reads it on its own
+	// goroutine.
+	windowPin atomic.Int64
 	// requestStart is the wall clock oneTurn stamps at the start of
 	// a streaming request; OnMessageEnd/Run end both read it under
 	// requestMu to compute the turn's ttft (ms) and reset it so a
