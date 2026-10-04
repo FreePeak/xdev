@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
-
 	"github.com/FreePeak/xdev/internal/theme"
 )
 
@@ -114,39 +112,15 @@ func (a *App) CycleMode() {
 }
 
 // modeLabel is the mode as the chrome shows it: the bare name, no icon and
-// no word, because the composer divider and the status row both carry it and
-// neither has room to spell it. Empty when the seam is unwired — a host that
-// never wired /mode has no mode to report, and an invented "default" would
-// claim a posture nobody chose.
+// no word, because the composer divider carries it and has no room to spell
+// it. Empty when the seam is unwired — a host that never wired /mode has no
+// mode to report, and an invented "default" would claim a posture nobody
+// chose.
 func (a *App) modeLabel() string {
 	if a.modeOps == nil || a.modeOps.Current == nil {
 		return ""
 	}
 	return strings.TrimSpace(a.modeOps.Current())
-}
-
-// modeChipWidth is the cells the status row reserves for the mode readout
-// (" · plan"), 0 when there is nothing to show. The location is what shrinks.
-func (a *App) modeChipWidth() int {
-	if lbl := a.modeLabel(); lbl != "" {
-		return width(" · " + lbl)
-	}
-	return 0
-}
-
-// drawStatusMode paints the mode beside the working directory, in the mode
-// ink rather than the location's grey: the location is where you are, the
-// mode is what you are allowed to do, and one grey string reads as one fact.
-// Returns the column after the chip so the caller can hand the HUD a
-// leftEnd that starts past what it drew. Caller holds a.mu.
-func (a *App) drawStatusMode(y, x int) int {
-	lbl := a.modeLabel()
-	if lbl == "" {
-		return x
-	}
-	txt := " · " + lbl
-	drawText(a.scr, x, y, txt, tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(a.modeToken()))))
-	return x + width(txt)
 }
 
 // modeToken is the ink for the mode in force. One colour for all four modes

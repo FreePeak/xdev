@@ -121,21 +121,21 @@ func TestModeCycleNeverReachesBypass(t *testing.T) {
 	}
 }
 
-// TestModeRidesBothChromeSurfaces pins the readout itself: the bare mode name
-// on the composer divider beside the model, and beside the working directory
-// on the status row. Both hide entirely when the seam is unwired — a host
-// that never wired /mode has no mode to report, and an invented "default"
-// would claim a posture nobody chose.
-func TestModeRidesBothChromeSurfaces(t *testing.T) {
+// TestModeRidesTheDividerNotTheStatusRow pins the readout itself: the bare
+// mode name on the composer divider beside the model, and nowhere else. The
+// status row once carried it beside the branch, which made one grey location
+// string read as a fourth word of the branch name; the divider already spells
+// the same posture, so the status row now answers only "where am I". Both
+// hide entirely when the seam is unwired — a host that never wired /mode has
+// no mode to report, and an invented "default" would claim a posture nobody
+// chose.
+func TestModeRidesTheDividerNotTheStatusRow(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.SetLocation("/tmp/somewhere")
 	app.AddSystemBlock("ready")
 	app.draw()
 	if d := dividerRow(t, scr); strings.Contains(d, "default") {
 		t.Fatalf("an unwired mode seam must paint no mode: %q", d)
-	}
-	if r := statusRow(t, scr); strings.Contains(r, "default") {
-		t.Fatalf("an unwired mode seam must paint no mode on the status row: %q", r)
 	}
 
 	cur := ModePlan
@@ -145,8 +145,8 @@ func TestModeRidesBothChromeSurfaces(t *testing.T) {
 	if d := dividerRow(t, scr); !strings.Contains(d, "test/free · plan") {
 		t.Fatalf("divider %q must carry the mode", d)
 	}
-	if r := statusRow(t, scr); !strings.Contains(r, "/tmp/somewhere · plan") {
-		t.Fatalf("status row %q must carry the mode beside the location", r)
+	if r := statusRow(t, scr); strings.Contains(r, "plan") {
+		t.Fatalf("status row %q must not carry the mode", r)
 	}
 	// The mode follows a flip without a rebuild: the chrome reads the holder.
 	cur = ModeAuto
@@ -155,13 +155,15 @@ func TestModeRidesBothChromeSurfaces(t *testing.T) {
 	if d := dividerRow(t, scr); !strings.Contains(d, "test/free · auto") {
 		t.Fatalf("divider %q did not follow the flip", d)
 	}
+	if r := statusRow(t, scr); strings.Contains(r, "auto") {
+		t.Fatalf("status row %q must not follow the mode", r)
+	}
 }
 
 // TestModeWearsItsOwnInk pins the colour half: each mode paints in its own
 // ink — grey, green, teal, red — and none of them in the accent the model name
 // beside them wears, because "model · auto" is a sentence about two different
-// facts and one ink would collapse it back into a single phrase. The
-// status-row mode is the same ink the divider uses.
+// facts and one ink would collapse it back into a single phrase.
 func TestModeWearsItsOwnInk(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	cur := ModePlan
@@ -172,23 +174,17 @@ func TestModeWearsItsOwnInk(t *testing.T) {
 
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	divY := rowOf(t, rows, "╰")
-	stY := rowOf(t, rows, "· plan")
 	modeInk := app.cellColor(app.th.Get(app.modeToken()))
 	modelInk := app.cellColor(app.th.Get(theme.StatusLineModel))
 	if modeInk == modelInk {
 		t.Fatalf("the mode ink must differ from the model ink (both %v)", modelInk)
 	}
-	for _, tc := range []struct {
-		name string
-		row  int
-	}{{"divider", divY}, {"status row", stY}} {
-		x := strings.Index(rows[tc.row], "plan")
-		if x < 0 {
-			t.Fatalf("%s %q has no mode on it", tc.name, rows[tc.row])
-		}
-		if got, _, _ := cellStyle(scr, x, tc.row).Decompose(); got != modeInk {
-			t.Fatalf("%s: the mode is painted in %v, want the mode ink %v", tc.name, got, modeInk)
-		}
+	x := strings.Index(rows[divY], "plan")
+	if x < 0 {
+		t.Fatalf("divider %q has no mode on it", rows[divY])
+	}
+	if got, _, _ := cellStyle(scr, x, divY).Decompose(); got != modeInk {
+		t.Fatalf("the mode is painted in %v, want the mode ink %v", got, modeInk)
 	}
 	// The model beside it keeps the model ink — the whole point of the split.
 	if x := strings.Index(rows[divY], "test/free"); x >= 0 {
