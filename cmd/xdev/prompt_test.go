@@ -293,3 +293,28 @@ func TestFanoutGuidanceIsOptIn(t *testing.T) {
 		t.Fatalf("fanout-on prompt is ~%d tokens (budget %d): trim the block", tokens, maxPromptTokens)
 	}
 }
+
+// TestFanoutGuidanceNeedsTheTaskTool pins the gate the first version was
+// missing: the block names `task`, so a prompt built from a registry
+// WITHOUT it must not carry the block. The vibe director's scope
+// (internal/agent/vibe.go) is built from this same closure with
+// vibe_spawn/vibe_send and no `task` — told to "send a batch of task
+// jobs", it could only fail.
+func TestFanoutGuidanceNeedsTheTaskTool(t *testing.T) {
+	loadedSettings = &config.Settings{}
+	loadedSettings.TypeSafe.Fanout = true
+	t.Cleanup(func() { loadedSettings = nil })
+
+	full := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	with := promptFn("BASE", t.TempDir(), full, "")()
+	if !strings.Contains(with, agent.FanoutGuidance) {
+		t.Fatal("parent registry has task but the block is missing")
+	}
+
+	bare := tool.NewRegistry()
+	bare.Register(tool.NewReadTool())
+	without := promptFn("BASE", t.TempDir(), bare, "")()
+	if strings.Contains(without, agent.FanoutGuidance) {
+		t.Fatal("block shipped into a prompt whose registry has no task tool")
+	}
+}
