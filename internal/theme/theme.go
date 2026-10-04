@@ -157,7 +157,11 @@ const (
 	ToolDiffRemovedWordBg = "tool_diff_removed_word_bg"
 
 	// Thinking-mode rails (8 + 1 optional: ThinkingMax falls back to
-	// ThinkingXhigh when a theme omits it).
+	// ThinkingXhigh when a theme omits it). The ladder is the shipped
+	// Accent → Muted ramp, one step per rung, so a launch theme paints a
+	// visible gradient from off to max without carrying eight colours of its
+	// own; a theme that names them (the omp contract requires them) still
+	// wins.
 	ThinkingOff     = "thinking_off"
 	ThinkingMinimal = "thinking_minimal"
 	ThinkingLow     = "thinking_low"
@@ -185,6 +189,11 @@ const (
 	StatusLineOutput    = "status_line_output"
 	StatusLineCost      = "status_line_cost"
 	StatusLineSubagents = "status_line_subagents"
+	// StatusLineMode paints the session mode (mode.go: /mode, the Shift-Tab
+	// cycle). Optional like the diff bands — NOT in the omp 66-token
+	// contract, because omp has no mode surface — so a theme that omits it
+	// derives it from Accent (extraChains) rather than failing to load.
+	StatusLineMode = "status_line_mode"
 
 	// Legacy xdev slot names (PRD §3.5): still what the TUI passes to Get,
 	// mirrored from the canonical tokens at parse time.
@@ -305,7 +314,26 @@ func groknightSlots() map[string]Color {
 		StatusLineUntracked: Hex("#6c6c6c"),
 		StatusLineOutput:    Hex("#6c6c6c"),
 		StatusLineCost:      Hex("#6c6c6c"),
+		// The reasoning rails (thinking_off..thinking_max). The launcher
+		// themes never named them — the contract requires them of an
+		// imported omp theme, not of a built-in — so they were unset and
+		// Get fell back to the body colour, which is why the reasoning level
+		// on the composer divider read as part of the model name. The ramp
+		// is one step per rung from the muted grey (off) to the accent
+		// (max): the effort is legible as an amount.
+		ThinkingOff:         Hex("#6c6c6c"),
+		ThinkingMinimal:     Hex("#7d7da8"),
+		ThinkingLow:         Hex("#8f8fb9"),
+		ThinkingMedium:      Hex("#a1a1ca"),
+		ThinkingHigh:        Hex("#b3b3db"),
+		ThinkingXhigh:       Hex("#c6a6e8"),
+		ThinkingMax:         Hex("#bb9af7"),
 		StatusLineSubagents: Hex("#bb9af7"),
+		// The session mode (mode.go). Magenta, the same accent the
+		// subagents and thinking read in: the mode is the harness's own
+		// posture, not content, and on the divider the model name beside it
+		// is the grey every other label already wears.
+		StatusLineMode: Hex("#bb9af7"),
 		// Diff rows, Claude Code's model (v2.1.287, the diff renderer): the
 		// +/- marker wears the palette's own green/red — the pair the status
 		// line paints a clean/dirty tree in, so one system owns both — and
@@ -381,6 +409,17 @@ func grokdaySlots() map[string]Color {
 		StatusLineOutput:    Hex("#767676"),
 		StatusLineCost:      Hex("#767676"),
 		StatusLineSubagents: Hex("#7D4BC6"),
+		StatusLineMode:      Hex("#7D4BC6"), // see groknightSlots
+		// The reasoning rails — see groknightSlots. The day twin of the dark
+		// ramp: grey at off, the accent at max, so the level reads as an
+		// amount on a light canvas too.
+		ThinkingOff:     Hex("#767676"),
+		ThinkingMinimal: Hex("#82829e"),
+		ThinkingLow:     Hex("#8e8eb0"),
+		ThinkingMedium:  Hex("#9a9ac2"),
+		ThinkingHigh:    Hex("#a6a6d4"),
+		ThinkingXhigh:   Hex("#b0a2dc"),
+		ThinkingMax:     Hex("#7D4BC6"),
 		// Diff rows — see groknightSlots. The bands are CC's day tints
 		// (addLine rgb(220,255,220), addWord rgb(178,255,178) and the two
 		// red equivalents): near-white, so the day canvas shows through.

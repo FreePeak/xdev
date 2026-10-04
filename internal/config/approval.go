@@ -38,6 +38,13 @@ func (s *Settings) Policy() (tool.ApprovalPolicy, error) {
 	return pol, nil
 }
 
+// ParseApprovalMode resolves the approvalMode vocabulary to the policy mode,
+// rejecting anything outside it. Exported because a writer (the TUI's /mode)
+// has to be able to reject a value BEFORE it reaches the settings file:
+// config.Set round-trips for YAML shape, not for this vocabulary, so an
+// unvalidated write would only surface at the next start.
+func ParseApprovalMode(v string) (tool.ApprovalMode, error) { return parseApprovalMode(v) }
+
 func parseApprovalMode(v string) (tool.ApprovalMode, error) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "yolo":

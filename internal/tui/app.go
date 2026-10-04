@@ -187,6 +187,7 @@ type App struct {
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
 	statusSegs []string
+	modeOps    *ModeOps // /mode + the Shift-Tab cycle, wired by cmd (nil → notices)
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
 
@@ -3471,11 +3472,18 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.poke()
 		}
 		return
-	case "thinking-toggle":
-		// Shift-Tab. Like the dock chords this runs after every modal
-		// handler, so an open picker keeps first claim on the key (the model
-		// picker binds Shift-Tab to "previous tab").
-		a.ToggleThinking()
+	case "thinking-toggle", "mode-cycle":
+		// Like the dock chords this runs after every modal handler, so an
+		// open picker keeps first claim on the key (the model picker binds
+		// Shift-Tab to "previous tab"). Both actions land here because they
+		// are chord-only: the toggle keeps no default chord since the mode
+		// cycle took Shift-Tab, but a keybindings.yml binding must still
+		// reach it.
+		if action == "mode-cycle" {
+			a.CycleMode()
+		} else {
+			a.ToggleThinking()
+		}
 		return
 	case "app.settings":
 		if a.SettingsOverlayOpen() {
@@ -5213,37 +5221,58 @@ func (a *App) drawComposer(yTop int) {
 		}
 	}
 
-	// Info divider bottom border: ╰─ ⠋ model · high ─────── ▲n▼n ─╯
+	// Info divider bottom border: ╰─ ⠋ model · high · plan ─────── ▲n▼n ─╯
+	//
+	// Each part wears its own ink: model, reasoning level and mode are three
+	// different questions (which model, how hard is it thinking, what is it
+	// allowed to do), and one status_line_model grey over all three answered
+	// none of them by colour. They stay one phrase with " · " between, so the
+	// row's geometry — and the hint's budget below — is unchanged.
 	yBottom := yTop + len(lines)
-	info := " "
-	// The run indicator LEADS the pair. Trailing it put the one thing on the
-	// row that moves at the far end of a static "model · high", where it read
-	// as another segment of the reasoning label instead of as the state of the
-	// turn.
-	if a.st.Running {
-		info += a.spinFrame() + " · "
+	infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
+	if hasInfoBg {
+		infoSt = infoSt.Background(a.cellColor(infoBg))
 	}
-	info += a.st.Model
-	// The reasoning level beside the model it applies to: the two are one
-	// request, and "which model" alone left the other half of it invisible.
-	// The bare rung, not "thinking <level>" — the model it sits beside says
-	// what the pair is, and the word only added width.
-	if l := a.thinkingLevel(); l != "" {
-		info += " · " + l
-	}
-	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
-		info += " · Vibe"
+	parts := a.dividerParts()
+	infoW := 0
+	for i, p := range parts {
+		if i > 0 {
+			infoW += width(dividerSep)
+		}
+		infoW += width(p.text)
 	}
 	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
 	for x := 2; x < w-2; x++ {
 		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
-	if info != " " {
-		infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
-		if hasInfoBg {
-			infoSt = infoSt.Background(a.cellColor(infoBg))
+	// infoX is where the phrase starts: the leading space the one-string
+	// version carried lives at 2, so the text itself begins at 3 — "╰ model"
+	// and not "╰model", which is the framing the box border buys.
+	const infoX = 3
+	// Drop the tail that will not fit rather than overrun the border: a long
+	// model name must never push the mode off the row's right edge, and the
+	// mode is the one part of this phrase a user cannot afford to lose.
+	for len(parts) > 0 && infoX+infoW > w-2 {
+		parts = parts[:len(parts)-1]
+		infoW = 0
+		for i, p := range parts {
+			if i > 0 {
+				infoW += width(dividerSep)
+			}
+			infoW += width(p.text)
 		}
-		drawText(a.scr, 2, yBottom, info, infoSt)
+	}
+	if len(parts) > 0 {
+		drawText(a.scr, infoX-1, yBottom, " ", infoSt)
+		x := infoX
+		for i, p := range parts {
+			if i > 0 {
+				drawText(a.scr, x, yBottom, dividerSep, infoSt.Foreground(a.cellColor(a.th.Get(theme.StatusLineSep))))
+				x += width(dividerSep)
+			}
+			drawText(a.scr, x, yBottom, p.text, infoSt.Foreground(a.cellColor(a.th.Get(p.token))))
+			x += width(p.text)
+		}
 	}
 	// The viewport hint rides this divider's right end. It used to be
 	// painted on transcript row 0, where it overwrote whatever content had
@@ -5261,7 +5290,7 @@ func (a *App) drawComposer(yTop int) {
 	}
 	if hint != "" {
 		hx := w - 3 - width(hint)
-		if hx > 2+width(info) {
+		if hx > infoX+infoW {
 			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			if hasInfoBg {
 				hintSt = hintSt.Background(a.cellColor(infoBg))
@@ -5325,8 +5354,9 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 }
 
 // drawStatusRow renders the bottom row: the working directory and its git
-// branch on the left (statusLocation), the configured HUD segments
-// (settings statusLine.segments) right-aligned
+// branch on the left (statusLocation), then the session mode
+// (drawStatusMode), then the configured HUD segments (settings
+// statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
 // on a small terminal. The row belongs to the main pane: its budget and its
@@ -5336,26 +5366,36 @@ func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
 	w := a.rightEdge()
 	// The running tool call leads the row on the left ("● <name>", with the
-	// room it needs reserved), then the location; the configured segments
-	// stay right-aligned.
+	// room it needs reserved), then the location, then the mode; the
+	// configured segments stay right-aligned. The mode sits beside the
+	// location because that is the pair a user reads together — where you are
+	// and what you may do here — and it is in the mode ink, so the two never
+	// read as one string.
+	modeW := a.modeChipWidth()
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		pathLbl := a.statusLocation(w - 2 - width(cmdLabel) - 2 - hudEssentialWidth(parts) - 1)
-		if pathLbl != "" {
+		lbl := a.statusLocation(w - 2 - width(cmdLabel) - 2 - hudEssentialWidth(parts) - 1 - modeW)
+		end := 2
+		if lbl != "" {
 			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-			drawText(a.scr, 2, y, pathLbl, pathSt)
+			drawText(a.scr, 2, y, lbl, pathSt)
+			end = 2 + width(lbl)
 		}
-		a.drawHUD(y, w, 2+width(cmdLabel)+width(pathLbl)+2, parts)
+		end = a.drawStatusMode(y, end+2)
+		a.drawHUD(y, w, end, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the location is what shrinks.
-	lbl := a.statusLocation(w - 2 - hudEssentialWidth(parts) - 1)
+	lbl := a.statusLocation(w - 2 - hudEssentialWidth(parts) - 1 - modeW)
+	end := 2
 	if lbl != "" {
 		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		drawText(a.scr, 2, y, lbl, pathSt)
+		end = 2 + width(lbl)
 	}
-	a.drawHUD(y, w, 2+width(lbl), parts)
+	end = a.drawStatusMode(y, end)
+	a.drawHUD(y, w, end, parts)
 }
 
 // statusLocation is the left side of the status row within budget cells: the
@@ -5726,8 +5766,71 @@ type hudPart struct {
 	popup             bool
 }
 
-// hudSep separates HUD segments on the status row.
-const hudSep = " │ "
+// hudSep separates HUD segments on the status row; dividerSep separates the
+// composer divider's pieces, which are one request read as a phrase
+// ("model · high · plan") rather than as independent metrics.
+const (
+	hudSep     = " │ "
+	dividerSep = " · "
+)
+
+// dividerParts is the composer's info divider as its coloured pieces: the
+// run indicator (when a turn is live), the model, the reasoning level and the
+// session mode, each with the theme token that paints it. Empty text is
+// dropped here rather than drawn — an unwired /thinking or /mode seam has
+// nothing to report, and an invented default would claim a posture nobody
+// chose. Caller holds a.mu.
+func (a *App) dividerParts() []hudPart {
+	var out []hudPart
+	add := func(text, token string) {
+		if text != "" {
+			out = append(out, hudPart{text: text, token: token})
+		}
+	}
+	// The run indicator LEADS the list. Trailing it put the one thing on the
+	// row that moves at the far end of a static "model · high", where it read
+	// as another segment of the reasoning label instead of as the state of
+	// the turn.
+	if a.st.Running {
+		add(a.spinFrame(), theme.AccentRunning)
+	}
+	add(a.st.Model, theme.StatusLineModel)
+	// The reasoning level beside the model it applies to: the two are one
+	// request, and "which model" alone left the other half of it invisible.
+	// The bare rung, not "thinking <level>" — the model it sits beside says
+	// what the pair is, and the word only added width.
+	add(a.thinkingLevel(), a.thinkingToken())
+	add(a.modeLabel(), theme.StatusLineMode)
+	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
+		add("Vibe", theme.StatusLineMode)
+	}
+	return out
+}
+
+// thinkingToken is the rail colour for the reasoning level in force, so the
+// level is legible as an amount of effort rather than as a second model name
+// (theme.ThinkingHigh & co). An unwired seam and an unknown rung both fall to
+// the model ink — a level nobody named must not wear a rung's colour.
+func (a *App) thinkingToken() string {
+	switch a.currentThinkingLevel() {
+	case "off":
+		return theme.ThinkingOff
+	case "minimal":
+		return theme.ThinkingMinimal
+	case "low":
+		return theme.ThinkingLow
+	case "medium":
+		return theme.ThinkingMedium
+	case "high":
+		return theme.ThinkingHigh
+	case "xhigh":
+		return theme.ThinkingXhigh
+	case "max":
+		return theme.ThinkingMax
+	default:
+		return theme.StatusLineModel
+	}
+}
 
 // hudParts renders the configured segments (settings statusLine.segments),
 // in order, dropping the ones with nothing to show (an unwired cost or
