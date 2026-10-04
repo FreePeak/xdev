@@ -475,6 +475,9 @@ func TestComposerIsBoxed(t *testing.T) {
 // foreground-only style resets its cells (tcell's zero background is
 // ColorDefault), so the row fill survives only in the gaps and the user
 // input reads as black behind the glyphs inside the band.
+//
+// The ❯ sits one cell in (userBandInset), not flush against the edge: the
+// prompt is a card with a margin, so the scan starts where the glyph is.
 func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 	app, scr := drawnApp(t, 80, 20)
 	app.AddUserBlock("hello band")
@@ -489,8 +492,8 @@ func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 	x0, y0 := -1, -1
 	for i := range prim {
 		// The band row is a transcript row, and with no top bar it can be
-		// row 0; what identifies it is the leading ❯ and flush left.
-		if i%w == 0 && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
+		// row 0; what identifies it is the leading ❯ at the band's margin.
+		if i%w == userBandInset && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
 			x0, y0 = i%w, i/w
 			break
 		}
@@ -499,11 +502,58 @@ func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 		t.Fatal("no user band row painted")
 	}
 	// Cells of "❯ hello band": gutter, space, and the ten prompt runes.
-	for x := range 12 {
+	for x := userBandInset; x < userBandInset+12; x++ {
 		_, bg, _ := prim[y0*w+x].Style.Decompose()
 		if bg != want {
 			t.Fatalf("band row cell %d (rune %q) bg = %s, want the band %v under the glyphs", x, string(prim[y0*w+x].Runes), bg, band)
 		}
+	}
+}
+
+// TestUserBandHasItsOwnAir pins the padding that used to be missing from the
+// sent message: a blank banded row above the prompt (so it hangs off its own
+// card instead of sitting on the answer above it) and a one-cell margin before
+// the ❯. The row COUNT alone would pass with the pad in the wrong place, and
+// the prompt reading as a table row is a geometry bug, not a style one.
+func TestUserBandHasItsOwnAir(t *testing.T) {
+	app, scr := drawnApp(t, 80, 20)
+	app.AddUserBlock("a prompt with air around it")
+	app.draw()
+
+	band, ok := app.th.Slot(theme.BgHighlight)
+	if !ok {
+		t.Fatal("built-in theme must carry a user band")
+	}
+	want := app.cellColor(band)
+	prim, w, _ := scr.GetContents()
+	y := -1
+	for row := range 20 {
+		if len(prim[row*w+userBandInset].Runes) > 0 && prim[row*w+userBandInset].Runes[0] == '❯' {
+			y = row
+			break
+		}
+	}
+	if y < 1 {
+		t.Fatalf("no prompt row above row 0 to pad: %d", y)
+	}
+	// The row above the prompt carries the band and nothing else.
+	for _, x := range []int{0, userBandInset, w / 2, w - 1} {
+		cell := prim[(y-1)*w+x]
+		r := ' '
+		if len(cell.Runes) > 0 {
+			r = cell.Runes[0]
+		}
+		_, bg, _ := cell.Style.Decompose()
+		if bg != want || r != ' ' {
+			t.Fatalf("pad row cell %d is %q on %s, want a blank banded cell", x, r, bg)
+		}
+	}
+	// The margin: the cell before the ❯ is the band, and it holds no glyph.
+	if r, _, _, _ := scr.GetContent(userBandInset-1, y); r != ' ' {
+		t.Fatalf("the margin cell is %q, want a blank cell before the ❯", r)
+	}
+	if r, _, _, _ := scr.GetContent(userBandInset, y); r != '❯' {
+		t.Fatalf("the prompt lost its ❯: %q", r)
 	}
 }
 

@@ -462,9 +462,6 @@ type App struct {
 	// border gets elsewhere. -1 means "no transition in flight", which is the
 	// steady state, so an idle transcript spends nothing on it.
 	focusFade float64
-	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
-	// divider — never on row 0, where it overwrote scrolled-to content.
-	scrollHint string
 	// jump is the "↓ n new" chip the painter draws over the transcript
 	// whenever rows are hidden below the viewport — cleared every frame, so
 	// a click is tested against the chip that is actually on screen
@@ -3899,6 +3896,14 @@ func (a *App) contentWidth() int {
 	return w
 }
 
+// userBandInset is the margin the sent-message band keeps between its left
+// edge and the ❯, in cells. grok's user prompt hangs off its own band rather
+// than butting against the terminal edge, and one cell of it is the rail
+// every other transcript row occupies — so the prompt lines up with the
+// content it sits above, and the band reads as a card instead of a bar
+// running off the left of the screen.
+const userBandInset = 1
+
 // blockLines returns block i's styled visual lines, rendering them only when
 // the block's stamp moved. The render lives in the row index — one entry per
 // block, a superseded render replaced in place rather than kept beside it, so
@@ -3922,13 +3927,21 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 	case KindUser:
 		// Grok user prompt: ❯ prefix, text_primary body, bg-highlight band
 		// across the full row; continuation lines indent past the prefix.
+		//
+		// The air a sent message needs lives HERE, not in the composer: a
+		// blank banded row above the text, so the prompt hangs off the top of
+		// its own card instead of sitting on the answer above it, and a
+		// userBandInset margin before the ❯. Below the text the block's own
+		// separator row already leaves air before the answer, so a second pad
+		// here would spend two blank rows of a small screen for one gap.
 		band := a.cellColor(a.th.Get(theme.BgHighlight))
 		pfxSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
 		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 		text := strings.TrimRight(b.Text, "\n")
-		wrapped := wrap(text, max(10, w-2))
+		wrapped := wrap(text, max(10, w-userBandInset-2))
+		lines = append(lines, line{bg: band, inset: userBandInset}) // the band's top pad
 		for j, wl := range wrapped {
-			ln := line{bg: band}
+			ln := line{bg: band, inset: userBandInset}
 			if j == 0 {
 				ln.runs = append(ln.runs, cell{text: "❯ ", style: pfxSt})
 			} else {
@@ -3939,7 +3952,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		}
 		if text == "" {
 			ln := textline("❯ ", pfxSt)
-			ln.bg = band
+			ln.bg, ln.inset = band, userBandInset
 			lines = append(lines, ln)
 		}
 	case KindThinking:
@@ -4620,7 +4633,7 @@ func (a *App) paint() {
 	w, h := a.width, a.height
 	s.Clear()
 	// Per-frame facts about the viewport: a frame that draws no transcript
-	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
+	a.selRows, a.selBarOn, a.selDockRows, a.linkHits = nil, false, nil, nil
 	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyDoc = 0, 0, -1, 0
 	// The pills' hit table is a per-frame fact for the same reason the
 	// scrollbar's is: a frame that drops a pill for width must not leave
@@ -4633,7 +4646,7 @@ func (a *App) paint() {
 	// no longer on screen.
 	// The scrollbar's geometry is the same per-frame fact: a welcome frame that
 	// draws no bar must not leave last frame's grab live on the last column.
-	a.scrollHint, a.selRows, a.selBarOn, a.selDockRows, a.linkHits = "", nil, false, nil, nil
+	a.selRows, a.selBarOn, a.selDockRows, a.linkHits = nil, false, nil, nil
 
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
@@ -4743,6 +4756,8 @@ func (a *App) paint() {
 		// share: tcell's zero background is ColorDefault, so a style that
 		// omits it resets the cell under the glyphs to the terminal's own
 		// colour instead of the band.
+		// A band can carry a margin: its runs start where the band says (a
+		// sent message hangs off its own card, one cell in from the edge).
 		banded := r.ln.bg != 0
 		if banded {
 			// Fill the full width so the band reads as one continuous row
@@ -4751,9 +4766,9 @@ func (a *App) paint() {
 				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
 			}
 		}
-		x := 3 // rail(1) + pad(2); user bands start their runs at x=0
-		if banded && len(r.ln.runs) > 0 && r.ln.runs[0].text == "❯ " {
-			x = 0
+		x := 3 // rail(1) + pad(2); a band starts its own runs, where it says
+		if banded {
+			x = r.ln.inset
 		}
 		if r.rail != "" {
 			railS := r.railS
@@ -4875,20 +4890,11 @@ func (a *App) paint() {
 	// painted under them is wiped by the same frame (a drag over the composer
 	// copied text and showed nothing, since the composer is exactly the row the
 	// user drags first). It is a screen overlay, so paint() draws it last.
-	// Scroll indicator (grok-style ▲n▼n): rows hidden above/below. It rides the
-	// composer's info divider — at y=0 it overwrote whatever content scrolled
-	// to the top row (a long thinking line, or the last prompt) and any
-	// right-aligned timestamp there, so the first line showed a hint glued to
-	// the text that never scrolled away. The divider is chrome: never content.
-	up, down := a.sm.Indicator(total, vp)
-	if up > 0 || down > 0 {
-		a.scrollHint = fmt.Sprintf("▲ %d ▼ %d", up, down)
-	} else {
-		a.scrollHint = ""
-	}
-	// "↓ n new": the scroll hint says a jump is possible, this is the jump.
-	// Painted over the transcript's own rows, before the dock and every
-	// overlay, so a panel that covers the chip wins the click.
+	// "↓ n new": the only scroll position report the transcript carries — the
+	// hint that used to also sit on the composer's divider said the same
+	// thing as a bare number. Painted over the transcript's own rows, before
+	// the dock and every overlay, so a panel that covers the chip wins the click.
+	_, down := a.sm.Indicator(total, vp)
 	a.drawJumpChip(s, edge, top, vp, down)
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
@@ -5213,8 +5219,13 @@ func clip(s string, maxCells int) string {
 // the terminal: with the sidebar open the box sits inside the main pane, so a
 // draft must wrap where the box ends — text the box cannot show is a wrap the
 // editor has to know about, or the prompt grows rows the box will not paint.
+//
+// The last cell of every input row is the composer's right padding: a full
+// row's last rune has one blank cell between it and the frame instead of
+// touching it (the air the user's own message gets, without costing the box a
+// whole row).
 func (a *App) composerAvail() int {
-	avail := a.rightEdge() - 7
+	avail := a.rightEdge() - 8
 	if avail < 4 {
 		avail = 4
 	}
@@ -5297,9 +5308,10 @@ func (a *App) drawComposer(yTop int) {
 	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
 	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
-	// above/below count the draft rows the window hides, and decide both
-	// where the ❯ prefix belongs and what the divider's hint says.
-	lines, curRow, curCol, above, below := a.composerView()
+	// above counts the draft rows the window hides, and says whether the ❯
+	// belongs on the first painted row (nothing is scrolled off the top) or
+	// belongs with the hidden head instead.
+	lines, curRow, curCol, above, _ := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
@@ -5314,7 +5326,10 @@ func (a *App) drawComposer(yTop int) {
 		drawText(a.scr, 5, y, ln, ms.body)
 	}
 	// Blank the space between the last text row and the right border so a
-	// short line cannot leave stale cells from a previous longer draft.
+	// short line cannot leave stale cells from a previous longer draft. The
+	// fill stops one cell short of the border (x < w-3): that cell is the
+	// trailing pad composerAvail() reserves, so a full row's last rune keeps
+	// its air instead of touching the frame.
 	for i, ln := range lines {
 		x := 5 + width(ln)
 		if x == 5 && a.ed.Text() == "" {
@@ -5325,7 +5340,7 @@ func (a *App) drawComposer(yTop int) {
 			drawText(a.scr, 5, yTop+i, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
 			x += width(ph)
 		}
-		for ; x < w-2; x++ {
+		for ; x < w-3; x++ {
 			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
 		}
 	}
@@ -5392,48 +5407,17 @@ func (a *App) drawComposer(yTop int) {
 			x += width(p.text)
 		}
 	}
-	// The viewport hint rides this divider's right end. It used to be
-	// painted on transcript row 0, where it overwrote whatever content had
-	// scrolled to the top: a long thinking line, or the last prompt, looked
-	// like it had gone static in the first line. The divider is chrome, so it
-	// takes the pixels instead; when the divider is too narrow for the hint,
-	// the hint is dropped rather than eating the model name. The copy
-	// confirmation that used to lead the queue is a toast now (toast.go), so
-	// two hints want the slot: the draft's own hidden rows — text the user is
-	// composing right now beats scrollback they already read — then the
-	// transcript's ▲n▼n.
-	var hint string
-	if hint = draftHint(above, below); hint == "" {
-		hint = a.scrollHint
-	}
-	if hint != "" {
-		hx := w - 3 - width(hint)
-		if hx > infoX+infoW {
-			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-			if hasInfoBg {
-				hintSt = hintSt.Background(a.cellColor(infoBg))
-			}
-			drawText(a.scr, hx, yBottom, hint, hintSt)
-		}
-	}
+	// The divider's right end is the frame's own: no count rides it. The ▲n▼n
+	// viewport hint that used to live here repeated what the "↓ n new" chip
+	// over the transcript already says (and says with a click on it), and
+	// "draft ▲n" put a second number in the corner of the one box the user is
+	// reading their own words in. A field that chatters about itself while you
+	// type is not a field.
 	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
 
 	// Cursor: blinking block at the editor position inside the painted window.
 	cx := 5 + curCol
 	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
-}
-
-// draftHint names the composer rows the window hides, if any.
-func draftHint(above, below int) string {
-	switch {
-	case above > 0 && below > 0:
-		return fmt.Sprintf("draft ▲%d ▼%d", above, below)
-	case above > 0:
-		return fmt.Sprintf("draft ▲%d", above)
-	case below > 0:
-		return fmt.Sprintf("draft ▼%d", below)
-	}
-	return ""
 }
 
 // drawJumpChip paints the "↓ n new" jump-to-latest button over the

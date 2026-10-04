@@ -27,13 +27,14 @@ func dividerRow(t *testing.T, scr tcell.SimulationScreen) string {
 	return ""
 }
 
-// TestScrollIndicatorNeverPaintsTranscriptRow pins the fix for "the last prompt
-// sits static in the first line": the ▲n▼n hint was painted at y=0 over the
-// scrolling transcript, so the top row showed the hint glued onto whatever
-// content reached it — a long thinking line, or the last prompt — and ate the
-// right-aligned timestamp there too. The hint belongs on the composer's
-// divider (chrome); content gets content rows — never a chrome row.
-func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
+// TestNoScrollCountOnTheDivider pins where the scroll position is reported: the
+// transcript's own "↓ n new" chip and nothing else. The ▲n▼n hint that used to
+// ride the composer's divider was a second copy of the same number — in the
+// one box the user is reading their own words in — and the "draft ▲n" beside it
+// was a third, for a box that has always windowed itself silently. Content rows
+// and chrome each keep their own job: the chip is the position report, the
+// divider is the model line.
+func TestNoScrollCountOnTheDivider(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddSystemBlock(strings.Repeat("line\n", 40)) // guarantees rows hidden above
 	app.draw()
@@ -42,8 +43,8 @@ func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("nothing drawn")
 	}
-	// With the top bar gone the transcript owns row 0, so the hint must not
-	// be there — it is still a content row, not a chrome row.
+	// Row 0 is transcript content, never chrome: neither the old y=0 hint nor
+	// any replacement may eat it.
 	if strings.Contains(rows[0], "▲") || strings.Contains(rows[0], "▼") {
 		t.Fatalf("scroll hint overwrote the first transcript row: %q", rows[0])
 	}
@@ -54,56 +55,35 @@ func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 	if !strings.Contains(divider, "╰") {
 		t.Fatalf("expected the info divider, got %q", divider)
 	}
-	if !strings.Contains(divider, "▲") || !strings.Contains(divider, "▼") {
-		t.Fatalf("the hint did not move to the divider: %q", divider)
+	if strings.Contains(divider, "▲") || strings.Contains(divider, "▼") {
+		t.Fatalf("the divider carries a scroll count again: %q", divider)
 	}
-}
-
-// TestScrollIndicatorYieldsToTheModelName: the divider is shared with the model
-// ref and the model name wins — a hint that cannot fit is dropped rather than
-// eating the text that says which model you are talking to.
-func TestScrollIndicatorYieldsToTheModelName(t *testing.T) {
-	app, scr := newTestApp(t, 14, 24)
-	app.AddSystemBlock(strings.Repeat("line\n", 40))
-	app.draw()
-
-	divider := dividerRow(t, scr)
-	if strings.Contains(divider, "▲") {
-		t.Fatalf("a hint too narrow to fit was painted over the model name: %q", divider)
-	}
+	// The model line keeps its own budget whole: dropping the hint must not
+	// have been paid for out of the model name.
 	if !strings.Contains(divider, "test/free") {
-		t.Fatalf("model name lost on a narrow divider: %q", divider)
+		t.Fatalf("model name lost when the hint went: %q", divider)
 	}
 }
 
-// TestScrollIndicatorGoneWithTheScrollback: the hint is recomputed every frame.
-// A frame whose transcript fits (or is gone — /clear, the welcome screen) must
-// not keep painting last frame's hint on the divider.
-func TestScrollIndicatorGoneWithTheScrollback(t *testing.T) {
-	app, scr := newTestApp(t, 100, 24)
-	app.AddSystemBlock(strings.Repeat("line\n", 40))
-	app.draw()
+// TestNoStaleCountAfterClear: /clear must not leave the last frame's count on
+// screen. With the hint gone from the divider there is nothing to go stale, so
+// this pins the chip instead — the one report left — clearing with the tail.
+func TestNoStaleCountAfterClear(t *testing.T) {
+	app, scr := scrolledUp(t) // a transcript with rows hidden below the tail
 	app.mu.Lock()
-	hinted := app.scrollHint
+	jumped := app.jump.w != 0
 	app.mu.Unlock()
-	if hinted == "" {
-		t.Fatal("the fixture must produce a hint before it can clear one")
-	}
-	if !strings.Contains(dividerRow(t, scr), "▲") {
-		t.Fatal("fixture did not reach the divider")
+	if !jumped {
+		t.Fatal("the fixture must hide rows below before it can clear them")
 	}
 
-	app.mu.Lock()
-	app.blocks = nil // /clear: the welcome frame never sets a viewport hint
-	app.mu.Unlock()
+	// Reset is the real /clear: it drops the blocks AND the scroll model's
+	// position, so nothing is hidden and nothing has a count to show. The
+	// welcome frame that follows is the screen a /clear leaves behind, and it
+	// must carry no number from the transcript that was just discarded.
+	app.Reset()
 	app.draw()
-	app.mu.Lock()
-	got := app.scrollHint
-	app.mu.Unlock()
-	if got != "" {
-		t.Fatalf("scrollHint still %q with no transcript", got)
-	}
-	if strings.Contains(dividerRow(t, scr), "▲") {
-		t.Fatalf("stale hint painted on the divider: %q", dividerRow(t, scr))
+	if strings.Contains(screenText(scr), "▲") || strings.Contains(screenText(scr), "▼") {
+		t.Fatalf("stale count painted after /clear:\n%s", screenText(scr))
 	}
 }

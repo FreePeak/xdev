@@ -42,8 +42,15 @@ func TestLargePasteStaysOnScreen(t *testing.T) {
 	if !strings.Contains(text, "pasted line") {
 		t.Fatalf("pasted draft is not on screen:\n%s", text)
 	}
-	if !strings.Contains(text, "draft ▲") {
-		t.Fatalf("a paged composer must say rows are hidden:\n%s", text)
+	// The box windows the draft, but it no longer SAYS so: the count used to
+	// ride the divider's right end and it duplicated what the "↓ n new" chip
+	// over the transcript already reports. What must survive is the window
+	// itself — the box never grows past the screen.
+	if strings.Contains(text, "draft ▲") {
+		t.Fatalf("the divider carries a draft count again:\n%s", text)
+	}
+	if got := app.composerRows(); got > app.composerBudget()+2 {
+		t.Fatalf("the box is %d rows against a %d budget: it grew past the screen", got, app.composerBudget())
 	}
 }
 
@@ -129,20 +136,6 @@ func TestRowWindowGeometry(t *testing.T) {
 		if hi-lo > max(c.budget, 1) || lo < 0 || hi > c.n {
 			t.Errorf("rowWindow(%d,%d,%d) = (%d,%d): window out of bounds",
 				c.n, c.cur, c.budget, lo, hi)
-		}
-	}
-}
-
-// draftHint is the only proof a paged box holds more than it paints.
-func TestDraftHint(t *testing.T) {
-	for c, want := range map[[2]int]string{
-		{0, 0}: "",
-		{3, 0}: "draft ▲3",
-		{0, 7}: "draft ▼7",
-		{3, 2}: "draft ▲3 ▼2",
-	} {
-		if got := draftHint(c[0], c[1]); got != want {
-			t.Errorf("draftHint(%d,%d) = %q, want %q", c[0], c[1], got, want)
 		}
 	}
 }

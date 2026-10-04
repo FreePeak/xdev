@@ -23,13 +23,17 @@ const stickyMinHeight = 3
 const stickyGap = 1
 
 // stickyPrompt is one user prompt's place in the transcript's row space: where
-// it starts (row) and how many lines of it render (full, the block's trailing
-// separator excluded — the gap between blocks is transcript spacing, not a
-// line of the prompt).
+// its TEXT starts (row) and how many lines of that text render (full, the
+// block's trailing separator excluded — the gap between blocks is transcript
+// spacing, not a line of the prompt).
+//
+// Both numbers are in TEXT rows, not render rows: a user band pads its own
+// first row (see blockLines), and a header that spent one of its three rows
+// on that padding would show a blank line where the request should be.
 type stickyPrompt struct {
 	block int   // index into App.blocks
-	row   int32 // first transcript row of the prompt (its inline top)
-	full  int   // rendered lines of the prompt
+	row   int32 // first transcript row of the prompt's text (its inline top)
+	full  int   // rendered text lines of the prompt
 }
 
 // stickyPrompts lists the prompts eligible to pin: every user block. A
@@ -43,11 +47,36 @@ func (a *App) stickyPrompts() []stickyPrompt {
 		if b.Kind != KindUser || i >= len(x.start) || i >= len(x.rend) {
 			continue
 		}
-		if full := len(x.rend[i].lines); full > 0 {
-			out = append(out, stickyPrompt{block: i, row: x.start[i], full: full})
+		lines := x.rend[i].lines
+		if first := bandTextIndex(lines); first >= 0 {
+			out = append(out, stickyPrompt{block: i, row: x.start[i] + int32(first), full: bandTextRows(lines)})
 		}
 	}
 	return out
+}
+
+// bandTextRows counts a render's rows that carry text. A banded block pads its
+// first row with blank cells (the sent message's own margin, see blockLines);
+// every other block is content end to end, so this is its render verbatim.
+func bandTextRows(lines []line) int {
+	n := 0
+	for i := range lines {
+		if len(lines[i].runs) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// bandTextIndex is the render row of the first row that carries text, or -1
+// when the render is chrome end to end and there is nothing to pin.
+func bandTextIndex(lines []line) int {
+	for i := range lines {
+		if len(lines[i].runs) > 0 {
+			return i
+		}
+	}
+	return -1
 }
 
 // stickyLayout is one frame's header decision. block -1 means no header: the
@@ -115,21 +144,38 @@ func computeSticky(firstRow int32, vp int, prompts []stickyPrompt) stickyLayout 
 // stickyHeaderRows materializes the pinned prompt's own inline render for the
 // header: the same banded ❯ rows the transcript paints, so pinning changes
 // WHERE a prompt is, never what it looks like. Caller holds a.mu, after sync.
+//
+// The window is in TEXT rows (the space stickyPrompts and computeSticky work
+// in), so the band's blank pad rows are stepped over: they are the card's
+// padding, not a line of the request.
 func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 	if h.block < 0 || h.block >= len(a.rowIdx.rend) {
 		return nil
 	}
 	lines := a.rowIdx.rend[h.block].lines
 	out := make([]rowView, 0, h.visible)
-	for i := h.clipTop; i < h.clipTop+h.visible && i < len(lines); i++ {
+	text := 0
+	for i := range lines {
+		if len(lines[i].runs) == 0 {
+			continue // the band's pad row: spacing, not a line
+		}
+		if text < h.clipTop {
+			text++
+			continue // scrolled past the top of the pinned window
+		}
+		if text >= h.clipTop+h.visible {
+			break
+		}
 		// The runs are copied, not shared: the ellipsis below edits the last
 		// one, and the row index's render is the transcript's own.
 		out = append(out, rowView{ln: line{
-			runs: append([]cell(nil), lines[i].runs...),
-			bg:   lines[i].bg,
+			runs:  append([]cell(nil), lines[i].runs...),
+			bg:    lines[i].bg,
+			inset: lines[i].inset,
 		}})
+		text++
 	}
-	if len(out) == 0 || h.clipTop+len(out) >= len(lines) {
+	if len(out) == 0 || h.clipTop+len(out) >= bandTextRows(lines) {
 		return out // nothing hidden below: no ellipsis to admit
 	}
 	// The ellipsis admits the hidden rows in two cells; a row already at the

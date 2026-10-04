@@ -168,14 +168,14 @@ func TestAgedToolOutputCollapsesFirst(t *testing.T) {
 	if !strings.Contains(joinedLines(app.blockLines(agedIdx, results[0], w)), "lines hidden") {
 		t.Error("collapsed result lost its hidden-line notice")
 	}
-	// The conversation spine is untouched: a user prompt keeps every row.
+	// The conversation spine is untouched: a user prompt keeps every row of its
+	// own text, however aged the session is — plus its band's blank pad row,
+	// which is the card's padding rather than trimmed content.
 	for _, b := range app.blocks {
 		if b.Kind == KindUser {
-			// Nothing about a prompt is elided: it renders as many rows as its
-			// own text wraps to, however aged the session is.
-			want := len(wrap(strings.TrimRight(b.Text, "\n"), max(10, w-2)))
-			if got := len(app.blockLines(idxOf(app, b), b, w)); got != want {
-				t.Fatalf("user prompt rendered %d rows, its text wraps to %d", got, want)
+			want := len(wrap(strings.TrimRight(b.Text, "\n"), max(10, w-userBandInset-2)))
+			if got := len(app.blockLines(idxOf(app, b), b, w)); got != want+1 {
+				t.Fatalf("user prompt rendered %d rows, its text wraps to %d plus one pad", got, want)
 			}
 			break
 		}

@@ -104,10 +104,11 @@ func TestDragFromUserRowStillSelectsText(t *testing.T) {
 	if menu {
 		t.Fatal("a drag opened the menu; only a click should")
 	}
-	// The row paints as "❯ first prompt", so cells 3..11 are the body text
-	// "irst prom" — the drag is measured in screen cells, prefix included.
-	if got := string(scr.GetClipboardData()); got != "irst prom" {
-		t.Fatalf("clipboard = %q, want %q", got, "irst prom")
+	// The row paints as " ❯ first prompt" (the band's own margin, then the
+	// prefix), so cells 3..11 are the body text "first pro" — the drag is
+	// measured in screen cells, margin and prefix included.
+	if got := string(scr.GetClipboardData()); got != "first pro" {
+		t.Fatalf("clipboard = %q, want %q", got, "first pro")
 	}
 }
 
