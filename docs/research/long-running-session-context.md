@@ -281,7 +281,7 @@ Source: `docs/research/dsh-internals.md:123-165` +
   oversized result by code-point-safe head+tail — `thresholdChars 8_192`,
   `headChars 4_096`, `tailChars 1_024` — *before* summarization, with **no
   model call**. Same ordering Claude Code uses, with the numbers written down.
-- **Envelope validation at config time** (`compaction-basic/src/config.ts:172-188`):
+- **Envelope validation at config time** (`compaction-basic/src/config.ts:153-186`):
   fails if `contextWindow − reservedCompletionTokens` leaves no message budget.
   See §5.1.
 - **Durable transaction**: `compaction/start{turn}` → summarize →
@@ -320,8 +320,10 @@ semantic port of this; the entry names are shared so sessions interop.
 - **Summary budgets**: `MAX_SUMMARY_TOKENS = 16_384`; summary budget
   `floor(0.8 × reserveTokens)`, so a 1M window authorizes ~120k-token summary,
   clamped hard. Effort honors the session's thinking level.
-- **Overflow recovery is four cases in order** (`checkCompaction`,
-  `session-maintenance.ts:1741-1930`): input overflow → **context promotion
+- **Overflow recovery is four cases in order** (`checkCompaction`, read from the
+  `@deepseek-ai/dsh-session-maintenance` package; that source is not in
+  this checkout, so the case list is cited from the package's own docs, not
+  from a line): input overflow → **context promotion
   first** (switch to a bigger-window model), then compaction; threshold →
   supersede-reads + dropUseless pruning *first*, then maintenance; incomplete
   output (`stopReason: "length"`) → drop the partial, input was fine;
@@ -382,7 +384,7 @@ and §7.3 lists xdev's own advantages, which are real.
   failure circuit breaker.
 - **Tier 3, the rapid-refill breaker** (§6.3) — a **loop-level** guard, the one
   piece xdev has nothing like: `RAPID_REFILL_TOOL_TURN_THRESHOLD = 3` /
-  `MAX_CONSECUTIVE_RAPID_REFILLS = 3` (`turn-loop-state.ts:15-17`). A compaction
+  `MAX_CONSECUTIVE_RAPID_REFILLS = 3` (`turn-loop-state.ts:21-22`). A compaction
   followed by fewer than 3 tool turns before the window refills is a compaction
   that did not buy space; three consecutive such events throw
   `createCompactRapidRefillError` instead of compacting forever at full cost.
@@ -438,7 +440,7 @@ xdev   threshold = ContextWindow − reserve                          // compact
 oc     promptCeiling = min(inputLimit − buffer,
                           context − max(min(outputLimit, 32_000), buffer))
 dsh    fails at config time if contextWindow − reservedCompletionTokens
-          leaves no message budget                                // config.ts:172-188
+          leaves no message budget                               // config.ts:153-186
 ```
 
 If a model's `MaxTokens` is large and the reserve is small, xdev can pass its
@@ -555,7 +557,7 @@ tool turns before the window refills is a compaction that **did not buy
 space**; `MAX_CONSECUTIVE_RAPID_REFILLS = 3` of those in a row throws at the
 boundary instead of compacting at full provider cost forever
 ([zcode-internals.md §6.3](zcode-internals.md), `evaluateRapidRefill`,
-`turn-loop-state.ts:15-17`).
+`turn-loop-state.ts:21-22`).
 xdev's ladder falls through to the next member and, if all fail, logs and
 continues — a session that cannot compact will keep trying at every boundary
 forever. Tracked as **#422**, which also carries the separate failure circuit
