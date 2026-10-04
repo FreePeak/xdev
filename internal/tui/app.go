@@ -268,6 +268,7 @@ type App struct {
 	thinkingOps        *ThinkingOps             // /thinking, wired by cmd (nil → notices)
 	cwd                string                   // working directory (the status row's left side)
 	branch             string                   // git branch for the status row ("" when none)
+	branchDirty        bool                     // the branch's tree has uncommitted changes (its ink)
 	commandDir         string                   // markdown command discovery root
 	pathRoot           string                   // @-completion root (empty disables the menu)
 	pathList           func(string) []PathEntry // one directory's entries (the only source)
@@ -587,6 +588,7 @@ func (a *App) SetLocation(cwd string) {
 	a.mu.Lock()
 	a.cwd = cwd
 	a.branch = gitBranch(cwd)
+	a.branchDirty = gitDirty(cwd)
 	a.mu.Unlock()
 }
 
@@ -5422,26 +5424,14 @@ func (a *App) drawStatusRow(y int) {
 	modeW := a.modeChipWidth()
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		lbl := a.statusLocation(w - 2 - width(cmdLabel) - 2 - hudEssentialWidth(parts) - 1 - modeW)
-		end := 2
-		if lbl != "" {
-			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-			drawText(a.scr, 2, y, lbl, pathSt)
-			end = 2 + width(lbl)
-		}
+		end := a.drawStatusLocation(y, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1-modeW)
 		end = a.drawStatusMode(y, end+2)
 		a.drawHUD(y, w, end, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the location is what shrinks.
-	lbl := a.statusLocation(w - 2 - hudEssentialWidth(parts) - 1 - modeW)
-	end := 2
-	if lbl != "" {
-		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-		drawText(a.scr, 2, y, lbl, pathSt)
-		end = 2 + width(lbl)
-	}
+	end := a.drawStatusLocation(y, w-2-hudEssentialWidth(parts)-1-modeW)
 	end = a.drawStatusMode(y, end)
 	a.drawHUD(y, w, end, parts)
 }
@@ -5457,13 +5447,50 @@ func (a *App) drawStatusRow(y int) {
 // disappeared exactly when the HUD pills joined it and the row was busiest.
 // It still yields whole: a branch too wide for the row leaves instead of
 // printing half of itself. Caller holds a.mu.
-func (a *App) statusLocation(budget int) string {
+func (a *App) statusLocation(budget int) (path, branch string) {
 	if a.branch != "" && budget-3-width(a.branch) >= 4 {
 		if p := pathDisplay(a.cwd, budget-3-width(a.branch)); p != "" {
-			return p + " · " + a.branch
+			return p, a.branch
 		}
 	}
-	return pathDisplay(a.cwd, budget-2)
+	return pathDisplay(a.cwd, budget-2), ""
+}
+
+// drawStatusLocation paints that location in two inks — the path in the
+// statusLinePath token, the branch in the tree's clean/dirty ink — and returns
+// the column after it. One grey string said "cwd · branch" as a single fact;
+// the two colours say what they are: where you are, and the state of the tree
+// you are about to edit. The model id already wears its own ink on the
+// divider directly above, so all three parts of the location answer the same
+// way. Caller holds a.mu.
+func (a *App) drawStatusLocation(y, budget int) int {
+	path, branch := a.statusLocation(budget)
+	st := func(token string) tcell.Style {
+		return tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(token)))
+	}
+	end := 2
+	if path != "" {
+		drawText(a.scr, end, y, path, st(theme.StatusLinePath))
+		end += width(path)
+	}
+	if branch != "" {
+		drawText(a.scr, end, y, dividerSep, st(theme.StatusLineSep))
+		end += width(dividerSep)
+		drawText(a.scr, end, y, branch, st(a.branchToken()))
+		end += width(branch)
+	}
+	return end
+}
+
+// branchToken is the branch's ink: the theme's git_clean on a clean tree,
+// git_dirty once the working tree has changes (gitDirty, sampled with the
+// branch itself). Both slots are part of the theme contract, so a theme
+// always has an answer; a theme that left them "" keeps the terminal's.
+func (a *App) branchToken() string {
+	if a.branchDirty {
+		return theme.StatusLineGitDirty
+	}
+	return theme.StatusLineGitClean
 }
 
 // drawHUD renders the configured status segments right-aligned on the

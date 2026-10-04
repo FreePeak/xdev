@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"os/exec"
 	"strings"
 
@@ -142,6 +143,16 @@ func gitBranch(cwd string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// gitDirty reports whether the tree at cwd has uncommitted changes, so the
+// branch on the status row can wear the theme's clean/dirty ink. It asks git
+// once, beside the rev-parse gitBranch already runs: the row is chrome that
+// is set when the location is set (startup, /cd, session switch), not a live
+// monitor — a session that edits the tree keeps the ink it started with.
+func gitDirty(cwd string) bool {
+	out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
+	return err == nil && len(bytes.TrimSpace(out)) > 0
 }
 
 // transcriptTop is the screen row the transcript viewport paints into: the

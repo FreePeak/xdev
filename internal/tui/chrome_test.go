@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1245,5 +1247,79 @@ func TestStatusRowKeepsBranchAndTruncatesThePath(t *testing.T) {
 	}
 	if !strings.Contains(row, "xdev-feature") {
 		t.Fatalf("the path is what the row keeps: %q", row)
+	}
+}
+
+// TestStatusRowWearsItsOwnInks pins the colour half of the location: the
+// path wears status_line_path, the branch wears the tree's clean/dirty ink,
+// and the two are not the same grey. One string said "cwd · branch" as a single
+// fact; the split inks say where you are and what state the tree is in, which
+// is the reading the model id already gets on the divider above.
+func TestStatusRowWearsItsOwnInks(t *testing.T) {
+	app, scr := newTestApp(t, 120, 24)
+	app.AddSystemBlock("ready")
+	app.SetLocation("/Volumes/work/harvey/freepeak/checkout/xdev-feature")
+	app.mu.Lock()
+	app.branch, app.branchDirty = "feat/branch-ink", false
+	app.mu.Unlock()
+	app.draw()
+
+	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
+	row := rowOf(t, rows, "feat/branch-ink")
+	pathX, branchX := strings.Index(rows[row], "xdev-feature"), strings.Index(rows[row], "feat/branch-ink")
+	pathInk := app.cellColor(app.th.Get(theme.StatusLinePath))
+	cleanInk := app.cellColor(app.th.Get(theme.StatusLineGitClean))
+	dirtyInk := app.cellColor(app.th.Get(theme.StatusLineGitDirty))
+	if got, _, _ := cellStyle(scr, pathX, row).Decompose(); got != pathInk {
+		t.Fatalf("the path is painted in %v, want statusLinePath %v", got, pathInk)
+	}
+	if got, _, _ := cellStyle(scr, branchX, row).Decompose(); got != cleanInk {
+		t.Fatalf("a clean branch is painted in %v, want statusLineGitClean %v", got, cleanInk)
+	}
+
+	// The same branch with an edit in the tree flips to the dirty ink — the
+	// green/red pair the theme already spent on this row's git state.
+	app.mu.Lock()
+	app.branchDirty = true
+	app.mu.Unlock()
+	app.draw()
+	if got, _, _ := cellStyle(scr, branchX, row).Decompose(); got != dirtyInk {
+		t.Fatalf("a dirty branch is painted in %v, want statusLineGitDirty %v", got, dirtyInk)
+	}
+}
+
+// TestGitDirtySamplesTheTree pins the half that cannot be asserted from a
+// hand-set flag: gitDirty is what makes the ink honest, so it must answer for
+// a real repo — dirty with an untracked file, clean without one — and false
+// for a directory that is not a repository at all (no branch, no ink).
+func TestGitDirtySamplesTheTree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if gitDirty(dir) {
+		t.Fatalf("a directory that is not a repo must not claim a dirty tree: %s", dir)
+	}
+	run("init")
+	if gitDirty(dir) {
+		t.Fatal("a fresh repo has nothing uncommitted")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scratch.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !gitDirty(dir) {
+		t.Fatal("an untracked file must read as a dirty tree")
+	}
+	if err := os.Remove(filepath.Join(dir, "scratch.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if gitDirty(dir) {
+		t.Fatal("the tree is clean again once the file is gone")
 	}
 }
