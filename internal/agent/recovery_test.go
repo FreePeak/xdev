@@ -496,11 +496,10 @@ func TestStreamEndedWithoutFinishReasonRetriesAndResumes(t *testing.T) {
 // TestStreamEndedMidToolCallReplaysTheTurn is the end-to-end pin for the
 // cut that ended sessions with the same "stream ended without
 // finish_reason" text: the stream died AFTER a tool call started, with no
-// text behind it. emitted was true (the call's Start reached the hooks),
-// so the ladder took the post-content branch — but no partial existed to
-// retain and the call was unpaired, so canRetain was false and the error
-// returned raw, ending the run. Nothing was rendered and nothing was
-// persisted, so the turn is replayable and must be replayed.
+// text behind it. The ladder took the post-content branch — no partial
+// existed to retain and the call was unpaired, so canRetain was false and
+// the error returned raw, ending the run. Nothing was rendered and nothing
+// was persisted, so the turn is replayable and must be replayed.
 func TestStreamEndedMidToolCallReplaysTheTurn(t *testing.T) {
 	cut := errors.New("openai-completions: stream ended without finish_reason")
 	p := &fakeProvider{calls: []fakeScript{
@@ -533,6 +532,96 @@ func TestStreamEndedMidToolCallReplaysTheTurn(t *testing.T) {
 				t.Fatalf("request %d replays the orphaned tool call: %+v", i, m.ToolCalls())
 			}
 		}
+	}
+}
+
+// TestStreamEndedAfterEmptyTextStartReplaysTheTurn is the same
+// session-killing shape without the tool call: the provider opened a
+// text block, then the stream cut before a single delta arrived (or every
+// delta was mojibake and CleanUTF8 dropped it). closeBlock flushed
+// nothing, so the turn rendered nothing and kept nothing — yet the block's
+// Start event had already set the "content emitted" flag, so the ladder
+// took the post-content branch, found no partial, and returned the error
+// raw: "· stream error — retrying (x5)" then the same error as the run's
+// verdict. A turn with nothing on screen is replayable, and must be.
+func TestStreamEndedAfterEmptyTextStartReplaysTheTurn(t *testing.T) {
+	cut := errors.New("openai-completions: stream ended without finish_reason")
+	for _, tc := range []struct {
+		name string
+		open ai.Event
+		delt ai.Event
+	}{
+		{"cut before any delta", ai.Event{Type: ai.EventTextStart}, ai.Event{}},
+		{"delta was all mojibake", ai.Event{Type: ai.EventTextStart}, textEvent("\xff\xfe")},
+		{"thinking cut before any delta", ai.Event{Type: ai.EventThinkingStart}, ai.Event{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fakeProvider{calls: []fakeScript{
+				{events: []ai.Event{{Type: ai.EventStart}, tc.open, tc.delt, ai.Errorf(cut)}},
+				{events: []ai.Event{ai.Event{Type: ai.EventStart}, textEvent("recovered"), doneEvent("recovered")}},
+			}}
+			a, _, p := storeAgent(t, p, CompactionConfig{})
+			a.Retry = fastRetry()
+			final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+			if err != nil {
+				t.Fatalf("a turn that rendered nothing must be replayed, not surfaced: %v", err)
+			}
+			if final.Text() != "recovered" {
+				t.Fatalf("final = %q", final.Text())
+			}
+			if len(p.gotReqs) != 2 {
+				t.Fatalf("stream calls = %d, want 2 (empty flush, replay)", len(p.gotReqs))
+			}
+		})
+	}
+}
+
+// TestTextBeforeOrphanToolCallRetainsAndContinues pins the mixed shape: text
+// streamed AND a tool call started, then the cut. The text is on screen (the
+// TUI's assistant block is still streaming), so the turn retains the partial
+// and continues rather than replaying — a replay would append the second
+// attempt's deltas into that same open block and show the text twice. The
+// unpaired call never rides along: closeBlock flushes text/thinking only, so
+// the retained partial is not a request the provider rejects.
+func TestTextBeforeOrphanToolCallRetainsAndContinues(t *testing.T) {
+	cut := errors.New("openai-completions: stream ended without finish_reason")
+	p := &fakeProvider{calls: []fakeScript{
+		{events: []ai.Event{
+			{Type: ai.EventStart},
+			{Type: ai.EventTextStart}, textEvent("looking "),
+			{Type: ai.EventToolcallStart, ToolCallID: "c1", ToolName: "echo", StreamIndex: 0},
+			ai.Errorf(cut),
+		}},
+		{events: []ai.Event{ai.Event{Type: ai.EventStart}, textEvent("recovered"), doneEvent("recovered")}},
+	}}
+	a, _, p := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+	final, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}})
+	if err != nil {
+		t.Fatalf("a cut after text must retain and continue, not surface: %v", err)
+	}
+	if final.Text() != "recovered" {
+		t.Fatalf("final = %q", final.Text())
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream calls = %d, want 2 (initial + one continuation)", len(p.gotReqs))
+	}
+	// The unpaired call is dropped, the visible text is kept: no request
+	// may carry an assistant tool call without a matching tool result.
+	retained := false
+	for i, r := range p.gotReqs {
+		for _, m := range r.Messages {
+			if m.Role != ai.RoleAssistant {
+				continue
+			}
+			if len(m.ToolCalls()) > 0 {
+				t.Fatalf("request %d carries the unpaired tool call: %+v", i, m.ToolCalls())
+			}
+			retained = retained || strings.Contains(m.Text(), "looking ")
+		}
+	}
+	if !retained {
+		t.Fatal("the continuation must carry the retained text, or the answer loses its context")
 	}
 }
 
