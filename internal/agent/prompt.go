@@ -329,6 +329,35 @@ func BuildSystemPrompt(base string, contextFiles string, defs []NamedToolDef) st
 	return b.String()
 }
 
+// FanoutGuidance is the optional parallel-subagent block, injected only
+// when `typesafe.fanout` is on. It is guidance, not a policy: nothing
+// inspects the turn or auto-spawns a child, the model reads it and
+// decides. The block stays short because it is billed on every request
+// and the task tool's own description already carries the mechanics
+// (batch shape, 8-way cap, result contract) — this only names the
+// decision the description cannot make, which is that a serial chain of
+// reads is usually one batch of subagents.
+const FanoutGuidance = "# Parallel subagents\n" +
+	"Before you start a substantial task, ask whether its parts are independent of each other. " +
+	"Two or more slices that need nothing from one another — separate subsystems, separate files, separate searches — " +
+	"go in one batch of at least three task jobs, not a serial sequence, and you continue with your own slice meanwhile.\n\n" +
+	"It costs tokens: every job is a fresh model context that re-reads what it needs, and you pay for its transcript too. " +
+	"Spend it only when wall-clock actually drops. Do it when the answer means reading a lot of code across a repo, or when " +
+	"independent edits can land in parallel. Skip it for one file, one lookup, a single command, a two-step change, or " +
+	"when the slices only become clear after the first read — that is a chain, and a chain stays here. " +
+	"Handing one narrow question to a subagent costs a whole model round trip to answer it yourself for free.\n\n" +
+	"State what each result must contain; only that result comes back. Do not send a job whose output you would have to " +
+	"re-read anyway to hand it to the next job."
+
+// BuildFanoutGuidance returns the FanoutGuidance block on its own, or ""
+// when fan-out is disabled — so a default session's prompt is unchanged.
+func BuildFanoutGuidance(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return "\n\n" + FanoutGuidance
+}
+
 // BuildDeferredIndex renders the one-line index of the tools a catalog keeps
 // out of the eager tool schema (M13 #54): one `name: summary` line each, plus
 // the bridge entry point. It is appended to the prompt next to the `# Tools`
