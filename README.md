@@ -161,8 +161,13 @@ difference.
 
 ## Terminal UI
 
-The look is Grok CLI's (GrokNight/GrokDay, and 66 named theme tokens you can
-remap in JSON with live reload). What matters for daily work:
+The look is Grok CLI's (GrokNight/GrokDay are the default `auto` pair, and 66
+named theme tokens you can remap in JSON with live reload). Eight ported
+palettes ship built in — `catppuccin`, `dracula`, `gruvbox`, `nord`,
+`one-dark`, `one-light`, `rose-pine`, `tokyo-night` — set one with
+`/theme <name>` or `xdev --theme <name>`. Each is upstream's own palette (all
+MIT/Apache; provenance per file in `internal/theme/builtin/`), and your own
+still live in `~/.xdev/agent/themes/`. What matters for daily work:
 
 | Keys | Action |
 |---|---|

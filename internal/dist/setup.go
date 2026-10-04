@@ -25,7 +25,8 @@ const setupStarterConfig = `# xdev configuration — written by "xdev setup".
 # rather than silently dropped. "xdev config list" prints the resolved values
 # and the layer each came from; "xdev config set <key> <value>" edits this file.
 
-theme: auto             # groknight | grokday | auto
+theme: auto             # groknight | grokday | catppuccin | dracula | gruvbox | nord
+                       # | one-dark | one-light | rose-pine | tokyo-night | auto
 approvalMode: yolo      # always-ask | write | yolo
 maxTurns: 0             # agent turns per run; 0 = unbounded (no cap)
 memoryLimit: 104857600  # bytes; hard RSS backstop (default 100 MB)

@@ -157,7 +157,7 @@ func main() {
 	systemPrompt := fs.String("system-prompt", "", "replace the built-in system prompt")
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
 	personality := fs.String("personality", "", "personality preset: default | friendly | pragmatic | none (default: settings.personality)")
-	themeName := fs.String("theme", "", "TUI theme: groknight | grokday (default: auto)")
+	themeName := fs.String("theme", "", "TUI theme: groknight | grokday | catppuccin | dracula | gruvbox | nord | one-dark | one-light | rose-pine | tokyo-night, or a name from ~/.xdev/agent/themes (default: auto)")
 	maxTurns := fs.Int("max-turns", 0, "max agent turns per run (0 = default 200)")
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	apiKeyValue := fs.String("api-key", "", "credential for this run only (never persisted)")

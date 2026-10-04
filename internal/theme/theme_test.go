@@ -111,8 +111,9 @@ func TestCapabilityFromEnv(t *testing.T) {
 // (not omp's 66-token contract), so they are optional for an imported theme and
 // required of a built-in.
 func TestBuiltinThemesPaintTheDiff(t *testing.T) {
-	for _, name := range []string{"groknight", "grokday"} {
-		th := Builtins()[name]
+	// Every built-in, not just the launch pair: a palette is a built-in, so a
+	// band it failed to pin would paint a diff the user's own colours decide.
+	for name, th := range Builtins() {
 		for _, slot := range []string{ToolDiffAdded, ToolDiffRemoved, ToolDiffContext,
 			ToolDiffAddedBg, ToolDiffRemovedBg, ToolDiffAddedWordBg, ToolDiffRemovedWordBg} {
 			if c, ok := th.Slot(slot); !ok || c == (Color{}) {
@@ -138,8 +139,7 @@ func TestBuiltinThemesPaintTheDiff(t *testing.T) {
 // red/green pair some readers cannot separate, so it must override the
 // built-ins' terminal-default mark, not skip over it.
 func TestColorBlindRemapsDiffSlots(t *testing.T) {
-	for _, name := range []string{"groknight", "grokday"} {
-		base := Builtins()[name]
+	for name, base := range Builtins() {
 		cb := ApplyColorBlindMode(base)
 		cbAdd, ok := cb.Slot(ToolDiffAdded)
 		cbRem, _ := cb.Slot(ToolDiffRemoved)

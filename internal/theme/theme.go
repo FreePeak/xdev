@@ -445,7 +445,7 @@ func grokdaySlots() map[string]Color {
 	}
 }
 
-// Builtins returns the launch themes.
+// Builtins returns the launch themes plus the ported palettes.
 //
 // The diff slots are NOT terminal-default any more. They were, because the
 // renderer used to colour the row's own WORDS with them, and a fixed RGB it
@@ -454,25 +454,41 @@ func grokdaySlots() map[string]Color {
 // model), so the theme's own green/red owns both the marker and the status
 // line's clean/dirty tree, and the band is a tint of its own rather than of
 // that ink. A theme that still leaves a slot "" keeps the terminal's answer.
+//
+// The two launch themes stay hand-written tables: each value was read out of
+// a Grok source file and the comment above it names where, which is worth
+// that verbosity. The ported palettes are data (palettes.go) — 37 upstream
+// tokens each, all MIT/Apache, validated by the same ParseTheme as a
+// ~/.xdev/agent/themes/*.json.
 func Builtins() map[string]*Theme {
-	return map[string]*Theme{
+	out := map[string]*Theme{
 		"groknight": {Name: "groknight", Dark: true, Slots: groknightSlots(), Defaults: map[string]bool{}},
 		"grokday":   {Name: "grokday", Dark: false, Slots: grokdaySlots(), Defaults: map[string]bool{}},
 	}
+	for name, t := range palettes() {
+		out[name] = t
+	}
+	return out
 }
 
-// Load resolves the theme by name ("groknight"|"grokday"; "" → auto). Auto
+// Load resolves the theme by name ("" → auto). "dark"/"light"/"night"/"day"
+// are aliases of the two launch themes; every other name is looked up
+// case-insensitively among the built-ins, so a ported palette is settable by
+// the same path as a hand-written one. Auto
 // polarity is XDEV_THEME, then the terminal's own answer to an OSC 11
 // background query, then COLORFGBG, then dark (Grok's default). OS
 // appearance polling is not implemented.
 func Load(name string) *Theme {
 	b := Builtins()
-	if name != "" {
-		switch strings.ToLower(name) {
-		case "groknight", "grok-night", "dark", "night":
-			return b["groknight"]
-		case "grokday", "grok-day", "light", "day":
-			return b["grokday"]
+	if n := strings.ToLower(name); n != "" {
+		switch n {
+		case "dark", "night":
+			n = "groknight"
+		case "light", "day":
+			n = "grokday"
+		}
+		if t, ok := b[n]; ok {
+			return t
 		}
 	}
 	// Auto: XDEV_THEME > terminal polarity guess > dark (Grok's default).

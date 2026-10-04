@@ -232,8 +232,8 @@ func TestAvailableThemesShape(t *testing.T) {
 		want    string // comma-joined
 		wantAny string // substring that must appear
 	}{
-		{"no custom dir", "", "auto,grokday,groknight", ""},
-		{"auto leads, customs trail built-ins sorted", dir, "auto,grokday,groknight,aardvark,zeta", ""},
+		{"no custom dir", "", "auto,catppuccin,dracula,grokday,groknight,gruvbox,nord,one-dark,one-light,rose-pine,tokyo-night", ""},
+		{"auto leads, customs trail built-ins sorted", dir, "auto,catppuccin,dracula,grokday,groknight,gruvbox,nord,one-dark,one-light,rose-pine,tokyo-night,aardvark,zeta", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
