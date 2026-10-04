@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path"
 	"slices"
 	"sort"
 	"strconv"
@@ -5284,13 +5285,17 @@ func (a *App) drawComposer(yTop int) {
 		infoSt = infoSt.Background(a.cellColor(infoBg))
 	}
 	parts := a.dividerParts()
-	infoW := 0
-	for i, p := range parts {
-		if i > 0 {
-			infoW += width(dividerSep)
+	measure := func(ps []hudPart) int {
+		n := 0
+		for i, p := range ps {
+			if i > 0 {
+				n += width(dividerSep)
+			}
+			n += width(p.text)
 		}
-		infoW += width(p.text)
+		return n
 	}
+	infoW := measure(parts)
 	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
 	for x := 2; x < w-2; x++ {
 		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
@@ -5299,18 +5304,23 @@ func (a *App) drawComposer(yTop int) {
 	// version carried lives at 2, so the text itself begins at 3 — "╰ model"
 	// and not "╰model", which is the framing the box border buys.
 	const infoX = 3
+	// The model is the one part that degrades instead of leaving: its
+	// "provider/" prefix is a routing detail the row never needed, so a
+	// narrow one keeps the name ("space-bunny-free"). Without this the tail
+	// drop below deleted the level AND the mode to make room for a prefix —
+	// the one part of the phrase a user cannot afford to lose.
+	for i := range parts {
+		if parts[i].name == "model" && infoX+infoW > w-2 {
+			parts[i].text = modelLeaf(parts[i].text)
+			infoW = measure(parts)
+		}
+	}
 	// Drop the tail that will not fit rather than overrun the border: a long
 	// model name must never push the mode off the row's right edge, and the
 	// mode is the one part of this phrase a user cannot afford to lose.
 	for len(parts) > 0 && infoX+infoW > w-2 {
 		parts = parts[:len(parts)-1]
-		infoW = 0
-		for i, p := range parts {
-			if i > 0 {
-				infoW += width(dividerSep)
-			}
-			infoW += width(p.text)
-		}
+		infoW = measure(parts)
 	}
 	if len(parts) > 0 {
 		drawText(a.scr, infoX-1, yBottom, " ", infoSt)
@@ -5440,9 +5450,9 @@ func (a *App) drawStatusRow(y int) {
 // working directory, then the git branch. The branch rides here because the
 // top bar that used to carry it is gone, so a checkout and its branch read as
 // one location instead of two surfaces.
-//
-// The branch claims its cells FIRST, because pathDisplay tail-truncates a long
-// path gracefully ("…/checkout/xdev-feature") while the branch has nothing to
+
+// The branch claims its cells FIRST, because pathDisplay degrades a long path
+// to the project folder it lives in ("xdev") while the branch has nothing to
 // degrade into — a deep worktree path spent the whole row, and the branch
 // disappeared exactly when the HUD pills joined it and the row was busiest.
 // It still yields whole: a branch too wide for the row leaves instead of
@@ -5854,12 +5864,13 @@ const (
 // session mode, each with the theme token that paints it. Empty text is
 // dropped here rather than drawn — an unwired /thinking or /mode seam has
 // nothing to report, and an invented default would claim a posture nobody
-// chose. Caller holds a.mu.
+// chose. The model part is NAMED, because it is the one piece a narrow row
+// shortens instead of dropping (see drawComposer). Caller holds a.mu.
 func (a *App) dividerParts() []hudPart {
 	var out []hudPart
-	add := func(text, token string) {
+	add := func(name, text, token string) {
 		if text != "" {
-			out = append(out, hudPart{text: text, token: token})
+			out = append(out, hudPart{name: name, text: text, token: token})
 		}
 	}
 	// The run indicator LEADS the list. Trailing it put the one thing on the
@@ -5867,17 +5878,17 @@ func (a *App) dividerParts() []hudPart {
 	// as another segment of the reasoning label instead of as the state of
 	// the turn.
 	if a.st.Running {
-		add(a.spinFrame(), theme.AccentRunning)
+		add("", a.spinFrame(), theme.AccentRunning)
 	}
-	add(a.st.Model, theme.StatusLineModel)
+	add("model", a.st.Model, theme.StatusLineModel)
 	// The reasoning level beside the model it applies to: the two are one
 	// request, and "which model" alone left the other half of it invisible.
 	// The bare rung, not "thinking <level>" — the model it sits beside says
 	// what the pair is, and the word only added width.
-	add(a.thinkingLevel(), a.thinkingToken())
-	add(a.modeLabel(), a.modeToken())
+	add("", a.thinkingLevel(), a.thinkingToken())
+	add("", a.modeLabel(), a.modeToken())
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
-		add("Vibe", theme.StatusLineMode)
+		add("", "Vibe", theme.StatusLineMode)
 	}
 	return out
 }
@@ -5980,9 +5991,10 @@ var statusKeepRank = map[string]int{
 }
 
 // pathDisplay renders the working directory for the status row: home
-// abbreviated ("~/work/proj"), and when the row is too narrow it keeps the
-// trailing components — the ones that identify the project — behind a
-// leading ellipsis ("…/freepeak/xdev").
+// abbreviated ("~/work/proj"), and when the row is too narrow just the folder
+// name — the one component that says which project this is ("xdev"). A middle
+// tier ("…/freepeak/xdev") spent the same cells to say less, and ended up one
+// narrow row away from printing "~/…", which reads as a broken path.
 func pathDisplay(cwd string, maxW int) string {
 	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwd, home) {
 		cwd = "~" + strings.TrimPrefix(cwd, home)
@@ -5990,17 +6002,22 @@ func pathDisplay(cwd string, maxW int) string {
 	if maxW <= 0 || width(cwd) <= maxW {
 		return cwd
 	}
-	parts := strings.Split(cwd, "/")
-	for i := 1; i < len(parts); i++ {
-		t := strings.Join(parts[i:], "/")
-		if t == "" {
-			continue
-		}
-		if w := width("…/" + t); w <= maxW {
-			return "…/" + t
-		}
+	if base := path.Base(cwd); base != "/" && base != "." {
+		return truncateCells(base, maxW, "…")
 	}
 	return truncateCells(cwd, maxW, "…")
+}
+
+// modelLeaf is a model id's own name, without the "provider/" prefix
+// ("onegw/opencode/space-bunny-free" → "space-bunny-free"). The prefix is a
+// routing detail: /model shows the whole id, and the composer divider on a
+// narrow row has cells for the name or for nothing. An id that is only a
+// name already comes back unchanged.
+func modelLeaf(id string) string {
+	if i := strings.LastIndex(id, "/"); i >= 0 && i < len(id)-1 {
+		return id[i+1:]
+	}
+	return id
 }
 
 // boxRune is the first rune of a themed box glyph ("" = a space).

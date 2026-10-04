@@ -393,14 +393,12 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	if !strings.Contains(narrow, "100k") {
 		t.Fatalf("both pills must survive a narrow row: %q", narrow)
 	}
-	// A path too long for the row keeps the components that identify the
-	// project and marks the cut with a leading ellipsis, instead of clipping
-	// at the screen edge. How many components survive is a function of what
-	// the row spent on the metrics — and the two pills are worth more cells
-	// than the old five-segment row, so the 60-column case keeps a shorter
-	// tail. What must not happen is the path disappearing.
-	if !strings.HasPrefix(strings.TrimSpace(narrow), "…/") {
-		t.Fatalf("60-column row must tail-keep the path: %q", narrow)
+	// A path too long for the row keeps the one component that identifies the
+	// project — the folder name — and drops the parents, instead of clipping at
+	// the screen edge or spending the same cells on "…/freepeak/xdev". What
+	// must not happen is the path disappearing.
+	if strings.Contains(narrow, "…") {
+		t.Fatalf("60-column row must show the folder name whole: %q", narrow)
 	}
 	if !strings.Contains(narrow, "xdev-feature") {
 		t.Fatalf("60-column row must keep the project name: %q", narrow)
@@ -408,6 +406,12 @@ func TestStatusRowShowsPathAndMetrics(t *testing.T) {
 	if home, err := os.UserHomeDir(); err == nil {
 		if got := pathDisplay(home+"/work/proj", 40); got != "~/work/proj" {
 			t.Fatalf("home must abbreviate, got %q", got)
+		}
+		if got := pathDisplay(home+"/work/harvey/proj", 8); got != "proj" {
+			t.Fatalf("a narrow row must show the folder name alone, got %q", got)
+		}
+		if got := pathDisplay("/", 40); got != "/" {
+			t.Fatalf("the root must not degrade to an empty name, got %q", got)
 		}
 	}
 }
@@ -1214,8 +1218,8 @@ func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 
 // TestStatusRowKeepsBranchAndTruncatesThePath pins the two halves of the
 // location's width argument: the branch claims cells first and a long path
-// gives way around it, while a branch too wide for the row leaves whole rather
-// than printing half of itself.
+// gives way down to its folder name around it, while a branch too wide for the
+// row leaves whole rather than printing half of itself.
 func TestStatusRowKeepsBranchAndTruncatesThePath(t *testing.T) {
 	app, scr := newTestApp(t, 100, 20)
 	app.AddSystemBlock("ready")
@@ -1225,14 +1229,12 @@ func TestStatusRowKeepsBranchAndTruncatesThePath(t *testing.T) {
 	app.mu.Unlock()
 	app.draw()
 
-	// A path longer than the row: the tail that identifies the project and the
-	// branch both survive, with the cut marked at the front.
+	// A path longer than the row gives way down to the folder it lives in and
+	// the branch survives beside it: the branch claims its cells first, the
+	// path spends what is left, and neither is clipped mid-string.
 	row := lastRow(screenText(scr))
-	if !strings.Contains(row, "xdev-feature") || !strings.Contains(row, "feat/branch-in-status-row") {
-		t.Fatalf("a long path must truncate around the branch, not swallow it: %q", row)
-	}
-	if !strings.Contains(row, "…") {
-		t.Fatalf("a truncated path must mark its cut: %q", row)
+	if !strings.Contains(row, "subdir · feat/branch-in-status-row") {
+		t.Fatalf("a long path must yield its parents to the branch, not swallow it: %q", row)
 	}
 
 	// A branch with no room at all leaves the row entirely — clipped in the
@@ -1245,7 +1247,7 @@ func TestStatusRowKeepsBranchAndTruncatesThePath(t *testing.T) {
 	if strings.Contains(row, "long-branch-name") {
 		t.Fatalf("a branch with no room must be dropped whole, not clipped: %q", row)
 	}
-	if !strings.Contains(row, "xdev-feature") {
+	if !strings.Contains(row, "subdir") {
 		t.Fatalf("the path is what the row keeps: %q", row)
 	}
 }
