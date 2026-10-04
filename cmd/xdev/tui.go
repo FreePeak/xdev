@@ -30,8 +30,20 @@ import (
 	"github.com/FreePeak/xdev/internal/tui"
 )
 
-// runTUI drives the interactive TUI mode (M4).
+// sendNowWait bounds how long the [send now] path waits for an interrupted
+// turn to release the session's single-turn slot. Two waits, not one: a short
+// one on the caller's goroutine (the common case — the run unwinds in
+// milliseconds) and a longer one on a background goroutine, so a run that
+// takes its time still delivers the message instead of leaving it queued
+// forever while every later submit is refused (#157).
+const sendNowWait = 2 * time.Second
 
+// sendNowWaitSlow is the background wait. It is the same shape as
+// sendNowWait and deliberately generous: nothing is lost by waiting, while
+// everything is lost by giving up.
+const sendNowWaitSlow = 30 * time.Second
+
+// runTUI drives the interactive TUI mode (M4).
 func tabInfos(ts *tabset) []tui.TabInfo {
 	snap := ts.snapshot()
 	o := make([]tui.TabInfo, len(snap))
@@ -39,6 +51,22 @@ func tabInfos(ts *tabset) []tui.TabInfo {
 		o[i] = tui.TabInfo{ID: t.ID, Title: t.Title, Running: t.Running, Unread: t.Unread, Current: t.Current}
 	}
 	return o
+}
+
+// tabsModeOn is the config value the settings row SHOWS, which is not the
+// boolean the App needs: opencode spells the strip's policy auto|on|off, and
+// an unset layer is "auto", not "on" — a panel that opened on "on" would write
+// a different value than the user had and the next start would keep it.
+func tabsModeOn(s *config.Settings) string {
+	if s == nil {
+		return "auto"
+	}
+	switch v := strings.ToLower(strings.TrimSpace(s.Tui.Tabs.Mode)); v {
+	case "on", "off":
+		return v
+	default:
+		return "auto"
+	}
 }
 
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
@@ -163,20 +191,33 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Extension processes: loaded ONCE (handshakes are expensive), their
 	// tools join the live registry so the lazy prompt picks them up, and
 	// each per-submit agent gets the same fail-closed Interceptor.
-	var (
-		agentMu  sync.Mutex
-		curAgent *agent.Agent
-		// lastTurnFailed marks whether the previous turn ended badly
-		// (aborted or provider error), so a failure-retain can fire on the
-		// turn boundary.
-		lastTurnFailed atomic.Bool
-	)
+	// lastTurnFailed marks whether the previous turn ended badly (aborted or
+	// provider error), so a failure-retain can fire on the turn boundary.
+	var lastTurnFailed atomic.Bool
+
+	// Session.
+	store, err := openStartupSession(cwd, opts)
+	if err != nil {
+		return 2, fmt.Errorf("session: %w", err)
+	}
+	// tabs is the live session set. `store` below is a convenience that
+	// always names the CURRENT session: every closure that used to read
+	// the one `store` variable now reads through tabs, so a switch re-
+	// points them without rewriting every call site. A turn claims its
+	// own session id at start and keeps that store even after a switch. It
+	// also owns each session's live agent (tabset.setAgent), which is why
+	// every steer seam below is wired AFTER this line.
+	tabs := newTabset(store)
+	storeOf := func() *session.Store { return tabs.store() }
+	// The live agent is per SESSION, not per process (#157). It was one
+	// pointer every turn overwrote, so with two sessions working whichever turn
+	// registered most recently also took every steer meant for the other one —
+	// a prompt typed into the foreground tab was injected into the background
+	// run. The mid-turn queue, the extension routes and the mailbox all ask the
+	// tabset for the agent of the session on screen.
 	routeToLiveAgent := func(call func(*agent.Agent, string)) func(text string) {
 		return func(text string) {
-			agentMu.Lock()
-			target := curAgent
-			agentMu.Unlock()
-			if target != nil {
+			if target := tabs.currentAgent(); target != nil {
 				call(target, text)
 			}
 		}
@@ -186,9 +227,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// With no turn running the sink delivers nothing, and the poller leaves the
 	// message UNREAD — the `inbox` tool and the next turn still see it.
 	setInboxSink(func(m agent.Message) bool {
-		agentMu.Lock()
-		a := curAgent
-		agentMu.Unlock()
+		a := tabs.currentAgent()
 		if a == nil {
 			return false // idle: the message stays unread for the next turn
 		}
@@ -216,19 +255,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	sessionMemory := buildMemory(lastSettings())
 	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
 		tailSystemPrompt(overrides, opts.AppendSystem), sessionMemory)
-
-	// Session.
-	store, err := openStartupSession(cwd, opts)
-	if err != nil {
-		return 2, fmt.Errorf("session: %w", err)
-	}
-	// tabs is the live session set. `store` below is a convenience that
-	// always names the CURRENT session: every closure that used to read
-	// the one `store` variable now reads through tabs, so a switch re-
-	// points them without rewriting every call site. A turn claims its
-	// own session id at start and keeps that store even after a switch.
-	tabs := newTabset(store)
-	storeOf := func() *session.Store { return tabs.store() }
 	// The breadcrumb keys --continue for this pane. A fresh session is
 	// memory-only until its first assistant message, so record the
 	// AUTO-PERSIST path: --continue already guards with os.Stat, and a
@@ -459,6 +485,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
+	// The tab-strip policy (tui.tabs.mode / tui.tabs.indicators) is applied
+	// through one closure, declared before the overlay's Write can name it: a
+	// `tui.tabs.*` write must move the strip on the next frame, not the next
+	// process.
+	applyTabPolicy := func() {
+		s := lastSettings()
+		app.SetTabPolicy(s.TabsModeOn(), s.TabsIndicatorsOn())
+	}
 	// Settings overlay (Alt+,): the settings this session already has a live
 	// seam for. The panel owns its key handling and rendering; what is wired
 	// here is the two things only cmd can do — read the layered values the
@@ -486,6 +520,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ThinkingLevels...)},
 				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
 					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
+				// The tab strip is a view of the tabset, not the tabset: the
+				// chords and /tabs keep working with it hidden. So both
+				// spellings are opencode's own values, so a config pasted from
+				// its tui.json lands unchanged.
+				{Key: "tui.tabs.mode", Label: "Session tabs", Value: tabsModeOn(s),
+					Editable: true, Kind: "select", Options: []string{"auto", "on", "off"}},
+				{Key: "tui.tabs.indicators", Label: "Tab badges", Value: s.TabsIndicators(),
+					Editable: true, Kind: "select", Options: []string{"status", "numbers"}},
 				{Key: "theme", Label: "Theme", Value: s.Theme, Editable: false, Kind: "text"},
 				{Key: "approvalMode", Label: "Approval mode", Value: s.ApprovalMode, Editable: false, Kind: "text"},
 				{Key: "defaultModel", Label: "Model", Value: s.DefaultModel, Editable: false, Kind: "text"},
@@ -520,6 +562,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			case "tui.exitDetach":
 				v := value == "true"
 				lastSettings().Tui.ExitDetach = &v
+			case "tui.tabs.mode":
+				lastSettings().Tui.Tabs.Mode = value
+				// The strip is the only thing mode moves, and the App owns
+				// that flag, so a write takes effect on the next frame
+				// rather than the next process.
+				applyTabPolicy()
+			case "tui.tabs.indicators":
+				lastSettings().Tui.Tabs.Indicators = value
+				applyTabPolicy()
 			case "thinking":
 				lastSettings().Thinking = value
 			case "sidebarMode":
@@ -857,6 +908,27 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			label = shortSessionID(next.id)
 		}
 		app.AddSystemBlock("· closed a session · now " + label)
+		return nil
+	}
+
+	// reopenLastTab is C-shift-T (opencode session_tab_reopen): re-open the
+	// most recently closed session. The tabset owns the closed stack; this
+	// only opens the file it names and reuses the /resume path, so a reopen
+	// is the same act as typing `/resume <id>` — one code path, no second
+	// way for a session to come back.
+	reopenLastTab := func() error {
+		path := tabs.takeClosed()
+		if path == "" {
+			return fmt.Errorf("no closed session to reopen")
+		}
+		ns, err := session.Open(path)
+		if err != nil {
+			return fmt.Errorf("reopen %s: %w", shortSessionID(sessionIDOfPath(path)), err)
+		}
+		if err := swapStoreTo(ns); err != nil {
+			_ = ns.Close()
+			return err
+		}
 		return nil
 	}
 
@@ -1221,9 +1293,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	app.SetSessionOps(&tui.SessionOps{
 		Fork: func() error {
 			// Fork parks the source and opens the child as current.
-			// A fresh session lives memory-only until its first
-			// assistant message — materialize it so the fork has a
-			// source file to copy.
+			// A fresh session lives memory-only until its first assistant
+			// message — materialize it so the fork has a source file to
+			// copy. But a session that never received a prompt has no
+			// history to copy: forking it just writes a SECOND empty file,
+			// which then shadows every real conversation on the next
+			// --continue (the empty-resume defect). Say so instead.
+			if !sessionHasMessages(storeOf()) {
+				return fmt.Errorf("nothing to fork yet — send a prompt first")
+			}
 			if storeOf().Path() == "" {
 				if _, err := storeOf().EnsureOnDisk(
 					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()), session.Options{}); err != nil {
@@ -1636,6 +1714,26 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
+	// /mode and the Shift-Tab cycle: one vocabulary over the two states this
+	// file already sets separately — the plan guard (planMode) and the
+	// approval policy (tools.approvalMode). Nothing here is a new gate; it is
+	// the same two knobs under one name, so the mode a user picks cannot
+	// disagree with what the next turn actually does.
+	//
+	// The live mode is DERIVED, never stored: plan wins when the guard is on
+	// (a read-only run is a stricter posture than any approval mode), else
+	// the approval vocabulary maps straight across. Deriving rather than
+	// caching is what keeps /plan and --approval-mode — both of which still
+	// exist and must keep working — in step with the readout instead of
+	// beside it.
+	sessionMode := func() string {
+		return sessionModeOf(planMode.Active(), approvalModeOverride(), lastSettings().ApprovalMode)
+	}
+	app.SetModeOps(&tui.ModeOps{
+		Current: sessionMode,
+		Set:     setSessionMode(planMode, vibeActive, persistApprovalMode, sessionMode),
+	})
+
 	// goalKick runs the goal's first turn. Setting a goal must actually start
 	// it: the goal state on its own only decorates the next user-driven turn,
 	// so `/goal <objective>` printed "goal created" and then nothing ran. The
@@ -2001,9 +2099,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// flushPendingQueue is the mid-turn queue's run-end flush (#157), declared
 	// further down (it needs runTurn) and deferred at the top of the goroutine
 	// so it runs LAST: a pending row the model never saw becomes the next turn
-	// rather than a row that lies about being sent. A turn can only start
-	// after the whole wiring below is in place, so the var is never nil here.
-	var flushPendingQueue = func() {}
+	// rather than a row that lies about being sent. It is handed the session
+	// whose run ENDED, because it drains that session's rows only. A turn can
+	// only start after the whole wiring below is in place, so the var is never
+	// nil here.
+	var flushPendingQueue = func(string) {}
 	startTurn := func() {
 		// Capture the session this turn belongs to UP FRONT. A switch mid-turn
 		// re-points storeOf(), and the turn must keep writing to the store it
@@ -2020,22 +2120,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// runs LAST: the deferred release below frees the turn claim, and
 			// this flush claims again to start the next turn. A pending row the
 			// model never saw becomes an ordinary turn rather than a row that
-			// lies about being sent. Only the FOREGROUND session flushes: a
-			// parked turn finishing must not steal the screen's composer queue.
-			defer func() {
-				if t := tabs.current(); t != nil && t.id == sid {
-					flushPendingQueue()
-				}
-			}()
+			// lies about being sent. The foreground gate stays: a parked turn
+			// finishing must not paint, and it must not touch the session on
+			// screen — its own rows are flushed when ITS tab is focused and its
+			// next turn starts (queue row survives a tab switch by design).
+			defer func() { flushPendingQueue(sid) }()
 			// LIFO: clear runs FIRST so this turn can never nil a slot that a
 			// newer turn already claimed.
 			defer cancel()
 			defer tabs.release(sid)
 			defer tabs.clear(sid)
-			// Spinner follows the foreground session only.
-			if t := tabs.current(); t != nil && t.id == sid {
-				app.SetRunning(true)
-			}
 			feedAdvisor := func() {}
 			modelMu.Lock()
 			lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
@@ -2117,28 +2211,38 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// Hook bus per submit: --hook specs, settings `hooks`, discovered
 			// files. Extensions compose into the same fail-closed chain.
 			hookBus := buildHookBus(cwd, opts, app.AddSystemBlock)
-			agentMu.Lock()
-			curAgent = ag
 			if c := agent.NewChain(hookBus, exts); c != nil {
 				ag.Intercept = c
 			}
 			ag.Hooks = agent.WithCompactionEvent(ag.Hooks, ag.Intercept)
-			// The mid-turn queue's retirement point (#157). The loop's steering
+			// The mid-turn queue's delivery point (#157). The loop's steering
 			// drain is where a queued prompt actually becomes part of the
-			// conversation, so that is where the TUI's pending row retires — not
-			// when the steer call returned, which only says the text is sitting in
-			// a channel. The retirement is a hit, not a swap: two prompts with the
-			// same text are two entries, and the oldest undelivered one is the one
-			// that was sent.
-			ag.SteeringDelivered = app.RetireDelivered
-			agentMu.Unlock()
+			// conversation, so that is where the TUI turns its pending row into
+			// a transcript row — not when the steer call returned, which only
+			// says the text is sitting in a channel. The callback is pinned to
+			// THIS session: two sessions can drain steering at the same moment,
+			// and each must only ever retire its own rows. The retirement is a
+			// hit, not a swap: two prompts with the same text are two entries,
+			// and the oldest undelivered one is the one that was sent.
+			ag.SteeringDelivered = func(texts []string) { app.RetireDelivered(sid, texts) }
+			// Registering the agent is the turn's READY edge, and it comes
+			// BEFORE "running" is published. The mid-turn queue asks for this
+			// session's agent the moment the UI says a turn is live, so the old
+			// order — spinner first, agent ~80 lines later — left a window in
+			// which every submit found a live turn and no agent to steer, was
+			// refused, and had its queue row withdrawn (#157).
+			tabs.setAgent(sid, ag)
+			// Spinner follows the foreground session only.
+			if t := tabs.current(); t != nil && t.id == sid {
+				app.SetRunning(true)
+			}
 			defer func() {
-				agentMu.Lock()
-				if curAgent == ag {
-					curAgent = nil
-				}
-				agentMu.Unlock()
-				// Spinner off only if we still own the foreground.
+				// Unregister BEFORE "running" falls, for the mirror of the
+				// same reason: a submit in the teardown window would again find
+				// a live turn with no agent. The pointer-checked clear is what
+				// keeps a newer turn on this session from being unregistered by
+				// the run before it.
+				tabs.clearAgent(sid, ag)
 				if t := tabs.current(); t != nil && t.id == sid {
 					app.SetRunning(false)
 				}
@@ -2159,9 +2263,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if turnTS.isFocused() {
 				app.EndAssistant()
 				app.FinishRun()
-				// One finished run is one turn — the count dsh's TimePill
-				// reads beside its steps, whatever the turn ended with.
-				app.AddTurn()
+				// No turn is counted here. A turn is counted where the prompt
+				// was ACCEPTED — the composer's send seam, and the queue's
+				// delivery callback for a prompt that joined a running turn
+				// (#157). Counting a finished run left a session's first turn
+				// reading 0 for as long as the model worked, and collapsed
+				// three queued prompts into one count.
 			} else {
 				tabs.note(sid)
 			}
@@ -2309,8 +2416,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// return means the message was not persisted, so the caller must release
 	// the claim it took.
 	runTurnNow := func(text string) bool { return persistAndStart(text, nil) }
-	// The mid-turn queue's run-end flush (#157), the var startTurn defers.
-	flushPendingQueue = func() {
+	// The mid-turn queue's run-end flush (#157), the var startTurn defers. It
+	// takes the session whose run ended, because it drains THAT session's rows
+	// only: the App is one transcript over several open sessions, so a run
+	// that ended while another session's messages waited must leave those rows
+	// where they are — that session's own flush, or its send-now, owns them.
+	flushPendingQueue = func(sid string) {
 		if collabGuestJoined() {
 			return
 		}
@@ -2320,7 +2431,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// that outlives its run is a prompt the user believes was sent and was
 		// not. Drained oldest-first, one per run, so a burst of prompts does
 		// not collapse into a single fused message.
-		text := app.TakeOldestQueued()
+		text := app.TakeOldestQueued(sid)
 		if text == "" {
 			return
 		}
@@ -2328,11 +2439,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// claim is gone (a turn that started between the pop and here owns the
 		// slot, and its own flush will drain the rest).
 		if !runTurn(text, nil) {
-			app.QueueAgain(text)
+			app.QueueAgain(text, sid)
 		}
 	}
-	// Background subagent completion notice (#296). A job started with
-	// background:true used to end silently: the model asked for work in
 	// parallel, then had to guess when it was done, because a result it never
 	// learns about is one it never reads. The same three-phase shape as the
 	// schedule reminder below, and for the same reason it cannot be an in-turn
@@ -2529,22 +2638,45 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if collabGuestJoined() {
 				return tui.Collab.Forward(text)
 			}
-			agentMu.Lock()
-			target := curAgent
-			agentMu.Unlock()
+			// The agent of the session ON SCREEN, not the last turn to start.
+			// With two sessions working, the old process-wide pointer fed a
+			// prompt typed in the foreground tab to the background run (#157).
+			target := tabs.currentAgent()
 			if target == nil {
 				return false // no live turn: the submit falls back to a real one
 			}
 			target.Steer(text)
 			return true
 		},
-		func(text string) {
-			if !tabs.currentRunning() {
+		func(sid, text string) {
+			// The row's OWNING session, captured at the keystroke. Everything
+			// below used to read the current tab instead, so a tab switch
+			// between "the person pressed send-now" and "the message is
+			// delivered" interrupted the wrong run and persisted the message
+			// into the wrong conversation (#157).
+			if sid == "" || sid != tabs.currentID() {
+				app.AddSystemBlock("that session is no longer on screen — the message stays queued")
+				return
+			}
+			// Take the row out of the queue FIRST, before touching the turn.
+			// From here the message has exactly one owner: this callback. It
+			// used to stay queued until the delivery landed, and the
+			// interrupted run's own end-of-run flush picked it up too — the
+			// drive that found this persisted the message twice, printed two
+			// ACK rows and counted two turns for one message (#157).
+			if _, ok := app.TakeQueued(sid, text); !ok {
+				return // already delivered, or taken back into the composer
+			}
+			requeue := func() { app.QueueAgain(text, sid) }
+			if !tabs.isRunning(sid) {
 				// Nothing to interrupt: the message is an ordinary submit now.
-				runTurn(text, nil)
+				if !runTurn(text, nil) {
+					requeue()
+				}
 				return
 			}
 			if collabGuestJoined() {
+				requeue()
 				app.AddSystemBlock("joined as a guest — the host runs the turn")
 				return
 			}
@@ -2552,10 +2684,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// turn goroutine clears the tab's running flag on its way out;
 			// taking the claim before it does would either lose the race or
 			// steal the turn from a run that is still unwinding.
-			stopped := tabs.abortCurrent()
+			stopped := tabs.abort(sid)
 			if !stopped {
 				app.AddSystemBlock("no turn is running — sending the message now")
-				runTurn(text, nil)
+				if !runTurn(text, nil) {
+					requeue()
+				}
 				return
 			}
 			// The abort is asynchronous by nature: the run is mid-stream and
@@ -2563,38 +2697,73 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// before starting the next turn, bounded so a provider that ignores
 			// the cancel cannot wedge the composer.
 			//
-			// The row leaves the queue ONLY when this actually delivers it, and
-			// a run that is still unwinding at the deadline will flush the queue
-			// at ITS end — so keeping the row here is both safe and necessary.
-			// Dropping it early would lose the message; dropping it after a
-			// successful runTurn is what prevents a double delivery, because
-			// runTurn IS the delivery.
+			// The row is already OUT of the queue (taken above, before the
+			// abort), so the interrupted run's own end-of-run flush cannot find
+			// it and cannot deliver this message a second time. Keeping it here
+			// "until the delivery lands" is exactly what it used to do, and the
+			// drive that found it printed two ACK rows and persisted the prompt
+			// twice (#157).
 			app.AddSystemBlock("· interrupted — delivering now")
-			deadline := time.Now().Add(2 * time.Second)
-			for tabs.currentRunning() && time.Now().Before(deadline) {
+			deadline := time.Now().Add(sendNowWait)
+			for tabs.isRunning(sid) && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
-			if tabs.currentRunning() {
-				app.AddSystemBlock("the interrupted turn has not released yet — this message runs as soon as it does")
+			if tabs.isRunning(sid) {
+				// The run outlived the wait. This branch used to end here with
+				// a notice and nothing else, so "send now" read as "send
+				// never": the row stayed pending, the slot stayed held, and
+				// every later submit was refused with "a turn is already
+				// running". The wait moves to a background goroutine and the
+				// delivery follows it, so a slow-unwinding run still gets the
+				// message instead of stranding it forever (#157).
+				goGuarded(func() {
+					limit := time.Now().Add(sendNowWaitSlow)
+					for tabs.isRunning(sid) && time.Now().Before(limit) {
+						time.Sleep(10 * time.Millisecond)
+					}
+					if tabs.isRunning(sid) {
+						if sid == tabs.currentID() {
+							app.AddSystemBlock("· still unwinding — this message runs as soon as it releases")
+						}
+						requeue() // the slot never came back; the row must not evaporate
+						return
+					}
+					if sid != tabs.currentID() {
+						requeue() // parked again: its next turn flushes the row
+						return
+					}
+					claimed, ok := tabs.claimCurrent()
+					if !ok {
+						requeue() // another turn took the slot; the row waits its own turn
+						return
+					}
+					app.SetRunning(false)
+					if !runTurnNow(text) {
+						tabs.release(claimed)
+						requeue()
+						return
+					}
+					app.AddSystemBlock("· delivered now")
+				})
 				return
 			}
 			// Claim the slot before runTurnNow, so two racing send-nows cannot
 			// both believe they own it. A failed claim means another turn got
 			// there first, and the row stays queued for that turn's flush.
-			sid, ok := tabs.claimCurrent()
+			claimed, ok := tabs.claimCurrent()
 			if !ok {
+				requeue()
 				app.AddSystemBlock("another turn started first — this message is still queued")
 				return
 			}
 			app.SetRunning(false)
-			// runTurnNow persists the message and starts the turn; the row is
-			// dropped only once that succeeded, because a message persisted
-			// AND left queued would be delivered a second time by the flush.
-			if runTurnNow(text) {
-				app.DropQueued(text)
-				return
+			// runTurnNow persists the message and starts the turn. The row is
+			// already out of the queue, so a failure here is the one case that
+			// puts it back — and a crash-free session never delivers it twice.
+			if !runTurnNow(text) {
+				tabs.release(claimed)
+				requeue()
 			}
-			tabs.release(sid)
 		})
 	// Shell mode (M10 #163): "!<command>" in the composer runs locally and
 	// prints to the transcript. Nothing is sent to the model, so the draft
@@ -2625,14 +2794,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	// Vision is the live model's property, not the launch model's: /model
 	// mid-session changes whether an attachment can be read at all.
-	// Session tabs (opencode session.tab.next / .previous). Alt+] / Alt+[
-	// cycle the open set without aborting a parked turn; Alt+Shift+] jumps
-	// to the next unread one. Wired through the keybinding table so
+	// Session tabs (opencode session.tab.next / .previous / .reopen).
+	// Alt+] / Alt+[ and Ctrl+Tab cycle the open set without aborting a parked
+	// turn; Alt+Shift+] jumps to the next unread one; C-Shift-T reopens the
+	// last closed session. Wired through the keybinding table so
 	// keybindings.yml can move them.
 	app.SetTabCycle(func(dir int, onlyUnread bool) { cycleTab(dir, onlyUnread) })
 	app.SetTabPick(focusTabByID)
 	app.SetTabClose(closeTabByID)
+	app.SetTabReopen(reopenLastTab)
 	app.SetTabs(tabInfos(tabs))
+	// The strip's policy at startup: the layered config, so a session that
+	// says mode: off never paints it (applyTabPolicy, declared with the
+	// overlay above, is the one place the App hears about it).
+	applyTabPolicy()
 	app.SetVision(func() bool {
 		modelMu.Lock()
 		defer modelMu.Unlock()
@@ -2641,12 +2816,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	app.Run() // blocks until Quit
 	// #92: the session is ending (quit, or the terminal closing): tell the
-	// bus once, with whatever agent was last live.
-	agentMu.Lock()
-	if curAgent != nil {
-		curAgent.EmitSessionShutdown()
+	// bus once, with whatever agents are live. Every open session is named: a
+	// turn may be running in a session the person has parked.
+	for _, ag := range tabs.liveAgents() {
+		ag.EmitSessionShutdown()
 	}
-	agentMu.Unlock()
 	// The memory session boundary (M12 #43/#44): the remote server flushes its
 	// queued retains, the local store drains its queue inside a fixed budget.
 	// Both are best-effort — the TUI is exiting either way.
@@ -3018,9 +3192,19 @@ func countsOf(msgs []ai.Message) (turns, steps int) {
 // same numbers the session had before it was closed. Every figure comes off
 // the persisted per-message Usage, which is the only record of the split —
 // an older message written before a bucket was tracked simply adds zero.
+//
+// A compaction summary's usage counts too, and not because of its role: the
+// summarize and handoff-document calls are billed requests whose tokens live
+// on the summary message (a handoff's wears the user role). It is counted by
+// carrying the usage, not by the role, so the two paths agree: an
+// un-attributed usage on a user message still counts, and a summary without
+// one contributes zero exactly as before.
 func usageOf(msgs []ai.Message) (in, out, cache, think, cacheWrite int64, cost float64) {
 	for _, m := range msgs {
-		if m.Role != ai.RoleAssistant || m.Usage == nil {
+		if m.Usage == nil {
+			continue
+		}
+		if m.Role != ai.RoleAssistant && m.Attribution != agent.HandoffAttribution {
 			continue
 		}
 		u := m.Usage
@@ -3212,6 +3396,33 @@ func (h *tuiHooks) OnContinuation(text string) {
 // just stops (#331).
 func (h *tuiHooks) OnEmptyTurn(text string) {
 	h.ts.paint(func() { h.ts.app.AddSystemBlock("· the model answered with nothing — asked again") })
+}
+
+// OnCompactionUsage implements agent.CompactionUsageHook: the summarize or
+// handoff document call is a provider request the user was billed for, so it
+// banks into the same counters a turn does. Without it the token pill, the
+// cache-hit rate and /usage's cost line all silently excluded every compaction
+// — a session that compacted ten times read as if it had spent nothing.
+func (h *tuiHooks) OnCompactionUsage(u *ai.Usage) {
+	if u == nil {
+		return
+	}
+	// CacheWrite is NOT added here: AddUsage's total argument is the provider's
+	// own whole-request count, and mixing a cache-write bucket into the four
+	// AddUsage takes would double it. A compaction that wrote cache is a
+	// side request whose markers stop at the last completed tool round, so
+	// the write is rare; the counter that matters is the spend.
+	if u.Input > 0 || u.Output > 0 || u.CacheRead > 0 {
+		h.ts.paint(func() {
+			h.ts.app.AddUsage(u.Input, u.Output, u.CacheRead, u.ReasoningTokens, 0)
+		})
+	}
+	if u.CacheWrite > 0 {
+		h.ts.paint(func() { h.ts.app.AddCacheWrite(u.CacheWrite) })
+	}
+	if u.Cost != nil {
+		h.ts.paint(func() { h.ts.app.AddCost(u.Cost.Total) })
+	}
 }
 
 func (h *tuiHooks) OnCompaction(tokensBefore int64) {
@@ -3445,10 +3656,11 @@ func sameModelRef(a, b string) bool {
 }
 
 // recentResumeOptions lists this folder's resumable sessions for the
-// no-argument /resume picker: subagent children and the live session are
-// filtered out (nothing to resume onto), newest first. No row cap — the
-// picker windows and scrolls its own list, so a cap here was the list's
-// real length (12 was the whole of it).
+// no-argument /resume picker: subagent children, the live session, and
+// EMPTY sessions (session.StatusEmpty — a row that restores a blank
+// transcript is not a session to resume) are filtered out, newest first. No
+// row cap — the picker windows and scrolls its own list, so a cap here was
+// the list's real length (12 was the whole of it).
 func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 	metas, err := session.List(sessionDataDir())
 	if err != nil {
@@ -3457,6 +3669,9 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 	out := make([]tui.ResumeOption, 0, len(metas))
 	for _, m := range metas {
 		if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent || m.ID == currentID {
+			continue
+		}
+		if m.Status == session.StatusEmpty {
 			continue
 		}
 		// The status closes the detail so the row says what happened to
@@ -3471,9 +3686,12 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 }
 
 // resumePickerItems lists resumable sessions as picker rows across ALL
-// projects (session.List already scans every bucket): subagent children
-// are filtered out (same rules as the text listing); session.List is
-// newest-first. Rows carry InCwd so the TUI can window the
+// projects (session.List already scans every bucket): subagent children and
+// EMPTY sessions (session.StatusEmpty) are filtered out (same rules as the
+// text listing); session.List is newest-first. Rows carry InCwd so the TUI
+// can window the current-folder scope without a second scan, and Pinned from
+// the session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
+// browsing while the picker windows to 8 visible rows.
 // current-folder scope without a second scan, and Pinned from the
 // session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
 // browsing while the picker windows to 8 visible rows.
@@ -3486,6 +3704,9 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 	var out []tui.SessionPickerItem
 	for _, m := range metas {
 		if m.TitleSource == "subagent" || len(m.ID) < 8 {
+			continue
+		}
+		if m.Status == session.StatusEmpty {
 			continue
 		}
 		out = append(out, tui.SessionPickerItem{

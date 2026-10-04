@@ -1,6 +1,10 @@
 package tui
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/FreePeak/xdev/internal/theme"
@@ -29,16 +33,18 @@ func currentTabID(tabs []TabInfo) string {
 	return ""
 }
 
-// tabStripVisible reports whether the strip owns its row. One open session
-// does not earn a permanent row: the status row already says everything it
-// could, and a line spent on one word is a line the transcript loses.
-func (a *App) tabStripVisible() bool { return len(a.tabs) >= 2 }
+// tabStripVisible reports whether the strip owns its row. Two gates, both
+// named: tui.tabs.mode off hides it (the chords and /tabs keep working — the
+// strip is a view), and one open session does not earn a permanent row: the
+// status row already says everything it could, and a line spent on one word
+// is a line the transcript loses.
+func (a *App) tabStripVisible() bool { return a.tabsStrip && len(a.tabs) >= 2 }
 
-// tabStripRow is the row the strip owns, directly under the top bar. It is
-// drawn only when more than one session is open — with a single session the
-// status row already says everything the strip could, and a permanent row
+// tabStripRow is the row the strip owns — row 0, the top row of the screen.
+// It is drawn only when more than one session is open: with a single session
+// the status row already says everything the strip could, and a permanent row
 // spent on one word costs the transcript a line for nothing.
-const tabStripRow = 1
+const tabStripRow = 0
 
 // drawTabStrip paints the open-session strip on row tabStripRow: one cell per
 // session, the running one wearing ✦, an unread one dim-bright with a ✦, and
@@ -46,7 +52,7 @@ const tabStripRow = 1
 // holds a.mu.
 func (a *App) drawTabStrip(s tcell.Screen, w int) {
 	a.tabHits = nil
-	if len(a.tabs) < 2 {
+	if !a.tabStripVisible() {
 		return
 	}
 	y := tabStripRow
@@ -56,7 +62,7 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 	closeSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 
 	x := 0
-	for _, t := range a.tabs {
+	for i, t := range a.tabs {
 		label := t.Title
 		if label == "" {
 			label = shortID(t.ID)
@@ -65,8 +71,15 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 		// claims 40 cells squeezes every other tab off the row, and the set
 		// you cannot see is the set you cannot switch to.
 		label = truncateCells(label, 24, "…")
+		// The badge is the tab's number under tui.tabs.indicators: numbers,
+		// and its status glyph otherwise (opencode's own default). The number
+		// is what the C-1..9 chords name, so it is not decoration: it is the
+		// legend for the keys.
 		badge := " "
-		if t.Running {
+		switch {
+		case a.tabsNumbered:
+			badge = fmt.Sprintf("%d", i+1)
+		case t.Running:
 			badge = "✦"
 		}
 		st := labelSt
@@ -175,4 +188,48 @@ func (a *App) closeTab(id string) {
 		a.AddSystemBlock("error: " + err.Error())
 	}
 	a.poke()
+}
+
+// tabSelectIndex reads the N out of a "session.tab.select.N" action id,
+// reporting false for anything else. The default dispatch arm calls it, so an
+// action that is not a tab jump falls through untouched.
+func tabSelectIndex(action string) (int, bool) {
+	rest, ok := strings.CutPrefix(action, tabSelectPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 1 || n > len(tabSelectDigits) {
+		return 0, false
+	}
+	return n, true
+}
+
+// selectTab focuses the Nth open session (opencode's session_tab_select_N:
+// Ctrl+1..9, with 0 the tenth). It goes through onTabPick — the same
+// callback a strip click and a /tabs row use — so all three ways of naming a
+// session reach one owner of the tabset, and the host's rebuild runs off the
+// UI loop exactly as the click path runs it. A chord aimed at a slot that is
+// not open says so; it never no-ops.
+func (a *App) selectTab(n int) {
+	a.mu.Lock()
+	tabs := append([]TabInfo(nil), a.tabs...)
+	pick := a.onTabPick
+	a.mu.Unlock()
+	if pick == nil {
+		a.AddSystemBlock("session tabs are not wired in this build")
+		return
+	}
+	if n > len(tabs) {
+		a.AddSystemBlock(fmt.Sprintf("only %d sessions open", len(tabs)))
+		a.poke()
+		return
+	}
+	id := tabs[n-1].ID
+	go func() {
+		if err := pick(id); err != nil {
+			a.AddSystemBlock("error: " + err.Error())
+		}
+		a.poke()
+	}()
 }

@@ -66,10 +66,17 @@ func (a *Agent) kickAsyncCompaction(ctx context.Context) bool {
 	go func() {
 		defer cancel()
 		var res asyncCompactResult
-		if summary, err := summarizeWith(jobCtx, provider, model, msgs, memCtx); err != nil {
+		summary, usage, err := summarizeWith(jobCtx, provider, model, msgs, memCtx)
+		if err != nil {
 			res.err = err
 		} else {
 			res.summary = textSummary(summary)
+			// The background call was billed whether or not its result is
+			// still applicable, so its usage rides the summary and is
+			// banked if the entry is applied. A dropped result is charged
+			// nowhere: it was not part of the conversation.
+			res.summary.Usage = usage
+			res.summary.Model = model
 		}
 		job.result <- res
 	}()

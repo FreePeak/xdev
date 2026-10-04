@@ -42,12 +42,13 @@ func TestScrollIndicatorNeverPaintsTranscriptRow(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("nothing drawn")
 	}
-	// Row 0 is the top bar's; the first transcript row sits below it.
+	// With the top bar gone the transcript owns row 0, so the hint must not
+	// be there — it is still a content row, not a chrome row.
 	if strings.Contains(rows[0], "▲") || strings.Contains(rows[0], "▼") {
-		t.Fatalf("scroll hint overwrote the top bar: %q", rows[0])
+		t.Fatalf("scroll hint overwrote the first transcript row: %q", rows[0])
 	}
-	if !strings.Contains(rows[1], "line") {
-		t.Fatalf("the first transcript row lost its content: %q", rows[1])
+	if !strings.Contains(rows[0], "line") {
+		t.Fatalf("the first transcript row lost its content: %q", rows[0])
 	}
 	divider := dividerRow(t, scr)
 	if !strings.Contains(divider, "╰") {

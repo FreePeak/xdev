@@ -7,10 +7,19 @@ import (
 	"syscall"
 )
 
-// prepareProcessGroup puts the kernel in its own process group so a cell
-// timeout can interrupt or kill the cell together with its children.
+// prepareProcessGroup puts the kernel in its own SESSION, so a cell timeout can
+// interrupt or kill the cell together with its children — and so a cell that
+// changes terminal attributes (an interactive `zsh -ic`, a `source ~/.zshrc`
+// reaching zle/stty, `stty`) cannot be stopped by the TUI's terminal. A new
+// process group inside the same session keeps that terminal as the child's
+// controlling terminal, which makes it a background group on it, and the
+// kernel delivers SIGTTOU, whose default disposition is STOP.
+//
+// Setsid alone, never Setsid+Setpgid: after setsid(2) the child is already a
+// group leader with pgid == pid, so the -pid signals below still reach it and
+// its children; asking for Setpgid as well fails on darwin with EPERM.
 func prepareProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
 // interruptGroup delivers SIGINT to the kernel group: python raises

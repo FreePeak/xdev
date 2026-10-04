@@ -327,9 +327,18 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// transcript. The press still anchors a selection: the panel's rows are
 		// in the copy table (selDockRows), which is what makes a drag over the
 		// sidebar copy the sidebar's own text.
+		// A focus CHANGE arms the border tween; re-focusing the box already
+		// under the wheel leaves it alone, so a click-and-jitter cannot restart
+		// the ease and strand it half-faded. Unfocusing eases back to dim
+		// rather than snapping, because the box shrinking to one row is the
+		// same visual event as the border dimming.
+		was := a.thinkFocus
 		a.thinkFocus = -1
 		if !a.dockAt(x, y) {
 			a.thinkFocus = a.thinkBoxAt(y)
+		}
+		if a.thinkFocus != was {
+			a.focusFade = 0
 		}
 		a.selThumbDrag = false
 		// Arm the user-message menu on the user row under this press, but do
@@ -859,8 +868,9 @@ func (a *App) selectionText() string {
 // selRowAt returns the selectable content of screen row y. Rows the transcript
 // painter recorded come from that capture, which leaves out the accent rail, its
 // padding and every run the frame builders marked chrome, so a copied line is
-// the text and not the decoration; the capture is viewport-relative, so the top
-// bar's row is subtracted. Every other row — the top bar itself, welcome, the
+// the text and not the decoration; the capture is viewport-relative, so the
+// session strip's row is subtracted. Every other row — the session strip,
+// welcome, the
 // composer, status row, an open overlay, or blank space under a short
 // transcript — is read back from the painted grid, trimmed of the trailing
 // cells that only exist to fill the width and of the frame the row was drawn

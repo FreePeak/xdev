@@ -166,6 +166,17 @@ type App struct {
 	// tabHits is the tab strip's clickable geometry, published each frame by
 	// the painter (tabstrip.go).
 	tabHits []tabHit
+	// tabsStrip is the user's tab-strip policy (tui.tabs.mode): false hides
+	// the strip and frees its row, and every tab chord still works — the strip
+	// is a view, the tabset is not. Set from cmd at startup and again by a
+	// /settings write, so the policy takes effect without a restart.
+	tabsStrip bool
+	// tabsNumbered paints each tab's index instead of a status glyph
+	// (tui.tabs.indicators: numbers).
+	tabsNumbered bool
+	// onTabReopen reopens the most recently closed session (opencode
+	// session_tab_reopen). nil degrades the chord to a notice.
+	onTabReopen func() error
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
 	// BeginMessage (one EventStart) discards one a dead turn left open, so
@@ -187,6 +198,7 @@ type App struct {
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
 	statusSegs []string
+	modeOps    *ModeOps // /mode + the Shift-Tab cycle, wired by cmd (nil → notices)
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
 
@@ -255,7 +267,7 @@ type App struct {
 	settingsOverlayOps *SettingsOverlayOps      // /settings overlay, wired by cmd (nil → disabled)
 	thinkingOps        *ThinkingOps             // /thinking, wired by cmd (nil → notices)
 	cwd                string                   // working directory (the status row's left side)
-	branch             string                   // git branch for the top bar ("" when none)
+	branch             string                   // git branch for the status row ("" when none)
 	commandDir         string                   // markdown command discovery root
 	pathRoot           string                   // @-completion root (empty disables the menu)
 	pathList           func(string) []PathEntry // one directory's entries (the only source)
@@ -302,7 +314,11 @@ type App struct {
 	// other replaces it — and a host that wires only the first must still be
 	// able to say "send now is not wired in this build" rather than silently
 	// queueing something the user asked to have sent.
-	onSendNow func(text string)
+	//
+	// It takes the owning session id as well as the text: the chord and the
+	// row button both name a message, and with several sessions open only the
+	// owning id says which conversation to deliver it to (#157).
+	onSendNow func(sid, text string)
 	// queue holds the pending mid-turn submits in delivery order and queueSeq
 	// is the append counter (queue.go). queueHits is the last painted frame's
 	// geometry — the mouse hit-tests against what was on screen, not against
@@ -434,6 +450,14 @@ type App struct {
 	// the transcript by default instead of whatever box happens to sit under the
 	// pointer. -1 = no box focused (app.go scrollThinkBox, selection.go press).
 	thinkFocus int
+	// focusFade is the 0→1 progress of the reasoning box's focus transition:
+	// 1 once focused (a tween that overshoots its target is a bug, so it
+	// clamps), 0 once not. Set by selection.go on a focus change and advanced
+	// one step per UI tick (app.go tick), so the border eases into its
+	// brightened ink instead of snapping — the same ~300ms ease an animated
+	// border gets elsewhere. -1 means "no transition in flight", which is the
+	// steady state, so an idle transcript spends nothing on it.
+	focusFade float64
 	// scrollHint is the ▲n▼n viewport hint, drawn on the composer's info
 	// divider — never on row 0, where it overwrote scrolled-to content.
 	scrollHint string
@@ -496,10 +520,21 @@ type blockKey struct {
 	stream   bool
 	expanded bool // box rows: the Ctrl+O state changed the row set
 	age      int64
+	spin     int  // the running frame this row paints: -1 when it paints none
 	trim     int8 // bounded middle trim: this block's render-window tier
 	dlen     int  // result box: a diff changes the row set without touching Text
 	thinkOff int  // reasoning box: the box's own scroll position
 	focused  bool // reasoning box: the wheel is aimed at it (border brightens)
+	// fade quantizes App.focusFade for the render cache: the tween changes the
+	// border's colour without changing a row's text or length, so a stamp that
+	// did not carry it would repaint the same cached border for the whole fade
+	// and the box would jump at the end. Eight buckets is 12.5% steps — finer
+	// than the 1/6 per tick the tween actually advances, so no step is skipped.
+	fade int8
+	// sub stamps a `task` call's child rows: they carry the running frame, so a
+	// settle has to pull the parent out of the render cache on its own, not
+	// wait for the next frame index to move.
+	sub uint64
 	// mermaid stamps whether a ```mermaid fence in this block drew as a
 	// diagram. Flipping the setting changes every block's rows without any of
 	// them changing length, so the stamp has to say which way it rendered or
@@ -528,18 +563,26 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		showThinking:  true,
 		renderMermaid: true,
 		width:         w, height: h,
-		keyq:   make(chan tcell.Event, 64),
-		dirty:  make(chan struct{}, 1),
-		quitCh: make(chan struct{}),
-		sm:     newScrollModel(),
+		// tabsStrip defaults ON. The policy (tui.tabs.mode) is a config value
+		// cmd only applies AFTER New, so a zero-value App — and every test
+		// that builds one without cmd — must still paint the strip the
+		// shipped way. SetTabPolicy turns it off from there.
+		tabsStrip: true,
+		keyq:      make(chan tcell.Event, 64),
+		dirty:     make(chan struct{}, 1),
+		quitCh:    make(chan struct{}),
+		sm:        newScrollModel(),
 		// No box is focused until a click names one: the wheel is the
 		// transcript's from the first frame.
 		thinkFocus: -1,
+		// -1 = no tween in flight. A box that has never been focused never
+		// animates, so the welcome screen and an idle transcript cost nothing.
+		focusFade: -1,
 	}
 }
 
-// SetLocation wires the working directory: the status row's left side, and
-// the top bar's git branch.
+// SetLocation wires the working directory and its git branch: both land on
+// the status row's left side.
 func (a *App) SetLocation(cwd string) {
 	a.mu.Lock()
 	a.cwd = cwd
@@ -633,8 +676,22 @@ func (a *App) SetImageSend(fn func(text string, imgs []PasteImage) bool) {
 // variation on sending. A host that wires only onQueue still gets the queue;
 // a host that wires neither keeps the pre-queue behavior, so the submit is
 // refused with a reason instead of vanishing.
-func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(text string)) {
+func (a *App) SetQueueHandlers(onQueue func(text string) bool, onSendNow func(sid, text string)) {
 	a.onQueue, a.onSendNow = onQueue, onSendNow
+}
+
+// OnSendNow is the chord's named send-now: the session on screen and its oldest
+// pending message, or (sid, "") when it has nothing queued. It is the same rule
+// the row's button follows — oldest first — so the chord and the button can
+// never disagree about which message "now" means, and the session is captured
+// with the message so a tab switch before the host delivers cannot redirect it.
+func (a *App) OnSendNow() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.queueForLocked(a.st.SessionID) {
+		return a.st.SessionID, e.text
+	}
+	return a.st.SessionID, ""
 }
 
 // SetVision wires "can the live model take an image?", which cmd answers from
@@ -1101,11 +1158,11 @@ const taskToolName = "task"
 // whatever call came next.
 func (a *App) AddTaskChild(callID, label, agent, model string) {
 	a.mu.Lock()
-	b := a.runningToolLocked(callID, taskToolName)
-	if b != nil {
+	if b := a.runningToolLocked(callID, taskToolName); b != nil {
 		b.Sub = append(b.Sub, &SubActivity{
 			Label: label, Agent: agent, Model: model, Status: "running", Ts: time.Now(),
 		})
+		b.subSeq++
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1125,6 +1182,7 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		}
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
+		b.subSeq++
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1137,6 +1195,7 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 	if b != nil {
 		if c := findSubLocked(b, label); c != nil {
 			c.Status, c.Dur = status, d
+			b.subSeq++
 		}
 	}
 	a.mu.Unlock()
@@ -1196,10 +1255,23 @@ func (a *App) RunningTaskCallID() string {
 	return ""
 }
 
+// spinFrame is the one running indicator's current glyph: the theme's frames at
+// the shared index. Every surface that says "still working" — the composer
+// divider, a tool call row, a reasoning box, a subagent's child row —
+// paints this, so they move in step and a theme restyles them together. One
+// helper because they were not one indicator: the reasoning box was a frozen
+// "⠹" and the child rows a static "⎿", so the same state read three ways.
+// Caller holds a.mu.
+func (a *App) spinFrame() string {
+	frames := a.th.SpinnerFrames()
+	return frames[a.st.spinnerIdx%len(frames)]
+}
+
 // subLines renders a `task` call's children as continuation rows under the
-// call row. Each row is `⎿ <label> · <what it last did>`, dim: it is
-// narration inside someone else's call, not a call of its own, and it must
-// not compete with the parent row for attention.
+// call row. A child still working takes the parent's spinning frame in place
+// of the `⎿` tick; a settled one keeps that tick, dim: the row is narration
+// inside someone else's call, not a call of its own, and it must not compete
+// with the parent for attention.
 //
 // The naming argument comes from toolDetail — the SAME precedence the
 // parent's own call rows use — so a child row and a call row read alike and
@@ -1211,10 +1283,18 @@ func (a *App) subLines(b *Block, w int) []line {
 	}
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))).Bold(true)
+	runSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning)))
 	var out []line
-	emit := func(text string) {
-		ln := textline("  ⎿ ", dim)
-		ln.runs = append(ln.runs, cell{text: text, style: nameSt})
+	// A child still working spins with the parent's bullet; a settled one keeps
+	// the dim tick it always had, so "which of these is still going" is one
+	// glance down the rows instead of a read of the elapsed clocks.
+	emit := func(text string, running bool) {
+		mark, st := "⎿", dim
+		if running {
+			mark, st = a.spinFrame(), runSt
+		}
+		ln := textline("  ", dim)
+		ln.runs = append(ln.runs, cell{text: mark, style: st}, cell{text: " ", style: dim}, cell{text: text, style: nameSt})
 		out = append(out, ln)
 	}
 	for _, c := range rows {
@@ -1236,10 +1316,10 @@ func (a *App) subLines(b *Block, w int) []line {
 		if budget := subRow(w); width(row) > budget {
 			row = truncateCells(row, budget, "…")
 		}
-		emit(row)
+		emit(row, c.Status == "running")
 	}
 	if more > 0 {
-		emit(fmt.Sprintf("+%d more running", more))
+		emit(fmt.Sprintf("+%d more running", more), true)
 	}
 	return out
 }
@@ -1486,6 +1566,32 @@ func (a *App) SetTabClose(fn func(id string) error) { a.onTabClose = fn }
 // a notice.
 func (a *App) SetTabPick(fn func(id string) error) { a.onTabPick = fn }
 
+// SetTabPolicy applies the tab-strip policy from settings (tui.tabs.mode and
+// tui.tabs.indicators). cmd calls it at startup and after a /settings write, so
+// turning the strip off does not need a restart. Caller holds no lock.
+func (a *App) SetTabPolicy(on, numbered bool) {
+	a.mu.Lock()
+	if a.tabsStrip != on || a.tabsNumbered != numbered {
+		a.clearRenderCache()
+	}
+	a.tabsStrip, a.tabsNumbered = on, numbered
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetTabReopen wires "reopen the last closed session" (opencode
+// session_tab_reopen, ctrl+shift+t). nil degrades the chord to a notice.
+func (a *App) SetTabReopen(fn func() error) { a.onTabReopen = fn }
+
+// SessionID names the session the transcript currently shows. It is the key
+// every session-owned piece of App state reads: the queue (#157) reads it to
+// decide which rows to paint, take back, flush, and retire.
+func (a *App) SessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.st.SessionID
+}
+
 // SetSessionID updates the status-row / dock identity after a switch.
 func (a *App) SetSessionID(id string) {
 	a.mu.Lock()
@@ -1504,10 +1610,13 @@ func (a *App) SetRunning(r bool) {
 	a.poke()
 }
 
-// AddTurn counts one finished run — the turn a dsh TimePill reports beside
-// its step count. SetRunning's falling edge is the seam: the run that
-// actually ended is the turn, whatever it ended with, and an idle re-render
-// never counts.
+// AddTurn counts one accepted user prompt — the turn a dsh TimePill reports
+// beside its step count. The seam is ACCEPTANCE, not the run's end: a prompt
+// the model is still working on has already been accepted, so a session's first
+// turn reads 1 while the work is in flight rather than 0, and three prompts
+// steered into one run count as three turns because three user messages went
+// into the conversation (#157). A refused or undelivered prompt never reaches
+// the seam, so the count only moves for words the model really got.
 func (a *App) AddTurn() {
 	a.mu.Lock()
 	a.st.Turns++
@@ -2085,6 +2194,7 @@ func (a *App) Reset() {
 	a.closeWindow()
 	a.blocks = nil
 	a.thinkFocus = -1  // the focused box went with them
+	a.focusFade = -1   // no tween: the box that was fading is gone with its blocks
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
 	a.msgv = nil       // likewise the read-only surface naming one
@@ -2370,6 +2480,7 @@ func (a *App) SetShowThinking(on bool) {
 		}
 		a.blocks = kept
 		a.thinkFocus = -1 // a dropped box cannot stay the wheel's target
+		a.focusFade = -1  // nor its half-drawn border
 	}
 	a.clearRenderCache()
 	a.mu.Unlock()
@@ -2820,6 +2931,17 @@ func (a *App) Run() {
 			// (selection.go selEdgeTick).
 			if a.selEdgeTick() {
 				animate = true
+				// The reasoning box's focus tween advances one step per tick and
+				// keeps asking for a frame until it lands. -1 is the steady state
+				// (no box was ever focused), so an idle transcript stays at zero
+				// repaint cost — the same discipline as the sheen above it.
+				if a.focusFade >= 0 {
+					a.focusFade += focusFadeStep
+					if a.focusFade >= 1 {
+						a.focusFade = 1 // clamp: an overshoot is a stuck mid-fade
+					}
+					animate = true
+				}
 			}
 			// An armed leader prefix is the same kind of timer: the pair has
 			// to stop waiting on its own, because Resolve alone would keep it
@@ -2896,6 +3018,16 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.mu.Lock()
 			a.width, a.height = r.Size()
 			a.clearRenderCache()
+			// The diff viewer's LAYOUT is its width (the pair below the
+			// threshold, the list above it), so a resize under an open overlay
+			// has to re-decide it here — the width has already moved, and the
+			// frame that would notice it is the next paint, by which time a
+			// frame drawn at the old budget has already shown. drawDiffOverlay
+			// re-checks the same fact each frame, so a resize that reaches it
+			// another way is still covered.
+			if a.diffOv != nil {
+				a.diffOv.reflow(a)
+			}
 			a.mu.Unlock()
 		}
 		// Mouse wheel scrolls the in-app transcript (tcell would otherwise let
@@ -2931,8 +3063,8 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.runPendingMsgAction()
 				return // the UI loop repaints after handleKey
 			}
-			// The tab strip is chrome under the top bar: a click there names a
-			// session, never a transcript row, so it is asked after every
+			// The tab strip is chrome above the transcript: a click there names
+			// a session, never a transcript row, so it is asked after every
 			// modal (a picker owns its own screen) and before the queue and
 			// the transcript selection below.
 			if a.handleTabStripMouse(m, press) {
@@ -3286,13 +3418,13 @@ func (a *App) handleKey(ev tcell.Event) {
 		// With nothing queued it is a notice, never a silent no-op: a chord
 		// that does nothing when pressed is a bug report waiting to happen.
 		if a.onSendNow != nil {
-			text := a.oldestQueued()
+			sid, text := a.OnSendNow()
 			if text == "" {
 				a.AddSystemBlock("nothing queued — type a prompt and Enter while a turn runs, or click a queued row")
 				a.poke()
 				return
 			}
-			a.onSendNow(text)
+			a.onSendNow(sid, text)
 			a.poke()
 			return
 		}
@@ -3326,6 +3458,17 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.AddSystemBlock("session tabs are not wired in this build")
 		}
 		return
+	default:
+		// The ten "switch to tab N" ids, opencode's
+		// session_tab_select_N. They resolve through the SAME
+		// onTabPick /tabs uses, so a jump and a click cannot diverge:
+		// one callback, one owner of the tabset. out-of-range N and a
+		// chord aimed at a tab that is not open are notices, never a
+		// silent no-op.
+		if n, ok := tabSelectIndex(action); ok {
+			a.selectTab(n)
+			return
+		}
 	case "session.delete":
 		// C-d / A-w / <leader>w. Close the CURRENT tab — or, on the last one,
 		// quit: "close this" with nothing left to close has to mean "exit",
@@ -3346,6 +3489,21 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 		a.closeTab(currentTabID(tabs))
 		return
+	case "session.tab.reopen":
+		// C-shift-T — reopen the last closed session (opencode
+		// session_tab_reopen). The host owns the closed stack, so the chord
+		// only asks; an unwired host says so rather than swallowing the key.
+		if a.onTabReopen == nil {
+			a.AddSystemBlock("reopening a closed session is not wired in this build")
+			return
+		}
+		go func() {
+			if err := a.onTabReopen(); err != nil {
+				a.AddSystemBlock("error: " + err.Error())
+			}
+			a.poke()
+		}()
+		return
 	case "session.list":
 		// <leader>l — the open-session set as a modal list (opencode's
 		// session_list). It reads the snapshot the status row already has.
@@ -3362,11 +3520,18 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.poke()
 		}
 		return
-	case "thinking-toggle":
-		// Shift-Tab. Like the dock chords this runs after every modal
-		// handler, so an open picker keeps first claim on the key (the model
-		// picker binds Shift-Tab to "previous tab").
-		a.ToggleThinking()
+	case "thinking-toggle", "mode-cycle":
+		// Like the dock chords this runs after every modal handler, so an
+		// open picker keeps first claim on the key (the model picker binds
+		// Shift-Tab to "previous tab"). Both actions land here because they
+		// are chord-only: the toggle keeps no default chord since the mode
+		// cycle took Shift-Tab, but a keybindings.yml binding must still
+		// reach it.
+		if action == "mode-cycle" {
+			a.CycleMode()
+		} else {
+			a.ToggleThinking()
+		}
 		return
 	case "app.settings":
 		if a.SettingsOverlayOpen() {
@@ -3544,8 +3709,10 @@ func (a *App) handleKey(ev tcell.Event) {
 			// Attachments make this the multimodal path's alone. A declined
 			// or unwired send returns the draft to the composer: the text-only
 			// handler cannot carry the bytes, and sending the chip as a word
-			// would let a model answer a picture it never received.
+			// would let a model answer a picture it never received. A declined
+			// send took no words, so it counts no turn.
 			if a.onSendImages != nil && a.onSendImages(text, imgs) {
+				a.AddTurn()
 				a.poke()
 				return
 			}
@@ -3553,6 +3720,14 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 		if a.onSend != nil {
+			// The prompt was ACCEPTED here, so this is the turn seam (#157):
+			// the count moves for words the host really took, whether or not
+			// the run that answers them has finished — a session's first turn
+			// reads 1 while the work is in flight rather than 0. A queued
+			// prompt is counted at its own delivery (RetireDelivered) instead,
+			// so no prompt is counted twice, and an unwired or refused send
+			// never reaches this line at all.
+			a.AddTurn()
 			a.onSend(text)
 		}
 	}
@@ -3660,8 +3835,8 @@ func (a *App) totalLinesLocked() int {
 }
 
 func (a *App) viewportLinesLocked() int {
-	// top bar (transcript only) + scrollback + blank + composer (grows with
-	// the draft) + status row.
+	// session strip (transcript only) + scrollback + blank + composer (grows
+	// with the draft) + status row.
 	return a.height - a.composerRows() - 2 - a.transcriptTop()
 }
 
@@ -3750,8 +3925,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		bullet, fg := "◈", theme.AccentTool
 		switch b.Status {
 		case "running":
-			frames := a.th.SpinnerFrames()
-			bullet, fg = frames[a.st.spinnerIdx%len(frames)], theme.AccentRunning
+			bullet, fg = a.spinFrame(), theme.AccentRunning
 		case "error":
 			bullet, fg = "✗", theme.AccentError
 		case "ok":
@@ -3965,6 +4139,12 @@ func thinkWindow(n, off, rows int) (start, end int) {
 	return max(0, end-rows), end
 }
 
+// focusFadeStep is one tick's worth of the focus tween. The UI runs at ~30fps
+// (app.go tick), so 1/6 lands in ~200ms — an eased border, not a slide. The
+// step is a constant rather than a duration so the ease has a fixed cost per
+// frame whatever the tick happens to be doing.
+const focusFadeStep = 1.0 / 6.0
+
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
 // "Thought for Xs" once it settles) and the body shows a fixed window of it.
@@ -3982,9 +4162,23 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	box := a.th.Box()
 	focused := i == a.thinkFocus
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
+	if fade := a.focusFade; fade >= 0 {
+		// During the tween the border sits BETWEEN the dim and the focused
+		// ink rather than between two identical ones: the base is already the
+		// thinking accent, so the eased colour is that accent walked back
+		// toward the body gray and forward again. At fade=1 it lands exactly on
+		// AccentThinking, so a settled box is the same cell it always was.
+		base := a.th.Get(theme.GrayDim)
+		if fade < 1 {
+			border = tcell.StyleDefault.Foreground(
+				a.cellColor(theme.Lerp(base, a.th.Get(theme.AccentThinking), fade)))
+		}
+	}
 	if focused {
 		// Bold is the terminal's own bright variant: the aim reads as the same
-		// hue turned up, not as a second colour with its own meaning.
+		// hue turned up, not as a second colour with its own meaning. Applied
+		// on top of the tween so the settled focused box is byte-for-byte the
+		// style it always was.
 		border = border.Bold(true)
 	}
 	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
@@ -3993,7 +4187,10 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	hdr := "Thought"
 	switch {
 	case b.stream:
-		hdr = "⠹ Thinking…"
+		// The theme's own frames, so a reasoning box spins in step with every
+		// other indicator. It was a frozen "⠹": the glyph said "running" and
+		// never moved, next to a tool bullet that did.
+		hdr = a.spinFrame() + " Thinking…"
 	case b.thinkDur > 0:
 		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
 	}
@@ -4299,6 +4496,17 @@ func isWindowRow(s string) bool {
 // whole session.
 func (a *App) draw() {
 	a.paint()
+	// The prompt box's rows are sent WHOLE, every frame, even though paint()
+	// fills them with the content they already hold: tcell writes only a cell
+	// whose content changed, so the spaces that did not change ride on no frame
+	// at all (measured: 16 of 120 columns carried a glyph). A terminal keeps
+	// what it was sent and renders "Type a message…" correctly; a pane that
+	// re-renders from its own grid — a reattach, a cleared terminal, a resize
+	// that re-clears — keeps ITS value in the columns xdev never addressed, and
+	// the box reads "TypeXaXmessage…XXXXXX" (composer_wire_test.go reproduces
+	// it through such a pane). Unconditional, because the pane's reset is
+	// silent by definition: no event announces it, so a trigger cannot cover it.
+	a.markComposerDirty()
 	a.scr.Show()
 	// A frame the terminal never took is not self-healing: tcell marks each
 	// cell clean before the write, so a dropped frame leaves a partial screen
@@ -4310,7 +4518,35 @@ func (a *App) draw() {
 	}
 }
 
-// logFrameAfterDraw is called once per frame after draw()
+// markComposerDirty forces the prompt box's rows dirty so the next flush
+// carries them whole. It must run after paint() and before Show(): paint
+// decides the cells' content, Show() decides which of them travel.
+//
+// The box is the composer's rows plus its top border and its info divider —
+// every row from yTop-1 up to the row the status line takes — because the
+// border and the divider are as unchanged as the spaces are, and a pane
+// showing its own fill inside the box reads as a broken prompt, not a blank
+// one. The columns are the main pane's (rightEdge): the context dock owns the
+// rest and paints its own rows, so marking them would only make this fix
+// repaint the panel.
+//
+// Caller holds a.mu, as paint() does.
+func (a *App) markComposerDirty() {
+	cells, ok := a.scr.(interface{ GetCells() *tcell.CellBuffer })
+	if !ok {
+		return // a screen that keeps its cells private cannot be asked
+	}
+	buf := cells.GetCells()
+	bw, bh := buf.Size()
+	cols := min(a.rightEdge(), bw)
+	top := a.height - 1 - a.composerRows()
+	for y := max(top-1, 0); y < min(a.height-1, bh); y++ {
+		for x := range cols {
+			buf.SetDirty(x, y, true)
+		}
+	}
+}
+
 // to snapshot the screen buffer to the log file when --log is active.
 func (a *App) logFrameAfterDraw() { a.logFrame() }
 
@@ -4342,10 +4578,9 @@ func (a *App) paint() {
 	// menu, shortcuts) instead of a blank void.
 	if len(a.blocks) == 0 {
 		composerTop := h - 1 - a.composerRows()
-		// Top bar, then the session strip under it, then the welcome body —
-		// the strip owns its row whether or not the transcript exists, so the
-		// two screens cannot disagree about what is open.
-		a.drawTopBar(s, w, false)
+		// The session strip at row 0, then the welcome body — the strip owns
+		// its row whether or not the transcript exists, so the two screens
+		// cannot disagree about what is open.
 		a.drawTabStrip(s, w)
 		a.drawWelcome(s, w, h)
 		a.drawSessionPicker(composerTop)
@@ -4371,22 +4606,19 @@ func (a *App) paint() {
 		return
 	}
 
-	// Grok layout: top bar, scrollback, blank row, composer box (grows
-	// with the draft's wrapped line count), status row at the bottom.
-	// The top bar is chrome: the transcript viewport starts below it.
+	// Grok layout: scrollback, blank row, composer box (grows with the
+	// draft's wrapped line count), status row at the bottom. The transcript
+	// viewport starts at transcriptTop(), which is 0 unless the session
+	// strip claims a row.
 	top := a.transcriptTop()
 	cRows := a.composerRows()
 	vp := h - cRows - 2 - top
 	if vp < 1 {
 		vp = 1
 	}
-	// The top bar belongs to the main pane: its prompts get the pane's width,
-	// and a bar running the terminal's full width would print them under the
-	// panel's own surface.
-	a.drawTopBar(s, a.rightEdge(), true)
-	// The session strip owns the row under the top bar (opencode's tab row),
-	// so the transcript's first row shifts with it — transcriptTop() is the
-	// single place that offset is computed, so the strip cannot desync the
+	// The session strip owns row 0 (opencode's tab row), so the transcript's
+	// first row shifts with it — transcriptTop() is the single place that
+	// offset is computed, so the strip cannot desync the
 	// scroll math by being drawn without being counted.
 	a.drawTabStrip(s, a.rightEdge())
 	// The panel is built before the transcript's width is computed: with it open
@@ -4929,8 +5161,8 @@ func (a *App) composerAvail() int {
 }
 
 // composerBudget is the most input rows the box may paint: the screen minus
-// everything else it shares the terminal with (top bar, one transcript row,
-// the box's own borders, the status row) — draw()'s viewport arithmetic
+// everything else it shares the terminal with (one transcript row, the box's
+// own borders, the status row) — draw()'s viewport arithmetic
 // solved for the composer. Without a ceiling the box grew past the screen:
 // its top edge climbed above row 0, drawComposer bailed on yTop < 1, and a
 // large paste showed NOTHING while the full draft sat in the buffer — the
@@ -5037,34 +5269,58 @@ func (a *App) drawComposer(yTop int) {
 		}
 	}
 
-	// Info divider bottom border: ╰─ model · ⠋ ─────── ▲n▼n ─╯
+	// Info divider bottom border: ╰─ ⠋ model · high · plan ─────── ▲n▼n ─╯
+	//
+	// Each part wears its own ink: model, reasoning level and mode are three
+	// different questions (which model, how hard is it thinking, what is it
+	// allowed to do), and one status_line_model grey over all three answered
+	// none of them by colour. They stay one phrase with " · " between, so the
+	// row's geometry — and the hint's budget below — is unchanged.
 	yBottom := yTop + len(lines)
-	info := " " + a.st.Model
-	// The reasoning level beside the model it applies to: the two are one
-	// request, and "which model" alone left the other half of it invisible.
-	// The bare rung, not "thinking <level>" — the model it sits beside says
-	// what the pair is, and the word only added width.
-	if l := a.thinkingLevel(); l != "" {
-		info += " · " + l
+	infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
+	if hasInfoBg {
+		infoSt = infoSt.Background(a.cellColor(infoBg))
 	}
-	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
-		info += " · Vibe"
-	}
-	if a.st.Running {
-		frames := a.th.SpinnerFrames() // theme frames, braille by default
-		a.st.spinnerIdx = a.st.spinnerIdx % len(frames)
-		info += " · " + frames[a.st.spinnerIdx]
+	parts := a.dividerParts()
+	infoW := 0
+	for i, p := range parts {
+		if i > 0 {
+			infoW += width(dividerSep)
+		}
+		infoW += width(p.text)
 	}
 	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
 	for x := 2; x < w-2; x++ {
 		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
-	if info != " " {
-		infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
-		if hasInfoBg {
-			infoSt = infoSt.Background(a.cellColor(infoBg))
+	// infoX is where the phrase starts: the leading space the one-string
+	// version carried lives at 2, so the text itself begins at 3 — "╰ model"
+	// and not "╰model", which is the framing the box border buys.
+	const infoX = 3
+	// Drop the tail that will not fit rather than overrun the border: a long
+	// model name must never push the mode off the row's right edge, and the
+	// mode is the one part of this phrase a user cannot afford to lose.
+	for len(parts) > 0 && infoX+infoW > w-2 {
+		parts = parts[:len(parts)-1]
+		infoW = 0
+		for i, p := range parts {
+			if i > 0 {
+				infoW += width(dividerSep)
+			}
+			infoW += width(p.text)
 		}
-		drawText(a.scr, 2, yBottom, info, infoSt)
+	}
+	if len(parts) > 0 {
+		drawText(a.scr, infoX-1, yBottom, " ", infoSt)
+		x := infoX
+		for i, p := range parts {
+			if i > 0 {
+				drawText(a.scr, x, yBottom, dividerSep, infoSt.Foreground(a.cellColor(a.th.Get(theme.StatusLineSep))))
+				x += width(dividerSep)
+			}
+			drawText(a.scr, x, yBottom, p.text, infoSt.Foreground(a.cellColor(a.th.Get(p.token))))
+			x += width(p.text)
+		}
 	}
 	// The viewport hint rides this divider's right end. It used to be
 	// painted on transcript row 0, where it overwrote whatever content had
@@ -5082,7 +5338,7 @@ func (a *App) drawComposer(yTop int) {
 	}
 	if hint != "" {
 		hx := w - 3 - width(hint)
-		if hx > 2+width(info) {
+		if hx > infoX+infoW {
 			hintSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 			if hasInfoBg {
 				hintSt = hintSt.Background(a.cellColor(infoBg))
@@ -5145,8 +5401,10 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 	a.jump = panelRect{x: x, y: y, w: w, h: 1}
 }
 
-// drawStatusRow renders the bottom row: the working directory on the left,
-// the configured HUD segments (settings statusLine.segments) right-aligned
+// drawStatusRow renders the bottom row: the working directory and its git
+// branch on the left (statusLocation), then the session mode
+// (drawStatusMode), then the configured HUD segments (settings
+// statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
 // on a small terminal. The row belongs to the main pane: its budget and its
@@ -5155,27 +5413,57 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
 	w := a.rightEdge()
-	// The running tool call leads the row: "● <name> · cd <cwd>" on
-	// the left, the configured segments right-aligned.
+	// The running tool call leads the row on the left ("● <name>", with the
+	// room it needs reserved), then the location, then the mode; the
+	// configured segments stay right-aligned. The mode sits beside the
+	// location because that is the pair a user reads together — where you are
+	// and what you may do here — and it is in the mode ink, so the two never
+	// read as one string.
+	modeW := a.modeChipWidth()
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		pathLbl := pathDisplay(a.cwd, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
-		if pathLbl != "" {
+		lbl := a.statusLocation(w - 2 - width(cmdLabel) - 2 - hudEssentialWidth(parts) - 1 - modeW)
+		end := 2
+		if lbl != "" {
 			pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
-			drawText(a.scr, 2, y, pathLbl, pathSt)
+			drawText(a.scr, 2, y, lbl, pathSt)
+			end = 2 + width(lbl)
 		}
-		a.drawHUD(y, w, 2+width(cmdLabel)+width(pathLbl)+2, parts)
+		end = a.drawStatusMode(y, end+2)
+		a.drawHUD(y, w, end, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
-	// run, so they claim the space first: the path is what shrinks.
-	budget := w - 2 - hudEssentialWidth(parts) - 1
-	lbl := pathDisplay(a.cwd, budget-2)
+	// run, so they claim the space first: the location is what shrinks.
+	lbl := a.statusLocation(w - 2 - hudEssentialWidth(parts) - 1 - modeW)
+	end := 2
 	if lbl != "" {
 		pathSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		drawText(a.scr, 2, y, lbl, pathSt)
+		end = 2 + width(lbl)
 	}
-	a.drawHUD(y, w, 2+width(lbl), parts)
+	end = a.drawStatusMode(y, end)
+	a.drawHUD(y, w, end, parts)
+}
+
+// statusLocation is the left side of the status row within budget cells: the
+// working directory, then the git branch. The branch rides here because the
+// top bar that used to carry it is gone, so a checkout and its branch read as
+// one location instead of two surfaces.
+//
+// The branch claims its cells FIRST, because pathDisplay tail-truncates a long
+// path gracefully ("…/checkout/xdev-feature") while the branch has nothing to
+// degrade into — a deep worktree path spent the whole row, and the branch
+// disappeared exactly when the HUD pills joined it and the row was busiest.
+// It still yields whole: a branch too wide for the row leaves instead of
+// printing half of itself. Caller holds a.mu.
+func (a *App) statusLocation(budget int) string {
+	if a.branch != "" && budget-3-width(a.branch) >= 4 {
+		if p := pathDisplay(a.cwd, budget-3-width(a.branch)); p != "" {
+			return p + " · " + a.branch
+		}
+	}
+	return pathDisplay(a.cwd, budget-2)
 }
 
 // drawHUD renders the configured status segments right-aligned on the
@@ -5526,8 +5814,71 @@ type hudPart struct {
 	popup             bool
 }
 
-// hudSep separates HUD segments on the status row.
-const hudSep = " │ "
+// hudSep separates HUD segments on the status row; dividerSep separates the
+// composer divider's pieces, which are one request read as a phrase
+// ("model · high · plan") rather than as independent metrics.
+const (
+	hudSep     = " │ "
+	dividerSep = " · "
+)
+
+// dividerParts is the composer's info divider as its coloured pieces: the
+// run indicator (when a turn is live), the model, the reasoning level and the
+// session mode, each with the theme token that paints it. Empty text is
+// dropped here rather than drawn — an unwired /thinking or /mode seam has
+// nothing to report, and an invented default would claim a posture nobody
+// chose. Caller holds a.mu.
+func (a *App) dividerParts() []hudPart {
+	var out []hudPart
+	add := func(text, token string) {
+		if text != "" {
+			out = append(out, hudPart{text: text, token: token})
+		}
+	}
+	// The run indicator LEADS the list. Trailing it put the one thing on the
+	// row that moves at the far end of a static "model · high", where it read
+	// as another segment of the reasoning label instead of as the state of
+	// the turn.
+	if a.st.Running {
+		add(a.spinFrame(), theme.AccentRunning)
+	}
+	add(a.st.Model, theme.StatusLineModel)
+	// The reasoning level beside the model it applies to: the two are one
+	// request, and "which model" alone left the other half of it invisible.
+	// The bare rung, not "thinking <level>" — the model it sits beside says
+	// what the pair is, and the word only added width.
+	add(a.thinkingLevel(), a.thinkingToken())
+	add(a.modeLabel(), theme.StatusLineMode)
+	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
+		add("Vibe", theme.StatusLineMode)
+	}
+	return out
+}
+
+// thinkingToken is the rail colour for the reasoning level in force, so the
+// level is legible as an amount of effort rather than as a second model name
+// (theme.ThinkingHigh & co). An unwired seam and an unknown rung both fall to
+// the model ink — a level nobody named must not wear a rung's colour.
+func (a *App) thinkingToken() string {
+	switch a.currentThinkingLevel() {
+	case "off":
+		return theme.ThinkingOff
+	case "minimal":
+		return theme.ThinkingMinimal
+	case "low":
+		return theme.ThinkingLow
+	case "medium":
+		return theme.ThinkingMedium
+	case "high":
+		return theme.ThinkingHigh
+	case "xhigh":
+		return theme.ThinkingXhigh
+	case "max":
+		return theme.ThinkingMax
+	default:
+		return theme.StatusLineModel
+	}
+}
 
 // hudParts renders the configured segments (settings statusLine.segments),
 // in order, dropping the ones with nothing to show (an unwired cost or

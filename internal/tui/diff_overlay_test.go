@@ -117,9 +117,11 @@ func TestDiffOverlayInsideIsTheTerminalBackground(t *testing.T) {
 		t.Fatal("no diff overlay for the changed file")
 	}
 	app.draw()
-
-	// A blank interior cell: inside the border, well clear of the diff text.
-	r, _, st, _ := scr.GetContent(100, 6)
+	// A blank interior cell: inside the border, below the fixture's five diff
+	// rows. It cannot be a row a diff band owns — a changed row's band runs to
+	// the panel's right border, so "well clear of the diff text" horizontally
+	// no longer clears it.
+	r, _, st, _ := scr.GetContent(100, 9)
 	if _, bg, _ := st.Decompose(); bg != tcell.ColorDefault {
 		t.Fatalf("overlay interior cell %q has background %v, want the terminal default", r, bg)
 	}
@@ -157,15 +159,15 @@ func TestDiffOverlayIgnoresANamedBackground(t *testing.T) {
 	// the terminal's own, so a viewer that named bg_base came up striped — black
 	// text bars on a grey band. A changed row is the one exception and it is
 	// not a field: a diff band is the claim on that row, so a cell a changed
-	// row painted carries the band's tint and never the themed fill.
-	_, _, blank, _ := scr.GetContent(100, 6)
+	// row painted carries the band's tint and never the themed fill. Its band
+	// runs the whole interior, so the probe for "blank" is a row below the
+	// diff, not a cell beside it.
+	_, _, blank, _ := scr.GetContent(100, 9)
 	if _, bg, _ := blank.Decompose(); bg != tcell.ColorDefault {
 		t.Fatalf("overlay blank interior has background %v, want the terminal default", bg)
 	}
-	// A changed row is the one exception and it is not a field: a diff band is
-	// the claim ON that row, so a cell a changed row painted carries the
-	// row's tint (or the stronger one under its changed words) and never the
-	// panel's fill. Row 6 of the dock fixture is its "-" row.
+	// A changed row carries the claim ON that row — the row's tint, or the
+	// stronger one under its changed words — and never the panel's fill.
 	remRow, _ := app.th.Slot(theme.ToolDiffRemovedBg)
 	remWord, _ := app.th.Slot(theme.ToolDiffRemovedWordBg)
 	rowY, rowX := -1, -1

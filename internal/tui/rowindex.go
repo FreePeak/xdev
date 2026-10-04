@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -155,17 +156,48 @@ func (x *rowIndex) blockAt(r int32) int {
 // A running tool row carries a live elapsed that no field of the block changes,
 // so its stamp ages in whole seconds: one row re-renders per tick and every
 // other block keeps its render.
+//
+// A row that PAINTS the running frame carries the frame index instead: the
+// index moves every 33ms tick, so without it in the stamp a cached row kept
+// the glyph it was first rendered with. That is why the tool bullet crawled at
+// one frame a second (only `age` moved), the reasoning box froze outright (it
+// had neither `age` nor any stamp), and a subagent's child rows never moved at
+// all — one state, three different animations.
 func (a *App) renderKey(i int, b *Block, w int) blockKey {
 	var age int64
-	if b.Kind == KindTool && b.Status == "running" && !b.Ts.IsZero() {
-		age = int64(time.Since(b.Ts).Seconds())
+	spin := -1
+	switch {
+	case b.Kind == KindTool && b.Status == "running":
+		if !b.Ts.IsZero() {
+			age = int64(time.Since(b.Ts).Seconds())
+		}
+		spin = a.st.spinnerIdx
+	case b.Kind == KindThinking && b.stream:
+		spin = a.st.spinnerIdx
+	}
+	// A call row painting child rows takes the frame too, but only while one
+	// of them is still working: a settled batch is static, and re-rendering it
+	// every tick would buy nothing.
+	if spin < 0 && len(b.Sub) > 0 {
+		for _, c := range b.Sub {
+			if c.Status == "running" {
+				spin = a.st.spinnerIdx
+				break
+			}
+		}
 	}
 	return blockKey{
 		idx: i, kind: b.Kind, width: w, tlen: len(b.Text),
 		tool: b.ToolName, status: b.Status, stream: b.stream,
-		expanded: b.Expanded, age: age, trim: a.trimTier(i),
+		expanded: b.Expanded, age: age, spin: spin, trim: a.trimTier(i),
 		dlen: len(b.Diff), thinkOff: b.ThinkOff, focused: i == a.thinkFocus,
-		live: b.liveSeq, mermaid: a.renderMermaid,
+		// fade quantizes the focus tween so the box re-renders as it eases. It
+		// changes a border's colour without changing any row's text or length,
+		// so a stamp that omitted it would paint the same cached border for the
+		// whole fade and the box would snap at the end. The in-flight sentinel
+		// (focusFade < 0) is stamped as -1, which no settled bucket reaches.
+		fade: fadeBucket(a.focusFade),
+		live: b.liveSeq, sub: b.subSeq, mermaid: a.renderMermaid,
 	}
 }
 
@@ -177,6 +209,17 @@ func (a *App) trimTier(i int) int8 {
 		return tierRecent
 	}
 	return a.rowIdx.tier[i]
+}
+
+// fadeBucket maps a focus tween's progress onto the render cache's stamp:
+// -1 for "no tween", 0..8 for the steps a live fade passes through. Eight
+// buckets is 12.5% — finer than the 1/6 per tick the tween advances, so no
+// visible step is ever coalesced into one repaint.
+func fadeBucket(fade float64) int8 {
+	if fade < 0 {
+		return -1
+	}
+	return int8(math.Round(fade * 8))
 }
 
 // toolWindow is a finished result's collapsed render window for a tier.

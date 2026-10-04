@@ -403,10 +403,13 @@ type CommandAPI interface {
 	RenameSession(title string) error
 	ExportSession(path string) error
 	ShareSession() error
+	PlanMode(args string) error
+	// Mode is /mode: the one mode vocabulary over plan mode and the approval
+	// policy (mode.go).
+	Mode(args string) error
 	ResumeSession(query string) error
 	TabsPicker() error
 	SwitchModel(args string) error
-	PlanMode(args string) error
 	Vibe(args string) error
 	// Trajectory is /trajectory: the session's event ledger, opened as a
 	// modal list where a row's inspector shows the record's full body.
@@ -481,10 +484,19 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.TabsPicker() }},
 		{Name: "model", Description: "show or switch the active model",
 			Fn: func(app CommandAPI, args string) error { return app.SwitchModel(args) }},
-		{Name: "settings", Description: "show settings overlay, or toggle: /settings [overlay|showThinking on|off]",
+		// Bare /settings opens the panel, because that is the surface that can
+		// UPDATE a setting — the dump it replaced answers "what is configured"
+		// by printing a wall of read-only transcript lines, which is the
+		// reason "my /settings will not update" was reportable at all. The
+		// dump survives as `/settings list`, and the toggles keep their own
+		// words (/settings showThinking on|off, sidebarMode, renderMermaid).
+		{Name: "settings", Description: "open the settings panel: /settings [list|showThinking on|off]",
 			Fn: func(app CommandAPI, args string) error {
-				if strings.TrimSpace(args) == "overlay" {
+				switch strings.TrimSpace(args) {
+				case "overlay", "":
 					return app.SettingsOverlay()
+				case "list", "show":
+					return app.SettingsView("")
 				}
 				return app.SettingsView(args)
 			}},
@@ -506,6 +518,8 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
+		{Name: "mode", Description: "session mode: /mode [default|auto|plan|bypass] (bare reports; shift+tab cycles default→auto→plan)",
+			Fn: func(app CommandAPI, args string) error { return app.Mode(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},
 		{Name: "goal", Description: "session objective: /goal <objective> starts it (and resumes on the first turn); /goal shows it, /goal complete|drop closes it",

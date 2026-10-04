@@ -47,7 +47,7 @@ func usageTestReport() *stats.Report {
 	return &stats.Report{
 		DataDir: "/tmp/xdev-usage-fixture",
 		Totals: stats.Totals{
-			Turns: 12, PricedTurns: 10, Input: 1_200_000, Output: 30_000,
+			Turns: 12, PricedRequests: 10, Input: 1_200_000, Output: 30_000,
 			TotalTokens: 1_230_000, CostUSD: 3.42,
 		},
 		Models: []stats.ModelStat{
@@ -98,7 +98,7 @@ func TestUsageCmdReportsAccountsLimitsAndObservedUsage(t *testing.T) {
 
 	// Observed totals.
 	for _, want := range []string{
-		"12 (10 priced)",
+		"12 (10 priced requests)",
 		"total " + stats.HumanTokens(1_230_000),
 		stats.HumanMoney(3.42),
 	} {

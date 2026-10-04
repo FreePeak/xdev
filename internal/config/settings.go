@@ -588,7 +588,61 @@ type TuiSettings struct {
 	// Default ON — a *bool so unset stays "on" and an explicit false is the
 	// only way to restore kill-on-exit. `xdev config set tui.exitDetach false`.
 	ExitDetach *bool `yaml:"exitDetach"`
+	// Tabs is the session tab strip (opencode's `tui.tabs`): whether the
+	// strip is painted at all, and how. Read through TabsMode /
+	// TabsIndicatorsOn, so a layer that omits the group keeps the shipped
+	// behaviour instead of blanking the strip.
+	Tabs TabSettings `yaml:"tabs"`
 }
+
+// TabSettings is `tui.tabs`, spelled exactly as opencode's own config schema
+// spells it (read out of the installed binary, not translated): mode is the
+// on/off the user asked for, scope is whether the open set is shared across
+// working directories or kept per cwd, indicators chooses status glyphs or
+// per-tab numbers. layout ("horizontal" | "vertical") is accepted and
+// ignored — xdev has one layout, and rejecting the key would make a config
+// pasted from an opencode tui.json un-loadable for a setting that changes
+// nothing here.
+type TabSettings struct {
+	Mode       string `yaml:"mode"`
+	Scope      string `yaml:"scope"`
+	Indicators string `yaml:"indicators"`
+	Layout     string `yaml:"layout"`
+}
+
+// The two values tui.tabs.indicators takes, named so the panel's Options list
+// and every reader quote the same strings instead of re-typing them.
+const (
+	tabsIndicatorsStatus  = "status"
+	tabsIndicatorsNumbers = "numbers"
+)
+
+// TabsModeOn reports whether the session tab strip is painted: "off" never,
+// "on" always, and the shipped default "auto" whenever the terminal can carry
+// it — which is every terminal this TUI runs on, so auto and on agree here and
+// auto is the name opencode users already know. An unknown value reads as
+// auto rather than blanking the strip: a hand-edited layer must not be able to
+// hide the switcher by typo.
+func (s *Settings) TabsModeOn() bool {
+	if s == nil {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(s.Tui.Tabs.Mode)) != "off"
+}
+
+// TabsIndicators reports the strip's badge as the config spells it: "numbers"
+// (the tab's index — the legend for the C-1..9 chords) or the shipped default
+// "status" (a per-tab status glyph). Unset reads as "status", so a layer that
+// omits the key keeps the default instead of blanking the badge column.
+func (s *Settings) TabsIndicators() string {
+	if s != nil && strings.EqualFold(strings.TrimSpace(s.Tui.Tabs.Indicators), tabsIndicatorsNumbers) {
+		return tabsIndicatorsNumbers
+	}
+	return tabsIndicatorsStatus
+}
+
+// TabsIndicatorsOn is TabsIndicators as the boolean the renderer needs.
+func (s *Settings) TabsIndicatorsOn() bool { return s.TabsIndicators() == tabsIndicatorsNumbers }
 
 // StatusLineSettings is the `statusLine` group (M12 F5). Segments is the
 // HUD segment order; the vocabulary lives with the renderer

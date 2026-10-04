@@ -272,16 +272,38 @@ func (a *Agent) persistCompaction(entry *session.CompactionEntry) error {
 	if err := a.Store.Append(entry); err != nil {
 		return fmt.Errorf("compaction: persist: %w", err)
 	}
-	if a.Hooks != nil {
-		a.Hooks.OnCompaction(entry.TokensBefore)
-	}
+	a.notifyCompaction(entry)
 	return nil
+}
+
+// notifyCompaction is the one emission point a compaction passes through, so
+// the notice and the side call's tokens can never disagree about whether a
+// compaction happened. A handoff is a compaction (it persists one) and goes
+// through here rather than re-raising both events itself.
+func (a *Agent) notifyCompaction(entry *session.CompactionEntry) {
+	if a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnCompaction(entry.TokensBefore)
+	// The side call's own usage: a summarize or a handoff document read the
+	// discarded history and wrote the summary, and the provider billed both.
+	// Before this the tokens went nowhere, so a session could compact over and
+	// over and its bill still read $0.00. Nil for the deterministic members
+	// (shake, soft, snapcompact) — they make no provider call.
+	if u := entry.Summary.Usage; u != nil && CompactionUsageNotify(a.Hooks) != nil {
+		CompactionUsageNotify(a.Hooks)(u)
+	}
 }
 
 // summarize renders msgs as a transcript and compresses it through one
 // provider call (no tools; hard MaxTokens clamp). It is the in-turn
 // spelling of summarizeWith; the async trigger keeps its own snapshot.
-func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error) {
+//
+// The usage comes back because the call is real spend: it read a long
+// prefix and wrote the summary, and the provider billed both. Dropping it
+// here is what made a compacted session's totals read as if compaction
+// were free.
+func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, *ai.Usage, error) {
 	extra := ""
 	if a.MemoryContext != nil {
 		extra = strings.TrimSpace(a.MemoryContext())
@@ -292,8 +314,14 @@ func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, error
 // summarizeWith is summarize against a provider/model snapshot: the async
 // job runs on its own goroutine, and a failover can move a.Provider or
 // a.Model while that call is in flight, so the background job must carry
-// copies rather than read the live fields.
-func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message, memoryContext string) (string, error) {
+// copies rather than read the live fields. The usage is the summarize
+// call's own, reported by the provider on its done event.
+//
+// The usage is returned rather than banked here because two callers want
+// it differently: the ladder attaches it to the summary it persists, and
+// the async job cannot touch live agent state from its goroutine. Both end
+// up on the summary message, which is where a resume reads it back.
+func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message, memoryContext string) (string, *ai.Usage, error) {
 	var b strings.Builder
 	if memoryContext != "" {
 		// #86: a compaction summary that forgets the recalled memories loses
@@ -322,7 +350,7 @@ func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs
 	}
 	ch, err := provider.Stream(ctx, req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var text strings.Builder
 	for ev := range ch {
@@ -330,15 +358,20 @@ func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs
 		case ai.EventTextDelta:
 			text.WriteString(ev.Delta)
 		case ai.EventDone:
+			// The message carries the provider's final shape and wins over
+			// the accumulated deltas; a wire that ends without one falls back
+			// to them. The usage rides out of the same event — that is the
+			// summarize call's own bill.
+			out := text.String()
 			if ev.Message != nil && ev.Message.Text() != "" {
-				return strings.TrimSpace(ev.Message.Text()), nil
+				out = ev.Message.Text()
 			}
-			return strings.TrimSpace(text.String()), nil
+			return strings.TrimSpace(out), ev.Usage, nil
 		case ai.EventError:
-			return "", ev.Err
+			return "", nil, ev.Err
 		}
 	}
-	return "", fmt.Errorf("compaction: stream ended without done")
+	return "", nil, fmt.Errorf("compaction: stream ended without done")
 }
 
 // maybeCompact applies the compaction ladder at a step boundary. Triggers

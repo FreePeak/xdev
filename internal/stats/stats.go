@@ -53,6 +53,19 @@ type Options struct {
 	MaxBytes int64
 	// NoRollup disables the on-disk cache (tests, cache debugging).
 	NoRollup bool
+	// Pricer looks up a local price for a model id (see
+	// config.Config.Pricing) and returns nil for a model with none. It is
+	// consulted ONLY for a request the provider priced in tokens alone.
+	// Nil = every unpriced request counts as $0, exactly what a scan with
+	// no models.yml has always done.
+	Pricer func(model string) Pricer
+}
+
+// Pricer is one model's local per-million-token rates. A lookup returning nil
+// is "no local price for this model": the request keeps the honest zero a
+// silent gateway produces, and PricedRequests does not count it.
+type Pricer interface {
+	USD(input, output, cacheRead, cacheWrite, total int64) float64
 }
 
 // Totals is the whole-store aggregate.
@@ -75,15 +88,24 @@ type Totals struct {
 	CacheWrite  int64 `json:"cacheWrite"`
 	TotalTokens int64 `json:"totalTokens"`
 
-	// CostUSD is what the providers actually reported (sum of
-	// usage.cost.total). It is an estimate of spend, not a bill: a provider
-	// that reports no cost contributes 0, which PricedTurns exposes.
-	//
-	// ponytail: no local price table, so a store behind a gateway that
-	// reports nothing (local onegw) reads $0.00. Upgrade path: per-model
-	// prices in models.yml, applied only when PricedTurns < Turns.
-	CostUSD     float64 `json:"costUsd"`
-	PricedTurns int     `json:"pricedTurns"`
+	// CostUSD is what the session cost: every provider-reported
+	// usage.cost.total, plus a local estimate (CostEstimated) for the requests
+	// that reported none. It is an estimate of spend, not a bill, and the two
+	// halves are always separable — CostUSD is their sum.
+	CostUSD float64 `json:"costUsd"`
+	// CostReported is only what providers said, so an estimate can always be
+	// told apart from a provider's own number.
+	CostReported float64 `json:"costReported"`
+	// CostEstimated is the part priced locally from models.yml.
+	CostEstimated float64 `json:"costEstimated"`
+	// BilledRequests is every request with usage: the denominator. It is
+	// above Turns, because a compaction's summarize call is a billed request
+	// that is not a turn.
+	BilledRequests int `json:"billedRequests"`
+	// PricedRequests is the subset that carries a price, reported or
+	// estimated. PricedRequests < BilledRequests is the honest zero a gateway
+	// produces, and the condition the local price table exists to fix.
+	PricedRequests int `json:"pricedRequests"`
 
 	FirstSession time.Time `json:"firstSession,omitempty"`
 	LastSession  time.Time `json:"lastSession,omitempty"`
@@ -91,12 +113,20 @@ type Totals struct {
 
 // ModelStat is one model's share of the scan.
 type ModelStat struct {
-	Model       string  `json:"model"`
-	Sessions    int     `json:"sessions"`
-	Turns       int     `json:"turns"`
-	Input       int64   `json:"input"`
-	Output      int64   `json:"output"`
+	Model string `json:"model"`
+	// Sessions counts session FILES this model appeared in, so a subagent
+	// session folds into its parent's row without inflating Turns.
+	Sessions int   `json:"sessions"`
+	Turns    int   `json:"turns"`
+	Input    int64 `json:"input"`
+	Output   int64 `json:"output"`
+	// CacheRead and CacheWrite are the model's own shares of the two
+	// prompt-cache buckets. CacheWrite was missing here while the
+	// whole-store Totals carried it, so "which model writes the cache"
+	// — the expensive half, at 1.25x the input rate — had no answer, and
+	// the model's tokens did not add up to its own buckets.
 	CacheRead   int64   `json:"cacheRead"`
+	CacheWrite  int64   `json:"cacheWrite"`
 	TotalTokens int64   `json:"totalTokens"`
 	CostUSD     float64 `json:"costUsd"`
 }
@@ -157,6 +187,10 @@ type Report struct {
 	toolIdx  map[string]*ToolStat
 	dayIdx   map[string]*DayStat
 	sessions []sessionCounters
+
+	// pricer is the local price table (Options.Pricer), used only for the
+	// requests a provider priced in tokens alone.
+	pricer func(string) Pricer
 }
 
 // Scan aggregates the session store under opts.DataDir.
@@ -188,6 +222,7 @@ func Scan(opts Options) (*Report, error) {
 	if !opts.NoRollup {
 		cache = loadRollup(opts.DataDir)
 	}
+	rep.pricer = opts.Pricer
 	fresh := rollup{}
 	var bytes int64
 	for _, m := range metas {
@@ -226,7 +261,8 @@ func Scan(opts Options) (*Report, error) {
 	return rep, nil
 }
 
-// fold merges one file's counters into the report.
+// fold merges one file's counters into the report, applying the local price
+// table to the requests that came without one.
 func (r *Report) fold(m session.SessionMeta, c counters) {
 	t := &r.Totals
 	t.Sessions++
@@ -244,7 +280,25 @@ func (r *Report) fold(m session.SessionMeta, c counters) {
 	t.CacheWrite += c.CacheWrite
 	t.TotalTokens += c.TotalTokens
 	t.CostUSD += c.CostUSD
-	t.PricedTurns += c.PricedTurns
+	t.CostReported += c.CostUSD
+	t.PricedRequests += c.PricedTurns
+	t.BilledRequests += c.PricedTurns + unpricedRequests(c.Unpriced)
+	// A price table only ever fills a gap: c.CostUSD above is what providers
+	// said and is never replaced — the estimate is added to it. It does not
+	// reach the per-day rows, because the unpriced buckets are kept per model
+	// and not per model per day; ponytail: dayCostUSD under-reports an
+	// estimated day. Upgrade path: key Unpriced by day as well as model.
+	for model, usd := range r.priceUnpriced(c.Unpriced) {
+		t.CostUSD += usd
+		t.CostEstimated += usd
+		t.PricedRequests += c.Unpriced[model].Turns
+		st := r.modelIndex()[model]
+		if st == nil {
+			st = &ModelStat{Model: model}
+			r.modelIndex()[model] = st
+		}
+		st.CostUSD += usd
+	}
 	if !m.Timestamp.IsZero() {
 		if t.FirstSession.IsZero() || m.Timestamp.Before(t.FirstSession) {
 			t.FirstSession = m.Timestamp
@@ -267,10 +321,12 @@ func (r *Report) fold(m session.SessionMeta, c counters) {
 			st.Input += mc.Input
 			st.Output += mc.Output
 			st.CacheRead += mc.CacheRead
+			st.CacheWrite += mc.CacheWrite
 			st.TotalTokens += mc.TotalTokens
 			st.CostUSD += mc.CostUSD
 		}
 	}
+
 	if len(c.Tools) > 0 {
 		byTool := r.toolIndex()
 		for name, tc := range c.Tools {
@@ -294,6 +350,38 @@ func (r *Report) fold(m session.SessionMeta, c counters) {
 	}
 
 	r.sessions = append(r.sessions, sessionCounters{turns: c.Turns, tokens: c.TotalTokens})
+}
+
+// priceUnpriced estimates the requests whose provider reported no cost,
+// keyed by model. A model with no entry in the scan's Pricer is returned at
+// zero — not omitted — so the caller can add it to the totals without
+// double-counting the model's row, and PricedRequests stays honest about how
+// much of the history is estimated rather than reported.
+func (r *Report) priceUnpriced(unpriced map[string]modelCounters) map[string]float64 {
+	out := make(map[string]float64, len(unpriced))
+	if r.pricer == nil {
+		return out
+	}
+	for model, b := range unpriced {
+		price := r.pricer(model)
+		if price == nil {
+			continue
+		}
+		usd := price.USD(b.Input, b.Output, b.CacheRead, b.CacheWrite, b.TotalTokens)
+		if usd > 0 {
+			out[model] = usd
+		}
+	}
+	return out
+}
+
+// unpricedRequests counts the requests collected as unpriced.
+func unpricedRequests(unpriced map[string]modelCounters) int {
+	n := 0
+	for _, b := range unpriced {
+		n += b.Turns
+	}
+	return n
 }
 
 // modelIndex / toolIndex / dayByName are the fold accumulators: map-keyed
@@ -388,6 +476,10 @@ type wireEntry struct {
 	Type      string       `json:"type"`
 	Timestamp time.Time    `json:"timestamp"`
 	Message   *wireMessage `json:"message"`
+	// Summary is a compaction entry's retained-context message. Its usage is
+	// what the summarize / handoff-document call cost, so it is token and
+	// cost the session paid but which used to land in no counter at all.
+	Summary *wireMessage `json:"summary"`
 }
 
 type wireMessage struct {
@@ -405,8 +497,110 @@ type wireBlock struct {
 	Name string `json:"name"`
 }
 
+// addUsage folds one billed request's usage into the totals and its model's
+// row, and returns what the caller owes the day rollup (tokens, USD). Every
+// figure comes off the persisted per-message Usage: a provider that reports no
+// usage contributes nothing, which PricedTurns exposes.
+//
+// turns says whether this request counts as a TURN in the model's row: a
+// compaction summary is a billed request the session paid for, but it is not
+// the model advancing the work, so it contributes tokens and cost and not a
+// turn. Keeping the flag here is what stops the two callers from drifting.
+func (c *counters) addUsage(m *wireMessage, turns bool) (turnTokens, turnCost float64) {
+	u := m.Usage
+	if u == nil {
+		return 0, 0
+	}
+	name := m.Model
+	if name == "" {
+		name = "unknown"
+	}
+	if c.Models == nil {
+		c.Models = map[string]modelCounters{}
+	}
+	mc := c.Models[name]
+	if turns {
+		mc.Turns++
+	}
+	c.Input += u.Input
+	c.Output += u.Output
+	c.CacheRead += u.CacheRead
+	c.CacheWrite += u.CacheWrite
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.Input + u.Output + u.CacheRead + u.CacheWrite
+	}
+	c.TotalTokens += total
+	mc.Input += u.Input
+	mc.Output += u.Output
+	mc.CacheRead += u.CacheRead
+	mc.CacheWrite += u.CacheWrite
+	mc.TotalTokens += total
+	c.Models[name] = mc
+	turnTokens = float64(total)
+	if u.Cost != nil {
+		// The provider priced it: believed, and never estimated.
+		c.CostUSD += u.Cost.Total
+		mc.CostUSD += u.Cost.Total
+		c.PricedTurns++
+		turnCost = u.Cost.Total
+	} else if c.Unpriced == nil {
+		// Tokens but no price — the exact set a local price table has to
+		// fill, kept aside so it can be priced at report time (models.yml is
+		// not part of the scan). Collected here rather than at the fold site
+		// so a compaction summary with no price is estimated too: it is a
+		// billed request like any other, and this is the one place that
+		// knows what a request reported.
+		c.Unpriced = map[string]modelCounters{}
+		c.Unpriced[name] = c.addUnpriced(name, u, total)
+	} else {
+		c.Unpriced[name] = c.addUnpriced(name, u, total)
+	}
+	return turnTokens, turnCost
+}
+
+// addUnpriced accumulates one unpriced request's buckets. The map's Turns
+// field counts REQUESTS here, not turns: a compaction summary is a request
+// that is not a turn, and BilledRequests is the denominator that needs both.
+func (c *counters) addUnpriced(name string, u *ai.Usage, total int64) modelCounters {
+	uc := c.Unpriced[name]
+	uc.Input += u.Input
+	uc.Output += u.Output
+	uc.CacheRead += u.CacheRead
+	uc.CacheWrite += u.CacheWrite
+	uc.TotalTokens += total
+	uc.Turns++
+	return uc
+}
+
+// addDay books one billed request against its UTC day: tokens and spend move
+// the day's totals, and only a TURN moves its turn count — a compaction
+// summary is spend without work.
+func (c *counters) addDay(e *wireEntry, turn bool, tokens, usd float64) {
+	if e.Timestamp.IsZero() {
+		return
+	}
+	if c.Days == nil {
+		c.Days = map[string]dayCounters{}
+	}
+	day := e.Timestamp.UTC().Format("2006-01-02")
+	d := c.Days[day]
+	if turn {
+		d.Turns++
+	}
+	d.TotalTokens += int64(tokens)
+	d.CostUSD += usd
+	c.Days[day] = d
+}
+
 // counters is the per-file rollup: everything the report needs from one
 // session file, small enough to cache thousands of.
+//
+// CostUSD / PricedTurns here are the PROVIDER-REPORTED subtotal only, and
+// Unpriced keeps the buckets of the requests that came without one. A locally
+// priced estimate is applied when these fold into a report, never here: it
+// depends on models.yml, and a price table edited between two scans must not
+// invalidate the cache — rollupVersion is about the file format, not prices.
 type counters struct {
 	UserMessages int     `json:"userMessages,omitempty"`
 	Injected     int     `json:"injected,omitempty"`
@@ -420,17 +614,29 @@ type counters struct {
 	TotalTokens  int64   `json:"totalTokens,omitempty"`
 	CostUSD      float64 `json:"costUsd,omitempty"`
 	PricedTurns  int     `json:"pricedTurns,omitempty"`
+	// Unpriced are the requests whose provider reported tokens but no cost,
+	// by model: the exact set a local price table estimates.
+	Unpriced map[string]modelCounters `json:"unpriced,omitempty"`
 
 	Models map[string]modelCounters `json:"models,omitempty"`
 	Tools  map[string]toolCounters  `json:"tools,omitempty"`
 	Days   map[string]dayCounters   `json:"days,omitempty"`
 }
 
+// modelCounters is one model's request buckets: what a per-model row is folded
+// from, and what the local price table multiplies (counters.Unpriced is the
+// same shape, holding the requests that came without a price).
+//
+// It is also what rides the on-disk rollup cache, so a field added here
+// without bumping rollupVersion is read back as zero from every session
+// scanned before the change — the rollupVersion comment names that
+// requirement.
 type modelCounters struct {
 	Turns       int     `json:"turns,omitempty"`
 	Input       int64   `json:"input,omitempty"`
 	Output      int64   `json:"output,omitempty"`
 	CacheRead   int64   `json:"cacheRead,omitempty"`
+	CacheWrite  int64   `json:"cacheWrite,omitempty"`
 	TotalTokens int64   `json:"totalTokens,omitempty"`
 	CostUSD     float64 `json:"costUsd,omitempty"`
 }
@@ -476,6 +682,14 @@ func readFileCounters(path string) (counters, error) {
 }
 
 func (c *counters) addEntry(e *wireEntry) {
+	// A compaction entry's summary carries a billed request's usage. It is
+	// folded as tokens and cost but is NOT a turn: the turn count is what
+	// "how many times the model was asked", and a summarize call asks
+	// something different (it compresses, it does not advance the work).
+	if e.Type == "compaction" && e.Summary != nil && e.Summary.Usage != nil {
+		tokens, usd := c.addUsage(e.Summary, false)
+		c.addDay(e, false, tokens, usd)
+	}
 	if e.Type != "message" || e.Message == nil {
 		return
 	}
@@ -496,35 +710,7 @@ func (c *counters) addEntry(e *wireEntry) {
 		if name == "" {
 			name = "unknown"
 		}
-		if c.Models == nil {
-			c.Models = map[string]modelCounters{}
-		}
-		mc := c.Models[name]
-		mc.Turns++
-		var turnTokens, turnCost float64
-		if u := m.Usage; u != nil {
-			c.Input += u.Input
-			c.Output += u.Output
-			c.CacheRead += u.CacheRead
-			c.CacheWrite += u.CacheWrite
-			total := u.TotalTokens
-			if total == 0 {
-				total = u.Input + u.Output + u.CacheRead + u.CacheWrite
-			}
-			c.TotalTokens += total
-			mc.Input += u.Input
-			mc.Output += u.Output
-			mc.CacheRead += u.CacheRead
-			mc.TotalTokens += total
-			turnTokens = float64(total)
-			if u.Cost != nil {
-				c.CostUSD += u.Cost.Total
-				mc.CostUSD += u.Cost.Total
-				c.PricedTurns++
-				turnCost = u.Cost.Total
-			}
-		}
-		c.Models[name] = mc
+		turnTokens, turnCost := c.addUsage(m, true)
 		for _, b := range m.Content {
 			if b.Type != "toolCall" {
 				continue
@@ -537,17 +723,7 @@ func (c *counters) addEntry(e *wireEntry) {
 			t.Calls++
 			c.Tools[b.Name] = t
 		}
-		if !e.Timestamp.IsZero() {
-			if c.Days == nil {
-				c.Days = map[string]dayCounters{}
-			}
-			day := e.Timestamp.UTC().Format("2006-01-02")
-			d := c.Days[day]
-			d.Turns++
-			d.TotalTokens += int64(turnTokens)
-			d.CostUSD += turnCost
-			c.Days[day] = d
-		}
+		c.addDay(e, true, turnTokens, turnCost)
 	case "toolResult":
 		if m.IsError {
 			c.ToolErrors++

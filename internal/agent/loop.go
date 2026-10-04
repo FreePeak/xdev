@@ -96,6 +96,30 @@ func (h TurnHooksFunc) OnTurnEnd(s ai.StopReason, err error) {
 	}
 }
 
+// CompactionUsageHook is the optional TurnHooks extension for the token
+// usage a compaction's side call cost: the summarize or handoff document call
+// that read the discarded history and wrote the summary. Separate from
+// TurnHooks (the GoalHook shape) so a hooks implementation that only wants
+// the notification stays valid — one that does not implement this counts no
+// side calls, which is the old behaviour, not an error.
+//
+// Why not a second argument on OnCompaction: that number is the context size
+// BEFORE the compaction, which is what the UI narrates, and no counter should
+// be able to read it as tokens billed.
+type CompactionUsageHook interface{ OnCompactionUsage(*ai.Usage) }
+
+// CompactionUsageNotify adapts a TurnHooks to a compaction-usage callback
+// (nil when the hooks do not implement CompactionUsageHook).
+func CompactionUsageNotify(h TurnHooks) func(*ai.Usage) {
+	if h == nil {
+		return nil
+	}
+	if ch, ok := h.(CompactionUsageHook); ok {
+		return ch.OnCompactionUsage
+	}
+	return nil
+}
+
 // compactionNotifier bridges the compaction call path onto the hook bus:
 // compact.go invokes TurnHooks.OnCompaction after persisting the summary
 // (that file is owned elsewhere this wave, so the seam lives here).
@@ -686,19 +710,19 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		if len(msg.ToolCalls()) == 0 {
 			a.Hooks.OnMessageEnd(msg)
 			// Messages queued during the final turn continue the run
-			// (queued steering is never discarded).
+			// (queued steering is never discarded). They are NOT announced
+			// here: the branches below decide their fate first — a continuation
+			// or an empty-turn nudge outranks them, and otherwise the run ENDS
+			// right after. This used to announce them before that decision, so
+			// a host that retires its pending rows on the callback told the
+			// person their message had been delivered — printed a row for it
+			// and counted a turn — while the text went nowhere (#157). Delivery
+			// is announced at the persist, which is the only place it is a fact.
+			//
+			// The step boundary at the top of the loop is different: those
+			// messages are injected into the very next provider request, so its
+			// announcement is immediate and correct.
 			queued := a.drainSteering()
-			// Same announcement as the step boundary above: a message that
-			// arrives after the model's last tool call continues THIS run
-			// rather than waiting for the next one, and the host's pending
-			// rows must retire when it does.
-			if a.SteeringDelivered != nil && len(queued) > 0 {
-				texts := make([]string, 0, len(queued))
-				for _, s := range queued {
-					texts = append(texts, s.Text)
-				}
-				a.SteeringDelivered(texts)
-			}
 			// Todo reminder (M3/TODO-tracker): an assistant turn that
 			// ends with open todo work gets a developer-role reminder
 			// injected into the history so the model sees it next turn.
@@ -842,10 +866,24 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				return msg, nil
 			}
 			history = append(history, *msg)
+			// Persist, THEN announce. This is the only place a final-turn
+			// steering message reaches the conversation: the run continues with
+			// them below, or ends right after — and in the ending case the
+			// session's run-end flush starts the next turn, which rebuilds the
+			// history from this store. So the persist is the delivery, and the
+			// announcement must not lead it by a single statement: a host that
+			// prints a row and counts a turn from this callback is reporting a
+			// durable user message, and any crash in between would otherwise
+			// lose a prompt the UI had already shown as delivered (#157).
+			texts := make([]string, 0, len(queued))
 			for _, s := range queued {
 				m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
 				history = append(history, m)
 				a.persist(m)
+				texts = append(texts, s.Text)
+			}
+			if a.SteeringDelivered != nil && len(texts) > 0 {
+				a.SteeringDelivered(texts)
 			}
 			if cont != "" {
 				m := ai.Message{

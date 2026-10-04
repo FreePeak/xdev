@@ -324,7 +324,9 @@ func TestHUDStatusLineBackground(t *testing.T) {
 }
 
 // TestSpinnerFramesFromTheme: the running indicator cycles the frames the
-// theme names, not the built-in braille list.
+// theme names, not the built-in braille list, and it LEADS the divider's
+// model pair (it used to trail "model · level", where the moving glyph read
+// as part of the static reasoning label).
 func TestSpinnerFramesFromTheme(t *testing.T) {
 	app, scr := drawnApp(t, 100, 24)
 	th := theme.Load("groknight")
@@ -336,16 +338,16 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 	app.st.spinnerIdx = 0
 	app.mu.Unlock()
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "test/free · X") {
-		t.Fatalf("theme frame 0 not drawn:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "X · test/free") {
+		t.Fatalf("theme frame 0 not drawn ahead of the model:\n%s", text)
 	}
 
 	app.mu.Lock()
 	app.st.spinnerIdx = 1
 	app.mu.Unlock()
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "test/free · Y") {
-		t.Fatalf("theme frame 1 not drawn:\n%s", text)
+	if text := screenText(scr); !strings.Contains(text, "Y · test/free") {
+		t.Fatalf("theme frame 1 not drawn ahead of the model:\n%s", text)
 	}
 }
 
@@ -480,9 +482,9 @@ func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 	prim, w, _ := scr.GetContents()
 	x0, y0 := -1, -1
 	for i := range prim {
-		// The top bar also leads with ❯ at (0,0); the band row is a
-		// transcript row, so below the bar and flush left.
-		if i%w == 0 && i >= w && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
+		// The band row is a transcript row, and with no top bar it can be
+		// row 0; what identifies it is the leading ❯ and flush left.
+		if i%w == 0 && len(prim[i].Runes) > 0 && prim[i].Runes[0] == '❯' {
 			x0, y0 = i%w, i/w
 			break
 		}
@@ -1152,98 +1154,96 @@ func TestAskCardTimeoutNotices(t *testing.T) {
 	}
 }
 
-// TestTopBarCarriesBranchAndLastPrompt pins the persistent header: once a
-// transcript is on screen, row 0 keeps the git branch AND the newest user
-// prompt collapsed to one line — so the request being answered stays visible
-// even while its transcript band scrolls away. With a single prompt the bar
-// names it once, not twice. Neither the directory path nor the model name is
-// on the bar (the status row and the composer's info divider carry them; both
-// removals were user-requested).
-func TestTopBarCarriesBranchAndLastPrompt(t *testing.T) {
+// TestNoTopBarAndBranchOnTheStatusRow pins the chrome contract after the top
+// bar was dropped: row 0 belongs to the transcript, and the git branch rides
+// the status row beside the working directory — one surface that reads as a
+// single location. The running spinner never comes back to that row either;
+// it lives in the composer's divider (TestSpinnerFramesFromTheme).
+func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
-	dir := t.TempDir()
-	app.SetLocation(dir)
+	app.SetLocation(t.TempDir())
 	app.mu.Lock()
 	app.branch = "fix/boxes"
+	app.st.Model = "some-model"
 	app.mu.Unlock()
 	app.AddUserBlock("fix the   tool\noutput box please")
 	app.AddSystemBlock(strings.Repeat("line\n", 60)) // guarantees hidden rows
 	app.draw()
 
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
-	bar := rows[0]
-	for _, want := range []string{"❯ fix/boxes", "· fix the tool"} {
-		if !strings.Contains(bar, want) {
-			t.Fatalf("top bar %q missing %q", bar, want)
+	// Row 0 is the session's own first prompt, not a header: no branch on it,
+	// and the prompt text is where it has always been.
+	if top := rows[0]; strings.Contains(top, "fix/boxes") || !strings.Contains(top, "fix the") {
+		t.Fatalf("row 0 %q must be transcript content, not a header", top)
+	}
+
+	// The branch is on the status row, next to the path, in that order.
+	status := lastRow(screenText(scr))
+	pathAt := strings.Index(status, "·")
+	branchAt := strings.Index(status, "fix/boxes")
+	if branchAt < 0 || pathAt < 0 || pathAt > branchAt {
+		t.Fatalf("status row %q must carry the directory then the branch", status)
+	}
+
+	// Running: the spinner belongs to the divider, not to row 0 or the
+	// status row.
+	th := theme.Load("groknight")
+	th.Symbols = theme.Symbols{Status: []string{"X", "Y"}}
+	app.SetTheme(th)
+	app.SetRunning(true)
+	app.mu.Lock()
+	app.st.spinnerIdx = 0
+	app.mu.Unlock()
+	app.draw()
+	text := screenText(scr)
+	first := strings.Split(strings.TrimRight(text, "\n"), "\n")[0]
+	for _, where := range []struct {
+		what string
+		ln   string
+	}{{"row 0", first}, {"the status row", lastRow(text)}} {
+		if strings.Contains(where.ln, "X ") || strings.Contains(where.ln, "Y ") {
+			t.Fatalf("a spinner frame leaked onto %s: %q", where.what, where.ln)
 		}
 	}
-	if got := strings.Count(bar, "fix the tool"); got != 1 {
-		t.Fatalf("one prompt must not be painted twice on %q", bar)
-	}
-	if dirName := dir[strings.LastIndex(dir, "/")+1:]; strings.Contains(bar, dirName) {
-		t.Fatalf("top bar still carries the directory path: %q", bar)
-	}
-	app.mu.Lock()
-	model := app.st.Model
-	app.mu.Unlock()
-	if model == "" || strings.Contains(bar, model) {
-		t.Fatalf("top bar %q must not carry the model name %q", bar, model)
-	}
-	// The transcript starts below the bar: the bar is chrome, content rows
-	// belong to the scrollback — and at the tail of a 60-row block the bar
-	// still names the last prompt. A row the sticky header pinned sits above
-	// the scrollback, so the check looks at the first CONTENT row.
-	body := strings.Join(rows[1:], "\n")
-	if !strings.Contains(body, "line") {
-		t.Fatalf("transcript content lost to the top bar: %q", rows[1])
+	if !strings.Contains(text, "X · some-model") {
+		t.Fatalf("the spinner belongs in the divider, not on a chrome row:\n%s", text)
 	}
 }
 
-// TestTopBarCarriesFirstAndLastPrompt: the header names the session's opening
-// request as well as the newest one, so a long chat still says what it is about
-// after the first exchange has scrolled out of the viewport. The first entry is
-// clipped and the newest keeps the wider share — the request being answered is
-// the one the bar must not truncate away — and the bar ends in air instead of
-// painting off the right edge.
-func TestTopBarCarriesFirstAndLastPrompt(t *testing.T) {
-	app, scr := newTestApp(t, 100, 24)
+// TestStatusRowKeepsBranchAndTruncatesThePath pins the two halves of the
+// location's width argument: the branch claims cells first and a long path
+// gives way around it, while a branch too wide for the row leaves whole rather
+// than printing half of itself.
+func TestStatusRowKeepsBranchAndTruncatesThePath(t *testing.T) {
+	app, scr := newTestApp(t, 100, 20)
+	app.AddSystemBlock("ready")
+	app.SetLocation("/Volumes/work/harvey/freepeak/checkout/xdev-feature/deep/nested/subdir")
 	app.mu.Lock()
-	app.branch = "feat/topbar"
+	app.branch = "feat/branch-in-status-row"
 	app.mu.Unlock()
-	app.AddUserBlock("port the top bar to carry the first prompt of the session too please")
-	app.AddAssistantBlock("done — three files touched")
-	app.AddUserBlock("and clip them to the width")
-	app.AddSystemBlock(strings.Repeat("line\n", 60))
 	app.draw()
 
-	bar := strings.TrimRight(strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0], " ")
-	// The opening prompt keeps the front of its collapsed line and pays for it
-	// with an ellipsis; the newest prompt is what the bar refuses to cut.
-	if !strings.Contains(bar, "· port the top bar to carry the first prompt of the ") {
-		t.Fatalf("first prompt missing or misclipped from top bar %q", bar)
+	// A path longer than the row: the tail that identifies the project and the
+	// branch both survive, with the cut marked at the front.
+	row := lastRow(screenText(scr))
+	if !strings.Contains(row, "xdev-feature") || !strings.Contains(row, "feat/branch-in-status-row") {
+		t.Fatalf("a long path must truncate around the branch, not swallow it: %q", row)
 	}
-	if !strings.HasSuffix(bar, "… · and clip them to the width") {
-		t.Fatalf("newest prompt clipped or misplaced on top bar %q", bar)
+	if !strings.Contains(row, "…") {
+		t.Fatalf("a truncated path must mark its cut: %q", row)
 	}
-	if len([]rune(bar)) > 99 {
-		t.Fatalf("top bar spills past the right edge (%d cells): %q", len([]rune(bar)), bar)
-	}
-}
 
-// TestTopBarNarrowKeepsNewestPrompt: on a bar too small for both, the newest
-// prompt — the request on screen — is the one that survives.
-func TestTopBarNarrowKeepsNewestPrompt(t *testing.T) {
-	app, scr := newTestApp(t, 44, 24)
-	app.AddUserBlock(strings.Repeat("first ", 20))
-	app.AddUserBlock("second")
-	app.AddSystemBlock(strings.Repeat("line\n", 20))
+	// A branch with no room at all leaves the row entirely — clipped in the
+	// middle it would read as a longer branch name than it is.
+	app.mu.Lock()
+	app.branch = strings.Repeat("long-branch-name-", 6)
+	app.mu.Unlock()
 	app.draw()
-
-	bar := strings.TrimRight(strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")[0], " ")
-	if !strings.Contains(bar, "· second") {
-		t.Fatalf("narrow bar must keep the newest prompt: %q", bar)
+	row = lastRow(screenText(scr))
+	if strings.Contains(row, "long-branch-name") {
+		t.Fatalf("a branch with no room must be dropped whole, not clipped: %q", row)
 	}
-	if len([]rune(bar)) > 43 {
-		t.Fatalf("narrow bar spills past the right edge (%d cells): %q", len([]rune(bar)), bar)
+	if !strings.Contains(row, "xdev-feature") {
+		t.Fatalf("the path is what the row keeps: %q", row)
 	}
 }
