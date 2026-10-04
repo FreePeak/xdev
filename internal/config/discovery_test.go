@@ -143,3 +143,67 @@ func TestDiscoverModelsInjectV1Path(t *testing.T) {
 		t.Fatalf("path = %q, want /v1/models", path)
 	}
 }
+
+// TestDiscoverModelsProviderWindowFillsWindowless pins the rung below a
+// stated context_length: a gateway answering bare {id, object, owned_by}
+// (onegw does that for all 108 of its ids, measured 2026-10-04) leaves every
+// discovered model at ContextWindow 0, and compaction then falls through to
+// the compiled 200000 default. The provider's own contextWindow is the one
+// honest number an operator has for that case, so discovery hands it to
+// every windowless entry instead of reporting "unknown".
+func TestDiscoverModelsProviderWindowFillsWindowless(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"bare"},{"id":"stated","context_length":64000},{"id":"out-token","max_tokens":8192}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	pc := &ProviderConfig{
+		BaseURL: srv.URL, Discovery: &DiscoveryConfig{Type: DiscoveryOpenAIModels},
+		ContextWindow: 1_000_000,
+		Models:        []ModelConfig{{ID: "pinned", ContextWindow: 4096}},
+	}
+	got, err := DiscoverModels(context.Background(), pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range got {
+		switch m.ID {
+		case "pinned":
+			if m.ContextWindow != 4096 {
+				t.Fatalf("a per-model pin lost: %+v", m)
+			}
+		case "stated":
+			if m.ContextWindow != 64000 {
+				t.Fatalf("a stated context_length lost: %+v", m)
+			}
+		case "bare":
+			if m.ContextWindow != 1_000_000 {
+				t.Fatalf("windowless entry did not take the provider window: %+v", m)
+			}
+		case "out-token":
+			// max_tokens stays the smaller rung it always was; the
+			// provider's window is a ceiling, not a floor that shrinks
+			// below a stated per-model bound.
+			if m.ContextWindow != 1_000_000 || m.MaxTokens != 8192 {
+				t.Fatalf("max_tokens window lost: %+v", m)
+			}
+		}
+	}
+}
+
+// TestDiscoverModelsNoProviderWindowStaysUnknown: with no provider window
+// configured the entry keeps reporting unknown (0), which is what lets
+// modelWindow's ladder decide. Discovery must not invent a default.
+func TestDiscoverModelsNoProviderWindowStaysUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"bare"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	pc := &ProviderConfig{BaseURL: srv.URL, Discovery: &DiscoveryConfig{Type: DiscoveryOpenAIModels}}
+	got, err := DiscoverModels(context.Background(), pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ContextWindow != 0 {
+		t.Fatalf("discovery invented a window: %+v", got)
+	}
+}

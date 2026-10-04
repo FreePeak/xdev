@@ -95,7 +95,7 @@ func DiscoverModels(ctx context.Context, pc *ProviderConfig) ([]ModelConfig, err
 		Data []discoveredModel `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err == nil && len(parsed.Data) > 0 {
-		return mergeDiscovered(pc.Models, parsed.Data), nil
+		return mergeDiscovered(pc.Models, pc.ContextWindow, parsed.Data), nil
 	}
 	// Some servers (and ollama's own shape) return {"models":[{...}]} or a
 	// bare array instead of {"data":[...]}.
@@ -103,17 +103,17 @@ func DiscoverModels(ctx context.Context, pc *ProviderConfig) ([]ModelConfig, err
 		Models []discoveredModel `json:"models"`
 	}
 	if err := json.Unmarshal(raw, &alt); err == nil && len(alt.Models) > 0 {
-		return mergeDiscovered(pc.Models, alt.Models), nil
+		return mergeDiscovered(pc.Models, pc.ContextWindow, alt.Models), nil
 	}
 	var bare []discoveredModel
 	if err := json.Unmarshal(raw, &bare); err == nil && len(bare) > 0 {
-		return mergeDiscovered(pc.Models, bare), nil
+		return mergeDiscovered(pc.Models, pc.ContextWindow, bare), nil
 	}
 	return nil, fmt.Errorf("config: discovery %s: unrecognized model list", endpoint)
 }
 
 // mergeDiscovered layers discovered models under the pinned ones.
-func mergeDiscovered(pinned []ModelConfig, found []discoveredModel) []ModelConfig {
+func mergeDiscovered(pinned []ModelConfig, providerWindow int, found []discoveredModel) []ModelConfig {
 	out := make([]ModelConfig, 0, len(pinned)+len(found))
 	seen := map[string]bool{}
 	for _, m := range pinned {
@@ -129,8 +129,14 @@ func mergeDiscovered(pinned []ModelConfig, found []discoveredModel) []ModelConfi
 		}
 		seen[id] = true
 		m := ModelConfig{ID: id, Name: id, ContextWindow: d.ContextLength, MaxTokens: d.MaxTokens}
-		if m.ContextWindow == 0 && d.MaxTokens > 0 {
-			m.ContextWindow = d.MaxTokens
+		// Two rungs below a stated context_length, in the order they were
+		// already: max_tokens is the only other number such a list carries
+		// and ollama-style servers do report it as the window, then the
+		// provider's own answer for every model whose list states nothing
+		// (a gateway answering bare {id, object, owned_by} — measured
+		// 2026-10-04: onegw states neither number for any of its 108 ids).
+		if m.ContextWindow == 0 {
+			m.ContextWindow = max(d.MaxTokens, providerWindow)
 		}
 		if d.SupportsThinking != nil {
 			m.Reasoning = *d.SupportsThinking

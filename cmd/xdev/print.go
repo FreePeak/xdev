@@ -884,8 +884,14 @@ func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg
 	return ai.NewInBandProvider(prov, format), nil
 }
 
-// modelWindow resolves the context window for one provider/model pair.
-// A window the catalog states is returned as-is; anything else falls back to
+// modelWindow resolves the context window for one provider/model pair, most
+// specific rung first: a window the catalog states for THIS model, then the
+// provider's own contextWindow (a gateway's uniform answer, which discovery
+// folds into every windowless entry it builds), then
+// agent.ResolveMaxContextTokens() — XDEV_MAX_CONTEXT_TOKENS when set, else
+// MaxContextTokensDefault. Returning 0 here would silently disable
+// compaction for the model, since every entry point on the ladder
+// (maybeCompact, HandoffDue) gates on ContextWindow > 0.
 // agent.ResolveMaxContextTokens() — XDEV_MAX_CONTEXT_TOKENS when set, else
 // MaxContextTokensDefault. Returning 0 here would silently disable
 // compaction for the model, since every entry point on the ladder
@@ -911,6 +917,14 @@ func modelWindow(cfg *config.Config, provider, model string) int {
 		if m.ID == model && m.ContextWindow > 0 {
 			return m.ContextWindow
 		}
+	}
+	// The provider's own window is the rung below a stated per-model one.
+	// Discovery already folds it into every windowless entry it builds, so
+	// this only fires for a model the catalog does not list at all — a
+	// gateway that swaps its lineup without a /v1/models read reaching
+	// this process.
+	if pc.ContextWindow > 0 {
+		return pc.ContextWindow
 	}
 	return agent.ResolveMaxContextTokens()
 }
