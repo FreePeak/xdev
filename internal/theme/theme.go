@@ -189,8 +189,11 @@ const (
 	StatusLineOutput    = "status_line_output"
 	StatusLineCost      = "status_line_cost"
 	StatusLineSubagents = "status_line_subagents"
-	// StatusLineMode paints the session mode (mode.go: /mode, the Shift-Tab
-	// cycle). Optional like the diff bands — NOT in the omp 66-token
+	// StatusLineMode is the FALLBACK ink for the session mode (mode.go: /mode,
+	// the Shift-Tab cycle) — what App.modeToken uses for a mode name the
+	// per-mode map does not carry. The four modes xdev ships each wear their
+	// own semantic ink instead (Claude Code's mode map: default/plan/accept/
+	// bypass). Optional like the diff bands — NOT in the omp 66-token
 	// contract, because omp has no mode surface — so a theme that omits it
 	// derives it from Accent (extraChains) rather than failing to load.
 	StatusLineMode = "status_line_mode"
@@ -299,11 +302,17 @@ func groknightSlots() map[string]Color {
 		MdCodeBg:           Hex("#1c1c1c"), // rgb(28,28,28)
 		MdMuted:            Hex("#6c6c6c"), // COMMENT
 		LinkFg:             Hex("#7aa6da"),
-		// Status-line hues: they keep the pre-segment rendering (model
-		// divider in gray_dim, counters in gray). StatusLineBg stays unset
-		// so the launch themes keep today's transparent status row.
+		// Status-line hues: StatusLineBg stays unset so the launch themes
+		// keep today's transparent status row.
+		//
+		// The model wears the ACCENT, not gray_dim (the comment above this
+		// block used to say otherwise): omp paints the model name through
+		// accentFg, and 43 of the 98 themes it ships resolve statusLineModel
+		// to `accent` — the name is the session's identity, and identity is
+		// what the accent is for. Gray_dim is right for the separators, which
+		// only have to divide the row's parts.
 		StatusLineSep:       Hex("#585858"),
-		StatusLineModel:     Hex("#585858"),
+		StatusLineModel:     Hex("#bb9af7"), // MAGENTA, accent_assistant
 		StatusLinePath:      Hex("#6c6c6c"),
 		StatusLineGitClean:  Hex("#9ece6a"),
 		StatusLineGitDirty:  Hex("#f7768e"),
@@ -329,10 +338,9 @@ func groknightSlots() map[string]Color {
 		ThinkingXhigh:       Hex("#c6a6e8"),
 		ThinkingMax:         Hex("#bb9af7"),
 		StatusLineSubagents: Hex("#bb9af7"),
-		// The session mode (mode.go). Magenta, the same accent the
-		// subagents and thinking read in: the mode is the harness's own
-		// posture, not content, and on the divider the model name beside it
-		// is the grey every other label already wears.
+		// The session mode (mode.go). The mode now wears a PER-MODE ink
+		// (App.modeToken), so this slot is only what an unrecognised mode
+		// name falls back to; it keeps the accent for that case.
 		StatusLineMode: Hex("#bb9af7"),
 		// Diff rows, Claude Code's model (v2.1.287, the diff renderer): the
 		// +/- marker wears the palette's own green/red — the pair the status
@@ -395,9 +403,11 @@ func grokdaySlots() map[string]Color {
 		MdCodeBg:           Hex("#e4e4e4"), // rgb(228,228,228)
 		MdMuted:            Hex("#767676"), // COMMENT
 		LinkFg:             Hex("#2F64D2"), // BLUE
-		// Status-line hues (see groknightSlots); StatusLineBg unset.
+		// Status-line hues (see groknightSlots); StatusLineBg unset. The
+		// model takes the day theme's MAGENTA, for the same reason the dark
+		// twin takes its accent.
 		StatusLineSep:       Hex("#a5a5a5"),
-		StatusLineModel:     Hex("#a5a5a5"),
+		StatusLineModel:     Hex("#7D4BC6"), // MAGENTA, accent_assistant
 		StatusLinePath:      Hex("#767676"),
 		StatusLineGitClean:  Hex("#378E23"),
 		StatusLineGitDirty:  Hex("#cd3048"),
