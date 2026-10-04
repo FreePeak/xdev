@@ -4425,13 +4425,26 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 		header, body = splitDiffHeader(body)
 	}
 
+	// Syntax highlighting (toolhl.go) runs on the plain-body path only, and
+	// only for a result whose own header names a language or whose tool is
+	// bash-with-shell-evidence. Everything else keeps the one-run wrap/textline
+	// path below it, byte for byte, including when NO_COLOR or the theme leaves
+	// the syntax_* slots unpainted.
+	//
+	// ponytail: the lexer runs over EVERY source row of the body, not just the
+	// head+tail window that gets painted, because wrap() already materialises
+	// every row to decide that window — lexing only the survivors would need a
+	// second counting pass to learn the row count first. So a settled result
+	// costs one extra pass over its own text, once: rowindex.go re-renders only
+	// when renderKey moves, so this is not per-frame. Measured on a 2000-row
+	// body (toolhl_bench_test.go): 784 KB / 5291 allocs coloured against
+	// 836 KB / 3301 allocs flat. Upgrade path if a 200k-line bash result ever
+	// shows up in a profile: window first, colour second.
 	var rows []line
 	if diff != "" {
 		rows = a.diffCells(sanitizeOutput(diff), inner)
 	} else {
-		for _, wl := range wrap(body, inner) {
-			rows = append(rows, textline(wl, bodySt))
-		}
+		rows = a.toolBodyRows(body, inner, bodySt, dimSt, a.toolOutputHL(b))
 	}
 
 	// A live box shows the newest rows and nothing else. Its head is not
