@@ -5495,35 +5495,33 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 }
 
 // drawStatusRow renders the bottom row: the working directory and its git
-// branch on the left (statusLocation), then the session mode
-// (drawStatusMode), then the configured HUD segments (settings
-// statusLine.segments) right-aligned
+// branch on the left (drawStatusLocation), then the configured HUD segments
+// (settings statusLine.segments) right-aligned
 // (caller holds a.mu). The keyboard chords used to live on the left; /hotkeys
 // and the welcome menu carry them now, which frees the room the metrics need
 // on a small terminal. The row belongs to the main pane: its budget and its
 // right edge are the pane's, not the terminal's, so the metrics never paint
 // into the sidebar's columns.
+//
+// The session mode used to sit here too, right of the branch. It rides the
+// composer divider instead — that divider already spells the same posture
+// ("model · high · plan"), and beside the branch the second copy read as a
+// fourth word of the branch name.
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
 	w := a.rightEdge()
 	// The running tool call leads the row on the left ("● <name>", with the
-	// room it needs reserved), then the location, then the mode; the
-	// configured segments stay right-aligned. The mode sits beside the
-	// location because that is the pair a user reads together — where you are
-	// and what you may do here — and it is in the mode ink, so the two never
-	// read as one string.
-	modeW := a.modeChipWidth()
+	// room it needs reserved), then the location; the configured segments
+	// stay right-aligned.
 	cmdLabel := a.hudCommand()
 	if cmdLabel != "" {
-		end := a.drawStatusLocation(y, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1-modeW)
-		end = a.drawStatusMode(y, end+2)
+		end := a.drawStatusLocation(y, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
 		a.drawHUD(y, w, end, parts)
 		return
 	}
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the location is what shrinks.
-	end := a.drawStatusLocation(y, w-2-hudEssentialWidth(parts)-1-modeW)
-	end = a.drawStatusMode(y, end)
+	end := a.drawStatusLocation(y, w-2-hudEssentialWidth(parts)-1)
 	a.drawHUD(y, w, end, parts)
 }
 

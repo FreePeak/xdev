@@ -3000,3 +3000,19 @@ Verified on the built binary, stock `origin/main` against this branch through th
 Cost, 2000-row body (`toolhl_bench_test.go`): 783 KB / 5290 allocs coloured against 836 KB / 3302 allocs flat, and `LooksLikeShell` is capped at `shellSampleRows` — a 2000-row non-shell log costs 99 us / 1000 allocs, exactly 200 rows lexed, so a 200k-line log cannot cost 200k lexes. `rowindex.go` re-renders a block only when `renderKey` moves, so all of it is paid once per settled block rather than per frame. Styling runs BEFORE wrapping, so one lex serves every row a long source line wraps into.
 
 Tests: `internal/tui/toolhl_test.go` — per-row colours through the real `toolBoxLines`, byte preservation (every run concatenated back to the original lines, including multibyte text and an unterminated comment), the flat fallback for an unknown extension and for a pathless non-bash tool, the shell-vs-log separation, diff bands surviving the change, a long line wrapping without losing colour, `NO_COLOR`, the `splitRowNumber` table, and two drift guards that fail if `extLang` names a lexer this build does not ship or a lexer in `codeLangs` gains no extension.
+
+---
+
+*Last updated: 2026-10-04 (`fix/statusbar-no-mode` — user request: "remove the mode next to the branch name in the bottom status bar").* The bottom status row painted the session mode a second time: `~/work/xdev · main · plan`, with `main` in the tree's clean/dirty ink and `plan` in the mode ink, separated only by the ` · ` that already joins the path to the branch. Three pieces of one grey row read as one string, so `· plan` looked like a fourth word of the branch. The mode already has a home — the composer's info divider spells it as part of the request it modifies, `╰ mock/mock-1 · auto · plan ──╯` — and the `/mode` transition announces it in the transcript. Deletion, not a knob: `drawStatusRow` no longer calls `drawStatusMode`, and `drawStatusMode`/`modeChipWidth` are gone with their only callers, so `modeChipWidth`'s reserved cells return to the path (the location was shrinking to make room for a word with a home elsewhere). The mode is still reachable everywhere it was: `dividerParts` and `modeToken` are untouched, and `modeLabel`'s contract (empty when the seam is unwired) survives.
+
+Verified against the **built binary** driven through a real pty with `pyte` resolving the frame, stock `origin/main` and this branch through the identical script after `/thinking high` + `/mode plan`:
+
+```
+                                     prompt-box divider                bottom status row
+[xdev-stock ]  ╰ mock/mock-1 · high · plan ─╯    /tmp/w-p-s · plan
+[xdev-fixed]  ╰ mock/mock-1 · high · plan ─╯    /tmp/w-p-f
+```
+
+The prompt box keeps the mode beside the thinking level in **both** arms — that is the one that survives, and it is the same divider that was already showing it, not a new home. Only the status row's second copy is gone.
+
+The divider repaints on a `/mode` flip in both arms; only stock leaves the mode on the status row. Tests: `internal/tui/mode_test.go` — `TestModeRidesTheDividerNotTheStatusRow` (the divider carries the mode, the status row must not, through a flip) and `TestModeWearsItsOwnInk` (the ink pin, now scoped to the divider alone). Both fail against stock.
