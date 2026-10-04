@@ -136,3 +136,51 @@ func TestDiffNO_COLORPaintsNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryBuiltinPalettePaintsTheDiff runs the band contract against every
+// built-in theme, not just groknight. A ported palette is a built-in, and a
+// palette that named all seven diff slots could still land on one value (a
+// word band equal to its row band teaches nothing) or on the terminal's own
+// answer — both are invisible to a test that only ever loads the launch pair.
+// The fixture is generic on purpose (a/f.go, three context lines); it is
+// written from the unified-diff grammar, not harvested from anything.
+func TestEveryBuiltinPalettePaintsTheDiff(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	for name := range theme.Builtins() {
+		app := idxApp(120, 40)
+		app.SetTheme(theme.Load(name))
+		var want []tcell.Color
+		for _, slot := range []string{theme.ToolDiffAddedBg, theme.ToolDiffAddedWordBg,
+			theme.ToolDiffRemovedBg, theme.ToolDiffRemovedWordBg} {
+			c, ok := app.th.Slot(slot)
+			if !ok {
+				t.Errorf("%s: %s is unset, so the diff band is the terminal's own", name, slot)
+				continue
+			}
+			want = append(want, app.cellColor(c))
+		}
+		if len(want) != 4 {
+			continue
+		}
+		if want[0] == want[1] || want[2] == want[3] {
+			t.Errorf("%s: a word band equals its row band", name)
+		}
+		if want[0] == want[2] || want[1] == want[3] {
+			t.Errorf("%s: added and removed collapsed onto one band", name)
+		}
+		striped := 0
+		for _, ln := range app.diffCells(diffFixture, 40) {
+			bg, ok := banded(ln)
+			if !ok {
+				continue
+			}
+			if !slices.Contains(want, bg) {
+				t.Fatalf("%s: row %q is banded in %v, want one of the palette's four", name, runsText(ln.runs), bg)
+			}
+			striped++
+		}
+		if striped == 0 {
+			t.Errorf("%s: the fixture painted no band at all", name)
+		}
+	}
+}
