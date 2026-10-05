@@ -14,6 +14,14 @@ import (
 // is pinned by number: it is the wait a human's question buys, so moving
 // the constant must fail here rather than in a stalled CI run.
 func TestAskTimeoutLayersAndDecodes(t *testing.T) {
+	// These assert the SHIPPED DEFAULTS, so they must read the shipped
+	// defaults — not the developer's own ~/.xdev/agent/config.yml, which
+	// LoadSettings folds in as the global layer. Both tests failed on any
+	// machine whose real config sets ask.* (autoAnswer: true,
+	// timeout: 300 is exactly what those keys are for), which is a test
+	// that measures the developer's machine, not the code. Every other
+	// config test in this package already sets this.
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	cwd := t.TempDir()
 	s, err := LoadSettings(cwd, nil)
 	if err != nil {
@@ -41,6 +49,7 @@ func TestAskTimeoutLayersAndDecodes(t *testing.T) {
 // recommendation. ask.timeout alone must never turn it on — a user who
 // raised the wait did not ask to be auto-answered.
 func TestAskAutoAnswerDefaultsOffAndLayersOn(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir()) // same reason as above: this asserts the default
 	cwd := t.TempDir()
 	s, err := LoadSettings(cwd, nil)
 	if err != nil {
