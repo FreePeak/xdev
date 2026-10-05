@@ -3060,4 +3060,19 @@ Tests: `cmd/xdev/prompt_test.go` `TestFanoutGuidanceIsOptIn` (absent with the fl
 
 The TUI is a **second entry point** (`cmd/xdev/tui.go` builds its own prompt through the same closure), so the flag was driven there too — the real binary in a forked pty at 110x40, `pyte` rendering the frames, both arms through the identical script: 18,980 system-prompt chars and `fanout=absent` with `task` among the 27 tools, 20,034 chars and `fanout=PRESENT` with the same 27 tools. The same 1,054-character delta. Both arms completed the turn (status row `1t·1g`) and the rendered frames are identical apart from the answer row's timestamp, which is the point: the block is invisible on screen and only present on the wire.
 
+**Measured against the real gateway, and the result is not the one the block assumes.** A four-package fixture repo (32 invented Go files, `alpha`/`beta`/`gamma`/`delta`, 8 uniform handlers each), the live `onegw` gateway, `space-bunny-free`, two trials per arm, same cwd and same question — *read every file, report each package's shape*:
+
+| arm | wall clock | `read` calls | `task` spawns | child sessions | HTTP 429 |
+|---|---|---|---|---|---|
+| fanout OFF, trial 1 | 34 s | 32 | 0 | 0 | 0 |
+| fanout OFF, trial 2 | 23 s | 32 | 0 | 0 | 0 |
+| fanout ON, trial 1 | **481 s** | 0 | 0 | 0 | 1 |
+| fanout ON, trial 2 | **2575 s** | 2 | 2 (a batch of 4, then 2) | 6 | 2 |
+
+Both ON answers were **correct** — trial 2's table reports 8 files for each of the four packages and quotes a representative handler verbatim — so the block does not break the work. It makes it far more expensive: the parallel path re-invoked the provider on six child sessions, and the gateway's account pool answered two of them with `rate_limit_exceeded`, so the wall clock was dominated by retry backoff rather than by the reads. A control run of the same ON binary on the same repo with no fan-out taken finished in 36 s with **0** 429s, which isolates the cause to the fan-out's own provider load rather than to the gate being closed.
+
+The same model, on the four-file fixture, spawned nothing either way — four tiny reads are not the shape the block describes, and the model did not treat them as one. That is the block working as written (it names the "one file, one lookup, one command" cases as do-not-fan-out), but it does mean the ON arm was only exercised on the 32-file case.
+
+Read honestly, the evidence supports the block as **guidance with a warning attached**: on the case it targets, the ON arm was correct and the OFF arm was also correct, and the ON arm was ~14x–70x slower on this gateway. The ceiling is provider concurrency, not prompt wording. A user on a gateway with real per-account headroom should see a different ratio; this one does not have it.
+
 Verified by driving the **built binary** against a mock `openai-completions` endpoint with an isolated `XDEV_AGENT_DIR`, both arms through the identical script: `fanout: absent` on the wire at 31,574 system-prompt chars versus `fanout: PRESENT` at 32,628 — the same 1,054-character delta the unit test pins — with the same 27 tools on both, so the toggle changes the prompt and nothing else.
