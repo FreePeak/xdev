@@ -201,6 +201,25 @@ const PromptContinuationPrompt = "the user's request is not finished: take the n
 // text-only yields after a nudge end the run.
 const maxPromptContinuations = 8
 
+// callMutated reports whether one already-issued tool call changed
+// anything. It is the single definition of "mid-task" the keep-going gate
+// uses, so the gate and the reasoning in the loop cannot drift apart.
+//
+// A tool with no Caps declaration counts as mutating: the same conservative
+// default Decide makes for an unmodeled tool (policy.go:119), because an
+// ext_*/mcp_* call may write anything and the safe reading of "unknown" is
+// "changed something". bash is always counted: a mutating command inside it
+// (`sed -i`, `git commit`) is invisible from the tool name, and reading that
+// far would need a shell parser, which is the complexity this gate exists to
+// avoid — so a run that only shelled out keeps its keep-going.
+func callMutated(c ai.ToolCallBlock) bool {
+	caps, declared := tool.CapsByName(c.Name)
+	if !declared {
+		return true
+	}
+	return !caps.ReadOnly
+}
+
 // ErrEmptyTurn is the failure voice of a model that answered nothing
 // after every nudge was spent. Ending the run is what the old code did;
 // ending it with an ERROR is what makes the stop visible and retryable
@@ -762,9 +781,19 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				// Two questions, two scopes. The single loop below gave both
 				// the wrong one.
 				//
-				// "Has this conversation used tools?" — usedTools — reads ALL of
-				// history: a run that resumed a session which used tools is
-				// still a run whose work owes a summary.
+				// "Has this conversation changed anything?" — mutated — reads ALL
+				// of history: a run that resumed a session which edited a file is
+				// still a run whose work owes a summary. It used to ask the
+				// weaker "did any tool run", which made a run that had only READ
+				// the codebase mid-task: 136 of the 356 keep-going nudges in this
+				// repo's own session store followed a research-shaped ask
+				// ("why is this slow", "deep dive to find the root cause"), and
+				// the nudge's own text — take the next concrete step, do not stop
+				// at a plan or a status report — is exactly the instruction such
+				// a request did not ask for. A report is finished when the
+				// reading is; only a run that already changed something has work
+				// left to continue. callMutated is the one definition of
+				// "changed" (see it).
 				//
 				// "Did THIS run already nudge and get a second yield?" —
 				// lastWasPromptCont — reads only from resumeFloor. It used to
@@ -778,10 +807,15 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				// after the nudge at all. A nudge in the persisted tail is a
 				// previous run's unfinished business, not an answer this run
 				// received, so it must not count as one.
-				usedTools := false
+				mutated := false
 				for _, h := range history {
-					if h.Role == ai.RoleAssistant && len(h.ToolCalls()) > 0 {
-						usedTools = true
+					if h.Role != ai.RoleAssistant {
+						continue
+					}
+					for _, c := range h.ToolCalls() {
+						if callMutated(c) {
+							mutated = true
+						}
 					}
 				}
 				lastWasPromptCont := false
@@ -800,7 +834,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 						}
 					}
 				}
-				if !lastWasPromptCont && (usedTools || openTodos) {
+				if !lastWasPromptCont && (mutated || openTodos) {
 					cont = PromptContinuationPrompt
 					contAttr = PromptContinuationAttribution
 					promptConts++

@@ -33,7 +33,21 @@ import (
 //
 // The rules below are the measured minimum, not a philosophy: each one names a
 // behaviour the session store shows going wrong. They are deliberately short —
-// a prompt nobody reads is a prompt that does not steer.
+// a prompt nobody reads is a prompt that does not steer. Two budgets guard this
+// constant and both must stay true: TestBasePromptStaysCompact (2000 runes
+// here) and TestBundledPromptStaysUnderBudget (the whole assembled prompt at
+// 1000 tokens, which shipped at 993) — so a new rule REPLACES prose here, it
+// never appends.
+//
+// The last two rules under "Before you act" are one decision, not two.
+// "Confirm the requirement" alone (#447) only stopped the agent acting on a
+// request it had misread; it never said what a misread looks like. A question —
+// "why is this slow?", "deep dive to find the root cause" — was still answered
+// by reading the codebase and then starting to implement, because nothing said
+// the report IS the deliverable. Over 355 keep-going nudges in this repo's own
+// session store, 300 fired after the run had already mutated the workspace and
+// 55 after one that had only read, so half the fix belongs in the loop
+// (PromptContinuation, loop.go), not here.
 const SystemPromptBase = `You are xdev, a coding agent working in the user's repository.
 
 Rules:
@@ -46,6 +60,8 @@ Rules:
 Before you act:
 - Confirm the requirement, don't assume it. Restate what you will do in a sentence or two, then
   start. "Find the root cause and fix" asks for a change; "why is this slow?" asks a question.
+- A question gets an answer: if the ask is why/what/how, or research/explore and report, do
+  the reading, give the report and stop. Don't start implementing.
 - Ask first when the request is ambiguous, non-trivial, spans repos, or would touch files outside
   the working directory. Use ask with the readings you actually have. A clear, explicit
   instruction to do X is its own confirmation — asking anyway is noise.
@@ -58,11 +74,9 @@ Getting code into context:
 - Keep bash for work that actually runs: build, test, git, package managers.
 
 Delegating:
-- The task tool runs a subagent in its own session and hands you back one result; its
-  transcript never reaches you. That pays off when the answer means reading a lot of code, and
-  costs more than it saves for a single file read, a quick lookup, or a command you could run.
-- Independent work is parallel work: send independent slices in one batch, and do not wait on
-  a result you do not need to continue.
+- task runs a subagent in its own session and returns one result; its transcript never reaches
+  you. Worth it when the answer means reading a lot of code, not for one read or command.
+- Independent work is parallel: send slices in one batch.
 - Say what the result must contain. You see that, never the work behind it.`
 
 // SubagentSystemPromptBase is the child's system prompt: same working

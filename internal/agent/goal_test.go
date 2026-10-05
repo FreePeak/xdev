@@ -489,3 +489,71 @@ func TestPromptContinuationDoesNotDoubleNudgeWithinARun(t *testing.T) {
 		t.Fatalf("prompt-continuation nudges sent = %d, want exactly 1", nudges)
 	}
 }
+
+// readOnlyTool is a declared, read-only tool: CapsByName knows the name, so
+// callMutated can see it is one. echo is UNDECLARED, which the helper counts
+// as mutating by design — so a test that needs "this run only read" has to
+// name a tool the manifest actually models as read-only.
+type readOnlyTool struct{ echoTool }
+
+func (readOnlyTool) Name() string { return "read" }
+
+// A run that only READ never earned a keep-going nudge (#414's gate). The
+// nudge text tells the model to take the next concrete step and never stop at
+// a plan or a status report, so firing it after a research-only run is what
+// made "why is this slow?" and "deep dive to find the root cause" answer by
+// starting to implement: 136 of the 356 nudges in this repo's session store
+// followed a research-shaped ask.
+func TestPromptContinuationStaysOffAfterAReadOnlyRun(t *testing.T) {
+	readThenYield := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{
+			ai.TextBlock{Text: "reading"},
+			ai.ToolCallBlock{ID: "r1", Name: "read", Arguments: json.RawMessage(`{"text":"x"}`)},
+		},
+	})}}
+	p := &fakeProvider{calls: []fakeScript{readThenYield, {events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "here is the report"}},
+	})}}}}
+	reg := tool.NewRegistry()
+	reg.Register(readOnlyTool{})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, PromptContinuation: true}
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "why is this slow?"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 2 {
+		t.Fatalf("stream requests = %d, want 2: a read-only run's report is the deliverable", len(p.gotReqs))
+	}
+	for i, r := range p.gotReqs {
+		last := r.Messages[len(r.Messages)-1]
+		if last.Role == ai.RoleUser && last.Attribution == PromptContinuationAttribution {
+			t.Fatalf("request %d got a keep-going nudge after a read-only run", i)
+		}
+	}
+}
+
+// The gate's own definition, pinned as a table so the conservative default
+// cannot rot: an undeclared tool may write anything, so it counts as a
+// mutation, while the manifest's read-only set never does.
+func TestCallMutatedReadsTheCapsManifest(t *testing.T) {
+	for _, tc := range []struct {
+		tool string
+		want bool
+		why  string
+	}{
+		{"read", false, "reading is not changing"},
+		{"grep", false, "reading is not changing"},
+		{"glob", false, "reading is not changing"},
+		{"lsp", false, "reading is not changing"},
+		{"write", true, "a file appeared"},
+		{"edit", true, "a file changed"},
+		{"bash", true, "a mutating command inside bash is invisible from the tool name"},
+		{"echo", true, "undeclared may write anything — the conservative default"},
+		{"mcp_something", true, "undeclared may write anything — the conservative default"},
+	} {
+		if got := callMutated(ai.ToolCallBlock{Name: tc.tool}); got != tc.want {
+			t.Errorf("callMutated(%q) = %v, want %v — %s", tc.tool, got, tc.want, tc.why)
+		}
+	}
+}
