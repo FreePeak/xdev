@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// The reasoning box's TEXT and BORDER are painted from theme slots, so a
-// /theme switch has to keep both readable. Two defects lived here, and neither
-// was visible from the launch theme:
+// The reasoning box's TEXT and BORDER are painted from the theme, so a /theme
+// switch has to keep both readable. Two defects lived here, and neither was
+// visible from the launch theme:
 //
 //  1. The border wore `accent_thinking`, which aliased `thinkingText` — a TEXT
 //     token every ported palette fills with its own base colour (rose-pine
@@ -17,14 +17,18 @@ import (
 //  2. The body wore `gray_dim` — chrome ink — at 1.3–2.6:1 on the same canvas
 //     (dracula 1.33, one-dark 1.76, gruvbox 1.78, nord 1.64).
 //
-// The fixes are the two slot swaps (the AccentThinking alias in custom.go, the
-// box's bodySt in app.go). These tests pin the CLAIM rather than the swap:
-// every reachable palette, both inks, against its own canvas, with the WCAG
-// ratio computed here. A later theme edit that darkens either ink back toward
-// its own base fails on the number, not on a hex someone forgot to update.
+// The body stayed a slot (text_primary, the one a palette sizes for reading).
+// The FRAME did not: it is now xdev's own ink, pinned per polarity
+// (ThinkFrame), so the third defect — a border that changed colour with every
+// /theme — has nowhere to live. These tests pin the CLAIM rather than the
+// swap: every reachable palette, both inks, against its own canvas, with the
+// WCAG ratio computed here. A later theme edit that darkens either ink back
+// toward its own base fails on the number, not on a hex someone forgot to
+// update.
 //
 // The render-path half — that the box actually PAINTS these two inks — is
-// internal/tui/thinkinks_render_test.go, because it needs the App.
+// internal/tui/thinkinks_render_test.go and internal/tui/thinkframe_test.go,
+// because they need the App.
 
 // relLuminance is the WCAG 2.1 relative-luminance formula. Theme colors are
 // plain sRGB, so this is the whole thing; there is no second, gamma-corrected
@@ -78,12 +82,16 @@ func TestReasoningInksAreReadableInEveryPalette(t *testing.T) {
 			if got := contrastRatio(th.Get(TextPrimary), bg); got < 4.5 {
 				t.Errorf("reasoning body (text_primary) reads %.2f:1 on bg_base %+v, want >= 4.5:1", got, bg)
 			}
-			frame := th.Get(AccentThinking)
+			// The FRAME is no longer the accent slot: it is one pinned ink per
+			// polarity (ThinkFrame), so the check runs against what actually
+			// paints rather than against whatever the palette aliases
+			// accent_thinking to.
+			frame := ThinkFrame(th)
 			if got := contrastRatio(frame, bg); got < 3.0 {
-				t.Errorf("reasoning border (accent_thinking) reads %.2f:1 on bg_base %+v, want >= 3:1", got, frame)
+				t.Errorf("reasoning frame %+v reads %.2f:1 on bg_base %+v, want >= 3:1", frame, got, bg)
 			}
 			if frame == bg {
-				t.Errorf("reasoning border is the canvas colour %+v: the frame is not there", frame)
+				t.Errorf("reasoning frame is the canvas colour %+v: the frame is not there", frame)
 			}
 		})
 	}
@@ -94,12 +102,14 @@ func TestReasoningInksAreReadableInEveryPalette(t *testing.T) {
 // table fills it with each palette's base colour; aliasing a FRAME to it is
 // what made the border vanish. The failure is silent — the theme still loads,
 // still names every required slot, still passes the picker — so it needs a
-//
-// A theme that names accent_thinking (or its camelCase spelling) outright
-// still wins: legacyOrder reads an explicit key before any alias, so this
-// guards the DEFAULT, not the escape hatch.
+// guard of its own. Nothing paints accent_thinking now (the frame is
+// ThinkFrame), so this is a belt on the table: an importer that reaches for
+// that slot must never get a text token as its answer.
 func TestThinkingAccentDoesNotAliasTheTextToken(t *testing.T) {
+	if got := legacyToCanonical[AccentThinking]; got == ThinkingText {
+		t.Errorf("accent_thinking aliases %q: thinkingText is each palette's BASE colour", got)
+	}
 	if got := legacyToCanonical[AccentThinking]; got != Accent {
-		t.Errorf("accent_thinking aliases %q, want %q: thinkingText is each palette's BASE colour", got, Accent)
+		t.Errorf("accent_thinking aliases %q, want %q", got, Accent)
 	}
 }
