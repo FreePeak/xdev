@@ -327,18 +327,11 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// transcript. The press still anchors a selection: the panel's rows are
 		// in the copy table (selDockRows), which is what makes a drag over the
 		// sidebar copy the sidebar's own text.
-		// A focus CHANGE arms the border tween; re-focusing the box already
-		// under the wheel leaves it alone, so a click-and-jitter cannot restart
-		// the ease and strand it half-faded. Unfocusing eases back to dim
-		// rather than snapping, because the box shrinking to one row is the
-		// same visual event as the border dimming.
-		was := a.thinkFocus
+		// A press re-aims the wheel, full stop: the frame's ink is fixed and
+		// Bold is the whole focus mark (thinkBoxLines), applied at paint time.
 		a.thinkFocus = -1
 		if !a.dockAt(x, y) {
 			a.thinkFocus = a.thinkBoxAt(y)
-		}
-		if a.thinkFocus != was {
-			a.focusFade = 0
 		}
 		a.selThumbDrag = false
 		// Arm the user-message menu on the user row under this press, but do
