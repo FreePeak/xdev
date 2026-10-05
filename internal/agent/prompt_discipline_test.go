@@ -52,6 +52,14 @@ func TestBasePromptCarriesConfirmFirst(t *testing.T) {
 		{"ask", "the ask tool is never named as the way to resolve an ambiguous request"},
 		{"ambiguous", "there is no trigger describing WHEN asking is right"},
 		{"explicit", "nothing excuses asking when the instruction was already explicit"},
+		// #447 alone only stopped the agent acting on a request it had
+		// misread; it never said what a misread looks like, so a QUESTION
+		// ("why is this slow?", "deep dive to find the root cause") was
+		// answered by reading the codebase and then implementing. These
+		// needles fail against the #447 prompt, which had neither.
+		{"question gets an answer", "a research request has no rule saying the report is the deliverable"},
+		{"stop", "nothing tells a read-only run where to end"},
+		{"implementing", "nothing forbids starting to implement a request that only asked to be researched"},
 	} {
 		if !strings.Contains(p, want.needle) {
 			t.Errorf("SystemPromptBase is missing %q — %s", want.needle, want.why)
