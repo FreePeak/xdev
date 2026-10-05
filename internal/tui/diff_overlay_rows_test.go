@@ -14,7 +14,9 @@ import (
 // border. It was padded to the TRANSCRIPT's wrap budget (contentWidth), not the
 // popup's, so with the sidebar open a changed row banded 70 cells and the rest
 // of the popup's interior stayed terminal-default — a stripe that stopped
-// halfway across the box, in the middle of the line it belongs to.
+// halfway across the box, in the middle of the line it belongs to. The box is
+// the PANE's (rightEdge), so the border is the pane's, not the terminal's:
+// the popup sits beside the sidebar and leaves the panel's rows clickable.
 func TestDiffOverlayRowBandReachesTheBorder(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	app, scr := newTestApp(t, 120, 30)
@@ -35,7 +37,7 @@ func TestDiffOverlayRowBandReachesTheBorder(t *testing.T) {
 	if !opened {
 		t.Fatal("no diff overlay for the changed file")
 	}
-	if want := app.width - 2*diffPad - 3; inner != want {
+	if want := app.rightEdge() - 2*diffPad - 3; inner != want {
 		t.Fatalf("overlay interior = %d, want the panel minus its margins and borders (%d)", inner, want)
 	}
 	app.draw()
@@ -48,7 +50,7 @@ func TestDiffOverlayRowBandReachesTheBorder(t *testing.T) {
 	}
 	// A band's rows start at the panel's inset (margin + border), so the stripe
 	// has to reach the border one cell short of the panel's right edge.
-	right := app.width - diffPad - 2
+	right := app.rightEdge() - diffPad - 2
 	found := 0
 	for y := 0; y < app.height; y++ {
 		for x := 0; x < app.width; x++ {
@@ -279,9 +281,13 @@ func TestSidebarDiffClickPaintsEveryRow(t *testing.T) {
 	if !strings.Contains(painted, "aTailLongEnoughToWrapAtThePopupWidth") {
 		t.Fatalf("the wrapped tail is not on screen:\n%s", painted)
 	}
-	// And no row overflows the panel's border.
+	// And no row overflows the panel's border. A border row is ruled out by its
+	// own corner glyph (╭ / ╰), not by a row number: its verticals are the
+	// corners' row-mates, never a │. (The pane's own rail column sits one cell
+	// left of the panel and is the transcript's, so it carries a │ on rows the
+	// viewer does not paint — that is the gutter, not an overflow.)
 	for i, row := range strings.Split(painted, "\n") {
-		if !strings.Contains(row, "│") {
+		if !strings.Contains(row, "│") || strings.ContainsAny(row, "╭╰") {
 			continue
 		}
 		if strings.Count(row, "│") < 2 {

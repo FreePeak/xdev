@@ -518,7 +518,10 @@ func (a *App) drawSettingsOverlay(yComposerTop int) {
 		return
 	}
 	s := a.scr
-	w := a.width
+	// Centred in the PANE, not the terminal: a panel opened from the status row
+	// is answering about the pane the row belongs to, and a terminal-centred
+	// one sat half under the context panel.
+	w := a.rightEdge()
 
 	settingsRegMu.Lock()
 	rows := st.rows

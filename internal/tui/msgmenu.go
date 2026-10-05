@@ -567,7 +567,10 @@ func (r panelRect) contains(x, y int) bool {
 // msgViewBounds is the rectangle the read-only surface occupies. Caller holds
 // a.mu.
 func (a *App) msgViewBounds() panelRect {
-	w := a.width
+	// The pane's width: the read-only surface is anchored to a message in the
+	// transcript, so it is that pane's surface — a terminal-wide one reached
+	// over the context panel and cut it in half.
+	w := a.rightEdge()
 	x := 2
 	y0 := 1
 	panelH := a.height - 1 - a.composerRows() - y0 - 1
@@ -595,11 +598,11 @@ func (a *App) drawMsgMenu() {
 	// max(label,hint)) is what keeps "files are NOT put back" from being cut
 	// to "files are NOT pu…" on a terminal with room for it — the truncation
 	// below is then only for terminals genuinely too narrow.
-	w := min(a.width-4, labelW+3+hintW+4)
+	w := min(a.rightEdge()-4, labelW+3+hintW+4)
 	h := len(msgMenuRows) + 2 // rows + top/bottom border
 	// Anchor below the click, then clamp: a click near the bottom edge would
 	// otherwise push the panel off screen and leave an unclickable menu.
-	x := min(max(2, m.ax-1), max(2, a.width-w-2))
+	x := min(max(2, m.ax-1), max(2, a.rightEdge()-w-2))
 	y := min(max(1, m.ay+1), max(1, a.height-a.composerRows()-h-1))
 
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
@@ -654,7 +657,7 @@ func (a *App) drawMsgView(yComposerTop int) {
 		return
 	}
 	s := a.scr
-	w := a.width
+	w := a.rightEdge()
 	x := 2
 	y0 := 1
 	panelH := yComposerTop - y0 - 1
