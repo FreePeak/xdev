@@ -1693,15 +1693,36 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	}
 	msg.StopReason = stop
 	msg.Usage = usage
-	a.requestMu.Lock()
-	if a.requestStart.IsZero() {
-		msg.TTFTMS = time.Since(started).Milliseconds()
-	} else {
-		msg.TTFTMS = time.Since(a.requestStart).Milliseconds()
+	// The provider already stamped both clocks on the Done message, and it
+	// stamps them fetch-origin — from before wirePost — so ttft covers
+	// connect + gateway queue + prefill and duration is the whole call
+	// (#283: "the wait the user feels"). This loop's own clocks are measured
+	// from `started`, which is stamped AFTER Stream returns, i.e. after the
+	// response headers: they read ~zero for a slow prefill and, being
+	// stamped at the start of the request, ttft measured from requestStart
+	// is the WHOLE call rather than the wait to the first token. Overwriting
+	// therefore made ttft >= duration on 89% of turns across 1,375 sessions
+	// on disk, and /usage's avg-ttft and the HUD's ⌚ ttft segment reported
+	// total call time as if it were latency to first token.
+	//
+	// So: keep the provider's numbers whenever it reported any, and fall
+	// back to the local clock only when it reported none (a provider that
+	// builds its own Done message without timing, e.g. a scripted test
+	// double). The fallback stays fetch-origin when a request clock exists,
+	// so it cannot report less than the real wait.
+	if msg.TTFTMS <= 0 {
+		a.requestMu.Lock()
+		if a.requestStart.IsZero() {
+			msg.TTFTMS = time.Since(started).Milliseconds()
+		} else {
+			msg.TTFTMS = time.Since(a.requestStart).Milliseconds()
+		}
+		a.requestMu.Unlock()
 	}
-	a.requestMu.Unlock()
+	if msg.DurationMS <= 0 {
+		msg.DurationMS = time.Since(started).Milliseconds()
+	}
 	msg.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-	msg.DurationMS = time.Since(started).Milliseconds()
 	// Preserve toolCall blocks in emission order (provider-done messages
 	// already carry content; rebuild only if provider didn't).
 	if len(msg.Content) == 0 {

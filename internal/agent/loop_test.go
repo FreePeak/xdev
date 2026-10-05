@@ -21,10 +21,12 @@ type fakeProvider struct {
 	i       int
 	gotReqs []ai.StreamRequest
 }
-
 type fakeScript struct {
 	events []ai.Event
 	err    error
+	// delay sleeps before the first event, so a test can give the loop's
+	// millisecond-resolution fallback clock something to measure.
+	delay time.Duration
 }
 
 func (f *fakeProvider) Stream(_ context.Context, req ai.StreamRequest) (<-chan ai.Event, error) {
@@ -45,6 +47,10 @@ func (f *fakeProvider) Stream(_ context.Context, req ai.StreamRequest) (<-chan a
 			return
 		}
 		for _, ev := range sc.events {
+			if sc.delay > 0 {
+				time.Sleep(sc.delay)
+				sc.delay = 0
+			}
 			ch <- ev
 		}
 	}()
@@ -862,5 +868,72 @@ func TestToolDefsGuardsMalformedSchema(t *testing.T) {
 	}
 	if !json.Valid(read.Parameters) || !strings.Contains(string(read.Parameters), "path") {
 		t.Fatalf("healthy tool schema altered: %s", read.Parameters)
+	}
+}
+
+// A provider that stamps its own fetch-origin clocks on the Done message must
+// keep them: the loop's local clock starts after the response headers, so
+// overwriting it reported ttft >= duration on 89% of the turns measured across
+// 1,375 session files, which made the HUD's ⌚ ttft segment a whole-call timer.
+func TestOneTurnKeepsProviderTTFT(t *testing.T) {
+	const (
+		providerTTFT = 4200
+		providerDur  = 9000
+	)
+	done := ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role:       ai.RoleAssistant,
+		Content:    []ai.Block{ai.TextBlock{Text: "hi"}},
+		StopReason: ai.StopReasonStop,
+		TTFTMS:     providerTTFT,
+		DurationMS: providerDur,
+	})
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{
+		{Type: ai.EventStart, Provider: "fake", Model: "m"},
+		{Type: ai.EventTextStart},
+		{Type: ai.EventTextDelta, Delta: "hi"},
+		done,
+	}}}}
+	a, ends, _ := runAgent(t, p)
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(*ends) != 1 {
+		t.Fatalf("message_end hooks = %d", len(*ends))
+	}
+	got := (*ends)[0]
+	if got.TTFTMS != providerTTFT {
+		t.Fatalf("ttft = %d, want the provider's %d", got.TTFTMS, providerTTFT)
+	}
+	if got.DurationMS != providerDur {
+		t.Fatalf("duration = %d, want the provider's %d", got.DurationMS, providerDur)
+	}
+}
+
+// A provider that reports no clocks (a scripted double, or a message it
+// assembled itself) still gets the loop's fallback, and the fallback must not
+// claim a longer wait than the call itself took.
+func TestOneTurnFallsBackToLocalTTFTWhenProviderIsSilent(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{{
+		// delay: give the loop's millisecond-resolution fallback clock
+		// something to measure.
+		delay: 30 * time.Millisecond,
+		events: []ai.Event{
+			{Type: ai.EventStart, Provider: "fake", Model: "m"},
+			{Type: ai.EventTextStart},
+			{Type: ai.EventTextDelta, Delta: "hi"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop,
+				Message: &ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "hi"}}, StopReason: ai.StopReasonStop}},
+		},
+	}}}
+	a, ends, _ := runAgent(t, p)
+	if _, err := a.Run(context.Background(), "sys", []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hi"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := (*ends)[0]
+	if got.TTFTMS <= 0 || got.DurationMS <= 0 {
+		t.Fatalf("silent provider got no fallback clocks: ttft=%d duration=%d", got.TTFTMS, got.DurationMS)
+	}
+	if got.TTFTMS > got.DurationMS {
+		t.Fatalf("fallback ttft %d > duration %d", got.TTFTMS, got.DurationMS)
 	}
 }
