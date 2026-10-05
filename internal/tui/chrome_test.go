@@ -510,11 +510,12 @@ func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 	}
 }
 
-// TestUserBandHasItsOwnAir pins the padding that used to be missing from the
-// sent message: a blank banded row above the prompt (so it hangs off its own
-// card instead of sitting on the answer above it) and a one-cell margin before
-// the ❯. The row COUNT alone would pass with the pad in the wrong place, and
-// the prompt reading as a table row is a geometry bug, not a style one.
+// TestUserBandHasItsOwnAir pins the padding on all four sides of a sent
+// message: a blank banded row above AND below the prompt, so it hangs off the
+// middle of its own card, and a userBandMargin of pane background at each side,
+// so the card floats instead of running off both edges. The row COUNT alone
+// would pass with the padding in the wrong place, and a prompt flush against
+// the screen edge is a geometry bug, not a style one.
 func TestUserBandHasItsOwnAir(t *testing.T) {
 	app, scr := drawnApp(t, 80, 20)
 	app.AddUserBlock("a prompt with air around it")
@@ -526,33 +527,56 @@ func TestUserBandHasItsOwnAir(t *testing.T) {
 	}
 	want := app.cellColor(band)
 	prim, w, _ := scr.GetContents()
+	runeAt := func(row, x int) rune {
+		if c := prim[row*w+x]; len(c.Runes) > 0 {
+			return c.Runes[0]
+		}
+		return ' '
+	}
+	bgAt := func(row, x int) tcell.Color {
+		_, bg, _ := prim[row*w+x].Style.Decompose()
+		return bg
+	}
 	y := -1
 	for row := range 20 {
-		if len(prim[row*w+userBandInset].Runes) > 0 && prim[row*w+userBandInset].Runes[0] == '❯' {
+		if runeAt(row, userBandInset) == '❯' {
 			y = row
 			break
 		}
 	}
-	if y < 1 {
-		t.Fatalf("no prompt row above row 0 to pad: %d", y)
+	if y < 1 || y >= 19 {
+		t.Fatalf("no prompt row with a row above and below to pad: %d", y)
 	}
-	// The row above the prompt carries the band and nothing else.
-	for _, x := range []int{0, userBandInset, w / 2, w - 1} {
-		cell := prim[(y-1)*w+x]
-		r := ' '
-		if len(cell.Runes) > 0 {
-			r = cell.Runes[0]
+	// The rows above and below the prompt carry the band and nothing else.
+	// The card's right end is not among them: the timestamp rides it, which is
+	// where it has always ridden, and the row it paints on is the card's own
+	// first row.
+	for _, row := range []int{y - 1, y + 1} {
+		for _, x := range []int{userBandMargin, userBandInset, w / 2} {
+			if bg := bgAt(row, x); bg != want || runeAt(row, x) != ' ' {
+				t.Fatalf("pad row %d cell %d is %q on %s, want a blank banded cell", row, x, runeAt(row, x), bg)
+			}
 		}
-		_, bg, _ := cell.Style.Decompose()
-		if bg != want || r != ' ' {
-			t.Fatalf("pad row cell %d is %q on %s, want a blank banded cell", x, r, bg)
+	}
+	// The margins: the band stops userBandMargin short of each edge, on every
+	// row of the card, so it floats with the pane's own background at both sides.
+	// What the margin must NOT be is the band — an unpainted cell is the
+	// terminal's own background, which is the whole contract here.
+	for _, row := range []int{y - 1, y, y + 1} {
+		for _, x := range []int{0, userBandMargin - 1, w - 1} {
+			if bg := bgAt(row, x); bg == want {
+				t.Fatalf("the card runs off the pane: row %d column %d is still banded", row, x)
+			}
 		}
 	}
-	// The margin: the cell before the ❯ is the band, and it holds no glyph.
-	if r, _, _, _ := scr.GetContent(userBandInset-1, y); r != ' ' {
-		t.Fatalf("the margin cell is %q, want a blank cell before the ❯", r)
+	if bg := bgAt(y, w-1-userBandMargin); bg != want {
+		t.Fatalf("the card's right edge is %s one column short of its margin, want the band %v", bg, band)
 	}
-	if r, _, _, _ := scr.GetContent(userBandInset, y); r != '❯' {
+	// One cell of air inside the card before the ❯, then the ❯ itself.
+	if r := runeAt(y, userBandInset-1); r != ' ' {
+		t.Fatalf("the cell inside the card is %q, want a blank cell before the ❯", r)
+	}
+	if r := runeAt(y, userBandInset); r != '❯' {
 		t.Fatalf("the prompt lost its ❯: %q", r)
 	}
 }
@@ -1228,9 +1252,11 @@ func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	// Row 0 is the session's own first prompt, not a header: no branch on it,
-	// and the prompt text is where it has always been.
-	if top := rows[0]; strings.Contains(top, "fix/boxes") || !strings.Contains(top, "fix the") {
-		t.Fatalf("row 0 %q must be transcript content, not a header", top)
+	// and the prompt is where it has always been — under the card's own blank
+	// padding row, which is air rather than content.
+	first := app.transcriptTop() + stickyPad // under the card's blank padding row
+	if first >= len(rows) || strings.Contains(rows[first], "fix/boxes") || !strings.Contains(rows[first], "fix the") {
+		t.Fatalf("row %d %q must be transcript content, not a header", first, rows[first])
 	}
 
 	// The branch is on the status row, next to the path, in that order.
@@ -1252,11 +1278,11 @@ func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 	app.mu.Unlock()
 	app.draw()
 	text := screenText(scr)
-	first := strings.Split(strings.TrimRight(text, "\n"), "\n")[0]
+	row0 := strings.Split(strings.TrimRight(text, "\n"), "\n")[0]
 	for _, where := range []struct {
 		what string
 		ln   string
-	}{{"row 0", first}, {"the status row", lastRow(text)}} {
+	}{{"row 0", row0}, {"the status row", lastRow(text)}} {
 		if strings.Contains(where.ln, "X ") || strings.Contains(where.ln, "Y ") {
 			t.Fatalf("a spinner frame leaked onto %s: %q", where.what, where.ln)
 		}

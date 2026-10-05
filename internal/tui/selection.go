@@ -512,10 +512,13 @@ func (a *App) selCornerAt(x, y int) selCorner {
 	if vp <= 0 || y < hdr || y >= hdr+vp {
 		return c
 	}
-	if dy := y - hdr; dy < a.stickyVis && a.stickyBlock >= 0 {
-		// The header's own rows are the pinned prompt's, from wherever the push
-		// has clipped it to (stickyDoc is its first painted row).
-		c.doc = int(a.stickyDoc) + dy
+	if dy := y - hdr; a.stickyVis > 0 && dy < a.stickyPad+a.stickyVis && a.stickyBlock >= 0 {
+		// The card's rows are the pinned prompt's, from wherever the push has
+		// clipped it to (stickyDoc is its first painted TEXT row). Its blank
+		// padding hangs off the first one: it is the card's top, so a gesture
+		// there starts at the request rather than at some row of the stream
+		// that happens to be under it.
+		c.doc = int(a.stickyDoc) + max(dy-a.stickyPad, 0)
 		return c
 	}
 	if a.selDocMode || y >= hdr {
@@ -694,8 +697,8 @@ func (a *App) selCacheRows(top int) {
 	}
 	for i, sr := range a.selRows {
 		doc := top + i
-		if a.stickyVis > 0 && i < a.stickyVis {
-			doc = int(a.stickyDoc) + i
+		if a.stickyVis > 0 && i < a.stickyPad+a.stickyVis {
+			doc = int(a.stickyDoc) + max(i-a.stickyPad, 0)
 		}
 		a.selCache[doc] = sr
 	}
@@ -770,7 +773,7 @@ func (a *App) selDocRow(d, top int, b selBounds) selSpanRow {
 	y := -1
 	switch {
 	case a.stickyVis > 0 && d >= int(a.stickyDoc) && d < int(a.stickyDoc)+a.stickyVis:
-		y = a.transcriptTop() + d - int(a.stickyDoc)
+		y = a.transcriptTop() + a.stickyPad + d - int(a.stickyDoc)
 	case d < top+a.stickyHdr && d >= top:
 		return spanRow(-1, selRow{text: "", x0: 0}, selBounds{lo: 1, hi: 0})
 	case d >= top:
