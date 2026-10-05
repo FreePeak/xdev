@@ -1738,6 +1738,11 @@ func (s *Settings) merge(layer *Settings) error {
 		}
 		s.TypeSafe.Timeout = layer.TypeSafe.Timeout
 	}
+	// Same plain-bool rule as ask.autoAnswer: the shipped default is off,
+	// so only a layer that opts in contributes.
+	if layer.TypeSafe.Fanout {
+		s.TypeSafe.Fanout = true
+	}
 	// imageProviders: the provider list is replaced wholesale (the same rule
 	// as webSearch — an overlay that names one provider means exactly that
 	// chain), the timeout and the size cap are validated here, and an
@@ -2132,6 +2137,7 @@ func List(s *Settings, globalPath string) []string {
 		"compaction.async " + fmt.Sprint(s.CompactionAsyncOn()),
 		"compaction.contextWindow " + s.CompactionContextWindowOn(),
 		"retry.infinite " + fmt.Sprint(s.InfiniteRetry()),
+		"typesafe.fanout " + fmt.Sprint(s.TypeSafe.Fanout),
 	}
 	if segs := s.StatusLineSegments(); segs != nil {
 		out = append(out, "statusLine.segments "+strings.Join(segs, ","))

@@ -1052,6 +1052,15 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 				sys += "\n\n" + gb
 			}
 		}
+		// The block names a tool, so it may only ride a prompt that HAS
+		// it: the vibe director's scope (internal/agent/vibe.go) is built
+		// from this same closure but carries vibe_spawn/vibe_send and no
+		// `task`, so an unconditional block would tell a model to send
+		// jobs it has no way to send.
+		_, hasTask := reg.Get(agent.TaskToolName)
+		if fg := agent.BuildFanoutGuidance(lastSettings().TypeSafe.Fanout && hasTask); fg != "" {
+			sys += fg
+		}
 		if appendSystem != "" {
 			sys += "\n\n" + appendSystem
 		}

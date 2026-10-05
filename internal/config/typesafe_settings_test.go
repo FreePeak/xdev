@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,5 +113,48 @@ func TestTypeSafeNegativeTimeoutRejected(t *testing.T) {
 `)
 	if _, err := LoadSettings(t.TempDir(), nil); err == nil {
 		t.Fatal("negative typesafe timeout accepted")
+	}
+}
+
+// TestTypeSafeFanoutOptIn pins the default: no fanout block unless the
+// user asks for it, and the flag rides the same block as the endpoint
+// (so `typesafe.fanout` is the whole surface, no second config group).
+func TestTypeSafeFanoutOptIn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	writeFile(t, GlobalSettingsPath(), `typesafe:
+  fanout: true
+`)
+
+	s, err := LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.TypeSafe.Fanout {
+		t.Fatal("typesafe.fanout: true did not read through to Settings")
+	}
+
+	writeFile(t, GlobalSettingsPath(), "typesafe: {}\n")
+	s, err = LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.TypeSafe.Fanout {
+		t.Fatal("fanout defaulted on with no setting")
+	}
+}
+
+// TestTypeSafeFanoutListRow pins the discoverability path: `config list`
+// has to name the opt-in, or the only way to find it is reading the PRD.
+func TestTypeSafeFanoutListRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	s, err := LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := fmt.Sprintf("typesafe.fanout %v", s.TypeSafe.Fanout)
+	if !strings.Contains(strings.Join(List(s, "x"), "\n"), row) {
+		t.Fatalf("config list is missing the %q row", row)
 	}
 }
