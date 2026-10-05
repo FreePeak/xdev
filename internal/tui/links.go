@@ -21,6 +21,11 @@ type linkHit struct {
 
 // smenuCovers reports whether the non-modal slash/@ suggestion panel paints
 // over (x, y). It is UI-thread state; callers hold a.mu.
+//
+// The columns are the PANE's (rightEdge) — the ones drawSlashDropdown paints.
+// The dropdown stopped at the panel's edge in #592, and a mask still spanning
+// a.width would swallow every link click in the panel's own columns: the
+// region the panel's own window already owns.
 func (a *App) smenuCovers(x, y int) bool {
 	if a.smenu == nil || !a.smenu.active() {
 		return false
@@ -31,7 +36,7 @@ func (a *App) smenuCovers(x, y int) bool {
 		return false
 	}
 	top := composerTop - len(rows) - 2
-	return x >= 2 && x <= a.width-3 && y >= top && y <= composerTop
+	return x >= 2 && x <= a.rightEdge()-3 && y >= top && y <= composerTop
 }
 
 func (a *App) linkAt(x, y int) string {

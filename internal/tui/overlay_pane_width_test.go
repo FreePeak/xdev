@@ -121,6 +121,44 @@ func TestSlashDropdownStopsAtTheSidebar(t *testing.T) {
 	}
 }
 
+// TestSlashDropdownMaskStopsAtTheSidebar is the same width, in the OTHER
+// consumer of the dropdown's geometry: the link mask. smenuCovers answered for
+// the whole terminal, so while the dropdown was open it swallowed every link
+// click in the panel's columns — clicks that land on the panel's own rows and
+// are the panel's, not a hidden transcript row under a popup that no longer
+// paints there. The mask must cover exactly what drawSlashDropdown draws.
+func TestSlashDropdownMaskStopsAtTheSidebar(t *testing.T) {
+	app, scr := newTestApp(t, 160, 40)
+	t.Cleanup(scr.Fini)
+	app.SetDockMode(DockShow)
+	app.SetDockOps(DockOps{Session: func() (string, string) { return "a session", "sess1234" }})
+	app.AddUserBlock("a prompt so the panel is on screen")
+	setDraft(&app.ed, "/", 0)
+	app.mu.Lock()
+	app.syncSlashMenu()
+	rows := app.smenu.rows()
+	composerTop := app.height - 1 - app.composerRows()
+	app.mu.Unlock()
+	if len(rows) == 0 {
+		t.Fatal("no dropdown to mask over")
+	}
+	top := composerTop - len(rows) - 2
+	edge := app.width - dockCols
+
+	app.mu.Lock()
+	// A column the dropdown really paints is masked (a transcript link under it
+	// is hidden); the panel's first column is not — that click belongs to the
+	// panel, whatever else is on screen.
+	inside, panel := app.smenuCovers(50, top), app.smenuCovers(edge, top)
+	app.mu.Unlock()
+	if !inside {
+		t.Fatal("the mask does not cover the dropdown's own rows inside the pane")
+	}
+	if panel {
+		t.Fatal("the mask still reaches the panel's columns: a click there belongs to the panel")
+	}
+}
+
 // TestPickerStopsAtTheSidebar: /model and every other modal picker. Same
 // rule, same window.
 func TestPickerStopsAtTheSidebar(t *testing.T) {
