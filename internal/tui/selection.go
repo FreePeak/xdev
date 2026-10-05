@@ -374,9 +374,17 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// the exact painted run, a menu against the user row. Whichever the
 		// release finds decides the click. Neither arms inside the dock: the
 		// panel painted those cells, so it owns the click.
+		// A click on a subagent's row opens that child's own transcript, the
+		// same surface /hub's Enter opens. It arms here for the same reason
+		// the menu does: a drag that starts on the row must still select
+		// text, so the open waits for a no-motion release.
 		if !a.dockAt(x, y) {
 			a.linkClick = a.linkAt(x, y)
-			if _, bi := a.userRowAt(y); bi >= 0 {
+			a.subID, a.subLabel = a.subChildAt(y)
+			if a.subID != "" {
+				a.msgArmed = false
+			}
+			if _, bi := a.userRowAt(y); bi >= 0 && a.subID == "" {
 				a.msgArmed = true
 			}
 		}
@@ -404,6 +412,7 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		// selection, not a click that should open anything.
 		a.linkClick = ""
 		a.msgArmed = false
+		a.subID, a.subLabel = "", ""
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
@@ -448,6 +457,22 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 			// reusing the press's index: the ordinal the session seam needs
 			// comes from the same lookup, and a transcript that re-laid-out
 			// in between must not hand the menu a stale block.
+			// A click that landed on a user prompt opens its menu, and one
+			// that landed on a subagent's row opens that child's own
+			// transcript in the agent-hub panel (the same surface /hub's Enter
+			// opens — so Esc is one key back to the session transcript, which
+			// never moved). Both re-resolve the row here rather than reusing
+			// the press's answer: the transcript can re-lay-out between press
+			// and release, and a stale row would open the wrong thing.
+			if a.subID != "" {
+				a.subID, a.subLabel = "", ""
+				a.selCache = nil
+				if !opened {
+					if id, label := a.subChildAt(a.selAnchor.y); id != "" {
+						a.openSubChildTranscript(id, label)
+					}
+				}
+			}
 			if a.msgArmed {
 				a.msgArmed = false
 				if !opened {

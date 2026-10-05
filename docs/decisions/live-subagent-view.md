@@ -274,3 +274,33 @@ Still open, and deliberately not in this change:
    turn, and it needs its own decision on what cancelling one means. A separate PR.
 7. **A human watching a real spawn.** The remaining step before this feature is honestly
    done.
+
+## 9. Follow-up: opening the child (`feat/subagent-transcript-view`)
+
+The rows above are narration. A user watching a child for two minutes still could not see
+the child — and the reason was structural, not a missing feature: **a foreground child is not
+a hub job.** `/hub`'s transcript view reads `Hub.Transcript` over `hubJob.stores`, a
+synchronous spawn was never registered anywhere, and `SpawnChild`'s store dies with the
+call. So the live view showed *what the child was doing* and nothing could show *what it
+said*.
+
+Decided there:
+
+8. **The hub's record shape, not its job surface.** `Hub.TrackForeground` reuses `hubJob`
+   for the store and terminal status and registers it in its own read-only map. Cancel, park
+   and revive stay on jobs only: the tool call owns a foreground child's context, so those
+   ops would have nothing honest to do to it, and one roster mixing both would offer
+   controls that work on half its rows.
+9. **The `/hub` panel, not a second renderer.** The click fills the existing transcript
+   view, so Esc means one thing in this app no matter how a child's transcript was opened,
+   and the rows are painted by code that already existed. `viewName` is the one new field:
+   the roster resolves a name from its own rows, and a foreground child has none.
+10. **No selection cursor.** `Alt+B` opens the newest child, exactly as `Ctrl+O` expands the
+    newest box; a click reaches any child, including the ones past the 3-row paint cap,
+    because the cap never touched the state. A cursor would have needed a second driver (the
+    mouse) for no case the pair does not already cover.
+
+Still open: full focus mode (Claude Code's Ctrl+B swaps the transcript for the child's). It
+needs its own render path, scroll save/restore, and Esc ordering against the double-Esc
+rewind — a separate decision, not a mode flag on this one. And a human watching a real
+spawn, clicking the row mid-run, and pressing Esc.

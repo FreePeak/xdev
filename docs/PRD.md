@@ -93,7 +93,7 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | Task agents (markdown discovery, first-wins merge, spawn policy, depth guard) | agent.md | CORE | M11 |
 | Hub tool (messaging/jobs/processes) | agent-hub.md | CORE | M11 |
 | Agent Hub TUI roster (status/model/activity/cost, steer, kill) | agent-hub.md | CORE | M11 |
-| Agent Hub inspector | agent-hub.md | NICE | M11 |
+| Agent Hub inspector (click/`Alt+B` a subagent row → that child's transcript; Esc back) | agent-hub.md, live-subagent-view.md | NICE | M11 |
 | Hooks event bus (lifecycle events, fail-closed `tool_call`/`tool_result`, subprocess hooks) | hooks.md | CORE | M11 |
 | Embedded-JS hooks | hooks.md | NICE | M11 |
 | Advisor/watchdog (per-delta constraint steering, nit→aside/concern→interrupt/blocker→steer) | watchdog.md | CORE | M11 |
@@ -3237,6 +3237,36 @@ Verified on the built binary in a forked pty with `pyte` (a full-screen TUI repa
 The general rule this earns, and the reason it is worth recording next to the tests rather than in a comment nobody reads: **a test that pins a DEFAULT must not read the machine's config through the loader it is testing.** `LoadSettings(cwd, nil)` reads as "no overlays" and is anything but. Verified by running the package three ways — with the real `ask:` config in a temp agent dir, with an empty one, and with the two new lines removed (which reproduces both failures under the same config).
 
 Full `go test ./...` on `origin/main` @ `75ee8b9` is now green for the first time in this tree.
+
+---
+
+*Last updated: 2026-10-06 (`feat/subagent-transcript-view` — a subagent row the user can read is only half of "watch a subagent": they must be able to OPEN it, and Esc must bring them back to the session):* **the live child rows shipped as narration.** A foreground `task` paints one dim `⎿ scout · read · src/boot.tsx` row per child (`feat/task-live-view`), and that row is the user's only handle on a child that runs for minutes — but nothing in the transcript could be opened, and the child's own transcript (the tool calls, the reasoning, the words) was unreachable from the session entirely, because **a foreground child is not a hub job.** `/hub`'s transcript view reads `Hub.Transcript(id, fromSeq)` over `hubJob.stores`, and a synchronous spawn was never registered: it blocks the very `task` call that would list it, and `SpawnChild`'s store is closed on return (`internal/agent/subagent.go`). So the only child the user was already watching was the one they could not inspect.
+
+**1. The capture seam — `Hub.TrackForeground` (`internal/agent/hub.go`).** The hub already had the machinery: `launchLocked` wraps `spec.OnRun` to hand the live child to `job.stores`, which is what `Transcript` walks. A foreground child needs exactly that and none of the rest of a job (no cancel, no park, no revive — the tool call owns its context, and those ops would have nothing honest to do to it), so it gets its own read-only registry: `fg-N` ids, `SettleForeground` to close the row when the call returns, `Foreground()` for a roster read, and `Transcript` resolving either map. The spec's `TranscriptID` rides the child's start event (`withForegroundID`), so a host learns which id its row's child is readable under without a second lookup.
+
+**2. The hit map — a child row is clickable.** `subLines` already emitted one line per child; nothing recorded *which* line was which child, so `blockAt` returned the parent block and a click could not name the child. `blockRend.subs` now holds `{block, offset, label, id}` recorded by the render that produced the lines (`blockLines`), so `subChildAt(y)` resolves a screen row to a child through the same screen-row → document-row → block → in-block-offset walk `thinkBoxAt` uses, and a hit can never point at an offset a different layout painted. Only children a host tracked are in it — an untracked row has no transcript, so offering a click would be a dead affordance.
+
+**3. One surface, one Esc contract.** The panel is `/hub`'s existing transcript view, not a second renderer: `openSubChildTranscript` fills `viewID`/`view`/`viewName` and Esc walks view → roster → closed exactly as Enter's does. `viewName` is the one new field — the roster resolves a name from its own rows, and a foreground child has none, so the title would have read `fg-7`. The panel never touches the scroll model, so the session transcript is exactly where it was underneath (pinned). **The click path calls it with `a.mu` held** (it is `handleMouse`'s), so a notice appended as a transcript block would deadlock against its own lock — the failure says which is why it is a comment and not a convention: an unreadable child renders its own "no transcript for X" row instead.
+
+**4. `Alt+B` = the newest child.** The `C-o` precedent exactly: no selection cursor is invented, so nothing has to drive one from the mouse, and a batch of 8 needs no picker — the click reaches whichever row was clicked (all of them, including the ones past the 3-row paint cap, because the cap is a paint decision and the state keeps every child). Unbound cases are silence (`ToggleBoxExpand`'s rule), not notices.
+
+Deliberately not: full focus mode (Claude Code's Ctrl+B swaps the transcript; that needs its own render path, its own scroll save/restore, and Esc ordering against the double-Esc rewind — the panel answers "what is this child doing" without any of that); foreground children in the `/hub` roster list (the roster's rows carry kill/park/revive, and none of those act on a child the tool call owns — the id reaches the panel through the transcript fetch, not a roster row); reading the child's JSONL from disk on open (the store is in memory for the session already, and a mid-run child has nothing readable on disk yet).
+
+Tests: `internal/agent/hub_foreground_test.go` (the spawn records the child, the start event carries the id, `Transcript` serves it, the job roster stays empty, two children keep separate ids) · `internal/tui/subagent_transcript_test.go` (click opens THAT child, Esc returns and the session transcript never moved, a drag across the row still selects, an untracked row is not openable and the chord is silent, `Alt+B` opens the newest of a batch while a click reaches the older sibling). `go build ./...`, `go vet`, and `go test ./internal/tui ./internal/agent ./cmd/xdev` green.
+
+**Driven on the built binary, and the drive found three defects the tests could not.** `scripts/tui-subagent-transcript-drive.py` (new) runs the real TUI in a forked pty against a mock provider, clicks the child's row with a real SGR click and scores the painted rows. The first commit's own tests were green and the feature did not work: **(1)** the hit recorded the child's row offset inside the *child slice*, not the block, so it resolved to the `task` CALL row — correct in the unit test only because its call row was row 0; **(2)** the panel painted its empty-roster panel (`no background agents yet`) OVER the child's transcript, because that branch is chosen on `len(ui.rows)` and a foreground child is not a hub job, so it had no row; **(3)** `statusLine.segments: debugMouse` — the segment the drive needs to tell *a click the app ignored* from *one it never received* — could not be selected at all: the vocabulary is keyed camelCase and the name is folded to lower case before the map test, so it was reported unknown and `case "debugMouse"` was unreachable.
+
+Stock binary first, so each finding has a baseline:
+
+```
+[pre-fix]  child row painted: yes · click → panel shows the child's transcript: NO
+[7c800f1]  child row painted: yes · click → YES (title "transcript · scout (fg-1)")
+           Esc → child's transcript closed: yes · session transcript intact: yes
+```
+
+The drive's own traps are worth the record, because each one reads as "the binary is broken": tcell opens `/dev/tty` itself so the child needs `setsid` + `TIOCSCTTY` (both best-effort — `pty.fork` may already be a session leader and `setsid`'s `EPERM` there is not a failure, but an *unhandled* one aborts the exec and paints nothing); the mock must branch on the CONVERSATION (`role == "user"` carrying the child prompt) because a body scan for the prompt marker also matches the parent's tool arguments; `[DONE]` goes AFTER the chunk carrying `finish_reason`, or the reader reports "stream ended without finish_reason" and the turn retries forever; `debugMouse` is a top-level settings key, not under `tui:`, and must be *named* in `statusLine.segments`; the status row is `height-1`.
+
+**Still not proven:** a human watching a real spawn against a real provider, clicking the child's row mid-run while it is still working. The drive's child settles in milliseconds.
 
 ---
 

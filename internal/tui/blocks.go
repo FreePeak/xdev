@@ -99,6 +99,10 @@ type SubActivity struct {
 	Calls  int           // finished tool calls, for the settled summary
 	Dur    time.Duration // terminal wall time, set when Status settles
 	Ts     time.Time     // when the child started, for its live elapsed
+	// TranscriptID is the id this child's own transcript is readable under
+	// (agent.Hub.TrackForeground hands one out). Empty when the host tracks
+	// nothing, which is exactly when the row must not offer to open one.
+	TranscriptID string
 }
 
 // subRowsMax is how many children a batch keeps on screen. ponytail: 3 + a

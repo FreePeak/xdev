@@ -67,6 +67,10 @@ const (
 // blockRend is one block's render: the stamp of the inputs that produced it,
 // the visual lines, the decoration every row of the block shares, and how many
 // transcript rows it occupies (its lines plus the blank separator row).
+//
+// subs are the child rows inside it a click can open, recorded by the render
+// that produced the lines — so a hit can never point at a row offset a
+// DIFFERENT layout put a child on. Cleared by reset with everything else.
 type blockRend struct {
 	key   blockKey
 	lines []line
@@ -74,6 +78,7 @@ type blockRend struct {
 	railS tcell.Style
 	ts    string // right-aligned timestamp, first row only
 	rows  int32
+	subs  []subHit
 }
 
 // rowView is one transcript row inside the viewport, ready to paint.

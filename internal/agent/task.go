@@ -562,7 +562,26 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 			Details: map[string]string{"job": id},
 		}, nil
 	}
+	var fgID string // the transcript id this foreground child is readable under
+
+	// A foreground child's transcript is the one thing /hub cannot show — it
+	// blocks this very call, so it is not a job — and the TUI has to be able
+	// to open it while the child is still running. TrackForeground captures
+	// the child's store through the same OnRun seam the hub uses and returns
+	// the id its transcript is readable under; the child's start event
+	// carries that id to the host, which is what binds a click on the child's
+	// transcript row to the transcript it can fetch.
+	if t.Hub != nil {
+		var capture func(*Agent)
+		fgID, capture = t.Hub.TrackForeground(spec)
+		spec.TranscriptID = fgID
+		spec.OnRun = composeOnRun(spec.OnRun, capture)
+		spec.OnEvent = withForegroundID(t.OnEvent, fgID)
+	}
 	res, err := SpawnChild(ctx, spec)
+	if fgID != "" {
+		t.Hub.SettleForeground(fgID, res, err)
+	}
 	if err != nil {
 		return tool.Result{Text: "task: " + err.Error(), IsError: true}, nil
 	}
@@ -688,6 +707,36 @@ func renderSubagentResult(res *SubagentResult) string {
 		fmt.Fprintf(&b, "\nsession: %s\n", res.SessionID[:min(8, len(res.SessionID))])
 	}
 	return b.String()
+}
+
+// composeOnRun chains a second OnRun onto the first, keeping the existing
+// hook's position (the advisor's, the hub's) ahead of the new one. Both are
+// cheap and neither blocks, so the order is only a readability rule.
+func composeOnRun(base, next func(*Agent)) func(*Agent) {
+	if next == nil {
+		return base
+	}
+	if base == nil {
+		return next
+	}
+	return func(ag *Agent) { base(ag); next(ag) }
+}
+
+// withForegroundID wraps a host's OnEvent so the child's start event carries
+// the id its transcript is readable under. Every later event repeats it: a
+// host keys children by label (labels are unique per batch), and the end
+// event is what settles the row, so a host that bound on start must still
+// recognise the same child on the way out.
+func withForegroundID(base func(SubagentEvent), id string) func(SubagentEvent) {
+	if base == nil {
+		return nil
+	}
+	return func(ev SubagentEvent) {
+		if ev.TranscriptID == "" {
+			ev.TranscriptID = id
+		}
+		base(ev)
+	}
 }
 
 // attachChildAdvisor wires a per-child reviewer (M11 #39 task.agentAdvisor)

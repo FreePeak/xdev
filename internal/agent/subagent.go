@@ -61,6 +61,12 @@ type SubagentSpec struct {
 	// parent's context is untouched either way (only the yield is
 	// parent-visible; the contract TestSubagentYieldOnlyIsolation pins).
 	OnEvent func(SubagentEvent)
+
+	// TranscriptID is the id a host may read this child's transcript under
+	// (Hub.TrackForeground hands one out); empty means nothing tracks it.
+	// SpawnChild copies it onto the child's start event, which is how a TUI
+	// row learns which id to fetch.
+	TranscriptID string
 }
 
 // SubagentEventKind names one observable moment in a child's run.
@@ -94,6 +100,11 @@ type SubagentEvent struct {
 	Args   json.RawMessage
 	Status string // SubagentTool: "ok" | "error"; SubagentEnd: the child's result status
 	Dur    time.Duration
+	// TranscriptID is the id this child's transcript is readable under
+	// (Hub.TrackForeground's "fg-N"; empty when nothing tracked the child).
+	// It rides the start event so a host can bind a click on the child's
+	// transcript row to the transcript it may fetch.
+	TranscriptID string
 }
 
 // SubagentOutput is the yield payload contract.
@@ -327,6 +338,9 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 	if spec.OnEvent != nil {
 		spec.OnEvent(SubagentEvent{
 			Kind: SubagentStart, Label: spec.Name, Model: spec.Model, Status: "running",
+			// The store is captured by now (OnRun fired above), so this is
+			// the first moment a host could fetch anything for this child.
+			TranscriptID: spec.TranscriptID,
 		})
 	}
 	cctx, cancel := context.WithCancel(ctx)
