@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/session"
 )
@@ -133,5 +134,88 @@ func TestShouldGenerateTitleAcceptsMechanicalPrefixes(t *testing.T) {
 			t.Errorf("%q is mechanical and should be replaced", mechanical)
 		}
 		_ = reopened.Close()
+	}
+}
+
+// A resumed session that still carries the mechanical stamp must name itself
+// from the prompt that opened it — that is the whole fix. A /rename, a
+// generated title and a session whose only user turn is harness-injected are
+// left exactly as they are, and the stamp is rewritten ON DISCE (the picker
+// and the tab strip both read the file, not the memory).
+func TestAdoptMechanicalTitleNamesAResumedSession(t *testing.T) {
+	dir := t.TempDir()
+	st := session.OpenMem("/proj", "print 2026-09-13 04:12")
+	p := filepath.Join(dir, "resumed.jsonl")
+	if _, err := st.EnsureOnDisk(p, session.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Append(userMessage(t, "fix the resume title\nsecond line ignored")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := session.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := adoptMechanicalTitle(reopened); got != "fix the resume title" {
+		t.Fatalf("adopted title = %q, want the opening prompt", got)
+	}
+	if reopened.Title() != "fix the resume title" {
+		t.Fatalf("in-memory title = %q", reopened.Title())
+	}
+	if title, _, ok := session.ParseTitleSlotSource(session.ReadTitleSlot(p)); !ok || title != "fix the resume title" {
+		t.Fatalf("on-disk slot title = %q (ok=%v)", title, ok)
+	}
+	// Idempotent: a second adopt has nothing mechanical left to replace.
+	if got := adoptMechanicalTitle(reopened); got != "" {
+		t.Fatalf("second adopt = %q, want no rewrite", got)
+	}
+	_ = reopened.Close()
+
+	// A manual rename is authoritative and must survive a resume.
+	manual := session.OpenMem("/proj", "print 2026-09-13 04:12")
+	mp := filepath.Join(dir, "manual.jsonl")
+	if _, err := manual.EnsureOnDisk(mp, session.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manual.Append(userMessage(t, "anything")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manual.Rename("my hand-written name", session.TitleSourceManual); err != nil {
+		t.Fatal(err)
+	}
+	_ = manual.Close()
+	mo, err := session.Open(mp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mo.Close()
+	if got := adoptMechanicalTitle(mo); got != "" || mo.Title() != "my hand-written name" {
+		t.Fatalf("manual title rewritten: %q -> %q", "my hand-written name", mo.Title())
+	}
+
+	// A session whose only user turn is harness text has no name to adopt:
+	// a goal continuation is not something the person typed.
+	harness := session.OpenMem("/proj", "print 2026-09-13 04:12")
+	hp := filepath.Join(dir, "harness.jsonl")
+	if _, err := harness.EnsureOnDisk(hp, session.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	harnessMsg := userMessage(t, "goal continuation: keep going")
+	harnessMsg.Message.Attribution = agent.GoalContinuationAttribution
+	if err := harness.Append(harnessMsg); err != nil {
+		t.Fatal(err)
+	}
+	_ = harness.Close()
+	ho, err := session.Open(hp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ho.Close()
+	if got := adoptMechanicalTitle(ho); got != "" || !strings.HasPrefix(ho.Title(), "print ") {
+		t.Fatalf("harness turn became a title: %q", ho.Title())
 	}
 }

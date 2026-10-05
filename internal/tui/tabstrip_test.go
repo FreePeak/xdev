@@ -6,12 +6,11 @@ import (
 	"time"
 )
 
-// TestTabStripPolicyHidesAndNumbers: tui.tabs.mode off hides the strip and
-// frees its row (the chords and /tabs keep working — the strip is a view of
-// the tabset, not the tabset), and tui.tabs.indicators numbers swaps the
-// status glyph for the tab's index, which is the legend for the C-1..9 chords.
-// New() defaults tabsStrip on, so a host that never calls SetTabPolicy still
-// paints the shipped strip.
+// TestTabStripPolicyHidesAndNumbers: the strip is OPT-IN (a default install
+// paints no tab row), tui.tabs.indicators numbers swaps the status glyph for
+// the tab's index — the legend for the C-1..9 chords — and turning the policy
+// back off hides the strip and frees its row. The chords and /tabs keep
+// working throughout: the strip is a view of the tabset, not the tabset.
 func TestTabStripPolicyHidesAndNumbers(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	app.SetTabs([]TabInfo{
@@ -19,8 +18,17 @@ func TestTabStripPolicyHidesAndNumbers(t *testing.T) {
 		{ID: "bbbb2222", Title: "second"},
 	})
 	app.draw()
+	if strings.Contains(screenText(scr), "second") {
+		t.Fatalf("the opt-in default must not paint the strip:\n%s", screenText(scr))
+	}
+	if app.tabStripVisible() {
+		t.Fatal("the opt-in default must not claim the transcript's first row")
+	}
+
+	app.SetTabPolicy(true, false)
+	app.draw()
 	if !strings.Contains(screenText(scr), "first") {
-		t.Fatal("the default policy does not paint the strip")
+		t.Fatalf("tui.tabs.mode on did not paint the strip:\n%s", screenText(scr))
 	}
 
 	app.SetTabPolicy(true, true)

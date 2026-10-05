@@ -30,6 +30,12 @@ import (
 // whole "it did something" signal, and its HUD counters are not accumulated
 // while parked. The upgrade path is a per-tab block list inside the App;
 // nothing above this type changes.
+//
+// The open set is also written to disk (tabset.persist → sessionops.go's
+// tab-set sidecar), so a later launch in the same directory reopens the same
+// sessions as tabs — opencode persists its own tab set the same way
+// (tui/<channel>/tui/tabs.json, scoped per cwd by default). Without it a
+// restart loses the set even though every session is still on disk.
 
 // tabSlots bounds the open set. Every entry holds an open writer plus its
 // windowed entries, so this is the memory ceiling the feature trades for
@@ -500,6 +506,22 @@ func (ts *tabset) setTitle(id, title string) {
 	if i := ts.indexOfLocked(id); i >= 0 {
 		ts.tabs[i].title = title
 	}
+}
+
+// persistIDs returns the open session ids in tab order — the set a later
+// launch in the same directory should reopen. The path, not the id: a
+// session's file is what survives a restart, and a store that never
+// materialized has nothing to reopen.
+func (ts *tabset) persistIDs() []string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	out := make([]string, 0, len(ts.tabs))
+	for _, t := range ts.tabs {
+		if t.store != nil && t.store.Path() != "" {
+			out = append(out, t.store.Path())
+		}
+	}
+	return out
 }
 
 // summary is the status-row reading: how many sessions are open, how many are

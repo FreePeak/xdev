@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -354,5 +355,68 @@ func TestTabsetReopenRestoresTheLastClosed(t *testing.T) {
 	ts2.closed = []string{path}
 	if got := ts2.takeClosed(); got != "" {
 		t.Fatalf("takeClosed returned an already-open tab: %q", got)
+	}
+}
+
+// The open set survives a restart: what one launch in a directory closes, the
+// next launch in that directory reopens as tabs (opencode persists its tab set
+// the same way), scoped per cwd so another directory's set is untouched. A
+// session file that is gone by then is skipped, not an error.
+func TestTabSetSurvivesARestart(t *testing.T) {
+	sandbox(t)
+	cwd := t.TempDir()
+	other := t.TempDir()
+
+	live := func(title string) string {
+		st := session.OpenMem(cwd, title)
+		if _, err := st.EnsureOnDisk(session.SessionFilePath(sessionDataDir(), cwd, time.Now(), st.ID()), session.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Append(userMessage(t, "hello "+title)); err != nil {
+			t.Fatal(err)
+		}
+		p := st.Path()
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	a, b := live("alpha"), live("beta")
+
+	ts := newTabset(memStore(t))
+	for _, p := range []string{a, b} {
+		st, err := session.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ts.open(st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveTabSet(cwd, ts.persistIDs())
+	saveTabSet(other, nil) // another directory's set is untouched by cwd's
+
+	got := savedTabSessions(cwd)
+	if len(got) != 2 {
+		t.Fatalf("reopened %d sessions, want the 2 persisted", len(got))
+	}
+	if got[0].ID() != sessionIDOfPath(a) || got[1].ID() != sessionIDOfPath(b) {
+		t.Fatalf("reopened out of order: %s then %s", got[0].ID(), got[1].ID())
+	}
+	for _, st := range got {
+		_ = st.Close()
+	}
+
+	// A deleted session is not a tab to reopen.
+	if err := os.Remove(a); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(savedTabSessions(cwd)); n != 1 {
+		t.Fatalf("a deleted session came back as a tab (%d open)", n)
+	}
+	// A memory-only session has no file, so it is never persisted: there is
+	// nothing on disk for the next launch to reopen.
+	if n := len(savedTabSessions(other)); n != 0 {
+		t.Fatalf("an empty directory reopened %d sessions", n)
 	}
 }

@@ -20,6 +20,7 @@ import (
 // still return, or the UI thread is gone.
 func TestTabStripCloseClickDoesNotDeadlock(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
+	app.SetTabPolicy(true, false) // the strip is opt-in; these test its rows
 	app.SetTabs([]TabInfo{
 		{ID: "aaaa1111", Title: "first"},
 		{ID: "bbbb2222", Title: "second", Current: true},
@@ -57,6 +58,7 @@ func TestTabStripCloseClickDoesNotDeadlock(t *testing.T) {
 // tabset. Only the hit lookup may hold the lock.
 func TestTabStripLabelClickDoesNotDeadlock(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
+	app.SetTabPolicy(true, false) // the strip is opt-in; these test its rows
 	app.SetTabs([]TabInfo{
 		{ID: "aaaa1111", Title: "first", Current: true},
 		{ID: "bbbb2222", Title: "second"},
