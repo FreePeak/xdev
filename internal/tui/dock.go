@@ -380,6 +380,19 @@ func (a *App) dockBuild() {
 	if f, ok := a.dockFooter(); ok {
 		folds = append(folds, f)
 	}
+	// MCP and the trajectory ride last, under the session's own identity: the
+	// panel ends on what this session is connected to and how to re-read it,
+	// rather than on a list of running children. The order of these appends IS
+	// the paint order — nothing sorts the panel's sections, so this is the
+	// only place their order lives.
+	if ops := a.dock.ops; ops.MCP != nil {
+		if f, ok := dockFoldOf(dockMCPID, ops.MCP(), dockListMax); ok {
+			folds = append(folds, f)
+		}
+	}
+	if f, ok := a.dockTrajFold(); ok {
+		folds = append(folds, f)
+	}
 	d.lines, _, _ = d.layout(folds, bandH)
 	if d.lines == nil {
 		d.lines = []dockRow{} // the built-and-empty state, so the next frame skips it
@@ -410,10 +423,6 @@ func (a *App) collect() []dockFold {
 		out = append(out, f)
 	}
 	add(dockAgentID, ops.Agents)
-	add(dockMCPID, ops.MCP)
-	if f, ok := a.dockTrajFold(); ok {
-		out = append(out, f)
-	}
 	return out
 }
 
