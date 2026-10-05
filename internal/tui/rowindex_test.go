@@ -169,13 +169,13 @@ func TestAgedToolOutputCollapsesFirst(t *testing.T) {
 		t.Error("collapsed result lost its hidden-line notice")
 	}
 	// The conversation spine is untouched: a user prompt keeps every row of its
-	// own text, however aged the session is — plus the card's blank pad rows
-	// above and below, which are its padding rather than trimmed content.
+	// own text, however aged the session is — plus the card's blank pad row
+	// above it, which is its padding rather than trimmed content.
 	for _, b := range app.blocks {
 		if b.Kind == KindUser {
 			want := len(wrap(strings.TrimRight(b.Text, "\n"), max(10, w-2*userBandMargin-2)))
-			if got := len(app.blockLines(idxOf(app, b), b, w)); got != want+2 {
-				t.Fatalf("user prompt rendered %d rows, its text wraps to %d plus two pads", got, want)
+			if got := len(app.blockLines(idxOf(app, b), b, w)); got != want+1 {
+				t.Fatalf("user prompt rendered %d rows, its text wraps to %d plus one pad", got, want)
 			}
 			break
 		}

@@ -198,19 +198,28 @@ func shellRowHasInk(s string, sp langSpec) bool {
 
 // toolHL is the highlighting decision for one finished tool result: which
 // lexer paints it, and whether its rows carry the "N:" render-window prefix
-// that snapshot.go: RenderWindow writes.
+// that snapshot.go: RenderWindow writes. report is the third option: the
+// result is prose a tool WROTE for a person (a subagent's findings), so it
+// paints through the markdown renderer rather than a lexer or a flat wrap.
 type toolHL struct {
 	lang     string
 	numbered bool // rows read "<line>: <source>", so the prefix is chrome
+	report   bool // prose the tool composed, not output it captured
 }
 
 // toolOutputHL decides how a finished tool result paints.
 //
-// The path is the exact answer and always wins: a `read` of a .go file is Go
-// whatever the rows happen to contain. Bash is the only tool that falls to a
-// heuristic, and ONLY bash — every other tool result that carries no path
-// paints flat, because guessing a language for an unknown tool's output is how
-// a log line ends up wearing a keyword colour.
+// Three answers, in this order:
+//
+//   - the path is the exact answer and always wins: a `read` of a .go file is
+//     Go whatever the rows happen to contain;
+//   - a REPORT: the result is prose a tool WROTE for a person rather than
+//     output it captured, so it paints as markdown. Only the tools that spawn
+//     a model say this (task — and every agent it runs, scout included, since
+//     a subagent's answer comes back as its task call's result). Bash is the
+//     one tool that falls to a heuristic, and ONLY bash — every other tool
+//     result carrying no path paints flat, because guessing a language for an
+//     unknown tool's output is how a log line ends up wearing a keyword colour.
 //
 // The zero value paints flat, and so does everything codeStyle cannot colour
 // (NO_COLOR, a theme with no syntax_* slot filled). Nothing here can turn a
@@ -227,6 +236,9 @@ func (a *App) toolOutputHL(b *Block) toolHL {
 	if lang := langForToolOutput(b.Text); lang != "" {
 		return toolHL{lang: lang, numbered: true}
 	}
+	if b.ToolName == taskToolName {
+		return toolHL{report: true}
+	}
 	if b.ToolName == "bash" && LooksLikeShell(b.Text) {
 		return toolHL{lang: shellLang}
 	}
@@ -240,7 +252,7 @@ var shellLang = normalizeLang("bash")
 
 // toolBodyRows lays a result body out into styled rows of inner width.
 //
-// Two paths, and the split is the whole safety story:
+// Three paths, and the split is the whole safety story:
 //
 //   - nothing to colour (no language, an unknown extension, NO_COLOR, a theme
 //     that pins no syntax_* ink): wrap() and textline() exactly as this painted
@@ -248,8 +260,21 @@ var shellLang = normalizeLang("bash")
 //   - a language: the same wrapCells the diff renderer uses, per styled source
 //     line. Styling BEFORE wrapping is what keeps a long source line
 //     consistently coloured — wrap first and a wrapped line's tail arrives as
-//     its own row with no "N:" prefix and nothing to hang the lexer on.
+//     its own row with no "N:" prefix and nothing to hang the lexer on;
+//   - a report: renderMarkdown, the same renderer the assistant's own answer
+//     goes through. It is the ONE path that changes the rows' text, because
+//     markdown is a layout, not a colour: a "# " heading arrives without its
+//     hashes, a bullet as "•". That is the point — a subagent that wrote a
+//     structured report finally reads as one, with the md_* inks it was always
+//     painted with in an assistant block.
 func (a *App) toolBodyRows(body string, inner int, bodySt, dimSt tcell.Style, hl toolHL) []line {
+	if hl.report {
+		var out []line
+		for _, ln := range a.renderMarkdown(body, inner) {
+			out = append(out, wrapLine(ln, inner)...)
+		}
+		return out
+	}
 	if hl.lang == "" {
 		var out []line
 		for _, wl := range wrap(body, inner) {

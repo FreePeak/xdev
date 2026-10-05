@@ -3180,6 +3180,40 @@ Tests: `internal/tui/overlay_pane_width_test.go` (new) — one test per overlay,
 ---
 
 
+
+### tidy(tui): the sent card spends half the padding, and a subagent's report renders as itself
+
+**Status: COMPLETE** (2026-10-05) · branch `tidy/user-band-colorize-subagents` · touched `internal/tui/app.go`, `internal/tui/sticky.go`, `internal/tui/toolhl.go` · tests `internal/tui/chrome_test.go`, `internal/tui/task_report_test.go` (new), `internal/tui/sticky_test.go`, `internal/tui/rowindex_test.go`, `internal/tui/msgmenu_test.go` · probes `scripts/tui-userband-drive.py`, `scripts/tui-report-drive.py` (new)
+
+Two follow-ups to #585/#590, from one user request: halve the padding and margin of the sent message, and colourise what `scout` and `task` output.
+
+**The card at half its air.** `userBandMargin` 2 → **1** and the pad row below the text is gone. The margin halves because a card two cells in at both sides spends more of a narrow pane on air than on the message; the `❯` still lands at `userBandInset = 2`, one cell inside the card, because the air INSIDE the card is the one part that does not halve — at zero the glyph sits against the card's own edge, which is the "bar with a bar's margins" look #590 removed. The **bottom pad row** goes rather than halving, because a row cannot be halved: the block's separator already paints that gap, so the card was spending two blank banded rows on one gap. The **sticky header** had to agree — `stickyLayout.padBottom` is deleted, `stickyPad` is documented as the TOP pad only, and `computeSticky`'s `2*stickyPad` arithmetic becomes `stickyPad` in all three places it appears (the height cap, the "leaves no rows" guard, the card's own row count). `stickyPad` itself stays 1: a pinned card is the transcript's card, so its padding is whatever the card paints.
+```
+[origin/main]                row 0:  ..####…####..   ← 2-cell margin, blank pad
+                            row 1:  ..#❯#ship the band padding###…###..
+                            row 2:  ..####…####..   ← the card's bottom pad
+[this branch]                row 0:  .#####…#####.    ← 1-cell margin, blank pad
+                            row 1:  .#❯#ship the band padding###…###.    ← ❯ at x=2
+                            row 2:  ................  ← the separator, which is that air
+                            pinned:  identical rows 0..1 — the header is the card
+```
+
+**A subagent's report is markdown, because it is prose a model wrote.** `toolHL` gained a third answer, `report`, and `toolBodyRows` a third path: `renderMarkdown`, the same renderer an assistant block goes through. `toolOutputHL` names `task` and only `task` — every agent it spawns (`scout`, `reviewer`, `sonic`, `security-reviewer`) comes back as its call's result, so naming the agents separately would be five names for one path. This is the one render path that **changes rows' text** rather than only their ink (a heading loses its `#`, a dash becomes `•`), which is the whole point: a subagent that wrote a structured report finally reads as one. Every other tool is untouched — a grep result containing `## Not a report` still paints flat — and a `task` result that is not markdown (`task: no provider configured for subagents`) passes through the renderer as the one paragraph it is, in the body ink the box already used, so the fallback is invisible.
+
+Verified against the **built binary** through a real pty, stock `origin/main` and this branch through the identical mock (`scripts/tui-report-drive.py`; the mock branches on the CONVERSATION — a child conversation is the one whose tool list carries `yield`, and the child ends on a `yield` call rather than a plain stop, or the report a user reads is the loose reply). Parent asks `stream=true`, so every answer streams; a plain JSON body there is a protocol error that shows up as `stream error — retrying`, not as a shortcut.
+
+```
+[stock]   │ ## Findings            c8c8c8   ← every row one flat ink, source visible
+          │ - the band margin      c8c8c8
+          │ ```go                  c8c8c8
+          │ const userBandMargin=1 c8c8c8
+[branch]  │ Findings               7aa2f7   ← md_heading_2
+          │ • the band margin      6c6c6c…  ← md_muted bullet, c8c8c8 words
+          │ const userBandMargin=1 31748f   ← the Go lexer's ink
+```
+
+Tests: `internal/tui/task_report_test.go` (new) — the report renders as markdown (heading ink, bullet glyph, inline code and fenced source intact, fenced line NOT in the flat body ink); every non-task tool stays flat even when its output contains headings; a plain `task` result still reads exactly as before. `chrome_test.go` — `TestUserBandHasItsOwnAir` now pins three edges and asserts the row below is NOT banded. `sticky_test.go`, `rowindex_test.go`, `msgmenu_test.go` updated for `userBandInset = 2` and the single pad row. Full `go test ./...` green.
+
 ---
 
 *Last updated: 2026-10-05 (`fix/resume-title` — user report: "fix xdev when resume the session it always has new tab session title `Print <datetime>`", then "make sure 1 session is 1 tab … explore deepdive in the opencode to understand how it works" and "default the tab will be disable too"):* **the symptom was one bug; the deepdive turned it into three.**

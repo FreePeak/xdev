@@ -3877,13 +3877,17 @@ func (a *App) contentWidth() int {
 // userBandMargin is the margin the sent-message card floats in from each side
 // of the pane, in cells: the band paints only between them, so the pane's own
 // background shows at both edges and the prompt reads as a card on the page
-// rather than as a bar running off the screen.
-const userBandMargin = 2
+// rather than as a bar running off the screen. One cell, not two: a card two
+// in on both sides spends more of a narrow pane on air than on the message,
+// and the message is the reason the card is there at all.
+const userBandMargin = 1
 
 // userBandInset is the column the card's own content starts at: the margin,
 // one cell of air inside it, then the ❯ — the same column the composer draws
 // its prefix at, so the message that was sent starts where the one being typed
-// did.
+// did. The air INSIDE the card is the one margin that does not halve: at zero
+// the glyph sits hard against the card's own edge, which is the "bar with a
+// bar's margins" look the margin exists to avoid.
 const userBandInset = userBandMargin + 1
 
 // blockLines returns block i's styled visual lines, rendering them only when
@@ -3911,11 +3915,13 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// across the card; continuation lines indent past the prefix.
 		//
 		// The air a sent message needs lives HERE, not in the composer: a
-		// blank banded row above AND below the text, so the prompt hangs off
-		// the middle of its own card instead of sitting on the answer above
-		// it; a userBandMargin of pane background at each side, so the card
-		// floats rather than running off both edges; and one cell of air
-		// inside the card before the ❯.
+		// blank banded row above the text, so the prompt hangs off the top
+		// of its own card instead of sitting on the answer above it; and a
+		// userBandMargin of pane background at each side, so the card floats
+		// rather than running off both edges. NO pad row below the text:
+		// the block's own separator already leaves air before the answer,
+		// so a second blank banded row would spend two rows of a small
+		// screen on air for one gap.
 		band := a.cellColor(a.th.Get(theme.BgHighlight))
 		pfxSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
 		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
@@ -3941,7 +3947,6 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			ln.bg, ln.inset = band, userBandInset
 			lines = append(lines, ln)
 		}
-		lines = append(lines, pad()) // the card's bottom padding
 	case KindThinking:
 		// Grok thinking.rs: "Thinking…" (running, with braille spinner) or
 		// "Thought for Xs" (done), in the same rounded frame a finished tool
@@ -4429,10 +4434,11 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	}
 
 	// Syntax highlighting (toolhl.go) runs on the plain-body path only, and
-	// only for a result whose own header names a language or whose tool is
-	// bash-with-shell-evidence. Everything else keeps the one-run wrap/textline
-	// path below it, byte for byte, including when NO_COLOR or the theme leaves
-	// the syntax_* slots unpainted.
+	// only for a result whose own header names a language, whose tool is
+	// bash-with-shell-evidence, or which is a subagent's report (toolOutputHL
+	// picks the one path per result). Everything else keeps the one-run
+	// wrap/textline path below it, byte for byte, including when NO_COLOR or
+	// the theme leaves the syntax_* slots unpainted.
 	//
 	// ponytail: the lexer runs over EVERY source row of the body, not just the
 	// head+tail window that gets painted, because wrap() already materialises
@@ -4728,20 +4734,17 @@ func (a *App) paint() {
 	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
-	// The header owns its card's padding on top of the rows it keeps: a blank
-	// banded row above the text and one below it, while it still has both, so
-	// a pinned prompt is the same card the transcript drew — margins and all —
-	// instead of a bar pressed against the top of the viewport. Both counts are
-	// zero when nothing is pinned, so the row is never painted without a card.
+	// The header owns its card's padding on top of the rows it keeps: one
+	// blank banded row above the text, the same one the transcript's own card
+	// paints, so a pinned prompt is that card — margins and all — rather than
+	// a bar pressed against the top of the viewport. The count is zero when
+	// nothing is pinned, so the row is never painted without a card.
 	padRow := a.stickyPadRow(sticky)
 	view := make([]rowView, 0, max(sticky.rows, end-start))
 	for range sticky.padTop {
 		view = append(view, padRow)
 	}
 	view = append(view, header...)
-	for range sticky.padBottom {
-		view = append(view, padRow)
-	}
 	// The remaining rows of the header's budget are the one row of air that
 	// says it is not part of the stream.
 	for range sticky.rows - len(view) {

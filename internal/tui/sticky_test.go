@@ -29,14 +29,16 @@ func TestStickyPinsOnlyAfterScrollPast(t *testing.T) {
 	if h.block != 0 {
 		t.Fatalf("scrolled one row past the first prompt: block = %d", h.block)
 	}
-	if h.rows != h.visible+h.padTop+h.padBottom+stickyGap {
-		t.Errorf("a pinned card leaves a gap before the transcript: rows=%d visible=%d pad=%d/%d",
-			h.rows, h.visible, h.padTop, h.padBottom)
+	if h.rows != h.visible+h.padTop+stickyGap {
+		t.Errorf("a pinned card leaves a gap before the transcript: rows=%d visible=%d pad=%d",
+			h.rows, h.visible, h.padTop)
 	}
 	// The card keeps its air at the top of the transcript: a header that only
-	// padded below would be a bar with a gap under it.
-	if h.padTop != stickyPad || h.padBottom != stickyPad {
-		t.Errorf("a pinned card pads both sides: padTop=%d padBottom=%d", h.padTop, h.padBottom)
+	// padded below would be a bar with a gap under it. It pads ABOVE only —
+	// one row, the same one the transcript's card paints — because the block
+	// separator under the prompt already supplies the air below it.
+	if h.padTop != stickyPad {
+		t.Errorf("a pinned card pads its top by the row its card paints: padTop=%d", h.padTop)
 	}
 }
 
@@ -96,9 +98,9 @@ func TestStickyPushedByNextPrompt(t *testing.T) {
 	if h.block != 0 || h.visible != 2 || h.clipTop != 1 {
 		t.Fatalf("mid-push: %+v", h)
 	}
-	if h.rows != h.visible+h.padTop+h.padBottom {
-		t.Errorf("a pushed header must not reserve a gap under it: rows=%d visible=%d pad=%d/%d",
-			h.rows, h.visible, h.padTop, h.padBottom)
+	if h.rows != h.visible+h.padTop {
+		t.Errorf("a pushed header must not reserve a gap under it: rows=%d visible=%d pad=%d",
+			h.rows, h.visible, h.padTop)
 	}
 	// next_naive 1: only the gap row would be left, so the header hands the
 	// viewport back to the transcript entirely.
@@ -647,9 +649,9 @@ func TestStickyPushClipsTheHeaderAndResolvesItsRows(t *testing.T) {
 		if h.block != 0 {
 			t.Fatalf("off %d: a pushed header belongs to block %d, want 0", off, h.block)
 		}
-		if h.rows != h.visible+h.padTop+h.padBottom {
-			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible (pad %d/%d) — the gap goes first",
-				off, h.rows, h.visible, h.padTop, h.padBottom)
+		if h.rows != h.visible+h.padTop {
+			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible (pad %d) — the gap goes first",
+				off, h.rows, h.visible, h.padTop)
 		}
 		// The row the pointer is over resolves into the pinned prompt's own
 		// rows, at the offset the header is showing.
