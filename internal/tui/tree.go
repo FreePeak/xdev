@@ -452,7 +452,7 @@ func treeRoleSlot(e TreeEntry) string {
 // a populated panel plus the two gestures that change the row set, so an open
 // modal is always visible and never a dead end. Callers hold a.mu.
 func (a *App) drawTreeEmpty(yComposerTop int) {
-	w := a.width
+	w := a.rightEdge()
 	s := a.scr
 	borderSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
@@ -521,7 +521,7 @@ func (a *App) drawTreeSelector(yComposerTop int) {
 	idxs := vis[start:min(len(vis), start+maxRows)]
 	selRow -= start
 
-	w := a.width
+	w := a.rightEdge()
 	s := a.scr
 	selSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))

@@ -272,6 +272,11 @@ func (a *App) handleTrajectoryMouse(m *tcell.EventMouse, press bool) bool {
 
 // drawTrajectory renders the ledger (or its inspector) above the composer.
 // Callers hold a.mu (draw does) — this must not re-lock a.mu.
+//
+// The panel is a surface of the PANE (rightEdge), not the terminal: it floats
+// above the composer, which stops at the context panel's left edge, so a
+// terminal-wide ledger painted its rows across the sidebar's FILES list and
+// its own border ran under the panel's.
 func (a *App) drawTrajectory(yComposerTop int) {
 	st := a.trajState()
 	if st == nil || !st.ui.open {
@@ -286,7 +291,7 @@ func (a *App) drawTrajectory(yComposerTop int) {
 	trajRegMu.Unlock()
 
 	s := a.scr
-	w := a.width
+	w := a.rightEdge()
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
 	selSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))

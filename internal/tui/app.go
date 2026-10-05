@@ -4999,15 +4999,20 @@ func (a *App) paint() {
 // (grok slash_dropdown.rs): aligned name column + dim description, selected
 // row highlighted. Rows sit on the composer's background so the popup reads
 // as one surface with the prompt box.
+//
+// The width is the PANE's (rightEdge), not the terminal's: the dropdown
+// floats above the composer, which stops at the context panel's left edge, so
+// a panel-width popup reached into the sidebar and painted its rows over the
+// FILES list and its border cut the dropdown's own middle in half.
 func (a *App) drawSlashDropdown(yComposerTop int) {
 	if a.smenu == nil || !a.smenu.active() {
 		return
 	}
+	w := a.rightEdge()
 	rows := a.smenu.rows()
 	if len(rows) == 0 || yComposerTop < len(rows)+1 {
 		return
 	}
-	w := a.width
 	s := a.scr
 	selName, _ := a.smenu.selected()
 	sel := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
@@ -5064,9 +5069,11 @@ func (a *App) drawPicker(yComposerTop int) {
 		return
 	}
 	p := a.pickers[len(a.pickers)-1]
-	w := a.width
+	// The panel spans the PANE, not the terminal: a modal-wide one reached
+	// across the context panel, whose columns it then painted over.
+	w := a.rightEdge()
 	// Never open-and-invisible (the 5b999f0 invariant, restated for the
-	// picker stack): an unusable terminal width or no room above the
+	// picker stack): an unusable pane width or no room above the
 	// composer must close the modal, not leave it owning the keyboard
 	// while painting nothing.
 	if w < 24 {

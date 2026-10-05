@@ -183,7 +183,7 @@ func (a *App) drawStatusPopup() {
 	}
 	// Rows + the two border rows, and the label/value columns plus the two
 	// pad cells and the two borders.
-	w := min(a.width-4, labelW+valueW+6)
+	w := min(a.rightEdge()-4, labelW+valueW+6)
 	h := len(rows) + 2
 	// The panel opens UP from the status row: its bottom sits one row above
 	// the pill that opened it, and a panel taller than the space above the
@@ -192,7 +192,7 @@ func (a *App) drawStatusPopup() {
 	// cover. It may overlap the composer; the msgmenu makes the same trade
 	// for a panel anchored lower down, and a metrics answer is worth a
 	// partially visible prompt box.
-	x := min(max(2, p.ax), max(2, a.width-w-2))
+	x := min(max(2, p.ax), max(2, a.rightEdge()-w-2))
 	y := max(0, p.ay-h)
 
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineSep)))

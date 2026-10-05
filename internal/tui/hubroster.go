@@ -310,7 +310,9 @@ func (ui *hubRosterUI) rowAt(y int) int {
 }
 
 // drawHubRoster renders the overlay above the composer. Callers hold a.mu
-// (draw does) — this must not re-lock a.mu.
+// (draw does) — this must not re-lock a.mu. The panel is a surface of the
+// PANE (rightEdge): it floats above the composer, so a terminal-wide roster
+// covered the context panel the way a full-width slash dropdown did.
 func (a *App) drawHubRoster(yComposerTop int) {
 	st := a.hubState()
 	if st == nil || !st.ui.open {
@@ -324,7 +326,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	ui := st.ui
 	hubRegMu.Unlock()
 	s := a.scr
-	w := a.width
+	w := a.rightEdge()
 	if len(ui.rows) == 0 {
 		// Empty roster: one panel line says so, with the chords that work.
 		h := 3
@@ -333,7 +335,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
 		rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
-		hubRosterBox(s, y, h, 46, a.th.Box(), brdSt)
+		hubRosterBox(s, y, h, min(46, w-4), a.th.Box(), brdSt)
 		drawText(s, 3, y+1, "no background agents yet — spawn one with the task tool", dimSt)
 		drawText(s, 3, y+2, "Esc close · refreshes as agents start", dimSt)
 		return

@@ -1019,7 +1019,7 @@ type diffOverlay struct {
 // a gutter to sit in and the rows have one inside it.
 const diffPad = 2
 
-// diffOverlayInner is the cells a diff row may occupy: the terminal less the
+// diffOverlayInner is the cells a diff row may occupy: the PANE less the
 // panel's two margins, its two borders and the inset its rows start at. Every
 // consumer of the overlay's width takes it from here — the wrap budget when
 // the overlay opens and the row paint when it draws — so a row is wrapped for
@@ -1030,7 +1030,13 @@ const diffPad = 2
 // a 113-column popup, and the same file wrapped at a different width with the
 // sidebar hidden. A band is padded to the wrap budget, so the band that
 // wrapped with it stopped mid-panel too.
-func (a *App) diffOverlayInner() int { return max(10, a.width-2*diffPad-3) }
+//
+// It is rightEdge(), not a.width: the viewer is a surface of the pane it was
+// opened over — a terminal-wide one painted the context panel out from under
+// the file list the reader clicks to change files. Clicking a panel row still
+// re-points the viewer (closeDiffOverlayOnClick), it just does so beside the
+// panel instead of on top of it.
+func (a *App) diffOverlayInner() int { return max(10, a.rightEdge()-2*diffPad-3) }
 
 // openDiffOverlay renders the diff for the newest finished tool block
 // that touches path and stores it as the active overlay.
@@ -1130,14 +1136,17 @@ func (ov *diffOverlay) reflow(a *App) {
 	ov.scrollOff = keep
 }
 
-// drawDiffOverlay renders the full-width diff surface above the composer.
+// drawDiffOverlay renders the diff surface beside the composer, spanning the
+// main pane. The panel is the PANE's width, not the terminal's: it sits beside
+// the context panel rather than painting over the changed-file list that is
+// how a reader points the viewer at another file.
 func (a *App) drawDiffOverlay(yComposerTop int) {
 	ov := a.diffOv
 	if ov == nil {
 		return
 	}
 	s := a.scr
-	w := a.width
+	w := a.rightEdge()
 	x := 2
 	y0 := 1
 	panelH := yComposerTop - y0 - 1

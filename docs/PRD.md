@@ -3110,3 +3110,39 @@ Tests: `internal/tui/chrome_test.go` — `TestUserBandHasItsOwnAir` rewritten fr
 
 *Last updated: 2026-10-05 (`feat/sidebar-mcp-traj-bottom`, user request: "move the mcp and trajectory in sidebar to bottom of the sidebar").* The panel painted MCP and TRAJECTORY last but one, above the SESSION footer, so the column ended on a list of running children and then on the session's identity — the two things a human scrolls past to find the button at the bottom. Both moved below the footer, and the panel now ends: `PLAN → TASKS → FILES → AGENTS → SESSION → MCP → TRAJECTORY`. Nothing about the layout changed: section order in the dock is the order of the appends in `dockBuild` (`internal/tui/dock.go`), nothing sorts them, so the move is `collect()` handing MCP and the trajectory back to the caller and `dockBuild` appending them after `dockFooter()`. `dock_section_order_test.go` (new) pins the order TWICE — once with rows, once at Ctrl+T's shut fold where the panel is nothing but headings, so the order is legible with no row content to lean on — and fails against stock — "the section is there" is what a move-back looks like green.
 
+---
+
+## Every overlay is a surface of the pane (2026-10-05)
+
+User report: *"fix the select box width when user type '/<command' the box width overlay the sidebar, this width must only == session width, fix the trajectory overlay windows too."*
+
+**The defect.** The context panel is a window of its own (`rightEdge()` is the pane's last column; the composer, the status row and the ask card already lay out against it). But the overlays that float above the composer still measured `a.width` — the WHOLE terminal — so with the panel open each one painted its row fills and its border straight across the panel's 42 columns, and the sidebar's FILES list and its own border vanished under it. Measured on `origin/main` at 160x40 with `sidebarMode: show`, driving the built binary through a real pty and scoring the replayed cell grid: the `/` dropdown left **320 background-filled cells** in the panel's columns (rows 28-35), and the `/trajectory` ledger and `/hub` roster left **40** (row 35).
+
+**The fix is one width, in ten painters.** Each overlay now takes `a.rightEdge()` instead of `a.width`:
+
+| painter | surface |
+|---|---|
+| `drawSlashDropdown` | the `/` and `@` dropdown (the reported one) |
+| `drawTrajectory` | the `/trajectory` ledger and its inspector |
+| `drawPicker` / `drawSessionPicker` | `/model` and every modal picker; the `/resume` list |
+| `drawTreeSelector` / `drawTreeEmpty` | the session tree |
+| `drawHubRoster` | `/hub` and its transcript view |
+| `drawDiffOverlay` + `diffOverlayInner` | the diff viewer, whose wrap budget is the same number |
+| `drawMsgView` / `drawMsgMenu` / `msgViewBounds` | the read-only message surface and its click menu |
+| `drawSettingsOverlay` | `Alt+,` — centred in the pane now, not on the terminal |
+| `drawStatusPopup` | the status pill's detail panel, clamped to the pane's edge |
+
+Nothing new: `rightEdge()` already existed and already returned the whole terminal when the panel is shut, so with the sidebar closed every overlay paints exactly where it did before (`TestOverlaysDoNotChangeWithThePanelClosed` pins that against the dropdown's content-sized border width, `min(w-4, nameW+44)`).
+
+**One design note worth keeping.** The diff viewer is opened FROM the panel's changed-file rows, so a pane-wide panel is not a regression there — it is the point: the file list the reader clicks to change files stays visible and clickable beside the diff. `closeDiffOverlayOnClick` is unchanged and still re-points the viewer on a panel click.
+
+Verified against the **built binary** driven through a real pty, stock `origin/main` and this branch through the identical script (`scripts/tui-overlay-width-drive.py`, `sidebarMode: show`, one mock provider, capture replayed through pyte and scored by cell — glyphs AND backgrounds, because a fill is what actually covers the panel while a glyph count stays clean):
+
+```
+[stock origin/main]   slash  panel glyphs=0  fill=320  rows=[28,29,30,31,32,33]
+                     traj   panel glyphs=0  fill=40   rows=[35]
+[fix/overlay-width]   slash  panel glyphs=0  fill=0    rows=[]
+                     traj   panel glyphs=0  fill=0    rows=[]
+```
+
+Tests: `internal/tui/overlay_pane_width_test.go` (new) — one test per overlay, each opening it with the panel pinned and asserting no cell of the panel's columns carries a non-default background or a box glyph, plus the diff viewer's FILES row surviving beside it and the closed-panel frame being unchanged; each fails on stock `main` except the closed-panel one. `internal/tui/diff_overlay_rows_test.go` — the band's stripe and the viewer's interior are now the PANE's (`rightEdge()`, not `a.width`), and the "no row lost its right border" loop rules out the two border rows by their corner glyph rather than a row number (with the panel beside the viewer, the pane's rail column carries a `│` on rows the viewer does not paint, and that is the gutter, not an overflow).

@@ -855,7 +855,7 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 		foot = append(foot, "No sessions in current folder. Press Tab to view all.")
 	}
 
-	w := a.width
+	w := a.rightEdge()
 	s := a.scr
 	selSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
