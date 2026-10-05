@@ -1934,8 +1934,17 @@ func (a *Agent) executeTool(ctx context.Context, t tool.Tool, args json.RawMessa
 	}
 }
 
+// runOneTool executes one tool call. The NUL scrub sits HERE, once, rather
+// than in each wire adapter: one guard then covers every path a call reaches
+// execution by — a streamed block, a replayed session, an imported log, an
+// in-band dialect decoder — and every tool, including ones added later. The
+// scrub also runs inside ai.parseToolArgs, so a stored transcript is already
+// clean; this pass is what covers a block that never went through the wire
+// parser at all.
 func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Message {
 	started := time.Now()
+	call.Name = ai.ScrubToolName(call.Name)
+	call.Arguments = ai.ScrubToolArgs(call.Arguments)
 	a.Hooks.OnToolStart(call)
 	// The plan-mode exit tool lives outside the registry (it is exposed
 	// only while the sub-state is live), so route it before lookup.

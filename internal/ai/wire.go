@@ -204,10 +204,94 @@ func parseToolArgs(api, id, raw string) json.RawMessage {
 	}
 	var args json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &args); err == nil {
-		return args
+		return scrubToolArgsNUL(args)
 	}
 	logx.Errorf("%s: unparseable tool call %s arguments, sent as {}; the model must re-issue it: %s", api, id, raw)
 	return json.RawMessage("{}")
+}
+
+// scrubToolArgsNUL removes NUL from every string inside a decoded tool-call
+// argument object. NUL is legal inside a JSON string, so the strict parse
+// above accepts it and no downstream decoder objects — but execve(2) rejects
+// any argv string containing one with EINVAL, which surfaced live as
+// `bash: start: fork/exec /bin/bash: invalid argument` and sent the model
+// hunting a shell that was never broken (measured 2026-10-05 on
+// onegw/opencode-space-bunny-free: 51 of 83,060 stored calls carried a U+0000).
+//
+// Every OTHER control character is legitimate payload and is left alone: \t
+// \n \r are what a multi-line command, a `write` of a source file and an
+// `edit` patch are made of. An argument left EMPTY by the scrub stays an empty
+// string rather than losing its key — dropping the key would silently satisfy
+// a `required` constraint the model never satisfied.
+//
+// ponytail: an argument scrubbed down to empty stays an empty string, so the
+// tool's own "command is required" error is what the model reads — no schema
+// walk and no per-tool opt-in here. Upgrade path: if a tool ever takes a
+// legitimate binary payload, that tool decodes it from base64 in its own
+// decoder rather than this scrub learning about it.
+func scrubToolArgsNUL(args json.RawMessage) json.RawMessage {
+	// A NUL in a JSON string arrives ESCAPED (\u0000), so scanning the raw
+	// bytes for the 0x00 code unit misses every real case — the guard has to
+	// look for the escape as well as the literal byte.
+	if !bytes.ContainsRune(args, 0) && !bytes.Contains(args, []byte(`\u0000`)) {
+		return args
+	}
+	var v any
+	if err := json.Unmarshal(args, &v); err != nil {
+		return args // not an object; the tool's own decoder owns that error
+	}
+	// Marshal skips nil, so a scrubbed-away value would DELETE its key and
+	// satisfy a `required` constraint the model never met. {"path":"\x00"} must
+	// reach the tool as {"path":""}, not {}.
+	v = scrubValueNUL(v)
+	out, err := json.Marshal(v)
+	if err != nil {
+		logx.Errorf("tool call arguments re-encoded to an empty object after the NUL scrub")
+		return json.RawMessage("{}")
+	}
+	return out
+}
+
+// scrubValueNUL walks a decoded JSON value, dropping NUL from every string.
+// Numbers and booleans are returned unchanged, so a numeric argument never
+// round-trips through float formatting on its way back to JSON.
+func scrubValueNUL(v any) any {
+	switch t := v.(type) {
+	case string:
+		if strings.ContainsRune(t, 0) {
+			return strings.ReplaceAll(t, "\x00", "")
+		}
+	case []any:
+		for i := range t {
+			t[i] = scrubValueNUL(t[i])
+		}
+	case map[string]any:
+		for k := range t {
+			t[k] = scrubValueNUL(t[k])
+		}
+	}
+	return v
+}
+
+// ScrubToolArgs and ScrubToolName are the exported half of the guard above, so
+// the agent applies the same scrub to a tool call that never passed through
+// this package's parser (a replayed session, an imported log, a synthesized
+// block). Both are idempotent: scrubbing a clean value returns it unchanged.
+func ScrubToolArgs(args json.RawMessage) json.RawMessage { return scrubToolArgsNUL(args) }
+
+func ScrubToolName(name string) string { return scrubToolName(name) }
+
+// scrubToolName is the same guard for the call's NAME. A spliced name reached
+// the registry lookup verbatim and answered `unknown tool "\x00bash"`, which
+// reads to the model as "this session has no bash tool" and to the user as a
+// broken session. A name that was only the splice has nothing to salvage and
+// stays empty, routing to the existing nameless-call error rather than
+// inventing a tool.
+func scrubToolName(name string) string {
+	if !strings.ContainsRune(name, 0) {
+		return name
+	}
+	return strings.ReplaceAll(name, "\x00", "")
 }
 
 // modelsProbeURL is the catalog endpoint a HealthCheck probes: {base}/models,
