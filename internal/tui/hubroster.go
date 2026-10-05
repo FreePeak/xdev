@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -84,14 +85,28 @@ func (a *App) openSubChildTranscript(id, label string) bool {
 		return false
 	}
 	st := a.hubState()
-	hubRegMu.Lock()
-	defer hubRegMu.Unlock()
 	if st == nil || st.ops == nil || st.ops.Transcript == nil {
 		return false
 	}
+	hubRegMu.Lock()
+	defer hubRegMu.Unlock()
+	// The roster snapshot is refreshed HERE, not only on a handled key, AND a
+	// child that is not a roster row is folded in as one. Both because the
+	// panel decides its OWN branch on len(ui.rows): a list that was still empty
+	// when the click landed painted "no background agents yet" OVER the child's
+	// transcript, and a child tracked by a `task` call never had a row at all.
+	// A view with rows hidden behind a panel that says nothing is running reads
+	// exactly like the app ignoring the click.
 	name := label
 	if name == "" {
 		name = id
+	}
+	if st.ops.Roster != nil {
+		rows := st.ops.Roster()
+		if !slices.ContainsFunc(rows, func(r HubAgent) bool { return r.ID == id }) {
+			rows = append(rows, HubAgent{ID: id, Name: name, Status: "running"})
+		}
+		st.ui.rows = rows
 	}
 	lines, total, ok := st.ops.Transcript(id, 0)
 	msg := "subagent: " + name

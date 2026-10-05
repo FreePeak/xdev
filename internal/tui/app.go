@@ -1305,10 +1305,17 @@ func (a *App) spinFrame() string {
 // parent's own call rows use — so a child row and a call row read alike and
 // the rules live in one place.
 //
+// base is how many rows the BLOCK has already emitted before the first child
+// row: the call row (and its wrapped continuations) come first, so a hit
+// recorded against the child slice alone names the CALL row. That reads as
+// correct in a test whose call row is the first thing on screen and wrong in
+// every real transcript, where the child sits one row below it — the case a
+// pty drive found and a simulation-screen test cannot.
+//
 // hits receives the rows a click can open: entry i is the block-row offset of
 // the child named by hits[i].label, filled only for children a host tracked
 // (TranscriptID set), so a row with nothing to show is never clickable.
-func (a *App) subLines(b *Block, w int, hits *[]subHit) []line {
+func (a *App) subLines(b *Block, w, base int, hits *[]subHit) []line {
 	rows, more := b.subVisible()
 	if len(rows) == 0 && more == 0 {
 		return nil
@@ -1349,7 +1356,9 @@ func (a *App) subLines(b *Block, w int, hits *[]subHit) []line {
 		if budget := subRow(w); width(row) > budget {
 			row = truncateCells(row, budget, "…")
 		}
-		at := len(out) // the child's row, offset within the block's own lines
+		// base + len(out): the row's offset within the WHOLE block, not within
+		// the child slice.
+		at := base + len(out)
 		emit(row, c.Status == "running")
 		if hits != nil && c.TranscriptID != "" {
 			*hits = append(*hits, subHit{offset: at, label: c.Label, id: c.TranscriptID})
@@ -1548,6 +1557,16 @@ func (a *App) AddLLMTime(dur time.Duration, ttftMS int64) {
 // SetStatusSegments configures the HUD (settings statusLine.segments): the
 // segment names to render, in order. Unknown names are skipped with a
 // warning; nil/empty restores the shipped layout.
+//
+// The lookup is CASE-INSENSITIVE in both directions, deliberately: the
+// vocabulary is keyed in whatever spelling it was documented in
+// (`debugMouse`, camelCase like every other settings key) and the segment
+// switch in hudSegment is folded to lower case. Folding the name and testing
+// the FOLDED key against a map keyed in camelCase dropped every camelCase
+// segment on the floor — `debugMouse` was reported "unknown" the line after
+// the map accepted it, and could not be enabled at all. Found by driving the
+// real binary: `scripts/tui-subagent-transcript-drive.py` needs this segment to
+// tell a click the app ignored from one it never received.
 func (a *App) SetStatusSegments(segs []string) {
 	known := make([]string, 0, len(segs))
 	var unknown []string
@@ -1556,7 +1575,7 @@ func (a *App) SetStatusSegments(segs []string) {
 		if name == "" {
 			continue
 		}
-		if _, ok := statusSegments[name]; ok {
+		if isStatusSegment(name) {
 			known = append(known, name)
 			continue
 		}
@@ -1570,6 +1589,21 @@ func (a *App) SetStatusSegments(segs []string) {
 	a.statusSegs = known
 	a.mu.Unlock()
 	a.poke()
+}
+
+// isStatusSegment is the vocabulary test, case-insensitive, over the canonical
+// (documented) spelling. ponytail: a map lookup plus an EqualFold scan — the
+// vocabulary is a dozen entries and this runs once per session.
+func isStatusSegment(folded string) bool {
+	if _, ok := statusSegments[folded]; ok {
+		return true
+	}
+	for name := range statusSegments {
+		if strings.EqualFold(name, folded) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetRunning toggles the spinner state and opens/closes the work span the
@@ -4086,7 +4120,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// as sibling tool calls, and they are the only place a user can
 		// see what a subagent is doing while its call blocks — the model
 		// sees only the yield (TestSubagentYieldOnlyIsolation).
-		lines = append(lines, a.subLines(b, w, &subs)...)
+		lines = append(lines, a.subLines(b, w, len(lines), &subs)...)
 	case KindToolDone:
 		lines = append(lines, a.toolBoxLines(i, b, w)...)
 	case KindSystem:
@@ -5808,8 +5842,15 @@ func statusSegmentNames() []string {
 // hudSegment renders one segment: its text and the statusLine token that
 // colors it. An empty text means the segment has nothing to show (hidden,
 // not blank) — an unwired cost or context never draws an empty cell.
+//
+// The name is folded here because it arrives folded (SetStatusSegments folds
+// it) and the switch is spelled in lower case for the same reason. A
+// camelCase `case` was unreachable: the folded "debugmouse" never matched
+// "debugMouse", so the one segment whose name is camelCase could never
+// render. ponytail: the fold, not a per-case dance — the vocabulary is a
+// dozen names and this runs once per segment per frame.
 func (a *App) hudSegment(name string) (text, token string) {
-	switch name {
+	switch strings.ToLower(name) {
 	case "model":
 		return a.st.Model, theme.StatusLineModel
 	case pillToken:
@@ -5955,7 +5996,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 			text += fmt.Sprintf(" ✦%d", unread)
 		}
 		return text, theme.StatusLineSep
-	case "debugMouse":
+	case "debugmouse":
 		return a.debugMouseLine, theme.StatusLineSep
 	}
 	return "", ""

@@ -50,13 +50,21 @@ func subRowScreenY(t *testing.T, app *App, label string) int {
 // host tracked, drawn so the child's row has a screen row to be clicked on.
 func subTranscriptApp(t *testing.T) *App {
 	t.Helper()
-	app, _ := newTestApp(t, 100, 30)
+	app, _ := subTranscriptScreen(t)
+	return app
+}
+
+// subTranscriptScreen is subTranscriptApp with the screen, for a test that has
+// to read what was painted.
+func subTranscriptScreen(t *testing.T) (*App, tcell.SimulationScreen) {
+	t.Helper()
+	app, scr := newTestApp(t, 100, 30)
 	app.AddToolBlock("c1", "task", `{"name":"scout","prompt":"map the app shell"}`)
 	app.AddTaskChild("c1", "scout", "scout", "free")
 	app.SetTaskChildTranscript("c1", "scout", "fg-7")
 	app.UpdateTaskChild("c1", "scout", "read", `{"path":"src/boot.tsx"}`, "ok")
 	app.draw()
-	return app
+	return app, scr
 }
 
 // The headline: a click on a subagent's row opens THAT child's own transcript
@@ -86,6 +94,73 @@ func TestSubagentRowClickOpensThatChildTranscript(t *testing.T) {
 	// Its own rows, not the roster job's.
 	if len(ui.view) != 3 || !strings.Contains(ui.view[0].Text, "map the app shell") {
 		t.Fatalf("view rows = %+v, want the child's transcript", ui.view)
+	}
+}
+
+// The pty drive (scripts/tui-subagent-transcript-drive.py) found this one: a
+// child transcript opened under the panel's EMPTY-ROSTER panel ("no background
+// agents yet"), because the panel chose that branch on a roster list that was
+// still empty — the click had just tracked the child, and nothing refilled the
+// list before the next frame. A view with rows hidden behind a panel that says
+// nothing is running reads exactly like the app ignoring the click.
+//
+// The offset is the other half of the same drive: the hit recorded the child's
+// row as offset 0 — the CALL row — so in any transcript with a row above the
+// child, the click resolved to the call. Both passed a simulation-screen test
+// whose call row happened to be the first row on screen.
+func TestSubagentHitIsTheChildRowNotTheCallRow(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.AddToolBlock("c1", "task", `{"name":"scout","prompt":"map the app shell"}`)
+	app.AddTaskChild("c1", "scout", "", "free")
+	app.SetTaskChildTranscript("c1", "scout", "fg-7")
+	app.draw()
+
+	app.mu.Lock()
+	hits := app.rowIdx.rend[0].subs
+	app.mu.Unlock()
+	if len(hits) != 1 {
+		t.Fatalf("subs = %+v, want one child hit", hits)
+	}
+	// The child is the block's SECOND row: row 0 is the `task` call row.
+	if hits[0].offset != 1 {
+		t.Fatalf("child hit offset = %d, want 1 (the row after the call row)", hits[0].offset)
+	}
+	// And the click must land on the CHILD's screen row, not the call's.
+	y := subRowScreenY(t, app, "scout")
+	app.mu.Lock()
+	id, _ := app.subChildAt(y - 1)
+	app.mu.Unlock()
+	if id != "" {
+		t.Fatalf("screen row %d (the call row) resolved to child %q; the offset points at the call", y-1, id)
+	}
+}
+
+// The panel must show the child's rows rather than its empty-roster panel: the
+// ops can read the child even when the roster it was opened from is empty, and
+// the empty-roster branch is chosen on len(rows).
+func TestSubagentPanelShowsRowsOverAnEmptyRoster(t *testing.T) {
+	app, scr := subTranscriptScreen(t)
+	ops := subAgentOps("fg-7")
+	ops.Roster = func() []HubAgent { return nil } // the state the drive found
+	app.SetHubOps(ops)
+
+	y := subRowScreenY(t, app, "scout")
+	app.mu.Lock()
+	press(app, 8, y)
+	release(app, 8, y)
+	app.mu.Unlock()
+	app.draw()
+
+	ui := hubUI(app)
+	if !ui.open || ui.viewID != "fg-7" || len(ui.view) != 3 {
+		t.Fatalf("panel = %+v, want the child's three rows over an empty roster", ui)
+	}
+	out := screenText(scr)
+	if strings.Contains(out, "no background agents yet") {
+		t.Fatalf("the empty-roster panel covered the child's transcript:\n%s", out)
+	}
+	if !strings.Contains(out, "map the app shell") {
+		t.Fatalf("the child's own rows are not on screen:\n%s", out)
 	}
 }
 

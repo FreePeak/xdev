@@ -1220,8 +1220,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// polling the panel at frame rate, which is the exact cost #283/#284 closed.
 		sessionHub.SetNotify(app.DockBump)
 		app.SetHubOps(&tui.HubOps{
+			// Jobs AND the children a `task` call spawned synchronously
+			// (agent.Hub.TrackForeground): a foreground child is not a job, so
+			// without the second list the panel drew "no background agents yet"
+			// OVER a child transcript its own ops could read — a click that opens
+			// the right rows under the title "nothing is running".
 			Roster: func() []tui.HubAgent {
-				rows := sessionHub.Roster()
+				rows := append(sessionHub.Roster(), sessionHub.Foreground()...)
 				out := make([]tui.HubAgent, len(rows))
 				for i, r := range rows {
 					out[i] = tui.HubAgent{
