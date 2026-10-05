@@ -342,41 +342,78 @@ func groknightSlots() map[string]Color {
 		// (App.modeToken), so this slot is only what an unrecognised mode
 		// name falls back to; it keeps the accent for that case.
 		StatusLineMode: Hex("#bb9af7"),
-		// Diff rows, Claude Code's model (v2.1.287, the diff renderer): the
-		// +/- marker wears the palette's own green/red — the pair the status
-		// line paints a clean/dirty tree in, so one system owns both — and
-		// the change itself is read from a BAND, not from coloured text.
-		// The bands are CC's own tints (addLine rgb(2,40,0), addWord
-		// rgb(4,71,0) and the two red equivalents): near-black, so they
-		// carry no palette identity and cannot land on the canvas.
-		ToolDiffAdded:         Hex("#9ece6a"),
-		ToolDiffRemoved:       Hex("#f7768e"),
-		ToolDiffContext:       Hex("#6c6c6c"),
+		// Diff rows. Claude Code's model (v2.1.287, the diff renderer) keeps
+		// the SHAPE — the +/- marker is the only coloured text on a changed
+		// row, and the change itself is read from a flat band — while the INKS
+		// are Rosé Pine's own git groups, the two upstream hands its diff
+		// signs (nvim lua/rose-pine/config.lua: git_add = "foam",
+		// git_delete = "love"). Foam rather than pine for the added marker:
+		// pine reads 4.0:1 on this canvas and 3.1:1 on the added band, so a
+		// pine "+" is a marker the reader has to squint at, which defeats the
+		// claim the band is making. Love reads 5.5:1 on the removed band.
+		ToolDiffAdded:   Hex("#9ccfd8"), // foam, upstream git_add
+		ToolDiffRemoved: Hex("#eb6f92"), // love, upstream git_delete
+		ToolDiffContext: Hex("#908caa"), // subtle, the unchanged rows
+		// The bands stay Claude Code's own near-black tints (addLine
+		// rgb(2,40,0), addWord rgb(4,71,0) and the two red equivalents). They
+		// are a near-black STRIPE, not a palette identity: the only ink that
+		// ever sits on one is the row's own body text, so re-tinting them to a
+		// palette hue would repaint the whole diff panel — the transcript box
+		// AND the sidebar's popup, which share these four slots — to buy no
+		// legibility. (The shipped rose-pine.json palette does use its own
+		// pine/foam tints here; a launch theme deliberately does not.)
 		ToolDiffAddedBg:       Hex("#022800"), // CC addLine
 		ToolDiffRemovedBg:     Hex("#3d0100"), // CC deleteLine
 		ToolDiffAddedWordBg:   Hex("#044700"), // CC addWord
 		ToolDiffRemovedWordBg: Hex("#5c0200"), // CC deleteWord
-		// Fenced-code tokens (#501), on Claude Code's dark scope map
-		// (v2.1.287, the hljs emitter's `scopes` table — One Dark). The 9
-		// roles map one-to-one onto its scopes, so a code block reads like a
-		// code block there. They DO paint (unlike the diff's old slots): an
-		// unpainted token class would leave the model's own code ambiguous,
-		// and the risk is a block that is harder to skim, not a change
-		// rendered in the reader's own green/red.
-		SyntaxComment:     Hex("#75715e"), // comment/meta
-		SyntaxKeyword:     Hex("#f92672"), // keyword/operator
-		SyntaxString:      Hex("#e6db74"), // string/regexp
-		SyntaxNumber:      Hex("#be84ff"), // literal/number
-		SyntaxType:        Hex("#a6e22e"), // built_in/type
-		SyntaxVariable:    Hex("#e6e6e6"), // variable/property (body text)
-		SyntaxFunction:    Hex("#a6e22e"), // title.function
-		SyntaxOperator:    Hex("#f92672"), // operator
-		SyntaxPunctuation: Hex("#f8f8f2"), // punctuation
+		// Tool output and fenced-code tokens (#501, #582) wear Rosé Pine's own
+		// syntax groups, mapped role-for-role onto its token table (vscode
+		// themes/rose-pine-color-theme.json). A `read` preview, an `edit`
+		// result and a bash command then read as ONE palette with the diff
+		// above them, instead of a Grok-coloured frame around a One-Dark
+		// block.
+		//
+		// Two of the nine are NOT upstream's own assignment, both forced by
+		// slots xdev has that Rosé Pine has no counterpart for:
+		//
+		//   Comment is `muted`, not nvim's `subtle`. xdev paints a tool body's
+		//   flat rows in TextSecondary (#c8c8c8 here), and a comment in the
+		//   same ink as the body is a comment that vanished — that is exactly
+		//   the regression TestFencedBlockInToolOutputIsNotColoured caught.
+		//   `muted` is one step quieter than `subtle`, still a Rosé Pine token,
+		//   and reads 3.3:1 on the code band against the old comment's 3.5:1.
+		//
+		//   Number is `rose`, not nvim's `gold`: upstream paints String and
+		//   Number the same ink, and two classes a reader tells apart wearing
+		//   one ink is the ambiguity these nine slots exist to remove
+		//   (TestFencedGoBlockColorsItsTokens). VS Code's own rose-pine gives
+		//   constant.numeric #ebbcba — rose — which stays in the palette.
+		SyntaxComment:     Hex("#6e6a86"), // muted, one step below subtle
+		SyntaxKeyword:     Hex("#31748f"), // Keyword
+		SyntaxString:      Hex("#f6c177"), // String
+		SyntaxNumber:      Hex("#ebbcba"), // constant.numeric, not nvim's gold
+		SyntaxType:        Hex("#9ccfd8"), // Type
+		SyntaxVariable:    Hex("#e0def4"), // Identifier (the brightest token)
+		SyntaxFunction:    Hex("#ebbcba"), // Function
+		SyntaxOperator:    Hex("#908caa"), // Operator
+		SyntaxPunctuation: Hex("#908caa"), // @punctuation
 	}
 }
 
-// grokdaySlots — exact GrokDay palette from grok-build
-// (crates/codegen/xai-grok-pager-render/src/theme/grokday.rs, 2026-09-09 sync).
+// grokdaySlots — the launch LIGHT theme: Rosé Pine Dawn's own groups (MIT,
+// github.com/rose-pine/rose-pine-theme) over GrokDay's neutral structure, the
+// exact twin of groknightSlots. The same split, the same reasoning: the canvas,
+// the borders and the muted greys stay GrokDay's because the terminal's own
+// background already supplies the canvas, and every INK a reader reads text
+// with is the palette's.
+//
+// Why the light twin matters less and is still here: `theme: auto` only picks
+// it for an explicit `light`/`day`, XDEV_THEME, or a terminal that answers the
+// OSC 11 / COLORFGBG light-background probe — so most sessions never see it. It
+// is also the twin a reader on a light terminal gets by DEFAULT, and "the dark
+// theme is Rosé Pine but the light one is One Light" is exactly the split a
+// palette migration is supposed to remove. The cost is one table; the mapping
+// is Dawn's, slot for slot.
 func grokdaySlots() map[string]Color {
 	return map[string]Color{
 		BgBase:             Hex("#eeeeee"),
@@ -430,28 +467,52 @@ func grokdaySlots() map[string]Color {
 		ThinkingHigh:    Hex("#a6a6d4"),
 		ThinkingXhigh:   Hex("#b0a2dc"),
 		ThinkingMax:     Hex("#7D4BC6"),
-		// Diff rows — see groknightSlots. The bands are CC's day tints
-		// (addLine rgb(220,255,220), addWord rgb(178,255,178) and the two
-		// red equivalents): near-white, so the day canvas shows through.
-		ToolDiffAdded:         Hex("#378E23"),
-		ToolDiffRemoved:       Hex("#cd3048"),
-		ToolDiffContext:       Hex("#767676"),
+		// Diff rows — the day twin of groknightSlots, same shape: Claude
+		// Code's model keeps the +/-, the bands are CC's day tints (addLine
+		// rgb(220,255,220), addWord rgb(178,255,178) and the two red
+		// equivalents, near-white so the day canvas shows through), and the
+		// inks are Dawn's own git groups.
+		//
+		// Pine for the added marker, where the dark twin uses foam — the one
+		// place the two variants do NOT pick the same token, and a
+		// measurement rather than a preference. On a near-white band the
+		// darker ink is the readable one: pine reads 5.6:1 on the added band
+		// and 5.3:1 on the day canvas, foam 3.2:1 and 3.0:1 — barely over the
+		// 3:1 floor for non-body text. The dark twin's foam reads 9.4:1 on
+		// ITS band, so each variant takes the end of the palette that carries
+		// its own polarity. Love reads 3.3:1 on the removed band, the
+		// weakest marker in the theme and still ahead of the pine it replaced
+		// at 2.9:1.
+		ToolDiffAdded:         Hex("#286983"), // pine, upstream git_add
+		ToolDiffRemoved:       Hex("#b4637a"), // love, upstream git_delete
+		ToolDiffContext:       Hex("#797593"), // subtle, the unchanged rows
 		ToolDiffAddedBg:       Hex("#dcffdc"),
 		ToolDiffRemovedBg:     Hex("#ffdcdc"),
 		ToolDiffAddedWordBg:   Hex("#b2ffb2"),
 		ToolDiffRemovedWordBg: Hex("#ffc7c7"),
-		// Fenced-code tokens (#501) — see groknightSlots: the same 9 roles on
-		// Claude Code's light scope map (v2.1.287 — One Light), whose inks
-		// hold contrast on the light code band.
-		SyntaxComment:     Hex("#969896"), // comment/meta
-		SyntaxKeyword:     Hex("#a71d5d"), // keyword/operator
-		SyntaxString:      Hex("#183691"), // string/regexp
-		SyntaxNumber:      Hex("#0086b3"), // literal/number
-		SyntaxType:        Hex("#0086b3"), // built_in/type
-		SyntaxVariable:    Hex("#333333"), // variable/property (body text)
-		SyntaxFunction:    Hex("#795da3"), // title.function
-		SyntaxOperator:    Hex("#a71d5d"), // operator
-		SyntaxPunctuation: Hex("#333333"), // punctuation
+		// Fenced-code and tool-output tokens (#501, #582) — the day twin of
+		// groknightSlots, from Dawn's own syntax groups (vscode
+		// themes/rose-pine-dawn-color-theme.json).
+		//
+		// Comment is `muted` (#9893a5), which VS Code gives
+		// punctuation.definition.tag, rather than `subtle`: grokday paints a
+		// tool body's flat rows in TextSecondary (#444444 here), and a comment
+		// in that same ink is a comment that vanished — the same failure
+		// TestFencedBlockInToolOutputIsNotColoured caught on the dark twin.
+		// `muted` reads 3.3:1 against that body against the old comment's
+		// 3.4:1, so the choice costs nothing.
+		//
+		// Number is `rose` (#d7827e) — VS Code's own constant.numeric for
+		// Dawn — and distinct from String (`gold`), as the nine slots require.
+		SyntaxComment:     Hex("#9893a5"), // muted
+		SyntaxKeyword:     Hex("#286983"), // Keyword
+		SyntaxString:      Hex("#ea9d34"), // String
+		SyntaxNumber:      Hex("#d7827e"), // constant.numeric
+		SyntaxType:        Hex("#56949f"), // Type
+		SyntaxVariable:    Hex("#575279"), // Identifier (body text)
+		SyntaxFunction:    Hex("#d7827e"), // Function
+		SyntaxOperator:    Hex("#797593"), // Operator
+		SyntaxPunctuation: Hex("#797593"), // @punctuation
 	}
 }
 
