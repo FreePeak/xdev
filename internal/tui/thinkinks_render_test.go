@@ -118,3 +118,51 @@ func TestReasoningBoxSurvivesAThemeSwitch(t *testing.T) {
 		t.Errorf("returning to the first theme painted %v/%v, want %v/%v", frame, body, firstFrame, firstBody)
 	}
 }
+
+// TestSlashDropdownTagWearsTheReadingInk closes the second consumer of the
+// reasoning accent. The slash dropdown's `[tag]` was painted with
+// `accent_thinking` too (app.go drawSlashDropdown), so the alias fixed for the
+// reasoning box was not a one-call-site swap: the same eight palettes would
+// have rendered a slash row's tag in the canvas colour.
+//
+// Tags are TEXT — a bracketed label on a popup row — so they take the body ink.
+// The tag is proven to EXIST rather than assumed: the dropdown only carries
+// `[extension]` / `[skill]` / `[path]` / `[markdown]` rows when something
+// discovered one, so the test seeds the only tag an App can produce without a
+// skills directory and fails loudly if that stops being true.
+func TestSlashDropdownTagWearsTheReadingInk(t *testing.T) {
+	for _, name := range everyPalette {
+		t.Run(name, func(t *testing.T) {
+			app, scr := newTestApp(t, 100, 30)
+			app.SetTheme(theme.Load(name))
+
+			m := newSlashMenu()
+			m.open("", ".", map[string]string{"zeta-demo": "a demo extension command"})
+			m.query("zeta")
+			rows := m.rows()
+			if len(rows) != 1 || rows[0].Tag == "" {
+				t.Fatalf("dropdown rows = %+v, want the one tagged extension row this test needs", rows)
+			}
+			app.smenu = m
+			app.draw()
+
+			want := app.cellColor(app.th.Get(theme.TextPrimary))
+			found := false
+			for y := 0; y < 30 && !found; y++ {
+				for x := 0; x < 100; x++ {
+					ch, _, st, _ := scr.GetContent(x, y)
+					if ch != '[' {
+						continue
+					}
+					if fg, _, _ := st.Decompose(); fg == want {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				t.Errorf("no slash-dropdown tag painted %v: the tag lost its ink on this palette", want)
+			}
+		})
+	}
+}

@@ -3066,4 +3066,6 @@ Verified against the **built binary** driven through a real pty, stock `origin/m
                      frame #61afef (accent)         body #abb2bf
 ```
 
+The swap was **not one call site**: `accent_thinking` also painted the slash dropdown's `[tag]` label, so the same fix would have left `[extension]` / `[skill]` / `[path]` in the canvas on eight palettes. A tag is text, so it now takes `text_primary` too, and the render test drives both surfaces.
+
 Tests pin the CLAIM, not the swap: contrast ratios computed in `internal/theme` over every palette (`text_primary` ≥ 4.5:1 for the body, `accent_thinking` ≥ 3:1 and never equal to the canvas for the frame), and the render-path half drives `blockLines` per palette and through `/theme` in sequence — the latter also pins that `SetTheme` still drops the render cache, since a switch that kept the old render would show the old inks however the slots resolved. Both new test files fail against stock, by the ratio on eight palettes and by the painted hex on ten.

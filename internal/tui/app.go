@@ -5006,7 +5006,14 @@ func (a *App) drawSlashDropdown(yComposerTop int) {
 		x := 4 + nameW
 		drawText(s, x, y, r.Description, st.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
 		if r.Tag != "" {
-			drawText(s, w-6-width(r.Tag), y, "["+r.Tag+"]", st.Foreground(a.cellColor(a.th.Get(theme.AccentThinking))))
+			// A tag is TEXT — a bracketed label on the row — so it wears the
+			// body ink. It used to read `accent_thinking`, which is a slot
+			// about reasoning and, before the alias was fixed, resolved to
+			// each palette's BASE colour: on the eight ported palettes the
+			// `[extension]` / `[skill]` / `[path]` labels were painted in
+			// the canvas. Nothing about a slash command's kind belongs on the
+			// reasoning box's ink.
+			drawText(s, w-6-width(r.Tag), y, "["+r.Tag+"]", st.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
 		}
 		y++
 	}
