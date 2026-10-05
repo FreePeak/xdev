@@ -342,13 +342,6 @@ func errIsAuth(err error) bool {
 	return errors.As(err, &he) && !he.RateLimited && he.Status == http.StatusUnauthorized
 }
 
-// errIsRateLimited reports GitHub's exhausted-quota 403, whose body is a
-// "rate limit exceeded" message and whose headers carry when it resets.
-func errIsRateLimited(err error) bool {
-	var he *httpError
-	return errors.As(err, &he) && he.RateLimited
-}
-
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
