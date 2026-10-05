@@ -4208,7 +4208,9 @@ const focusFadeStep = 1.0 / 6.0
 
 // thinkBoxLines renders one reasoning block in the same rounded frame a result
 // gets: the top border carries the state ("⠹ Thinking…" while it streams,
-// "Thought for Xs" once it settles) and the body shows a fixed window of it.
+// "Thought for Xs" once it settles) and the body shows a fixed window of it in
+// the theme's BODY ink — reasoning is the model's own words, so a /theme switch
+// must not turn it into chrome (see the bodySt comment below).
 //
 // The window's height IS the focus. An unfocused box is one row — the newest
 // thought — so a turn reads as a list of one-liners with its reasoning out of
@@ -4224,11 +4226,12 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	focused := i == a.thinkFocus
 	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentThinking)))
 	if fade := a.focusFade; fade >= 0 {
-		// During the tween the border sits BETWEEN the dim and the focused
-		// ink rather than between two identical ones: the base is already the
-		// thinking accent, so the eased colour is that accent walked back
-		// toward the body gray and forward again. At fade=1 it lands exactly on
-		// AccentThinking, so a settled box is the same cell it always was.
+		// During the tween the border sits BETWEEN the dim ink and the
+		// focused ink rather than between two identical ones: the base is
+		// already the thinking accent, so the eased colour is that accent
+		// walked back toward gray_dim and forward again. At fade=1 it lands
+		// exactly on AccentThinking, so a settled box is the same cell it
+		// always was.
 		base := a.th.Get(theme.GrayDim)
 		if fade < 1 {
 			border = tcell.StyleDefault.Foreground(
@@ -4242,7 +4245,21 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 		// style it always was.
 		border = border.Bold(true)
 	}
-	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	// The reasoning body wears the body ink (TextPrimary), not a chrome grey.
+	// Reasoning is the model's own words — the content of the turn — and
+	// `gray_dim` made it chrome: 1.3:1 on dracula, 1.6:1 on nord, 1.8:1 on
+	// one-dark and gruvbox, so a /theme switch left a frame around text nobody
+	// could read. TextSecondary was no better (it aliases `muted`: 1.9:1 on
+	// dracula, 2.2:1 on tokyo-night), because every ported palette fills that
+	// slot with its own quiet group. TextPrimary is the one slot a palette
+	// sizes for reading, and it clears 4.5:1 on all ten shipped themes
+	// (TestReasoningInksAreReadableInEveryPalette).
+	//
+	// The hierarchy the grey gave up is now carried by the frame: the border
+	// is the accent and the state header is bold, so an unfocused box still
+	// reads as one row of chrome inside a frame, and a clicked one opens as
+	// prose.
+	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	inner := max(1, w-4) // side borders + one pad cell each
 
 	hdr := "Thought"
