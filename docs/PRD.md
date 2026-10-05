@@ -3067,3 +3067,8 @@ Verified against the **built binary** driven through a real pty, stock `origin/m
 ```
 
 Tests pin the CLAIM, not the swap: contrast ratios computed in `internal/theme` over every palette (`text_primary` ≥ 4.5:1 for the body, `accent_thinking` ≥ 3:1 and never equal to the canvas for the frame), and the render-path half drives `blockLines` per palette and through `/theme` in sequence — the latter also pins that `SetTheme` still drops the render cache, since a switch that kept the old render would show the old inks however the slots resolved. Both new test files fail against stock, by the ratio on eight palettes and by the painted hex on ten.
+
+---
+
+*Last updated: 2026-10-05 (`feat/sidebar-mcp-traj-bottom`, user request: "move the mcp and trajectory in sidebar to bottom of the sidebar").* The panel painted MCP and TRAJECTORY last but one, above the SESSION footer, so the column ended on a list of running children and then on the session's identity — the two things a human scrolls past to find the button at the bottom. Both moved below the footer, and the panel now ends: `PLAN → TASKS → FILES → AGENTS → SESSION → MCP → TRAJECTORY`. Nothing about the layout changed: section order in the dock is the order of the appends in `dockBuild` (`internal/tui/dock.go`), nothing sorts them, so the move is `collect()` handing MCP and the trajectory back to the caller and `dockBuild` appending them after `dockFooter()`. `dockSectionOrder` (new) pins the order and fails against stock — "the section is there" is what a move-back looks like green.
+
