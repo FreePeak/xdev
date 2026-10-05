@@ -14,6 +14,8 @@
 #   XDEV_UPDATE_API     GitHub API root              (default https://api.github.com)
 #   XDEV_INSTALL_DIR    install target directory     (default ~/.local/bin)
 #   GITHUB_TOKEN        optional; lifts the anonymous 60 req/h API limit
+#                      (unset and no gh CLI means an anonymous install, which
+#                       is fine until the per-IP quota is spent)
 #
 # Windows has no shell here; grab xdev_windows_amd64.exe from the release page.
 set -euo pipefail
