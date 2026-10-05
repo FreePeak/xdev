@@ -11,9 +11,10 @@ import (
 
 // The palette half of the reasoning box's ink contract is
 // internal/theme/thinkinks_test.go (contrast ratios, the alias table). This is
-// the render-path half: the box must PAINT the two slots that contract names,
+// the render-path half: the box must PAINT the two inks that contract names,
 // on every palette, so a swap that moved the numbers but not the paint fails
-// here.
+// here. The body's slot is the theme's; the frame's is the pinned per-polarity
+// ink (theme.ThinkFrame) — see thinkframe_test.go for that half's own pins.
 //
 // Both defects it exists for were invisible from the launch theme and both
 // survived the whole chrome suite: `accent_thinking` aliased `thinkingText`
@@ -58,8 +59,8 @@ func boxInks(app *App, i int) (frame, body tcell.Color, text string) {
 // and a user can only ever see this as "the thinking box looks wrong".
 func assertBoxInks(t *testing.T, app *App, label string, frame, body tcell.Color, text string) {
 	t.Helper()
-	if want := app.cellColor(app.th.Get(theme.AccentThinking)); frame != want {
-		t.Errorf("%s: border painted %v, want accent_thinking %v", label, frame, want)
+	if want := app.cellColor(theme.ThinkFrame(app.th)); frame != want {
+		t.Errorf("%s: border painted %v, want the pinned frame %v", label, frame, want)
 	}
 	if want := app.cellColor(app.th.Get(theme.TextPrimary)); body != want {
 		t.Errorf("%s: body painted %v, want text_primary %v", label, body, want)
