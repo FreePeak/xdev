@@ -240,10 +240,20 @@ func RequiredSlots() []string {
 // legacyToCanonical maps the xdev slot names the TUI reads onto the
 // canonical token that satisfies them.
 var legacyToCanonical = map[string]string{
-	BgHighlight:        UserMessageBg,
-	AccentUser:         UserMessageText,
-	AccentAssistant:    Accent,
-	AccentThinking:     ThinkingText,
+	BgHighlight:     UserMessageBg,
+	AccentUser:      UserMessageText,
+	AccentAssistant: Accent,
+	// AccentThinking takes `accent`, NOT `thinkingText`. The reasoning box's
+	// border is a frame, and `thinkingText` is a text token: every ported
+	// palette fills it with its own BASE colour (rose-pine #1f1d2e,
+	// dracula #282a36, nord #242933 — read from a working TUI's token table,
+	// where it is the canvas behind the reasoning, not its ink). Aliasing to
+	// it painted the frame 1.0:1 against bg_base in all eight, so /theme
+	// made the box's border disappear. `accent` is the palette's identity ink
+	// and every shipped palette carries it with real contrast. A theme that
+	// names `accent_thinking` outright still wins — legacyOrder reads the
+	// explicit key before any alias.
+	AccentThinking:     Accent,
 	AccentTool:         ToolTitle,
 	AccentError:        Error,
 	AccentSuccess:      Success,
