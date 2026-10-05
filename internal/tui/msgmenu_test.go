@@ -97,18 +97,19 @@ func TestDragFromUserRowStillSelectsText(t *testing.T) {
 
 	y := userRow(t, app, 0)
 	app.mu.Lock()
-	drag(app, 3, y, 11, y)
+	drag(app, 5, y, 11, y)
 	menu := app.msgm != nil
 	app.mu.Unlock()
 
 	if menu {
 		t.Fatal("a drag opened the menu; only a click should")
 	}
-	// The row paints as " ❯ first prompt" (the band's own margin, then the
-	// prefix), so cells 3..11 are the body text "first pro" — the drag is
-	// measured in screen cells, margin and prefix included.
-	if got := string(scr.GetClipboardData()); got != "first pro" {
-		t.Fatalf("clipboard = %q, want %q", got, "first pro")
+	// The row paints as "  ❯ first prompt" (the card's margin, its air, then
+	// the prefix), so cell 5 is where the prompt's text starts and cells 5..11
+	// are "first p" — the drag is measured in screen cells, margin, air and
+	// prefix included.
+	if got := string(scr.GetClipboardData()); got != "first p" {
+		t.Fatalf("clipboard = %q, want %q", got, "first p")
 	}
 }
 

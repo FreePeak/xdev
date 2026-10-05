@@ -29,8 +29,14 @@ func TestStickyPinsOnlyAfterScrollPast(t *testing.T) {
 	if h.block != 0 {
 		t.Fatalf("scrolled one row past the first prompt: block = %d", h.block)
 	}
-	if h.rows != h.visible+stickyGap {
-		t.Errorf("a pinned prompt leaves a gap before the transcript: rows=%d visible=%d", h.rows, h.visible)
+	if h.rows != h.visible+h.padTop+h.padBottom+stickyGap {
+		t.Errorf("a pinned card leaves a gap before the transcript: rows=%d visible=%d pad=%d/%d",
+			h.rows, h.visible, h.padTop, h.padBottom)
+	}
+	// The card keeps its air at the top of the transcript: a header that only
+	// padded below would be a bar with a gap under it.
+	if h.padTop != stickyPad || h.padBottom != stickyPad {
+		t.Errorf("a pinned card pads both sides: padTop=%d padBottom=%d", h.padTop, h.padBottom)
 	}
 }
 
@@ -90,8 +96,9 @@ func TestStickyPushedByNextPrompt(t *testing.T) {
 	if h.block != 0 || h.visible != 2 || h.clipTop != 1 {
 		t.Fatalf("mid-push: %+v", h)
 	}
-	if h.rows != h.visible {
-		t.Error("a pushed header must not reserve a gap under it")
+	if h.rows != h.visible+h.padTop+h.padBottom {
+		t.Errorf("a pushed header must not reserve a gap under it: rows=%d visible=%d pad=%d/%d",
+			h.rows, h.visible, h.padTop, h.padBottom)
 	}
 	// next_naive 1: only the gap row would be left, so the header hands the
 	// viewport back to the transcript entirely.
@@ -155,23 +162,31 @@ func TestStickyHeaderPinsPromptAtTopOfViewport(t *testing.T) {
 		t.Fatalf("screen too short: %d rows", len(rows))
 	}
 	hdr := app.transcriptTop()
-	if !strings.Contains(rows[hdr], "port the sticky header") {
-		t.Fatalf("the scrolled-past prompt is not pinned at row %d: %q", hdr, rows[hdr])
+	app.mu.Lock()
+	pad, painted := app.stickyPad, app.stickyHdr
+	app.mu.Unlock()
+	// The pinned prompt is a card: a blank banded row of padding above it, then
+	// the request. Row hdr alone is that air, not the request.
+	if got := strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr]), "█▀▄")); got != "" {
+		t.Fatalf("the pinned card has no padding at the top of the transcript: %q", rows[hdr])
 	}
-	if !strings.Contains(rows[hdr], "❯") {
-		t.Fatalf("the pinned prompt must keep the user band glyph: %q", rows[hdr])
+	if !strings.Contains(rows[hdr+pad], "port the sticky header") {
+		t.Fatalf("the scrolled-past prompt is not pinned at row %d: %q", hdr+pad, rows[hdr+pad])
+	}
+	if !strings.Contains(rows[hdr+pad], "❯") {
+		t.Fatalf("the pinned prompt must keep the user band glyph: %q", rows[hdr+pad])
 	}
 	// A header, not a second copy: the prompt is not painted again below it,
 	// because the rows it hides are the rows the transcript resumes after.
 	body := strings.Join(rows[hdr+1:], "\n")
-	if got := strings.Count(body, "port the sticky header"); got != 0 {
-		t.Fatalf("the pinned prompt is duplicated %d times below itself", got)
+	if got := strings.Count(body, "port the sticky header"); got != 1 {
+		t.Fatalf("the pinned prompt is painted %d times below itself, want the one the header shows", got)
 	}
-	// A blank gap separates the header from the transcript below it. The
-	// scrollbar rides every viewport row, so its glyph is the one thing the gap
-	// is not allowed to be empty of.
-	if got := strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+1]), "█▀▄")); got != "" {
-		t.Fatalf("no gap under the header: %q", got)
+	// The card's own bottom padding, then the blank gap, separate the header
+	// from the transcript below it. The scrollbar rides every viewport row, so
+	// its glyph is the one thing those rows are not allowed to be empty of.
+	if got := strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+painted-1]), "█▀▄")); got != "" {
+		t.Fatalf("no gap under the header: %q", rows[hdr+painted-1])
 	}
 }
 
@@ -296,8 +311,11 @@ func TestStickyHeaderCopiesAsPainted(t *testing.T) {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	rows := app.selRows
-	if len(rows) == 0 || !strings.Contains(rows[0].text, "a long prompt line here") {
-		t.Fatalf("the pinned prompt is not in the selection capture: %+v", rows[:min(3, len(rows))])
+	pad := app.stickyPad
+	// The card's top padding is the card's first row: it is blank but it still
+	// belongs to the pinned prompt, so the capture holds the request one row in.
+	if len(rows) <= pad || !strings.Contains(rows[pad].text, "a long prompt line here") {
+		t.Fatalf("the pinned prompt is not in the selection capture: %+v", rows[:min(pad+3, len(rows))])
 	}
 }
 
@@ -549,15 +567,18 @@ func TestStickyHeaderPaintsOnce(t *testing.T) {
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	hdr := app.transcriptTop()
 	app.mu.Lock()
-	painted, block, vis := app.stickyHdr, app.stickyBlock, app.stickyVis
+	painted, block, vis, pad := app.stickyHdr, app.stickyBlock, app.stickyVis, app.stickyPad
 	app.mu.Unlock()
 	if block < 0 || painted == 0 {
 		t.Fatalf("no sticky header painted (rows %d, block %d)", painted, block)
 	}
-	// The header's rows are the pinned prompt's, then exactly one blank row.
+	// The header is the pinned card: `vis` text rows of the prompt between
+	// blank padding above and below, then exactly one blank gap. Only the text
+	// rows are the request — the padding is air, and painting it as content
+	// would make the header look like it had blank lines in the middle.
 	for i := range vis {
-		if !strings.Contains(rows[hdr+i], "HEADPROMPT") {
-			t.Fatalf("header row %d does not show the pinned prompt: %q", i, rows[hdr+i])
+		if !strings.Contains(rows[hdr+pad+i], "HEADPROMPT") {
+			t.Fatalf("header row %d does not show the pinned prompt: %q", i, rows[hdr+pad+i])
 		}
 	}
 	if strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+painted-1]), "█▀▄")) != "" {
@@ -626,8 +647,9 @@ func TestStickyPushClipsTheHeaderAndResolvesItsRows(t *testing.T) {
 		if h.block != 0 {
 			t.Fatalf("off %d: a pushed header belongs to block %d, want 0", off, h.block)
 		}
-		if h.rows != h.visible {
-			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible — the gap goes first", off, h.rows, h.visible)
+		if h.rows != h.visible+h.padTop+h.padBottom {
+			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible (pad %d/%d) — the gap goes first",
+				off, h.rows, h.visible, h.padTop, h.padBottom)
 		}
 		// The row the pointer is over resolves into the pinned prompt's own
 		// rows, at the offset the header is showing.

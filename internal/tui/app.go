@@ -420,10 +420,17 @@ type App struct {
 	selBarPos   int // thumb's first half row on the track at paint time
 	selBarEnd   int // thumb's half-row end at paint time (exclusive)
 	// The sticky header's geometry at paint time. stickyHdr is how many rows of
-	// the transcript's top the header owns (its prompt plus the gap under it),
-	// stickyVis how many of those are the prompt's own rows, stickyBlock the
-	// prompt it pinned (-1 when none) and stickyDoc the document row its first
-	// painted row shows.
+	// the transcript's top the header owns (its card, padding and gap
+	// included), stickyVis how many of those are the prompt's own text rows,
+	// stickyBlock the prompt it pinned (-1 when none) and stickyDoc the
+	// document row its first painted row shows.
+	//
+	// All three numbers matter because a header row is NOT the document row
+	// its screen position names: below the header, screen row y is document
+	// row start+(y-top), exactly as it always was, but a header row shows a
+	// row of the pinned prompt, which the viewport has already scrolled past.
+	// The rows between are the card's blank padding: they belong to the header
+	// (a click on one is not a hit on any transcript row) and to no prompt.
 	//
 	// Both numbers matter because a header row is NOT the document row its
 	// screen position names: below the header, screen row y is document row
@@ -433,6 +440,7 @@ type App struct {
 	// mu-guarded.)
 	stickyHdr   int
 	stickyVis   int
+	stickyPad   int
 	stickyBlock int
 	stickyDoc   int32
 	// toasts is the live notice stack (toast.go): the copy confirmation, a
@@ -3896,13 +3904,17 @@ func (a *App) contentWidth() int {
 	return w
 }
 
-// userBandInset is the margin the sent-message band keeps between its left
-// edge and the ❯, in cells. grok's user prompt hangs off its own band rather
-// than butting against the terminal edge, and one cell of it is the rail
-// every other transcript row occupies — so the prompt lines up with the
-// content it sits above, and the band reads as a card instead of a bar
-// running off the left of the screen.
-const userBandInset = 1
+// userBandMargin is the margin the sent-message card floats in from each side
+// of the pane, in cells: the band paints only between them, so the pane's own
+// background shows at both edges and the prompt reads as a card on the page
+// rather than as a bar running off the screen.
+const userBandMargin = 2
+
+// userBandInset is the column the card's own content starts at: the margin,
+// one cell of air inside it, then the ❯ — the same column the composer draws
+// its prefix at, so the message that was sent starts where the one being typed
+// did.
+const userBandInset = userBandMargin + 1
 
 // blockLines returns block i's styled visual lines, rendering them only when
 // the block's stamp moved. The render lives in the row index — one entry per
@@ -3926,22 +3938,26 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 	switch b.Kind {
 	case KindUser:
 		// Grok user prompt: ❯ prefix, text_primary body, bg-highlight band
-		// across the full row; continuation lines indent past the prefix.
+		// across the card; continuation lines indent past the prefix.
 		//
 		// The air a sent message needs lives HERE, not in the composer: a
-		// blank banded row above the text, so the prompt hangs off the top of
-		// its own card instead of sitting on the answer above it, and a
-		// userBandInset margin before the ❯. Below the text the block's own
-		// separator row already leaves air before the answer, so a second pad
-		// here would spend two blank rows of a small screen for one gap.
+		// blank banded row above AND below the text, so the prompt hangs off
+		// the middle of its own card instead of sitting on the answer above
+		// it; a userBandMargin of pane background at each side, so the card
+		// floats rather than running off both edges; and one cell of air
+		// inside the card before the ❯.
 		band := a.cellColor(a.th.Get(theme.BgHighlight))
 		pfxSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
 		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 		text := strings.TrimRight(b.Text, "\n")
-		wrapped := wrap(text, max(10, w-userBandInset-2))
-		lines = append(lines, line{bg: band, inset: userBandInset}) // the band's top pad
+		// The card spans userBandMargin in from the pane at each side and its
+		// text starts userBandInset in, so the text keeps one cell of air
+		// inside the card's right edge: pane - 2*margin - 2.
+		wrapped := wrap(text, max(10, w-2*userBandMargin-2))
+		pad := func() line { return line{bg: band, inset: userBandInset} }
+		lines = append(lines, pad()) // the card's top padding
 		for j, wl := range wrapped {
-			ln := line{bg: band, inset: userBandInset}
+			ln := pad()
 			if j == 0 {
 				ln.runs = append(ln.runs, cell{text: "❯ ", style: pfxSt})
 			} else {
@@ -3955,6 +3971,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			ln.bg, ln.inset = band, userBandInset
 			lines = append(lines, ln)
 		}
+		lines = append(lines, pad()) // the card's bottom padding
 	case KindThinking:
 		// Grok thinking.rs: "Thinking…" (running, with braille spinner) or
 		// "Thought for Xs" (done), in the same rounded frame a finished tool
@@ -4652,6 +4669,7 @@ func (a *App) paint() {
 	// Per-frame facts about the viewport: a frame that draws no transcript
 	a.selRows, a.selBarOn, a.selDockRows, a.linkHits = nil, false, nil, nil
 	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyDoc = 0, 0, -1, 0
+	a.stickyPad = 0
 	// The pills' hit table is a per-frame fact for the same reason the
 	// scrollbar's is: a frame that drops a pill for width must not leave
 	// last frame's rectangle live, or a click would open a popup for a
@@ -4754,13 +4772,23 @@ func (a *App) paint() {
 	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
-	gapRow := sticky.rows - len(header) // 1 while pinned, 0 while being pushed off
-	// The header rows first (they overwrite the viewport's own first rows),
-	// then the stream from the row the header ends at. Both are rowViews, so
-	// the paint loop below cannot tell them apart.
-	view := make([]rowView, 0, max(len(header)+gapRow, end-start))
+	// The header owns its card's padding on top of the rows it keeps: a blank
+	// banded row above the text and one below it, while it still has both, so
+	// a pinned prompt is the same card the transcript drew — margins and all —
+	// instead of a bar pressed against the top of the viewport. Both counts are
+	// zero when nothing is pinned, so the row is never painted without a card.
+	padRow := a.stickyPadRow(sticky)
+	view := make([]rowView, 0, max(sticky.rows, end-start))
+	for range sticky.padTop {
+		view = append(view, padRow)
+	}
 	view = append(view, header...)
-	for range gapRow {
+	for range sticky.padBottom {
+		view = append(view, padRow)
+	}
+	// The remaining rows of the header's budget are the one row of air that
+	// says it is not part of the stream.
+	for range sticky.rows - len(view) {
 		view = append(view, rowView{})
 	}
 	view = append(view, a.viewRows(int32(start+sticky.rows), int32(end))...)
@@ -4773,13 +4801,17 @@ func (a *App) paint() {
 		// share: tcell's zero background is ColorDefault, so a style that
 		// omits it resets the cell under the glyphs to the terminal's own
 		// colour instead of the band.
-		// A band can carry a margin: its runs start where the band says (a
-		// sent message hangs off its own card, one cell in from the edge).
+		//
+		// A band can float: one that carries a margin paints only between it
+		// and its mirror at the right edge, so the sent message reads as a
+		// card on the pane rather than a bar running off both sides.
 		banded := r.ln.bg != 0
 		if banded {
-			// Fill the full width so the band reads as one continuous row
-			// (grok semantic band).
-			for bx := range bandLim {
+			bx0, bx1 := 0, bandLim
+			if m := r.ln.inset - 1; m > 0 {
+				bx0, bx1 = m, bandLim-m
+			}
+			for bx := bx0; bx < bx1; bx++ {
 				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
 			}
 		}
@@ -4893,10 +4925,12 @@ func (a *App) paint() {
 	// prompt's rows); every row below it keeps the viewport's own mapping,
 	// because the header re-renders rows the viewport already owned.
 	a.stickyHdr, a.stickyVis, a.stickyBlock = sticky.rows, len(header), sticky.block
+	a.stickyPad = sticky.padTop
 	a.stickyDoc = 0
 	if sticky.block >= 0 {
-		// The header's first painted row IS the prompt's row clipTop, so this is
-		// the document row every hit-test reads instead of re-deriving it.
+		// The header's first PAINTED TEXT row is the prompt's row clipTop: the
+		// blank card padding above it belongs to no prompt, so this is the
+		// document row every hit-test reads instead of re-deriving it.
 		a.stickyDoc = sticky.row + int32(sticky.clipTop)
 	}
 	if a.selDown {
