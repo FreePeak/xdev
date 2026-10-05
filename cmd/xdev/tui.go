@@ -3085,6 +3085,13 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 	case agent.SubagentEnd:
 		s.app.FinishTaskChild(callID, ev.Label, ev.Status, ev.Dur)
 	}
+	// The id the child's own transcript is readable under, when a hub tracked
+	// it (every event carries it). Without one the row stays narration only:
+	// there is nothing to open, and a row that pretended otherwise would
+	// open nothing.
+	if ev.TranscriptID != "" {
+		s.app.SetTaskChildTranscript(callID, ev.Label, ev.TranscriptID)
+	}
 }
 
 // callID is the `task` call this child was started under ("" = unknown, and

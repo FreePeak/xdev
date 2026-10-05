@@ -20,11 +20,15 @@ import (
 // (or Revive) to a parked job re-spawns the child with its prior output
 // injected as context (issue #37).
 type Hub struct {
-	mu    sync.Mutex
-	next  int
-	jobs  map[string]*hubJob
-	inbox map[string][]InboxMsg // steering traffic per job id (Send audit log)
-	procs *ProcTable            // named long-running child processes (lazy)
+	mu   sync.Mutex
+	next int
+	jobs map[string]*hubJob
+	// foreground is the same record shape for a child a tool call spawned
+	// synchronously (TrackForeground): read-only, never a job, so the roster
+	// and the job ops below cannot act on one.
+	foreground map[string]*hubJob
+	inbox      map[string][]InboxMsg // steering traffic per job id (Send audit log)
+	procs      *ProcTable            // named long-running child processes (lazy)
 	// notify fires when a job settles; see SetNotify.
 	notify func()
 	// settleListeners fire on the same edge with the job snapshot resolved;
@@ -86,6 +90,97 @@ type RosterEntry struct {
 	Activity string  `json:"activity"`
 	Tokens   int64   `json:"tokens"`
 	Cost     float64 `json:"cost"` // USD; 0 when the provider reports none
+}
+
+// TrackForeground registers a child that is NOT a background job — one a
+// `task` call spawned synchronously — and returns the id its transcript is
+// readable under plus the OnRun hook that captures the child's store.
+//
+// It exists for the same reason Start does, minus the lifetime: a foreground
+// child blocks the turn that spawned it, so its transcript is the one thing a
+// user cannot otherwise reach (the roster only lists jobs). The record is
+// read-only — no cancel, no park, no revive — because the tool call already
+// owns the child's context and those actions would have nothing honest to do
+// to it.
+//
+// The id is unique per spawn ("fg-N") so a child's transcript cannot collide
+// with a job's, and Transcript serves both from one store walk.
+func (h *Hub) TrackForeground(spec SubagentSpec) (string, func(*Agent)) {
+	job := &hubJob{Label: spec.Name, spec: spec, done: make(chan struct{})}
+	h.mu.Lock()
+	if h.foreground == nil {
+		h.foreground = map[string]*hubJob{}
+	}
+	h.next++
+	id := fmt.Sprintf("fg-%d", h.next)
+	job.ID = id
+	h.foreground[id] = job
+	h.mu.Unlock()
+	return id, func(ag *Agent) {
+		if ag == nil || ag.Store == nil {
+			return
+		}
+		h.mu.Lock()
+		job.Agent = ag
+		job.stores = append(job.stores, ag.Store)
+		h.mu.Unlock()
+	}
+}
+
+// SettleForeground marks a tracked foreground child terminal, so its roster
+// row stops saying "running" once its call has returned. A status the child
+// never reached (a killed process, a panic in the tool) is reported as
+// failed rather than left running forever.
+func (h *Hub) SettleForeground(id string, res *SubagentResult, err error) {
+	h.mu.Lock()
+	j, ok := h.foreground[id]
+	if !ok {
+		h.mu.Unlock()
+		return
+	}
+	j.Result, j.Err = res, err
+	close(j.done)
+	if notify := h.notify; notify != nil {
+		h.mu.Unlock()
+		notify()
+		return
+	}
+	h.mu.Unlock()
+}
+
+// Foreground reports one roster row per tracked foreground child, so a panel
+// can name the child whose transcript it is about to show. Jobs are excluded:
+// Roster already lists those, and one list mixing the two would offer controls
+// (kill/park/revive) that only work on half its rows.
+func (h *Hub) Foreground() []RosterEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []RosterEntry
+	for i := 1; i <= h.next; i++ {
+		j, ok := h.foreground[fmt.Sprintf("fg-%d", i)]
+		if !ok {
+			continue
+		}
+		e := RosterEntry{ID: j.ID, Name: j.Label, Model: j.spec.Model}
+		select {
+		case <-j.done:
+			if j.Err != nil || j.Result == nil || j.Result.Status == "failed" ||
+				j.Result.Status == "schema-mismatch" || j.Result.Status == "canceled" {
+				e.Status = "failed"
+			} else {
+				e.Status = "done"
+			}
+		default:
+			if j.Agent == nil {
+				e.Status = "idle"
+			} else {
+				e.Status = "running"
+			}
+		}
+		e.Tokens, e.Cost, e.Activity = rosterActivity(j)
+		out = append(out, e)
+	}
+	return out
 }
 
 func NewHub() *Hub {
@@ -336,13 +431,19 @@ func rosterActivity(j *hubJob) (tokens int64, cost float64, activity string) {
 	return tokens, cost, activity
 }
 
-// Transcript returns a job's child-session messages with sequence >= fromSeq
+// Transcript returns a child-session's messages with sequence >= fromSeq
 // (incremental fetch; entries accumulate across revives). total is the full
-// message count; ok is false for unknown jobs.
+// message count; ok is false for an unknown id. A foreground child's id
+// (TrackForeground) resolves here too — the same walk, the same entries — so
+// whatever reads a transcript needs no second code path for a child a tool
+// call spawned.
 func (h *Hub) Transcript(id string, fromSeq int) ([]TranscriptEntry, int, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	j, ok := h.jobs[id]
+	if !ok {
+		j, ok = h.foreground[id]
+	}
 	if !ok {
 		return nil, 0, false
 	}

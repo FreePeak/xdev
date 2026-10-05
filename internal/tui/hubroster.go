@@ -46,19 +46,94 @@ type hubRosterUI struct {
 	// open is the overlay's visibility: omp shows the roster even with an
 	// empty agent list (the pane is where you learn nothing is running), so
 	// "is it on screen" cannot be derived from a non-empty row list.
-	open    bool
-	rows    []HubAgent
-	sel     int
-	viewID  string
-	view    []HubTranscriptLine
-	viewTop int
-	msg     string // transient feedback line (kill/revive results)
+	open   bool
+	rows   []HubAgent
+	sel    int
+	viewID string
+	view   []HubTranscriptLine
+	// viewName is the child's display name, when the opener knew one. The
+	// roster's own Enter resolves the name from its rows; a child a tool call
+	// spawned is not a roster row, so its label has to be carried here or the
+	// title would read "fg-7".
+	viewName string
+	viewTop  int
+	msg      string // transient feedback line (kill/revive results)
 	// hitY0 and hitIdx are the row map the painter publishes each frame — omp's
 	// lists do the same inside render() — so a click lands on exactly the agent
 	// row the user saw: hitIdx[i] is the index into rows of the painted row at
 	// screen row hitY0+i.
 	hitY0  int
 	hitIdx []int
+}
+
+// openSubChildTranscript shows one child's transcript in the panel's own
+// transcript view, the same surface /hub's Enter opens — so there is one
+// Esc contract for "I am looking at a child" (Esc steps back to the roster,
+// Esc again closes it) and no second renderer for the same rows. The click
+// on a child's row and the key that opens it share this one activation, so
+// the two cannot drift.
+//
+// Nothing here takes a.mu: the click path calls it with the lock held
+// (handleMouse), so a notice appended as a transcript block would deadlock
+// against its own lock. The panel's own line carries the answer instead —
+// which is also where a user looking at a panel expects it.
+//
+// It reports whether a transcript was actually readable.
+func (a *App) openSubChildTranscript(id, label string) bool {
+	if id == "" {
+		return false
+	}
+	st := a.hubState()
+	hubRegMu.Lock()
+	defer hubRegMu.Unlock()
+	if st == nil || st.ops == nil || st.ops.Transcript == nil {
+		return false
+	}
+	name := label
+	if name == "" {
+		name = id
+	}
+	lines, total, ok := st.ops.Transcript(id, 0)
+	msg := "subagent: " + name
+	if !ok {
+		// A child whose transcript is gone (nothing tracked it, or the
+		// session's hub dropped it) still gets a panel that says so, rather
+		// than a click that visibly does nothing.
+		lines = []HubTranscriptLine{{Role: "agent", Text: "no transcript for " + name}}
+		msg = "no transcript for " + name
+	} else if len(lines) == 0 {
+		// One row so the panel never opens empty and reads as broken.
+		lines = []HubTranscriptLine{{Role: "agent", Text: "no messages yet"}}
+	}
+	st.ui = hubRosterUI{
+		open:     true,
+		rows:     st.ui.rows,
+		sel:      st.ui.sel,
+		viewID:   id,
+		view:     lines,
+		viewName: name,
+		// Open at the tail: a child transcript is read newest-first while it
+		// runs, the same reason the roster's own view starts at the end.
+		viewTop: max(0, total-hubViewRows),
+		msg:     msg,
+	}
+	a.poke()
+	return ok
+}
+
+// openNewestSubChildTranscript is the chord's activation: the newest tracked
+// child in the transcript, opened in the panel. No cursor is invented — the
+// click path exists for "this specific child", and the key answers "the one
+// I am watching", which is the newest by construction (children are appended
+// in start order and the transcript follows the tail).
+func (a *App) openNewestSubChildTranscript() bool {
+	a.mu.Lock()
+	id, label := a.newestSubChild()
+	a.mu.Unlock()
+	if id == "" {
+		return false
+	}
+	return a.openSubChildTranscript(id, label)
 }
 
 // The App struct lives in app.go, which another agent owns this wave, so
@@ -350,14 +425,13 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	if ui.viewID != "" {
 		lines := ui.view
 		start := min(ui.viewTop, max(0, len(lines)-1))
-		end := min(len(lines), start+hubViewRows)
-		visible := lines[start:end]
+		visible := lines[start:min(len(lines), start+hubViewRows)]
 		h := len(visible) + 2
 		y := yComposerTop - h - 2
 		panelW := min(w-2, hubPanelWidth(w, visible)+3)
 		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
 		hubRosterBox(s, y, h, hubPanelWidth(w, visible), a.th.Box(), brdSt)
-		drawText(s, 3, y+1, rosterSnippet("transcript · "+rosterNameByID(ui, ui.viewID)+" ("+ui.viewID+")", printW(panelW, 3)), dimSt)
+		drawText(s, 3, y+1, rosterSnippet("transcript · "+ui.viewTitle()+ui.viewID, printW(panelW, 3)), dimSt)
 		for i, ln := range visible {
 			drawText(s, 3, y+2+i, rosterLine(ln.Role, ln.Text, panelW), fgSt)
 		}
@@ -475,6 +549,19 @@ func rosterNameByID(ui hubRosterUI, id string) string {
 		}
 	}
 	return id
+}
+
+// viewTitle is the child's name for the panel header: the name its opener
+// knew, else the roster row's own name (what /hub's Enter had), else nothing
+// (the bare id follows, so the title never reads "fg-7 (fg-7)").
+func (ui hubRosterUI) viewTitle() string {
+	if ui.viewName != "" {
+		return ui.viewName + " ("
+	}
+	if n := rosterNameByID(ui, ui.viewID); n != ui.viewID {
+		return n + " ("
+	}
+	return ""
 }
 
 // rosterSnippet trims s to max runes on one line.

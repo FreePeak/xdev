@@ -226,6 +226,11 @@ type App struct {
 	// msgFire is a menu action built under a.mu and run after unlocking — the
 	// session rewind replays the transcript and must not run locked.
 	msgFire func()
+	// subID/subLabel are the subagent child row the press armed, resolved on
+	// the release (the row is resolved again there, so a transcript that
+	// re-laid-out cannot open a stale child). Empty = no child armed.
+	subID    string
+	subLabel string
 
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
@@ -1144,6 +1149,17 @@ func (a *App) AppendToolOutput(callID, name, chunk string) {
 // call row they belong to.
 const taskToolName = "task"
 
+// subHit is one clickable child row: which child of which `task` block, and
+// the id its transcript is readable under. The painter fills the slice for
+// every block it renders that has tracked children, and a click reads it back,
+// so the two can never disagree about where a child row is.
+type subHit struct {
+	block  int // index into App.blocks
+	offset int // the child's row within that block's rendered lines
+	label  string
+	id     string
+}
+
 // AddTaskChild records that a `task` call started a child. The child is
 // attached to the newest running `task` row — the same call a result would
 // close — and a child that arrives after the call settled is dropped: the
@@ -1156,6 +1172,25 @@ func (a *App) AddTaskChild(callID, label, agent, model string) {
 			Label: label, Agent: agent, Model: model, Status: "running", Ts: time.Now(),
 		})
 		b.subSeq++
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
+// SetTaskChildTranscript binds a child to the id its own transcript is
+// readable under. It is separate from AddTaskChild because the id arrives on
+// the same start event but only when a hub is tracking children, and a row
+// with no id must not pretend one exists.
+func (a *App) SetTaskChildTranscript(callID, label, transcriptID string) {
+	if transcriptID == "" {
+		return
+	}
+	a.mu.Lock()
+	if b := a.runningToolLocked(callID, taskToolName); b != nil {
+		if c := findSubLocked(b, label); c != nil {
+			c.TranscriptID = transcriptID
+			b.subSeq++
+		}
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1269,7 +1304,11 @@ func (a *App) spinFrame() string {
 // The naming argument comes from toolDetail — the SAME precedence the
 // parent's own call rows use — so a child row and a call row read alike and
 // the rules live in one place.
-func (a *App) subLines(b *Block, w int) []line {
+//
+// hits receives the rows a click can open: entry i is the block-row offset of
+// the child named by hits[i].label, filled only for children a host tracked
+// (TranscriptID set), so a row with nothing to show is never clickable.
+func (a *App) subLines(b *Block, w int, hits *[]subHit) []line {
 	rows, more := b.subVisible()
 	if len(rows) == 0 && more == 0 {
 		return nil
@@ -1281,7 +1320,7 @@ func (a *App) subLines(b *Block, w int) []line {
 	// A child still working spins with the parent's bullet; a settled one keeps
 	// the dim tick it always had, so "which of these is still going" is one
 	// glance down the rows instead of a read of the elapsed clocks.
-	emit := func(text string, running bool) {
+	emit := func(text string, running bool) line {
 		mark, st := "⎿", dim
 		if running {
 			mark, st = a.spinFrame(), runSt
@@ -1289,6 +1328,7 @@ func (a *App) subLines(b *Block, w int) []line {
 		ln := textline("  ", dim)
 		ln.runs = append(ln.runs, cell{text: mark, style: st}, cell{text: " ", style: dim}, cell{text: text, style: nameSt})
 		out = append(out, ln)
+		return ln
 	}
 	for _, c := range rows {
 		phrase := c.Tool
@@ -1309,7 +1349,11 @@ func (a *App) subLines(b *Block, w int) []line {
 		if budget := subRow(w); width(row) > budget {
 			row = truncateCells(row, budget, "…")
 		}
+		at := len(out) // the child's row, offset within the block's own lines
 		emit(row, c.Status == "running")
+		if hits != nil && c.TranscriptID != "" {
+			*hits = append(*hits, subHit{offset: at, label: c.Label, id: c.TranscriptID})
+		}
 	}
 	if more > 0 {
 		emit(fmt.Sprintf("+%d more running", more), true)
@@ -3331,6 +3375,13 @@ func (a *App) handleKey(ev tcell.Event) {
 		// transcript rather than swallowing the chord.
 		_ = a.HubRoster()
 		return
+	case "app.subagent.transcript":
+		// The newest child a `task` call spawned, in its own transcript.
+		// Nothing tracked (no hub, or no `task` call this session) is
+		// silence, like ctrl+o on a transcript with no box: the chord must
+		// not claim to have opened something.
+		a.openNewestSubChildTranscript()
+		return
 	case "model-cycle":
 		// Unwired cycling is a no-op, not an error: the chord is bound by
 		// default and most sessions configure no pattern list.
@@ -3908,6 +3959,9 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		x.grow(i + 1)
 	}
 	x.markDirty(i)
+	// subs collects the child rows this render makes clickable, so the
+	// offsets recorded here are the offsets the lines above actually got.
+	var subs []subHit
 	var lines []line
 	switch b.Kind {
 	case KindUser:
@@ -4032,7 +4086,7 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// as sibling tool calls, and they are the only place a user can
 		// see what a subagent is doing while its call blocks — the model
 		// sees only the yield (TestSubagentYieldOnlyIsolation).
-		lines = append(lines, a.subLines(b, w)...)
+		lines = append(lines, a.subLines(b, w, &subs)...)
 	case KindToolDone:
 		lines = append(lines, a.toolBoxLines(i, b, w)...)
 	case KindSystem:
@@ -4064,7 +4118,10 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 			lines = append(lines, wrapLine(ln, w)...)
 		}
 	}
-	x.rend[i] = blockRend{key: key, lines: lines, rows: int32(len(lines)) + 1}
+	for j := range subs {
+		subs[j].block = i
+	}
+	x.rend[i] = blockRend{key: key, lines: lines, rows: int32(len(lines)) + 1, subs: subs}
 	return lines
 }
 
@@ -4317,6 +4374,57 @@ func (a *App) thinkBoxAt(y int) int {
 		return -1
 	}
 	return bi
+}
+
+// subChildAt names the subagent child row painted on screen row y: its
+// transcript id and label, or ("", "") when the row is not one. The walk is
+// thinkBoxAt's — screen row → document row → block → offset inside that
+// block's rendered lines — and the per-block hit table is the one the render
+// that painted those lines filled, so the two cannot disagree about which
+// child a row is.
+//
+// A row under the sticky header is never a child: the header re-renders rows
+// the viewport already had, so its screen row does not name the document row
+// it shows, and guessing would open the wrong child.
+func (a *App) subChildAt(y int) (id, label string) {
+	if len(a.blocks) == 0 {
+		return "", ""
+	}
+	top, vp := a.selViewport()
+	hdr := a.transcriptTop()
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return "", ""
+	}
+	if dy := y - hdr; dy < a.stickyHdr && (a.stickyVis > 0 || a.stickyBlock >= 0) {
+		return "", ""
+	}
+	doc := int32(top + y - hdr)
+	bi := a.rowIdx.blockAt(doc)
+	if bi < 0 || bi >= len(a.blocks) {
+		return "", ""
+	}
+	off := int(doc - a.rowIdx.start[bi])
+	for _, h := range a.rowIdx.rend[bi].subs {
+		if h.offset == off {
+			return h.id, h.label
+		}
+	}
+	return "", ""
+}
+
+// newestSubChild is subChildAt's keyboard twin: the newest tracked child in
+// the transcript, which is the one a chord without a cursor should open. It
+// returns the same pair, so the click and the key share one activation path.
+func (a *App) newestSubChild() (id, label string) {
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != taskToolName || len(a.rowIdx.rend[i].subs) == 0 {
+			continue
+		}
+		hits := a.rowIdx.rend[i].subs
+		return hits[len(hits)-1].id, hits[len(hits)-1].label
+	}
+	return "", ""
 }
 
 // scrollThinkBox routes a wheel notch to the reasoning box a click focused

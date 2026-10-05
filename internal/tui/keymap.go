@@ -73,9 +73,10 @@ var BuiltinActions = []string{
 	"thinking-toggle", // request-side reasoning off ⇄ auto (omp alt+t; no default chord)
 	"session.tab.next", "session.tab.previous",
 	"session.tab.next_unread", "session.tab.previous_unread",
-	"session.tab.reopen", // C-shift-T: reopen the last closed session
-	"app.settings",       // Alt+,: the settings overlay (grok settings panel)
-	"send-now",           // F6: interrupt the live turn and run a queued message now (#157)
+	"session.tab.reopen",      // C-shift-T: reopen the last closed session
+	"app.settings",            // Alt+,: the settings overlay (grok settings panel)
+	"send-now",                // F6: interrupt the live turn and run a queued message now (#157)
+	"app.subagent.transcript", // Alt+B: the newest subagent's own transcript
 	// Session lifecycle (opencode session_new / session_list / session_delete),
 	// reachable single-key or behind the leader prefix.
 	"session.list", "session.new", "session.delete",
@@ -163,6 +164,13 @@ func DefaultKeyMap() *KeyMap {
 			// as Alt+M (omp's app.agents.hub); it opens the overlay even
 			// when no agent is running.
 			"A-a": "app.agents.hub",
+			// The subagent a `task` call spawned, in that child's own
+			// transcript (the panel /hub's Enter opens). Alt+S is the dock's
+			// section cycle and A-t is the session tree, so the deliverable
+			// chord left in this class is Alt+B ("agent"), the same class
+			// Alt+A (the hub) and Alt+M (models) already use. Opening nothing
+			// is silence, like ctrl+o on an empty transcript.
+			"A-b": "app.subagent.transcript",
 			"C-r": "history-prev",
 			// omp's app.clipboard.pasteImage. This is NOT the ordinary paste —
 			// the terminal owns that and bracketed paste delivers it (see
