@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -32,8 +33,15 @@ type fakeRepo struct {
 	// rejectToken answers 401 to any request carrying an Authorization
 	// header (the stale-GITHUB_TOKEN case).
 	rejectToken bool
-	assetHits   atomic.Int32
-	seen        atomic.Value // string: last path requested
+	// rateLimit answers GitHub's exhausted-quota 403: the same status a bad
+	// credential gets, with the headers that say why.
+	rateLimit bool
+	// resetSec is X-RateLimit-Reset on that answer.
+	resetSec int64
+	// authHits counts requests that carried an Authorization header.
+	authHits  atomic.Int32
+	assetHits atomic.Int32
+	seen      atomic.Value // string: last path requested
 }
 
 func (f *fakeRepo) name() string {
@@ -54,12 +62,34 @@ func (f *fakeRepo) releaseJSON(host string) string {
 		f.tag, f.tag, f.prerelease, assets)
 }
 
+// serveRateLimited is GitHub's exhausted-quota answer, verbatim in shape: a
+// 403 (not a 429) carrying x-ratelimit-remaining: 0 and a reset epoch, with a
+// body that says "rate limit exceeded" — the same status a bad token gets.
+func (f *fakeRepo) serveRateLimited(w http.ResponseWriter) {
+	reset := f.resetSec
+	if reset == 0 {
+		reset = time.Now().Add(time.Hour).Unix()
+	}
+	w.Header().Set("X-RateLimit-Limit", "60")
+	w.Header().Set("X-RateLimit-Remaining", "0")
+	w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset, 10))
+	w.WriteHeader(http.StatusForbidden)
+	fmt.Fprint(w, `{"message":"API rate limit exceeded for 192.0.2.1.","documentation_url":"https://docs.github.com/rest"}`)
+}
+
 func (f *fakeRepo) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/FreePeak/xdev/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			f.authHits.Add(1)
+		}
 		if f.rejectToken && r.Header.Get("Authorization") != "" {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		if f.rateLimit {
+			f.serveRateLimited(w)
 			return
 		}
 		f.seen.Store(r.URL.Path)
@@ -385,6 +415,100 @@ func TestUpdateRetriesWithoutTokenOnAuthFailure(t *testing.T) {
 	}
 	if !strings.Contains(out, "installed "+target) {
 		t.Errorf("stdout does not report the install:\n%s", out)
+	}
+}
+
+// noGH stands in for a machine with no gh CLI or no gh login, so the token
+// tests never depend on whoever is running them. Returns "".
+func noGH(t *testing.T) {
+	t.Helper()
+	prev := ghCLIToken
+	ghCLIToken = func() string { return "" }
+	t.Cleanup(func() { ghCLIToken = prev })
+}
+
+// fromGH stands in for a logged-in gh CLI, without needing one.
+func fromGH(t *testing.T, token string) {
+	t.Helper()
+	prev := ghCLIToken
+	ghCLIToken = func() string { return token }
+	t.Cleanup(func() { ghCLIToken = prev })
+}
+
+// An exhausted anonymous quota must not throw away a credential the CLI
+// already had. GitHub answers the rate-limited 403 with the SAME status it
+// uses for a bad token, so treating them alike discarded a working token and
+// retried into the 60/h anonymous bucket the call had just exhausted.
+func TestUpdateKeepsTokenOnRateLimit(t *testing.T) {
+	bin := fakeBinary()
+	reset := time.Now().Add(30 * time.Minute).Truncate(time.Second)
+	f := &fakeRepo{tag: "v9.9.9", binary: bin, rateLimit: true, resetSec: reset.Unix()}
+	f.start(t)
+	t.Setenv("GITHUB_TOKEN", "good-token")
+	withTarget(t, []byte("old binary"))
+	code, _, errw := runUpdate(t, nil, "1.0.0")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	// One request only: the retry that used to strip the token is gone, so
+	// a quota problem is reported as a quota problem instead of spending a
+	// second request to learn the same thing.
+	if n := f.authHits.Load(); n != 1 {
+		t.Errorf("authenticated requests = %d, want 1 (the token must not be dropped and retried)", n)
+	}
+	if strings.Contains(errw, "retrying unauthenticated") {
+		t.Errorf("a rate limit was misreported as a bad token:\n%s", errw)
+	}
+	for _, want := range []string{"API quota", reset.Local().Format("15:04:05"), "GITHUB_TOKEN"} {
+		if !strings.Contains(errw, want) {
+			t.Errorf("stderr missing %q:\n%s", want, errw)
+		}
+	}
+}
+
+// The ordinary case: no token anywhere, quota to spare. Anonymous updates are
+// how most people install, so the gh fallback must not become a requirement.
+func TestUpdateWorksWithNoTokenAtAll(t *testing.T) {
+	noGH(t)
+	bin := fakeBinary()
+	f := &fakeRepo{tag: "v9.9.9", binary: bin, sumsBody: sha256Hex(bin) + "  " + PlatformAssetName() + "\n"}
+	f.start(t)
+	target := withTarget(t, []byte("old binary"))
+	code, out, errw := runUpdate(t, nil, "1.0.0")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, errw)
+	}
+	if n := f.authHits.Load(); n != 0 {
+		t.Errorf("a tokenless machine sent %d authenticated requests, want 0", n)
+	}
+	if !strings.Contains(out, "installed "+target) {
+		t.Errorf("stdout does not report the install:\n%s", out)
+	}
+}
+
+// A user logged in to the gh CLI has 5000 req/h and does not need to export
+// anything: `xdev update` must find that token on its own.
+func TestUpdateUsesGHCLIToken(t *testing.T) {
+	bin := fakeBinary()
+	f := &fakeRepo{tag: "v9.9.9", binary: bin, sumsBody: sha256Hex(bin) + "  " + PlatformAssetName() + "\n"}
+	f.start(t)
+	fromGH(t, "gh-cli-token")
+	withTarget(t, []byte("old binary"))
+	if code, _, errw := runUpdate(t, nil, "1.0.0"); code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, errw)
+	}
+	if n := f.authHits.Load(); n == 0 {
+		t.Error("the gh CLI token was not sent: the update ran anonymously")
+	}
+}
+
+// An exported token still wins over the CLI, so an explicit choice is never
+// overridden by whatever gh happens to have logged in.
+func TestGithubTokenPrefersEnvOverGHCLI(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "from-env")
+	fromGH(t, "from-cli")
+	if got := githubToken(); got != "from-env" {
+		t.Errorf("githubToken() = %q, want the exported token", got)
 	}
 }
 

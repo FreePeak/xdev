@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -166,7 +167,8 @@ func (c *Client) Download(ctx context.Context, a Asset, w io.Writer) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("download %s: %s: %s", a.Name, resp.Status, strings.TrimSpace(string(body)))
+		return &httpError{Status: resp.StatusCode, URL: a.URL, Body: strings.TrimSpace(string(body)),
+			RateLimited: rateLimited(resp), Reset: resetAt(resp)}
 	}
 	n, err := io.Copy(w, io.LimitReader(resp.Body, maxAssetBytes))
 	if err != nil {
@@ -262,6 +264,10 @@ func (c *Client) get(ctx context.Context, url string, limit int64) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", url, err)
 	}
+	if rateLimited(resp) {
+		return nil, &httpError{Status: resp.StatusCode, URL: url,
+			Body: strings.TrimSpace(string(body)), RateLimited: true, Reset: resetAt(resp)}
+	}
 	if int64(len(body)) > limit {
 		return nil, fmt.Errorf("%s: response larger than %d bytes", url, limit)
 	}
@@ -275,6 +281,13 @@ type httpError struct {
 	Status int
 	URL    string
 	Body   string
+	// RateLimited marks GitHub's exhausted-quota answer (403 "API rate limit
+	// exceeded", or a 429) as distinct from a credential rejection, which
+	// carries the same 403 status.
+	RateLimited bool
+	// Reset is X-RateLimit-Reset: when the quota comes back. Zero when the
+	// response did not say.
+	Reset time.Time
 }
 
 func (e *httpError) Error() string {
@@ -282,7 +295,34 @@ func (e *httpError) Error() string {
 	if e.Body != "" {
 		msg += ": " + firstLine(e.Body)
 	}
+	if e.RateLimited {
+		msg += "\n  hint: GitHub's API quota for this IP is spent"
+		if !e.Reset.IsZero() {
+			msg += " and resets at " + e.Reset.Local().Format("15:04:05")
+		}
+		msg += "; set GITHUB_TOKEN (xdev reads `gh auth token` too, when the gh CLI is logged in)"
+	}
 	return msg
+}
+
+// resetAt reads X-RateLimit-Reset: when the quota comes back. The zero time
+// when the response does not say, which is not an error worth reporting.
+func resetAt(resp *http.Response) time.Time {
+	sec, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+// rateLimited reports whether a response is GitHub refusing on quota rather
+// than on credentials. `x-ratelimit-remaining: 0` is the header signal; a 429
+// is unambiguous on its own.
+func rateLimited(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	return resp.Header.Get("X-RateLimit-Remaining") == "0"
 }
 
 func errIsNotFound(err error) bool {
@@ -292,9 +332,21 @@ func errIsNotFound(err error) bool {
 
 // errIsAuth reports a credential rejection: a stale GITHUB_TOKEN in the
 // environment must not turn a working anonymous update into a 401.
+//
+// A rate-limit 403 is NOT a credential rejection. GitHub answers an exhausted
+// quota with 403 and the same status a bad token gets, so treating them alike
+// made the retry below throw away a perfectly good token and spend the last
+// request on the 60/h anonymous quota.
 func errIsAuth(err error) bool {
 	var he *httpError
-	return errors.As(err, &he) && (he.Status == http.StatusUnauthorized || he.Status == http.StatusForbidden)
+	return errors.As(err, &he) && !he.RateLimited && he.Status == http.StatusUnauthorized
+}
+
+// errIsRateLimited reports GitHub's exhausted-quota 403, whose body is a
+// "rate limit exceeded" message and whose headers carry when it resets.
+func errIsRateLimited(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.RateLimited
 }
 
 func firstLine(s string) string {

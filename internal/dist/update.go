@@ -48,7 +48,9 @@ without touching the network; the job verb schedules that check twice a day.
   XDEV_CHANNEL   default channel (stable)
   XDEV_UPDATE_REPO  owner/repo to update from (default FreePeak/xdev)
   XDEV_UPDATE_API   API root for mirrors (default https://api.github.com)
-  GITHUB_TOKEN   optional; raises the anonymous API rate limit
+  GITHUB_TOKEN   optional; raises the anonymous API rate limit. When unset,
+              xdev uses the token of a logged-in gh CLI, and failing that
+              updates anonymously (60 requests/h per IP).
 
 Flags:
 `)
@@ -189,13 +191,39 @@ func channelEnv() string {
 	return ChannelStable
 }
 
+// githubToken resolves the credential to update with, in the order the user
+// already controls: the environment, then the gh CLI they are logged into,
+// then nothing. The last step is not a failure — an anonymous update works
+// until the 60 req/h per-IP quota runs out, and a machine with no GitHub
+// credentials at all is the ordinary case, not an exception.
 func githubToken() string {
 	for _, k := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
 		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
 			return v
 		}
 	}
-	return ""
+	return ghCLIToken()
+}
+
+// ghCLIToken asks an installed, logged-in gh for its token, the same way
+// internal/tool already drives gh. Bounded and silent: no gh, no login, a
+// keyring prompt, or a slow binary all read as "no token", which is the
+// anonymous path that worked before this existed. A variable so the tests can
+// stand in for it — the machine running them is not the machine under test.
+var ghCLIToken = func() string {
+	gh, err := exec.LookPath("gh")
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gh, "auth", "token")
+	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func envOr(key, fallback string) string {
