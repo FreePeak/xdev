@@ -3254,7 +3254,19 @@ Deliberately not: full focus mode (Claude Code's Ctrl+B swaps the transcript; th
 
 Tests: `internal/agent/hub_foreground_test.go` (the spawn records the child, the start event carries the id, `Transcript` serves it, the job roster stays empty, two children keep separate ids) · `internal/tui/subagent_transcript_test.go` (click opens THAT child, Esc returns and the session transcript never moved, a drag across the row still selects, an untracked row is not openable and the chord is silent, `Alt+B` opens the newest of a batch while a click reaches the older sibling). `go build ./...`, `go vet`, and `go test ./internal/tui ./internal/agent ./cmd/xdev` green.
 
-*Not verified by the tests, and the only thing that proves it: a human watching a real spawn, clicking the child's row mid-run, and pressing Esc. The simulation screen is evidence about the paint and hit paths, not about the experience.*
+**Driven on the built binary, and the drive found three defects the tests could not.** `scripts/tui-subagent-transcript-drive.py` (new) runs the real TUI in a forked pty against a mock provider, clicks the child's row with a real SGR click and scores the painted rows. The first commit's own tests were green and the feature did not work: **(1)** the hit recorded the child's row offset inside the *child slice*, not the block, so it resolved to the `task` CALL row — correct in the unit test only because its call row was row 0; **(2)** the panel painted its empty-roster panel (`no background agents yet`) OVER the child's transcript, because that branch is chosen on `len(ui.rows)` and a foreground child is not a hub job, so it had no row; **(3)** `statusLine.segments: debugMouse` — the segment the drive needs to tell *a click the app ignored* from *one it never received* — could not be selected at all: the vocabulary is keyed camelCase and the name is folded to lower case before the map test, so it was reported unknown and `case "debugMouse"` was unreachable.
+
+Stock binary first, so each finding has a baseline:
+
+```
+[pre-fix]  child row painted: yes · click → panel shows the child's transcript: NO
+[7c800f1]  child row painted: yes · click → YES (title "transcript · scout (fg-1)")
+           Esc → child's transcript closed: yes · session transcript intact: yes
+```
+
+The drive's own traps are worth the record, because each one reads as "the binary is broken": tcell opens `/dev/tty` itself so the child needs `setsid` + `TIOCSCTTY` (both best-effort — `pty.fork` may already be a session leader and `setsid`'s `EPERM` there is not a failure, but an *unhandled* one aborts the exec and paints nothing); the mock must branch on the CONVERSATION (`role == "user"` carrying the child prompt) because a body scan for the prompt marker also matches the parent's tool arguments; `[DONE]` goes AFTER the chunk carrying `finish_reason`, or the reader reports "stream ended without finish_reason" and the turn retries forever; `debugMouse` is a top-level settings key, not under `tui:`, and must be *named* in `statusLine.segments`; the status row is `height-1`.
+
+**Still not proven:** a human watching a real spawn against a real provider, clicking the child's row mid-run while it is still working. The drive's child settles in milliseconds.
 
 ---
 
