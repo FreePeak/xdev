@@ -57,4 +57,34 @@ func TestDockEndsWithMCPThenTrajectory(t *testing.T) {
 	if tail := rows[traj:]; tail[len(tail)-1].act != dockTrajID {
 		t.Fatalf("the ledger button is not the panel's last row\n%s", dockLines(rows))
 	}
+
+	// The state where the order is still legible with NOTHING in the sections:
+	// foldShut keeps each section's heading and drops its rows, so the panel
+	// reduces to headings and the column reads as a bare index — SESSION, then
+	// MCP, then TRAJECTORY, which is the whole claim with no row content to
+	// lean on. The rows being empty under every heading is the fold's job;
+	// the ORDER of those headings is what this change moved.
+	app.mu.Lock()
+	app.dock.fold = foldShut
+	app.dock.lines = nil
+	app.mu.Unlock()
+	app.draw()
+	app.mu.Lock()
+	shut := append([]dockRow(nil), app.dock.lines...)
+	app.mu.Unlock()
+	headAt := func(prefix string) int {
+		for i, r := range shut {
+			if r.head && strings.HasPrefix(r.text, prefix) {
+				return i
+			}
+		}
+		return -1
+	}
+	if session, mcp, traj := headAt("SESSION"), headAt("MCP"), headAt("TRAJECTORY"); session < 0 || mcp < 0 || traj < 0 {
+		t.Fatalf("a heading is missing when the fold shuts the rows: session=%d mcp=%d traj=%d\n%s",
+			session, mcp, traj, dockLines(shut))
+	} else if !(session < mcp && mcp < traj) {
+		t.Fatalf("fold %d: wanted SESSION < MCP < TRAJECTORY, got %d < %d < %d\n%s",
+			foldShut, session, mcp, traj, dockLines(shut))
+	}
 }
