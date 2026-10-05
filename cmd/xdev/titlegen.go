@@ -63,6 +63,43 @@ func shouldGenerateTitle(store *session.Store) bool {
 	return false
 }
 
+// adoptMechanicalTitle fills the `print <timestamp>` stamp a session is born
+// with, using its own first TYPED prompt, and returns the title it stamped.
+//
+// Every name a session shows — the tab strip, the dock's title slot, /resume,
+// /tabs — reads that one string, so a resumed session whose ai-title request
+// failed (or never ran: the cascade is best-effort by design) greets the user
+// with a wall clock instead of the conversation they are reopening.
+//
+// The guard is shouldGenerateTitle, so a manual rename, a subagent title and an
+// already-generated title are never touched, and a session with no typed
+// prompt yet (a fresh /new tab) has nothing to name it with. Harness-injected
+// user turns (goal continuations, turn budgets, the empty-turn nudge) are
+// skipped for the same reason replayTranscript skips them: a title nobody
+// typed is not a name.
+func adoptMechanicalTitle(store *session.Store) string {
+	if !shouldGenerateTitle(store) {
+		return ""
+	}
+	for _, e := range store.Entries() {
+		me, ok := e.(*session.MessageEntry)
+		if !ok || me.Message.Role != ai.RoleUser || harnessUserAttribution(me.Message) {
+			continue
+		}
+		title := titleFromPrompt(me.Message.Text())
+		if title == "" {
+			return ""
+		}
+		if err := store.Rename(title, session.TitleSourceAuto); err != nil {
+			logx.Debugf("session title: %v", err)
+			return ""
+		}
+		logx.Debugf("session title: mechanical stamp -> %q", title)
+		return title
+	}
+	return ""
+}
+
 // readTitleLine returns the store's line-1 slot bytes (nil when the session is
 // not on disk yet).
 func readTitleLine(store *session.Store) []byte {

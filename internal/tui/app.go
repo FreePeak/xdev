@@ -572,11 +572,11 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		showThinking:  true,
 		renderMermaid: true,
 		width:         w, height: h,
-		// tabsStrip defaults ON. The policy (tui.tabs.mode) is a config value
-		// cmd only applies AFTER New, so a zero-value App — and every test
-		// that builds one without cmd — must still paint the strip the
-		// shipped way. SetTabPolicy turns it off from there.
-		tabsStrip: true,
+		// tabsStrip defaults OFF: the strip is opt-in through
+		// tui.tabs.mode, so a default install spends no row on the
+		// switcher. Every tab chord and /tabs keep working regardless —
+		// the strip is a view of the tabset, not the tabset.
+		tabsStrip: false,
 		keyq:      make(chan tcell.Event, 64),
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),

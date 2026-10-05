@@ -621,17 +621,19 @@ const (
 	tabsIndicatorsNumbers = "numbers"
 )
 
-// TabsModeOn reports whether the session tab strip is painted: "off" never,
-// "on" always, and the shipped default "auto" whenever the terminal can carry
-// it — which is every terminal this TUI runs on, so auto and on agree here and
-// auto is the name opencode users already know. An unknown value reads as
-// auto rather than blanking the strip: a hand-edited layer must not be able to
-// hide the switcher by typo.
+// TabsModeOn reports whether the session tab strip is painted: "on" always,
+// "off" never, and the shipped default "auto" — which xdev reads as OFF, the
+// one place it deliberately differs from opencode (there "auto" means on
+// everywhere except a Herd environment). The strip costs a row of transcript
+// and the session set is fully reachable without it, so a default install
+// shows none; `xdev config set tui.tabs.mode on` turns it on. An unknown value
+// reads as the default rather than being honoured: a hand-edited layer must
+// not be able to hide — or conjure — the switcher by typo.
 func (s *Settings) TabsModeOn() bool {
 	if s == nil {
-		return true
+		return false
 	}
-	return strings.ToLower(strings.TrimSpace(s.Tui.Tabs.Mode)) != "off"
+	return strings.EqualFold(strings.TrimSpace(s.Tui.Tabs.Mode), "on")
 }
 
 // TabsIndicators reports the strip's badge as the config spells it: "numbers"
@@ -1557,6 +1559,21 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.Tui.ExitDetach != nil {
 		s.Tui.ExitDetach = layer.Tui.ExitDetach
+	}
+	// Tui.Tabs was silently dropped here: the whole group had no merge arm,
+	// so `tui.tabs.mode: on` in a config layer parsed and then evaporated —
+	// the strip's visibility was decided by App.New's default alone, and
+	// `xdev config set tui.tabs.mode …` (which writes this file) could not
+	// turn it on. Field-wise, same zero-skip rule as Thinking: "" never
+	// overwrites, so an explicit value in a later layer wins.
+	if layer.Tui.Tabs.Mode != "" {
+		s.Tui.Tabs.Mode = layer.Tui.Tabs.Mode
+	}
+	if layer.Tui.Tabs.Scope != "" {
+		s.Tui.Tabs.Scope = layer.Tui.Tabs.Scope
+	}
+	if layer.Tui.Tabs.Indicators != "" {
+		s.Tui.Tabs.Indicators = layer.Tui.Tabs.Indicators
 	}
 	if layer.SidebarMode != "" {
 		s.SidebarMode = layer.SidebarMode

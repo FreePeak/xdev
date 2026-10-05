@@ -197,6 +197,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	if err != nil {
 		return 2, fmt.Errorf("session: %w", err)
 	}
+	// A resumed session that still carries its mechanical `print <timestamp>`
+	// stamp names itself from the prompt that opened it, BEFORE the tabset
+	// snapshots the title (focusTab does the same for a session adopted
+	// later). Without it, --continue/-r reopened the conversation and showed
+	// a wall clock in the tab strip, the dock and /resume.
+	adoptMechanicalTitle(store)
 	// tabs is the live session set. `store` below is a convenience that
 	// always names the CURRENT session: every closure that used to read
 	// the one `store` variable now reads through tabs, so a switch re-
@@ -205,6 +211,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// also owns each session's live agent (tabset.setAgent), which is why
 	// every steer seam below is wired AFTER this line.
 	tabs := newTabset(store)
+	// The sessions this directory had open last time come back as tabs
+	// (opencode persists its tab set the same way), so a restart resumes the
+	// working set instead of collapsing it to one session. A file that is gone
+	// or no longer a session is already filtered out; the live startup
+	// session is first so it is the one on screen.
+	restored := savedTabSessions(cwd)
+	for _, st := range restored {
+		if st.ID() == store.ID() {
+			continue
+		}
+		// The same fix as the startup session: a restored tab still
+		// carrying its birth stamp names itself from its opening prompt.
+		adoptMechanicalTitle(st)
+		if _, err := tabs.open(st); err != nil {
+			_ = st.Close()
+		}
+	}
+	saveTabSet(cwd, tabs.persistIDs())
 	storeOf := func() *session.Store { return tabs.store() }
 	// The live agent is per SESSION, not per process (#157). It was one
 	// pointer every turn overwrote, so with two sessions working whichever turn
@@ -799,6 +823,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.id = t.id
 		ts.setFocused(true)
 		wireTaskParent(reg, t.store)
+		// A resumed session that still carries its mechanical
+		// `print <timestamp>` stamp names itself from the prompt that
+		// opened it, once, here — every surface (tab strip, dock slot,
+		// /resume, /tabs) reads that one string, and the ai-title
+		// request that would otherwise fix it is best-effort (it fails
+		// silently, leaving the stamp for the rest of the session's life).
+		if title := adoptMechanicalTitle(t.store); title != "" {
+			tabs.setTitle(t.id, title)
+			app.DockBump()
+		}
 		if vibeScope != nil {
 			workers, on := agent.LoadVibe(t.store.Entries())
 			vibeScope.Restore(workers, on)
@@ -807,6 +841,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetLocation(t.store.CWD())
 		app.SetSessionID(t.store.ID())
 		saveBreadcrumb(breadcrumbPath(t.store))
+		// The open set is what the next launch reopens, so every switch
+		// rewrites it. Cheap enough (a few paths) to sit on the one
+		// seam that already owns the tabset snapshot.
+		saveTabSet(cwd, tabs.persistIDs())
 		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
 			replaySession(app, res.Messages)
 		}
@@ -931,6 +969,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	closeTabByID := func(id string) error {
 		sessMu.Lock()
 		defer sessMu.Unlock()
+		// The closed session leaves the persisted set too, or the next
+		// launch reopens the tab the user just closed. A closure, not a
+		// deferred call: defer evaluates its arguments NOW, which would
+		// record the set while the tab is still open.
+		defer func() { saveTabSet(cwd, tabs.persistIDs()) }()
 		cur := tabs.current()
 		if cur == nil || cur.id != id {
 			if tabs.close(id) == nil && len(tabs.snapshot()) == 0 {
@@ -2293,6 +2336,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					app.SetRunning(false)
 				}
 				app.SetTabs(tabInfos(tabs))
+				saveTabSet(cwd, tabs.persistIDs())
 			}()
 			sessMu.Lock()
 			hist, errH := session.BuildContext(turnStore.Entries(), turnStore.LeafID(), session.SystemPrompt{})

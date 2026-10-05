@@ -432,6 +432,62 @@ func saveSessionPins(pins map[string]bool) error {
 	return os.WriteFile(pinsPath(), append(b, '\n'), 0o644)
 }
 
+// tabSetPath is the open-session sidecar, scoped per working directory the way
+// opencode scopes its own tab set (tui.tabs.scope defaults to cwd there too):
+// {"<bucket>": {"paths": ["<session file>", ...]}}. A path, not an id: the
+// session file is what survives a restart, so a missing or moved file is
+// simply skipped on the way back in.
+func tabSetPath() string { return filepath.Join(config.DataDir(), "session-tabs.json") }
+
+// saveTabSet records the open sessions for cwd. Best-effort: a lost tab layout
+// is a cosmetic loss, and failing a /new over it would be worse.
+func saveTabSet(cwd string, paths []string) {
+	all := loadTabSets()
+	key := session.EncodeCWDBucket(cwd)
+	if len(paths) == 0 {
+		delete(all, key)
+	} else {
+		all[key] = paths
+	}
+	b, err := json.MarshalIndent(all, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(tabSetPath(), append(b, '\n'), 0o644); err != nil {
+		logx.Debugf("tab set: %v", err)
+	}
+}
+
+// loadTabSets reads the sidecar; any error means "nothing persisted".
+func loadTabSets() map[string][]string {
+	out := map[string][]string{}
+	b, err := os.ReadFile(tabSetPath())
+	if err != nil {
+		return out
+	}
+	if json.Unmarshal(b, &out) != nil {
+		return map[string][]string{}
+	}
+	return out
+}
+
+// savedTabSessions is what a launch in cwd should reopen as tabs: the recorded
+// paths in order, skipping any file that is gone or no longer a session.
+func savedTabSessions(cwd string) []*session.Store {
+	var out []*session.Store
+	for _, p := range loadTabSets()[session.EncodeCWDBucket(cwd)] {
+		if _, err := os.Stat(p); err != nil {
+			continue // deleted or moved since: not a tab to reopen
+		}
+		st, err := session.Open(p)
+		if err != nil {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
 // toggleSessionPin flips one pin and persists the sidecar.
 func toggleSessionPin(shortID string) error {
 	pins := loadSessionPins()

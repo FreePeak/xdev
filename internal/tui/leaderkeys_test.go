@@ -133,6 +133,7 @@ func TestCloseTabChordClosesCurrentTab(t *testing.T) {
 // switch to it instead.
 func TestTabStripHitSeparatesLabelFromClose(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
+	app.SetTabPolicy(true, false) // the strip is opt-in; this tests its hit table
 	app.SetTabs([]TabInfo{
 		{ID: "aaa", Title: "first", Current: true},
 		{ID: "bbb", Title: "second"},
@@ -201,6 +202,7 @@ func TestTabStripHiddenForOneSession(t *testing.T) {
 // over the first line of output.
 func TestTranscriptTopAccountsForStrip(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
+	app.SetTabPolicy(true, false) // the strip is opt-in; this tests its row
 	app.AddUserBlock("hi")
 	app.SetTabs([]TabInfo{{ID: "aaa", Current: true}})
 	if got := app.transcriptTop(); got != 0 {
