@@ -203,17 +203,20 @@ func shellRowHasInk(s string, sp langSpec) bool {
 // result is prose a tool WROTE for a person (a subagent's findings), so it
 // paints through the markdown renderer rather than a lexer or a flat wrap.
 // search is the fourth: rows are "path:line: text" (grep, ast_grep), painted
-// with the syntax palette's function/number/punctuation slots.
+// with the syntax palette's function/number/punctuation slots. paths is the
+// fifth: rows are bare file paths (glob), painted with the same function slot
+// a search row gives its path.
 type toolHL struct {
 	lang     string
 	numbered bool // rows read "<line>: <source>", so the prefix is chrome
 	report   bool // prose the tool composed, not output it captured
 	search   bool // rows read "path:line: text" (grep, ast_grep)
+	paths    bool // rows are bare file paths (glob)
 }
 
 // toolOutputHL decides how a finished tool result paints.
 //
-// Four answers, in this order:
+// Five answers, in this order:
 //
 //   - the path is the exact answer and always wins: a `read` of a .go file is
 //     Go whatever the rows happen to contain;
@@ -227,7 +230,10 @@ type toolHL struct {
 //   - a SEARCH: grep and ast_grep return "path:line: text" rows. The path is
 //     the function slot, the line number the number slot, the colon the
 //     punctuation slot, and the matched text the body ink. The same shape
-//     every search tool returns, so one rule covers both.
+//     every search tool returns, so one rule covers both;
+//   - PATHS: glob returns one bare file path per row, which is the same path a
+//     search row already wears, so it wears the same ink. A row that is not a
+//     path (the tool's own "[showing N files]" footer, a blank) stays flat.
 //
 // The zero value paints flat, and so does everything codeStyle cannot colour
 // (NO_COLOR, a theme with no syntax_* slot filled). Nothing here can turn a
@@ -253,6 +259,9 @@ func (a *App) toolOutputHL(b *Block) toolHL {
 	if b.ToolName == "grep" || b.ToolName == "ast_grep" {
 		return toolHL{search: true}
 	}
+	if b.ToolName == "glob" {
+		return toolHL{paths: true}
+	}
 	return toolHL{}
 }
 
@@ -263,7 +272,7 @@ var shellLang = normalizeLang("bash")
 
 // toolBodyRows lays a result body out into styled rows of inner width.
 //
-// Four paths, and the split is the whole safety story:
+// Five paths, and the split is the whole safety story:
 //
 //   - nothing to colour (no language, an unknown extension, NO_COLOR, a theme
 //     that pins no syntax_* ink): wrap() and textline() exactly as this painted
@@ -281,7 +290,10 @@ var shellLang = normalizeLang("bash")
 //   - a search: splitSearchRow colours the path, line number and colon of a
 //     "path:line: text" row with the syntax palette's function/number/
 //     punctuation slots. The matched text keeps the body ink — it is the
-//     content, not the chrome.
+//     content, not the chrome;
+//   - paths: one bare file path per row, in the same function slot a search
+//     row gives its path, so a glob listing and a grep hit read as one palette.
+//     The tool's own "[showing N files]" footer is not a path and stays flat.
 func (a *App) toolBodyRows(body string, inner int, bodySt, dimSt tcell.Style, hl toolHL) []line {
 	if hl.report {
 		var out []line
@@ -290,11 +302,15 @@ func (a *App) toolBodyRows(body string, inner int, bodySt, dimSt tcell.Style, hl
 		}
 		return out
 	}
-	if hl.search {
+	if hl.search || hl.paths {
 		cs := a.mdStyle().code
+		row := a.searchRow
+		if hl.paths {
+			row = a.pathRow
+		}
 		var out []line
 		for _, src := range strings.Split(body, "\n") {
-			for _, ln := range wrapCells(a.searchRow(src, cs, bodySt, dimSt), inner) {
+			for _, ln := range wrapCells(row(src, cs, bodySt, dimSt), inner) {
 				out = append(out, ln)
 			}
 		}
@@ -348,6 +364,23 @@ func (a *App) searchRow(src string, cs codeStyle, bodySt, dimSt tcell.Style) lin
 	return line{runs: runs}
 }
 
+// pathRow colours one bare file path in the function slot — the same ink a
+// search row gives its path, so a glob listing and a grep hit read as one
+// palette. A row that is not a path keeps the body ink: glob's own
+// "[showing N files]" footer, "no files matched", and any blank.
+//
+// The test is the shape of the row, not a regex over it: glob prints one path
+// per row and never a path containing whitespace (a name with a space arrives
+// as one field of a shell-escaped listing at most, and painting that flat is
+// the safe half of the guess).
+func (a *App) pathRow(src string, cs codeStyle, bodySt, dimSt tcell.Style) line {
+	if src == "" || strings.HasPrefix(src, "[") || strings.ContainsAny(src, " \t") {
+		return textline(src, bodySt)
+	}
+	return line{runs: []cell{{text: src, style: cs.styleFor(tokFunc)}}}
+}
+
+// toolBodyRow colours one source line, or returns it in the box's own ink.
 // toolBodyRow colours one source line, or returns it in the box's own ink.
 // runsString of the result is always src, on both paths — the row's bytes are
 // what the tool produced, and highlighting may only change which ink a byte

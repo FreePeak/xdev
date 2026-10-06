@@ -223,6 +223,48 @@ func TestGrepNonMatchingRowStaysFlat(t *testing.T) {
 	}
 }
 
+// A glob listing is one bare file path per row, and each wears the same
+// function slot a grep row gives its path — the two search surfaces read as
+// one palette. The tool's own footer is not a path and stays flat.
+func TestGlobResultHighlightsItsPaths(t *testing.T) {
+	app, _ := newTestApp(t, 100, 40)
+	body := "internal/tui/toolhl.go\ninternal/tui/dock.go\ninternal/theme/theme.go\n[showing 3 files]"
+	app.AddToolBlock("c1", "glob", `{"pattern":"**/*.go"}`)
+	app.FinishTool("c1", "glob", false, body, ToolOutcome{})
+
+	rows, text := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
+	if !strings.Contains(text, "internal/tui/dock.go") {
+		t.Fatalf("the listing did not survive the render:\n%s", text)
+	}
+	var pathRow, footRow line
+	for _, ln := range bodyRows(rows) {
+		switch runsString(ln.runs) {
+		case "internal/tui/dock.go":
+			pathRow = ln
+		case "[showing 3 files]":
+			footRow = ln
+		}
+	}
+	if got := runStyles(pathRow); len(got) != 1 {
+		t.Fatalf("a glob path painted %d inks, want one: %v", len(got), pathRow.runs)
+	}
+	if got := inkOfLine(app, pathRow); got != app.cellColor(app.th.Get(theme.SyntaxFunction)) {
+		t.Fatalf("a glob path painted %v, want the function slot %v", got, app.cellColor(app.th.Get(theme.SyntaxFunction)))
+	}
+	if got := runStyles(footRow); len(got) != 1 || inkOfLine(app, footRow) == app.cellColor(app.th.Get(theme.SyntaxFunction)) {
+		t.Fatalf("the footer is not a path and must stay flat: %v", footRow.runs)
+	}
+}
+
+// inkOfLine is the foreground of a row's first run.
+func inkOfLine(a *App, ln line) tcell.Color {
+	if len(ln.runs) == 0 {
+		return tcell.ColorDefault
+	}
+	fg, _, _ := ln.runs[0].style.Decompose()
+	return fg
+}
+
 // Bash output that reads as shell — a listing of variables and strings — is
 // coloured; bash output that reads as a log is not.
 func TestLooksLikeShellSeparatesScriptsFromLogs(t *testing.T) {
