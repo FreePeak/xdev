@@ -381,7 +381,6 @@ func (a *App) pathRow(src string, cs codeStyle, bodySt, dimSt tcell.Style) line 
 }
 
 // toolBodyRow colours one source line, or returns it in the box's own ink.
-// toolBodyRow colours one source line, or returns it in the box's own ink.
 // runsString of the result is always src, on both paths — the row's bytes are
 // what the tool produced, and highlighting may only change which ink a byte
 // wears.
