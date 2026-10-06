@@ -4876,10 +4876,11 @@ func (a *App) paint() {
 	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
-	// The header owns its card's padding on top of the rows it keeps: one
-	// blank banded row above the text, the same one the transcript's own card
-	// paints, so a pinned prompt is that card — margins and all — rather than
-	// a bar pressed against the top of the viewport. The count is zero when
+	// The header owns its card's padding on top of the rows it keeps: a blank
+	// banded row above the text and one below it, the same rows the
+	// transcript's own card paints, so a pinned prompt is that card — margins
+	// and all — rather than a bar pressed against the top of the viewport with
+	// its last line hard against the stream below. Both counts are zero when
 	// nothing is pinned, so the row is never painted without a card.
 	padRow := a.stickyPadRow(sticky)
 	view := make([]rowView, 0, max(sticky.rows, end-start))
@@ -4887,6 +4888,9 @@ func (a *App) paint() {
 		view = append(view, padRow)
 	}
 	view = append(view, header...)
+	for range sticky.padBottom {
+		view = append(view, padRow)
+	}
 	// The remaining rows of the header's budget are the one row of air that
 	// says it is not part of the stream.
 	for range sticky.rows - len(view) {

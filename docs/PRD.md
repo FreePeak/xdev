@@ -3214,6 +3214,30 @@ Verified against the **built binary** through a real pty, stock `origin/main` an
 
 Tests: `internal/tui/task_report_test.go` (new) — the report renders as markdown (heading ink, bullet glyph, inline code and fenced source intact, fenced line NOT in the flat body ink); every non-task tool stays flat even when its output contains headings; a plain `task` result still reads exactly as before. `chrome_test.go` — `TestUserBandHasItsOwnAir` now pins three edges and asserts the row below is NOT banded. `sticky_test.go`, `rowindex_test.go`, `msgmenu_test.go` updated for `userBandInset = 2` and the single pad row. Full `go test ./...` green.
 
+### fix(tui): the pinned prompt pads the edge that touches the stream
+
+**Status: COMPLETE** (2026-10-06) · branch `fix/sticky-bottom-pad` · touched `internal/tui/sticky.go`, `internal/tui/app.go` · tests `internal/tui/sticky_test.go` · probe `scripts/tui-sticky-padding-drive.py` (new)
+
+**The bug.** `tidy/user-band-colorize-subagents` (#598) removed the pad row BELOW a sent message and, with it, the pinned header's `padBottom`: the inline card's air under its text comes from the block separator, and a pinned card has no separator — it has `stickyGap`, one blank row that reads as air under the WHOLE header. So a scrolled-past prompt showed its top pad, its text, and then straight into the gap: the request's last line sat hard against the block of stream it was floating above. Every interaction test passed — the header's row BUDGET was right, only the air under the text was not the card's.
+
+**The fix.** `stickyLayout` carries `padBottom` again (#590 had it), the push gives it up before a word — gap, then bottom padding, then text, top padding last — and `paint` spends it from the same `stickyPadRow` the top pad spends, so the pinned card is banded on all four edges. The inline card is untouched: it pads above only, and that is unchanged.
+
+Verified on the built binary through a real pty, stock `origin/main` @ `a9d2872` and this branch through the identical ladder (five turns, `Shift+Up` per row, `[band]` = the band's own background):
+
+```
+[stock]   0 [band]        1 [band]   ❯ PROMPT4 ship the band padding
+          2 [    ]  ← the gap, taken for the card's own air
+          3 [    ]  ┃  PROMPT4-ROW-08
+[branch]  0 [band]        1 [band]   ❯ PROMPT4 ship the band padding
+          2 [band] ← the card's bottom pad, banded
+          3 [    ]  ← the gap is the gap again
+          4 [    ]  ┃  PROMPT4-ROW-09
+```
+
+The push case holds too: scrolled to where the next prompt clips the pinned one (`--ladder 0,3,6,8,12,20`), the bottom pad is the first row given up, so the stream underneath never jumps — `stickyGap` still rides the row after it, unbanded.
+
+Tests: `TestStickyPinsOnlyAfterScrollPast` and `TestStickyPushedByNextPrompt` assert `rows == visible + padTop + padBottom + gap`, and `TestStickyHeaderPadsBelowItsText` (new) pins the fix on the painted screen — the row under the pinned prompt's last text row carries the BAND and no glyphs, and the row after it is not banded. That last test is the one that fails on stock (verified by reverting the fix in place: `row 4 paints default, want the band #242424`), which is why every other test here missed the bug. Full `go test ./...` green.
+
 ---
 
 *Last updated: 2026-10-05 (`fix/resume-title` — user report: "fix xdev when resume the session it always has new tab session title `Print <datetime>`", then "make sure 1 session is 1 tab … explore deepdive in the opencode to understand how it works" and "default the tab will be disable too"):* **the symptom was one bug; the deepdive turned it into three.**
