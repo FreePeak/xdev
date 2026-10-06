@@ -104,7 +104,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev [flags] "prompt"        one-shot print run
   xdev print [flags] "prompt"  same as above
   xdev --bg [flags] "prompt"   detached print run (survives terminal kill)
-  xdev bg <list|logs|stop|rm>  manage detached jobs
+  xdev bg <list|logs|stop|rm|prune>  manage detached jobs
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev rpc                     JSONL-over-stdio RPC server (embedders)
   xdev acp                     ACP server on stdio (editors)

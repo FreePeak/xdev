@@ -116,7 +116,6 @@ func TestTailFile(t *testing.T) {
 	}
 }
 
-
 func TestRmBgRefusesRunning(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDEV_AGENT_DIR", dir)
@@ -148,5 +147,80 @@ func TestRenderBgListEmpty(t *testing.T) {
 	renderBgList(&b, nil)
 	if !strings.Contains(b.String(), "no background jobs") {
 		t.Fatalf("empty list: %q", b.String())
+	}
+}
+
+// TestPruneBgSkipsLiveAndRecent is the guard the sweep exists for: a prune must
+// take the old corpses and leave both a running job and a freshly finished one
+// alone. Getting this backwards deletes a live run's status file out from under
+// it, so the test asserts the survivors by directory existence, not by count.
+func TestPruneBgSkipsLiveAndRecent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dir)
+	now := time.Now().UTC()
+	zero := 0
+
+	// live: our own pid, no exit code — must survive any prune.
+	if err := writeBgStatus(bgStatus{ID: "live0001", PID: os.Getpid(), Started: now}); err != nil {
+		t.Fatal(err)
+	}
+	// recent: finished a minute ago — inside the window, must survive.
+	if err := writeBgStatus(bgStatus{
+		ID: "recent01", PID: 999999999, Started: now.Add(-time.Minute),
+		Finished: now.Add(-time.Minute), ExitCode: &zero,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// ancient: finished long ago — the only candidate.
+	if err := writeBgStatus(bgStatus{
+		ID: "ancient1", PID: 999999998, Started: now.Add(-30 * 24 * time.Hour),
+		Finished: now.Add(-30 * 24 * time.Hour), ExitCode: &zero,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dry run reports the candidate and deletes nothing.
+	rows, err := pruneBg(bgPruneDefaultAge, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != "ancient1" {
+		t.Fatalf("dry run picked %v, want [ancient1]", rows)
+	}
+	for _, id := range []string{"live0001", "recent01", "ancient1"} {
+		if _, err := os.Stat(bgJobDir(id)); err != nil {
+			t.Fatalf("dry run deleted %s: %v", id, err)
+		}
+	}
+
+	rows, err = pruneBg(bgPruneDefaultAge, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != "ancient1" {
+		t.Fatalf("prune picked %v, want [ancient1]", rows)
+	}
+	if _, err := os.Stat(bgJobDir("ancient1")); !os.IsNotExist(err) {
+		t.Fatalf("ancient job survived the sweep: %v", err)
+	}
+	if _, err := os.Stat(bgJobDir("live0001")); err != nil {
+		t.Fatalf("prune removed a live job: %v", err)
+	}
+	if _, err := os.Stat(bgJobDir("recent01")); err != nil {
+		t.Fatalf("prune removed a job inside the window: %v", err)
+	}
+}
+
+func TestPruneBgEmpty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dir)
+	rows, err := pruneBg(bgPruneDefaultAge, false)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("prune of an empty store = %v, %v", rows, err)
+	}
+	var b strings.Builder
+	renderBgPrune(&b, nil, false)
+	if !strings.Contains(b.String(), "no finished background jobs") {
+		t.Fatalf("empty prune render: %q", b.String())
 	}
 }

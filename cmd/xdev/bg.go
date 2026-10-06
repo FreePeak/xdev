@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -42,6 +43,10 @@ const (
 	bgStatusName    = "status.json"
 	bgLogName       = "log"
 	bgDefaultMaxAge = 2 * time.Hour
+	// bgPruneDefaultAge is how long a finished job's record is kept before
+	// `xdev bg prune` may collect it. A week matches the gc retention window
+	// so the two sweeps agree on what "old" means.
+	bgPruneDefaultAge = 168 * time.Hour
 	// bgEnvID is set on the child so it knows which status file to update.
 	bgEnvID = "XDEV_BG_ID"
 	// bgEnvMarker tags the child argv/environ so `xdev ps` / `xdev bg list`
@@ -338,7 +343,6 @@ func stripBgFlag(argv []string) []string {
 	return out
 }
 
-
 // finalizeBgStatus is called by the child on the way out.
 func finalizeBgStatus(code int, runErr error) {
 	id := os.Getenv(bgEnvID)
@@ -422,6 +426,58 @@ func rmBg(id string) error {
 		return fmt.Errorf("job %s is still running — stop it first", id)
 	}
 	return os.RemoveAll(bgJobDir(id))
+}
+
+// pruneBg removes finished jobs whose completion is older than the retention
+// window and reports what it removed. A live job is never a candidate: the
+// filter runs on the reconciled status, and rmBg refuses a live PID anyway, so
+// a sweep can never be the thing that kills a running run.
+//
+// ponytail: no scheduled sweep — pruning stays a verb the user runs. The
+// upgrade path is an age check on TUI start, which needs the bg dir read once
+// per launch rather than a daemon (#131 residual).
+func pruneBg(olderThan time.Duration, dryRun bool) ([]bgStatus, error) {
+	all, err := listBgStatuses()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-olderThan)
+	var gone []bgStatus
+	for _, st := range all {
+		if st.ExitCode == nil {
+			continue // still running (or unreconciled): never a candidate
+		}
+		// Finished is the age that matters — how long the corpse has sat
+		// here. Started is the fallback for a record reconcile had to stamp.
+		when := st.Finished
+		if when.IsZero() {
+			when = st.Started
+		}
+		if when.After(cutoff) {
+			continue
+		}
+		if !dryRun {
+			if err := rmBg(st.ID); err != nil {
+				return gone, fmt.Errorf("%s: %w", st.ID, err)
+			}
+		}
+		gone = append(gone, st)
+	}
+	return gone, nil
+}
+
+func renderBgPrune(out io.Writer, rows []bgStatus, dryRun bool) {
+	if len(rows) == 0 {
+		fmt.Fprintln(out, "no finished background jobs to prune")
+		return
+	}
+	verb := "pruned"
+	if dryRun {
+		verb = "would prune"
+	}
+	for _, st := range rows {
+		fmt.Fprintf(out, "%s %s (%s)\n", verb, st.ID, bgStateLabel(st))
+	}
 }
 
 func bgStateLabel(st bgStatus) string {
@@ -572,21 +628,49 @@ func runBg(args []string) int {
 		}
 		fmt.Fprintf(out, "removed %s\n", id)
 		return 0
+	case "prune":
+		fs := flag.NewFlagSet("bg prune", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		olderThan := fs.Duration("older-than", bgPruneDefaultAge, "only prune jobs finished longer ago than this")
+		dryRun := fs.Bool("dry-run", false, "report what would go; delete nothing")
+		asJSON := fs.Bool("json", false, "print the pruned jobs as JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		if *olderThan < 0 {
+			fmt.Fprintln(errOut, "xdev bg prune: --older-than must not be negative")
+			return 2
+		}
+		rows, err := pruneBg(*olderThan, *dryRun)
+		if err != nil {
+			fmt.Fprintln(errOut, "xdev bg prune:", err)
+			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rows)
+			return 0
+		}
+		renderBgPrune(out, rows, *dryRun)
+		return 0
 	case "help", "-h", "--help":
-		fmt.Fprint(out, `usage: xdev bg <list|logs|stop|rm> [id]
+		fmt.Fprint(out, `usage: xdev bg <list|logs|stop|rm|prune> [id]
 
   xdev --bg "prompt"     start a detached print run; prints the job id
   xdev bg list           background jobs (status under ~/.xdev/agent/bg/)
   xdev bg logs <id>      tail the job's log (--tail N, --all)
   xdev bg stop <id>      SIGTERM, then SIGKILL after 5s
   xdev bg rm <id>        delete a finished job's status + log
+  xdev bg prune          delete every finished job past the retention window
+                         (--older-than 168h, --dry-run, --json)
 
 A --bg run defaults --max-time to 2h when unset, so a wedged provider cannot
 run forever. Stream watchdogs and --max-turns still apply.
 `)
 		return 0
 	default:
-		fmt.Fprintf(errOut, "xdev bg: unknown subcommand %q (list|logs|stop|rm)\n", args[0])
+		fmt.Fprintf(errOut, "xdev bg: unknown subcommand %q (list|logs|stop|rm|prune)\n", args[0])
 		return 2
 	}
 }
