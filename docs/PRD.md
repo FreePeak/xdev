@@ -3346,3 +3346,17 @@ Verified: `go build ./...` clean; `go test ./...` fully green. Each new guard fa
 **Cause 3 — a rate-limit 403 was classified as a bad credential, so the retry made things worse.** `errIsAuth` returned true for 401 *or* 403; GitHub answers an exhausted quota with 403 and the same status a bad token gets, so `updateMain`'s `c.Token = ""; retry` threw away a working token and spent the last request on the anonymous bucket that had just failed. `rateLimited()` now reads `x-ratelimit-remaining: 0` (or a 429), `httpError` carries `RateLimited`/`Reset`, `errIsAuth` matches 401 only, and the message names the reset time and the credential. `Download` returns the same typed error, so a rate-limited asset download is no longer a bare status line.
 
 **Verified by driving the built binary, not by reading it.** Against real api.github.com with a PATH containing no `gh`: an anonymous `--check` resolved `v0.4.248`, and a full anonymous install replaced a copy and self-verified (`installed … verified: xdev v0.4.248`) — the no-token user is unaffected, which is the contract that mattered most. With `gh` on PATH and nothing exported, the same binary resolved the release too. Four tests cover the four paths; each fails against the reverted code (reverting `errIsAuth` prints `retrying unauthenticated` on a quota error; reverting `githubToken` sends zero authenticated requests).
+
+---
+
+### feat(bg): `xdev bg prune` — the finished-job corpses are collectable now
+
+**Status: COMPLETE** (2026-10-06) · branch `feat/bg-prune` · touched `cmd/xdev/bg.go`, `cmd/xdev/bg_test.go`, `cmd/xdev/main.go` · tests `cmd/xdev/bg_test.go`
+
+**The gap.** `xdev gc` sweeps `{blob, artifact, subagent, dump}` and its usage says so; the `~/.xdev/agent/bg/<id>/` status files were outside every sweep. A user who ran `--bg` for a week accumulated corpses with no verb to collect them — measured on this host before the change: **78 job dirs, 65 done, 12 failed, 1 running**, and the only way to reclaim one was `xdev bg rm <id>`, 77 times. This is the `bg` half of the same gap the `ps` ceiling note names (#131 residual; #428 is the residency vocabulary that would make it a counter instead of a directory read).
+
+**The change.** `xdev bg prune [--older-than 168h] [--dry-run] [--json]`. The candidate filter is `ExitCode != nil && Finished <= now-olderThan` — a live job has no exit code and is never a candidate, and `rmBg` already refuses a live PID, so the sweep cannot kill a running run even if the filter were wrong. `Finished` (how long the corpse has sat) is the age that matters; `Started` is the fallback for a record `reconcileBgStatus` had to stamp. Default window is a week, matching `gc`'s retention so the two sweeps agree on "old".
+
+**Verified by driving the built binary against the real bg store.** `bg prune --dry-run` (default window) correctly found nothing — every corpse on this host is younger than 168h. With `--older-than 0`: **77 candidates, and the live job `fa6d4332` absent from the list** (grep count 0), `78` dirs still on disk after the dry run. `--json` emits the same rows as `bg list --json`.
+
+Tests: `TestPruneBgSkipsLiveAndRecent` — three jobs seeded (live at our own PID, finished a minute ago, finished 30 days ago) and asserted by **directory existence, not by count**: the dry run and the real sweep must each pick exactly `ancient1`, and `live0001`/`recent01` must both survive. `TestPruneBgEmpty` covers the empty store and the render. Full `./cmd/...` and `./internal/session/...` suites green.
