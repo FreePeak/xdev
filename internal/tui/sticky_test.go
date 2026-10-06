@@ -711,9 +711,15 @@ func TestStickyPushClipsTheHeaderAndResolvesItsRows(t *testing.T) {
 		if h.block != 0 {
 			t.Fatalf("off %d: a pushed header belongs to block %d, want 0", off, h.block)
 		}
-		if h.rows != h.visible+h.padTop {
-			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible (pad %d) — the gap goes first",
-				off, h.rows, h.visible, h.padTop)
+		if h.rows != h.visible+h.padTop+h.padBottom {
+			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible (pad %d/%d) — the gap goes first",
+				off, h.rows, h.visible, h.padTop, h.padBottom)
+		}
+		// The bottom padding is the FIRST row the push gives up: the card
+		// under a pushing prompt keeps its top air and its words as long as
+		// it can, and spends the blank row under the text before either.
+		if h.padBottom != 0 {
+			t.Fatalf("off %d: a pushed header still paints %d rows of bottom padding", off, h.padBottom)
 		}
 		// The row the pointer is over resolves into the pinned prompt's own
 		// rows, at the offset the header is showing.
