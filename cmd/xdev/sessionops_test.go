@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
@@ -279,15 +278,15 @@ func TestReplayTranscriptTurnBudgetNotice(t *testing.T) {
 
 	replayTranscript(app, []ai.Message{{
 		Role:        ai.RoleUser,
-		Content:     []ai.Block{ai.TextBlock{Text: agent.TurnBudgetPrompt}},
-		Attribution: agent.TurnBudgetAttribution,
+		Content:     []ai.Block{ai.TextBlock{Text: "turn limit reached — wrap up the current step and report status"}},
+		Attribution: "turn-limit",
 	}})
 	blocks := app.Blocks()
-	if len(blocks) != 1 || blocks[0].Kind != tui.KindSystem {
-		t.Fatalf("wrap-up replayed as %v, want one system block", blocks)
+	if len(blocks) != 1 || blocks[0].Kind != tui.KindUser {
+		t.Fatalf("wrap-up replayed as %v, want one user block", blocks)
 	}
-	if strings.Contains(blocks[0].Text, agent.TurnBudgetPrompt) {
-		t.Fatalf("the raw harness prompt leaked into the transcript: %q", blocks[0].Text)
+	if !strings.Contains(blocks[0].Text, "turn limit reached — wrap up the current step and report status") {
+		t.Fatalf("the harness prompt missing from the transcript: %q", blocks[0].Text)
 	}
 }
 

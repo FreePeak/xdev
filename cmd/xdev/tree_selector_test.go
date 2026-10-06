@@ -4,7 +4,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
@@ -91,8 +90,8 @@ func TestTreeRewindTarget(t *testing.T) {
 	// continuation) rewinds the same way but offers no draft: resending text
 	// the user never typed would put it in the composer as their own words.
 	harness := &session.MessageEntry{Message: ai.Message{
-		Role: ai.RoleUser, Attribution: agent.TurnBudgetAttribution,
-		Content: []ai.Block{ai.TextBlock{Text: agent.TurnBudgetPrompt}},
+		Role: ai.RoleUser, Attribution: "turn-limit",
+		Content: []ai.Block{ai.TextBlock{Text: "turn limit reached — wrap up the current step and report status"}},
 	}}
 	harness.Env = session.Envelope{ID: "cccccccc", ParentID: "bbbbbbbb", Type: session.TypeMessage}
 	if target, draft := treeRewindTarget(harness); target != "bbbbbbbb" || draft != "" {
