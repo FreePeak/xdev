@@ -196,6 +196,7 @@ func shellRowHasInk(s string, sp langSpec) bool {
 	}
 	return false
 }
+
 // toolHL is the highlighting decision for one finished tool result: which
 // lexer paints it, and whether its rows carry the "N:" render-window prefix
 // that snapshot.go: RenderWindow writes. report is the third option: the

@@ -222,6 +222,7 @@ func TestGrepNonMatchingRowStaysFlat(t *testing.T) {
 		}
 	}
 }
+
 // Bash output that reads as shell — a listing of variables and strings — is
 // coloured; bash output that reads as a log is not.
 func TestLooksLikeShellSeparatesScriptsFromLogs(t *testing.T) {

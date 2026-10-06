@@ -3349,6 +3349,7 @@ Verified: `go build ./...` clean; `go test ./...` fully green. Each new guard fa
 
 ---
 
+
 ### feat(bg): `xdev bg prune` — the finished-job corpses are collectable now
 
 **Status: COMPLETE** (2026-10-06) · branch `feat/bg-prune` · touched `cmd/xdev/bg.go`, `cmd/xdev/bg_test.go`, `cmd/xdev/main.go` · tests `cmd/xdev/bg_test.go`
@@ -3360,3 +3361,26 @@ Verified: `go build ./...` clean; `go test ./...` fully green. Each new guard fa
 **Verified by driving the built binary against the real bg store.** `bg prune --dry-run` (default window) correctly found nothing — every corpse on this host is younger than 168h. With `--older-than 0`: **77 candidates, and the live job `fa6d4332` absent from the list** (grep count 0), `78` dirs still on disk after the dry run. `--json` emits the same rows as `bg list --json`.
 
 Tests: `TestPruneBgSkipsLiveAndRecent` — three jobs seeded (live at our own PID, finished a minute ago, finished 30 days ago) and asserted by **directory existence, not by count**: the dry run and the real sweep must each pick exactly `ancient1`, and `live0001`/`recent01` must both survive. `TestPruneBgEmpty` covers the empty store and the render. Full `./cmd/...` and `./internal/session/...` suites green.
+
+---
+
+### feat(tui): grep and ast_grep results wear the syntax palette, and so does the sidebar
+
+**Status: COMPLETE** (2026-10-06) · branch `feat/grep-search-highlight` · touched `internal/tui/toolhl.go`, `internal/tui/dock.go` · tests `internal/tui/toolhl_test.go`, `internal/tui/rosepine_test.go` · probe `/tmp/xdev-sidebar-ink.py` (throwaway pty harness, same shape as `scripts/tui-overlay-width-drive.py`)
+
+**User request, twice:** "colorize the grep and all system tools output using rose pine text color scheme in my xdev", then "also colorize the sidebar components too".
+
+**1. A search result was one body-ink run.** `grep` and `ast_grep` return `path:line: text` rows — the shape `internal/tool/search.go: renderGrep` and `internal/tool/ast.go: renderASTMatches` both write — and `toolOutputHL` had no arm for them, so every row painted flat. `toolHL` gained a fourth answer, `search`, and `toolBodyRows` a fourth path: `searchRow` splits the row on `searchRowRe` (the same non-greedy `^(.*?):(\d+):(.*)$` `grepLineRe` uses, so a colon inside a path cannot swallow the line number) and paints the path in `syntax_function`, the number in `syntax_number`, each colon in `syntax_punctuation`, and the matched text in the body ink. A row that does not match the shape — a continuation, a note, a blank — keeps the body ink, the same fallback every other path uses. Bytes are preserved exactly: the runs concatenate back to the source row, which is the contract selection and copy depend on.
+
+**2. The sidebar's chrome was two greys.** `drawDock` painted every non-file row in `text_primary` and every count in `gray_dim`. It now resolves three palette inks through a local `inkOf(slot, fallback)` that mirrors `codeStyleFor` and `diffStyle` exactly — `Slot` not `Get` (a theme that leaves a slot to the terminal default degrades to the ink it painted before), and `NO_COLOR` read in the renderer rather than left to tcell (a run that picked an ink would still look coloured in a cell dump while the terminal shows one ink). Section headings wear `syntax_type`, a changed file's path wears `syntax_function` (the ink a grep row already gives a path), and a new `dockRow.muted` marks the rows that state something ABOUT the panel rather than a fact of the session — the `+N more` markers, the identity footer — which wear `syntax_comment`. The session's own name in the title slot keeps the brightest ink on purpose: it is what the panel IS, where a heading labels the rows under it. The change counts keep the diff's own two marker inks, untouched.
+
+**Verified against the built binary**, driven through a real pty with `pyte` reading the cell grid (a full-screen TUI repaints every dirty cell, so grepping the raw capture proves nothing — only the SGR at a named cell does), one mock provider, one prompt, `sidebarMode: show`:
+
+```
+[groknight]  SESSION · 31a989ec  9ccfd8 (syntax_type)      /tmp  6e6a86 (syntax_comment)
+             mock/mock-1 · auto  6e6a86                    xdev 0.1.0-dev  6e6a86
+[grokday  ]  SESSION · 81cdcc59  56949f (Dawn type)        /tmp  9893a5 (Dawn comment)
+[NO_COLOR ]  SESSION · 4ff287a3  default                   /tmp  default
+```
+
+**Tests.** `internal/tui/toolhl_test.go` — three new cases: a grep row paints three distinct inks, its bytes survive the render, and a row that does not match the shape stays flat. `internal/tui/rosepine_test.go` — `TestLaunchThemesPaintTheSidebarInRosePine`, a table over BOTH launch themes, reads the ink at each panel row off the simulated screen and asserts it against PINNED literals (never read back out of the theme, the trap this file's header records). Both new halves fail against the reverted code, verified by neutralising `inkOf` to always take its fallback: every heading paints `#E1E1E1` and every footer row `#585858` instead of Rosé Pine's `#9ccfd8` / `#6e6a86`.

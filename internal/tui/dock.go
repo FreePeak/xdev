@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -119,14 +120,17 @@ type DockOps struct {
 // dockRow is one painted row. text is the row's own line; add and del are the
 // right-aligned change counts a changed-file row carries, in the diff's own two
 // inks; head marks a section heading, which paints as a bold name and the dim
-// count its source appended.
+// count its source appended; muted marks a row that states something ABOUT the
+// panel rather than a fact of the session (the "+N more" markers, the identity
+// footer), which paints in the palette's comment ink.
 type dockRow struct {
-	text string
-	add  string // "+41" (diff-added ink), empty on every row but a changed file
-	del  string // "-12" (diff-removed ink)
-	head bool
-	path string // full file path of a FILES row, so a click resolves it without re-parsing the clipped text
-	act  string // non-file action a click opens ("trajectory"): the panel's own buttons
+	text  string
+	add   string // "+41" (diff-added ink), empty on every row but a changed file
+	del   string // "-12" (diff-removed ink)
+	head  bool
+	muted bool   // a note about the panel, not a session fact
+	path  string // full file path of a FILES row, so a click resolves it without re-parsing the clipped text
+	act   string // non-file action a click opens ("trajectory"): the panel's own buttons
 }
 
 // dockRowText returns the selectable text of a dock row: the row's
@@ -559,8 +563,11 @@ func (a *App) dockFooter() (dockFold, bool) {
 		id = shortID(a.st.SessionID)
 	}
 	f := dockFold{id: "footer", title: dockClip("SESSION · " + id), max: 4}
+	// Every row here is muted: the footer is the identity block a reader
+	// consults, not the working set they scan, so it paints in the quiet ink
+	// under its own heading rather than competing with TASKS and FILES.
 	if a.cwd != "" {
-		f.rows = append(f.rows, dockRow{text: dockClip(pathDisplay(a.cwd, dockInner))})
+		f.rows = append(f.rows, dockRow{text: dockClip(pathDisplay(a.cwd, dockInner)), muted: true})
 	}
 	// No branch row: it moved to the status row's left beside the path when the
 	// top bar came off, and a panel that repeats it just spends a row saying
@@ -575,10 +582,10 @@ func (a *App) dockFooter() (dockFold, bool) {
 		if a.st.Model != "" {
 			row = a.st.Model + " · " + l
 		}
-		f.rows = append(f.rows, dockRow{text: dockClip(row)})
+		f.rows = append(f.rows, dockRow{text: dockClip(row), muted: true})
 	}
 	if a.version != "" {
-		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version)})
+		f.rows = append(f.rows, dockRow{text: dockClip("xdev " + a.version), muted: true})
 	}
 	if len(f.rows) == 0 {
 		return dockFold{}, false
@@ -671,7 +678,7 @@ func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int,
 		}
 		// A folded section explains itself in the summary, not row by row.
 		if cut := len(f.rows) - shown; cut > 0 && (shown > 0 || fold != foldShut) {
-			out = append(out, dockRow{text: dockClip(fmt.Sprintf("+%d more", cut))})
+			out = append(out, dockRow{text: dockClip(fmt.Sprintf("+%d more", cut)), muted: true})
 		}
 	}
 	if hidden > 0 {
@@ -679,7 +686,7 @@ func dockEmit(cands []dockCand, headAt []int, folds []dockFold, keep, limit int,
 		if fold == foldShut {
 			note = fmt.Sprintf("%d rows folded away · ctrl+t opens them", hidden)
 		}
-		out = append(out, dockRow{}, dockRow{text: dockClip(note)})
+		out = append(out, dockRow{}, dockRow{text: dockClip(note), muted: true})
 	}
 	if len(out) > limit {
 		return nil, 0, hidden
@@ -869,6 +876,28 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	body := tcell.StyleDefault
 	ink := body.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	// The panel's own inks, from the palette the rest of the TUI paints with.
+	// Each answers "what IS this row?" rather than "which section is it in":
+	// a section heading is a label, a file path is a path (the ink a grep result
+	// already gives one, toolhl.go), and a note the panel wrote about itself is
+	// a comment. Slot, not Get: a theme that leaves the syntax_* slots to the
+	// terminal default degrades to the ink and the dim the panel painted before,
+	// which is the contract codeStyleFor and diffStyle already keep. NO_COLOR is
+	// read here for the same reason it is read there — the renderer must not
+	// choose inks it is forbidden to emit.
+	noColor := os.Getenv("NO_COLOR") != ""
+	inkOf := func(slot string, fallback tcell.Style) tcell.Style {
+		if noColor {
+			return fallback
+		}
+		if c, ok := a.th.Slot(slot); ok {
+			return body.Foreground(a.cellColor(c))
+		}
+		return fallback
+	}
+	label := inkOf(theme.SyntaxType, ink).Bold(true)
+	comment := inkOf(theme.SyntaxComment, dim)
+	pathInk := inkOf(theme.SyntaxFunction, ink)
 	// The change counts wear the diff's own inks, on the panel's background: a
 	// file's "+N" is the green its diff block already paints with — the MARKER
 	// ink, since the panel has no band behind a two-character count. Built from
@@ -883,6 +912,8 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	}
 	head := d.titleRows()
 	for i, line := range d.titleLines {
+		// The session's own name keeps the brightest ink: it is what the panel
+		// IS, where a section heading is a label for rows underneath it.
 		drawText(s, x+dockPad, top+i, line, ink.Bold(true))
 	}
 	for i, r := range d.lines {
@@ -893,21 +924,26 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 		switch {
 		case r.head:
 			name, count := dockSplit(r.text)
-			drawText(s, x+dockPad, y, name, ink.Bold(true))
+			drawText(s, x+dockPad, y, name, label)
 			if count != "" {
-				drawText(s, x+dockPad+width(name)+1, y, count, dim)
+				drawText(s, x+dockPad+width(name)+1, y, count, comment)
 			}
 		case r.right() != "":
 			// A changed file: the path flush left, its counts flush right, so the
 			// numbers line up down the column whatever the names are.
 			cx := x + dockPad + dockInner - width(r.right())
-			drawText(s, x+dockPad, y, r.text, ink)
+			drawText(s, x+dockPad, y, r.text, pathInk)
 			drawText(s, cx, y, r.add, added)
 			drawText(s, cx+width(r.add)+1, y, r.del, removed)
 		case r.act != "":
 			// A button row: the panel's own action, not a fact about the
 			// session, so it wears the accent the links wear.
 			drawText(s, x+dockPad, y, r.text, body.Foreground(a.cellColor(a.th.Get(theme.AccentUser))))
+		case r.muted:
+			// A note about the panel rather than a fact of the session: the
+			// "+N more" markers and the identity footer, which is the quiet
+			// block a reader consults rather than scans.
+			drawText(s, x+dockPad, y, r.text, comment)
 		default:
 			drawText(s, x+dockPad, y, r.text, ink)
 		}
