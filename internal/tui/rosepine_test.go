@@ -324,3 +324,96 @@ func TestLaunchThemesPaintTheSidebarOverlayDiffInRosePine(t *testing.T) {
 		})
 	}
 }
+
+// The sidebar is a surface the palette reaches, and this is the end-to-end
+// half: drawDock resolves the syntax_* slots, so a section heading, a changed
+// file's path and the identity footer each wear a Rosé Pine ink on the launch
+// theme. Asserted against the pinned literals, for the same reason as
+// everything above — a test that asks the theme what it should have painted
+// passes on the palette it replaced.
+//
+// The fixtures are the test app's own (dockTestApp), never a real repository.
+func TestLaunchThemesPaintTheSidebarInRosePine(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	for _, tc := range []struct {
+		name  string
+		label string // a section heading: syntax_type
+		path  string // a changed file's path: syntax_function
+		note  string // the identity footer: syntax_comment
+	}{
+		{"groknight", rpFoam, rpRose, rpMuted},
+		{"grokday", dawnFoam, dawnRose, dawnMuted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, scr, _ := dockTestApp(t, 160, 40)
+			app.SetTheme(theme.Load(tc.name))
+			app.SetDockMode(DockShow)
+			app.SetVersion("0.4.127")
+			app.SetLocation("/tmp/somewhere")
+			app.AddToolBlock("", "edit", `{"path":"internal/tui/dock.go"}`)
+			app.FinishTool("", "edit", false, "edited",
+				ToolOutcome{Diff: "--- a/x\n+++ b/internal/tui/dock.go\n@@ -1,2 +1,3 @@\n ctx\n+added\n-removed\n"})
+			app.draw()
+
+			app.mu.Lock()
+			left := app.width - dockCols
+			top, _ := app.dockGrid()
+			headRows := app.dock.titleRows()
+			rows := append([]dockRow(nil), app.dock.lines...)
+			app.mu.Unlock()
+
+			// Read the ink the panel actually painted, per row, off the screen: the
+			// panel is one window, so a row's first non-blank cell carries its ink.
+			inkAt := func(y int) tcell.Color {
+				for x := left + dockPad; x < app.width; x++ {
+					ch, _, st, _ := scr.GetContent(x, y)
+					if ch == ' ' || ch == 0 {
+						continue
+					}
+					fg, _, _ := st.Decompose()
+					return fg
+				}
+				return tcell.ColorDefault
+			}
+
+			// One row per role, found by the row's own shape: a heading has head
+			// set, a changed file carries a path, and the footer's last row names
+			// the build. Asserted against the literals, so this fails if a slot
+			// stops being read rather than only if its value changes.
+			want := map[string]tcell.Color{
+				"heading": app.cellColor(theme.Hex(tc.label)),
+				"path":    app.cellColor(theme.Hex(tc.path)),
+				"note":    app.cellColor(theme.Hex(tc.note)),
+			}
+			seen := map[string]bool{}
+			for i, r := range rows {
+				y := top + headRows + i
+				switch {
+				case r.head:
+					if got := inkAt(y); got == want["heading"] {
+						seen["heading"] = true
+					} else {
+						t.Errorf("section heading %q painted %v, want Rosé Pine %s", r.text, got, tc.label)
+					}
+				case r.path != "":
+					if got := inkAt(y); got == want["path"] {
+						seen["path"] = true
+					} else {
+						t.Errorf("changed-file row %q painted %v, want Rosé Pine %s", r.text, got, tc.path)
+					}
+				case strings.HasPrefix(r.text, "xdev "):
+					if got := inkAt(y); got == want["note"] {
+						seen["note"] = true
+					} else {
+						t.Errorf("footer row %q painted %v, want Rosé Pine %s", r.text, got, tc.note)
+					}
+				}
+			}
+			for _, role := range []string{"heading", "path", "note"} {
+				if !seen[role] {
+					t.Errorf("no %s row painted the palette's ink anywhere in the panel", role)
+				}
+			}
+		})
+	}
+}

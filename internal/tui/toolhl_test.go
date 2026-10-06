@@ -152,20 +152,117 @@ func TestUnknownToolOutputPaintsFlat(t *testing.T) {
 	}
 }
 
-// A tool result carrying no path at all stays flat, whatever it contains: the
-// only tool allowed a guess is bash.
-func TestNonBashOutputWithoutPathStaysFlat(t *testing.T) {
+// A grep result's "path:line: text" rows are coloured: the path in the
+// function slot, the line number in the number slot, the colon in the
+// punctuation slot, and the matched text in the body ink.
+func TestGrepResultHighlightsPathLineAndText(t *testing.T) {
 	app, _ := newTestApp(t, 100, 40)
-	body := strings.Repeat("func main() { let x = 1 }\n", 6)
-	app.AddToolBlock("c1", "grep", `{"pattern":"x"}`)
+	body := "internal/tui/toolhl.go:200:func (a *App) toolOutputHL(b *Block) toolHL {\n" +
+		"internal/tui/app.go:4511:func (a *App) toolBoxLines(i int, b *Block, w int) []line {"
+	app.AddToolBlock("c1", "grep", `{"pattern":"toolOutputHL"}`)
+	app.FinishTool("c1", "grep", false, body, ToolOutcome{})
+
+	rows, text := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
+	if !strings.Contains(text, "internal/tui/toolhl.go:200:func") {
+		t.Fatalf("the grep result did not survive the render:\n%s", text)
+	}
+	var src line
+	for _, ln := range bodyRows(rows) {
+		if strings.Contains(runsString(ln.runs), "internal/tui/toolhl.go:200:func") {
+			src = ln
+		}
+	}
+	if len(runStyles(src)) < 3 {
+		t.Fatalf("a grep row painted in %d inks; the path, line number and text should each wear their own: %v", len(runStyles(src)), src.runs)
+	}
+}
+
+// A grep result's bytes are preserved exactly: concatenating the runs of a
+// rendered row reproduces the source line, so selection and copy are untouched.
+func TestGrepHighlightPreservesBytesExactly(t *testing.T) {
+	app, _ := newTestApp(t, 100, 40)
+	src := []string{
+		"internal/tui/toolhl.go:200:func (a *App) toolOutputHL(b *Block) toolHL {",
+		"internal/tui/app.go:4511:func (a *App) toolBoxLines(i int, b *Block, w int) []line {",
+	}
+	app.AddToolBlock("c1", "grep", `{"pattern":"toolOutputHL"}`)
+	app.FinishTool("c1", "grep", false, strings.Join(src, "\n"), ToolOutcome{})
+
+	rows, _ := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
+	var got []string
+	for _, ln := range bodyRows(rows) {
+		got = append(got, runsString(ln.runs))
+	}
+	for i, want := range src {
+		if got[i] != want {
+			t.Fatalf("row %d: got %q, want %q", i, got[i], want)
+		}
+	}
+}
+
+// A grep row that does not match the "path:line: text" shape (a continuation,
+// a note, a blank) keeps the body ink — the same fallback every other path
+// uses.
+func TestGrepNonMatchingRowStaysFlat(t *testing.T) {
+	app, _ := newTestApp(t, 100, 40)
+	body := "internal/tui/toolhl.go:200:func (a *App) toolOutputHL(b *Block) toolHL {\n" +
+		"  a continuation line\n" +
+		"[showing first 10 matches]"
+	app.AddToolBlock("c1", "grep", `{"pattern":"toolOutputHL"}`)
 	app.FinishTool("c1", "grep", false, body, ToolOutcome{})
 
 	rows, _ := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
-	for _, ln := range bodyRows(rows) {
+	bodyRows := bodyRows(rows)
+	if len(bodyRows) < 3 {
+		t.Fatalf("expected at least 3 body rows, got %d", len(bodyRows))
+	}
+	for i, ln := range bodyRows[1:] {
 		if len(runStyles(ln)) > 1 {
-			t.Fatalf("a grep result painted a coloured row: %v", ln.runs)
+			t.Fatalf("row %d painted a coloured run: %v", i+1, ln.runs)
 		}
 	}
+}
+
+// A glob listing is one bare file path per row, and each wears the same
+// function slot a grep row gives its path — the two search surfaces read as
+// one palette. The tool's own footer is not a path and stays flat.
+func TestGlobResultHighlightsItsPaths(t *testing.T) {
+	app, _ := newTestApp(t, 100, 40)
+	body := "internal/tui/toolhl.go\ninternal/tui/dock.go\ninternal/theme/theme.go\n[showing 3 files]"
+	app.AddToolBlock("c1", "glob", `{"pattern":"**/*.go"}`)
+	app.FinishTool("c1", "glob", false, body, ToolOutcome{})
+
+	rows, text := joinBox(t, app, app.blocks[len(app.blocks)-1], 96)
+	if !strings.Contains(text, "internal/tui/dock.go") {
+		t.Fatalf("the listing did not survive the render:\n%s", text)
+	}
+	var pathRow, footRow line
+	for _, ln := range bodyRows(rows) {
+		switch runsString(ln.runs) {
+		case "internal/tui/dock.go":
+			pathRow = ln
+		case "[showing 3 files]":
+			footRow = ln
+		}
+	}
+	if got := runStyles(pathRow); len(got) != 1 {
+		t.Fatalf("a glob path painted %d inks, want one: %v", len(got), pathRow.runs)
+	}
+	if got := inkOfLine(app, pathRow); got != app.cellColor(app.th.Get(theme.SyntaxFunction)) {
+		t.Fatalf("a glob path painted %v, want the function slot %v", got, app.cellColor(app.th.Get(theme.SyntaxFunction)))
+	}
+	if got := runStyles(footRow); len(got) != 1 || inkOfLine(app, footRow) == app.cellColor(app.th.Get(theme.SyntaxFunction)) {
+		t.Fatalf("the footer is not a path and must stay flat: %v", footRow.runs)
+	}
+}
+
+// inkOfLine is the foreground of a row's first run.
+func inkOfLine(a *App, ln line) tcell.Color {
+	if len(ln.runs) == 0 {
+		return tcell.ColorDefault
+	}
+	fg, _, _ := ln.runs[0].style.Decompose()
+	return fg
 }
 
 // Bash output that reads as shell — a listing of variables and strings — is
