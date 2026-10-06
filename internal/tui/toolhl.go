@@ -29,6 +29,7 @@ package tui
 // selection, copy and the transcript are unaffected.
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -195,21 +196,23 @@ func shellRowHasInk(s string, sp langSpec) bool {
 	}
 	return false
 }
-
 // toolHL is the highlighting decision for one finished tool result: which
 // lexer paints it, and whether its rows carry the "N:" render-window prefix
 // that snapshot.go: RenderWindow writes. report is the third option: the
 // result is prose a tool WROTE for a person (a subagent's findings), so it
 // paints through the markdown renderer rather than a lexer or a flat wrap.
+// search is the fourth: rows are "path:line: text" (grep, ast_grep), painted
+// with the syntax palette's function/number/punctuation slots.
 type toolHL struct {
 	lang     string
 	numbered bool // rows read "<line>: <source>", so the prefix is chrome
 	report   bool // prose the tool composed, not output it captured
+	search   bool // rows read "path:line: text" (grep, ast_grep)
 }
 
 // toolOutputHL decides how a finished tool result paints.
 //
-// Three answers, in this order:
+// Four answers, in this order:
 //
 //   - the path is the exact answer and always wins: a `read` of a .go file is
 //     Go whatever the rows happen to contain;
@@ -219,7 +222,11 @@ type toolHL struct {
 //     a subagent's answer comes back as its task call's result). Bash is the
 //     one tool that falls to a heuristic, and ONLY bash — every other tool
 //     result carrying no path paints flat, because guessing a language for an
-//     unknown tool's output is how a log line ends up wearing a keyword colour.
+//     unknown tool's output is how a log line ends up wearing a keyword colour;
+//   - a SEARCH: grep and ast_grep return "path:line: text" rows. The path is
+//     the function slot, the line number the number slot, the colon the
+//     punctuation slot, and the matched text the body ink. The same shape
+//     every search tool returns, so one rule covers both.
 //
 // The zero value paints flat, and so does everything codeStyle cannot colour
 // (NO_COLOR, a theme with no syntax_* slot filled). Nothing here can turn a
@@ -242,6 +249,9 @@ func (a *App) toolOutputHL(b *Block) toolHL {
 	if b.ToolName == "bash" && LooksLikeShell(b.Text) {
 		return toolHL{lang: shellLang}
 	}
+	if b.ToolName == "grep" || b.ToolName == "ast_grep" {
+		return toolHL{search: true}
+	}
 	return toolHL{}
 }
 
@@ -252,7 +262,7 @@ var shellLang = normalizeLang("bash")
 
 // toolBodyRows lays a result body out into styled rows of inner width.
 //
-// Three paths, and the split is the whole safety story:
+// Four paths, and the split is the whole safety story:
 //
 //   - nothing to colour (no language, an unknown extension, NO_COLOR, a theme
 //     that pins no syntax_* ink): wrap() and textline() exactly as this painted
@@ -266,12 +276,26 @@ var shellLang = normalizeLang("bash")
 //     markdown is a layout, not a colour: a "# " heading arrives without its
 //     hashes, a bullet as "•". That is the point — a subagent that wrote a
 //     structured report finally reads as one, with the md_* inks it was always
-//     painted with in an assistant block.
+//     painted with in an assistant block;
+//   - a search: splitSearchRow colours the path, line number and colon of a
+//     "path:line: text" row with the syntax palette's function/number/
+//     punctuation slots. The matched text keeps the body ink — it is the
+//     content, not the chrome.
 func (a *App) toolBodyRows(body string, inner int, bodySt, dimSt tcell.Style, hl toolHL) []line {
 	if hl.report {
 		var out []line
 		for _, ln := range a.renderMarkdown(body, inner) {
 			out = append(out, wrapLine(ln, inner)...)
+		}
+		return out
+	}
+	if hl.search {
+		cs := a.mdStyle().code
+		var out []line
+		for _, src := range strings.Split(body, "\n") {
+			for _, ln := range wrapCells(a.searchRow(src, cs, bodySt, dimSt), inner) {
+				out = append(out, ln)
+			}
 		}
 		return out
 	}
@@ -290,6 +314,37 @@ func (a *App) toolBodyRows(body string, inner int, bodySt, dimSt tcell.Style, hl
 		}
 	}
 	return out
+}
+
+// searchRowRe matches a search result's "path:line: text" row. The path is
+// non-greedy so a colon inside it cannot swallow the line number. The same
+// shape grep and ast_grep return, so one rule covers both.
+var searchRowRe = regexp.MustCompile(`^(.*?):(\d+):(.*)$`)
+
+// searchRow colours one search result row: the path in the function slot, the
+// line number in the number slot, the colon in the punctuation slot, and the
+// matched text in the body ink. A row that does not match the shape (a
+// continuation, a note, a blank) keeps the body ink — the same fallback every
+// other path uses.
+func (a *App) searchRow(src string, cs codeStyle, bodySt, dimSt tcell.Style) line {
+	m := searchRowRe.FindStringSubmatch(src)
+	if m == nil {
+		return textline(src, bodySt)
+	}
+	path, num, text := m[1], m[2], m[3]
+	var runs []cell
+	if path != "" {
+		runs = append(runs, cell{text: path, style: cs.styleFor(tokFunc)})
+	}
+	if num != "" {
+		runs = append(runs, cell{text: ":", style: cs.styleFor(tokPunct)})
+		runs = append(runs, cell{text: num, style: cs.styleFor(tokNumber)})
+	}
+	if text != "" {
+		runs = append(runs, cell{text: ":", style: cs.styleFor(tokPunct)})
+		runs = append(runs, cell{text: text, style: bodySt})
+	}
+	return line{runs: runs}
 }
 
 // toolBodyRow colours one source line, or returns it in the box's own ink.
