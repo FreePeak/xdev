@@ -3567,7 +3567,6 @@ func harnessUserAttribution(m ai.Message) bool {
 	case agent.ContinuationAttribution,
 		agent.GoalContinuationAttribution,
 		agent.PromptContinuationAttribution,
-		agent.TurnBudgetAttribution,
 		agent.EmptyTurnAttribution,
 		agent.HubNoticeAttribution:
 		return true
@@ -3586,10 +3585,6 @@ func replayTranscript(app *tui.App, msgs []ai.Message) {
 			// mid-task.
 			if m.Attribution == agent.ContinuationAttribution {
 				app.AddSystemBlock("· recovered provider cut-off — continuation injected")
-				continue
-			}
-			if m.Attribution == agent.TurnBudgetAttribution {
-				app.AddSystemBlock("· turn wrapped up — the session keeps going instead of asking you to say \"continue\"")
 				continue
 			}
 			// The rest (goal continuations, prompt continuations, the
