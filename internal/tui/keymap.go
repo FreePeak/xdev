@@ -69,7 +69,8 @@ var BuiltinActions = []string{
 	"retry",           // F5: re-run the current session's last turn (omp's retry)
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
-	"mode-cycle",      // Shift-Tab: default → auto → plan → default (Claude Code's cycle)
+	"mode-cycle",      // legacy name; default map now points Shift-Tab at effort-cycle
+	"effort-cycle",    // Shift-Tab: lean → standard → full → lean (session effort)
 	"thinking-toggle", // request-side reasoning off ⇄ auto (omp alt+t; no default chord)
 	"session.tab.next", "session.tab.previous",
 	"session.tab.next_unread", "session.tab.previous_unread",
@@ -198,15 +199,11 @@ func DefaultKeyMap() *KeyMap {
 			"A-,": "app.settings",
 			"C-t": "dock-fold",
 
-			// Shift-Tab cycles the session MODE (Claude Code's own use of
-			// the chord: default ⇄ acceptEdits ⇄ plan). Every terminal sends
-			// it as KeyBacktab, which chordOf renders "Shift-Tab" — so that
-			// is the chord to bind, not the "S-Tab" spelling chordOf can
-			// never emit. The request-side reasoning toggle keeps its action
-			// (omp's alt+t) and simply has no default chord any more; one
-			// chord cannot mean two things, and the mode is the one a user
-			// reaches for mid-turn. keybindings.yml can put the toggle back.
-			"Shift-Tab": "mode-cycle",
+			// Shift-Tab cycles session EFFORT (lean → standard → full). Every
+			// terminal sends it as KeyBacktab, which chordOf renders "Shift-Tab".
+			// Permission /mode keeps its own command; keybindings.yml can put
+			// mode-cycle back on this chord. The thinking toggle has no default.
+			"Shift-Tab": "effort-cycle",
 			// Session tabs (opencode session.tab.next / .previous). Alt+letter
 			// class matches model-select / hub / dock; ] and [ are the natural
 			// "next / prev" pair and reach every terminal we target.

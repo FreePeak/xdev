@@ -486,6 +486,14 @@ type Settings struct {
 	// (ThinkingLevel). Deliberately NOT in repoSafeSettingsKeys: it is not a
 	// display knob but a spend knob, so a cloned repository may not set it.
 	Thinking string `yaml:"thinking"`
+	// Effort is the session effort rung (lean|standard|full): how hard the
+	// session works — tools advertised eagerly, optional full-workflow
+	// prompt appendix, and the thinking default when Thinking is still
+	// "auto". "" means unset → standard. NOT the permission posture
+	// (approvalMode /mode) and NOT the request-side budget (Thinking /
+	// :effort). Deliberately NOT in repoSafeSettingsKeys: a clone must not
+	// force the user's spend surface.
+	Effort string `yaml:"effort"`
 	// Personality selects the prompt-tail preset (M10 #32, omp parity):
 	// default | friendly | pragmatic | none. A PERSONALITY.md override
 	// always beats the preset; "none" omits the block.
@@ -1008,6 +1016,15 @@ func (s *Settings) ThinkingLevel() string {
 		return "auto"
 	}
 	return s.Thinking
+}
+
+// SessionEffort reports the effective session effort rung: unset is
+// "standard", the shipped default that matches the pre-effort deferred set.
+func (s *Settings) SessionEffort() string {
+	if s == nil || s.Effort == "" {
+		return SessionEffortStandard
+	}
+	return NormalizeSessionEffort(s.Effort)
 }
 
 // AllowCompoundCommandsOn reports the effective bash.allowCompoundCommands
@@ -1583,6 +1600,11 @@ func (s *Settings) merge(layer *Settings) error {
 		// explicit "off" in a later layer wins.
 		s.Thinking = layer.Thinking
 	}
+	if layer.Effort != "" {
+		// Same zero-skip rule as Thinking: "" never overwrites.
+		s.Effort = layer.Effort
+	}
+
 	if layer.Handoff.SaveToDisk {
 		// Same plain-bool rule as Advisor: only a layer that turns it ON
 		// contributes (the shipped default is off).
@@ -1883,6 +1905,9 @@ func (s *Settings) merge(layer *Settings) error {
 	if s.Thinking != "" && !slices.Contains(ThinkingLevels, s.Thinking) {
 		return fmt.Errorf("unknown thinking %q (want %s)", s.Thinking, strings.Join(ThinkingLevels, "|"))
 	}
+	if s.Effort != "" && !IsSessionEffort(s.Effort) {
+		return fmt.Errorf("unknown effort %q (want %s)", s.Effort, strings.Join(SessionEffortLevels, "|"))
+	}
 	return nil
 }
 
@@ -2128,6 +2153,8 @@ func List(s *Settings, globalPath string) []string {
 		"tui.exitDetach " + fmt.Sprint(s.TuiExitDetachOn()),
 		"sidebarMode " + s.SidebarModeOn(),
 		"thinking " + s.ThinkingLevel(),
+		"effort " + s.SessionEffort(),
+
 		"computer " + fmt.Sprint(s.ComputerOn()),
 		"advisor " + fmt.Sprint(s.Advisor),
 		"memory " + memoryOrDefault(s.Memory),

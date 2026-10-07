@@ -715,6 +715,7 @@ func (f *fakeAPI) PlanMode(args string) error {
 	return nil
 }
 
+func (f *fakeAPI) Effort(args string) error { return nil }
 func (f *fakeAPI) Mode(args string) error {
 	if f.fail == "mode" {
 		return fmt.Errorf("boom")

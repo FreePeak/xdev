@@ -179,7 +179,7 @@ still live in `~/.xdev/agent/themes/`. What matters for daily work:
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
 | `Alt+,` | settings panel: live-edit the session's settings (Enter changes the row under the cursor) |
-| `Shift+Tab` | cycle the session mode: `default` → `auto` → `plan` (`/mode`) |
+| `Shift+Tab` | cycle session effort: `lean` → `standard` → `full` (`/effort`) |
 | *(no default chord)* | request-side reasoning off ⇄ let the model role decide (`/thinking`; bind `thinking-toggle` in `keybindings.yml`) |
 | `Ctrl+O` | expand the newest tool result or thinking box |
 | `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
@@ -227,20 +227,24 @@ label, and the model it sits beside says what the pair is. Both read the live
 seam, so a `/thinking` flip repaints both on the next frame; a host that never
 wired `/thinking` paints neither.
 
+**Session effort** (`/effort`, Shift+Tab) is how hard the session works — not
+what it is allowed to do. `lean` keeps the pi core tools eager and pins thinking
+low when `/thinking` is still auto; `standard` is the shipped default (today's
+deferred catalog); `full` opens the long tail eagerly and appends an omp-shaped
+workflow block to the system prompt. The effort rung rides the composer divider
+beside the mode. Permissions stay on `/mode`.
+
 **The session mode** is the one fact that decides what a tool call may do, and
 it is on screen in both chrome rows: the bare name on the divider beside the
-model, and beside the working directory on the status row. `Shift+Tab` cycles
-`default` → `auto` → `plan`; `/mode <name>` sets one directly and `/mode` bare
-reports it. `default` asks before a write or a command, `auto` runs both
-unchecked, `plan` is read-only research the `propose` tool exits, and `bypass`
-never asks. `bypass` is reachable **by name only** — it is deliberately off the
-cycle, because the mistakes it permits cannot be undone by answering a card —
-and a session already in `bypass` enters the cycle at `default`, the least
-permissive mode. The mode names what the harness already enforces (the
-`approvalMode` policy and the plan guard); `/plan` and `--approval-mode` keep
-working and the readout follows them, because it is derived rather than
-stored. Plan is never written to the settings file: a file that opened every
-session read-only would be a trap.
+model, and beside the working directory on the status row. `/mode <name>` sets
+one directly and `/mode` bare reports it (`default` asks before a write or a
+command, `auto` runs both unchecked, `plan` is read-only research the `propose`
+tool exits, `bypass` never asks and is by name only). Shift+Tab no longer cycles
+mode — bind `mode-cycle` in `keybindings.yml` if you want that chord back. The
+mode names what the harness already enforces (the `approvalMode` policy and the
+plan guard); `/plan` and `--approval-mode` keep working and the readout follows
+them. Plan is never written to the settings file.
+
 
 The **context dock** (`Alt+S`) is a fixed 42-column window right of the
 transcript, opencode's sidebar shape: it owns every row of the terminal, so the
@@ -272,7 +276,8 @@ hides the sidebar and brings it back.
 | `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/context [auto\|200k\|300k\|500k\|1m]` | the context window for every model (bare reports; pins it live and persisted — `auto` hands each model back the window its catalog states) |
-| `/mode [default\|auto\|plan\|bypass]` | the session mode (bare reports; `Shift+Tab` cycles the first three — `bypass` is by name only) |
+| `/effort [lean\|standard\|full]` | session effort: tools + prompt depth + thinking default when `thinking` is auto (bare reports; `Shift+Tab` cycles) |
+| `/mode [default\|auto\|plan\|bypass]` | permission/plan posture (bare reports; not on Shift+Tab — use `/mode` or bind `mode-cycle`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |
 | `/usage` | the session's token, time and tool-call report: totals with thousands separators, cache hit rate, live context against the model's window, LLM vs tool time, average time-to-first-token, and the tool-call count — the same readings the status row carries, at report width |

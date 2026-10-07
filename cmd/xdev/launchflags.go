@@ -239,14 +239,25 @@ func applyThinkingFlag(flagValue, modelEffort string) (string, error) {
 
 // thinkingLevel folds the settings key under the flag: --thinking wins when it
 // names a level, otherwise the persisted `thinking` layer decides ("auto" when
-// neither says anything). The role's ":effort" is deliberately NOT consulted
-// here — applyThinkingFlag takes it as the "auto" fallback, which keeps one
-// precedence ladder: flag > settings > role effort.
+// neither says anything). When that layer is still "auto", the session effort
+// rung may pin a default (lean→low, full→high); standard leaves auto alone.
+// The role's ":effort" is deliberately NOT consulted here — applyThinkingFlag
+// takes it as the "auto" fallback, which keeps one precedence ladder:
+// flag > settings thinking > session effort default > role effort.
 func thinkingLevel(settings *config.Settings, flagValue string) string {
 	if lv := strings.TrimSpace(flagValue); lv != "" && lv != "auto" {
 		return lv // trimmed: a padded flag is still the level it names
 	}
-	return settings.ThinkingLevel()
+	if settings == nil {
+		return "auto"
+	}
+	if lv := settings.ThinkingLevel(); lv != "" && lv != "auto" {
+		return lv
+	}
+	if def := config.SessionEffortThinking(settings.SessionEffort()); def != "" && def != "auto" {
+		return def
+	}
+	return "auto"
 }
 
 // thinkingForModel adapts a pinned request-side level to the model about to

@@ -1824,6 +1824,41 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		Set:     setSessionMode(planMode, vibeActive, persistApprovalMode, sessionMode),
 	})
 
+	// /effort and Shift-Tab: session effort (lean|standard|full) — tools
+	// deferred, full prompt appendix, and the thinking default when the
+	// user has not pinned /thinking. Re-applies the deferred catalog on
+	// the live registry so the next turn sees the new surface without a
+	// restart. Permissions stay on /mode.
+	app.SetEffortOps(&tui.EffortOps{
+		Current: func() string { return lastSettings().SessionEffort() },
+		Set: func(name string) error {
+			if !config.IsSessionEffort(name) {
+				return fmt.Errorf("effort: want %s", strings.Join(config.SessionEffortLevels, "|"))
+			}
+			if err := config.Set(config.GlobalSettingsPath(), "effort", name); err != nil {
+				return err
+			}
+			lastSettings().Effort = name
+			tool.ApplySessionEffort(reg, name)
+			// When thinking is still auto, re-fold the effort default onto
+			// the live holder so the next turn's reasoning budget matches.
+			if lastSettings().ThinkingLevel() == "auto" || lastSettings().Thinking == "" {
+				def := config.SessionEffortThinking(name)
+				modelMu.Lock()
+				applied := thinkingForModel(def, live.provName, live.model, cfg)
+				le, err := applyThinkingFlag(applied, live.roleEffort)
+				if err == nil {
+					live.effort, live.level = le, def
+				}
+				modelMu.Unlock()
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+
 	// goalKick runs the goal's first turn. Setting a goal must actually start
 	// it: the goal state on its own only decorates the next user-driven turn,
 	// so `/goal <objective>` printed "goal created" and then nothing ran. The
