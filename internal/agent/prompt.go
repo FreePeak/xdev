@@ -39,6 +39,22 @@ import (
 // 1000 tokens, which shipped at 993) — so a new rule REPLACES prose here, it
 // never appends.
 //
+// The first rule under "Rules" is the effort ladder, added after a field report
+// ("my xdev is usually overthinking and make everything too complicated for the
+// simple task and simple request from user"). Measured over the 80 newest
+// session files: 180 real user turns against 649 harness continuations (3.6 per
+// turn), ~122 tool calls per turn, and 44 of the 80 sessions ran `git worktree`
+// — one of them 94 times, for "the thinking box color in xdev". None of that
+// was the model disobeying: the always-loaded project rules mandate a
+// worktree+branch+PR for every change, and the loop's keep-going nudge
+// (loop.go) refused to let a run stop once anything had run. The base prompt
+// said nothing about matching effort to the ask, so the only instruction with
+// an opinion was the heaviest one. This rule is the counterweight, and it is
+// first on purpose: the hierarchy is user > project rules > base, so a
+// counterweight has to be stated, not implied. It REPLACED prose rather than
+// extending the constant — 1899 runes before, 1889 after, which is how the two
+// budgets above stay true.
+//
 // The last two rules under "Before you act" are one decision, not two.
 // "Confirm the requirement" alone (#447) only stopped the agent acting on a
 // request it had misread; it never said what a misread looks like. A question —
@@ -51,33 +67,34 @@ import (
 const SystemPromptBase = `You are xdev, a coding agent working in the user's repository.
 
 Rules:
-- Work only inside the current working directory unless given an absolute path elsewhere.
+- Work only in the current working directory unless given an absolute path elsewhere.
+- Match the effort to the ask: a question or a one-liner gets an answer or a surgical edit, not a
+  plan, a worktree or a pipeline; a multi-file change gets the whole workflow. Take the smaller
+  reading, and say what you skipped.
 - Prefer minimal, surgical edits; keep the codebase boring and consistent with its conventions.
-- Verify changes: run the relevant build/test command before claiming success.
-- Never invent file contents; read before editing. Never leave placeholders or stubs.
-- If blocked by missing information you cannot obtain with tools, say so plainly.
+- Verify changes: run the relevant build/test before claiming success.
+- Never invent file contents; read before editing. No placeholders or stubs.
+- If blocked by information you cannot obtain with tools, say so plainly.
 
 Before you act:
 - Confirm the requirement, don't assume it. Restate what you will do in a sentence or two, then
   start. "Find the root cause and fix" asks for a change; "why is this slow?" asks a question.
-- A question gets an answer: if the ask is why/what/how, or research/explore and report, do
-  the reading, give the report and stop. Don't start implementing.
-- Ask first when the request is ambiguous, non-trivial, spans repos, or would touch files outside
-  the working directory. Use ask with the readings you actually have. A clear, explicit
-  instruction to do X is its own confirmation — asking anyway is noise.
+- A question gets an answer: for why/what/how or research/explore-and-report, do the reading,
+  give the report and stop. Don't start implementing.
+- Ask when the request is ambiguous, non-trivial, spans repos, or touches files outside the
+  working directory; an explicit instruction to do X is its own confirmation.
 - Confirm once, before the first change. That covers the whole run: after go, keep going.
 
-Getting code into context:
-- Search first, then read: grep and glob to find candidates, read only the ranges you need.
-- Use read, not the shell, for file content. read pages the range you ask for; cat, head, sed
-  and pipes dump whole files and burn the context window.
+Context:
+- Search first: grep/glob for candidates, then read only the ranges you need.
+- Use read, not the shell, for file content; cat/head/sed and pipes burn the context window.
 - Keep bash for work that actually runs: build, test, git, package managers.
 
 Delegating:
-- task runs a subagent in its own session and returns one result; its transcript never reaches
-  you. Worth it when the answer means reading a lot of code, not for one read or command.
+- task runs one job in its own session and returns one result; its transcript never reaches you.
+  Worth it when the answer means reading a lot of code, not for one read or command.
 - Independent work is parallel: send slices in one batch.
-- Say what the result must contain. You see that, never the work behind it.`
+- Say what the result must contain: that is all you see.`
 
 // SubagentSystemPromptBase is the child's system prompt: same working
 // rules, plus the yield contract that ends the run.
@@ -294,13 +311,29 @@ func expandImports(content, baseDir string, budget *int, seen map[string]bool) s
 // claim more than the file has: a repository rule and a system rule are
 // different things, and saying so keeps the hierarchy honest instead of
 // merely louder.
+//
+// The last sentence bounds a rule's REACH, not just its rank, and it exists
+// because unbounded reach is what turned a 6-word ask into a delivery
+// pipeline. Every repository keeps rules that describe a process — a
+// worktree, a branch, a review, a ticket — and an always-loaded file states
+// them without saying what they are for, so the cheapest reading is "always".
+// Measured: 44 of the 80 newest sessions in this repo's own store ran `git
+// worktree`, one of them 94 times, for asks like "the thinking box color in
+// xdev". The header cannot know which of the file's rules is a process rule,
+// so it states the principle and leaves the classification to the model,
+// which has the task in front of it.
 const ProjectContextHeader = `# Project rules and conventions
 
 These are the binding rules for this repository, loaded automatically. They
 apply to the work in this session whether or not the task restates them: a
 task prompt that omits a rule below has not cancelled it. Follow them without
 re-reading this file, and read the file itself when you need detail a summary
-would lose. Direct user instructions for this task still take precedence.`
+would lose. Direct user instructions for this task still take precedence.
+
+Read each rule for its scope: a rule describing a process (a worktree, a
+branch, a review, a ticket) binds the changes that process exists for, not
+every message. A question, a one-line fix or a local tweak is answered
+directly; scale the ceremony to the change.`
 
 // ProjectContextBlock frames injected context files with ProjectContextHeader.
 // Both injection sites (the parent prompt and a subagent's) call this, so the

@@ -536,24 +536,41 @@ func TestPromptContinuationStaysOffAfterAReadOnlyRun(t *testing.T) {
 // The gate's own definition, pinned as a table so the conservative default
 // cannot rot: an undeclared tool may write anything, so it counts as a
 // mutation, while the manifest's read-only set never does.
+//
+// bash is judged by its arguments, not by its name (#414 follow-up). The
+// args-less rows below are the fail-closed direction: a bash call whose
+// command cannot be read is mutating, which is why the old
+// "bash is always mutating" rule survived as the DEFAULT rather than being
+// deleted. The two args-bearing rows are what the classifier buys — a
+// session that only ever ran `git status` now ends when the model says it is
+// done, instead of collecting keep-going nudges for work that never happened.
 func TestCallMutatedReadsTheCapsManifest(t *testing.T) {
 	for _, tc := range []struct {
 		tool string
+		args string
 		want bool
 		why  string
 	}{
-		{"read", false, "reading is not changing"},
-		{"grep", false, "reading is not changing"},
-		{"glob", false, "reading is not changing"},
-		{"lsp", false, "reading is not changing"},
-		{"write", true, "a file appeared"},
-		{"edit", true, "a file changed"},
-		{"bash", true, "a mutating command inside bash is invisible from the tool name"},
-		{"echo", true, "undeclared may write anything — the conservative default"},
-		{"mcp_something", true, "undeclared may write anything — the conservative default"},
+		{"read", "", false, "reading is not changing"},
+		{"grep", "", false, "reading is not changing"},
+		{"glob", "", false, "reading is not changing"},
+		{"lsp", "", false, "reading is not changing"},
+		{"write", "", true, "a file appeared"},
+		{"edit", "", true, "a file changed"},
+		{"bash", "", true, "no arguments to judge — fail closed, as before"},
+		{"bash", `{"command":"git commit -m x"}`, true, "a mutating command"},
+		{"bash", `{"command":"git status --short"}`, false, "a read command is not a mutation"},
+		{"bash", `{"command":"wc -c a b | tail -1"}`, false, "reads in a pipeline are reads"},
+		{"bash", `{"command":"not json"}`, true, "unparseable arguments fail closed"},
+		{"echo", "", true, "undeclared may write anything — the conservative default"},
+		{"mcp_something", "", true, "undeclared may write anything — the conservative default"},
 	} {
-		if got := callMutated(ai.ToolCallBlock{Name: tc.tool}); got != tc.want {
-			t.Errorf("callMutated(%q) = %v, want %v — %s", tc.tool, got, tc.want, tc.why)
+		c := ai.ToolCallBlock{Name: tc.tool}
+		if tc.args != "" {
+			c.Arguments = json.RawMessage(tc.args)
+		}
+		if got := callMutated(c); got != tc.want {
+			t.Errorf("callMutated(%s %s) = %v, want %v — %s", tc.tool, tc.args, got, tc.want, tc.why)
 		}
 	}
 }
