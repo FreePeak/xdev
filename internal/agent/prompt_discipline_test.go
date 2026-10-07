@@ -35,6 +35,41 @@ func TestBasePromptCarriesToolDiscipline(t *testing.T) {
 	}
 }
 
+// TestBasePromptCarriesTheEffortLadder locks the rule that answers the field
+// report "my xdev is usually overthinking and make everything too complicated
+// for the simple task and simple request from user".
+//
+// The gap it fills is a hierarchy gap, not a wording one. xdev's prompt
+// already said "minimal, surgical edits" and "a question gets an answer, give
+// the report and stop" — and the agent still opened a worktree and a PR for a
+// colour tweak, because the always-loaded project rules mandate exactly that
+// for every change and nothing in the base prompt contradicted them at the
+// level of EFFORT. Measured over the 80 newest session files: 180 real user
+// turns against 649 harness continuations (3.6 per turn), ~122 tool calls per
+// turn, 44 of 80 sessions running `git worktree` (94 times in one session, for
+// "the thinking box color in xdev").
+//
+// Each needle is the part that does work: "match the effort" is the rule,
+// "one-liner" and "worktree" name the two ends it arbitrates between, and
+// "smaller" is the tie-break that makes the choice deterministic when two
+// readings of a request survive.
+func TestBasePromptCarriesTheEffortLadder(t *testing.T) {
+	p := strings.ToLower(SystemPromptBase)
+	for _, want := range []struct {
+		needle string
+		why    string
+	}{
+		{"match the effort", "nothing in the base prompt scales work to the size of the ask"},
+		{"one-liner", "the small end of the ladder is unnamed, so a trivial ask has no rule to land on"},
+		{"worktree", "the ceremony the field report complained about is never named, so the rule cannot bound it"},
+		{"smaller", "with no tie-break, an ambiguous request defaults to the heavier reading"},
+	} {
+		if !strings.Contains(p, want.needle) {
+			t.Errorf("SystemPromptBase is missing %q — %s", want.needle, want.why)
+		}
+	}
+}
+
 // TestBasePromptCarriesConfirmFirst locks the "confirm before implementing"
 // rule. Field report: a request that read like a question ("find the root
 // causes and fix why the decisions are held at gates") was answered with 12
@@ -88,6 +123,12 @@ func TestBasePromptKeepsItsOriginalRules(t *testing.T) {
 // the whole assembled prompt is 1000 tokens (maxPromptTokens, enforced in
 // cmd/xdev/prompt_test.go); the base is the part a change to this file can
 // move, so it gets its own ceiling well under the total.
+//
+// The effort ladder (the first rule under "Rules") was added against a
+// measured field report and had to REPLACE prose rather than extend the
+// constant: the base went 1899 runes → 1889 runes for the change, which is
+// what kept both this ceiling and the 1000-token assembled budget true
+// without raising either.
 func TestBasePromptStaysCompact(t *testing.T) {
 	const maxRunes = 2000
 	if n := len([]rune(SystemPromptBase)); n > maxRunes {

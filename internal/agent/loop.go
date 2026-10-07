@@ -184,14 +184,30 @@ const maxPromptContinuations = 8
 // A tool with no Caps declaration counts as mutating: the same conservative
 // default Decide makes for an unmodeled tool (policy.go:119), because an
 // ext_*/mcp_* call may write anything and the safe reading of "unknown" is
-// "changed something". bash is always counted: a mutating command inside it
-// (`sed -i`, `git commit`) is invisible from the tool name, and reading that
-// far would need a shell parser, which is the complexity this gate exists to
-// avoid — so a run that only shelled out keeps its keep-going.
+// "changed something".
+//
+// bash is judged by its ARGUMENTS, not by its name. It used to be
+// unconditionally mutating, on the reasoning that `sed -i` or `git commit`
+// is invisible from the tool name — true, but the cost was measured: with
+// bash always "mutating", every session that shelled out for `git status`
+// or `wc -c` kept its keep-going nudge, which is 649 continuations over 180
+// real user turns (3.6 each) in the 80 newest session files, and 44 of
+// those sessions then ran `git worktree`. The classifier that answers the
+// question now lives next to the bash tool (tool.BashCallIsReadOnly), beside
+// the quote-aware splitter the policy rules already use, so the gate reads
+// one implementation instead of growing a second shell parser here.
+//
+// It stays a heuristic and it stays fail-closed in the direction that
+// matters: an unrecognised command is mutating, so the worst case is one
+// lost nudge on a run that really was mid-task, never a mutation read as a
+// read.
 func callMutated(c ai.ToolCallBlock) bool {
 	caps, declared := tool.CapsByName(c.Name)
 	if !declared {
 		return true
+	}
+	if c.Name == "bash" {
+		return !tool.BashCallIsReadOnly(c.Arguments)
 	}
 	return !caps.ReadOnly
 }

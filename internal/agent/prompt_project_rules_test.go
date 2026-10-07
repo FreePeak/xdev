@@ -41,6 +41,38 @@ func TestProjectContextHeaderStatesTheRulesAreBinding(t *testing.T) {
 	}
 }
 
+// TestProjectContextHeaderBoundsAProcessRule locks the second half of the
+// overthinking fix. Stating that a repository's rules are binding (the test
+// above) is what makes them survive a task prompt that does not repeat them —
+// and it is also what turned a 6-word ask into a delivery pipeline, because
+// every repository keeps rules that describe a PROCESS (a worktree, a branch,
+// a review, a ticket) and an always-loaded file states them without saying
+// what they are for. The cheapest reading of "binding" is "always", so the
+// header has to bound the reach as well as state the rank.
+//
+// Measured on this repo's own store: 44 of the 80 newest sessions ran `git
+// worktree` — one of them 94 times — for asks like "the thinking box color in
+// xdev" and "move the mcp and trajectory in sidebar to bottom". Each needle
+// below is a part of that bound: "scope" says a rule has one, the process
+// examples name what a process rule looks like, and "scale the ceremony" is
+// the instruction the model acts on.
+func TestProjectContextHeaderBoundsAProcessRule(t *testing.T) {
+	h := flat(strings.ToLower(ProjectContextHeader))
+	for _, want := range []struct {
+		needle string
+		why    string
+	}{
+		{"scope", "a binding rule with unbounded reach is read as applying to every message"},
+		{"worktree", "the process rule the field report actually hit is never named"},
+		{"not every message", "nothing says a process rule has a smaller reach than the whole session"},
+		{"scale the ceremony", "the model is given the principle but no instruction to act on"},
+	} {
+		if !strings.Contains(h, want.needle) {
+			t.Errorf("ProjectContextHeader is missing %q — %s", want.needle, want.why)
+		}
+	}
+}
+
 // TestProjectContextHeaderIsNotLoud keeps the other half of the deal: the
 // block is a repository's rules, not a second system prompt, and the header
 // must not blur that. A header that claims to override the user or the system
