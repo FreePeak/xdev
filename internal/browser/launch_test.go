@@ -191,3 +191,63 @@ func TestEnsureLaunchedFailsFast(t *testing.T) {
 		t.Fatalf("ensureLaunched waited %s, want it bounded by the 1s context", elapsed)
 	}
 }
+
+// TestLaunchBrowserIsHeadless pins the flag that keeps xdev's own browser off
+// the user's screen. The tool drives CDP, so a launched browser needs no
+// window; without --headless a visible Chrome appears the moment a session
+// touches the browser tool. The fake records its argv, so the assertion is on
+// the real command line rather than on a helper that could drift from it.
+func TestLaunchBrowserIsHeadless(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake browser is a shell script")
+	}
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	bin := filepath.Join(dir, "fake-chrome")
+	// Record argv, then exit: launchBrowser never waits on the process.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envBinary, bin)
+
+	proc, err := launchBrowser("http://127.0.0.1:1", filepath.Join(dir, "profile"))
+	if err != nil {
+		t.Fatalf("launchBrowser: %v", err)
+	}
+	// Wait for the script's write BEFORE killing anything: the process is
+	// started asynchronously, so an immediate Kill can land before the shell
+	// has run and the args file stays empty.
+	var got []byte
+	for i := 0; i < 200; i++ {
+		if got, err = os.ReadFile(argsFile); err == nil && len(got) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if proc != nil {
+		_ = proc.Kill()
+	}
+	argv := strings.Split(strings.TrimSpace(string(got)), "\n")
+	if !hasArg(argv, "--headless=new") {
+		t.Errorf("launched argv = %v, want --headless=new so no window appears", argv)
+	}
+	// The debugging port and the private profile must survive alongside it.
+	for _, want := range []string{
+		"--remote-debugging-port=1",
+		"--user-data-dir=" + filepath.Join(dir, "profile"),
+	} {
+		if !hasArg(argv, want) {
+			t.Errorf("launched argv = %v, missing %q", argv, want)
+		}
+	}
+}
+
+func hasArg(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

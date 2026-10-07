@@ -149,14 +149,22 @@ func launchBrowser(endpoint, profileDir string) (*os.Process, error) {
 	}
 	// A non-default --user-data-dir is required by Chrome 136+ for remote
 	// debugging at all, and it is what keeps this profile out of the user's.
-	cmd := osexec.Command(bin,
-		"--remote-debugging-port="+strconv.Itoa(port),
+	//
+	// --headless=new: xdev's own browser must never take a window. The tool is
+	// driven over CDP, so nothing needs a screen, and a window that appears
+	// while the user is working is a side effect they did not ask for. The
+	// attach-first path is untouched — a browser the USER started is still
+	// driven as-is, window and all, because it is theirs.
+	args := []string{
+		"--remote-debugging-port=" + strconv.Itoa(port),
 		"--remote-debugging-address=127.0.0.1",
-		"--user-data-dir="+profileDir,
+		"--user-data-dir=" + profileDir,
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--headless=new",
 		"about:blank",
-	)
+	}
+	cmd := osexec.Command(bin, args...)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launching %s: %w", bin, err)
 	}
