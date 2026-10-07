@@ -302,10 +302,11 @@ nothing per turn.
 The rest of the surface: `grep`/`glob` (the host's `rg` is used when present),
 `eval` (a persistent Python kernel; a `.ipynb` reads and edits as cell blocks),
 `ast_grep`/`ast_edit`, `lsp`, `debug` (DAP over stdio: dlv, debugpy, lldb-dap),
-`browser` (CDP: attaches to a Chrome you started, else launches one on a
-private profile and closes it again after 5 idle minutes — `browser.autolaunch:
-false` keeps it attach-only, `browser.idleExit: <seconds>` tunes the idle
-exit, `0` keeps the browser for the whole session),
+`browser` (CDP: attaches to a Chrome you started, else launches one **headless**
+on a private profile and closes it again after 5 idle minutes — a browser xdev
+starts never takes a window; `browser.autolaunch: false` keeps it attach-only,
+`browser.idleExit: <seconds>` tunes the idle exit, `0` keeps the browser for
+the whole session),
 `web_search`, `github`, `security_scan`, `computer`, `tts`, `generate_image`,
 `checkpoint` / `rewind`, `todo`, `ask`, `task` + `hub` + `send_message` /
 `inbox` for subagents and cross-session mail, and the memory and skill tools.
