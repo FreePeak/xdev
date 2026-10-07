@@ -360,6 +360,19 @@ func (r *Registry) Deferred() []Entry {
 	return c.Entries()
 }
 
+// ResetDeferred clears every deferred entry so ApplySessionEffort can rebuild
+// the catalog for a new rung without leftover names from the previous one.
+// Registered tools stay registered; only the deferred view is wiped.
+func (r *Registry) ResetDeferred() {
+	if r == nil {
+		return
+	}
+	c := r.Catalog()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	clear(c.entries)
+}
+
 // deferred reports whether name is behind the catalog. Callers hold r.mu (the
 // lock order is registry then catalog, never the reverse).
 func (r *Registry) deferred(name string) bool {

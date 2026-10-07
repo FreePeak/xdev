@@ -200,7 +200,8 @@ type App struct {
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
 	statusSegs []string
-	modeOps    *ModeOps // /mode + the Shift-Tab cycle, wired by cmd (nil → notices)
+	modeOps    *ModeOps   // /mode (permissions/plan), wired by cmd (nil → notices)
+	effortOps  *EffortOps // /effort + Shift-Tab cycle, wired by cmd (nil → notices)
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
 
@@ -3628,16 +3629,26 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.poke()
 		}
 		return
-	case "thinking-toggle", "mode-cycle":
+	case "thinking-toggle", "mode-cycle", "effort-cycle":
 		// Like the dock chords this runs after every modal handler, so an
 		// open picker keeps first claim on the key (the model picker binds
-		// Shift-Tab to "previous tab"). Both actions land here because they
-		// are chord-only: the toggle keeps no default chord since the mode
-		// cycle took Shift-Tab, but a keybindings.yml binding must still
-		// reach it.
-		if action == "mode-cycle" {
-			a.CycleMode()
-		} else {
+		// Shift-Tab to "previous tab"). effort-cycle is the default Shift-Tab
+		// binding (session effort lean→standard→full); mode-cycle remains a
+		// named action so a keybindings.yml can still drive /mode. The
+		// thinking toggle keeps no default chord.
+		switch action {
+		case "effort-cycle", "mode-cycle":
+			// mode-cycle was the old Shift-Tab binding; it now drives effort
+			// so existing keybindings.yml and the default map stay useful.
+			// A user who wants the permission cycle rebinds mode-cycle and
+			// leaves effort-cycle alone — both names call CycleEffort when
+			// the effort seam is wired, else fall back to CycleMode.
+			if a.effortOps != nil {
+				a.CycleEffort()
+			} else {
+				a.CycleMode()
+			}
+		default:
 			a.ToggleThinking()
 		}
 		return
@@ -6104,6 +6115,7 @@ func (a *App) dividerParts() []hudPart {
 	// what the pair is, and the word only added width.
 	add("", a.thinkingLevel(), a.thinkingToken())
 	add("", a.modeLabel(), a.modeToken())
+	add("", a.effortLabel(), a.effortToken())
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		add("", "Vibe", theme.StatusLineMode)
 	}

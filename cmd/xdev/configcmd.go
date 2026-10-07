@@ -132,6 +132,12 @@ func validateKey(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("thinking must be %s, got %q", strings.Join(config.ThinkingLevels, "|"), value)
+	case "effort":
+		if config.IsSessionEffort(value) {
+			return nil
+		}
+		return fmt.Errorf("effort must be %s, got %q", strings.Join(config.SessionEffortLevels, "|"), value)
+
 	}
 	return nil
 }
@@ -150,6 +156,9 @@ func fallbackValue(s *config.Settings, key string) string {
 		return s.DefaultModel
 	case "showThinking":
 		return fmt.Sprint(s.ShowThinkingOn())
+	case "effort":
+		return s.SessionEffort()
+
 	case "renderMermaid":
 		return fmt.Sprint(s.RenderMermaidOn())
 	case "tui.exitDetach":

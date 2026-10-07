@@ -394,6 +394,33 @@ func BuildDeferredIndex(entries []tool.Entry) string {
 	return b.String()
 }
 
+// SystemPromptFullAppendix is the optional omp-shaped workflow block that
+// session effort "full" appends after the base. It is deliberately NOT in
+// SystemPromptBase: lean and standard keep the <1k-token budget; full pays
+// the cost only when the user asked for complex-work detail.
+const SystemPromptFullAppendix = `# Full-effort workflow
+
+- Decompose non-trivial work with todo before editing; keep the list current.
+- Research before editing exported symbols: grep/lsp references, then change once.
+- Prefer task for independent slices that each return one result; say what the yield must contain.
+- Verify the real binary or test path, not only that the code compiles.
+- Prefer ask when two readings of the requirement would produce different diffs.`
+
+// ApplySessionEffortPrompt folds the full-workflow appendix onto the base
+// when effort is full. lean and standard leave the base untouched so the
+// token budget stays pi-shaped for daily work.
+func ApplySessionEffortPrompt(base, effort string) string {
+	if base == "" {
+		base = SystemPromptBase
+	}
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "full", "max", "omp", "complex":
+		return base + "\n\n" + SystemPromptFullAppendix
+	default:
+		return base
+	}
+}
+
 // MaxToolRecapChars bounds the whole `# Tools` recap. Bundled base prose
 // plus this section must stay inside the <1,000-token system-prompt goal
 // (PRD §1 Goal 4); tools past the budget are listed name-only.

@@ -1088,17 +1088,23 @@ func tailSystemPrompt(overrides agent.SystemPromptOverrides, flagAppend string) 
 
 // basePrompt resolves the system prompt base: --system-prompt flag
 // (text, or a file path — see resolvePromptFlag) → SYSTEM.md (project,
-// then user) → the built-in default.
+// then user) → the built-in default, then folds the session-effort
+// appendix (full only) so lean/standard stay on the pi budget.
 func basePrompt(opts printOptions, cwd string) string {
+	var base string
 	if opts.SystemPrompt != "" {
 		if flagPrompt := resolvePromptFlag(opts.SystemPrompt); flagPrompt != "" {
-			return flagPrompt
+			base = flagPrompt
 		}
 	}
-	if o := agent.LoadSystemPromptOverrides(cwd); o.System != "" {
-		return o.System
+	if base == "" {
+		if o := agent.LoadSystemPromptOverrides(cwd); o.System != "" {
+			base = o.System
+		} else {
+			base = agent.SystemPromptBase
+		}
 	}
-	return agent.SystemPromptBase
+	return agent.ApplySessionEffortPrompt(base, lastSettings().SessionEffort())
 }
 
 // resolvePromptFlag applies omp's text-or-file semantics to the
@@ -1848,34 +1854,20 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		reg.Register(&agent.NewContextTool{Notes: notes})
 		tool.RegisterURIScheme("history", notes.ResolveHistory)
 	}
-	// M13 #54: deferred tool catalog. The long tail leaves the eager tool
-	// schema and the prompt recap (Registry.Defs omits it) and is listed as a
-	// one-line index instead; the model finds it with tool_search, reads its
-	// schema with tool_describe, and runs it through tool_call, which re-enters
-	// the normal call path (approval policy, interception, hooks).
-	for _, d := range []struct {
-		name  string
-		index string
-		tags  []string
-	}{
-		{"ast_grep", "structural code search with ast-grep patterns", []string{"search", "code"}},
-		{"ast_edit", "AST-aware codemod rewrites", []string{"edit", "codemod", "code"}},
-		{"github", "GitHub operations: PRs, issues, files, search, Actions", []string{"git", "pr", "remote"}},
-		{agent.HubToolName, "message and inspect the subagents running in this session", []string{"subagent", "agent"}},
-		{agent.SendMessageToolName, "send a message to another xdev session (mailbox)", []string{"mailbox", "agent"}},
-		{agent.InboxToolName, "read messages other sessions sent this one (mailbox)", []string{"mailbox", "agent"}},
-		{tool.CheckpointToolName, "bookmark the session tree at this point", []string{"session", "rewind"}},
-		{tool.RewindToolName, "return the session to an earlier checkpoint", []string{"session", "rewind"}},
-	} {
-		reg.Defer(d.name, d.index, d.tags...)
-	}
+	// M13 #50: browser — CDP attach to an already-running Chrome. Never
+	// launches a browser; screenshots land in the session blob store.
+	reg.Register(browser.NewTool(settings.BrowserConfig(), session.NewBlobStore(config.DataDir())))
+	// Session effort (lean|standard|full) owns the deferred catalog: lean
+	// keeps pi-core + the bridge; standard is the set this block used to
+	// hard-code; full opens almost everything. Apply AFTER every Register
+	// (including browser) so a missing optional tool never panics and lean
+	// can defer the long tail in one pass.
+	tool.ApplySessionEffort(reg, settings.SessionEffort())
 	cat := reg.Catalog()
 	reg.Register(tool.NewToolSearchTool(cat))
 	reg.Register(tool.NewToolDescribeTool(cat))
 	reg.Register(tool.NewToolCallTool(cat))
-	// M13 #50: browser — CDP attach to an already-running Chrome. Never
-	// launches a browser; screenshots land in the session blob store.
-	reg.Register(browser.NewTool(settings.BrowserConfig(), session.NewBlobStore(config.DataDir())))
+
 	// --tools / --no-tools (issue #33): narrow the built-in set before any
 	// prompt or agent sees it. A name that matched nothing is reported —
 	// silently narrowing less than asked is how a launch flag lies.

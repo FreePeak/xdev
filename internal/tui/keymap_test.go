@@ -33,9 +33,13 @@ func TestDefaultKeyMapResolvesAllActions(t *testing.T) {
 		"history-next": true, "abort": true, "complete": true,
 		"dismiss-menu": true, "newline": true,
 		// The reasoning toggle kept its action and lost its default chord to
-		// the mode cycle (Shift-Tab), so it is user-bindable only.
+		// the effort cycle (Shift-Tab), so it is user-bindable only.
 		"thinking-toggle": true,
+		// mode-cycle kept its action for keybindings.yml; Shift-Tab now
+		// drives effort-cycle. Permission cycling is /mode or a user chord.
+		"mode-cycle": true,
 	}
+
 	for _, action := range BuiltinActions {
 		if unbound[action] {
 			continue
@@ -72,17 +76,17 @@ func TestChordOf(t *testing.T) {
 	}
 }
 
-// TestResolveModeCycle pins the chord end to end: the event a terminal actually
+// TestResolveEffortCycle pins the chord end to end: the event a terminal actually
 // sends for Shift-Tab resolves to the action the default map names, Tab itself
 // still means menu-accept, and the request-side reasoning toggle — which lost
-// this chord to the mode cycle — is still reachable from a user keybinding.
-func TestResolveModeCycle(t *testing.T) {
+// this chord to the effort cycle — is still reachable from a user keybinding.
+func TestResolveEffortCycle(t *testing.T) {
 	m := DefaultKeyMap()
-	if got := m.Chord("mode-cycle"); got != "Shift-Tab" {
+	if got := m.Chord("effort-cycle"); got != "Shift-Tab" {
 		t.Fatalf("default chord = %q, want Shift-Tab", got)
 	}
-	if got := m.Resolve(tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift)); got != "mode-cycle" {
-		t.Fatalf("Resolve(Shift-Tab) = %q, want mode-cycle", got)
+	if got := m.Resolve(tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift)); got != "effort-cycle" {
+		t.Fatalf("Resolve(Shift-Tab) = %q, want effort-cycle", got)
 	}
 	// Tab itself still means menu-accept: the cycle must not eat it.
 	if got := m.Resolve(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)); got != "menu-accept" {
@@ -91,11 +95,11 @@ func TestResolveModeCycle(t *testing.T) {
 	// The toggle kept its action and lost only its chord, so a keybindings.yml
 	// entry still reaches it.
 	if got := m.Chord("thinking-toggle"); got != "" {
-		t.Fatalf("thinking-toggle kept chord %q after mode-cycle took Shift-Tab", got)
+		t.Fatalf("thinking-toggle kept chord %q after effort-cycle took Shift-Tab", got)
 	}
 }
 
-// TestThinkingToggleIsUserBindable is the half of the mode-cycle change a
+// TestThinkingToggleIsUserBindable is the half of the effort-cycle change a
 // keyboard-only user depends on: the reasoning toggle lost Shift-Tab, so a
 // keybindings.yml entry has to be the way back to it — through the real load
 // path, not a map poked from a test.
@@ -115,8 +119,8 @@ func TestThinkingToggleIsUserBindable(t *testing.T) {
 	}
 	// …and the cycle keeps Shift-Tab, since the user binding names a
 	// different chord.
-	if got := m.Resolve(tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift)); got != "mode-cycle" {
-		t.Fatalf("Resolve(Shift-Tab) = %q, want mode-cycle", got)
+	if got := m.Resolve(tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift)); got != "effort-cycle" {
+		t.Fatalf("Resolve(Shift-Tab) = %q, want effort-cycle", got)
 	}
 }
 
