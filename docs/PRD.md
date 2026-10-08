@@ -3445,3 +3445,5 @@ Resolution order, one ladder for all four run modes: `--thinking` > the `thinkin
 
 **Tests.** `TestOpenTodosDoNotEarnAKeepGoingNudge` (724e3fbb shape: todo init + read + report → 3 requests, no nudge). `TestPromptContinuationPromptLetsAReportStop`. Extended `TestReadOnlyCommandClassifiesShellLines` and `TestCallMutatedReadsTheCapsManifest` for `/dev/null`, curl GET, python -c. All fail against the reverted gate/classifier.
 
+*Last updated: 2026-10-08 (`fix/double-high-divider` — user-reported: double "high" · "high" next to the model name on the composer prompt box).* **Root cause.** After #613 the session-effort ladder and `/thinking` share the same vocabulary (`low|medium|high|xhigh|max`). `dividerParts` still painted both labels side by side, so the common case — thinking auto-resolved (or pinned) to the same rung effort is on — rendered `model · high · high`. **Fix.** Keep the thinking label (it still carries `off`/`auto`/`minimal` effort does not); surface the effort chip only when it actually differs. One test pins the collapse and the disagree case.
+

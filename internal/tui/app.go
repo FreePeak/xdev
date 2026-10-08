@@ -6076,12 +6076,14 @@ const (
 )
 
 // dividerParts is the composer's info divider as its coloured pieces: the
-// run indicator (when a turn is live), the model, the reasoning level and the
-// session effort, each with the theme token that paints it. Empty text is
-// dropped here rather than drawn — an unwired /thinking or /effort seam has
-// nothing to report, and an invented default would claim a posture nobody
-// chose. The model part is NAMED, because it is the one piece a narrow row
-// shortens instead of dropping (see drawComposer). Caller holds a.mu.
+// run indicator (when a turn is live), the model, the reasoning level and —
+// when it differs from the reasoning level — the session effort, each with
+// the theme token that paints it. Empty text is dropped here rather than
+// drawn — an unwired /thinking or /effort seam has nothing to report, and an
+// invented default would claim a posture nobody chose. The two dials share a
+// vocabulary after the CC ladder, so equal rungs collapse to one word instead
+// of "high · high". The model part is NAMED, because it is the one piece a
+// narrow row shortens instead of dropping (see drawComposer). Caller holds a.mu.
 func (a *App) dividerParts() []hudPart {
 	var out []hudPart
 	add := func(name, text, token string) {
@@ -6101,8 +6103,19 @@ func (a *App) dividerParts() []hudPart {
 	// request, and "which model" alone left the other half of it invisible.
 	// The bare rung, not "thinking <level>" — the model it sits beside says
 	// what the pair is, and the word only added width.
-	add("", a.thinkingLevel(), a.thinkingToken())
-	add("", a.effortLabel(), a.effortToken())
+	//
+	// After the session-effort ladder adopted the same vocabulary as /thinking
+	// (low|medium|high|xhigh|max), painting both labels side by side produced
+	// "model · high · high" whenever the two dials landed on the same rung —
+	// the common case when thinking is auto and effort pins the default, and
+	// also when the user sets both to high. One amount of effort is one word:
+	// keep the thinking label (it still carries off/auto/minimal the effort
+	// dial does not), and only surface the effort rung when it actually differs.
+	think := a.thinkingLevel()
+	add("", think, a.thinkingToken())
+	if effort := a.effortLabel(); effort != "" && effort != think {
+		add("", effort, a.effortToken())
+	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		add("", "Vibe", theme.StatusLineMode)
 	}
