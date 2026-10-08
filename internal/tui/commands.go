@@ -404,9 +404,6 @@ type CommandAPI interface {
 	ExportSession(path string) error
 	ShareSession() error
 	PlanMode(args string) error
-	// Mode is /mode: the one mode vocabulary over plan mode and the approval
-	// policy (mode.go).
-	Mode(args string) error
 	// Effort is /effort: lean|standard|full session effort (tools+prompt+thinking default).
 	Effort(args string) error
 	ResumeSession(query string) error
@@ -525,8 +522,6 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
-		{Name: "mode", Description: "session mode (permissions): /mode [default|auto|plan|bypass] (bare reports)",
-			Fn: func(app CommandAPI, args string) error { return app.Mode(args) }},
 		{Name: "effort", Description: "session effort: /effort [lean|standard|full] (bare reports; shift+tab cycles lean→standard→full)",
 			Fn: func(app CommandAPI, args string) error { return app.Effort(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",

@@ -189,13 +189,10 @@ const (
 	StatusLineOutput    = "status_line_output"
 	StatusLineCost      = "status_line_cost"
 	StatusLineSubagents = "status_line_subagents"
-	// StatusLineMode is the FALLBACK ink for the session mode (mode.go: /mode,
-	// the Shift-Tab cycle) — what App.modeToken uses for a mode name the
-	// per-mode map does not carry. The four modes xdev ships each wear their
-	// own semantic ink instead (Claude Code's mode map: default/plan/accept/
-	// bypass). Optional like the diff bands — NOT in the omp 66-token
-	// contract, because omp has no mode surface — so a theme that omits it
-	// derives it from Accent (extraChains) rather than failing to load.
+	// StatusLineMode is the chrome ink for session effort's standard rung
+	// (and the Vibe chip). Optional like the diff bands — NOT in the omp
+	// 66-token contract — so a theme that omits it derives it from Accent
+	// (extraChains) rather than failing to load.
 	StatusLineMode = "status_line_mode"
 
 	// Legacy xdev slot names (PRD §3.5): still what the TUI passes to Get,
@@ -338,9 +335,7 @@ func groknightSlots() map[string]Color {
 		ThinkingXhigh:       Hex("#c6a6e8"),
 		ThinkingMax:         Hex("#bb9af7"),
 		StatusLineSubagents: Hex("#bb9af7"),
-		// The session mode (mode.go). The mode now wears a PER-MODE ink
-		// (App.modeToken), so this slot is only what an unrecognised mode
-		// name falls back to; it keeps the accent for that case.
+		// Session effort (standard rung) and the Vibe chip.
 		StatusLineMode: Hex("#bb9af7"),
 		// Diff rows. Claude Code's model (v2.1.287, the diff renderer) keeps
 		// the SHAPE — the +/- marker is the only coloured text on a changed

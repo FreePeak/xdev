@@ -210,40 +210,30 @@ block to every row, click or no click.
 Display and request are separate switches. The box above is *display*
 (`showThinking`, `/settings showThinking on|off`); `/thinking off` is the
 *request*: the next turn goes out with no reasoning budget at all, and the
-toggle (its `thinking-toggle` action, no default chord since the mode cycle
+toggle (its `thinking-toggle` action, no default chord since the effort cycle
 took `Shift+Tab`) flips between "off" and "auto", where "auto" hands the
 decision back to the model role's `:effort` (`@slow:high`, or the persisted
 `thinking` key). `/thinking low` pins one rung for the rest of the session and
 writes it to the global layer.
 
 The level is on screen wherever the model is: the bare rung rides the
-composer's info divider beside the model name and the session mode
-(`╰─ onegw/…-free · high · plan ──╯`), and repeats in the sidebar's SESSION
+composer's info divider beside the model name and the session effort
+(`╰─ onegw/…-free · high · standard ──╯`), and repeats in the sidebar's SESSION
 footer as one row pairing the two (`onegw/…-free · high`) — the section that is
 never folded away. Each part wears its own colour: the model in the status-line
 grey, the level on the theme's own reasoning ramp (grey at `off`, the accent at
-`max`), the mode in the mode ink. The word "thinking" is the command, not the
-label, and the model it sits beside says what the pair is. Both read the live
-seam, so a `/thinking` flip repaints both on the next frame; a host that never
-wired `/thinking` paints neither.
+`max`), the effort rung in its own ink. The word "thinking" is the command, not
+the label, and the model it sits beside says what the pair is. Both read the
+live seam, so a `/thinking` flip repaints both on the next frame; a host that
+never wired `/thinking` paints neither.
 
 **Session effort** (`/effort`, Shift+Tab) is how hard the session works — not
 what it is allowed to do. `lean` keeps the pi core tools eager and pins thinking
 low when `/thinking` is still auto; `standard` is the shipped default (today's
 deferred catalog); `full` opens the long tail eagerly and appends an omp-shaped
 workflow block to the system prompt. The effort rung rides the composer divider
-beside the mode. Permissions stay on `/mode`.
-
-**The session mode** is the one fact that decides what a tool call may do, and
-it is on screen in both chrome rows: the bare name on the divider beside the
-model, and beside the working directory on the status row. `/mode <name>` sets
-one directly and `/mode` bare reports it (`default` asks before a write or a
-command, `auto` runs both unchecked, `plan` is read-only research the `propose`
-tool exits, `bypass` never asks and is by name only). Shift+Tab no longer cycles
-mode — bind `mode-cycle` in `keybindings.yml` if you want that chord back. The
-mode names what the harness already enforces (the `approvalMode` policy and the
-plan guard); `/plan` and `--approval-mode` keep working and the readout follows
-them. Plan is never written to the settings file.
+beside the model and the thinking level. Permissions stay on `/plan` and
+`approvalMode` (`--approval-mode`, `xdev config set approvalMode`).
 
 
 The **context dock** (`Alt+S`) is a fixed 42-column window right of the
@@ -277,7 +267,6 @@ hides the sidebar and brings it back.
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/context [auto\|200k\|300k\|500k\|1m]` | the context window for every model (bare reports; pins it live and persisted — `auto` hands each model back the window its catalog states) |
 | `/effort [lean\|standard\|full]` | session effort: tools + prompt depth + thinking default when `thinking` is auto (bare reports; `Shift+Tab` cycles) |
-| `/mode [default\|auto\|plan\|bypass]` | permission/plan posture (bare reports; not on Shift+Tab — use `/mode` or bind `mode-cycle`) |
 | `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |
 | `/usage` | the session's token, time and tool-call report: totals with thousands separators, cache hit rate, live context against the model's window, LLM vs tool time, average time-to-first-token, and the tool-call count — the same readings the status row carries, at report width |
