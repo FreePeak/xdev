@@ -486,13 +486,15 @@ type Settings struct {
 	// (ThinkingLevel). Deliberately NOT in repoSafeSettingsKeys: it is not a
 	// display knob but a spend knob, so a cloned repository may not set it.
 	Thinking string `yaml:"thinking"`
-	// Effort is the session effort rung (lean|standard|full): how hard the
-	// session works — tools advertised eagerly, optional full-workflow
-	// prompt appendix, and the thinking default when Thinking is still
-	// "auto". "" means unset → standard. NOT the permission posture
-	// (approvalMode /mode) and NOT the request-side budget (Thinking /
-	// :effort). Deliberately NOT in repoSafeSettingsKeys: a clone must not
-	// force the user's spend surface.
+	// Effort is the session effort rung (low|medium|high|xhigh|max — the
+	// Claude Code ladder, config.SessionEffortLevels): how hard the session
+	// works — tools advertised eagerly, optional workflow prompt appendix,
+	// and the thinking default when Thinking is still "auto". "" means unset
+	// → medium. The pre-ladder spellings (lean|standard|full, omp|complex)
+	// still fold to their rung. NOT the permission posture (approvalMode
+	// /plan) and NOT the request-side budget (Thinking / :effort).
+	// Deliberately NOT in repoSafeSettingsKeys: a clone must not force the
+	// user's spend surface.
 	Effort string `yaml:"effort"`
 	// Personality selects the prompt-tail preset (M10 #32, omp parity):
 	// default | friendly | pragmatic | none. A PERSONALITY.md override
@@ -1018,11 +1020,12 @@ func (s *Settings) ThinkingLevel() string {
 	return s.Thinking
 }
 
-// SessionEffort reports the effective session effort rung: unset is
-// "standard", the shipped default that matches the pre-effort deferred set.
+// SessionEffort reports the effective session effort rung: unset is the
+// shipped default (medium), the rung that matches the pre-effort deferred
+// set. Unknown values fold to the same default, never to a wider rung.
 func (s *Settings) SessionEffort() string {
 	if s == nil || s.Effort == "" {
-		return SessionEffortStandard
+		return SessionEffortDefault
 	}
 	return NormalizeSessionEffort(s.Effort)
 }
@@ -1905,7 +1908,11 @@ func (s *Settings) merge(layer *Settings) error {
 	if s.Thinking != "" && !slices.Contains(ThinkingLevels, s.Thinking) {
 		return fmt.Errorf("unknown thinking %q (want %s)", s.Thinking, strings.Join(ThinkingLevels, "|"))
 	}
-	if s.Effort != "" && !IsSessionEffort(s.Effort) {
+	// IsSessionEffortValue, not IsSessionEffort: a value this key carried
+	// before the ladder (lean|standard|full, omp|complex) still resolves, so
+	// an existing config keeps loading instead of being moved aside as
+	// *.broken-*. The WRITE paths keep the closed vocabulary.
+	if s.Effort != "" && !IsSessionEffortValue(s.Effort) {
 		return fmt.Errorf("unknown effort %q (want %s)", s.Effort, strings.Join(SessionEffortLevels, "|"))
 	}
 	return nil

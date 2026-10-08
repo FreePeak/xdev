@@ -580,8 +580,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ContextWindowChoices...)},
 				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
 					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
+				// The session effort rung is a select for the same reason
+				// thinking is: the vocabulary is the ladder, and /effort and
+				// Shift-Tab write the same key through the same door
+				// (EffortOps.Set), so the panel cannot disagree about it.
+				{Key: "effort", Label: "Session effort", Value: s.SessionEffort(),
+					Editable: true, Kind: "select", Options: append([]string(nil), config.SessionEffortLevels...)},
 				// The tab strip is a view of the tabset, not the tabset: the
-				// chords and /tabs keep working with it hidden. So both
+				// chords and /tabs keep working with it hidden. Both
 				// spellings are opencode's own values, so a config pasted from
 				// its tui.json lands unchanged.
 				{Key: "tui.tabs.mode", Label: "Session tabs", Value: tabsModeOn(s),
@@ -633,6 +639,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				applyTabPolicy()
 			case "thinking":
 				lastSettings().Thinking = value
+			case "effort":
+				// Same seam /effort and Shift-Tab go through, so a rung set in
+				// the panel re-deferrs the live catalog exactly like the
+				// command does (the row writes the key; the fold below is what
+				// makes the next turn see the new surface).
+				if err := app.Effort(value); err != nil {
+					return err
+				}
 			case "sidebarMode":
 				lastSettings().SidebarMode = value
 			case "compaction.contextWindow":
@@ -1803,12 +1817,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return nil
 		},
 	})
-
-	// /effort and Shift-Tab: session effort (lean|standard|full) — tools
-	// deferred, full prompt appendix, and the thinking default when the
-	// user has not pinned /thinking. Re-applies the deferred catalog on
-	// the live registry so the next turn sees the new surface without a
-	// restart. Permissions stay on /plan and approvalMode.
+	// /effort and Shift-Tab: session effort (low|medium|high|xhigh|max) —
+	// tools deferred, workflow prompt appendix on the rungs above the default,
+	// and the thinking default when the user has not pinned /thinking.
+	// Re-applies the deferred catalog on the live registry so the next turn
+	// sees the new surface without a restart. Permissions stay on /plan and
+	// approvalMode.
 	app.SetEffortOps(&tui.EffortOps{
 		Current: func() string { return lastSettings().SessionEffort() },
 		Set: func(name string) error {

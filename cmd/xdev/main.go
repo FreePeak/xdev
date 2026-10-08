@@ -185,7 +185,8 @@ func main() {
 	noTitle := fs.Bool("no-title", false, "skip the session title entirely (the mechanical stamp and the ai-title pass)")
 	modelsPatterns := repeatable{}
 	fs.Var(&modelsPatterns, "models", "comma-separated model patterns for Ctrl+P cycling (the catalog listing is the `models` subcommand)")
-	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (xhigh/max clamp to high; default: the `thinking` settings key, then the model's inline `:effort`)")
+	thinkingFlag := fs.String("thinking", "", "thinking level: off | minimal | low | medium | high | xhigh | max | auto (default: the `thinking` settings key, then the session effort rung, then the model's inline `:effort`)")
+	effortFlag := fs.String("effort", "", "session effort rung: low | medium | high | xhigh | max (overrides the `effort` settings key and XDEV_EFFORT_LEVEL for this run)")
 	hideThinking := fs.Bool("hide-thinking", false, "hide thinking blocks in TUI output (display only; model thinking is unaffected)")
 	printThoughts := fs.Bool("print-thoughts", false, "include thinking blocks in print-mode output")
 	toolsFlag := fs.String("tools", "", "comma-separated tools to enable (default: all)")
@@ -303,6 +304,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, notice)
 	}
 	cliKeyValue = *apiKeyValue
+	// The effort rung may also be named by the environment (CC's
+	// CLAUDE_CODE_EFFORT_LEVEL shape): it sits BELOW --effort and the
+	// persisted `thinking` key but ABOVE the session-effort default, which is
+	// what makes a wrapper script able to pin a rung for one shell without
+	// touching the user's config file. Folding it into the settings layer here
+	// (rather than reading the env in every run mode) keeps one resolution
+	// order for print, RPC, ACP and the TUI.
+	if lv := effortEnvLevel(); lv != "" {
+		settings.Effort = lv
+	}
+	// --effort outranks both the env var and the settings key: it is the
+	// explicit choice for this run, the same rank --thinking has over the
+	// `thinking` key.
+	if *effortFlag != "" {
+		lv := strings.ToLower(strings.TrimSpace(*effortFlag))
+		if !config.IsSessionEffort(lv) {
+			fmt.Fprintf(os.Stderr, "xdev: effort must be %s, got %q\n", strings.Join(config.SessionEffortLevels, "|"), *effortFlag)
+			os.Exit(2)
+		}
+		settings.Effort = lv
+	}
 	loadedSettings = settings
 	// M12 F2: user-declared extra SKILL.md roots (inert until wired).
 	skills.SetCustomDirectories(settings.Skills.CustomDirectories)

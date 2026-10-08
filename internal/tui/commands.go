@@ -404,7 +404,8 @@ type CommandAPI interface {
 	ExportSession(path string) error
 	ShareSession() error
 	PlanMode(args string) error
-	// Effort is /effort: lean|standard|full session effort (tools+prompt+thinking default).
+	// Effort is /effort: the session effort rung (low|medium|high|xhigh|max)
+	// — tools + prompt depth + the thinking default when thinking is auto.
 	Effort(args string) error
 	ResumeSession(query string) error
 	TabsPicker() error
@@ -522,7 +523,7 @@ func builtinCommands() []Command {
 			Fn: func(app CommandAPI, args string) error { return app.Memory(args) }},
 		{Name: "advisor", Description: "background reviewer: /advisor on|off|status|dump",
 			Fn: func(app CommandAPI, args string) error { return app.Advisor(args) }},
-		{Name: "effort", Description: "session effort: /effort [lean|standard|full] (bare reports; shift+tab cycles lean→standard→full)",
+		{Name: "effort", Description: "session effort: /effort [low|medium|high|xhigh|max] (bare reports; shift+tab cycles the ladder)",
 			Fn: func(app CommandAPI, args string) error { return app.Effort(args) }},
 		{Name: "plan", Description: "toggle plan mode (read-only research, propose to exit); /plan show reads the pending plan",
 			Fn: func(app CommandAPI, args string) error { return app.PlanMode(args) }},

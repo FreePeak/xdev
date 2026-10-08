@@ -966,6 +966,29 @@ func modelReasoning(cfg *config.Config, provider, model string) (supported, know
 	return false, false
 }
 
+// modelEfforts reports the reasoning rungs a model advertises (models.yml
+// `efforts:`, ordered low→high). known is false when the catalog lists no
+// entry for the id at all — the same "no opinion" modelReasoning reports, and
+// the reason a gateway-served id nobody pinned keeps the rung the user chose.
+// A listed entry that states no `efforts:` is known with an empty list: the
+// model is on record, it just names no ladder, so the non-reasoning fallback
+// applies.
+func modelEfforts(cfg *config.Config, provider, model string) (advertised []string, known bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	pc, ok := cfg.Providers[provider]
+	if !ok {
+		return nil, false
+	}
+	for _, m := range providerModels(provider, pc) {
+		if m.ID == model {
+			return m.Efforts, true
+		}
+	}
+	return nil, false
+}
+
 // providerModels merges pinned + discovered models once per provider per
 // process: discovery is best-effort (a down server must not affect
 // startup), and the result is cached so a stalled endpoint is not retried
@@ -1857,11 +1880,11 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M13 #50: browser — CDP attach to an already-running Chrome. Never
 	// launches a browser; screenshots land in the session blob store.
 	reg.Register(browser.NewTool(settings.BrowserConfig(), session.NewBlobStore(config.DataDir())))
-	// Session effort (lean|standard|full) owns the deferred catalog: lean
-	// keeps pi-core + the bridge; standard is the set this block used to
-	// hard-code; full opens almost everything. Apply AFTER every Register
-	// (including browser) so a missing optional tool never panics and lean
-	// can defer the long tail in one pass.
+	// Session effort (low|medium|high|xhigh|max) owns the deferred catalog:
+	// low keeps pi-core + the bridge; medium is the set this block used to
+	// hard-code; high and above open almost everything. Apply AFTER every
+	// Register (including browser) so a missing optional tool never panics and
+	// low can defer the long tail in one pass.
 	tool.ApplySessionEffort(reg, settings.SessionEffort())
 	cat := reg.Catalog()
 	reg.Register(tool.NewToolSearchTool(cat))

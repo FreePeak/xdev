@@ -22,7 +22,9 @@ func (a *App) SetEffortOps(ops *EffortOps) { a.effortOps = ops }
 
 // Effort implements CommandAPI /effort: bare reports the rung, /effort
 // <name> sets it, and anything unrecognised is a usage error — never a
-// silent flip (same rule /thinking follows).
+// silent flip (same rule /thinking follows). The vocabulary is the same
+// upward ladder /thinking and --thinking share (low|medium|high|xhigh|max),
+// so the rung a user types is the rung the request carries.
 func (a *App) Effort(args string) error {
 	if a.effortOps == nil || a.effortOps.Current == nil || a.effortOps.Set == nil {
 		return fmt.Errorf("effort not wired")
@@ -48,14 +50,15 @@ func (a *App) setEffort(name string) error {
 	return nil
 }
 
-// CycleEffort is the Shift-Tab chord: the next rung in SessionEffortCycle.
-// An unknown current value enters the cycle at lean (the lightest rung).
+// CycleEffort is the Shift-Tab chord: the next rung in SessionEffortCycle
+// (low → medium → high → xhigh → max → low). An unknown current value enters
+// the cycle at low (the lightest rung).
 func (a *App) CycleEffort() {
 	if a.effortOps == nil || a.effortOps.Current == nil || a.effortOps.Set == nil {
 		return
 	}
 	cur := a.effortOps.Current()
-	next := config.SessionEffortLean
+	next := config.SessionEffortLevels[0]
 	for i, e := range config.SessionEffortCycle {
 		if e == cur {
 			next = config.SessionEffortCycle[(i+1)%len(config.SessionEffortCycle)]
@@ -68,7 +71,7 @@ func (a *App) CycleEffort() {
 }
 
 // effortLabel is the bare rung the chrome shows. Empty when the seam is
-// unwired — an invented "standard" would claim a posture nobody chose.
+// unwired — an invented "medium" would claim a posture nobody chose.
 func (a *App) effortLabel() string {
 	if a.effortOps == nil || a.effortOps.Current == nil {
 		return ""
@@ -76,15 +79,22 @@ func (a *App) effortLabel() string {
 	return strings.TrimSpace(a.effortOps.Current())
 }
 
-// effortToken is the ink for the effort rung: lean is muted, standard is
-// the status-line grey, full wears the success accent so complex work is visible.
+// effortToken is the ink for the effort rung: the rung itself is named on the
+// same rail /thinking uses, so the ladder reads as one amount of effort
+// rather than as two unrelated labels. low is the muted end, medium the
+// status-line grey, and high and above wear the theme's own reasoning ink for
+// their rung (a theme that names none falls back to the accent).
 func (a *App) effortToken() string {
 	switch a.effortLabel() {
-	case config.SessionEffortLean:
+	case config.SessionEffortLow:
 		return theme.Gray
-	case config.SessionEffortFull:
-		return theme.AccentSuccess
-	case config.SessionEffortStandard:
+	case config.SessionEffortHigh:
+		return theme.ThinkingHigh
+	case config.SessionEffortXHigh:
+		return theme.ThinkingXhigh
+	case config.SessionEffortMax:
+		return theme.ThinkingMax
+	case config.SessionEffortMedium:
 		return theme.StatusLineMode
 	default:
 		return theme.StatusLineMode

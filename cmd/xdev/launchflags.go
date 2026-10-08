@@ -124,6 +124,26 @@ func approvalModeOverride() string {
 	return ""
 }
 
+// effortEnvLevel reads the effort rung the environment names
+// (XDEV_EFFORT_LEVEL, the shape Claude Code's CLAUDE_CODE_EFFORT_LEVEL has).
+// It returns "" for unset and for a value the ladder does not know: an
+// environment variable is the one input a user cannot see in a config file,
+// so an unknown spelling is ignored with a warning rather than failing the
+// launch — the run still has the persisted key and the default to fall back
+// on, and a typo in a shell export must not cost a session.
+func effortEnvLevel() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("XDEV_EFFORT_LEVEL")))
+	if v == "" {
+		return ""
+	}
+	if !config.IsSessionEffort(v) {
+		fmt.Fprintf(os.Stderr, "xdev: XDEV_EFFORT_LEVEL=%q is not an effort rung (want %s) — ignored\n",
+			os.Getenv("XDEV_EFFORT_LEVEL"), strings.Join(config.SessionEffortLevels, "|"))
+		return ""
+	}
+	return v
+}
+
 // workspaceDirs is the launch cwd plus every --add-dir root, deduped and
 // absolutized. Discovery walks these roots in order.
 func workspaceDirs(cwd string) []string {
@@ -213,26 +233,27 @@ func parseCSV(v string) []string {
 }
 
 // applyThinkingFlag resolves --thinking against the effort the model
-// pinned. The ladder this build has is minimal|low|medium|high
-// (config.EffortTokens is the carrier every adapter translates); the omp
-// vocabulary maps onto it as:
+// pinned. Every rung of config.EffortLevels is a real level of its own —
+// the ladder tops out at max, and EffortTokens carries a distinct budget
+// for xhigh and max (the adapters translate; the OpenAI wires clamp a level
+// name at or above high onto their own "high", the Anthropic wire sends the
+// number):
 //
 //	off              → no thinking requested
-//	xhigh, max       → high (the top rung; there is no wider budget)
+//	minimal … max    → the rung itself
 //	auto, ""         → keep the model's resolved effort (provider default)
 //
-// ponytail: xhigh/max clamp to high instead of widening EffortTokens — a
-// bigger budget needs an adapter-side vocabulary, not a flag.
+// A rung the chosen model does not advertise is folded down by
+// thinkingForModel before this runs, so what arrives here is already
+// something the model can take.
 func applyThinkingFlag(flagValue, modelEffort string) (string, error) {
-	switch flagValue {
+	switch strings.ToLower(strings.TrimSpace(flagValue)) {
 	case "", "auto":
 		return modelEffort, nil
 	case "off":
 		return "", nil
-	case "minimal", "low", "medium", "high":
-		return flagValue, nil
-	case "xhigh", "max":
-		return "high", nil
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(flagValue)), nil
 	}
 	return "", fmt.Errorf("thinking must be %s, got %q", strings.Join(config.ThinkingLevels, "|"), flagValue)
 }
@@ -240,10 +261,16 @@ func applyThinkingFlag(flagValue, modelEffort string) (string, error) {
 // thinkingLevel folds the settings key under the flag: --thinking wins when it
 // names a level, otherwise the persisted `thinking` layer decides ("auto" when
 // neither says anything). When that layer is still "auto", the session effort
-// rung may pin a default (lean→low, full→high); standard leaves auto alone.
-// The role's ":effort" is deliberately NOT consulted here — applyThinkingFlag
-// takes it as the "auto" fallback, which keeps one precedence ladder:
-// flag > settings thinking > session effort default > role effort.
+// rung may pin a default (low→low, high and above→their own rung); medium
+// leaves auto alone. The role's ":effort" is deliberately NOT consulted here —
+// applyThinkingFlag takes it as the "auto" fallback, which keeps one
+// precedence ladder:
+//
+//	--thinking > settings.thinking > the rung's own environment >
+//	session effort default > role ":effort" > model default
+//
+// The rung's own environment is XDEV_EFFORT_LEVEL, applied in main before the
+// run modes resolve (see effortEnvLevel).
 func thinkingLevel(settings *config.Settings, flagValue string) string {
 	if lv := strings.TrimSpace(flagValue); lv != "" && lv != "auto" {
 		return lv // trimmed: a padded flag is still the level it names
@@ -261,32 +288,41 @@ func thinkingLevel(settings *config.Settings, flagValue string) string {
 }
 
 // thinkingForModel adapts a pinned request-side level to the model about to
-// run. The level the user chose stays sticky — it is remembered, reported and
-// re-applied on the next model that can take it — but a rung that actually
-// asks for a reasoning budget (low|medium|high, plus the xhigh/max names that
-// clamp to high) cannot ride out to a model the catalog marks as
-// non-reasoning: it falls back to "auto", which hands the decision to the
-// model's own ":effort" and in practice sends no reasoning parameter at all.
+// run. Two rules, both Claude Code's, in this order:
+//
+//  1. CLAMP to the rungs the model advertises (models.yml `efforts:`), taking
+//     the highest at or below the request. A model that lists low/medium/high
+//     runs a requested xhigh as high instead of failing at the wire.
+//  2. A model the catalog marks as non-reasoning (and that advertises no
+//     rung) falls back to "auto" — the level the user chose stays sticky, it
+//     just is not sent to a model that cannot take it.
 //
 // "off" and "minimal" are deliberately left alone: both already mean "no
 // reasoning requested", which every model accepts, so downgrading them would
-// only lose the user's stated intent. A model the catalog does not list is
-// left alone too — a gateway serves ids models.yml never pinned, and reading
-// "not listed" as "cannot reason" would silently drop a budget the user asked
-// for (modelReasoning reports that case as unknown, not as unsupported).
+// only lose the user's stated intent. A model the catalog does not list and
+// that advertises nothing is left alone too — a gateway serves ids models.yml
+// never pinned, and reading "not listed" as "cannot reason" would silently
+// drop a budget the user asked for (modelReasoning reports that case as
+// unknown, not as unsupported).
 func thinkingForModel(level, provider, model string, cfg *config.Config) string {
 	switch level {
 	case "low", "medium", "high", "xhigh", "max":
 	default:
 		return level
 	}
-	if supported, known := modelReasoning(cfg, provider, model); known && !supported {
+	advertised, known := modelEfforts(cfg, provider, model)
+	if !known {
+		return level // nothing on record: no opinion, no clamp
+	}
+	if len(advertised) > 0 {
+		return config.ClampEffort(level, advertised)
+	}
+	if supported, _ := modelReasoning(cfg, provider, model); !supported {
 		return "auto"
 	}
 	return level
 }
 
-// resolveThinkingDisplay folds --hide-thinking and --print-thoughts onto the
 // settings default (nil = follow settings). Both drive the one showThinking
 // seam: print mode renders thinking blocks through printHooks, the TUI
 // through App.SetShowThinking. --hide-thinking wins when both are passed, so

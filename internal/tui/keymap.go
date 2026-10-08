@@ -69,7 +69,7 @@ var BuiltinActions = []string{
 	"retry",           // F5: re-run the current session's last turn (omp's retry)
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
-	"effort-cycle",    // Shift-Tab: lean → standard → full → lean (session effort)
+	"effort-cycle",    // Shift-Tab: low → … → max → low (session effort)
 	"thinking-toggle", // request-side reasoning off ⇄ auto (omp alt+t; no default chord)
 	"session.tab.next", "session.tab.previous",
 	"session.tab.next_unread", "session.tab.previous_unread",
@@ -198,9 +198,9 @@ func DefaultKeyMap() *KeyMap {
 			"A-,": "app.settings",
 			"C-t": "dock-fold",
 
-			// Shift-Tab cycles session EFFORT (lean → standard → full). Every
-			// terminal sends it as KeyBacktab, which chordOf renders "Shift-Tab".
-			// The thinking toggle has no default chord.
+			// Shift-Tab cycles session EFFORT (low → medium → high → xhigh →
+			// max). Every terminal sends it as KeyBacktab, which chordOf
+			// renders "Shift-Tab". The thinking toggle has no default chord.
 			"Shift-Tab": "effort-cycle",
 			// Session tabs (opencode session.tab.next / .previous). Alt+letter
 			// class matches model-select / hub / dock; ] and [ are the natural

@@ -63,8 +63,11 @@ var repoSafeProviderKeys = []string{"api", "models", "discovery", "toolsFormat"}
 
 // repoSafeModelKeys are the fields a project may set per model entry. The
 // per-model baseUrl/apiKey/headers overrides are absent on purpose: they are
-// the provider-level authority in miniature.
-var repoSafeModelKeys = []string{"id", "name", "reasoning", "vision", "contextWindow", "maxTokens"}
+// the provider-level authority in miniature. `efforts` IS allowed — it is a
+// capability claim about the model, the same kind of data as `reasoning`
+// and `maxTokens` (it can only make xdev clamp a rung down, never spend
+// more), and a project vendoring its own model file needs to declare it.
+var repoSafeModelKeys = []string{"id", "name", "reasoning", "vision", "contextWindow", "maxTokens", "efforts"}
 
 // readYAMLLayer reads one configuration file; ok=false when it is absent.
 func readYAMLLayer(path string) (raw []byte, ok bool, err error) {

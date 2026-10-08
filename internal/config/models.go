@@ -63,6 +63,13 @@ type ModelConfig struct {
 	ID        string `yaml:"id"`
 	Name      string `yaml:"name,omitempty"`
 	Reasoning bool   `yaml:"reasoning,omitempty"`
+	// Efforts lists the reasoning rungs this model advertises, ordered
+	// low→high (config.EffortLevels names). Empty = "no opinion": a rung the
+	// user chose rides out unchanged, which is what a gateway serving ids
+	// models.yml never pinned relies on. A list is what makes the
+	// highest-at-or-below clamp real for a model that advertises fewer rungs
+	// than the built-in ladder (config.ClampEffort).
+	Efforts []string `yaml:"efforts,omitempty"`
 	// Pricing is the model's per-million-token rates in USD, used to estimate
 	// the cost of a request the provider reported no cost for. Absent = the
 	// model is priced by whatever the provider says, and nothing else.
