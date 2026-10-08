@@ -1804,31 +1804,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
-	// /mode and the Shift-Tab cycle: one vocabulary over the two states this
-	// file already sets separately — the plan guard (planMode) and the
-	// approval policy (tools.approvalMode). Nothing here is a new gate; it is
-	// the same two knobs under one name, so the mode a user picks cannot
-	// disagree with what the next turn actually does.
-	//
-	// The live mode is DERIVED, never stored: plan wins when the guard is on
-	// (a read-only run is a stricter posture than any approval mode), else
-	// the approval vocabulary maps straight across. Deriving rather than
-	// caching is what keeps /plan and --approval-mode — both of which still
-	// exist and must keep working — in step with the readout instead of
-	// beside it.
-	sessionMode := func() string {
-		return sessionModeOf(planMode.Active(), approvalModeOverride(), lastSettings().ApprovalMode)
-	}
-	app.SetModeOps(&tui.ModeOps{
-		Current: sessionMode,
-		Set:     setSessionMode(planMode, vibeActive, persistApprovalMode, sessionMode),
-	})
-
 	// /effort and Shift-Tab: session effort (lean|standard|full) — tools
 	// deferred, full prompt appendix, and the thinking default when the
 	// user has not pinned /thinking. Re-applies the deferred catalog on
 	// the live registry so the next turn sees the new surface without a
-	// restart. Permissions stay on /mode.
+	// restart. Permissions stay on /plan and approvalMode.
 	app.SetEffortOps(&tui.EffortOps{
 		Current: func() string { return lastSettings().SessionEffort() },
 		Set: func(name string) error {

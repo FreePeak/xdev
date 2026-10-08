@@ -200,7 +200,6 @@ type App struct {
 	// statusSegs is the HUD segment order (settings statusLine.segments);
 	// empty = defaultStatusSegments.
 	statusSegs []string
-	modeOps    *ModeOps   // /mode (permissions/plan), wired by cmd (nil → notices)
 	effortOps  *EffortOps // /effort + Shift-Tab cycle, wired by cmd (nil → notices)
 	// ask is the blocking ask card (#46/#36); nil = closed.
 	ask *askState
@@ -3629,26 +3628,15 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.poke()
 		}
 		return
-	case "thinking-toggle", "mode-cycle", "effort-cycle":
+	case "thinking-toggle", "effort-cycle":
 		// Like the dock chords this runs after every modal handler, so an
 		// open picker keeps first claim on the key (the model picker binds
 		// Shift-Tab to "previous tab"). effort-cycle is the default Shift-Tab
-		// binding (session effort lean→standard→full); mode-cycle remains a
-		// named action so a keybindings.yml can still drive /mode. The
-		// thinking toggle keeps no default chord.
-		switch action {
-		case "effort-cycle", "mode-cycle":
-			// mode-cycle was the old Shift-Tab binding; it now drives effort
-			// so existing keybindings.yml and the default map stay useful.
-			// A user who wants the permission cycle rebinds mode-cycle and
-			// leaves effort-cycle alone — both names call CycleEffort when
-			// the effort seam is wired, else fall back to CycleMode.
-			if a.effortOps != nil {
-				a.CycleEffort()
-			} else {
-				a.CycleMode()
-			}
-		default:
+		// binding (session effort lean→standard→full). The thinking toggle
+		// keeps no default chord.
+		if action == "effort-cycle" {
+			a.CycleEffort()
+		} else {
 			a.ToggleThinking()
 		}
 		return
@@ -6089,8 +6077,8 @@ const (
 
 // dividerParts is the composer's info divider as its coloured pieces: the
 // run indicator (when a turn is live), the model, the reasoning level and the
-// session mode, each with the theme token that paints it. Empty text is
-// dropped here rather than drawn — an unwired /thinking or /mode seam has
+// session effort, each with the theme token that paints it. Empty text is
+// dropped here rather than drawn — an unwired /thinking or /effort seam has
 // nothing to report, and an invented default would claim a posture nobody
 // chose. The model part is NAMED, because it is the one piece a narrow row
 // shortens instead of dropping (see drawComposer). Caller holds a.mu.
@@ -6114,7 +6102,6 @@ func (a *App) dividerParts() []hudPart {
 	// The bare rung, not "thinking <level>" — the model it sits beside says
 	// what the pair is, and the word only added width.
 	add("", a.thinkingLevel(), a.thinkingToken())
-	add("", a.modeLabel(), a.modeToken())
 	add("", a.effortLabel(), a.effortToken())
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
 		add("", "Vibe", theme.StatusLineMode)

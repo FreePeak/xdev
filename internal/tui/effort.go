@@ -22,7 +22,7 @@ func (a *App) SetEffortOps(ops *EffortOps) { a.effortOps = ops }
 
 // Effort implements CommandAPI /effort: bare reports the rung, /effort
 // <name> sets it, and anything unrecognised is a usage error — never a
-// silent flip (same rule /mode and /thinking follow).
+// silent flip (same rule /thinking follows).
 func (a *App) Effort(args string) error {
 	if a.effortOps == nil || a.effortOps.Current == nil || a.effortOps.Set == nil {
 		return fmt.Errorf("effort not wired")
@@ -77,7 +77,7 @@ func (a *App) effortLabel() string {
 }
 
 // effortToken is the ink for the effort rung: lean is muted, standard is
-// the mode grey, full wears the success accent so complex work is visible.
+// the status-line grey, full wears the success accent so complex work is visible.
 func (a *App) effortToken() string {
 	switch a.effortLabel() {
 	case config.SessionEffortLean:

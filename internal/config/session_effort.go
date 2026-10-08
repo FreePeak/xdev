@@ -5,7 +5,7 @@ import "strings"
 // Session effort is the one dial that scales how hard a session works:
 // tools advertised eagerly, optional prompt appendix, and the thinking
 // default when `thinking` is still "auto". It is NOT the permission
-// posture (/mode) and NOT the request-side reasoning budget (:effort /
+// posture (/plan, approvalMode) and NOT the request-side reasoning budget (:effort /
 // /thinking) — those stay their own knobs. A plain string key on
 // Settings, like Thinking: "" means unset in this layer, default standard.
 //
@@ -25,7 +25,7 @@ const (
 var SessionEffortLevels = []string{SessionEffortLean, SessionEffortStandard, SessionEffortFull}
 
 // SessionEffortCycle is the Shift-Tab order: lean → standard → full → lean.
-// All three are safe to cycle; none widens permissions (that is /mode).
+// All three are safe to cycle; none widens permissions (that is /plan + approvalMode).
 var SessionEffortCycle = []string{SessionEffortLean, SessionEffortStandard, SessionEffortFull}
 
 // IsSessionEffort reports whether v is one of the three writeable rungs

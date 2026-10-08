@@ -24,7 +24,6 @@ type fakeAPI struct {
 
 	setModel  string
 	plan      string
-	mode      string
 	vibe      string
 	advisor   string
 	mem       string
@@ -716,14 +715,6 @@ func (f *fakeAPI) PlanMode(args string) error {
 }
 
 func (f *fakeAPI) Effort(args string) error { return nil }
-func (f *fakeAPI) Mode(args string) error {
-	if f.fail == "mode" {
-		return fmt.Errorf("boom")
-	}
-	f.mode = args
-	return nil
-}
-
 func (f *fakeAPI) Vibe(args string) error {
 	if f.fail == "vibe" {
 		return fmt.Errorf("boom")

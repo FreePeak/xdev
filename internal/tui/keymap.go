@@ -69,7 +69,6 @@ var BuiltinActions = []string{
 	"retry",           // F5: re-run the current session's last turn (omp's retry)
 	"dock-cycle",      // Alt+S: the context dock's display policy (#291 §1)
 	"dock-fold",       // Ctrl+T: walk the dock's section folds
-	"mode-cycle",      // legacy name; default map now points Shift-Tab at effort-cycle
 	"effort-cycle",    // Shift-Tab: lean → standard → full → lean (session effort)
 	"thinking-toggle", // request-side reasoning off ⇄ auto (omp alt+t; no default chord)
 	"session.tab.next", "session.tab.previous",
@@ -201,8 +200,7 @@ func DefaultKeyMap() *KeyMap {
 
 			// Shift-Tab cycles session EFFORT (lean → standard → full). Every
 			// terminal sends it as KeyBacktab, which chordOf renders "Shift-Tab".
-			// Permission /mode keeps its own command; keybindings.yml can put
-			// mode-cycle back on this chord. The thinking toggle has no default.
+			// The thinking toggle has no default chord.
 			"Shift-Tab": "effort-cycle",
 			// Session tabs (opencode session.tab.next / .previous). Alt+letter
 			// class matches model-select / hub / dock; ] and [ are the natural
@@ -250,7 +248,7 @@ func DefaultKeyMap() *KeyMap {
 			// menu-accept). These share chords because context disambiguates.
 			// history-next has no default (Up/Down already recall when the
 			// editor is in history mode); "thinking-toggle" lost Shift-Tab
-			// to mode-cycle above. Both stay settable from keybindings.yml.
+			// to effort-cycle above. Both stay settable from keybindings.yml.
 		},
 		actions: append([]string(nil), BuiltinActions...),
 	}

@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // The reasoning level is the one request-side fact the chrome could not show:
@@ -71,22 +73,20 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 // TestNarrowDividerKeepsTheModelLeaf pins the divider's degradation: the
 // model is the one part that shortens instead of leaving, because its
 // "provider/" prefix is routing the /model menu already shows — on a narrow
-// row the name is worth the level and the mode beside it.
+// row the name is worth the level beside it.
 func TestNarrowDividerKeepsTheModelLeaf(t *testing.T) {
 	app, scr := newTestApp(t, 40, 24)
 	app.AddSystemBlock("ready")
 	level := "high"
 	app.SetThinkingOps(thinkWired(&level))
-	cur := ModePlan
-	app.SetModeOps(modeWired(&cur))
 	app.SetStatusModel("onegw/opencode/space-bunny-free")
 	app.draw()
 	div := dividerRow(t, scr)
 	if strings.Contains(div, "onegw") {
 		t.Fatalf("a narrow row must drop the provider prefix: %q", div)
 	}
-	if !strings.Contains(div, "space-bunny-free · high · plan") {
-		t.Fatalf("the leaf name must buy the level and the mode their cells: %q", div)
+	if !strings.Contains(div, "space-bunny-free · high") {
+		t.Fatalf("the leaf name must buy the level its cells: %q", div)
 	}
 
 	// Wide enough for the whole id: the prefix is not a permanent omission.
@@ -155,5 +155,29 @@ func TestDockFooterSeesAFlipOnTheNextFrame(t *testing.T) {
 	}
 	if !strings.Contains(dividerRow(t, scr), "test/free · low") {
 		t.Fatal("the divider did not repaint with the new level")
+	}
+}
+
+// TestThinkingLevelWearsItsRail pins the reasoning half of the divider ink:
+// the level is an amount of effort, so it wears the theme's rail colour for
+// that rung rather than the model grey, and a level nobody named falls back
+// to the model ink instead of borrowing a rung's colour.
+func TestThinkingLevelWearsItsRail(t *testing.T) {
+	app, _ := newTestApp(t, 100, 24)
+	lvl := "high"
+	app.SetThinkingOps(&ThinkingOps{Current: func() string { return lvl }, Set: func(l string) error { lvl = l; return nil }})
+	if got := app.thinkingToken(); got != theme.ThinkingHigh {
+		t.Fatalf("high token = %q, want %q", got, theme.ThinkingHigh)
+	}
+	if got := app.thinkingToken(); got != app.dividerParts()[1].token {
+		t.Fatalf("the divider must paint the level in its rail token")
+	}
+	lvl = "off"
+	if got := app.thinkingToken(); got != theme.ThinkingOff {
+		t.Fatalf("off token = %q, want %q", got, theme.ThinkingOff)
+	}
+	lvl = "whatever"
+	if got := app.thinkingToken(); got != theme.StatusLineModel {
+		t.Fatalf("an unknown rung must fall back to the model ink, got %q", got)
 	}
 }

@@ -35,9 +35,6 @@ func TestDefaultKeyMapResolvesAllActions(t *testing.T) {
 		// The reasoning toggle kept its action and lost its default chord to
 		// the effort cycle (Shift-Tab), so it is user-bindable only.
 		"thinking-toggle": true,
-		// mode-cycle kept its action for keybindings.yml; Shift-Tab now
-		// drives effort-cycle. Permission cycling is /mode or a user chord.
-		"mode-cycle": true,
 	}
 
 	for _, action := range BuiltinActions {
