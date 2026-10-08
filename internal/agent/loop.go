@@ -167,10 +167,10 @@ const EmptyTurnAttribution = "empty-turn"
 const PromptContinuationAttribution = "prompt-continuation"
 
 // PromptContinuationPrompt is injected when an interactive run has already
-// used tools (or still has open todos) and the model yields with text and
-// no tool calls. The user asked for Claude-style keep-going, not a
-// "should I continue?" pause.
-const PromptContinuationPrompt = "the user's request is not finished: take the next concrete step now with tools. Do not ask the user to approve or continue. Do not stop at a plan or a status report. If the work is fully verified complete, say so in one sentence and stop."
+// mutated the workspace and the model yields with text and no tool calls.
+// The user asked for Claude-style keep-going on unfinished edits, not a
+// "should I continue?" pause — and not a push past a finished report.
+const PromptContinuationPrompt = "the user's request is not finished: take the next concrete step now with tools. Do not ask the user to approve or continue. If this turn already delivered the answer or report the user asked for, say so in one sentence and stop. Do not start implementing after a research or report request."
 
 // maxPromptContinuations bounds keep-going without /goal. A completed
 // answer after tools still gets at most this many nudges; two consecutive
@@ -740,6 +740,15 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				// left to continue. callMutated is the one definition of
 				// "changed" (see it).
 				//
+				// Open todos are NOT a keep-going signal. Session 724e3fbb
+				// (2026-10-08, onegw): the user asked for a live UI issue report
+				// only; the model wrote "# … live issue report / No code changes
+				// — report only", still holding an open "Write full issue report"
+				// todo it never marked done, and openTodos ORed the nudge back
+				// on — the next turn opened a worktree and started implementing.
+				// Soft nagging still happens above via todoReminder(); this gate
+				// only asks whether the workspace already changed.
+				//
 				// "Did THIS run already nudge and get a second yield?" —
 				// lastWasPromptCont — reads only from resumeFloor. It used to
 				// read all of history, which answered for a run that never
@@ -771,15 +780,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 						lastWasPromptCont = false
 					}
 				}
-				openTodos := false
-				if a.Tools != nil {
-					if t, ok := a.Tools.Get("todo"); ok {
-						if tt, ok := t.(interface{ Snapshot() []tool.TodoPhase }); ok {
-							openTodos = len(tool.OpenForReminder(tt.Snapshot())) > 0
-						}
-					}
-				}
-				if !lastWasPromptCont && (mutated || openTodos) {
+				if !lastWasPromptCont && mutated {
 					cont = PromptContinuationPrompt
 					contAttr = PromptContinuationAttribution
 					promptConts++

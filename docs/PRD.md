@@ -3420,3 +3420,18 @@ Tests: `TestPruneBgSkipsLiveAndRecent` — three jobs seeded (live at our own PI
 ---
 
 *Last updated: 2026-10-08 (**drop `/mode`**).* Session effort (`/effort` lean|standard|full, Shift+Tab) is the only session dial left on the divider. Permission posture stays on `/plan` and `approvalMode` (`--approval-mode`, `xdev config set approvalMode`); the `/mode` slash command, mode-cycle keybinding, mode chrome chip, and ModeOps wiring are gone — no second name for the same knobs.
+
+---
+
+*Last updated: 2026-10-08 (`fix/stop-report-nudge` — session 724e3fbb, onegw: user asked for a live UI issue report only; the agent wrote "**No code changes — report only**", then the harness injected the keep-going nudge and it opened a worktree and started implementing without approval):* **three residual keep-going leaks after #596/#606, each closed at its own layer.**
+
+**RC1 — open todos ORed into the keep-going gate (`internal/agent/loop.go`).** The gate fired when `mutated || openTodos`. A research run that opened a todo list and never marked "Write full issue report" done still had open todos at the report yield, so the nudge fired even though nothing on disk had changed. Soft nagging still rides `todoReminder()` above; the gate now asks only `mutated`.
+
+**RC2 — `todo` was undeclared in `builtinCaps`, so every todo call counted as a mutation (`internal/tool/caps.go`).** `callMutated` uses `CapsByName`, which only sees the builtin table. A miss fails closed → "changed something". Declaring `todo` as `{ReadOnly, ScopeSession, TierReadOnly}` makes a research run that only planned + read stop at the report.
+
+**RC3 — bash research probes still classified as mutations (`internal/tool/readonly.go`).** (a) `hasWriteRedirect` treated any `>` as a write, so `2>/dev/null` / `>/dev/null` on every probe bought a nudge. (b) `python3` and `curl` were unmodelled heads, so `python3 -c '…'` and `curl -s URL` always mutated. `/dev/null` and fd-`&` shuffles are no longer writes; `curl` GET probes and `python3 -c` one-liners are read-only; heredocs/script paths and `curl -o/-d` stay fail-closed. (`2>&1` still fails closed because policy.go's splitter cuts on bare `&` — acceptable.)
+
+**Nudge copy.** The old text said "Do not stop at a plan or a status report" — the exact wrong instruction after a research yield. It now names a delivered report as a valid stop and forbids starting an implement pass after a research/report request.
+
+**Tests.** `TestOpenTodosDoNotEarnAKeepGoingNudge` (724e3fbb shape: todo init + read + report → 3 requests, no nudge). `TestPromptContinuationPromptLetsAReportStop`. Extended `TestReadOnlyCommandClassifiesShellLines` and `TestCallMutatedReadsTheCapsManifest` for `/dev/null`, curl GET, python -c. All fail against the reverted gate/classifier.
+
