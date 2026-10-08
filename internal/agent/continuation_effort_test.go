@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/ai"
@@ -86,4 +87,69 @@ func TestMutatingBashStillEarnsAKeepGoingNudge(t *testing.T) {
 		t.Fatalf("a run that staged files got no keep-going nudge: %+v", last)
 	}
 	_ = json.Marshal
+}
+
+// TestOpenTodosDoNotEarnAKeepGoingNudge is the 724e3fbb regression: a research
+// run that opens a todo list, reads the codebase, and yields the report must
+// STOP — even when the "write the report" todo is still pending. openTodos used
+// to OR into the keep-going gate, so the nudge's "do not stop at a status
+// report" text then pushed the model into a worktree and an implementation it
+// was never asked for. Soft nagging still rides todoReminder(); this gate only
+// asks whether the workspace already changed.
+func TestOpenTodosDoNotEarnAKeepGoingNudge(t *testing.T) {
+	initTodos := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{
+			ai.TextBlock{Text: "planning the review"},
+			ai.ToolCallBlock{ID: "t1", Name: "todo", Arguments: json.RawMessage(
+				`{"op":"init","list":[{"phase":"report","items":["Write full issue report"]}]}`,
+			)},
+		},
+	})}}
+	readThenYield := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{
+			ai.TextBlock{Text: "reading"},
+			ai.ToolCallBlock{ID: "r1", Name: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)},
+		},
+	})}}
+	report := fakeScript{events: []ai.Event{ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, StopReason: ai.StopReasonStop,
+		Content: []ai.Block{ai.TextBlock{Text: "# live issue report\n\n**No code changes** — report only."}},
+	})}}
+	p := &fakeProvider{calls: []fakeScript{initTodos, readThenYield, report, report}}
+
+	reg := tool.NewRegistry()
+	reg.Register(tool.NewTodoTool())
+	reg.Register(readOnlyTool{})
+	a := &Agent{Provider: p, Tools: reg, Hooks: TurnHooksFunc{}, PromptContinuation: true}
+	if _, err := a.Run(context.Background(), "sys",
+		[]ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "write me the fully report list all the current issues"}}}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.gotReqs) != 3 {
+		t.Fatalf("stream requests = %d, want 3 (todo, read, report) — open todos must not buy a keep-going nudge after a report", len(p.gotReqs))
+	}
+	for i, r := range p.gotReqs {
+		last := r.Messages[len(r.Messages)-1]
+		if last.Role == ai.RoleUser && last.Attribution == PromptContinuationAttribution {
+			t.Fatalf("request %d got a keep-going nudge after a report-only run with open todos", i)
+		}
+	}
+}
+
+// TestPromptContinuationPromptLetsAReportStop pins the nudge copy: the old
+// text said "Do not stop at a plan or a status report", which is exactly the
+// wrong instruction after a research yield. The new text must name the report
+// as a valid stop and must not tell the model to keep going past one.
+func TestPromptContinuationPromptLetsAReportStop(t *testing.T) {
+	if strings.Contains(PromptContinuationPrompt, "Do not stop at a plan or a status report") {
+		t.Fatal("nudge still forbids stopping at a status report — that is the 724e3fbb instruction that started the implement pass")
+	}
+	if !strings.Contains(PromptContinuationPrompt, "delivered the answer or report") {
+		t.Fatal("nudge must tell the model a delivered report is a valid stop")
+	}
+	if !strings.Contains(PromptContinuationPrompt, "Do not start implementing after a research or report request") {
+		t.Fatal("nudge must forbid starting an implement pass after a report")
+	}
 }

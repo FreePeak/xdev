@@ -56,6 +56,12 @@ var builtinCaps = map[string]Caps{
 	"web_search": {ReadOnly: true, ConcurrentSafe: true, SideEffect: ScopeNetwork, Tier: TierReadOnly},
 	"lsp":        {ReadOnly: true, ConcurrentSafe: true, SideEffect: ScopeNone, Tier: TierReadOnly},
 
+	// Session scratch — does not change the workspace. Without this entry
+	// callMutated treated every todo call as a mutation (CapsByName miss →
+	// fail closed), so a research run that opened a todo list kept its
+	// keep-going nudge after the report (session 724e3fbb).
+	"todo": {ReadOnly: true, ConcurrentSafe: true, SideEffect: ScopeSession, Tier: TierReadOnly},
+
 	// Known mutators (friendlier plan-mode denial via Destructive).
 	"ast_edit": {Destructive: true, SideEffect: ScopeWorkspace, Tier: TierWrite},
 }

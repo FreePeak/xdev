@@ -79,6 +79,31 @@ func TestReadOnlyCommandClassifiesShellLines(t *testing.T) {
 		{"git status $(touch x)", false, "a read with a write substitution is not a read"},
 		{"cd /tmp && git status", true, "cd persists nothing — the tool gives every call a fresh process"},
 		{"cd /tmp && rm -rf x", false, "cd does not launder a write after it"},
+		// /dev/null redirects are not workspace writes (session 724e3fbb:
+		// every research probe used 2>/dev/null and the gate treated them as
+		// mutations, so the keep-going nudge fired after the report).
+		// Note: `2>&1` is still fail-closed — policy.go's splitter cuts on
+		// bare `&`, so the segment never reaches hasWriteRedirect intact.
+		{"ls docs 2>/dev/null", true, "stderr to null is not a write"},
+		{"pwd; ls 2>/dev/null; head -5 f", true, "compound of reads with null redirects"},
+		{"cat a >/dev/null", true, "stdout to null is not a write"},
+		{"wc -c f > out.txt", false, "a real file redirect stays a write"},
+		{"echo hi >> log", false, "append stays a write"},
+
+		// curl GET probes are the live-test surface; -o/-d stay mutating.
+		{"curl -s http://127.0.0.1:8080/health", true, "GET probe"},
+		{"curl -sS -H 'X-Admin-Password: x' http://127.0.0.1:8080/admin", true, "GET with headers"},
+		{"curl -s -X GET http://127.0.0.1:8080/x", true, "explicit GET"},
+		{"curl -s -o /tmp/out http://x", false, "output file is a write"},
+		{"curl -s -d 'a=1' http://x", false, "POST body"},
+		{"curl -s --data-urlencode a=1 http://x", false, "urlencoded POST"},
+
+		// python -c is the visible research one-liner; a heredoc/script path
+		// is opaque and fails closed (body may open files for write).
+		{"python3 -c 'print(1)'", true, "inline -c program is visible"},
+		{`python3 -c "import json; print(1)"`, true, "double-quoted -c"},
+		{"python3 - <<'PY'\nprint(1)\nPY", false, "heredoc body is opaque"},
+		{"python3 script.py", false, "script path is opaque"},
 	} {
 		if got := ReadOnlyCommand(tc.cmd); got != tc.want {
 			t.Errorf("ReadOnlyCommand(%q) = %v, want %v — %s", tc.cmd, got, tc.want, tc.why)
