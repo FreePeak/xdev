@@ -47,8 +47,8 @@ func BashCallIsReadOnly(args json.RawMessage) bool {
 }
 
 // readOnlyHeads are the commands whose every invocation is a read. Commands
-// with a write flag (sed -i, sort -o) or a mutating subcommand (git) are
-// handled by name in readOnlySegment, not here.
+// with a write flag (sed -i, sort -o, curl -o) or a mutating subcommand (git)
+// are handled by name in readOnlySegment, not here.
 var readOnlyHeads = map[string]bool{
 	"ls": true, "pwd": true, "cat": true, "head": true, "tail": true,
 	"wc": true, "rg": true, "grep": true, "egrep": true, "fgrep": true,
@@ -107,6 +107,10 @@ func readOnlySegment(seg string) bool {
 		return !hasFlagContaining(fields[1:], 'i')
 	case "sort":
 		return !hasFlagContaining(fields[1:], 'o')
+	case "curl", "curl.exe":
+		return readOnlyCurl(fields[1:])
+	case "python", "python3", "python2":
+		return readOnlyPython(fields[1:])
 	default:
 		return readOnlyHeads[head]
 	}
@@ -176,8 +180,12 @@ func isAssignment(f string) bool {
 	return true
 }
 
-// hasWriteRedirect reports whether a segment redirects output to a file: any
-// `>` outside quotes. `grep "a>b" f` does not, `wc -c f > out` does.
+// hasWriteRedirect reports whether a segment redirects output to a real file.
+// A quoted `>` is data (`grep "a>b" f`). `>/dev/null`, `2>/dev/null`, `&>/dev/null`
+// and bare fd shuffles (`2>&1`, `>&2`) discard or re-pipe streams — they do not
+// change the workspace, so they must not trip the keep-going gate. Session
+// 724e3fbb's entire research bash surface used `2>/dev/null` on every probe,
+// and the old "any > is a write" rule classified all 32 of them as mutations.
 func hasWriteRedirect(seg string) bool {
 	var quote byte
 	for i := 0; i < len(seg); i++ {
@@ -190,7 +198,93 @@ func hasWriteRedirect(seg string) bool {
 		case c == '\'' || c == '"':
 			quote = c
 		case c == '>':
+			// Walk the redirect operator: [n]>, [n]>>, [n]>&m, &>, &>>.
+			j := i + 1
+			if j < len(seg) && seg[j] == '>' {
+				j++ // >>
+			}
+			if j < len(seg) && seg[j] == '&' {
+				// `>&1`, `2>&1`, `&>` — fd shuffle / merge, not a file write.
+				return false
+			}
+			for j < len(seg) && (seg[j] == ' ' || seg[j] == '\t') {
+				j++
+			}
+			rest := seg[j:]
+			switch {
+			case rest == "":
+				return false
+			case strings.HasPrefix(rest, "/dev/null"):
+				return false
+			default:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// readOnlyCurl is true when curl is used as a pure HTTP GET probe: no
+// body/upload/output-file flags. Session research calls `curl -s URL` constantly;
+// those must not buy a keep-going nudge. `-o`/`-O`/`-d`/`-T`/`--data*` write
+// or POST, so they stay mutating.
+func readOnlyCurl(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-o" || a == "--output" || a == "-O" || a == "--remote-name" ||
+			a == "-d" || a == "--data" || a == "--data-raw" || a == "--data-binary" ||
+			a == "--data-urlencode" || a == "-F" || a == "--form" || a == "-T" ||
+			a == "--upload-file" || a == "-J" || a == "--remote-header-name":
+			return false
+		case strings.HasPrefix(a, "-o") && a != "-o" && !strings.HasPrefix(a, "--"):
+			// curl allows -oFILE glued.
+			return false
+		case strings.HasPrefix(a, "--output="):
+			return false
+		case a == "-X" || a == "--request":
+			if i+1 < len(args) {
+				m := strings.ToUpper(args[i+1])
+				if m != "GET" && m != "HEAD" && m != "OPTIONS" {
+					return false
+				}
+				i++
+			}
+		case strings.HasPrefix(a, "-X") && len(a) > 2 && !strings.HasPrefix(a, "--"):
+			m := strings.ToUpper(a[2:])
+			if m != "GET" && m != "HEAD" && m != "OPTIONS" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readOnlyPython is true for the research shape `python3 -c '…'` / `python -c "…"`.
+// A heredoc (`python3 - <<'PY' …`) or a script path is opaque and stays mutating:
+// the keep-going gate cannot see whether the body writes files, and session
+// 724e3fbb's probes used both forms — classifying heredocs as RO would hide a
+// real `open(path,'w')`. `-c` is the one form whose whole program is in argv.
+func readOnlyPython(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-c" || a == "--command":
 			return true
+		case strings.HasPrefix(a, "-") && a != "-" && !strings.HasPrefix(a, "--"):
+			// Short flag cluster: -u -c etc. Keep scanning.
+			if strings.ContainsRune(a, 'c') {
+				return true
+			}
+			continue
+		case a == "-":
+			// stdin / heredoc program — opaque.
+			return false
+		case strings.HasPrefix(a, "-"):
+			continue
+		default:
+			// A script path is opaque.
+			return false
 		}
 	}
 	return false
