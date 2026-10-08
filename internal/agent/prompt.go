@@ -394,11 +394,16 @@ func BuildDeferredIndex(entries []tool.Entry) string {
 	return b.String()
 }
 
-// SystemPromptFullAppendix is the optional omp-shaped workflow block that
-// session effort "full" appends after the base. It is deliberately NOT in
-// SystemPromptBase: lean and standard keep the <1k-token budget; full pays
-// the cost only when the user asked for complex-work detail.
-const SystemPromptFullAppendix = `# Full-effort workflow
+// SystemPromptRungAppendix is the optional workflow block the session-effort
+// rungs above the default append after the base (high, xhigh, max). It is
+// deliberately NOT in SystemPromptBase: low and medium keep the <1k-token
+// budget; the rungs that mean "this is complex work" pay the cost only when
+// the user asked for that detail.
+//
+// The block is one, not one per rung: what separates high from xhigh and max
+// is the reasoning budget (config.EffortTokens), not more prose — a prompt
+// that grew with the ladder would spend tokens to say the same thing louder.
+const SystemPromptRungAppendix = `# Full-effort workflow
 
 - Decompose non-trivial work with todo before editing; keep the list current.
 - Research before editing exported symbols: grep/lsp references, then change once.
@@ -406,16 +411,18 @@ const SystemPromptFullAppendix = `# Full-effort workflow
 - Verify the real binary or test path, not only that the code compiles.
 - Prefer ask when two readings of the requirement would produce different diffs.`
 
-// ApplySessionEffortPrompt folds the full-workflow appendix onto the base
-// when effort is full. lean and standard leave the base untouched so the
-// token budget stays pi-shaped for daily work.
+// ApplySessionEffortPrompt folds the workflow appendix onto the base when the
+// effort rung is high or above. low and medium leave the base untouched so
+// the token budget stays pi-shaped for daily work. The pre-ladder names
+// (full/omp/complex) fold to high, so a stored `effort: full` keeps its
+// appendix instead of silently losing it.
 func ApplySessionEffortPrompt(base, effort string) string {
 	if base == "" {
 		base = SystemPromptBase
 	}
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "full", "max", "omp", "complex":
-		return base + "\n\n" + SystemPromptFullAppendix
+	case "high", "xhigh", "max", "full", "omp", "complex":
+		return base + "\n\n" + SystemPromptRungAppendix
 	default:
 		return base
 	}

@@ -166,3 +166,39 @@ func TestApplyPersonalityPreset(t *testing.T) {
 		t.Fatalf("file should beat the preset, got %q", file.Personality)
 	}
 }
+
+// TestApplySessionEffortPromptFoldsOnlyAboveTheDefault: the workflow appendix
+// is the rung's one prompt-side effect, and it must be OFF for the rungs that
+// mean "a normal ask" (low, medium) and ON for the rungs that mean "complex
+// work" (high and above). The pre-ladder name `full` is folded too, so a
+// config written before the ladder keeps its appendix instead of silently
+// losing it.
+func TestApplySessionEffortPromptFoldsOnlyAboveTheDefault(t *testing.T) {
+	const base = "BASE"
+	for _, tc := range []struct {
+		effort string
+		want   bool
+	}{
+		{effort: "", want: false},
+		{effort: "low", want: false},
+		{effort: "medium", want: false},
+		{effort: "high", want: true},
+		{effort: "xhigh", want: true},
+		{effort: "max", want: true},
+		{effort: "FULL", want: true}, // the pre-ladder spelling, case-folded
+		{effort: " standard ", want: false},
+	} {
+		got := ApplySessionEffortPrompt(base, tc.effort)
+		has := strings.Contains(got, SystemPromptRungAppendix)
+		if has != tc.want {
+			t.Errorf("ApplySessionEffortPrompt(base, %q) appendix = %v, want %v", tc.effort, has, tc.want)
+		}
+		if !strings.HasPrefix(got, base) {
+			t.Errorf("effort %q lost the base prompt: %q", tc.effort, got)
+		}
+	}
+	// An empty base is the built-in one, not an empty prompt.
+	if got := ApplySessionEffortPrompt("", "max"); !strings.HasPrefix(got, SystemPromptBase) {
+		t.Fatal("an empty base must fall back to SystemPromptBase")
+	}
+}

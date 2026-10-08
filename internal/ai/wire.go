@@ -161,7 +161,14 @@ func malformedStream(api, stage string, err error) error {
 	return fmt.Errorf("%s: %w: %s: %v", api, ErrMalformedStream, stage, err)
 }
 
-// reasoningEffort maps a thinking budget to the OpenAI reasoning-effort tier.
+// reasoningEffort maps a thinking budget to the OpenAI reasoning-effort
+// tier. The wire's own vocabulary stops at "high" (no OpenAI-compatible
+// endpoint documents xhigh/max), so every rung at or above high's budget
+// folds onto it: the top rungs of xdev's ladder are a wider budget, and the
+// adapters that carry a NUMBER (Anthropic's budget_tokens) are the ones that
+// express that. Folding rather than passing an unknown tier is deliberate —
+// an endpoint that rejects an unrecognised effort would fail the whole turn
+// over a rung the user asked for.
 func reasoningEffort(tokens int) string {
 	switch {
 	case tokens <= 2048:

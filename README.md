@@ -179,7 +179,7 @@ still live in `~/.xdev/agent/themes/`. What matters for daily work:
 | `Alt+M` / `Alt+A` / `Alt+T` | model picker / agent hub / session tree |
 | `Alt+S` / `Ctrl+T` | context dock: cycle shown/hidden/auto / fold its sections |
 | `Alt+,` | settings panel: live-edit the session's settings (Enter changes the row under the cursor) |
-| `Shift+Tab` | cycle session effort: `lean` → `standard` → `full` (`/effort`) |
+| `Shift+Tab` | cycle session effort: `low` → `medium` → `high` → `xhigh` → `max` (`/effort`) |
 | *(no default chord)* | request-side reasoning off ⇄ let the model role decide (`/thinking`; bind `thinking-toggle` in `keybindings.yml`) |
 | `Ctrl+O` | expand the newest tool result or thinking box |
 | `Esc` | idle: clear the draft → `Esc` again brings it back → `Esc` opens the session tree (running: cancels the turn) |
@@ -228,12 +228,25 @@ live seam, so a `/thinking` flip repaints both on the next frame; a host that
 never wired `/thinking` paints neither.
 
 **Session effort** (`/effort`, Shift+Tab) is how hard the session works — not
-what it is allowed to do. `lean` keeps the pi core tools eager and pins thinking
-low when `/thinking` is still auto; `standard` is the shipped default (today's
-deferred catalog); `full` opens the long tail eagerly and appends an omp-shaped
-workflow block to the system prompt. The effort rung rides the composer divider
-beside the model and the thinking level. Permissions stay on `/plan` and
-`approvalMode` (`--approval-mode`, `xdev config set approvalMode`).
+what it is allowed to do. The ladder is Claude Code's own (`low`, `medium`,
+`high`, `xhigh`, `max`), and each rung moves three things together: the tool
+surface (`low` keeps the pi core tools eager, `medium` is the shipped default
+deferred catalog, `high` and above open the long tail), the workflow block
+appended to the system prompt (`high` and above), and the thinking default when
+`/thinking` is still auto (`low`→low, `high`→high, `xhigh`→xhigh, `max`→max;
+`medium` leaves the model to decide). `xhigh` and `max` share `high`'s tool
+surface and prompt — what they buy is the wider reasoning budget.
+
+The rung is set the same way anywhere: `/effort <rung>`, `--effort <rung>`,
+`xdev config set effort <rung>` (persisted), or `XDEV_EFFORT_LEVEL` for one
+shell. A rung the active model cannot reach is **clamped to the highest rung it
+can** rather than failing at the wire — a model whose `models.yml` entry
+declares `efforts: [low, medium, high]` runs a requested `xhigh` as `high`, and
+a model marked non-reasoning sends no reasoning parameter at all (the choice
+stays sticky and re-applies when a model that can take it is live). The rung
+rides the composer divider beside the model and the thinking level. Permissions
+stay on `/plan` and `approvalMode` (`--approval-mode`, `xdev config set
+approvalMode`).
 
 
 The **context dock** (`Alt+S`) is a fixed 42-column window right of the
@@ -266,9 +279,9 @@ hides the sidebar and brings it back.
 | `/sidebar [show\|hide\|auto]` | the sidebar's own switch: bare toggles what is on screen (`/dock` is an alias), `auto` hands it back to the width rule — `Alt+S` still walks all three policies |
 | `/thinking [off\|auto\|minimal\|low\|medium\|high]` | request-side reasoning for the next turn (bare reports; `on` = `auto`) |
 | `/context [auto\|200k\|300k\|500k\|1m]` | the context window for every model (bare reports; pins it live and persisted — `auto` hands each model back the window its catalog states) |
-| `/effort [lean\|standard\|full]` | session effort: tools + prompt depth + thinking default when `thinking` is auto (bare reports; `Shift+Tab` cycles) |
-| `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
+| `/effort [low\|medium\|high\|xhigh\|max]` | session effort: tools + prompt depth + thinking default when `thinking` is auto (bare reports; `Shift+Tab` cycles) |
 | `/auto-answer [yes\|no]` | the ask card's answer policy — `ask.autoAnswer`, live and persisted (a bare call toggles; off, an unanswered question waits for you) |
+| `/goal <objective>` `/plan` `/prewalk` `/handoff` `/advisor` `/vibe` | run modes: name the session's objective and start on it (bare `/goal` shows it, `/goal complete\|drop` closes it), read-only research, model handoff, background reviewer, director mode |
 | `/usage` | the session's token, time and tool-call report: totals with thousands separators, cache hit rate, live context against the model's window, LLM vs tool time, average time-to-first-token, and the tool-call count — the same readings the status row carries, at report width |
 | `/memory` `/skill:<name>` `/hub` `/tasks` `/join <link>` | knowledge, skills, the subagent roster, background jobs, joining a shared session |
 | `/help` `/quit` | every command, and an exit that prints the `--resume` line to get back |

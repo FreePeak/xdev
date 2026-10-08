@@ -132,8 +132,8 @@ func TestApplyThinkingFlag(t *testing.T) {
 		{"low", "", "low", false},
 		{"medium", "", "medium", false},
 		{"high", "", "high", false},
-		{"xhigh", "", "high", false}, // clamped: the ladder tops out at high
-		{"max", "", "high", false},
+		{"xhigh", "", "xhigh", false}, // the ladder tops out at max, not high
+		{"max", "", "max", false},
 		{"bogus", "", "", true},
 	} {
 		got, err := applyThinkingFlag(tc.flag, tc.role)
@@ -153,27 +153,34 @@ func TestApplyThinkingFlag(t *testing.T) {
 	}
 }
 
-// TestThinkingForModel pins the sticky-with-fallback rule: a pinned level is
-// remembered as-is, but a rung that actually asks for a reasoning budget
-// cannot ride out to a model the catalog marks as non-reasoning — it falls
-// back to "auto" instead of failing (or silently degrading) at the wire.
-// "off"/"minimal" are already no-reasoning requests every model accepts; an
-// unlisted model is unknown, not unsupported, so the level rides through.
+// TestThinkingForModel pins the two rules, in order: CLAMP a requested rung
+// onto the rungs the model advertises (models.yml `efforts:`), then fall back
+// to "auto" for a model the catalog marks as non-reasoning. The pinned level
+// is remembered as-is either way — it is re-applied the moment a model that
+// can take it is live — so the clamp is what keeps a request from failing (or
+// silently degrading) at the wire. "off"/"minimal" are already no-reasoning
+// requests every model accepts; a model nothing is on record for is unknown,
+// not unsupported, so its rung rides through.
 func TestThinkingForModel(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
 		"onegw": {Models: []config.ModelConfig{
 			{ID: "thinker", Reasoning: true},
 			{ID: "plain"},
+			// A model that announces a narrower ladder than the built-in one:
+			// this is the case the clamp exists for.
+			{ID: "narrow", Reasoning: true, Efforts: []string{"low", "medium", "high"}},
+			{ID: "tiny-ladder", Reasoning: true, Efforts: []string{"low"}},
 		}},
 	}}
 	resetProviderModelCache()
 	defer resetProviderModelCache()
 	for _, tc := range []struct {
-		name           string
+		name            string
 		level, prov, mo string
-		want           string
+		want            string
 	}{
 		{name: "pinned rung on a reasoning model rides through", level: "high", prov: "onegw", mo: "thinker", want: "high"},
+		{name: "a model that advertises no ladder keeps the rung", level: "max", prov: "onegw", mo: "thinker", want: "max"},
 		{name: "pinned rung on a non-reasoning model falls to auto", level: "high", prov: "onegw", mo: "plain", want: "auto"},
 		{name: "xhigh/max are rungs too", level: "max", prov: "onegw", mo: "plain", want: "auto"},
 		{name: "off is not a rung — untouched", level: "off", prov: "onegw", mo: "plain", want: "off"},
@@ -181,6 +188,13 @@ func TestThinkingForModel(t *testing.T) {
 		{name: "auto is untouched", level: "auto", prov: "onegw", mo: "plain", want: "auto"},
 		{name: "unlisted model is unknown, not unsupported", level: "high", prov: "onegw", mo: "ghost", want: "high"},
 		{name: "unknown provider is unknown", level: "high", prov: "void", mo: "ghost", want: "high"},
+
+		// Clamp: the highest advertised rung at or below the request.
+		{name: "xhigh clamps to the highest advertised rung", level: "xhigh", prov: "onegw", mo: "narrow", want: "high"},
+		{name: "max clamps too", level: "max", prov: "onegw", mo: "narrow", want: "high"},
+		{name: "a rung the model does advertise is kept", level: "medium", prov: "onegw", mo: "narrow", want: "medium"},
+		{name: "a one-rung model takes its only rung", level: "max", prov: "onegw", mo: "tiny-ladder", want: "low"},
+		{name: "off is never clamped to a rung", level: "off", prov: "onegw", mo: "narrow", want: "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := thinkingForModel(tc.level, tc.prov, tc.mo, cfg); got != tc.want {
@@ -193,6 +207,15 @@ func TestThinkingForModel(t *testing.T) {
 	}
 	if ok, known := modelReasoning(cfg, "onegw", "thinker"); !known || !ok {
 		t.Fatalf("thinker = (%v,%v), want (true,true)", ok, known)
+	}
+	if got, known := modelEfforts(cfg, "onegw", "narrow"); !known || len(got) != 3 {
+		t.Fatalf("narrow efforts = (%v,%v), want the 3 advertised rungs", got, known)
+	}
+	if got, known := modelEfforts(cfg, "onegw", "thinker"); !known || got != nil {
+		t.Fatalf("a model with no `efforts:` must be known with an empty list, got (%v,%v)", got, known)
+	}
+	if _, known := modelEfforts(cfg, "onegw", "ghost"); known {
+		t.Fatal("an unlisted model must report no effort opinion")
 	}
 }
 

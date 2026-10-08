@@ -6,16 +6,26 @@ import (
 )
 
 // Session-effort deferral (feat/session-effort): one table decides which
-// registered tools leave the eager schema. lean keeps the pi core + the
-// discovery bridge; standard is today's hard-coded deferred set; full only
-// defers the rare long tail. ApplySessionEffort is idempotent and safe to
-// call mid-session after /effort flips the rung — it rebuilds the deferred
-// set from scratch so a previous rung cannot leak tools in or out.
+// registered tools leave the eager schema. The rung vocabulary is Claude
+// Code's ladder (low|medium|high|xhigh|max, config.SessionEffortLevels);
+// what it moves here is the TOOL SURFACE, which has three shapes:
+//
+//	low             → the pi core + the discovery bridge
+//	medium          → today's hard-coded deferred set
+//	high and above  → only the rare long tail is deferred
+//
+// xhigh/max share high's surface deliberately: the extra rungs buy a wider
+// reasoning budget (config.EffortTokens), not a fourth catalog. The
+// pre-ladder aliases (lean|standard|full) are folded first, so a stored
+// `effort: full` keeps resolving to the same surface. ApplySessionEffort is
+// idempotent and safe to call mid-session after /effort flips the rung — it
+// rebuilds the deferred set from scratch so a previous rung cannot leak
+// tools in or out.
 
-// sessionEffortLeanEager never defers on the lean rung. Bridge tools are
+// sessionEffortLowEager never defers on the low rung. Bridge tools are
 // always eager (Catalog.Defer panics on them); they are listed here so a
 // Names() walk does not try to index them as "everything else".
-var sessionEffortLeanEager = map[string]bool{
+var sessionEffortLowEager = map[string]bool{
 	"read": true, "write": true, "edit": true, "bash": true,
 	"grep": true, "glob": true,
 	"ask": true, "todo": true,
@@ -23,9 +33,9 @@ var sessionEffortLeanEager = map[string]bool{
 	ToolSearchName: true, ToolDescribeName: true, ToolCallName: true,
 }
 
-// sessionEffortStandardDeferred is the set newToolRegistry deferred before
+// sessionEffortMediumDeferred is the set newToolRegistry deferred before
 // session effort existed — keep byte-stable for the default rung.
-var sessionEffortStandardDeferred = []struct {
+var sessionEffortMediumDeferred = []struct {
 	name  string
 	index string
 	tags  []string
@@ -40,10 +50,11 @@ var sessionEffortStandardDeferred = []struct {
 	{RewindToolName, "return the session to an earlier checkpoint", []string{"session", "rewind"}},
 }
 
-// sessionEffortFullDeferred is the rare long tail that stays behind the
+// sessionEffortHighDeferred is the rare long tail that stays behind the
 // bridge even when the session is opened wide — desktop control, speech,
 // image gen and the schedule surface are demand tools, not the coding path.
-var sessionEffortFullDeferred = []struct {
+// xhigh and max share it: the extra rungs buy reasoning budget, not tools.
+var sessionEffortHighDeferred = []struct {
 	name  string
 	index string
 	tags  []string
@@ -58,7 +69,7 @@ var sessionEffortFullDeferred = []struct {
 }
 
 // ApplySessionEffort rebuilds the deferred catalog for one effort rung.
-// Unknown effort folds to standard. Tools not registered are skipped — a
+// Unknown effort folds to the default. Tools not registered are skipped — a
 // --no-lsp build must not panic on a missing name.
 func ApplySessionEffort(r *Registry, effort string) {
 	if r == nil {
@@ -66,22 +77,22 @@ func ApplySessionEffort(r *Registry, effort string) {
 	}
 	r.ResetDeferred()
 	switch normalizeEffort(effort) {
-	case "lean":
+	case "low":
 		for _, name := range r.Names() {
-			if sessionEffortLeanEager[name] || isBridgeTool(name) {
+			if sessionEffortLowEager[name] || isBridgeTool(name) {
 				continue
 			}
-			r.Defer(name, indexFor(r, name), "effort", "lean")
+			r.Defer(name, indexFor(r, name), "effort", "low")
 		}
-	case "full":
-		for _, d := range sessionEffortFullDeferred {
+	case "high", "xhigh", "max":
+		for _, d := range sessionEffortHighDeferred {
 			if _, ok := r.Get(d.name); !ok {
 				continue
 			}
 			r.Defer(d.name, d.index, d.tags...)
 		}
-	default: // standard
-		for _, d := range sessionEffortStandardDeferred {
+	default: // medium
+		for _, d := range sessionEffortMediumDeferred {
 			if _, ok := r.Get(d.name); !ok {
 				continue
 			}
@@ -90,25 +101,28 @@ func ApplySessionEffort(r *Registry, effort string) {
 	}
 }
 
+// normalizeEffort folds an effort rung onto the three catalog shapes this
+// table has, including the pre-ladder aliases (lean|standard|full) so a
+// session or config written before the ladder keeps its surface.
 func normalizeEffort(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "lean", "simple", "min", "minimal":
-		return "lean"
-	case "full", "max", "omp", "complex":
-		return "full"
+	case "low", "lean", "simple", "min", "minimal":
+		return "low"
+	case "high", "xhigh", "max", "full", "omp", "complex":
+		return "high"
 	default:
-		return "standard"
+		return "medium"
 	}
 }
 
 // indexFor prefers a known standard/full blurb, else the tool's first line.
 func indexFor(r *Registry, name string) string {
-	for _, d := range sessionEffortStandardDeferred {
+	for _, d := range sessionEffortMediumDeferred {
 		if d.name == name {
 			return d.index
 		}
 	}
-	for _, d := range sessionEffortFullDeferred {
+	for _, d := range sessionEffortHighDeferred {
 		if d.name == name {
 			return d.index
 		}

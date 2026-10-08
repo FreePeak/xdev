@@ -1,16 +1,28 @@
 package config
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestNormalizeSessionEffort(t *testing.T) {
 	cases := map[string]string{
-		"":         SessionEffortStandard,
-		"standard": SessionEffortStandard,
-		"LEAN":     SessionEffortLean,
-		"simple":   SessionEffortLean,
-		"full":     SessionEffortFull,
-		"omp":      SessionEffortFull,
-		"nope":     SessionEffortStandard,
+		"":       SessionEffortDefault,
+		"medium": SessionEffortMedium,
+		"LOW":    SessionEffortLow,
+		"high":   SessionEffortHigh,
+		"xhigh":  SessionEffortXHigh,
+		"max":    SessionEffortMax,
+		"nope":   SessionEffortDefault,
+		// The pre-ladder spellings fold onto their nearest rung so a stored
+		// `effort: full` keeps resolving after the ladder change.
+		"lean":     SessionEffortLow,
+		"simple":   SessionEffortLow,
+		"minimal":  SessionEffortLow,
+		"standard": SessionEffortMedium,
+		"full":     SessionEffortHigh,
+		"omp":      SessionEffortHigh,
+		"complex":  SessionEffortHigh,
 	}
 	for in, want := range cases {
 		if got := NormalizeSessionEffort(in); got != want {
@@ -20,40 +32,68 @@ func TestNormalizeSessionEffort(t *testing.T) {
 }
 
 func TestIsSessionEffort(t *testing.T) {
-	if !IsSessionEffort("lean") || !IsSessionEffort("FULL") {
+	if !IsSessionEffort("low") || !IsSessionEffort("MAX") {
 		t.Fatal("known rungs must pass")
 	}
-	if IsSessionEffort("") || IsSessionEffort("nope") || IsSessionEffort("simple") {
-		// aliases normalize but are not the closed write vocabulary
-		t.Fatal("aliases and empty must fail the closed check used by /effort set")
+	if IsSessionEffort("") || IsSessionEffort("nope") {
+		t.Fatal("empty and unknown must fail the closed check used by /effort set")
+	}
+	// Aliases normalize but are NOT the closed write vocabulary: /effort and
+	// --effort take the ladder spelling, so a stored value and a typed value
+	// cannot drift apart.
+	for _, alias := range []string{"lean", "simple", "standard", "full", "omp", "complex"} {
+		if IsSessionEffort(alias) {
+			t.Errorf("%q is an alias, not a writeable rung", alias)
+		}
 	}
 }
 
 func TestSessionEffortThinking(t *testing.T) {
-	if got := SessionEffortThinking("lean"); got != "low" {
-		t.Fatalf("lean → %q, want low", got)
+	want := map[string]string{
+		SessionEffortLow:    "low",
+		SessionEffortMedium: "auto",
+		SessionEffortHigh:   "high",
+		SessionEffortXHigh:  "xhigh",
+		SessionEffortMax:    "max",
 	}
-	if got := SessionEffortThinking("full"); got != "high" {
-		t.Fatalf("full → %q, want high", got)
+	for rung, level := range want {
+		if got := SessionEffortThinking(rung); got != level {
+			t.Errorf("SessionEffortThinking(%q) = %q, want %q", rung, got, level)
+		}
 	}
-	if got := SessionEffortThinking("standard"); got != "auto" {
-		t.Fatalf("standard → %q, want auto", got)
+	// Every level the effort rung implies must be one /thinking accepts, or
+	// the fold would hand applyThinkingFlag a value it rejects.
+	for _, rung := range SessionEffortLevels {
+		if lv := SessionEffortThinking(rung); lv != "auto" && !isThinkingLevel(lv) {
+			t.Errorf("rung %q implies %q, which /thinking does not accept", rung, lv)
+		}
 	}
 }
 
+func isThinkingLevel(v string) bool {
+	for _, l := range ThinkingLevels {
+		if l == v {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSessionEffortCycleCoversEveryRung(t *testing.T) {
-	if len(SessionEffortCycle) != 3 {
-		t.Fatalf("cycle = %v", SessionEffortCycle)
+	if !reflect.DeepEqual(SessionEffortCycle, SessionEffortLevels) {
+		t.Fatalf("cycle %v must walk the whole ladder %v", SessionEffortCycle, SessionEffortLevels)
 	}
 	for _, e := range SessionEffortLevels {
-		found := false
-		for _, c := range SessionEffortCycle {
-			if c == e {
-				found = true
-			}
+		if !IsSessionEffort(e) {
+			t.Fatalf("cycle names %q, which is not a writeable rung", e)
 		}
-		if !found {
-			t.Fatalf("%q missing from cycle", e)
+	}
+}
+
+func TestSessionEffortBlurbEveryRung(t *testing.T) {
+	for _, e := range SessionEffortLevels {
+		if SessionEffortBlurb(e) == "" {
+			t.Errorf("rung %q has no blurb", e)
 		}
 	}
 }
