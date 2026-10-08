@@ -103,3 +103,34 @@ func TestEffortRungWearsItsOwnInk(t *testing.T) {
 		seen[tok] = rung
 	}
 }
+
+// TestDividerDropsADuplicateEffortRung pins the bug the CC ladder introduced
+// on the composer divider: thinking and session effort share low|medium|high|
+// xhigh|max, so painting both labels side by side produced "model · high · high"
+// whenever the dials agreed (the common case when thinking is auto and effort
+// pins the default). One amount of effort is one word; the effort chip only
+// appears when it actually differs from the thinking label.
+func TestDividerDropsADuplicateEffortRung(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.AddSystemBlock("ready")
+	think := "high"
+	effort := "high"
+	app.SetThinkingOps(thinkWired(&think))
+	app.SetEffortOps(effortWired(&effort))
+	app.draw()
+	div := dividerRow(t, scr)
+	if !strings.Contains(div, "test/free · high") {
+		t.Fatalf("divider %q must still carry the shared rung once", div)
+	}
+	if strings.Count(div, "high") != 1 {
+		t.Fatalf("divider %q painted the same rung twice", div)
+	}
+
+	// A real disagreement keeps both words: the user asked for two things.
+	effort = "low"
+	app.draw()
+	div = dividerRow(t, scr)
+	if !strings.Contains(div, "test/free · high · low") {
+		t.Fatalf("divider %q must keep both labels when they disagree", div)
+	}
+}
