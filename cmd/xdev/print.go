@@ -1729,6 +1729,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// registry so the URL cache and the pr_checkout registry are shared.
 	ghTool := tool.NewGithubTool(cwd)
 	ghTool.RegisterURISchemes()
+	// gmail tool via gog (same shell-out shape as github via gh). Auth is
+	// the CLI's business: `gog auth add` / GOG_ACCOUNT.
+	gmailTool := tool.NewGmailTool(cwd)
 	// xd:// proposal devices (#36): read xd://propose serves the pending
 	// plan; writes to xd://resolve / xd://reject finalize it — the same
 	// seam the skill/memory read schemes ride.
@@ -1748,6 +1751,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		&tool.ASTEditTool{CWD: cwd},
 		eval.NewTool(cwd),
 		ghTool,
+		gmailTool,
 		// ask is the parent's channel to the user; children (ChildTools
 		// below) deliberately omit it — a scoped subagent has no user.
 		tool.NewAskTool(settings.AskTimeout(), settings.AskAutoAnswerOn()),

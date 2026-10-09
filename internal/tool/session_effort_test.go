@@ -40,7 +40,7 @@ func TestApplySessionEffortLowDefersLongTail(t *testing.T) {
 
 func TestApplySessionEffortMediumMatchesLegacySet(t *testing.T) {
 	r := NewRegistry()
-	for _, n := range []string{"read", "ast_grep", "ast_edit", "github", "hub", "send_message", "inbox", CheckpointToolName, RewindToolName, "lsp"} {
+	for _, n := range []string{"read", "ast_grep", "ast_edit", "github", "gmail", "hub", "send_message", "inbox", CheckpointToolName, RewindToolName, "lsp"} {
 		r.Register(namedStub{n: n, d: n})
 	}
 	ApplySessionEffort(r, "medium")
@@ -48,7 +48,7 @@ func TestApplySessionEffortMediumMatchesLegacySet(t *testing.T) {
 	for _, e := range r.Deferred() {
 		deferred[e.Name] = true
 	}
-	for _, want := range []string{"ast_grep", "ast_edit", "github", "hub", "send_message", "inbox", CheckpointToolName, RewindToolName} {
+	for _, want := range []string{"ast_grep", "ast_edit", "github", "gmail", "hub", "send_message", "inbox", CheckpointToolName, RewindToolName} {
 		if !deferred[want] {
 			t.Fatalf("medium must defer %s", want)
 		}

@@ -43,6 +43,7 @@ var sessionEffortMediumDeferred = []struct {
 	{"ast_grep", "structural code search with ast-grep patterns", []string{"search", "code"}},
 	{"ast_edit", "AST-aware codemod rewrites", []string{"edit", "codemod", "code"}},
 	{"github", "GitHub operations: PRs, issues, files, search, Actions", []string{"git", "pr", "remote"}},
+	{"gmail", "Gmail via gog: search, get, thread, send, reply, mark_read, labels", []string{"mail", "email", "google"}},
 	{"hub", "message and inspect the subagents running in this session", []string{"subagent", "agent"}},
 	{"send_message", "send a message to another xdev session (mailbox)", []string{"mailbox", "agent"}},
 	{"inbox", "read messages other sessions sent this one (mailbox)", []string{"mailbox", "agent"}},
