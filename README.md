@@ -309,7 +309,7 @@ on a private profile and closes it again after 5 idle minutes — a browser xdev
 starts never takes a window; `browser.autolaunch: false` keeps it attach-only,
 `browser.idleExit: <seconds>` tunes the idle exit, `0` keeps the browser for
 the whole session),
-`web_search`, `github`, `security_scan`, `computer`, `tts`, `generate_image`,
+`web_search`, `github`, `gmail`, `security_scan`, `computer`, `tts`, `generate_image`,
 `checkpoint` / `rewind`, `todo`, `ask`, `task` + `hub` + `send_message` /
 `inbox` for subagents and cross-session mail, and the memory and skill tools.
 MCP servers and subprocess extensions register into that same registry, so they
