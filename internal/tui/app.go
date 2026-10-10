@@ -4001,14 +4001,13 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// Grok user prompt: ❯ prefix, text_primary body, bg-highlight band
 		// across the card; continuation lines indent past the prefix.
 		//
-		// The air a sent message needs lives HERE, not in the composer: a
-		// blank banded row above the text, so the prompt hangs off the top
-		// of its own card instead of sitting on the answer above it; and a
-		// userBandMargin of pane background at each side, so the card floats
-		// rather than running off both edges. NO pad row below the text:
-		// the block's own separator already leaves air before the answer,
-		// so a second blank banded row would spend two rows of a small
-		// screen on air for one gap.
+		// NO pad row above or below the text. The transcript's own separator
+		// row already leaves air between every block, so a card that padded
+		// itself spent a row of a small screen on a gap the session had
+		// already drawn — and the prompt read as a floating box rather than
+		// as a row of the conversation. What is left is the band itself,
+		// floating a userBandMargin in from each edge, and the one cell of
+		// air inside it before the ❯.
 		band := a.cellColor(a.th.Get(theme.BgHighlight))
 		pfxSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser)))
 		bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
@@ -4018,7 +4017,6 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// inside the card's right edge: pane - 2*margin - 2.
 		wrapped := wrap(text, max(10, w-2*userBandMargin-2))
 		pad := func() line { return line{bg: band, inset: userBandInset} }
-		lines = append(lines, pad()) // the card's top padding
 		for j, wl := range wrapped {
 			ln := pad()
 			if j == 0 {

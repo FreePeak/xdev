@@ -39,9 +39,11 @@ const stickyGap = 1
 // block's trailing separator excluded - the gap between blocks is transcript
 // spacing, not a line of the prompt).
 //
-// row and full are in TEXT rows, not render rows: a user card pads its own top
-// row (see blockLines), and a header that spent its rows on that padding would
-// show a blank line where the request should be.
+// row and full are in TEXT rows, not render rows: a render whose rows are all
+// text needs no shifting (the inline card pads no row of its own since
+// fix/user-band-no-top-pad), and one that ever pads again must not have the
+// header spend its rows on that padding, which would show a blank line where
+// the request should be. bandTextIndex is what keeps that promise.
 type stickyPrompt struct {
 	block int   // index into App.blocks
 	row   int32 // first transcript row of the prompt's text (its inline top)
@@ -69,7 +71,9 @@ func (a *App) stickyPrompts() []stickyPrompt {
 
 // bandTextRows counts a render's rows that carry text. A user card pads its own
 // first and last row (see blockLines); every other block is content end to end,
-// so this is its render verbatim.
+// so this is its render verbatim. With the inline card padding no row of its
+// own, a user render is text end to end too — the walk stays as the guard that
+// survives the next render that pads one.
 func bandTextRows(lines []line) int {
 	n := 0
 	for i := range lines {
@@ -223,12 +227,16 @@ func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 }
 
 // stickyPadRow is the blank banded row the pinned prompt's card pads itself
-// with, so the header spends the padding the transcript drew rather than
-// inventing its own. An unpinned prompt (h.padTop and h.padBottom both zero)
+// with. The inline card no longer draws a pad row of its own (the block
+// separator is the air a sent message gets inline), so the header builds its
+// air from the card's own band: the first line's background and inset, with
+// the runs dropped. An unpinned prompt (h.padTop and h.padBottom both zero)
 // never reaches the painter with it.
 func (a *App) stickyPadRow(h stickyLayout) rowView {
 	if h.block < 0 || h.block >= len(a.rowIdx.rend) || len(a.rowIdx.rend[h.block].lines) == 0 {
 		return rowView{}
 	}
-	return rowView{ln: a.rowIdx.rend[h.block].lines[0]}
+	ln := a.rowIdx.rend[h.block].lines[0]
+	ln.runs = nil
+	return rowView{ln: ln}
 }
