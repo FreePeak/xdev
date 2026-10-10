@@ -39,9 +39,11 @@ const stickyGap = 1
 // block's trailing separator excluded - the gap between blocks is transcript
 // spacing, not a line of the prompt).
 //
-// row and full are in TEXT rows, not render rows: a user card pads its own top
-// row (see blockLines), and a header that spent its rows on that padding would
-// show a blank line where the request should be.
+// row and full are in TEXT rows, not render rows: a render whose rows are all
+// text needs no shifting (the inline card pads no row of its own since
+// fix/user-band-no-top-pad), and one that ever pads again must not have the
+// header spend its rows on that padding, which would show a blank line where
+// the request should be. bandTextIndex is what keeps that promise.
 type stickyPrompt struct {
 	block int   // index into App.blocks
 	row   int32 // first transcript row of the prompt's text (its inline top)
@@ -69,7 +71,9 @@ func (a *App) stickyPrompts() []stickyPrompt {
 
 // bandTextRows counts a render's rows that carry text. A user card pads its own
 // first and last row (see blockLines); every other block is content end to end,
-// so this is its render verbatim.
+// so this is its render verbatim. With the inline card padding no row of its
+// own, a user render is text end to end too — the walk stays as the guard that
+// survives the next render that pads one.
 func bandTextRows(lines []line) int {
 	n := 0
 	for i := range lines {
