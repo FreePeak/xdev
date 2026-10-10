@@ -107,9 +107,9 @@ func TestEffortRungWearsItsOwnInk(t *testing.T) {
 // TestDividerDropsADuplicateEffortRung pins the bug the CC ladder introduced
 // on the composer divider: thinking and session effort share low|medium|high|
 // xhigh|max, so painting both labels side by side produced "model · high · high"
-// whenever the dials agreed (the common case when thinking is auto and effort
-// pins the default). One amount of effort is one word; the effort chip only
-// appears when it actually differs from the thinking label.
+// whenever the two dials agreed. One amount of effort is one word; the chip
+// only ever appears once (TestDividerFoldsTheTwoDialsIntoOneRung covers the
+// two rungs disagreeing).
 func TestDividerDropsADuplicateEffortRung(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddSystemBlock("ready")
@@ -125,12 +125,56 @@ func TestDividerDropsADuplicateEffortRung(t *testing.T) {
 	if strings.Count(div, "high") != 1 {
 		t.Fatalf("divider %q painted the same rung twice", div)
 	}
+}
 
-	// A real disagreement keeps both words: the user asked for two things.
+// TestDividerFoldsTheTwoDialsIntoOneRung is the case #614 left open: with
+// `thinking: high` pinned AND `effort: max`, the divider painted
+// "test/free · high · max" — two rungs of the same ladder on one request.
+// One request has one reasoning posture, so the higher rung wins and the
+// lower word is gone.
+func TestDividerFoldsTheTwoDialsIntoOneRung(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.AddSystemBlock("ready")
+	think := "high"
+	effort := "max"
+	app.SetThinkingOps(thinkWired(&think))
+	app.SetEffortOps(effortWired(&effort))
+	app.draw()
+	div := dividerRow(t, scr)
+	if !strings.Contains(div, "test/free · max") {
+		t.Fatalf("divider %q must carry the higher rung once", div)
+	}
+	if strings.Count(div, "high") != 0 || strings.Count(div, "·") != 1 {
+		t.Fatalf("divider %q painted two rungs of one ladder", div)
+	}
+
+	// The other direction folds the same way: an effort rung BELOW the pinned
+	// thinking level still leaves one word — the one the request actually
+	// spends, which is the pinned thinking level.
 	effort = "low"
 	app.draw()
 	div = dividerRow(t, scr)
-	if !strings.Contains(div, "test/free · high · low") {
-		t.Fatalf("divider %q must keep both labels when they disagree", div)
+	if div != "test/free · high" && !strings.Contains(div, "test/free · high") {
+		t.Fatalf("divider %q must keep only the higher rung", div)
+	}
+	if strings.Contains(div, "low") {
+		t.Fatalf("divider %q kept a rung the request does not spend", div)
+	}
+
+	// "auto" and "off" are not rungs, so they are never folded away: auto
+	// beside an effort rung still says which level the auto model will take,
+	// and off is its own statement next to any chip.
+	think = "auto"
+	effort = "max"
+	app.draw()
+	div = dividerRow(t, scr)
+	if !strings.Contains(div, "auto · max") {
+		t.Fatalf("divider %q must keep auto beside the rung it pins", div)
+	}
+	think = "off"
+	app.draw()
+	div = dividerRow(t, scr)
+	if !strings.Contains(div, "off · max") {
+		t.Fatalf("divider %q must keep off beside the effort chip", div)
 	}
 }
