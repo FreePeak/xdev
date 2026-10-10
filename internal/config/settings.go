@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -203,6 +204,124 @@ func mergeMnemopi(dst, layer MnemopiSettings) MnemopiSettings {
 		dst.QueueDrainMillis = layer.QueueDrainMillis
 	}
 	return dst
+}
+
+// GatewaySettings is the `gateway` group: the Telegram bridge. A pointer
+// bool for Enabled follows the same reason as ShowThinking: the zero-skip
+// merge cannot tell "unset" from "off", and the shipped default is OFF, so
+// only a pointer expresses a user who turned it off.
+type GatewaySettings struct {
+	Enabled *bool `yaml:"enabled"`
+	// AllowedChats is the allowlist of numeric Telegram chat ids, as
+	// STRINGS. A []int64 field cannot be written by `xdev config set`:
+	// yamlScalar turns "123,456" into a list of YAML strings, and decoding
+	// those into int64 fails the writer's own round-trip guard — so the
+	// type is the one every writer actually produces. Empty denies every
+	// chat (fail-closed), the safe default for a bridge that runs code.
+	AllowedChats []string `yaml:"allowedChats"`
+	// AllowedAll accepts any chat id. Explicit opt-in for a single-user
+	// box; it exists because guessing your own chat id is a hurdle nobody
+	// should clear on a phone at 2am.
+	AllowedAll bool `yaml:"allowedAll"`
+	// Workspace is the cwd the worker turns run in (default: $HOME).
+	Workspace string `yaml:"workspace"`
+	// PollTimeout is the Bot API long-poll timeout (0 = the 50s default).
+	PollTimeout int `yaml:"pollTimeout"`
+	// LeaseWait bounds how long a second message waits for the chat's
+	// turn lease before it is answered "busy" (0 = 5s).
+	LeaseWait int `yaml:"leaseWait"`
+	// ReplyChunk bounds one sendMessage in UTF-16 code units
+	// (Telegram's limit is 4096; 0 = 4000).
+	ReplyChunk int `yaml:"replyChunk"`
+	// Model overrides the session model for gateway turns ("" = session).
+	Model string `yaml:"model"`
+}
+
+// GatewayEnabled reports the master switch (nil-safe).
+func (s *Settings) GatewayEnabled() bool {
+	return s != nil && s.Gateway.Enabled != nil && *s.Gateway.Enabled
+}
+
+// DefaultGatewayWorkspace is where gateway turns run when
+// gateway.workspace is unset: the user's home. A bridge that ran turns in
+// the daemon's own cwd would inherit whatever directory launchd chose.
+func DefaultGatewayWorkspace() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return "."
+}
+
+// GatewayWorkspace resolves the turn cwd ("" → the home directory).
+func (s *Settings) GatewayWorkspace() string {
+	if s != nil && strings.TrimSpace(s.Gateway.Workspace) != "" {
+		return strings.TrimSpace(s.Gateway.Workspace)
+	}
+	return DefaultGatewayWorkspace()
+}
+
+// GatewayAllowedChats is the effective allowlist: settings, then
+// TELEGRAM_ALLOWED_CHATS (comma-separated, same value grammar) so a daemon
+// started by launchd can be authorized without editing config.yml. An
+// unparsable entry is dropped rather than fatal: the caller authorizes on
+// the parsed set, and a typo must not silently turn into "allow everything".
+func (s *Settings) GatewayAllowedChats() []int64 {
+	var raw []string
+	if s != nil {
+		raw = append(raw, s.Gateway.AllowedChats...)
+	}
+	if v := strings.TrimSpace(os.Getenv("TELEGRAM_ALLOWED_CHATS")); v != "" {
+		raw = append(raw, strings.Split(v, ",")...)
+	}
+	out := make([]int64, 0, len(raw))
+	for _, part := range raw {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if id, err := strconv.ParseInt(part, 10, 64); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// GatewayAllowAll reports whether every chat is accepted: the settings key
+// or TELEGRAM_ALLOW_ALL_CHATS=1.
+func (s *Settings) GatewayAllowAll() bool {
+	if s != nil && s.Gateway.AllowedAll {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TELEGRAM_ALLOW_ALL_CHATS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// GatewayPollTimeout is the long-poll timeout in seconds (default 50).
+func (s *Settings) GatewayPollTimeout() int {
+	if s != nil && s.Gateway.PollTimeout > 0 {
+		return s.Gateway.PollTimeout
+	}
+	return 50
+}
+
+// GatewayLeaseWait bounds the wait for a chat's turn lease (default 5s).
+func (s *Settings) GatewayLeaseWait() time.Duration {
+	if s != nil && s.Gateway.LeaseWait > 0 {
+		return time.Duration(s.Gateway.LeaseWait) * time.Second
+	}
+	return 5 * time.Second
+}
+
+// GatewayReplyChunk is one sendMessage's size in UTF-16 code units
+// (default 4000, under Telegram's 4096 hard cap).
+func (s *Settings) GatewayReplyChunk() int {
+	if s != nil && s.Gateway.ReplyChunk > 0 {
+		return s.Gateway.ReplyChunk
+	}
+	return 4000
 }
 
 // HindsightSettings is the `hindsight` group (memory: hindsight). Every key
@@ -446,6 +565,10 @@ type Settings struct {
 	// environment variables override them at the backend (see
 	// internal/memory/hindsight.go for the precedence table).
 	Hindsight HindsightSettings `yaml:"hindsight"`
+	// Gateway is the Telegram bridge group (gateway.*): a small daemon that
+	// long-polls the Bot API, maps each chat to one session, and runs each
+	// turn as a detached worker process. Inert unless enabled.
+	Gateway GatewaySettings `yaml:"gateway"`
 	// Advisor runs a background reviewer on the session (M11, research §6).
 	// The reviewer model comes from advisorModel (else the run model);
 	// without either the flag warns and starts disarmed.
@@ -1571,6 +1694,41 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.AdvisorModel != "" {
 		s.AdvisorModel = layer.AdvisorModel
 	}
+	if layer.Gateway.Enabled != nil {
+		s.Gateway.Enabled = layer.Gateway.Enabled
+	}
+	if layer.Gateway.AllowedChats != nil {
+		s.Gateway.AllowedChats = append([]string(nil), layer.Gateway.AllowedChats...)
+	}
+	if layer.Gateway.AllowedAll {
+		// Same plain-bool rule as Advisor: only a layer that turns it ON
+		// contributes.
+		s.Gateway.AllowedAll = true
+	}
+	if layer.Gateway.Workspace != "" {
+		s.Gateway.Workspace = layer.Gateway.Workspace
+	}
+	if layer.Gateway.PollTimeout != 0 {
+		if layer.Gateway.PollTimeout < 1 || layer.Gateway.PollTimeout > 60 {
+			return fmt.Errorf("gateway.pollTimeout must be 1..60 seconds, got %d", layer.Gateway.PollTimeout)
+		}
+		s.Gateway.PollTimeout = layer.Gateway.PollTimeout
+	}
+	if layer.Gateway.LeaseWait != 0 {
+		if layer.Gateway.LeaseWait < 0 {
+			return fmt.Errorf("gateway.leaseWait must be >= 0, got %d", layer.Gateway.LeaseWait)
+		}
+		s.Gateway.LeaseWait = layer.Gateway.LeaseWait
+	}
+	if layer.Gateway.ReplyChunk != 0 {
+		if layer.Gateway.ReplyChunk < 1 || layer.Gateway.ReplyChunk > 4096 {
+			return fmt.Errorf("gateway.replyChunk must be 1..4096 (Telegram's limit), got %d", layer.Gateway.ReplyChunk)
+		}
+		s.Gateway.ReplyChunk = layer.Gateway.ReplyChunk
+	}
+	if layer.Gateway.Model != "" {
+		s.Gateway.Model = layer.Gateway.Model
+	}
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
 	}
@@ -2055,6 +2213,12 @@ func settingsRoundTrip(path string, out []byte) error {
 // quarantine as *.broken-*, taking the user's settings with it) and a failed
 // write never truncates what was there. The existing file's mode is kept:
 // config.yml holds no secrets but is created 0600 by DataDir conventions.
+// WriteSettingsAtomicFor is writeSettingsAtomic for a caller outside the
+// config package. It exists because a YAML list value cannot pass through
+// Set (whose value is a scalar); the round-trip guard the caller applies is
+// the same one setSettingsRoundTrip uses.
+func WriteSettingsAtomicFor(path string, out []byte) error { return writeSettingsAtomic(path, out) }
+
 func writeSettingsAtomic(path string, out []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

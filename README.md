@@ -463,8 +463,10 @@ adapters + the shared SSE/partial-JSON reader), `agent` (the loop, compaction
 ladder, subagents, plan/goal modes, prompt assembly), `session` (the JSONL tree
 store), `tool` (the registry, approvals, output sinks), `tui` (the frame-plan
 renderer over tcell), `config` (layering + the credential chain), and `dist`
-(`setup`/`update`/`bench`). The rest are the seams: `rpc`, `acp`, `protocol`,
-`ext`, `mcpclient`, `memory`, `skills`, `rules`, `hooks`, `theme`, `stats`.
+(`setup`/`update`/`bench`), plus `gateway` (the Telegram bridge daemon) and
+`serve` (the loopback broker/gateway/relay services). The rest are the seams:
+`rpc`, `acp`, `protocol`, `ext`, `mcpclient`, `memory`, `skills`, `rules`,
+`hooks`, `theme`, `stats`.
 
 ## Documentation
 
