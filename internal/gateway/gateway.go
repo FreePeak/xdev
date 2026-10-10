@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -219,6 +218,12 @@ func (d *Daemon) handle(ctx context.Context, u Update) {
 		return
 	}
 	text := strings.TrimSpace(m.Text)
+	if text == "" {
+		// A photo, a sticker or an edit arrives as a message with no text:
+		// spawning a worker for it would run a turn about nothing.
+		_ = d.reply(ctx, chat, "xdev gateway reads text only — send /help for the commands.")
+		return
+	}
 	switch {
 	case text == "/start", strings.HasPrefix(text, "/help"):
 		_ = d.reply(ctx, chat, slashHelp)
@@ -408,6 +413,47 @@ type workerResult struct {
 	exit    int
 }
 
+// workerOutputCap bounds one turn's captured stdout+stderr. A phone turn is a
+// short answer plus a log tail; anything past this is a loop, and dropping the
+// oldest bytes keeps the answer (written last) while bounding memory.
+const workerOutputCap = 256 << 10
+
+// ringBuffer is an io.Writer that keeps only its last `limit` bytes. The
+// answer a worker prints arrives after the preamble, so the tail is what
+// matters and what survives.
+type ringBuffer struct {
+	mu      sync.Mutex
+	buf     []byte
+	limit   int
+	dropped int
+}
+
+func (r *ringBuffer) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.buf = append(r.buf, p...)
+	if over := len(r.buf) - r.limit; over > 0 {
+		r.buf = append(r.buf[:0], r.buf[over:]...)
+		r.dropped += over
+	}
+	return len(p), nil
+}
+
+func (r *ringBuffer) String() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := string(r.buf)
+	if r.dropped > 0 {
+		out = "… (" + strconv.Itoa(r.dropped) + " bytes dropped)\n" + out
+	}
+	return out
+}
+
+// alive reports whether the worker is still running. The pid alone is not
+// enough: once Wait returns the pid can be recycled, and /stop would then
+// signal an innocent bystander. The closed done channel is what Wait left
+// behind, so it is the honest signal (nil-safe: /status asks a chat that may
+// never have run).
 func (w *worker) alive() bool {
 	if w == nil || w.pid <= 0 {
 		return false
@@ -471,7 +517,13 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 		// A detached worker must not inherit a TTY sense of "interactive".
 		"TERM=dumb",
 	)
-	var buf bytes.Buffer
+	// stdout and stderr share one bounded buffer: the answer goes to the
+	// chat and the diagnostics to the failure message, so both are needed,
+	// and a worker that prints without bound must not grow an unbounded one.
+	// The cap drops the OLDEST bytes, so the answer (written last) survives
+	// and the prelude is what is lost.
+	var buf ringBuffer
+	buf.limit = workerOutputCap
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &buf, &buf, nil
 	cmd.SysProcAttr = sysProcAttr()
 
@@ -496,7 +548,8 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 	return w, nil
 }
 
-// workerLogTail bounds how much of a failed turn's output is sent back.
+// workerLogTail bounds how much of a failed turn's output is sent back: a
+// phone message carries a window into the log, not the whole log.
 const workerLogTail = 2000
 
 // stopWorker asks the turn to end the way `xdev bg stop` does.

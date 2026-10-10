@@ -22,6 +22,9 @@ type fakeBot struct {
 	updates []Update
 	// sent records (chatID, text) per sendMessage.
 	sent []sentMsg
+	// failAfter makes sendMessage fail once this many messages have been
+	// sent (0 = never fail), which is how a partial send is tested.
+	failAfter int
 	// lastOffset/lastTimeout capture the most recent getUpdates payload.
 	lastOffset  int64
 	lastTimeout int
@@ -70,9 +73,17 @@ func newFakeBot(t *testing.T) *fakeBot {
 			return
 		}
 		b.mu.Lock()
+		if b.failAfter > 0 && len(b.sent) >= b.failAfter {
+			b.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry later"}`))
+			return
+		}
 		b.sent = append(b.sent, sentMsg{Chat: payload.ChatID, Text: payload.Text})
+		n := len(b.sent)
 		b.mu.Unlock()
-		writeOK(w, map[string]any{"message_id": int64(len(b.sent))})
+		writeOK(w, map[string]any{"message_id": int64(n)})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

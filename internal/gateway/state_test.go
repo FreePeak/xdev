@@ -179,3 +179,44 @@ func newTestDaemon(t *testing.T, b *fakeBot, allowed []int64) *Daemon {
 	}
 	return d
 }
+
+// TestTurnIsSerializedPerChat: a second message on a chat whose turn is
+// running must not spawn a second worker — two workers would interleave two
+// writers into one session file. The lease is what makes that impossible, and
+// the daemon's own reply path must say so.
+func TestTurnIsSerializedPerChat(t *testing.T) {
+	c := newTestChats(t)
+	release, err := c.Acquire(1, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Acquire(1, 300*time.Millisecond)
+		done <- err
+	}()
+	err = <-done
+	release()
+	if err == nil {
+		t.Fatal("a second message on a busy chat must fail-closed, not interleave")
+	}
+}
+
+// TestEmptyMessageIsNotATurn: an edited photo or a sticker arrives as a
+// message with no text; sending it to the model would produce a turn about
+// nothing. It must be ignored with a reply, not spawned.
+func TestEmptyMessageIsNotATurn(t *testing.T) {
+	b := newFakeBot(t)
+	b.queue(Update{UpdateID: 9, Message: &Message{Chat: Chat{ID: 1, Type: "private"}, From: &User{ID: 1}, Text: ""}})
+	d := newTestDaemon(t, b, []int64{1})
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	if err := d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, msg := range b.sentAll() {
+		if msg.Chat == 1 {
+			t.Errorf("an empty message produced %q — it must not reach the model", msg.Text)
+		}
+	}
+}
