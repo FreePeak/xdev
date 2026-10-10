@@ -251,3 +251,24 @@ func hasArg(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestNewToolCarriesTheProfileDir is the regression for a bug that shipped
+// dead: config.BrowserConfig fills Settings.ProfileDir, NewTool dropped it, and
+// autolaunch() reads Tool.ProfileDir — so auto-launch was off in every real run
+// while TestAutolaunchOn, which sets Tool.ProfileDir by hand, stayed green.
+// This asserts the wiring the constructor is responsible for, so the two cannot
+// drift apart again.
+func TestNewToolCarriesTheProfileDir(t *testing.T) {
+	dir := t.TempDir()
+	tl := NewTool(Settings{ProfileDir: dir}, nil)
+	if tl.ProfileDir != dir {
+		t.Errorf("NewTool dropped Cfg.ProfileDir: Tool.ProfileDir = %q, want %q", tl.ProfileDir, dir)
+	}
+	if !tl.autolaunch() {
+		t.Error("a tool built from a config with a profile dir must be able to auto-launch")
+	}
+	// And the converse: no profile dir in the config means attach-only.
+	if off := NewTool(Settings{}, nil); off.autolaunch() {
+		t.Error("a tool with no profile dir must be attach-only")
+	}
+}
