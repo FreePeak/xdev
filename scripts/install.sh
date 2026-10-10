@@ -17,6 +17,8 @@
 #                      (unset and no gh CLI means an anonymous install, which
 #                       is fine until the per-IP quota is spent)
 #
+#   NO_COLOR            set (to anything) forces the plain, colourless lines
+#                       that a pipe gets anyway
 # Windows has no shell here; grab xdev_windows_amd64.exe from the release page.
 set -euo pipefail
 
@@ -24,7 +26,29 @@ REPO="${XDEV_UPDATE_REPO:-FreePeak/xdev}"
 API="${XDEV_UPDATE_API:-https://api.github.com}"
 INSTALL_DIR="${XDEV_INSTALL_DIR:-$HOME/.local/bin}"
 
-die() { echo "xdev install: $*" >&2; exit 1; }
+# Colour, but only where it belongs: a terminal that asked for it. Captured
+# output (CI, a pipe, `xdev update`'s subprocess) gets exactly the plain lines
+# it got before — no escape codes to strip, nothing to break a log parser.
+# The hues are the terminal's OWN palette (bold magenta title, green ticks, red
+# errors, dim grue), not the TUI theme's 24-bit slots: the installer cannot see
+# the background, and groknight's own accents are unreadable on a light one
+# (measured: success #9ece6a is 1.8:1 on white, dim #585858 is 2.8:1 on black).
+if [ -t 1 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+  ESC="$(printf '\033')"
+  C_MARK="${ESC}[32m"     # green — the ✓
+  C_HEAD="${ESC}[1;35m"   # bold magenta — the title
+  C_ERR="${ESC}[1;31m"    # bold red — xdev install:
+  C_DIM="${ESC}[2m"       # dim — the quiet tail
+  C_OFF="${ESC}[0m"
+else
+  ESC="" C_MARK="" C_HEAD="" C_ERR="" C_DIM="" C_OFF=""
+fi
+
+die() { printf '%sxdev install:%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+# step <what happened> — one line per milestone, the way the install reads to
+# a person: a green tick and the fact, nothing else.
+step() { printf ' %s✓%s %s\n' "$C_MARK" "$C_OFF" "$*"; }
 
 command -v curl >/dev/null 2>&1 || die "needs curl"
 if command -v sha256sum >/dev/null 2>&1; then HASH_TOOL="sha256sum"
@@ -58,7 +82,7 @@ api_get() {
   fi
 }
 
-echo "== xdev install (${GOOS}/${GOARCH}) =="
+printf '%s== xdev install (%s/%s) ==%s\n' "$C_HEAD" "$GOOS" "$GOARCH" "$C_OFF"
 api_get "/repos/${REPO}/releases/latest" "$TMP/release.json" \
   || die "cannot read releases from ${API}/repos/${REPO} (anonymous rate limit? set GITHUB_TOKEN)"
 
@@ -71,17 +95,19 @@ SUMS_URL="$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\/SHA256SUMS\
 [ -n "$URL" ] || die "release ${TAG} carries no ${ASSET} binary"
 # Mirrors `xdev update`: an unverifiable binary is never installed.
 [ -n "$SUMS_URL" ] || die "release ${TAG} carries no SHA256SUMS manifest — refusing an unverified binary"
-echo "release:    ${TAG}"
+printf '%srelease:%s    %s\n' "$C_DIM" "$C_OFF" "$TAG"
 
 curl -fsSL "$SUMS_URL" -o "$TMP/SHA256SUMS" || die "cannot download the checksum manifest"
 WANT_SHA="$(awk -v a="$ASSET" '{ f = $2; sub(/^\*/, "", f); if (f == a) print $1 }' "$TMP/SHA256SUMS" | head -n 1)"
 [ -n "$WANT_SHA" ] || die "no SHA-256 entry for ${ASSET} in ${TAG}"
 
 curl -fsSL "$URL" -o "$TMP/xdev" || die "download of ${ASSET} failed"
+echo ""
+step "Downloaded" "$(awk -v b="$(wc -c <"$TMP/xdev")" 'BEGIN { printf "%.1f MB", b / 1000000 }')"
 ACTUAL_SHA="$($HASH_TOOL "$TMP/xdev" | awk '{print $1}')"
 [ "$ACTUAL_SHA" = "$WANT_SHA" ] \
   || die "SHA-256 mismatch: got ${ACTUAL_SHA}, manifest says ${WANT_SHA} — nothing installed"
-echo "verified:   ${ACTUAL_SHA}"
+step "Verified" "$ACTUAL_SHA"
 
 mkdir -p "$INSTALL_DIR" || die "cannot create ${INSTALL_DIR}"
 TARGET="${INSTALL_DIR}/xdev"
@@ -98,14 +124,14 @@ rm -f "$TARGET"
 mv "$TMP/xdev" "$TARGET" || die "cannot write ${TARGET} (permissions? try XDEV_INSTALL_DIR=\$HOME/.local/bin)"
 chmod 0755 "$TARGET"
 
-echo "installed:  ${TARGET}"
+step "Installed" "$TARGET"
 "$TARGET" version || die "${TARGET} was installed but did not run"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo ""
-     echo "${INSTALL_DIR} is not on PATH — add this to ~/.zshrc or ~/.bashrc:"
+     printf '%s%s is not on PATH — add this to ~/.zshrc or ~/.bashrc:%s\n' "$C_DIM" "$INSTALL_DIR" "$C_OFF"
      echo "  export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
 echo ""
-echo "Later upgrades: re-run this command, or \`xdev update\`."
+printf "%sLater upgrades: re-run this command, or \`xdev update\`.\n%s\n" "$C_DIM" "$C_OFF"
