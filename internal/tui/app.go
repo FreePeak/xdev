@@ -6091,13 +6091,29 @@ func (a *App) dividerParts() []hudPart {
 	// After the session-effort ladder adopted the same vocabulary as /thinking
 	// (low|medium|high|xhigh|max), painting both labels side by side produced
 	// "model · high · high" whenever the two dials landed on the same rung —
-	// the common case when thinking is auto and effort pins the default, and
-	// also when the user sets both to high. One amount of effort is one word:
-	// keep the thinking label (it still carries off/auto/minimal the effort
-	// dial does not), and only surface the effort rung when it actually differs.
+	// and "model · high · max" whenever they landed on adjacent ones, which is
+	// what a pinned `thinking: high` plus `effort: max` reads as. One request
+	// has one reasoning posture, so when BOTH dials name a rung they are
+	// folded onto the ladder and the higher rung is the one painted: the
+	// lower word would read as a second, conflicting setting on one request.
+	//
+	// The fold is by rank (config.EffortRank), not by equality, so it also
+	// covers the rungs the two vocabularies do not share: thinking's "auto"
+	// and "off" carry no rank, so they are never folded away — "auto · max"
+	// still names the rung that pins the level an auto model will take, and
+	// "off" still says what it says beside any chip.
 	think := a.thinkingLevel()
+	effort := a.effortLabel()
+	if tr, tOK := config.EffortRank(think); tOK {
+		if er, eOK := config.EffortRank(effort); eOK {
+			if er > tr {
+				think = effort
+			}
+			effort = ""
+		}
+	}
 	add("", think, a.thinkingToken())
-	if effort := a.effortLabel(); effort != "" && effort != think {
+	if effort != "" {
 		add("", effort, a.effortToken())
 	}
 	if a.vibeOps != nil && a.vibeOps.Active != nil && a.vibeOps.Active() {
