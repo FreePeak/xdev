@@ -50,6 +50,19 @@ platform, verifies its SHA-256 against the release manifest, and installs to
 curl -fsSL https://raw.githubusercontent.com/FreePeak/xdev/main/scripts/install.sh | sh
 ```
 
+```text
+== xdev install (darwin/arm64) ==
+release:    v0.4.264
+
+ ✓ Downloaded 22.7 MB
+ ✓ Verified bcc85320cfe7e82f86604d400fe9641f4f5f8f06225ec612c1b736a14fdafd3e
+ ✓ Installed ~/.local/bin/xdev
+xdev v0.4.264
+```
+
+Colour only when the output can show it: a TTY, not `TERM=dumb`, no
+`NO_COLOR`. Piping the script's output gets the same lines with no escape.
+
 **Windows** — download `xdev_windows_amd64.exe` (or `_arm64`) from
 [the latest release](https://github.com/FreePeak/xdev/releases/latest) and put it
 on your `PATH`.
