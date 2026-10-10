@@ -10,28 +10,18 @@ package tui
 // the painter decides how to spend the rows it is handed and this file is
 // testable without a screen.
 
-// stickyPad is the header's own air, in rows: the card's blank banded row
-// above AND below its text, so a pinned prompt is a card on all four edges and
-// not a bar pressed against the top of the transcript. The header counts these
-// in the rows it owns but never in the rows it keeps visible, so the prompt
-// still shrinks one text row per row scrolled.
-//
-// The bottom pad belongs to the PINNED copy, not to the card: inline, the
-// block separator supplies the air under a sent message (blockLines pads above
-// its text only). Pinned, the card is a header with a gap under it, and that
-// gap reads as air under the WHOLE header — so the last text row sat hard
-// against the stream it floats above, the one edge the top pad cannot answer.
-const stickyPad = 1
-
 // stickyMinHeight is the floor a pinned prompt collapses to, in TEXT rows:
 // enough rows to read its first line and admit with an ellipsis that the rest
-// is hidden. stickyPad sits on top of it.
+// is hidden.
 const stickyMinHeight = 3
 
 // stickyGap is the blank row between a pinned prompt and the transcript below
 // it (grok's HEADER_CONTENT_GAP): one row of air says the header is not part of
-// the stream. A prompt being pushed off renders no gap after it, so the
-// transcript's first row does not move while the push plays out.
+// the stream. It is the ONLY air the pinned copy paints — the inline card pads
+// no row of its own (fix/user-band-no-top-pad), and a pinned prompt is the same
+// card, so padding the header would be the one difference between the two
+// renderings of one message. A prompt being pushed off renders no gap after
+// it, so the transcript's first row does not move while the push plays out.
 const stickyGap = 1
 
 // stickyPrompt is one user prompt's place in the transcript's row space: where
@@ -69,11 +59,10 @@ func (a *App) stickyPrompts() []stickyPrompt {
 	return out
 }
 
-// bandTextRows counts a render's rows that carry text. A user card pads its own
-// first and last row (see blockLines); every other block is content end to end,
-// so this is its render verbatim. With the inline card padding no row of its
-// own, a user render is text end to end too — the walk stays as the guard that
-// survives the next render that pads one.
+// bandTextRows counts a render's rows that carry text. A user card pads no row
+// of its own (see blockLines); every other block is content end to end, so this
+// is its render verbatim. The walk stays as the guard that survives the next
+// render that pads one.
 func bandTextRows(lines []line) int {
 	n := 0
 	for i := range lines {
@@ -97,16 +86,14 @@ func bandTextIndex(lines []line) int {
 
 // stickyLayout is one frame's header decision. block -1 means no header: the
 // prompt renders inline in the transcript, exactly as before. rows is what the
-// header owns of the viewport, padding and gap included, so the transcript
-// resumes at start+rows and still ends at start+vp.
+// header owns of the viewport, gap included, so the transcript resumes at
+// start+rows and still ends at start+vp.
 type stickyLayout struct {
-	block     int   // pinned block (-1 = none)
-	visible   int   // TEXT rows of the prompt on screen, after clipping
-	clipTop   int   // text rows cut off its top by the next prompt pushing in
-	rows      int   // screen rows the header owns: padding, text and gap
-	row       int32 // the prompt's first TEXT row (it stays pinned past it)
-	padTop    int   // blank banded rows the card paints above its text
-	padBottom int   // blank banded rows the card paints below its text
+	block   int   // pinned block (-1 = none)
+	visible int   // TEXT rows of the prompt on screen, after clipping
+	clipTop int   // text rows cut off its top by the next prompt pushing in
+	rows    int   // screen rows the header owns: text and gap
+	row     int32 // the prompt's first TEXT row (it stays pinned past it)
 }
 
 // computeSticky picks the prompt to pin for a viewport whose first row is
@@ -115,9 +102,8 @@ type stickyLayout struct {
 //
 // The 1:1 shrink is the point: the header gives a row back for every row
 // scrolled, so the content below it advances by one row per row of scroll and
-// the viewport's bottom line never jumps. It counts TEXT rows, and the card's
-// own padding rides on top of them (stickyPad), so a pinned prompt is the same
-// card the transcript drew and the shrink still counts words.
+// the viewport's bottom line never jumps. It counts TEXT rows, exactly the rows
+// the inline card renders — the header paints nothing the inline copy does not.
 func computeSticky(firstRow int32, vp int, prompts []stickyPrompt) stickyLayout {
 	none := stickyLayout{block: -1}
 	if len(prompts) == 0 || firstRow <= 0 {
@@ -136,42 +122,34 @@ func computeSticky(firstRow int32, vp int, prompts []stickyPrompt) stickyLayout 
 	p := prompts[pin]
 	// Its text is what is left of it once the rows scrolled past its top are
 	// gone — never below the floor, never taller than it renders inline, never
-	// taller than the viewport minus the padding the card wraps itself in.
-	text := max(min(p.full-int(firstRow-p.row), vp-2*stickyPad), min(stickyMinHeight, p.full))
-	if text+2*stickyPad+stickyGap >= vp {
+	// taller than the viewport minus the one gap row under it.
+	text := max(min(p.full-int(firstRow-p.row), vp-stickyGap), min(stickyMinHeight, p.full))
+	if text+stickyGap >= vp {
 		return none // the header would leave the transcript no rows at all
 	}
 	// How many rows the card may own at all. With no following prompt it is the
 	// whole viewport, and it has already been shown to fit. With one, it is
-	// everything above the incoming card's OWN top padding: a header that
-	// covered that row would show the new prompt without the air the card
-	// paints for itself.
+	// everything above the incoming card's OWN top row: a header that covered
+	// that row would show the new prompt its transcript already paints.
 	room := vp
 	if next := pin + 1; next < len(prompts) {
-		room = int(prompts[next].row-firstRow) - stickyPad
+		room = int(prompts[next].row - firstRow)
 	}
-	card := text + 2*stickyPad + stickyGap
-	h := stickyLayout{block: p.block, row: p.row, padTop: stickyPad, padBottom: stickyPad}
+	card := text + stickyGap
+	h := stickyLayout{block: p.block, row: p.row}
 	if room >= card {
 		h.visible, h.rows = text, card
 		return h
 	}
 	// Pushed off. The push clips the card from the TOP — that is the direction
 	// the next prompt arrives from — so what the header gives up comes off the
-	// BOTTOM, cheapest row first: the blank gap, then the blank padding under
-	// the text, then the text itself. The padding over the text goes last.
-	h.padBottom = 0
-	if room >= text+stickyPad {
-		h.visible, room = text, room-text
-		h.padTop = min(stickyPad, room)
-	} else {
-		h.padTop, h.visible = 0, min(text, room)
-	}
+	// BOTTOM, cheapest row first: the blank gap, then the text itself.
+	h.visible = min(text, room)
 	if h.visible <= 0 {
 		return none // nothing of the card is left above the incoming one
 	}
 	h.clipTop = text - h.visible
-	h.rows = h.padTop + h.visible + h.padBottom
+	h.rows = h.visible
 	return h
 }
 
@@ -180,9 +158,9 @@ func computeSticky(firstRow int32, vp int, prompts []stickyPrompt) stickyLayout 
 // WHERE a prompt is, never what it looks like. Caller holds a.mu, after sync.
 //
 // The window is in TEXT rows (the space stickyPrompts and computeSticky work
-// in), so the card's blank pad row is stepped over: it is the card's padding,
-// not a line of the request, and the painter spends stickyPad rows for it from
-// the header's own row budget instead.
+// in), so a render row carrying no text is stepped over: it would be spacing,
+// not a line of the request, and showing it would paint a blank line where the
+// request should be.
 func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 	if h.block < 0 || h.block >= len(a.rowIdx.rend) {
 		return nil
@@ -192,7 +170,7 @@ func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 	text := 0
 	for i := range lines {
 		if len(lines[i].runs) == 0 {
-			continue // the card's pad row: spacing, not a line
+			continue // spacing, not a line of the request
 		}
 		if text < h.clipTop {
 			text++
@@ -224,19 +202,4 @@ func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 	tail.text = truncateCells(tail.text, max(0, wrapW-used-2), "") + " …"
 	out[len(out)-1].ln = last
 	return out
-}
-
-// stickyPadRow is the blank banded row the pinned prompt's card pads itself
-// with. The inline card no longer draws a pad row of its own (the block
-// separator is the air a sent message gets inline), so the header builds its
-// air from the card's own band: the first line's background and inset, with
-// the runs dropped. An unpinned prompt (h.padTop and h.padBottom both zero)
-// never reaches the painter with it.
-func (a *App) stickyPadRow(h stickyLayout) rowView {
-	if h.block < 0 || h.block >= len(a.rowIdx.rend) || len(a.rowIdx.rend[h.block].lines) == 0 {
-		return rowView{}
-	}
-	ln := a.rowIdx.rend[h.block].lines[0]
-	ln.runs = nil
-	return rowView{ln: ln}
 }

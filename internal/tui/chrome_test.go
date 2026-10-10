@@ -1249,9 +1249,9 @@ func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	// Row 0 is the session's own first prompt, not a header: no branch on it,
-	// and the prompt is where it has always been — under the card's own blank
-	// padding row, which is air rather than content.
-	first := app.transcriptTop() + stickyPad // under the card's blank padding row
+	// and the prompt is where it has always been — the first row of the
+	// transcript, the card padding itself no longer.
+	first := app.transcriptTop()
 	if first >= len(rows) || strings.Contains(rows[first], "fix/boxes") || !strings.Contains(rows[first], "fix the") {
 		t.Fatalf("row %d %q must be transcript content, not a header", first, rows[first])
 	}
