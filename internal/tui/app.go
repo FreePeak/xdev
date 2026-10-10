@@ -445,7 +445,6 @@ type App struct {
 	// mu-guarded.)
 	stickyHdr   int
 	stickyVis   int
-	stickyPad   int
 	stickyBlock int
 	stickyDoc   int32
 	// toasts is the live notice stack (toast.go): the copy confirmation, a
@@ -4770,7 +4769,6 @@ func (a *App) paint() {
 	// Per-frame facts about the viewport: a frame that draws no transcript
 	a.selRows, a.selBarOn, a.selDockRows, a.linkHits = nil, false, nil, nil
 	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyDoc = 0, 0, -1, 0
-	a.stickyPad = 0
 	// The pills' hit table is a per-frame fact for the same reason the
 	// scrollbar's is: a frame that drops a pill for width must not leave
 	// last frame's rectangle live, or a click would open a popup for a
@@ -4873,23 +4871,13 @@ func (a *App) paint() {
 	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
-	// The header owns its card's padding on top of the rows it keeps: a blank
-	// banded row above the text and one below it, the same rows the
-	// transcript's own card paints, so a pinned prompt is that card — margins
-	// and all — rather than a bar pressed against the top of the viewport with
-	// its last line hard against the stream below. Both counts are zero when
-	// nothing is pinned, so the row is never painted without a card.
-	padRow := a.stickyPadRow(sticky)
+	// The header paints the prompt's own rows and nothing else: it is the
+	// inline card verbatim, so a pinned prompt looks exactly like the one the
+	// transcript drew — no blank banded rows the inline copy does not have.
+	// The one row after it is the gap that says the header is not part of the
+	// stream, and it is zero when nothing is pinned.
 	view := make([]rowView, 0, max(sticky.rows, end-start))
-	for range sticky.padTop {
-		view = append(view, padRow)
-	}
 	view = append(view, header...)
-	for range sticky.padBottom {
-		view = append(view, padRow)
-	}
-	// The remaining rows of the header's budget are the one row of air that
-	// says it is not part of the stream.
 	for range sticky.rows - len(view) {
 		view = append(view, rowView{})
 	}
@@ -5027,11 +5015,9 @@ func (a *App) paint() {
 	// prompt's rows); every row below it keeps the viewport's own mapping,
 	// because the header re-renders rows the viewport already owned.
 	a.stickyHdr, a.stickyVis, a.stickyBlock = sticky.rows, len(header), sticky.block
-	a.stickyPad = sticky.padTop
 	a.stickyDoc = 0
 	if sticky.block >= 0 {
-		// The header's first PAINTED TEXT row is the prompt's row clipTop: the
-		// blank card padding above it belongs to no prompt, so this is the
+		// The header's first painted TEXT row is the prompt's row clipTop: the
 		// document row every hit-test reads instead of re-deriving it.
 		a.stickyDoc = sticky.row + int32(sticky.clipTop)
 	}

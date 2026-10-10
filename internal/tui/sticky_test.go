@@ -33,16 +33,9 @@ func TestStickyPinsOnlyAfterScrollPast(t *testing.T) {
 	if h.block != 0 {
 		t.Fatalf("scrolled one row past the first prompt: block = %d", h.block)
 	}
-	if h.rows != h.visible+h.padTop+h.padBottom+stickyGap {
-		t.Errorf("a pinned card leaves a gap before the transcript: rows=%d visible=%d padTop=%d padBottom=%d",
-			h.rows, h.visible, h.padTop, h.padBottom)
-	}
-	// The card keeps its air on BOTH edges of its text: a header that padded
-	// only above would be a bar with a gap under it, and one that padded only
-	// below would be a bar pressed against the top of the transcript.
-	if h.padTop != stickyPad || h.padBottom != stickyPad {
-		t.Errorf("a pinned card pads both sides of its text by one row: padTop=%d padBottom=%d",
-			h.padTop, h.padBottom)
+	if h.rows != h.visible+stickyGap {
+		t.Errorf("a pinned header leaves one gap row before the transcript: rows=%d visible=%d",
+			h.rows, h.visible)
 	}
 }
 
@@ -97,18 +90,18 @@ func TestStickyPushedByNextPrompt(t *testing.T) {
 	if h := computeSticky(16, 20, prompts); h.clipTop != 0 {
 		t.Fatalf("one row clear of the header, nothing pushed yet: %+v", h)
 	}
-	// The next prompt sits at naive row 3: one row of the header is pushed.
-	h := computeSticky(17, 20, prompts)
+	// The next prompt's first text row is at naive row 3: the gap row is the
+	// first thing the push gives up, so the push starts one row later than it
+	// did while the header also carried padding to spend.
+	h := computeSticky(18, 20, prompts)
 	if h.block != 0 || h.visible != 2 || h.clipTop != 1 {
 		t.Fatalf("mid-push: %+v", h)
 	}
-	if h.rows != h.visible+h.padTop+h.padBottom {
-		t.Errorf("a pushed header must not reserve a gap under it: rows=%d visible=%d padTop=%d padBottom=%d",
-			h.rows, h.visible, h.padTop, h.padBottom)
+	if h.rows != h.visible {
+		t.Errorf("a pushed header must not reserve a gap under it: rows=%d visible=%d", h.rows, h.visible)
 	}
-	// next_naive 1: only the gap row would be left, so the header hands the
-	// viewport back to the transcript entirely.
-	if h := computeSticky(19, 20, prompts); h.block != -1 {
+	// The next prompt's own row: nothing of the pinned card is left above it.
+	if h := computeSticky(20, 20, prompts); h.block != -1 {
 		t.Fatalf("the push must end with no header at all: %+v", h)
 	}
 }
@@ -169,28 +162,25 @@ func TestStickyHeaderPinsPromptAtTopOfViewport(t *testing.T) {
 	}
 	hdr := app.transcriptTop()
 	app.mu.Lock()
-	pad, painted := app.stickyPad, app.stickyHdr
+	painted := app.stickyHdr
 	app.mu.Unlock()
-	// The pinned prompt is a card: a blank banded row of padding above it, then
-	// the request. Row hdr alone is that air, not the request.
-	if got := strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr]), "█▀▄")); got != "" {
-		t.Fatalf("the pinned card has no padding at the top of the transcript: %q", rows[hdr])
+	// The pinned prompt IS the card the transcript drew: its first text row is
+	// the header's first row, with no blank banded row in between — the inline
+	// copy pads none of its own, and a pinned prompt must not add any.
+	if !strings.Contains(rows[hdr], "port the sticky header") {
+		t.Fatalf("the scrolled-past prompt is not pinned at row %d: %q", hdr, rows[hdr])
 	}
-	if !strings.Contains(rows[hdr+pad], "port the sticky header") {
-		t.Fatalf("the scrolled-past prompt is not pinned at row %d: %q", hdr+pad, rows[hdr+pad])
+	if !strings.Contains(rows[hdr], "❯") {
+		t.Fatalf("the pinned prompt must keep the user band glyph: %q", rows[hdr])
 	}
-	if !strings.Contains(rows[hdr+pad], "❯") {
-		t.Fatalf("the pinned prompt must keep the user band glyph: %q", rows[hdr+pad])
+	// A header, not a second copy: the rows the prompt occupies are the rows
+	// the transcript hides, so it is painted exactly once on screen.
+	if got := strings.Count(screenText(scr), "port the sticky header"); got != 1 {
+		t.Fatalf("the pinned prompt is painted %d times, want the one the header shows", got)
 	}
-	// A header, not a second copy: the prompt is not painted again below it,
-	// because the rows it hides are the rows the transcript resumes after.
-	body := strings.Join(rows[hdr+1:], "\n")
-	if got := strings.Count(body, "port the sticky header"); got != 1 {
-		t.Fatalf("the pinned prompt is painted %d times below itself, want the one the header shows", got)
-	}
-	// The card's own bottom padding, then the blank gap, separate the header
-	// from the transcript below it. The scrollbar rides every viewport row, so
-	// its glyph is the one thing those rows are not allowed to be empty of.
+	// The blank gap row separates the header from the transcript below it. The
+	// scrollbar rides every viewport row, so its glyph is the one thing that row
+	// is not allowed to be empty of.
 	if got := strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+painted-1]), "█▀▄")); got != "" {
 		t.Fatalf("no gap under the header: %q", rows[hdr+painted-1])
 	}
@@ -317,11 +307,10 @@ func TestStickyHeaderCopiesAsPainted(t *testing.T) {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	rows := app.selRows
-	pad := app.stickyPad
-	// The card's top padding is the card's first row: it is blank but it still
-	// belongs to the pinned prompt, so the capture holds the request one row in.
-	if len(rows) <= pad || !strings.Contains(rows[pad].text, "a long prompt line here") {
-		t.Fatalf("the pinned prompt is not in the selection capture: %+v", rows[:min(pad+3, len(rows))])
+	// The header's first captured row is the prompt's first text row: the
+	// header pads nothing, so there is no blank row holding the request's place.
+	if len(rows) == 0 || !strings.Contains(rows[0].text, "a long prompt line here") {
+		t.Fatalf("the pinned prompt is not in the selection capture: %+v", rows[:min(3, len(rows))])
 	}
 }
 
@@ -573,21 +562,19 @@ func TestStickyHeaderPaintsOnce(t *testing.T) {
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
 	hdr := app.transcriptTop()
 	app.mu.Lock()
-	painted, block, vis, pad := app.stickyHdr, app.stickyBlock, app.stickyVis, app.stickyPad
-	app.mu.Unlock()
+	painted, block, vis := app.stickyHdr, app.stickyBlock, app.stickyVis
 	if block < 0 || painted == 0 {
 		t.Fatalf("no sticky header painted (rows %d, block %d)", painted, block)
 	}
-	// The header is the pinned card: `vis` text rows of the prompt between
-	// blank padding above and below, then exactly one blank gap. Only the text
-	// rows are the request — the padding is air, and painting it as content
-	// would make the header look like it had blank lines in the middle.
+	// The header is the prompt verbatim: `vis` text rows of it, nothing else,
+	// then exactly one blank gap. Painting a blank row as content would make
+	// the header look like it had a blank line in the middle.
 	for i := range vis {
-		if !strings.Contains(rows[hdr+pad+i], "HEADPROMPT") {
-			t.Fatalf("header row %d does not show the pinned prompt: %q", i, rows[hdr+pad+i])
+		if !strings.Contains(rows[hdr+i], "HEADPROMPT") {
+			t.Fatalf("header row %d does not show the pinned prompt: %q", i, rows[hdr+i])
 		}
 	}
-	if strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+painted-1]), "█▀▄")) != "" {
+	if got := strings.TrimSpace(strings.Trim(strings.TrimSpace(rows[hdr+painted-1]), "█▀▄")); got != "" {
 		t.Fatalf("the gap under the header is not blank: %q", rows[hdr+painted-1])
 	}
 	// The row just past the header is the stream, not another copy of the
@@ -603,15 +590,12 @@ func TestStickyHeaderPaintsOnce(t *testing.T) {
 	}
 }
 
-// TestStickyHeaderPadsBelowItsText is the fix's own contract, pinned on the
-// painted screen: the pinned card's LAST edge carries the band's blank row,
-// not the gap. Every other test here counts rows and text, which is why the
-// missing bottom pad passed all of them — the header's row budget was right,
-// the air under the text just was not the card's. It is the one edge the top
-// pad cannot answer: pinned, the gap under the card reads as air under the
-// WHOLE header, so without this row the request's last line sits hard against
-// the stream it is floating above.
-func TestStickyHeaderPadsBelowItsText(t *testing.T) {
+// TestStickyHeaderPadsNoRowOfItsOwn is the deletion's own contract, pinned on
+// the painted screen: the header paints the prompt's text rows and nothing
+// else, so the row directly under the last text row is the gap — unbanded — and
+// not a blank banded row the inline copy does not have either. It is the same
+// rule fix/user-band-no-top-pad applied inline, held to the pinned copy.
+func TestStickyHeaderPadsNoRowOfItsOwn(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddUserBlock(strings.Repeat("HEADPROMPT row\n", 5))
 	app.AddAssistantBlock(strings.Repeat("STREAM row\n", 40))
@@ -622,7 +606,7 @@ func TestStickyHeaderPadsBelowItsText(t *testing.T) {
 	app.draw()
 
 	app.mu.Lock()
-	hdr, pad, vis := app.transcriptTop(), app.stickyPad, app.stickyVis
+	hdr, painted, vis := app.transcriptTop(), app.stickyHdr, app.stickyVis
 	app.mu.Unlock()
 	if vis == 0 {
 		t.Fatal("no sticky header painted")
@@ -643,21 +627,25 @@ func TestStickyHeaderPadsBelowItsText(t *testing.T) {
 		}
 		return true
 	}
-	// The row directly under the pinned prompt's last text row is the card's
-	// own bottom padding: banded, and carrying no glyphs.
-	bottom := hdr + pad + vis
-	if bgAt(bottom, userBandInset) != want {
-		t.Fatalf("the pinned card has no bottom padding: row %d paints %s, want the band %v",
-			bottom, bgAt(bottom, userBandInset), want)
+	// The header is `vis` text rows: its first row is the request, not air.
+	if !strings.Contains(screenText(scr), "HEADPROMPT row") {
+		t.Fatal("the pinned prompt is not on screen at all")
 	}
+	// The row directly under the last text row is the gap: blank, and NOT the
+	// band — a banded blank row there is a pad row the inline card does not have.
+	bottom := hdr + vis
 	if !blank(bottom) {
-		t.Fatalf("the pinned card's bottom padding carries glyphs: %q", screenText(scr))
+		t.Fatalf("the row under the header carries glyphs: %q", screenText(scr))
 	}
-	// And the row after it is the gap, which is transcript spacing and must
-	// NOT be banded: two cards' worth of air under one request is the other
-	// half of the bug.
-	if bgAt(bottom+1, userBandInset) == want {
-		t.Fatalf("the gap under the header is banded too: row %d", bottom+1)
+	if bgAt(bottom, userBandInset) == want {
+		t.Fatalf("the row under the header is banded padding, row %d", bottom)
+	}
+	// Exactly one row of gap, then the stream — painted is the header's budget.
+	if painted != vis+stickyGap {
+		t.Fatalf("the header owns %d rows for %d text rows and %d gap", painted, vis, stickyGap)
+	}
+	if !strings.Contains(screenText(scr), "STREAM row") {
+		t.Fatalf("the stream is not under the header: %q", screenText(scr))
 	}
 }
 
@@ -711,15 +699,11 @@ func TestStickyPushClipsTheHeaderAndResolvesItsRows(t *testing.T) {
 		if h.block != 0 {
 			t.Fatalf("off %d: a pushed header belongs to block %d, want 0", off, h.block)
 		}
-		if h.rows != h.visible+h.padTop+h.padBottom {
-			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible (pad %d/%d) — the gap goes first",
-				off, h.rows, h.visible, h.padTop, h.padBottom)
-		}
-		// The bottom padding is the FIRST row the push gives up: the card
-		// under a pushing prompt keeps its top air and its words as long as
-		// it can, and spends the blank row under the text before either.
-		if h.padBottom != 0 {
-			t.Fatalf("off %d: a pushed header still paints %d rows of bottom padding", off, h.padBottom)
+		// The gap row is the FIRST thing the push gives up: the card under a
+		// pushing prompt spends its blank row under it before either word.
+		if h.rows != h.visible {
+			t.Fatalf("off %d: a pushed header reserves %d rows for %d visible",
+				off, h.rows, h.visible)
 		}
 		// The row the pointer is over resolves into the pinned prompt's own
 		// rows, at the offset the header is showing.
