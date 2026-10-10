@@ -510,15 +510,14 @@ func TestUserBandPaintsUnderGlyphs(t *testing.T) {
 	}
 }
 
-// TestUserBandHasItsOwnAir pins the padding on three sides of a sent message:
-// a blank banded row above the prompt, so it hangs off the top of its own
-// card, and a userBandMargin of pane background at each side, so the card
-// floats instead of running off both edges. No pad row BELOW: the block's own
-// separator already supplies that air, so a second blank banded row would
-// spend two rows of a small screen on air for one gap. The row COUNT alone
-// would pass with the padding in the wrong place, and a prompt flush against
-// the screen edge is a geometry bug, not a style one.
-func TestUserBandHasItsOwnAir(t *testing.T) {
+// TestUserBandPadsNoRowOfItsOwn pins the sent message as ONE row of card, not
+// a box: no blank banded row above the ❯ and none below it — the block
+// separator is transcript spacing and already draws that air — while the
+// userBandMargin at each side and the single cell inside the card before the
+// ❯ stay. The row count alone would pass with the padding in the wrong place,
+// and a prompt flush against the screen edge is a geometry bug, not a style
+// one.
+func TestUserBandPadsNoRowOfItsOwn(t *testing.T) {
 	app, scr := drawnApp(t, 80, 20)
 	app.AddUserBlock("a prompt with air around it")
 	app.draw()
@@ -546,31 +545,25 @@ func TestUserBandHasItsOwnAir(t *testing.T) {
 			break
 		}
 	}
-	if y < 1 || y >= 19 {
-		t.Fatalf("no prompt row with a row above it to pad: %d", y)
+	if y < 0 || y >= 20 {
+		t.Fatalf("no prompt row painted: %d", y)
 	}
-	// The row above the prompt carries the band and nothing else. The card's
-	// right end is not among them: the timestamp rides it, which is where it
-	// has always ridden, and the row it paints on is the card's own first row.
-	for _, x := range []int{userBandMargin, userBandInset, w / 2} {
-		if bg := bgAt(y-1, x); bg != want || runeAt(y-1, x) != ' ' {
-			t.Fatalf("pad row cell %d is %q on %s, want a blank banded cell", x, runeAt(y-1, x), bg)
-		}
+	// The row above the prompt is the transcript's own spacing, not the
+	// card's: it must not carry the band.
+	if bg := bgAt(y-1, userBandInset); bg == want {
+		t.Fatalf("the card still pads a blank banded row above its text: %s", bg)
 	}
-	// Below the prompt there is no banded air of the card's own: the row is
-	// the block's separator, which is transcript spacing and paints the pane.
+	// Below the prompt likewise: no band.
 	if bg := bgAt(y+1, userBandInset); bg == want {
 		t.Fatalf("the card pads below its text as well, one row for one gap")
 	}
-	// The margins: the band stops userBandMargin short of each edge, on every
-	// row of the card, so it floats with the pane's own background at both sides.
-	// What the margin must NOT be is the band — an unpainted cell is the
-	// terminal's own background, which is the whole contract here.
-	for _, row := range []int{y - 1, y} {
-		for _, x := range []int{0, userBandMargin - 1, w - 1} {
-			if bg := bgAt(row, x); bg == want {
-				t.Fatalf("the card runs off the pane: row %d column %d is still banded", row, x)
-			}
+	// The margins: the band stops userBandMargin short of each edge, so it
+	// floats with the pane's own background at both sides. What the margin
+	// must NOT be is the band — an unpainted cell is the terminal's own
+	// background, which is the whole contract here.
+	for _, x := range []int{0, userBandMargin - 1, w - 1} {
+		if bg := bgAt(y, x); bg == want {
+			t.Fatalf("the card runs off the pane: column %d is still banded", x)
 		}
 	}
 	if bg := bgAt(y, w-1-userBandMargin); bg != want {

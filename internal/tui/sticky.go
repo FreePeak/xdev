@@ -223,12 +223,16 @@ func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 }
 
 // stickyPadRow is the blank banded row the pinned prompt's card pads itself
-// with, so the header spends the padding the transcript drew rather than
-// inventing its own. An unpinned prompt (h.padTop and h.padBottom both zero)
+// with. The inline card no longer draws a pad row of its own (the block
+// separator is the air a sent message gets inline), so the header builds its
+// air from the card's own band: the first line's background and inset, with
+// the runs dropped. An unpinned prompt (h.padTop and h.padBottom both zero)
 // never reaches the painter with it.
 func (a *App) stickyPadRow(h stickyLayout) rowView {
 	if h.block < 0 || h.block >= len(a.rowIdx.rend) || len(a.rowIdx.rend[h.block].lines) == 0 {
 		return rowView{}
 	}
-	return rowView{ln: a.rowIdx.rend[h.block].lines[0]}
+	ln := a.rowIdx.rend[h.block].lines[0]
+	ln.runs = nil
+	return rowView{ln: ln}
 }
