@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/gateway"
 	"github.com/FreePeak/xdev/internal/serve"
 )
 
@@ -82,7 +83,7 @@ var psSubcommands = map[string]bool{
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
 	"stats": true, "memory": true, "share": true, "ps": true, "bg": true,
-	"update": true, "setup": true, "bench": true,
+	"gateway": true, "update": true, "setup": true, "bench": true,
 }
 
 // runPS implements `xdev ps`: which xdev processes are on this host, and an
@@ -240,6 +241,13 @@ func psClassify(argv []string, dataDir string) (kind, service, listen string, ha
 			serve.ReadToken(dataDir, svc) != ""
 	case "tui":
 		return psKindInteractive, "", "", false
+	case "gateway":
+		// The bridge is a long-lived daemon with no listen socket of its own
+		// (it polls the Bot API), so it reports the chat map instead of a
+		// listen address. The token file's presence is the daemon's proof of
+		// being configured at all.
+		return psKindDaemon, "telegram", "",
+			gateway.ReadTokenFile(dataDir) != ""
 	case "rpc", "acp":
 		return psKindWire, "", "", false
 	case "":
