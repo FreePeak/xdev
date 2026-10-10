@@ -1904,7 +1904,14 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	}
 	t, ok := a.Tools.Get(call.Name)
 	if !ok {
-		res := tool.Result{Text: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
+		// The miss message names a near-miss and the deferred catalog
+		// instead of just reporting the absence: measured over every stored
+		// session on 2026-10-10, 17 of 26 registrations of `unknown tool`
+		// were one garbled name (`ash_edit` = `ast_edit` minus a character),
+		// and a bare "unknown tool" made those models emit more junk names
+		// (ash_g1..ash_g4, ash_q..ash_w) rather than recover. See
+		// unknownname.go.
+		res := tool.Result{Text: unknownToolText(a.Tools, call.Name), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
 		return toolResultMsg(call, res, time.Since(started))
 	}
