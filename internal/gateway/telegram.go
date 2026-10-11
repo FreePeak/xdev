@@ -53,11 +53,17 @@ const (
 	telegramErrBodyCap = 300
 	// maxBackoff caps the poll retry backoff.
 	maxBackoff = 30 * time.Second
+	// typingInterval is how often a running turn re-fires sendChatAction.
+	// Telegram's typing indicator expires after ~5s, and one post is cheap,
+	// so 2s keeps the bubble alive across a slow turn — the same cadence
+	// Hermes' gateway keepalive loop uses.
+	typingInterval = 2 * time.Second
 )
 
 // Telegram is a minimal Bot API client over stdlib net/http: getUpdates,
-// sendMessage, and getMe. No SDK, no dependency — the three methods the
-// bridge needs are shorter than the import list of a client library.
+// sendMessage, sendChatAction, and getMe. No SDK, no dependency — the four
+// methods the bridge needs are shorter than the import list of a client
+// library.
 type Telegram struct {
 	// Token is the bot token from @BotFather.
 	Token string
@@ -261,6 +267,16 @@ func (t *Telegram) SendMessage(ctx context.Context, chatID int64, text string) e
 	t.logf("telegram: %v; resending as plain text", err)
 	plain := map[string]any{"chat_id": chatID, "text": text}
 	return t.call(ctx, "sendMessage", plain, &sent)
+}
+
+// SendChatAction posts one chat action — the bridge only ever needs "typing".
+// Telegram's typing bubble expires after ~5s, so a running turn re-fires it:
+// without that the chat looks idle for the whole of a slow model call.
+// A chat action is a courtesy, not the answer, so a failure is the caller's
+// to log and never a reason to fail the turn.
+func (t *Telegram) SendChatAction(ctx context.Context, chatID int64) error {
+	return t.call(ctx, "sendChatAction",
+		map[string]any{"chat_id": chatID, "action": "typing"}, nil)
 }
 
 // isParseError reports whether err is Telegram refusing a parse_mode body.
