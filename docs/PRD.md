@@ -3572,3 +3572,27 @@ Verified on the built binary through a real pty with `scripts/tui-sticky-padding
 3. **The iterative-update summarize + structured template.** The history summarize's system prompt is prime's checkpoint template, and a second compaction feeds the previous summary back as `<previous-summary>` with an explicit PRESERVE/ADD/UPDATE instruction. `internal/agent/compact_split_test.go` — `TestSecondCompactionUpdatesThePreviousSummary`, `TestCompactionPromptNamesTheSectionsAContinuationNeeds`, `TestSummarizeCarriesRecalledMemory` (memory stays preserved across the boundary — the contract the TUI/backends already honoured).
 **Async + CLI share the same span.** `kickAsyncCompaction` (the background summarize) and `CompactPlan.Compact` (the `xdev compress` CLI, which builds a span from a raw plan) both resolve their input through `cp.historyEnd()`, so a split cut summarizes the same span whichever entry point asked.
 **Verified against the real binary**, not only in tests: `xdev compress --method handoff` over a 13-message invented fixture (`A --> B --> C` paths only, no employer data) reached the local openai-completions SSE probe and the recorded request carried the prefix prompt for a mid-turn `--keep-recent` and the structured template for a turn-boundary one — both arms exercised through `compressSession`, the same engine a live boundary runs.
+
+---
+
+*Last updated: 2026-10-11 (`fix/sticky-top-margin` — user request: "add margin top of the top sticket latest user message in the session TUI"):* the pinned prompt's card carries **one blank banded row above its text**, so a scrolled-past request floats off the top of the transcript instead of being tacked to it. Inline, a sent message's air comes from the block separator — which a pinned prompt has already scrolled away from; directly above a header sits the session strip, so the `❯` was hard against the frame above it.
+
+**One row, on the top only.** `stickyMarginTop = 1` rides on top of the card the way `stickyGap` rides under it, and it is the header's own row budget that pays for it:
+
+```
+[stock 5bd5f1b]  row 0:  ❯ PROMPT1 ship the band padding   ← the request flush on the strip
+[this branch]   row 0:  .####.                            ← the card's top margin: blank, banded, same two edges
+                row 1:  ❯ PROMPT1 ship the band padding
+                row 2:  ··············                     ← stickyGap, unchanged: the bottom edge is still air only
+                row 3:  ┃  PROMPT1-ROW-01                  ← the stream, one row lower
+```
+
+The bottom edge stays unpadded: #618 (`fix/sticky-no-pad`) took the pad row off both copies and `stickyGap` is already the air under the card — one message must not disagree with itself between its two renderings, and the request that prompted #618 was to *remove* padding, not to move it.
+
+**The margin is not a row the push spends.** While the next prompt pushes the card off, the rows go cheapest first: the gap, then the text. The top margin is held to the last, because the incoming prompt's own text row is about to cover that cell anyway — spending it early would only drag the words one row further up the screen for no gain. `stickyLayout.margin` therefore stays `stickyMarginTop` through the whole push arc and `rows = margin + visible` throughout; the only thing clipping is `clipTop`, as before.
+
+**The four header-row hit-tests index the card, not the header.** `dy < stickyMargin` is the card's own air and belongs to no prompt, so `userRowAt` (msgmenu.go) reports no block on it and `selCornerAt` / `selCacheRows` / `selDocRow` (selection.go) start the pinned prompt's document rows at `dy - stickyMargin`. A click, a copy and a click-through all name the row that is actually painted — the same contract #618 re-established, now with one more row to account for.
+
+Tests: `internal/tui/sticky_test.go` — `TestStickyHeaderCarriesATopMargin` (new: the margin row is blank and BANDED at `userBandInset`, stops `userBandMargin` short of the left edge and reaches the card's own right edge, and the header's budget is exactly margin + text + gap), `TestStickyHeaderPaintsOnce` and `TestStickyHeaderPadsNoRowOfItsOwn` read the prompt at `hdr+stickyMarginTop`, `TestStickyPushedByNextPrompt` pins the held margin at firstRow 19, `TestStickyPushClipsTheHeaderAndResolvesItsRows` asserts `rows == margin+visible` at every pushed offset, and the click/copy tests press at `hdr+stickyMarginTop`. `internal/tui/chrome_test.go` — `TestNoTopBarAndBranchOnTheStatusRow` reads the session's first prompt at `transcriptTop()+stickyMargin`.
+
+Verified on the built binary through a real pty with `scripts/tui-sticky-padding-drive.py` (mock provider, 100x30, three turns, Shift+Up ladder), stock `ee9199a` (`fix/sticky-no-pad`, the last commit on this path) beside this branch through the identical script: at the tail stock's row 0 is `❯ PROMPT2 …` and this branch's row 0 is the blank banded margin; scrolled back, stock pins the request on row 0 and this branch pins it on row 1 with the band above it, the stream one row lower in both.
