@@ -18,6 +18,17 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 )
 
+// botMenu is the command list the Telegram client shows when the user taps
+// "/". Descriptions are short (Telegram caps each at 256 chars and the menu
+// at 100) and must describe the action, not the mechanism.
+var botMenu = []BotCommand{
+	{"help", "What this bot does and how to talk to it"},
+	{"status", "Bot, workspace, memory and this chat's session"},
+	{"new", "Start a fresh session (the old one stays on disk)"},
+	{"stop", "Cancel the turn running right now"},
+	{"whoami", "Your Telegram user and chat id"},
+}
+
 // slashHelp is what /help answers. The set is the minimal useful one
 // Hermes' gateway exposes to chat users (gateway/run_busy.py:907-922):
 // status, help, stop, and a fresh session.
@@ -161,6 +172,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// the bridge, and WriteUnit guards the rest of the daemon's needs.
 	if err := WriteStatus(d.dataDir, Status{PID: os.Getpid(), Version: d.version, BotName: me.Username, Workspace: d.workspace, Started: time.Now().UTC()}); err != nil {
 		d.logFn("gateway: status file: %v", err)
+	}
+	// Register the "/" menu. A failure here is a warning, never fatal: the
+	// menu is a convenience, and a bridge that must see its commands typed
+	// still works.
+	if err := d.tg.SetMyCommands(ctx, botMenu); err != nil {
+		d.logFn("gateway: command menu: %v", err)
+	} else {
+		d.logFn("gateway: registered %d command(s) in the client menu", len(botMenu))
 	}
 	offset := int64(0)
 	conflicts := 0
