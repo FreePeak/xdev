@@ -22,6 +22,12 @@ type Settings struct {
 	Model string `yaml:"model"`
 	// Timeout bounds one request.
 	Timeout time.Duration `yaml:"timeout"`
+	// Fanout adds parallel-subagent guidance to the system prompt
+	// (see agent.BuildFanoutGuidance): the LLM itself decides per turn
+	// whether the work is independent enough to fan out. Off by
+	// default — a turn that serializes anyway pays the extra prompt
+	// tokens and gains nothing.
+	Fanout bool `yaml:"fanout"`
 }
 
 // Config returns settings with environment fallbacks and defaults. A custom

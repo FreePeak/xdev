@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/agent"
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/tool"
 )
 
@@ -259,5 +260,61 @@ func TestPersonalityPresetReachesThePrompt(t *testing.T) {
 	// An unknown preset never reaches a run.
 	if err := (&agent.SystemPromptOverrides{}).ApplyPersonalityPreset("moody"); err == nil {
 		t.Fatal("unknown preset must error")
+	}
+}
+
+// TestFanoutGuidanceIsOptIn pins the toggle's whole contract: the block
+// appears in the rendered prompt only when typesafe.fanout is on, and the
+// ON case still leaves it inside PRD §1 Goal 4's budget.
+func TestFanoutGuidanceIsOptIn(t *testing.T) {
+	loadedSettings = nil
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	build := func(on bool) string {
+		t.Helper()
+		loadedSettings = &config.Settings{}
+		loadedSettings.TypeSafe.Fanout = on
+		return promptFn("BASE", t.TempDir(), reg, "")()
+	}
+	t.Cleanup(func() { loadedSettings = nil })
+
+	off := build(false)
+	if strings.Contains(off, agent.FanoutGuidance) {
+		t.Fatal("fanout block present with typesafe.fanout unset")
+	}
+	on := build(true)
+	if !strings.Contains(on, agent.FanoutGuidance) {
+		t.Fatal("fanout block missing with typesafe.fanout: true")
+	}
+	// The block plus its blank-line separator, and nothing else.
+	if got, want := len([]rune(on))-len([]rune(off)), len([]rune("\n\n"+agent.FanoutGuidance)); got != want {
+		t.Fatalf("fanout block changed the prompt by %d chars, block is %d", got, want)
+	}
+	if tokens := len([]rune(on)) / 4; tokens >= maxPromptTokens {
+		t.Fatalf("fanout-on prompt is ~%d tokens (budget %d): trim the block", tokens, maxPromptTokens)
+	}
+}
+
+// TestFanoutGuidanceNeedsTheTaskTool pins the gate the first version was
+// missing: the block names `task`, so a prompt built from a registry
+// WITHOUT it must not carry the block. The vibe director's scope
+// (internal/agent/vibe.go) is built from this same closure with
+// vibe_spawn/vibe_send and no `task` — told to "send a batch of task
+// jobs", it could only fail.
+func TestFanoutGuidanceNeedsTheTaskTool(t *testing.T) {
+	loadedSettings = &config.Settings{}
+	loadedSettings.TypeSafe.Fanout = true
+	t.Cleanup(func() { loadedSettings = nil })
+
+	full := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	with := promptFn("BASE", t.TempDir(), full, "")()
+	if !strings.Contains(with, agent.FanoutGuidance) {
+		t.Fatal("parent registry has task but the block is missing")
+	}
+
+	bare := tool.NewRegistry()
+	bare.Register(tool.NewReadTool())
+	without := promptFn("BASE", t.TempDir(), bare, "")()
+	if strings.Contains(without, agent.FanoutGuidance) {
+		t.Fatal("block shipped into a prompt whose registry has no task tool")
 	}
 }
