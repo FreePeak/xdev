@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -289,5 +290,51 @@ func TestGetUpdatesSendsOffsetAndTimeout(t *testing.T) {
 	}
 	if gotTimeout != 7 {
 		t.Errorf("timeout sent = %d, want 7", gotTimeout)
+	}
+}
+
+// TestTransportErrorNeverCarriesTheToken: a net/http error quotes the URL,
+// and the URL carries the bot token — so one stale-token retry logs the
+// secret. Measured on the live bridge 2026-10-11: the daemon log held
+// `getMe: Post "https://api.telegram.org/bot8271667235:AAH…/getMe"`.
+func TestTransportErrorNeverCarriesTheToken(t *testing.T) {
+	tok := "111111111:TESTtestTESTtestTESTtestTESTtestTESTtest"
+	url := "https://api.telegram.org/bot" + tok + "/getMe"
+	// The real transport's shape for a cancelled request.
+	raw := errors.New(`Post "` + url + `": context canceled`)
+	got := maskTokenInError(raw, tok).Error()
+	if strings.Contains(got, tok) {
+		t.Fatalf("the token survived the mask: %q", got)
+	}
+	if !strings.Contains(got, "…") || !strings.Contains(got, "/bot") {
+		t.Errorf("the masked error lost the endpoint too: %q", got)
+	}
+	if !strings.Contains(got, "context canceled") {
+		t.Errorf("the underlying reason was lost: %q", got)
+	}
+}
+
+// TestTransportErrorIsLeftAlone: a token-free error (a dial failure naming
+// the host but not the bot) must pass through untouched, so the masking is
+// not a blanket rewrite.
+func TestTransportErrorIsLeftAlone(t *testing.T) {
+	raw := errors.New(`dial tcp 127.0.0.1:8899: connect: connection refused`)
+	if got := maskTokenInError(raw, "111111111:secretvalue").Error(); got != raw.Error() {
+		t.Errorf("error changed: %q", got)
+	}
+}
+
+// TestCallMasksTokenToAnUnreachableAPI: the client against a dead endpoint
+// must report the masked endpoint, not the secret.
+func TestCallMasksTokenToAnUnreachableAPI(t *testing.T) {
+	tg := &Telegram{Token: "111111111:TESTtestTESTtestTESTtestTESTtestTESTtest",
+		BaseURL:    "http://127.0.0.1:1", // reserved: nothing listens
+		HTTPClient: &http.Client{Timeout: time.Second}}
+	_, err := tg.GetMe(context.Background())
+	if err == nil {
+		t.Fatal("an unreachable API must error")
+	}
+	if strings.Contains(err.Error(), "111111111:TESTtest") {
+		t.Errorf("the error leaked the token: %v", err)
 	}
 }

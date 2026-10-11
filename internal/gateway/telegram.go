@@ -115,7 +115,11 @@ func (t *Telegram) call(ctx context.Context, method string, payload any, out any
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := t.client().Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram %s: %w", method, err)
+		// The transport error embeds the URL, and the URL carries the token
+		// — a raw one in a log line or an error reply is a secret in a
+		// place the operator did not choose. Masked: the endpoint is still
+		// named (as api.telegram.org/bot<mask>/getMe), the secret is not.
+		return fmt.Errorf("telegram %s: %w", method, maskTokenInError(err, t.Token))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -372,4 +376,19 @@ func ValidTokenShape(tok string) bool {
 		}
 	}
 	return true
+}
+
+// maskTokenInError rewrites a token that a transport error carries inside a
+// URL. net/http errors of every kind ("Post “https://api.telegram.org/bot827…/getMe”:
+// context canceled", dial errors, TLS errors) all quote the URL, so the fix is
+// one redaction at the single place the URL is built.
+func maskTokenInError(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, token) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(msg, token, MaskToken(token)))
 }
