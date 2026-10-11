@@ -26,6 +26,11 @@ import (
 
 var version = "0.1.0-dev"
 
+// The headless service lives in cmd (it owns the session core), while its
+// dispatch lives in internal/serve. Registering here keeps that direction
+// instead of importing cmd from a library package.
+func init() { serve.RegisterHeadless(runHeadless) }
+
 // repeatable implements flag.Value for overlay paths (`-config a.yml
 // -config b.yml`), whose order is the merge order.
 type repeatable []string
