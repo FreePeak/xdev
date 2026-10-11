@@ -25,6 +25,14 @@ type fakeBot struct {
 	// failAfter makes sendMessage fail once this many messages have been
 	// sent (0 = never fail), which is how a partial send is tested.
 	failAfter int
+	// conflictOnce makes the first getUpdates answer 409 — the shape of
+	// "another client poked this token just now".
+	conflictOnce bool
+	// alwaysConflict makes every getUpdates answer 409, the shape of a
+	// real rival poller.
+	alwaysConflict bool
+	// conflicts counts the 409s served.
+	conflicts int
 	// lastOffset/lastTimeout capture the most recent getUpdates payload.
 	lastOffset  int64
 	lastTimeout int
@@ -52,12 +60,29 @@ func newFakeBot(t *testing.T) *fakeBot {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 		b.mu.Lock()
 		b.lastOffset, b.lastTimeout = payload.Offset, payload.Timeout
+		// A 409 is how Telegram terminates an EXISTING long poll when a new
+		// getUpdates arrives. conflictOnce is the "something poked the API"
+		// shape; alwaysConflict is a real rival poller.
+		conflict := b.alwaysConflict
+		if !conflict && b.conflictOnce {
+			conflict = true
+			b.conflictOnce = false
+		}
 		var out []Update
 		if len(b.updates) > 0 {
 			out = b.updates
 			b.updates = nil
 		}
 		b.mu.Unlock()
+		if conflict {
+			b.mu.Lock()
+			b.conflicts++
+			b.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":409,"description":"Conflict: terminated by other getUpdates request"}`))
+			return
+		}
 		if out == nil {
 			out = []Update{}
 		}
@@ -122,6 +147,14 @@ func (b *fakeBot) sentAll() []sentMsg {
 }
 
 func (b *fakeBot) url() string { return b.srv.URL }
+
+// conflictCount is how many 409s the fake bot has served (mutex-guarded read,
+// the same one the handlers take).
+func (b *fakeBot) conflictCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.conflicts
+}
 
 func textUpdate(text string, chat int64) Update {
 	return Update{UpdateID: time.Now().UnixNano(), Message: &Message{Text: text, Chat: Chat{ID: chat, Type: "private"}, From: &User{ID: chat, Username: "tester"}}}
