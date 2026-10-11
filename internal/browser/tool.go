@@ -175,11 +175,24 @@ type tab struct {
 
 // NewTool returns the browser tool. blobs holds screenshots; nil uses a
 // store under the system temp dir (tests, harnesses).
+//
+// Cfg.ProfileDir is carried into the Tool's own ProfileDir, which is the field
+// autolaunch() reads. That copy is the whole fix for a bug that shipped dead:
+// BrowserConfig fills Settings.ProfileDir, NewTool ignored it, and so
+// `t.ProfileDir == ""` in every real run — auto-launch was off in production
+// and on in the tests, which set Tool.ProfileDir by hand. The field is on the
+// Tool, not on Settings, so it has to be copied here; forgetting it is silent,
+// which is why TestNewToolCarriesTheProfileDir pins it.
 func NewTool(cfg Settings, blobs *session.BlobStore) *Tool {
 	if blobs == nil {
 		blobs = session.NewBlobStore(filepath.Join(os.TempDir(), "xdev-browser"))
 	}
-	return &Tool{Cfg: cfg, Blobs: blobs, tabs: map[string]*tab{}}
+	return &Tool{
+		Cfg:        cfg,
+		Blobs:      blobs,
+		ProfileDir: cfg.ProfileDir,
+		tabs:       map[string]*tab{},
+	}
 }
 
 // Close releases every attached connection and stops the browser this tool
