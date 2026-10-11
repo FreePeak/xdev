@@ -185,15 +185,15 @@ TaskParams = {
 ```
 **Agent types (built-in)**:
 
-| Agent | Mode | Purpose | Tools Available |
-|---|---|---|---|
-| `build` | primary | Default agent, all tools | All (per permission) |
-| `plan` | primary | Plan mode, disallows edits | Read-only + plan_exit + question + task(general:deny) |
-| `general` | subagent | Multi-step parallel tasks | All except todowrite |
-| `explore` | subagent | Codebase exploration | grep, glob, list, bash, webfetch, websearch, read (NO edit/write) |
-| `compaction` | hidden/primary | Context summarization | None (prompt-only) |
-| `title` | hidden/primary | Title generation (temp=0.5) | None (prompt-only) |
-| `summary` | hidden/primary | PR-style summary | None (prompt-only) |
+| Agent | Mode | Purpose | Tools Available | Note |
+|---|---|---|---|---|
+| `build` | primary | Default agent, all tools | All (per permission) | |
+| `plan` | primary | Plan mode, disallows edits | Read-only + plan_exit + question + task(general:deny) | |
+| `general` | subagent | Multi-step parallel tasks | All except todowrite | |
+| `explore` | subagent | Codebase exploration | grep, glob, list, bash, webfetch, websearch, read (NO edit/write) | |
+| `compaction` | hidden/primary | Context summarization | None (prompt-only) | v1-only: v2 has no compaction *agent* — the checkpoint is an in-module prompt template (`session/compaction.ts:46-86`) run by the session's own model. See §7. |
+| `title` | hidden/primary | Title generation (temp=0.5) | None (prompt-only) | |
+| `summary` | hidden/primary | PR-style summary | None (prompt-only) | |
 
 **Task result format** (returned to parent):
 ```xml
@@ -455,7 +455,7 @@ opencode models all conversation content as **parts** within **messages**. Every
 | `step-start` | Marks start of an assistant turn | — |
 | `step-finish` | Marks end of assistant turn | — |
 | `file` | File attachment (image, etc.) | `mime: string`, `url: string`, `filename?: string` |
-| `compaction` | Compaction summary marker | — |
+| `compaction` | Compaction checkpoint marker | v1: a bare summary marker. v2: a first-class *message* with `status` running/completed/failed, `reason` auto/manual, the kept `recent` tail, the summarizer's own usage, and the optional provider state — `packages/schema/src/session-message.ts:238-270` |
 | `patch` | Patch output metadata | `files: [{filePath, type, patch, additions, deletions}]` |
 
 **Part data JSON** (from DB samples):
@@ -673,7 +673,7 @@ CREATE TABLE session_message (
 |---|---|
 | **New session** | Row in `session`, workspace_id optional |
 | **Fork** | New session with `parent_id = source session ID` |
-| **Compact** | Updates `time_compacting`, creates summary message |
+| **Compact** | v1: updates `time_compacting`, creates a summary message. v2: writes a `compaction` message with a durable status (`running` → `completed`/`failed`), so an interrupted compaction is visible rather than assumed done — `packages/schema/src/session-message.ts:247-270`, `packages/core/src/session/compaction.ts:412-430` |
 | **Archive** | Sets `time_archived`, retains DB rows |
 | **Share** | Creates row in `session_share(session_id, id, secret, url)` |
 
@@ -711,24 +711,114 @@ CREATE TABLE todo (
 
 ## 7. Compaction
 
-opencode uses **auto-compaction** when context window approaches limit:
+<!-- 2026-10-03 re-read against the opencode source tree at cd9a14a (v2.0.18),
+     superseding the v1.18.28 binary-forensics notes this section originally
+     carried. Every claim below is file:line. What CHANGED from v1 is called
+     out, because the rest of this doc is still v1-era. -->
 
-**Trigger**: `compaction: { auto: true, tail_turns: 15 }` — preserves last 15 turns, compacts rest.
+The engine is one module, `packages/core/src/session/compaction.ts` (810 ln).
+Compaction is **proactive**: `required()` (`:744-763`) is consulted at the top
+of every logical step, before the request is built
+(`packages/core/src/session/runner/llm.ts:220-225`), and a positive result
+compacts then `continue`s the step loop with a fresh assistant-message id.
 
-**Compaction agent**: hidden `compaction` agent (prompt `re`):
-> You are a context summarization agent. You are given a conversation between a user and an agent. Your goal is to produce a structured summary matching the format specified so another coding agent can continue the work.
-> Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
+**Settings** (`packages/schema/src/config/compaction.ts`):
 
-**Flow**:
-1. Detects context overflow or auto threshold
-2. Creates compaction message with `mode: "compaction"`
-3. Older messages summarized by compaction model (small/fast model)
-4. Summary part injected as `<system-reminder>` into next user turn
-5. Original messages retained in DB (for replay/debugging)
+| Key | Default | Meaning |
+|---|---|---|
+| `auto` | `true` | enable automatic compaction (`:404`) |
+| `buffer` | `20_000` | tokens held back from the prompt ceiling (`DEFAULT_BUFFER :40`) |
+| `keep.tokens` | `15_000` | recent tail retained verbatim (`DEFAULT_KEEP_TOKENS :41`) |
 
-**Overflow handling**: If session exceeds model context even after compaction → `ContextOverflowError` → session enters error state.
+`tail_turns` and `prune` are **v1-only** and are now reported as unsupported
+config: `packages/core/src/config/normalize.ts:328-329` calls
+`unsupportedIfPresent` for both. The v1 schema that still defines them (with
+`tail_turns` default 2, `preserve_recent_tokens`, `reserved`) is
+`packages/core/src/v1/config/config.ts:148-167`.
 
-**Tail continuation**: After compaction, model receives: "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+**Trigger** (`required()`, `:744-763`): refuse to compact twice in a row (the
+last message being a completed checkpoint returns false), refuse before a
+primary response has anchored the new window, then compare a ceiling that
+subtracts *both* the buffer and the completion allowance:
+
+```
+promptCeiling = min(inputLimit - buffer, context - max(min(outputLimit, 32_000), buffer))
+compacts when estimateTokens(messages) >= promptCeiling
+```
+
+**Token estimate** (`estimateTokens`, `:174-192`): the last assistant message's
+reported usage (`input + cache.read + cache.write + output + reasoning`) plus
+locally priced parts appended after it — the same
+"provider-usage-with-estimate-floor" rule as omp and dsh, but priced over the
+full envelope (tools + system), not just the transcript. Fallback is
+`Token.estimate` over the base transcript; `CHARS_PER_TOKEN = 4`
+(`packages/core/src/util/token.ts:4-5`). Media is priced by mime, not measured:
+image `1_500`, PDF `2_000` (`:44-45`, `estimateMedia :210-213`).
+
+**Cut point** (`findTailStart`, `:331-360`): accumulate
+`Token.estimate(serialize(message))` backwards to `keep.tokens`, always keep at
+least the newest entry, then **rewind to a user boundary** so an assistant's
+tool calls and their results stay on one side. If everything fits, only the
+latest user exchange is retained so there is still a prefix to summarize.
+
+**Pre-summarize truncation** (this is the microcompact-equivalent tier, and it
+is free): `truncateToolOutput` (`:258-270`) clips any serialized tool result to
+`TOOL_OUTPUT_MAX_CHARS = 2_000` on a surrogate-pair-safe boundary and appends
+`[truncated]`, applied to tool results (`:305`) and shell output (`:318`). It
+runs before the summary request, so the summarizer — and the token estimate —
+never see the discarded bytes. Note the honesty of the cut: what is truncated
+is what the summary is *given*, not what the transcript *stores*; the DB keeps
+the full result.
+
+**Summary prompt** (`SUMMARY_TEMPLATE :46-86` + `SUMMARY_RULES :79-86`):
+required headings — Objective, Requirements, Decisions, Work State (Completed /
+Active / Blocked), Next Move, Relevant Files (at most 15, most important
+first), Important Context. Rules: terse single-line bullets over prose, no
+nested lists, preserve exact paths / symbols / commands / error strings /
+URLs, carry forward only unanswered user requests verbatim, record consequential
+workflow state (uncommitted / committed / pushed / under review / merged), and
+never mention that compaction happened. Older checkpoints written against a
+longer template are detected by the catch-all `## Additional Context` heading
+(`LEGACY_HEADING :88`) and re-written to the current level of detail rather than
+having their detail carried forward (`:372-381`). A summary that misses a
+required heading is rejected and retried (`:660-680`); hitting the output
+token limit is a typed failure, not a short summary (`:676`).
+
+**No separate compaction model.** `compactionRequest` (`:469-494`) sends the
+summary request through the session's own model ref; the only reason it can go
+elsewhere is a provider request hook. The v1 note that a "small/fast model"
+compacts does not survive v2.
+
+**Provider-native compaction** (`packages/core/src/plugin/compaction.ts:9-27`):
+a model may declare a native strategy, and two mechanisms are supported —
+`trigger` replaces the history with `[...retained, assistant(checkpoint)]` and
+reports the compaction's own usage, `endpoint` delegates to `llm.compact`.
+Native requires routing pinned in the catalog, not a `model.request` rewrite
+(`:518-527`), so a checkpoint is never installed that the next request would
+skip.
+
+**Overflow recovery** (`packages/core/src/session/runner/llm.ts:265-272`): the
+step's retry hook may call `compaction.compact({..., overflow: true})`, and
+`compact` routes that to `recoverLocally` (`:737-740`, `:497-500`), which
+**re-reads the original durable messages** instead of resubmitting the window
+that just overflowed — stated as the contract at `:120`. Exactly one recovery
+is allowed per step: a success sets `recoveredOverflow`, which disables the
+hook for the rest of that step (`llm.ts:224`). v2 has no `ContextOverflowError`;
+it survives only in the v1 schema (`packages/schema/src/v1/session.ts:57`) and
+the v1 migration (`v1-migration.bun.ts:1018`) — a v2 overflow surfaces as
+`provider.invalid-request` (`compaction.ts:658`).
+
+**Manual compact** (`compactManual`, `:764-800`): refuses with
+`compaction.unavailable` ("Nothing to compact yet") when `findTailStart` has no
+cut, so a manual request on a short session is a typed no-op, not a bill.
+
+**Delta vs the v1 text this replaces:** `tail_turns: 15` becomes
+`keep.tokens: 15_000`; the hidden `compaction` agent becomes an in-module
+prompt template; "small/fast model" becomes the session model;
+`ContextOverflowError` becomes one-shot local recovery from durable history;
+and one thing v1 did not have at all — a threshold that subtracts the model's
+completion allowance from the prompt ceiling, which is the check xdev's
+`threshold()` still omits.
 
 ---
 
@@ -754,7 +844,7 @@ opencode uses **auto-compaction** when context window approaches limit:
   mcp?: Record<string, McpConfig>,
   permission?: Record<string, string | Record<string, string>>,
   tool_output?: { max_lines: number, max_bytes: number },
-  compaction?: { auto: boolean, tail_turns: number },
+  compaction?: { auto: boolean, buffer?: number, keep?: { tokens: number } },  // v2; `tail_turns` is v1-only (see §7)
   experimental?: {
     primary_tools?: string[],
     mcp_timeout?: number,
@@ -964,7 +1054,7 @@ User can define custom agents in `opencode.json` or `.opencode/agent(s)/<name>.m
 | **Permission model with glob patterns** | CORE | M3 | Clean pattern-based permission system (`allow/deny/ask` per action with glob resource matching). Simpler than omp's approval modes. |
 | **Part-based message format** | CORE | M2 | Type-discriminated parts (text, tool, reasoning, step-start/finish) enable clean serialization. Follow the SQLite schema pattern. |
 | **Plan mode as sub-state** | CORE | M11 | First-class plan mode with `plan_exit` tool, read-only restriction, and explore-agent delegation. Port the system-reminder injection approach. |
-| **Auto-compaction with tail preservation** | CORE | M6 | Tail-turns preservation + summary-injection is clean. Port the compaction agent prompt and ContextOverflowError handling. |
+| **Auto-compaction with tail preservation** | CORE | M6 | Still the shape worth porting, but §7's v2 re-read replaces the mechanism: token-based tail (`keep.tokens`) not turn-based, the required-heading checkpoint template with its retry-on-missing-heading rule, the pre-summarize 2 000-char tool-output truncation (the free tier xdev has no name for), and the prompt ceiling that subtracts the completion allowance. `ContextOverflowError` is v1-only — v2 recovers by re-reading durable history once. |
 | **AGENTS.md discovery** | CORE | M10 | Simple upward-walk discovery from cwd to worktree root. Well-documented behavior. |
 | **Skills system (SKILL.md)** | CORE | M12 | Clean file-based skill discovery with frontmatter. Port the `skill://` protocol for lazy loading. |
 | **Commands system (markdown files)** | CORE | M10 | Markdown commands with `$ARGUMENTS` expansion. Cheap to implement. |
@@ -993,7 +1083,7 @@ User can define custom agents in `opencode.json` or `.opencode/agent(s)/<name>.m
 - **#3 (M2 session core)**: Add opencode's SQLite schema as a reference for the message/part/event table design; specifically the `session_context_epoch` table for tracking compaction state and the denormalized `session_id` on `part` table for efficient queries.
 - **#4 (M3 agent loop + 4 tools)**: Add opencode's permission model (glob-pattern-based `allow/deny/ask` rules per tool action) as a CORE reference pattern; note the `external_directory` boundary concept. Update edit-tool spec to reference opencode's string-replace with fuzzy recovery as an alternative to line-anchored edit.
 - **#5 (M4 TUI)**: Add opencode's keybinding config system as reference; note TUI renders HTML/CSS not terminal-native (different approach from xdev).
-- **#6 (M5 compaction + retry)**: Add opencode's auto-compaction with tail-turns preservation and compaction agent prompt as reference; note the `ContextOverflowError` handling pattern.
+- **#6 (M5 compaction + retry)**: Add opencode's auto-compaction as reference; §7's v2 re-read replaces the mechanism named here. Portable: the token-based kept tail (`keep.tokens`), the required-heading checkpoint template with its retry-on-missing-heading rule, the pre-summarize tool-output truncation, the prompt ceiling that subtracts the completion allowance, and overflow recovery that re-reads durable history once instead of resubmitting the failed window.
 - **#7 (M6 RPC + subagents + MCP)**: Add opencode's task tool with `task_id` session resumption as a CORE feature to port; note background subagent support behind experimental flag.
 - **#8 (M7 ext protocol)**: Add opencode's plugin system (`PluginInput → Hooks` interface) as reference for extension protocol; note the `tool.execute.before/after` hook pattern.
 - **#9 (M8 memory audit)**: No direct opencode relevance (no memory system); skip.
