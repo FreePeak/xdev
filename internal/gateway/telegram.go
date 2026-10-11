@@ -231,16 +231,51 @@ func (t *Telegram) GetUpdates(ctx context.Context, offset int64, timeout int) ([
 	return updates, nil
 }
 
-// SendMessage sends one already-chunked message. Plain text: no parse_mode,
-// because model output routinely contains characters that are valid Markdown
-// and invalid Telegram entities, and a rejected send is a lost answer.
+// SendMessage sends one already-chunked message, HTML-parsed.
+//
+// parse_mode is HTML rather than MarkdownV2 on purpose: the two dialects
+// differ per chunk of model output, and the failure modes are not symmetric.
+// MarkdownV2 has ~20 reserved characters that must ALL be escaped, and its
+// grammar is strict enough that one unescaped '_' inside an identifier or a
+// stray '.' after a number rejects the entire send — so a near-perfect
+// conversion loses the whole answer. HTML escaping has exactly three
+// reserved characters and they never collide with code, which is why a
+// rendering tag is constructed from the text rather than by escaping prose.
+//
+// There is still ONE attempt per message: if the API rejects the parsed
+// form, the same text is resent with parse_mode omitted. The phone renders
+// it as text — a plain answer beats a lost one.
 func (t *Telegram) SendMessage(ctx context.Context, chatID int64, text string) error {
-	payload := map[string]any{
-		"chat_id": chatID,
-		"text":    text,
-	}
+	rendered := ToTelegramHTML(text)
+	payload := map[string]any{"chat_id": chatID, "text": rendered, "parse_mode": "HTML"}
 	var sent SentMessage
-	return t.call(ctx, "sendMessage", payload, &sent)
+	err := t.call(ctx, "sendMessage", payload, &sent)
+	if err == nil {
+		return nil
+	}
+	if !isParseError(err) {
+		return err
+	}
+	// The API rejected the parsed form. Resend the same text as plain text;
+	// a readable answer matters more than its formatting.
+	t.logf("telegram: %v; resending as plain text", err)
+	plain := map[string]any{"chat_id": chatID, "text": text}
+	return t.call(ctx, "sendMessage", plain, &sent)
+}
+
+// isParseError reports whether err is Telegram refusing a parse_mode body.
+func isParseError(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	switch api.Code {
+	case http.StatusBadRequest:
+		return strings.Contains(strings.ToLower(api.Description), "parse") ||
+			strings.Contains(strings.ToLower(api.Description), "entity") ||
+			strings.Contains(strings.ToLower(api.Description), "tag")
+	}
+	return false
 }
 
 // Me is getMe's result (identity + a cheap token check).

@@ -330,7 +330,10 @@ func memoryNote(s *config.Settings) string {
 	return s.Memory
 }
 
-// reply sends text as one or more Telegram messages.
+// reply sends text as one or more Telegram messages. Each chunk carries the
+// others' formatting: ToTelegramHTML maps markdown to Telegram's HTML subset,
+// and Telegram.SendMessage falls back to plain text when the API rejects a
+// parsed body — so a formatting quirk costs the italics, never the answer.
 func (d *Daemon) reply(ctx context.Context, chat int64, text string) error {
 	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
