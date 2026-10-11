@@ -173,18 +173,82 @@ func contextTokens(msgs []ai.Message) int64 {
 	return estimateTokens(msgs)
 }
 
+// compactionPrompt is the system prompt of the history summarize call: prime's
+// structured checkpoint template (pa-core/src/session_engine/compaction.rs:434)
+// with xdev's existing prose rules folded in. The template is the point — a
+// free-form summary drops the sections a continuation actually needs (what is
+// done, what is blocked, the exact next move), and the model that reads it next
+// re-litigates finished work.
+//
+// When a prior summary exists the summarizer is asked to UPDATE it rather than
+// re-describe a window the live context no longer holds (compaction.rs:442):
+// the previous summary rides the request as <previous-summary>.
 const compactionPrompt = `Summarize the conversation so far for seamless continuation.
-Preserve concretely: the user's goals and constraints, decisions made and why,
-file paths touched and their current state, commands run and their outcomes,
-errors hit and fixes applied, and the exact next steps in flight.
-Be dense and factual — the summary REPLACES this history in the live context.`
+
+Use this EXACT format (omit sections that do not apply):
+
+## Goal
+- [what the user is trying to accomplish, one line per goal]
+
+## Constraints & Preferences
+- [constraints, preferences, requirements the user stated, or "(none)"]
+
+## Progress
+### Done
+- [x] [completed tasks and changes]
+### In Progress
+- [ ] [current work]
+### Blocked
+- [blockers and why, or "(none)"]
+
+## Key Decisions
+- **[decision]**: [rationale]
+
+## Next Steps
+1. [ordered next actions]
+
+## Critical Context
+- [facts the next turn cannot continue without, or "(none)"]
+
+Preserve exact file paths, function names, error messages, commands and their
+outcomes. Keep each section to terse single-line bullets. Carry forward only
+user requests that remain unanswered. Do not mention that a summary exists.`
+
+// compactionTurnPrefixPrompt is the split-turn arm's system prompt: the span
+// is the PREFIX of one turn whose suffix stays retained below the summary, so
+// the summary exists to make that suffix legible — not to restate it
+// (compaction.rs:440).
+const compactionTurnPrefixPrompt = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[what the user asked for in this turn]
+
+## Early Progress
+- [key decisions and work done in the prefix]
+
+## Context for Suffix
+- [information needed to understand the retained recent work]
+
+Be concise. Focus on what is needed to understand the kept suffix.`
 
 // findCutPoint returns the history index where pre-compaction history ends:
 // walking backwards, accumulate estimated tokens until the kept tail reaches
 // keepRecent; the cut lands on a user or assistant message boundary, never
 // between a tool call and its result, and never before index 1 (something
-// must be summarized). Returns -1 when nothing can be dropped.
-func findCutPoint(msgs []ai.Message, keepRecent int64) int {
+// must be summarized).
+//
+// The result also reports the SPLIT-TURN arm (prime's find_cut_point,
+// pa-core/src/session_engine/compaction.rs:368-431): when the allowance lands
+// inside a turn, the cut is still the first kept message, and turnStart names
+// the user message that began the turn it sits in — so the caller can
+// summarize that turn's prefix separately and keep the turn's own retained
+// suffix out of the summary. Before this the cut walked FORWARD to the next
+// user message, which moved the whole turn onto the discarded side: the
+// summary then replaced a turn whose suffix was still live, and the model read
+// the same turn twice.
+func findCutPoint(msgs []ai.Message, keepRecent int64) cutPoint {
 	acc := int64(0)
 	cut := -1
 	for i := len(msgs) - 1; i >= 0; i-- {
@@ -195,7 +259,7 @@ func findCutPoint(msgs []ai.Message, keepRecent int64) int {
 		}
 	}
 	if cut < 1 {
-		return -1
+		return cutPoint{cut: -1}
 	}
 	// Never split a tool turn: advance past toolResults (and any dangling
 	// assistant toolCalls at the boundary) so the kept window starts clean.
@@ -203,9 +267,68 @@ func findCutPoint(msgs []ai.Message, keepRecent int64) int {
 		cut++
 	}
 	if cut >= len(msgs) {
+		return cutPoint{cut: -1}
+	}
+	// A cut on a user message sits on a turn boundary: there is no prefix to
+	// split out. Otherwise the turn containing it started at an earlier user
+	// message — or at the history start, which is not a separate arm.
+	if msgs[cut].Role == ai.RoleUser {
+		return cutPoint{cut: cut, turnStart: -1}
+	}
+	return cutPoint{cut: cut, turnStart: turnStart(msgs, cut)}
+}
+
+// turnStartOrBoundary is turnStart's answer when the caller already knows the
+// cut sits on a turn boundary: a user message reports the boundary rather than
+// the start of the turn containing it (which does not exist), and a
+// tool-result cut reports the same.
+func turnStartOrBoundary(msgs []ai.Message, i int) int {
+	if i < 0 || i >= len(msgs) {
 		return -1
 	}
-	return cut
+	if msgs[i].Role == ai.RoleUser {
+		return -1
+	}
+	return turnStart(msgs, i)
+}
+
+// turnStart is the index of the user message that began the turn containing i,
+// scanning backwards; -1 when i sits inside the first turn (its start is the
+// history start, which needs no separate arm).
+func turnStart(msgs []ai.Message, i int) int {
+	for j := i - 1; j >= 0; j-- {
+		if msgs[j].Role == ai.RoleUser {
+			return j
+		}
+	}
+	return -1
+}
+
+// cutPoint is one resolved compaction boundary.
+type cutPoint struct {
+	// cut is the first kept message index: everything before it is replaced by
+	// the summary, everything from it is retained verbatim.
+	cut int
+	// turnStart is the start of the turn the cut lands inside (-1 when the cut
+	// sits on a turn boundary): msgs[turnStart:cut] is that turn's prefix,
+	// summarized apart from the older history.
+	turnStart int
+}
+
+// ok reports whether the cut resolved to a droppable prefix.
+func (c cutPoint) ok() bool { return c.cut >= 1 }
+
+// split is whether this cut splits a turn: its prefix is summarized apart
+// from the older history while its suffix is retained verbatim.
+func (c cutPoint) split() bool { return c.turnStart >= 0 }
+
+// historyEnd is the index the older (pre-turn) history ends at: the turn start
+// for a split cut, the cut itself otherwise.
+func (c cutPoint) historyEnd() int {
+	if c.split() {
+		return c.turnStart
+	}
+	return c.cut
 }
 
 // compactionSpan prepares one boundary compaction: the context rebuilt from
@@ -218,9 +341,21 @@ func findCutPoint(msgs []ai.Message, keepRecent int64) int {
 type compactionSpan struct {
 	msgs     []ai.Message
 	entryIDs []string
-	cut      int
-	tokens   int64
+	// cp is the resolved boundary: cut is the first kept message index and
+	// turnStart (-1 when the cut sits on a turn boundary) names the start of
+	// the turn the cut lands inside, whose prefix this span summarizes apart
+	// from the older history (prime's split-turn arm).
+	cp     cutPoint
+	tokens int64
 }
+
+// cut is the first kept message index: everything before it is replaced by
+// the summary.
+func (s *compactionSpan) cut() int { return s.cp.cut }
+
+// split is whether this span ends inside a turn, so its prefix is summarized
+// with the turn-prefix prompt rather than the history prompt.
+func (s *compactionSpan) split() bool { return s.cp.split() }
 
 func (a *Agent) compactionSpan() (*compactionSpan, error) {
 	if a.Store == nil {
@@ -233,23 +368,23 @@ func (a *Agent) compactionSpan() (*compactionSpan, error) {
 	if len(res.Messages) < 2 {
 		return nil, fmt.Errorf("compaction: nothing to summarize")
 	}
-	cut := findCutPoint(res.Messages, a.compaction().keepRecent())
-	if cut < 1 {
+	cp := findCutPoint(res.Messages, a.compaction().keepRecent())
+	if !cp.ok() {
 		return nil, fmt.Errorf("compaction: no droppable prefix")
 	}
-	if cut >= len(res.EntryIDs) || res.EntryIDs[cut] == "" {
-		return nil, fmt.Errorf("compaction: cut %d has no anchor entry", cut)
+	if cp.cut >= len(res.EntryIDs) || res.EntryIDs[cp.cut] == "" {
+		return nil, fmt.Errorf("compaction: cut %d has no anchor entry", cp.cut)
 	}
 	return &compactionSpan{
 		msgs:     res.Messages,
 		entryIDs: res.EntryIDs,
-		cut:      cut,
+		cp:       cp,
 		tokens:   contextTokens(res.Messages),
 	}, nil
 }
 
 // anchor is the entry the compaction keeps: everything before it is dropped.
-func (s *compactionSpan) anchor() string { return s.entryIDs[s.cut] }
+func (s *compactionSpan) anchor() string { return s.entryIDs[s.cut()] }
 
 // compact runs the method ladder over the current history span, persists the
 // retained-context entry the winning method produced, and notifies the hook
@@ -295,6 +430,33 @@ func (a *Agent) notifyCompaction(entry *session.CompactionEntry) {
 	}
 }
 
+// previousSummary is the summary the newest compaction in this span's history
+// left behind, trimmed of any file-list block a prior version appended. It is
+// the anchor of the iterative-update arm (prime's prepare_compaction): the new
+// summarize call is asked to UPDATE this text rather than re-describe a window
+// the live context no longer holds. "" when the span carries no prior
+// compaction — the first compaction of a session summarizes from scratch.
+func (a *Agent) previousSummary(span *compactionSpan) string {
+	entries := a.Store.Entries()
+	// The newest compaction written BEFORE the span's anchor is the one the
+	// new summarize updates; an entry sitting at or after the anchor belongs to
+	// history the rebuild already dropped, so re-summarizing it would duplicate
+	// what the retained summary already says.
+	anchor := span.anchor()
+	for i, e := range entries {
+		if e.Envelope().ID != anchor {
+			continue
+		}
+		for _, prev := range entries[:i] {
+			if c, ok := prev.(*session.CompactionEntry); ok {
+				return c.Summary.Text()
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
 // summarize renders msgs as a transcript and compresses it through one
 // provider call (no tools; hard MaxTokens clamp). It is the in-turn
 // spelling of summarizeWith; the async trigger keeps its own snapshot.
@@ -304,11 +466,20 @@ func (a *Agent) notifyCompaction(entry *session.CompactionEntry) {
 // here is what made a compacted session's totals read as if compaction
 // were free.
 func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, *ai.Usage, error) {
+	return a.summarizeSpan(ctx, msgs, false, "")
+}
+
+// summarizeSpan is summarize over one span of the span resolution: splitTurn
+// selects the turn-prefix prompt (the span is the prefix of a turn whose
+// suffix is retained below the summary) and previousSummary, when the store
+// already holds a summary, is fed back so the new one updates it instead of
+// re-describing a window the live context no longer holds.
+func (a *Agent) summarizeSpan(ctx context.Context, msgs []ai.Message, splitTurn bool, previousSummary string) (string, *ai.Usage, error) {
 	extra := ""
 	if a.MemoryContext != nil {
 		extra = strings.TrimSpace(a.MemoryContext())
 	}
-	return summarizeWith(ctx, a.Provider, a.Model, msgs, extra)
+	return summarizeWith(ctx, a.Provider, a.Model, msgs, extra, splitTurn, previousSummary)
 }
 
 // summarizeWith is summarize against a provider/model snapshot: the async
@@ -321,7 +492,7 @@ func (a *Agent) summarize(ctx context.Context, msgs []ai.Message) (string, *ai.U
 // it differently: the ladder attaches it to the summary it persists, and
 // the async job cannot touch live agent state from its goroutine. Both end
 // up on the summary message, which is where a resume reads it back.
-func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message, memoryContext string) (string, *ai.Usage, error) {
+func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs []ai.Message, memoryContext string, splitTurn bool, previousSummary string) (string, *ai.Usage, error) {
 	var b strings.Builder
 	if memoryContext != "" {
 		// #86: a compaction summary that forgets the recalled memories loses
@@ -341,9 +512,21 @@ func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs
 		}
 		fmt.Fprintf(&b, "%s: %s\n\n", role, txt)
 	}
+	if previousSummary != "" {
+		// The iterative-update arm (prime's prepare_compaction, compaction.rs:
+		// 588-608): a second compaction merges the new span into the summary
+		// that already governs this history, so the durable record keeps what
+		// the first summarize paid for instead of re-describing a window the
+		// live context no longer holds.
+		b.WriteString("Update the existing summary in the <previous-summary> tags below with the conversation above. PRESERVE everything it already records, add what is new, and move finished work into the Done section.\n\n<previous-summary>\n" + previousSummary + "\n</previous-summary>\n\n")
+	}
+	system := compactionPrompt
+	if splitTurn {
+		system = compactionTurnPrefixPrompt
+	}
 
 	req := ai.StreamRequest{
-		System:    compactionPrompt,
+		System:    system,
 		Messages:  []ai.Message{{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: b.String()}}}},
 		MaxTokens: MaxSummaryTokens,
 		Model:     model,

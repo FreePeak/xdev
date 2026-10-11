@@ -36,7 +36,7 @@ const (
 // methodSnapcompactRun retains the span as a bitmap plus a short caption. The
 // caption is what a text-only provider (or a human reading the session) sees;
 func methodSnapcompactRun(a *Agent, _ context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
-	text := renderTranscript(span.msgs[:span.cut], snapResultChars, snapTotalChars)
+	text := renderTranscript(span.msgs[:span.cut()], snapResultChars, snapTotalChars)
 	// A text-only model cannot read a bitmap, so the dropped span is kept as
 	// a text excerpt instead of being encoded into bytes nobody can consume
 	// (#83; omp gates the same rung on model capability).
@@ -49,7 +49,7 @@ func methodSnapcompactRun(a *Agent, _ context.Context, span *compactionSpan) (*s
 	}
 	caption := fmt.Sprintf(
 		"snapcompact: %d dropped messages rendered as a %d-row bitmap (%d bytes, %.1f KiB base64); read the attached image for the detail this summary omits.",
-		span.cut, rows, len(img), float64(base64.StdEncoding.EncodedLen(len(img)))/1024)
+		span.cut(), rows, len(img), float64(base64.StdEncoding.EncodedLen(len(img)))/1024)
 	summary := ai.Message{
 		Role: ai.RoleAssistant,
 		Content: []ai.Block{
@@ -262,7 +262,7 @@ func snapcompactText(_ *Agent, span *compactionSpan, text string) (*session.Comp
 		Role: ai.RoleAssistant,
 		Content: []ai.Block{ai.TextBlock{Text: fmt.Sprintf(
 			"snapcompact (text-only model, no bitmap): %d dropped messages, %d chars retained as plain text:\n%s",
-			span.cut, len(excerpt), excerpt)}},
+			span.cut(), len(excerpt), excerpt)}},
 		StopReason: ai.StopReasonStop,
 	}
 	return compactEntry(span, summary), nil

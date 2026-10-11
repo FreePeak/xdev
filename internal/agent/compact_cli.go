@@ -31,17 +31,17 @@ func PlanCompaction(msgs []ai.Message, entryIDs []string, keepRecent int64) (*Co
 	if keepRecent <= 0 {
 		keepRecent = DefaultKeepRecentTokens
 	}
-	cut := findCutPoint(msgs, keepRecent)
-	if cut < 1 {
+	cp := findCutPoint(msgs, keepRecent)
+	if !cp.ok() {
 		return nil, fmt.Errorf("no droppable prefix: the whole history fits in the %d-token kept tail", keepRecent)
 	}
-	if cut >= len(entryIDs) || entryIDs[cut] == "" {
-		return nil, fmt.Errorf("cut %d has no anchor entry", cut)
+	if cp.cut >= len(entryIDs) || entryIDs[cp.cut] == "" {
+		return nil, fmt.Errorf("cut %d has no anchor entry", cp.cut)
 	}
 	return &CompactPlan{
 		Messages:     msgs,
 		EntryIDs:     entryIDs,
-		Cut:          cut,
+		Cut:          cp.cut,
 		TokensBefore: contextTokens(msgs),
 	}, nil
 }
@@ -79,7 +79,11 @@ func IsDeterministicMethod(name string) bool {
 // handoff member (the provider summarize); the deterministic members ignore
 // them, which is what makes an offline compaction possible at all.
 func (p *CompactPlan) Compact(ctx context.Context, method string, provider ai.Provider, model string) (ai.Message, error) {
-	span := &compactionSpan{msgs: p.Messages, entryIDs: p.EntryIDs, cut: p.Cut, tokens: p.TokensBefore}
+	span := &compactionSpan{
+		msgs: p.Messages, entryIDs: p.EntryIDs,
+		cp:     cutPoint{cut: p.Cut, turnStart: turnStartOrBoundary(p.Messages, p.Cut)},
+		tokens: p.TokensBefore,
+	}
 	switch method {
 	case methodShake, methodSoft, methodSnapcompact:
 		fn := compactMethods[method]
@@ -95,7 +99,7 @@ func (p *CompactPlan) Compact(ctx context.Context, method string, provider ai.Pr
 		if provider == nil {
 			return ai.Message{}, fmt.Errorf("method handoff needs a reachable provider; use --method shake for an offline compaction")
 		}
-		text, usage, err := summarizeWith(ctx, provider, model, span.msgs[:span.cut], "")
+		text, usage, err := summarizeWith(ctx, provider, model, span.msgs[:span.cut()], "", span.split(), "")
 		if err != nil {
 			return ai.Message{}, fmt.Errorf("compaction: handoff: %w", err)
 		}

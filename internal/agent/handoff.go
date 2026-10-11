@@ -248,12 +248,12 @@ func (a *Agent) HandoffRung(ctx context.Context, system string, history []ai.Mes
 // document (nil firstKeptEntryId = only the document survives), because an
 // explicit /handoff must never fail for being short.
 func (a *Agent) handoffCut(res *session.ContextResult) (*string, []ai.Message) {
-	cut := findCutPoint(res.Messages, a.compaction().keepRecent())
-	if cut < 1 || cut >= len(res.EntryIDs) || res.EntryIDs[cut] == "" {
+	cp := findCutPoint(res.Messages, a.compaction().keepRecent())
+	if !cp.ok() || cp.cut >= len(res.EntryIDs) || res.EntryIDs[cp.cut] == "" {
 		return nil, nil
 	}
-	id := res.EntryIDs[cut]
-	return &id, res.Messages[cut:]
+	id := res.EntryIDs[cp.cut]
+	return &id, res.Messages[cp.cut:]
 }
 
 // handoffDoc runs the side request: the live transform over the full history
