@@ -285,6 +285,30 @@ type Me struct {
 	FirstName string `json:"first_name"`
 }
 
+// BotCommand is one entry in the client's "/" menu.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetMyCommands registers the command menu, so a phone user tapping "/" sees
+// the available commands with descriptions instead of having to know them.
+// Every scope is registered separately, because Telegram picks the narrowest
+// matching one and a group chat never falls through to the default.
+func (t *Telegram) SetMyCommands(ctx context.Context, cmds []BotCommand) error {
+	for _, scope := range []map[string]any{
+		{"type": "default"},
+		{"type": "all_private_chats"},
+		{"type": "all_group_chats"},
+	} {
+		payload := map[string]any{"commands": cmds, "scope": scope}
+		if err := t.call(ctx, "setMyCommands", payload, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetMe validates the token and names the bot. This is the one call the
 // daemon makes at startup, so a wrong token fails immediately and loudly
 // rather than as a silent loop that never receives anything.

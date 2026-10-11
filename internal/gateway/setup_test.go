@@ -102,3 +102,36 @@ func TestResolveTokenPrefersEnv(t *testing.T) {
 		t.Errorf("ResolveToken = %q, want the env token", got)
 	}
 }
+
+// TestBotMenuDescribesActionNotMechanism: Telegram caps each description at
+// 256 chars and the whole menu at 100 entries; a menu that fails either is a
+// menu that silently renders wrong. The assertion that matters is that every
+// entry names a command that actually exists in the dispatcher.
+func TestBotMenuDescribesActionNotMechanism(t *testing.T) {
+	if len(botMenu) == 0 {
+		t.Fatal("no menu registered — the user must type every command from memory")
+	}
+	seen := map[string]bool{}
+	for _, c := range botMenu {
+		switch {
+		case c.Command == "" || strings.ContainsAny(c.Command, " /"):
+			t.Errorf("bad command name %q", c.Command)
+		case len(c.Description) == 0:
+			t.Errorf("%s has no description", c.Command)
+		case len(c.Description) > 256:
+			t.Errorf("%s description is %d chars, want <= 256", c.Command, len(c.Description))
+		case len(botMenu) > 100:
+			t.Error("menu over 100 entries")
+		}
+		if seen[c.Command] {
+			t.Errorf("duplicate command %q", c.Command)
+		}
+		seen[c.Command] = true
+	}
+	// Every menu command must be one the dispatcher answers.
+	for _, want := range []string{"help", "status", "new", "stop", "whoami"} {
+		if !seen[want] {
+			t.Errorf("the dispatcher serves /%s but the menu omits it", want)
+		}
+	}
+}
