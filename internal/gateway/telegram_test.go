@@ -23,6 +23,8 @@ type fakeBot struct {
 	updates []Update
 	// sent records (chatID, text) per sendMessage.
 	sent []sentMsg
+	// actions records (chatID, action) per sendChatAction.
+	actions []sentAction
 	// failAfter makes sendMessage fail once this many messages have been
 	// sent (0 = never fail), which is how a partial send is tested.
 	failAfter int
@@ -44,6 +46,11 @@ type fakeBot struct {
 type sentMsg struct {
 	Chat int64
 	Text string
+}
+
+type sentAction struct {
+	Chat   int64
+	Action string
 }
 
 func newFakeBot(t *testing.T) *fakeBot {
@@ -88,6 +95,20 @@ func newFakeBot(t *testing.T) *fakeBot {
 			out = []Update{}
 		}
 		writeOK(w, out)
+	})
+	mux.HandleFunc("/bot"+b.token+"/sendChatAction", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			ChatID int64  `json:"chat_id"`
+			Action string `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.mu.Lock()
+		b.actions = append(b.actions, sentAction{Chat: payload.ChatID, Action: payload.Action})
+		b.mu.Unlock()
+		writeOK(w, true)
 	})
 	mux.HandleFunc("/bot"+b.token+"/sendMessage", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -141,6 +162,20 @@ func (b *fakeBot) sentTo(chat int64) []string {
 	return out
 }
 
+// actionCount is how many chat actions the fake bot has served.
+func (b *fakeBot) actionCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.actions)
+}
+
+// sentActions returns a copy of the recorded chat actions.
+func (b *fakeBot) sentActions() []sentAction {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]sentAction(nil), b.actions...)
+}
+
 func (b *fakeBot) sentAll() []sentMsg {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -159,6 +194,91 @@ func (b *fakeBot) conflictCount() int {
 
 func textUpdate(text string, chat int64) Update {
 	return Update{UpdateID: time.Now().UnixNano(), Message: &Message{Text: text, Chat: Chat{ID: chat, Type: "private"}, From: &User{ID: chat, Username: "tester"}}}
+}
+
+// TestTypingKeepsTheBubbleAliveDuringATurn is the reported behaviour: while a
+// turn is running and nothing has been sent yet, the chat must show the
+// typing indicator, refreshed — Telegram expires it after ~5s, so one post at
+// t=0 would leave a long model call looking idle. The loop is driven with a
+// short interval so the test measures the cadence rather than sleeping 5s.
+func TestTypingKeepsTheBubbleAliveDuringATurn(t *testing.T) {
+	b := newFakeBot(t)
+	tg := &Telegram{Token: b.token, BaseURL: b.url(), HTTPClient: &http.Client{Timeout: 2 * time.Second}}
+	done := make(chan struct{})
+	stop := startTyping(context.Background(), tg, 42, done, 30*time.Millisecond)
+	time.Sleep(140 * time.Millisecond)
+	stop()
+	time.Sleep(80 * time.Millisecond)
+
+	posted := b.sentActions()
+	if len(posted) < 3 {
+		t.Fatalf("typing posted %d times in 140ms at a 30ms interval, want >= 3 (the bubble expires every ~5s)", len(posted))
+	}
+	for _, a := range posted {
+		if a.Action != "typing" {
+			t.Errorf("chat action %q, want typing", a.Action)
+		}
+		if a.Chat != 42 {
+			t.Errorf("chat action went to chat %d, want 42", a.Chat)
+		}
+	}
+	// After the stop func, a turn that has finished must not keep posting:
+	// the bubble belongs to the running turn alone. The settle sleep lets a
+	// post already in flight land, so the assertion is about the loop, not
+	// about a race with the request in progress.
+	time.Sleep(60 * time.Millisecond)
+	after := len(b.sentActions())
+	time.Sleep(120 * time.Millisecond)
+	if got := len(b.sentActions()); got != after {
+		t.Errorf("typing kept posting after stop (%d -> %d)", after, got)
+	}
+}
+
+// TestTypingStopsWhenTheWorkerEnds: the same loop must also exit when the
+// worker's done channel closes, with no stop call — that is how /stop and a
+// crashed worker end the bubble.
+func TestTypingStopsWhenTheWorkerEnds(t *testing.T) {
+	b := newFakeBot(t)
+	tg := &Telegram{Token: b.token, BaseURL: b.url(), HTTPClient: &http.Client{Timeout: 2 * time.Second}}
+	done := make(chan struct{})
+	_ = startTyping(context.Background(), tg, 7, done, 20*time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+	close(done)
+	time.Sleep(60 * time.Millisecond) // let a post already in flight land
+	after := len(b.sentActions())
+	time.Sleep(120 * time.Millisecond)
+	if got := len(b.sentActions()); got != after {
+		t.Errorf("typing kept posting after the worker ended (%d -> %d)", after, got)
+	}
+}
+
+// TestTypingFailureIsNotFatal: a chat action the API rejects must stay a log
+// line. The daemon's contract is that the ANSWER is what matters, so the
+// typing loop keeps running and the turn is unaffected.
+func TestTypingFailureIsNotFatal(t *testing.T) {
+	tg := &Telegram{Token: "111111111:TESTtestTESTtestTESTtestTESTtestTESTtest",
+		BaseURL:    "http://127.0.0.1:1", // reserved: nothing listens
+		HTTPClient: &http.Client{Timeout: 200 * time.Millisecond}}
+	done := make(chan struct{})
+	stop := startTyping(context.Background(), tg, 1, done, 20*time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+	stop() // must not panic or block on the failed sends
+}
+
+// TestTurnPostsTypingWhileTheWorkerRuns: the wiring, not just the loop — an
+// inbound chat message must produce a typing action before its answer.
+func TestTurnPostsTypingWhileTheWorkerRuns(t *testing.T) {
+	b := newFakeBot(t)
+	b.queue(textUpdate("hi", 5))
+	d := newTestDaemon(t, b, []int64{5})
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	if err := d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(b.sentActions()) == 0 {
+		t.Fatal("a turn ran with no sendChatAction — the phone would show no typing bubble")
+	}
 }
 
 // TestChunkTextSplitsOnUTF16NotRunes pins the rule a rune-count split gets

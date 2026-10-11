@@ -366,6 +366,35 @@ func (d *Daemon) reply(ctx context.Context, chat int64, text string) error {
 	return nil
 }
 
+// startTyping keeps the chat's typing bubble alive while the turn runs, and
+// returns a stop func the caller defers after w.wait() returns. Telegram
+// expires the "typing" action after ~5s, so the loop re-posts it every
+// typingInterval — Hermes' gateway does the same, and a long model call is
+// exactly the window the bubble would otherwise go dark for. The first post
+// is immediate (a phone user sees feedback right away, not after 2s).
+// Failures are log lines: a chat action is a courtesy, never the reason to
+// fail a turn.
+func startTyping(ctx context.Context, tg *Telegram, chat int64, done <-chan struct{}, every time.Duration) func() {
+	stop := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			if err := tg.SendChatAction(ctx, chat); err != nil {
+				tg.logf("gateway: typing for chat %d: %v", chat, err)
+			}
+			select {
+			case <-stop:
+				return
+			case <-done:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
 // turn runs one chat message end to end: lease, spawn, wait, reply.
 func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 	release, err := d.chats.Acquire(chat, d.cfg.GatewayLeaseWait())
@@ -386,7 +415,9 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 	d.chats.AttachWorker(chat, w)
 	d.logFn("gateway: chat %d turn started (pid %d, session %s)", chat, w.pid, orNew(sessionID))
 
+	stopTyping := startTyping(ctx, d.tg, chat, w.done, typingInterval)
 	res := w.wait()
+	stopTyping()
 	d.chats.AttachWorker(chat, nil)
 	if sessionID == "" {
 		// A fresh conversation: the worker just created the session file.

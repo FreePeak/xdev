@@ -102,6 +102,12 @@ fresh install gets memory growth for free.
   turn ends; Hermes' edit-message streaming is a nice-to-have that doubles the
   Bot API surface. `ponytail:` if this ships, it is a `sendMessage` per N
   seconds replaced by `editMessageText`, ~20 lines behind the existing sender.
+- **No message editing, but yes the typing bubble.** The chat gets no
+  partial-answer edits (above), yet it is never left looking idle: while a
+  turn runs the daemon re-posts `sendChatAction` every 2s
+  (`startTyping`, `gateway.go`), the same keepalive Hermes' gateway runs.
+  Cheap (one small POST per 2s), non-fatal on failure, and it stops with the
+  worker — `/stop` included. Shipped 2026-10-11.
 - **No media.** Text in and out; a photo-upload path is a worker-side feature.
 - **No session subprocess reuse across daemon restarts.** Workers are per-turn;
   the session *file* is the durable state, which is what makes this safe.
