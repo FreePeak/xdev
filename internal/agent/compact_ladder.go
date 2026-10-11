@@ -75,7 +75,7 @@ func RegisterCompactionMethod(name string, fn func(ctx context.Context, a *Agent
 		return
 	}
 	compactMethodOverrides[n] = func(a *Agent, ctx context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
-		summary, err := fn(ctx, a, span.msgs[:span.cut])
+		summary, err := fn(ctx, a, span.msgs[:span.cut()])
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +170,11 @@ func (a *Agent) hasExplicitProduct() bool {
 // and dropping them is how a compacted session showed $0.00 for the very
 // call that replaced its history.
 func methodHandoffRun(a *Agent, ctx context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
-	summary, usage, err := a.summarize(ctx, span.msgs[:span.cut])
+	// The summarize input is the span's DROPPED span: the older history up to
+	// the turn start, or — for a split cut — that turn's prefix, whose suffix is
+	// retained below the summary. The span's own prior summary rides along so
+	// the call updates it instead of re-describing history already summarized.
+	summary, usage, err := a.summarizeSpan(ctx, span.msgs[:span.cp.historyEnd()], span.split(), a.previousSummary(span))
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +202,7 @@ func methodRemoteRun(a *Agent, _ context.Context, _ *compactionSpan) (*session.C
 // repeated boilerplate collapse. The skeleton — who spoke, which tool ran —
 // survives without a model call.
 func methodShakeRun(_ *Agent, _ context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
-	text := elideShake(span.msgs[:span.cut])
+	text := elideShake(span.msgs[:span.cut()])
 	if strings.TrimSpace(text) == "" {
 		return nil, errors.New("shake: span rendered empty")
 	}
@@ -208,10 +212,10 @@ func methodShakeRun(_ *Agent, _ context.Context, span *compactionSpan) (*session
 // methodSoftRun prunes the discarded span structurally — superseded reads and
 // results that carry nothing — and retains what is left as text.
 func methodSoftRun(_ *Agent, _ context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
-	kept, dropped := pruneUseless(span.msgs[:span.cut])
+	kept, dropped := pruneUseless(span.msgs[:span.cut()])
 	var b strings.Builder
 	fmt.Fprintf(&b, "soft prune: %d of %d dropped messages carried nothing (superseded reads, empty results), %d kept.\n\n",
-		dropped, span.cut, len(kept))
+		dropped, span.cut(), len(kept))
 	b.WriteString(renderTranscript(kept, elideResultChars, elideTotalChars))
 	if strings.TrimSpace(b.String()) == "" {
 		return nil, errors.New("soft: span rendered empty")

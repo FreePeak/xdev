@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/session"
 )
@@ -209,5 +210,82 @@ func compressTestHasCompaction(t *testing.T, path string) bool {
 func TestDefaultCompressMethodStaysOffline(t *testing.T) {
 	if got := defaultCompressMethod(nil); got != "shake" {
 		t.Fatalf("defaultCompressMethod(nil) = %q, want shake", got)
+	}
+}
+
+// TestCompressHandoffUsesTheStructuredPrompt drives the built binary's real
+// compaction path (compressSession) with a handoff provider that records the
+// system prompt it was handed, and pins the two prompt arms: the structured
+// history template on an ordinary cut, and the split-turn prefix prompt when
+// the kept tail lands inside a turn.
+func TestCompressHandoffUsesTheStructuredPrompt(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+	path := compressTestSession(t, dataDir, cwd)
+
+	// keepRecent 200 lands the cut inside the fixture's LAST turn — the split
+	// arm — so this drive proves the real CLI path picks the prefix prompt for
+	// a mid-turn cut rather than the generic one.
+	prov := &compressPromptProvider{}
+	stats, err := compressSession(context.Background(), path, agent.MethodHandoff, 200, true, prov, "test-model")
+	if err != nil {
+		t.Fatalf("compressSession: %v", err)
+	}
+	if stats.Method != agent.MethodHandoff {
+		t.Fatalf("method = %q, want %q", stats.Method, agent.MethodHandoff)
+	}
+	if len(prov.systems) != 1 {
+		t.Fatalf("summarize calls = %d, want 1", len(prov.systems))
+	}
+	if !strings.Contains(prov.systems[0], "Summarize the prefix to provide context for the retained suffix") {
+		t.Errorf("a mid-turn cut must summarize the prefix, got %q", prov.systems[0])
+	}
+
+}
+
+// compressPromptProvider records the system prompt of every summarize call it
+// is handed and answers with a fixed structured summary, so the CLI path can be
+// driven end to end without a provider.
+type compressPromptProvider struct{ systems []string }
+
+func (p *compressPromptProvider) Stream(_ context.Context, req ai.StreamRequest) (<-chan ai.Event, error) {
+	p.systems = append(p.systems, req.System)
+	ch := make(chan ai.Event, 2)
+	ch <- ai.Donef(ai.StopReasonStop, nil, &ai.Message{
+		Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "## Goal\nkeep going"}}, StopReason: ai.StopReasonStop,
+	})
+	close(ch)
+	return ch, nil
+}
+
+func (p *compressPromptProvider) Name() string { return "compress-probe" }
+func (p *compressPromptProvider) API() string  { return "compress-probe-api" }
+
+// TestCompressHandoffKeepsWholeTurnsAboveTheAllowance is the counterpart drive:
+// a kept tail large enough to swallow whole turns leaves the cut on a user
+// message, so the summarize carries the structured history template rather than
+// the prefix one.
+func TestCompressHandoffKeepsWholeTurnsAboveTheAllowance(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+	path := compressTestSession(t, dataDir, cwd)
+
+	// 250 tokens keeps the fixture's last whole turn (the user message at index 4
+	// plus the reply after it), so the walk stops AT that user message: a turn
+	// boundary, not a split.
+	prov := &compressPromptProvider{}
+	if _, err := compressSession(context.Background(), path, agent.MethodHandoff, 250, true, prov, "test-model"); err != nil {
+		t.Fatalf("compressSession: %v", err)
+	}
+	if len(prov.systems) != 1 {
+		t.Fatalf("summarize calls = %d, want 1", len(prov.systems))
+	}
+	if !strings.Contains(prov.systems[0], "## Goal") {
+		t.Errorf("a turn-boundary cut must summarize with the structured prompt, got %q", prov.systems[0])
+	}
+	if strings.Contains(prov.systems[0], "PREFIX") {
+		t.Errorf("a turn-boundary cut is not a split turn, got %q", prov.systems[0])
 	}
 }
