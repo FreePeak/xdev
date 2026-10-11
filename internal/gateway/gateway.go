@@ -163,6 +163,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.logFn("gateway: status file: %v", err)
 	}
 	offset := int64(0)
+	conflicts := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -173,10 +174,34 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return nil
 			}
 			if IsConflict(err) {
-				// Two pollers on one token: Telegram answers 409 to the
-				// loser. Retrying loses messages forever, so stop and say why.
-				return fmt.Errorf("gateway: another process is polling this bot token (409 Conflict) — stop the other gateway first")
+				// A 409 means another poller holds this token's update
+				// queue. It is NOT always a rival daemon: Telegram also
+				// terminates an old long poll when a NEW one arrives, so any
+				// client that pokes the API (a getMe, a stray getUpdates from
+				// an operator checking the bot, a health probe) makes the
+				// long poll 409 and the poll would then exit — and launchd's
+				// KeepAlive would restart it, so a single probe is a restart.
+				// Measured 2026-10-11: two `getUpdates` curls from a shell
+				// caused two restarts of a live, healthy daemon.
+				//
+				// So: a 409 is tolerated, with backoff. What a 409 is NOT
+				// allowed to do is spin — a real rival poller produces a 409
+				// on every poll, which the backoff paces to once every 8s and
+				// a counter reports, so a genuine conflict is still visible
+				// (it is only no longer fatal, and no longer self-inflicted
+				// by a health check).
+				conflicts++
+				if conflicts == 1 || conflicts%20 == 0 {
+					d.logFn("gateway: poll conflict #%d: another getUpdates on this token (a rival daemon, or a check by hand); continuing", conflicts)
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(conflictBackoff):
+				}
+				continue
 			}
+			conflicts = 0
 			d.logFn("gateway: poll error: %v", err)
 			select {
 			case <-time.After(pollBackoff):
@@ -196,6 +221,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 }
+
+// conflictBackoff paces the polls after a 409. Telegram terminates an
+// existing long poll when another getUpdates arrives, so a 409 is expected
+// whenever anything else touches the token; 8s is long enough that a real
+// rival poller is visible (one log line per 20) and short enough that the
+// daemon is back before the next message.
+const conflictBackoff = 8 * time.Second
 
 // pollBackoff is the fixed wait between failed polls: a dead endpoint is
 // retried at this cadence rather than killing a background daemon.

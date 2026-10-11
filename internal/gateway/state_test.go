@@ -173,7 +173,11 @@ func newTestDaemon(t *testing.T, b *fakeBot, allowed []int64) *Daemon {
 	if err := WriteToken(dataDir, b.token); err != nil {
 		t.Fatal(err)
 	}
-	d, err := NewDaemon(Options{Settings: st, DataDir: dataDir, Exe: "/bin/true", BaseURL: b.url()})
+	// The test binary stands in for the xdev worker: a spawnable executable
+	// whose argv the daemon controls. /bin/true would exit 0 with no output,
+	// which cannot prove a turn ran, so use os.Args[0] and let the worker
+	// be a real process.
+	d, err := NewDaemon(Options{Settings: st, DataDir: dataDir, Exe: os.Args[0], BaseURL: b.url()})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -218,5 +222,55 @@ func TestEmptyMessageIsNotATurn(t *testing.T) {
 		if msg.Chat == 1 {
 			t.Errorf("an empty message produced %q — it must not reach the model", msg.Text)
 		}
+	}
+}
+
+// TestConflictDoesNotKillTheDaemon: Telegram terminates an existing long
+// poll when another getUpdates arrives, so a `getUpdates` curl from an
+// operator makes the live poll 409 — and a daemon that exits on 409 turns
+// one hand check into a restart (measured 2026-10-11 against the real bot:
+// two curls, two restarts).
+func TestConflictDoesNotKillTheDaemon(t *testing.T) {
+	b := newFakeBot(t)
+	b.queue(textUpdate("hello", 1))
+	// The first getUpdates 409s (the fake bot answers getUpdates with a
+	// conflict once), the next one serves the queued update.
+	b.conflictOnce = true
+	d := newTestDaemon(t, b, []int64{1})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned an error on a tolerated 409: %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Run did not return after the context was cancelled — the loop is stuck")
+	}
+	// The 409 must be visible in the log, not silent.
+	if got := b.conflictCount(); got == 0 {
+		t.Error("the 409 was not recorded — a real rival poller must stay visible")
+	}
+}
+
+// TestRivalPollerIsStillVisible: a genuine second daemon produces a 409 on
+// every poll. Paced at 8s it would log every 20th — with the test's short
+// window, the first one is the assertion that would catch a silent loop.
+func TestRivalPollerIsStillVisible(t *testing.T) {
+	b := newFakeBot(t)
+	b.alwaysConflict = true
+	d := newTestDaemon(t, b, []int64{1})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	go func() { _ = d.Run(ctx) }()
+	time.Sleep(500 * time.Millisecond)
+	if b.conflictCount() == 0 {
+		t.Fatal("a 409-on-every-poll rival was not seen — the conflict path is not running")
+	}
+	// And no turn was ever started: the conflict is the whole story.
+	for _, m := range b.sentAll() {
+		t.Errorf("unexpected message on a conflicted poll: %q", m.Text)
 	}
 }

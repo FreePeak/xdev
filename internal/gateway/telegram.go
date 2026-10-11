@@ -161,7 +161,14 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("telegram %s: HTTP %d: %s", e.Method, e.HTTPStatus, e.Description)
 }
 
-// IsConflict reports whether err is the 409 a second poller causes.
+// IsConflict reports whether err is the 409 a second getUpdates causes.
+//
+// Telegram's rule: a new getUpdates terminates the previous long poll, and
+// the terminated one surfaces as 409 to whoever was holding it. So a 409
+// means "something else polled this token just now" — a rival daemon, or a
+// curl, or a health check. The daemon must not treat it as fatal (see
+// daemon.go's conflict handling), but the caller still needs to tell it from
+// a network error.
 func IsConflict(err error) bool {
 	var api *APIError
 	return errors.As(err, &api) && (api.Code == http.StatusConflict || api.HTTPStatus == http.StatusConflict)
