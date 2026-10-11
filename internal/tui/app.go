@@ -425,28 +425,26 @@ type App struct {
 	selBarPos   int // thumb's first half row on the track at paint time
 	selBarEnd   int // thumb's half-row end at paint time (exclusive)
 	// The sticky header's geometry at paint time. stickyHdr is how many rows of
-	// the transcript's top the header owns (its card, padding and gap
+	// the transcript's top the header owns (its card, margin and gap
 	// included), stickyVis how many of those are the prompt's own text rows,
+	// stickyMargin how many of those are the card's blank margin above them,
 	// stickyBlock the prompt it pinned (-1 when none) and stickyDoc the
 	// document row its first painted row shows.
 	//
-	// All three numbers matter because a header row is NOT the document row
+	// All four numbers matter because a header row is NOT the document row
 	// its screen position names: below the header, screen row y is document
 	// row start+(y-top), exactly as it always was, but a header row shows a
 	// row of the pinned prompt, which the viewport has already scrolled past.
-	// The rows between are the card's blank padding: they belong to the header
-	// (a click on one is not a hit on any transcript row) and to no prompt.
+	// The card's margin rows belong to the header (a click on one is not a hit
+	// on any transcript row) and to no prompt.
 	//
-	// Both numbers matter because a header row is NOT the document row its
-	// screen position names: below the header, screen row y is document row
-	// start+(y-top), exactly as it always was, but a header row shows a row of
-	// the pinned prompt, which the viewport has already scrolled past.
+	//
 	// Published every frame with the rest of the geometry; (UI-thread;
-	// mu-guarded.)
-	stickyHdr   int
-	stickyVis   int
-	stickyBlock int
-	stickyDoc   int32
+	stickyHdr    int
+	stickyVis    int
+	stickyMargin int // top margin rows the pinned card paints above its text
+	stickyBlock  int
+	stickyDoc    int32
 	// toasts is the live notice stack (toast.go): the copy confirmation, a
 	// failed chord, a failed MCP server — everything transient, painted in
 	// the top-right corner and dropped on its own deadline.
@@ -4768,7 +4766,7 @@ func (a *App) paint() {
 	s.Clear()
 	// Per-frame facts about the viewport: a frame that draws no transcript
 	a.selRows, a.selBarOn, a.selDockRows, a.linkHits = nil, false, nil, nil
-	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyDoc = 0, 0, -1, 0
+	a.stickyHdr, a.stickyVis, a.stickyMargin, a.stickyBlock, a.stickyDoc = 0, 0, 0, -1, 0
 	// The pills' hit table is a per-frame fact for the same reason the
 	// scrollbar's is: a frame that drops a pill for width must not leave
 	// last frame's rectangle live, or a click would open a popup for a
@@ -4871,12 +4869,17 @@ func (a *App) paint() {
 	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
-	// The header paints the prompt's own rows and nothing else: it is the
-	// inline card verbatim, so a pinned prompt looks exactly like the one the
-	// transcript drew — no blank banded rows the inline copy does not have.
-	// The one row after it is the gap that says the header is not part of the
-	// stream, and it is zero when nothing is pinned.
+	// The header paints the prompt's own rows and the card's air: the margin
+	// row above it is the same blank banded row the inline card's own margins
+	// give it (fixed as a full-bleed bar in fix/user-band-padding), so a pinned
+	// prompt floats off the top of the transcript rather than being tacked to
+	// it. The one row after the text is the gap that says the header is not
+	// part of the stream, and both are zero when nothing is pinned.
+	margin := a.stickyMarginRow(sticky)
 	view := make([]rowView, 0, max(sticky.rows, end-start))
+	for range sticky.margin {
+		view = append(view, margin)
+	}
 	view = append(view, header...)
 	for range sticky.rows - len(view) {
 		view = append(view, rowView{})
@@ -5014,7 +5017,7 @@ func (a *App) paint() {
 	// header's OWN rows are a special case (a corner on one takes the pinned
 	// prompt's rows); every row below it keeps the viewport's own mapping,
 	// because the header re-renders rows the viewport already owned.
-	a.stickyHdr, a.stickyVis, a.stickyBlock = sticky.rows, len(header), sticky.block
+	a.stickyHdr, a.stickyVis, a.stickyBlock, a.stickyMargin = sticky.rows, len(header), sticky.block, sticky.margin
 	a.stickyDoc = 0
 	if sticky.block >= 0 {
 		// The header's first painted TEXT row is the prompt's row clipTop: the

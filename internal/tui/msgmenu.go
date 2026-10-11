@@ -148,10 +148,10 @@ func (a *App) userRowAt(y int) (ord, block int) {
 	}
 	bi := -1
 	switch dy := y - hdr; {
-	case a.stickyVis > 0 && dy < a.stickyVis && a.stickyBlock >= 0:
+	case a.stickyVis > 0 && dy >= a.stickyMargin && dy < a.stickyMargin+a.stickyVis && a.stickyBlock >= 0:
 		bi = a.stickyBlock // a row of the pinned card
 	case dy < a.stickyHdr:
-		bi = -1 // the blank gap under it: nothing to hit
+		bi = -1 // the card's margin and the gap under it: nothing to hit
 	default:
 		bi = a.rowIdx.blockAt(int32(top + dy))
 	}

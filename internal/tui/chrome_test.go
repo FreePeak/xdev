@@ -1248,12 +1248,14 @@ func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 	app.draw()
 
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
-	// Row 0 is the session's own first prompt, not a header: no branch on it,
-	// and the prompt is where it has always been — the first row of the
-	// transcript, the card padding itself no longer.
-	first := app.transcriptTop()
+	// The session's own first prompt is what opens the transcript, not a
+	// header: no branch on it, and the request starts at the prompt's own row —
+	// directly, or one row below the pinned card's top margin (fix/sticky-top-margin).
+	app.mu.Lock()
+	first := app.transcriptTop() + app.stickyMargin
+	app.mu.Unlock()
 	if first >= len(rows) || strings.Contains(rows[first], "fix/boxes") || !strings.Contains(rows[first], "fix the") {
-		t.Fatalf("row %d %q must be transcript content, not a header", first, rows[first])
+		t.Fatalf("row %d %q must be the session's own prompt, not a header", first, rows[first])
 	}
 
 	// The branch is on the status row, next to the path, in that order.
