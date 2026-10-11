@@ -144,6 +144,34 @@ func (h *Headless) Addr() string {
 	return h.ln.Addr().String()
 }
 
+// BindForTest binds the listener and starts serving, returning a stop function.
+// It exists so a test (or a client harness) can reach a deterministic bound
+// address instead of racing Run's goroutine to observe the port. The
+// registration is published here, exactly as Run does.
+func BindForTest(h *Headless) (func(), error) {
+	ln, err := net.Listen("tcp", h.options.addr(defaultHeadlessListen))
+	if err != nil {
+		return nil, err
+	}
+	h.ln = ln
+	h.srv = &http.Server{
+		Handler:           h.h,
+		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
+	url := "http://" + ln.Addr().String()
+	regPath := HeadlessRegistrationPath(h.options.dataDir())
+	if err := writeRegistration(regPath, h.Registration(url)); err != nil {
+		h.logf("%s: registration: %v", serviceHeadless, err)
+	}
+	stop := func() {
+		_ = h.srv.Close()
+		_, _ = removeRegistrationIfOwner(regPath, h.id)
+	}
+	go func() { _ = h.srv.Serve(ln) }()
+	return stop, nil
+}
+
 // mux is the route table. Four routes plus the open probe: anything more is a
 // surface a client has to learn, and the RPC contract already covers the rest.
 func (h *Headless) mux(maxBody int64) http.Handler {

@@ -177,6 +177,10 @@ type rpcHandler struct {
 	curID   string
 	cancel  context.CancelFunc
 
+	// notify receives the lifecycle frames only the headless transport carries
+	// (nil on stdio RPC, where the contract has no frame for them yet).
+	notify headlessNotifier
+
 	store *session.Store
 	agent *agent.Agent
 
@@ -388,10 +392,46 @@ func (h *rpcHandler) OnToolResultMessage(m *ai.Message) {
 	}
 }
 
-// OnCompaction and OnTurnEnd: no RPC surface yet (v2 frames).
-func (h *rpcHandler) OnCompaction(before int64) {}
+// headlessNotifier is set by the headless transport: the ONE frame the SSE
+// stream should carry that the RPC contract does not have yet is the
+// "context is about to change" notice, because a client watching the stream
+// needs to know the history it just read is being replaced (the TUI paints a
+// system block for the same event; a remote client has no local peer to read).
+type headlessNotifier interface {
+	// NotifyCompaction maps to the SSE `session_compact` frame.
+	NotifyCompaction(before int64)
+	// NotifyTurnEnd maps to the SSE `turn_end` frame.
+	NotifyTurnEnd(reason ai.StopReason, err error)
+}
 
-func (h *rpcHandler) OnTurnEnd(s ai.StopReason, err error) {}
+// OnCompaction bridges the compaction notice to the headless stream when one
+// is attached. Stdio RPC has no frame for it yet (v2), so a bare rpcHandler
+// with no notifier behaves exactly as before.
+func (h *rpcHandler) OnCompaction(before int64) {
+	h.notifier().NotifyCompaction(before)
+}
+
+// OnTurnEnd bridges the terminal reason so a remote client can tell "the
+// model finished" from "the stream dropped". The response frame already
+// carries it for the prompt it answers; this covers a run whose terminal
+// message never arrives (abort), where the frame is all a client gets.
+func (h *rpcHandler) OnTurnEnd(s ai.StopReason, err error) {
+	h.notifier().NotifyTurnEnd(s, err)
+}
+
+// notifier is whichever transport attached one, or a no-op — the RPC contract
+// has no frames for these yet, and a stdio client must see no behaviour change.
+func (h *rpcHandler) notifier() headlessNotifier {
+	if h.notify != nil {
+		return h.notify
+	}
+	return nopNotifier{}
+}
+
+type nopNotifier struct{}
+
+func (nopNotifier) NotifyCompaction(int64)             {}
+func (nopNotifier) NotifyTurnEnd(ai.StopReason, error) {}
 
 // OnContinuation: same — the injected turn persists as an attributed
 // message entry, so readers of the store can still count it (#283).
