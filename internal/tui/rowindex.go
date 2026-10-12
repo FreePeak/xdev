@@ -382,17 +382,42 @@ func (a *App) sync(w int) int32 {
 	}
 
 	total := a.reconcile(w, from)
+	// The auto latch decides on the layout that is NOT compact
+	// (compactFullRows), never on the total this pass just measured: compact
+	// mode shrinks the very number the threshold reads, so a latch that read
+	// that number back flipped on, saw the shrunken total, flipped off, and
+	// flipped on again — every frame, with a full re-render and a toast per
+	// flip. A total measured with the mode off is the one input the mode
+	// cannot move.
+	if !a.compact {
+		a.compactFullRows = total
+	}
 	// The compact latch is settled here, on the fresh row count, and the frame
 	// that flips it is the frame that paints it: the mode is part of every box's
 	// stamp, so a flip invalidates those rows and one more pass renders them
 	// collapsed. Only a mode CHANGE pays for that pass — a steady state falls
 	// straight through.
-	if a.compactAutoLatch(total) {
+	if a.compactAutoLatch(a.compactFullRows) {
 		total = a.reconcile(w, a.firstBoxRow())
+		if !a.compact {
+			a.compactFullRows = total
+		}
 		trimmed = true
 	}
 	// The row cap last, on the offsets just computed: a trim can only ever
 	// shrink the transcript, so it never invalidates the scan above.
+	//
+	// A trim does NOT move compactFullRows, and that is deliberate. The cut is
+	// made on the layout that is ON SCREEN — the compact one, while the mode is
+	// on — and compactFullRows is the uncompacted height, so the rows the trim
+	// removed say nothing about the number the latch reads. Guessing (subtract
+	// the compact rows, say) drifts downward every trim, and a drifted-low
+	// measurement reads a long session as short and releases the mode it just
+	// latched — the oscillation this fix exists to remove. Keeping the last
+	// measurement taken with the mode OFF is both stable and honest: the cap
+	// (5 000) sits above the threshold (2 000), so a transcript the cap is
+	// cutting is long by construction, and Reset is what zeroes the
+	// measurement when the transcript really does start over.
 	if a.trimTranscript(total) {
 		total = a.rowIdx.total()
 		trimmed = true
@@ -447,7 +472,7 @@ func (a *App) firstBoxRow() int32 {
 // --- the row cap ---------------------------------------------------------
 
 // trimTranscript drops the oldest blocks until the layout fits transcriptCap
-// rows, and reports how many blocks went and how many rows they carried.
+// rows, and reports whether it moved anything.
 //
 // It runs at the END of sync, on the freshly computed offsets, and only when
 // the total is over the cap: the common frame pays one int compare. Everything
@@ -460,6 +485,10 @@ func (a *App) firstBoxRow() int32 {
 // retained at an index nothing reads. The alternative — a growing offset into
 // an append-only slice — keeps every dropped render alive, which is the memory
 // this cap exists to bound.
+//
+// The cut is on the layout that is on screen — the compact one while the mode
+// is on — so it says nothing about the uncompacted height the latch reads;
+// sync's own comment is where that separation is spelled out.
 func (a *App) trimTranscript(total int32) bool {
 	if total <= transcriptCap {
 		return false
@@ -467,14 +496,14 @@ func (a *App) trimTranscript(total int32) bool {
 	x := &a.rowIdx
 	n := len(a.blocks)
 	// Newest-first: keep the tail window unconditionally, then walk back while
-	// the layout still fits. The first block whose head fits is the cut; a
-	// single block taller than the cap is kept anyway (dropping it would leave
-	// the frame with nothing to paint, and the row cap is a budget, not a
-	// promise).
+	// the layout still fits. The first block whose head fits is the cut.
 	cut := max(0, n-transcriptKeepTail)
 	for cut > 0 && total-x.start[cut-1] <= transcriptCap {
 		cut--
 	}
+	// A single block taller than the cap is kept anyway: dropping it would
+	// leave the frame with nothing to paint, and the row cap is a budget, not
+	// a promise.
 	if cut == 0 {
 		return false
 	}
