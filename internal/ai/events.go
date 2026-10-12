@@ -36,6 +36,15 @@ type Event struct {
 	Provider string
 	API      string
 	Model    string
+	// ServedBy is the leg that ACTUALLY served this request as
+	// "provider/model", set only when the wire reported a divergence from
+	// Model. A gateway in front of the provider can fall a combo through to
+	// a sibling leg, and its X-OneGW-Decision response header is where it
+	// says so; the provider adapters copy that answer here so a host can
+	// tell the user their request was answered by something else. Empty
+	// means "no divergence was reported" — never "the same model", which a
+	// caller must not have to distinguish.
+	ServedBy string
 
 	// text_* / thinking_*
 	Delta    string // incremental text (text_delta, thinking_delta)

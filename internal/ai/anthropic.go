@@ -41,7 +41,6 @@ func NewAnthropicProvider(name, baseURL, apiKey string, headers map[string]strin
 func (p *AnthropicProvider) Name() string { return p.name }
 func (p *AnthropicProvider) API() string  { return APIAnthropicMessages }
 
-
 // HealthCheck implements ai.HealthChecker. No key on the probe — the
 // live call carries it; the endpoint answers catalog reads to any
 // caller.
@@ -331,7 +330,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 		defer resp.Body.Close()
 		defer cancel()
 		defer close(ch)
-		p.stream(sctx, resp.Body, model, ch, start)
+		p.stream(sctx, resp.Body, model, ch, start, servedByDecision(resp, model))
 	}()
 	return withWatchdog(ctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
@@ -347,7 +346,7 @@ type anthropicBlockState struct {
 	args  strings.Builder
 }
 
-func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model string, ch chan<- Event, start time.Time) {
+func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model string, ch chan<- Event, start time.Time, servedBy string) {
 	var (
 		ttft     int64
 		emitted  bool // any event emitted yet (start sentinel)
@@ -362,7 +361,7 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 	emit := func(ev Event) {
 		if !emitted {
 			emitted = true
-			ch <- Event{Type: EventStart, Provider: p.name, API: APIAnthropicMessages, Model: model}
+			ch <- Event{Type: EventStart, Provider: p.name, API: APIAnthropicMessages, Model: model, ServedBy: servedBy}
 		}
 		if ttft == 0 {
 			switch ev.Type {

@@ -3154,6 +3154,17 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 		// One EventStart is one provider request, which is the "step"
 		// dsh's TimePill counts beside its turns.
 		h.ts.paint(func() { h.ts.app.AddStep() })
+		// A gateway that fell the request over to a sibling model must not
+		// leave the status row claiming the pinned one. The badge on the
+		// model segment is the standing reading; the toast is the moment,
+		// because a switch is the answer to "why is this answer unlike the
+		// last one" and the user is looking at the transcript, not the
+		// divider, when it happens.
+		h.ts.paint(func() { h.ts.app.SetServedBy(ev.ServedBy) })
+		if ev.ServedBy != "" {
+			notice := ai.SwitchPhrase(ev.Model, ev.ServedBy)
+			h.ts.paint(func() { h.ts.app.Toast(tui.ToastInfo, notice, 0) })
+		}
 	case ai.EventTextStart:
 		h.ts.paint(func() { h.ts.app.BeginAssistant() })
 	case ai.EventTextDelta:

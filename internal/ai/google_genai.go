@@ -324,7 +324,7 @@ func (p *GoogleGenAIProvider) streamAt(ctx context.Context, req StreamRequest, u
 		defer resp.Body.Close()
 		defer cancel()
 		defer close(ch)
-		p.stream(sctx, resp.Body, model, ch, start)
+		p.stream(sctx, resp.Body, model, ch, start, servedByDecision(resp, model))
 	}()
 	return withWatchdog(ctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
@@ -342,7 +342,7 @@ func (p *GoogleGenAIProvider) resolveModel(req StreamRequest) (string, error) {
 
 // stream maps the SSE chunk stream onto the unified event contract:
 // start → (thinking|text|toolcall triplets)* → exactly one terminal event.
-func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model string, ch chan<- Event, start time.Time) {
+func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model string, ch chan<- Event, start time.Time, servedBy string) {
 	var (
 		text       strings.Builder
 		toolCalls  = map[int]*ToolCallBlock{}
@@ -357,7 +357,7 @@ func (p *GoogleGenAIProvider) stream(ctx context.Context, body io.Reader, model 
 	emit := func(ev Event) {
 		if !emitted {
 			emitted = true
-			ch <- Event{Type: EventStart, Provider: p.name, API: p.API(), Model: model}
+			ch <- Event{Type: EventStart, Provider: p.name, API: p.API(), Model: model, ServedBy: servedBy}
 		}
 		if ttft == 0 {
 			switch ev.Type {
