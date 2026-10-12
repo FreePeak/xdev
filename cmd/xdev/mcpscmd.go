@@ -48,7 +48,6 @@ func runMcps(args []string) int {
 			if st.ErrorTime != "" {
 				fmt.Printf("    since: %s\n", st.ErrorTime)
 			}
-			fmt.Printf("    fix: xdev mcps fix %s\n", st.Name)
 		}
 	}
 	return 0

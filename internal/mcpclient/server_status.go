@@ -63,7 +63,7 @@ func ServerHealthProbe(ctx context.Context, cfg *Config) ([]ServerStatus, error)
 		} else if sc.Disabled {
 			st.State = "disabled"
 		} else {
-			ok, err := sc.IsHealthy()
+			ok, reason, err := sc.Probe()
 			if err != nil {
 				lastErr = fmt.Errorf("probe %s: %w", name, err)
 				st.State = "error"
@@ -71,7 +71,13 @@ func ServerHealthProbe(ctx context.Context, cfg *Config) ([]ServerStatus, error)
 				st.LastError = err
 				st.ErrorTime = time.Now().Format(time.RFC3339)
 			} else if !ok {
+				// A down server is the common case, and it is the one the
+				// state word alone cannot explain: record the cause and the
+				// time here too, or the detail rows below are empty exactly
+				// when a user needs them.
 				st.State = "unreachable"
+				st.ErrorDetail = reason
+				st.ErrorTime = time.Now().Format(time.RFC3339)
 			} else {
 				st.State = "online"
 			}

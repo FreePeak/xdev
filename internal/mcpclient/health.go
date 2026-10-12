@@ -26,11 +26,13 @@ func detachedStdio() *os.File {
 
 // probeHTTP GETs the health endpoint and reports whether the server
 // answered 200. A connection failure is a clean "down" — the caller
-// decides whether to start it.
-func probeHTTP(rawURL string) (bool, error) {
+// decides whether to start it — and the REASON travels back separately so a
+// caller that renders this state to a user can say why it is down instead of
+// printing the word "unreachable" and stopping.
+func probeHTTP(rawURL string) (bool, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return false, fmt.Errorf("parse health url: %w", err)
+		return false, "", fmt.Errorf("parse health url: %w", err)
 	}
 	if u.Scheme == "" {
 		u.Scheme = "http"
@@ -39,31 +41,47 @@ func probeHTTP(rawURL string) (bool, error) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
-		return false, fmt.Errorf("request: %w", err)
+		return false, "", fmt.Errorf("request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, nil // down, not an error
+		return false, err.Error(), nil // down, not an error
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK, nil
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Sprintf("%s answered %s", u.String(), resp.Status), nil
+	}
+	return true, "", nil
 }
 
 // probeStdio checks whether the configured command exists on PATH.
-func probeStdio(command string) (bool, error) {
+func probeStdio(command string) (bool, string, error) {
 	if command == "" {
-		return false, nil
+		return false, "no url and no command configured", nil
 	}
-	_, err := exec.LookPath(command)
-	return err == nil, nil
+	if _, err := exec.LookPath(command); err != nil {
+		return false, err.Error(), nil
+	}
+	return true, "", nil
 }
 
 // IsHealthy reports whether the server is reachable. For HTTP servers it
 // probes HealthEndpoint(); for stdio servers it checks the command exists.
 // An empty config (nil or no URL/command) is treated as unhealthy.
 func (sc *ServerConfig) IsHealthy() (bool, error) {
+	ok, _, err := sc.Probe()
+	return ok, err
+}
+
+// Probe is IsHealthy plus the reason the server did not answer, so the one
+// view built to explain a broken server can print the cause and the time
+// instead of only the state word. reason is "" when the server is healthy,
+// and a down server is still NOT an error: auto-start depends on that
+// contract (StartAuto treats an error as fatal), and a cold start is the
+// normal case, not a failure.
+func (sc *ServerConfig) Probe() (healthy bool, reason string, err error) {
 	if sc == nil {
-		return false, nil
+		return false, "no url and no command configured", nil
 	}
 	if sc.URL != "" {
 		return probeHTTP(sc.HealthEndpoint())
