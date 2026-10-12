@@ -28,6 +28,9 @@ import (
 // recovery_notice_every_round persists at the first round and then on the
 // stride. A loop bounded at 12 rounds writes 4 records, not 12, and not 1
 // either: a single record cannot say whether the loop was still climbing.
+//
+// The fixture is a REFUSED connection: a connectivity outage is unbounded
+// (agent.outageMayNotEndATurn) and would never reach round 12 at all.
 func TestRecoveryNoticeIsPersistedThrottled(t *testing.T) {
 	down := fakeScript{err: errors.New("dial tcp 127.0.0.1:8080: connect: connection refused")}
 	calls := make([]fakeScript, maxSilentRecoveryRounds*(oneShotRetry().MaxRetries+1)+4)
