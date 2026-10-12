@@ -382,19 +382,40 @@ func (a *App) sync(w int) int32 {
 	}
 
 	total := a.reconcile(w, from)
+	// The auto latch decides on the layout that is NOT compact
+	// (compactFullRows), never on the total this pass just measured: compact
+	// mode shrinks the very number the threshold reads, so a latch that read
+	// that number back flipped on, saw the shrunken total, flipped off, and
+	// flipped on again — every frame, with a full re-render and a toast per
+	// flip. A total measured with the mode off is the one input the mode
+	// cannot move.
+	if !a.compact {
+		a.compactFullRows = total
+	}
 	// The compact latch is settled here, on the fresh row count, and the frame
 	// that flips it is the frame that paints it: the mode is part of every box's
 	// stamp, so a flip invalidates those rows and one more pass renders them
 	// collapsed. Only a mode CHANGE pays for that pass — a steady state falls
 	// straight through.
-	if a.compactAutoLatch(total) {
+	if a.compactAutoLatch(a.compactFullRows) {
 		total = a.reconcile(w, a.firstBoxRow())
+		if !a.compact {
+			a.compactFullRows = total
+		}
 		trimmed = true
 	}
 	// The row cap last, on the offsets just computed: a trim can only ever
 	// shrink the transcript, so it never invalidates the scan above.
-	if a.trimTranscript(total) {
+	if dropped := a.trimTranscript(total); dropped > 0 {
 		total = a.rowIdx.total()
+		// The cap is the one thing that shrinks the full layout while compact
+		// mode is on, so it carries compactFullRows down by what left the
+		// window: otherwise the latch would read the trimmed total as "this
+		// session got short" and let go of a long transcript.
+		a.compactFullRows -= dropped
+		if !a.compact {
+			a.compactFullRows = total
+		}
 		trimmed = true
 	}
 	// One notice per CHANGE, and only when something moved: sync runs on every
@@ -447,7 +468,8 @@ func (a *App) firstBoxRow() int32 {
 // --- the row cap ---------------------------------------------------------
 
 // trimTranscript drops the oldest blocks until the layout fits transcriptCap
-// rows, and reports how many blocks went and how many rows they carried.
+// rows, and returns how many rows left the window (0 = nothing was trimmed, and
+// every block carries at least one row, so the count is never ambiguous).
 //
 // It runs at the END of sync, on the freshly computed offsets, and only when
 // the total is over the cap: the common frame pays one int compare. Everything
@@ -460,9 +482,14 @@ func (a *App) firstBoxRow() int32 {
 // retained at an index nothing reads. The alternative — a growing offset into
 // an append-only slice — keeps every dropped render alive, which is the memory
 // this cap exists to bound.
-func (a *App) trimTranscript(total int32) bool {
+//
+// The dropped-row count is what lets sync carry the uncompacted row count
+// (App.compactFullRows) down with the trim: while compact mode is on, this is
+// the only thing that can shorten the full layout, and a latch that missed it
+// would let go of a transcript that is still long.
+func (a *App) trimTranscript(total int32) int32 {
 	if total <= transcriptCap {
-		return false
+		return 0
 	}
 	x := &a.rowIdx
 	n := len(a.blocks)
@@ -476,7 +503,7 @@ func (a *App) trimTranscript(total int32) bool {
 		cut--
 	}
 	if cut == 0 {
-		return false
+		return 0
 	}
 	dropped := int(x.start[cut])
 	for _, b := range a.blocks[:cut] {
@@ -511,7 +538,7 @@ func (a *App) trimTranscript(total int32) bool {
 		x.start = append(x.start, 0)
 	}
 	x.dirty = 0
-	return true
+	return int32(dropped)
 }
 
 // rowChrome is the decoration a block's rows share: the accent rail, and the

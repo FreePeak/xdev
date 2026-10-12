@@ -406,6 +406,15 @@ type App struct {
 	// have it re-applied a frame later.
 	compactLatch bool
 	compactAuto  bool
+	// compactFullRows is the transcript's row count measured with compact mode
+	// OFF: the only input the auto latch is allowed to read, because compact
+	// mode shrinks the very total the threshold compares against. A latch that
+	// read the live total flipped on, saw its own smaller layout, flipped off,
+	// and flipped on again — a full re-render and a toast per flip, every
+	// frame. It is carried by the two things that move a layout on their own:
+	// a non-compact reconcile measures it, and a trim takes the dropped rows
+	// off it (a compact reconcile cannot see the full height it is hiding).
+	compactFullRows int32
 	// trimNoticeOn records that the trim notice is already up, so a session
 	// that keeps trimming says it once instead of on every frame. It clears
 	// the moment a pass moves nothing, which is what lets the next trim speak.
@@ -2336,11 +2345,12 @@ func (a *App) Reset() {
 	a.closeWindow()
 	a.blocks = nil
 	a.droppedRows, a.droppedUserRows = 0, 0
-	a.thinkFocus = -1  // the focused box went with them
-	a.msgArmed = false // so did the armed menu row: its block is gone
-	a.msgm = nil       // a menu over replayed-away blocks is not a menu
-	a.msgv = nil       // likewise the read-only surface naming one
-	a.statusPop = nil  // a panel over the previous session's transcript
+	a.compactFullRows = 0 // the row count belonged to the transcript that just left
+	a.thinkFocus = -1     // the focused box went with them
+	a.msgArmed = false    // so did the armed menu row: its block is gone
+	a.msgm = nil          // a menu over replayed-away blocks is not a menu
+	a.msgv = nil          // likewise the read-only surface naming one
+	a.statusPop = nil     // a panel over the previous session's transcript
 	a.sm = newScrollModel()
 	a.clearRenderCache()
 	a.mu.Unlock()
@@ -3052,15 +3062,20 @@ func (a *App) CompactState() string {
 // the session rather than a timer. It reports whether the mode moved, which is
 // the caller's signal that the boxes it collapsed still have to be rendered.
 //
+// `full` is the row count with the mode OFF (App.compactFullRows), never the
+// total the current pass measured: compact mode shrinks the very number the
+// threshold compares, so a latch reading its own output oscillated — on, 120
+// rows, off, 2 220 rows, on — with a full re-render and a toast per flip.
+//
 // A crossing is handled ONCE (compactLatch): the threshold turning the mode on
 // is a default, not a policy, so a human who turns it straight back off does
 // not have it turn itself on again on the next frame. compactAuto is what makes
 // the auto-on reversible — only a mode the THRESHOLD set is let go when the
 // transcript shrinks, never one a chord or the settings row chose.
-func (a *App) compactAutoLatch(total int32) bool {
+func (a *App) compactAutoLatch(full int32) bool {
 	was := a.compact
 	switch {
-	case total <= compactAfterRows:
+	case full <= compactAfterRows:
 		a.compactLatch = false
 		if a.compactAuto {
 			a.compact, a.compactAuto = false, false
@@ -4252,8 +4267,12 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// Compact mode keeps the reasoning box's frame — the turn's own shape,
 		// and what the click expands — and drops its body: one row saying how
 		// much was hidden. The header (the spinner, "Thought for Xs") is the
-		// block's state, so it stays.
-		if a.compact {
+		// block's state, so it stays. Ctrl+O (Block.Expanded) outranks the mode
+		// exactly as it does for a result box: a compact box has no body to
+		// drop, so one that ignored Expanded kept painting the very notice the
+		// click had just dismissed — the one box in the transcript whose
+		// affordance did nothing.
+		if a.compact && !b.Expanded {
 			lines = a.thinkBoxCompact(i, b, w)
 			break
 		}
@@ -4626,6 +4645,10 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 //
 // The body is measured, not printed: thinkRows is what the full box wraps, and
 // its length is the honest "how much is behind this row".
+//
+// A box the user opened (Ctrl+O, Block.Expanded) never reaches here: the
+// caller keeps the full box for it, so the per-block state and the
+// transcript-wide mode stay independent. This is the collapsed render.
 func (a *App) thinkBoxCompact(i int, b *Block, w int) []line {
 	box := a.th.Box()
 	focused := i == a.thinkFocus

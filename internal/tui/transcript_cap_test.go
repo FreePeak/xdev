@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -339,5 +340,75 @@ func TestClickCollapsedRowExpandsIt(t *testing.T) {
 	app.mu.Unlock()
 	if !expanded {
 		t.Fatal("a click on the collapsed result did not expand it")
+	}
+}
+
+// The auto latch must not oscillate. Its input is the row count with the mode
+// OFF (App.compactFullRows): the mode shrinks the very number the threshold
+// compares, so a latch that read the total it had just laid out flipped on
+// (2 220 rows), off (120 rows), on — every frame, each flip a full re-render
+// and a toast. This is the shape that produced it: long in-flight tool CALL
+// rows, which wrap into a block of their own when the transcript is not
+// compact and clip to one row when it is, so the two layouts straddle
+// compactAfterRows.
+func TestCompactAutoLatchDoesNotFlap(t *testing.T) {
+	measure := func(compact bool) int32 {
+		app := idxApp(120, 40)
+		wrapHeavyCalls(app, 60)
+		if compact {
+			app.SetCompact(true)
+		}
+		return app.sync(app.contentWidth())
+	}
+	fullTotal, compactTotal := measure(false), measure(true)
+	if fullTotal <= compactAfterRows || compactTotal > compactAfterRows {
+		t.Skipf("fixture does not straddle %d rows (full %d, compact %d)", compactAfterRows, fullTotal, compactTotal)
+	}
+
+	app := idxApp(120, 40)
+	wrapHeavyCalls(app, 60)
+	w := app.contentWidth()
+	states, totals := make([]bool, 0, 12), make([]int32, 0, 12)
+	for range 12 {
+		totals = append(totals, app.sync(w))
+		states = append(states, app.Compact())
+	}
+	for i := 1; i < len(states); i++ {
+		if states[i] != states[i-1] {
+			t.Fatalf("compact mode flipped on frame %d: states=%v totals=%v", i, states, totals)
+		}
+	}
+	if !states[0] {
+		t.Fatalf("the fixture never latched the mode on: states=%v totals=%v", states, totals)
+	}
+}
+
+// wrapHeavyCalls appends n in-flight tool calls whose naming argument wraps
+// into many rows in the full layout and clips to one row in compact mode.
+func wrapHeavyCalls(app *App, n int) {
+	long := strings.Repeat("segment", 300)
+	for i := range n {
+		app.AddToolBlock(fmt.Sprintf("c%d", i), "bash", fmt.Sprintf(`{"command":"echo %s"}`, long))
+	}
+}
+
+// Ctrl+O opens a reasoning box in compact mode exactly as it opens a result:
+// the transcript-wide mode and the per-block state are independent, and a
+// compact box that ignored Expanded painted the notice it was told to dismiss.
+func TestCompactThinkingCtrlOOpensTheBody(t *testing.T) {
+	app := idxApp(120, 40)
+	compactFill(app)
+	app.SetCompact(true)
+	i := kindIndex(app, KindThinking)
+	collapsed := rowsOfBlock(app, i)
+	if !strings.Contains(strings.Join(collapsed, "\n"), "hidden (Ctrl+O to expand)") {
+		t.Fatalf("setup: the compact reasoning box is not collapsed:\n%s", strings.Join(collapsed, "\n"))
+	}
+	app.mu.Lock()
+	app.blocks[i].Expanded = true
+	app.mu.Unlock()
+	got := rowsOfBlock(app, i)
+	if len(got) <= len(collapsed) {
+		t.Fatalf("Expanded reasoning stayed at %d rows (was %d):\n%s", len(got), len(collapsed), strings.Join(got, "\n"))
 	}
 }
