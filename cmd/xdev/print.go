@@ -34,6 +34,7 @@ import (
 	"github.com/FreePeak/xdev/internal/rules"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/skills"
+	"github.com/FreePeak/xdev/internal/testimpact"
 	"github.com/FreePeak/xdev/internal/tiny"
 	"github.com/FreePeak/xdev/internal/tool"
 	"github.com/FreePeak/xdev/internal/tts"
@@ -1785,6 +1786,14 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M15: typesafe — System One evaluation (hosted Jev or local Laya);
 	// TYPESAFE_BASE_URL selects the endpoint and auth is optional.
 	reg.Register(typesafe.NewTool(settings.TypeSafeConfig()))
+	// regression_tests — the change→tests selector: `go list` gives the exact
+	// candidate set from the dependency graph, and the typesafe block's
+	// endpoint (hosted Jev or local Laya) ranks it. It selects, never runs.
+	// PRD §1 Goal 4 is a hard gate on the bundled prompt
+	// (cmd/xdev/prompt_test.go measures <1000 tokens), so this tool ships
+	// deferred: session effort at the default rung keeps it behind the
+	// catalog, where it costs nothing until the model asks for it.
+	reg.Register(testimpact.NewTool(cwd, settings.TypeSafeConfig()))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	sharedHub = hub

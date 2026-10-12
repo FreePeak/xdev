@@ -416,7 +416,7 @@ func BuildDeferredIndex(entries []tool.Entry) string {
 	}
 	var b strings.Builder
 	b.WriteString("\n\n# Deferred tools\n")
-	b.WriteString("Not in the tool list. Call tool_search to find one, tool_describe <name> for its schema, tool_call {\"name\":<name>,\"args\":{...}} to run it.\n")
+	b.WriteString("Not in the tool list. tool_search finds one, tool_describe reads it, tool_call runs it.\n")
 	for _, e := range entries {
 		fmt.Fprintf(&b, "\n%s: %s\n", e.Name, e.Index)
 	}

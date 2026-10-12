@@ -56,6 +56,7 @@ var sessionEffortMediumDeferred = []struct {
 	// falls out of the catalog and lands in the eager schema.
 	{ImpactToolName, ImpactIndex, []string{"code", "graph", "impact"}},
 	{CodeQueryToolName, CodeQueryIndex, []string{"code", "graph", "search"}},
+	{"regression_tests", "pick which tests to re-run", []string{"test", "regression", "impact"}},
 }
 
 // sessionEffortHighDeferred is the rare long tail that stays behind the
