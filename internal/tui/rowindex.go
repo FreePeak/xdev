@@ -406,16 +406,20 @@ func (a *App) sync(w int) int32 {
 	}
 	// The row cap last, on the offsets just computed: a trim can only ever
 	// shrink the transcript, so it never invalidates the scan above.
-	if dropped := a.trimTranscript(total); dropped > 0 {
+	//
+	// A trim does NOT move compactFullRows, and that is deliberate. The cut is
+	// made on the layout that is ON SCREEN — the compact one, while the mode is
+	// on — and compactFullRows is the uncompacted height, so the rows the trim
+	// removed say nothing about the number the latch reads. Guessing (subtract
+	// the compact rows, say) drifts downward every trim, and a drifted-low
+	// measurement reads a long session as short and releases the mode it just
+	// latched — the oscillation this fix exists to remove. Keeping the last
+	// measurement taken with the mode OFF is both stable and honest: the cap
+	// (5 000) sits above the threshold (2 000), so a transcript the cap is
+	// cutting is long by construction, and Reset is what zeroes the
+	// measurement when the transcript really does start over.
+	if a.trimTranscript(total) {
 		total = a.rowIdx.total()
-		// The cap is the one thing that shrinks the full layout while compact
-		// mode is on, so it carries compactFullRows down by what left the
-		// window: otherwise the latch would read the trimmed total as "this
-		// session got short" and let go of a long transcript.
-		a.compactFullRows -= dropped
-		if !a.compact {
-			a.compactFullRows = total
-		}
 		trimmed = true
 	}
 	// One notice per CHANGE, and only when something moved: sync runs on every
@@ -468,8 +472,7 @@ func (a *App) firstBoxRow() int32 {
 // --- the row cap ---------------------------------------------------------
 
 // trimTranscript drops the oldest blocks until the layout fits transcriptCap
-// rows, and returns how many rows left the window (0 = nothing was trimmed, and
-// every block carries at least one row, so the count is never ambiguous).
+// rows, and reports whether it moved anything.
 //
 // It runs at the END of sync, on the freshly computed offsets, and only when
 // the total is over the cap: the common frame pays one int compare. Everything
@@ -483,27 +486,26 @@ func (a *App) firstBoxRow() int32 {
 // an append-only slice — keeps every dropped render alive, which is the memory
 // this cap exists to bound.
 //
-// The dropped-row count is what lets sync carry the uncompacted row count
-// (App.compactFullRows) down with the trim: while compact mode is on, this is
-// the only thing that can shorten the full layout, and a latch that missed it
-// would let go of a transcript that is still long.
-func (a *App) trimTranscript(total int32) int32 {
+// The cut is on the layout that is on screen — the compact one while the mode
+// is on — so it says nothing about the uncompacted height the latch reads;
+// sync's own comment is where that separation is spelled out.
+func (a *App) trimTranscript(total int32) bool {
 	if total <= transcriptCap {
-		return 0
+		return false
 	}
 	x := &a.rowIdx
 	n := len(a.blocks)
 	// Newest-first: keep the tail window unconditionally, then walk back while
-	// the layout still fits. The first block whose head fits is the cut; a
-	// single block taller than the cap is kept anyway (dropping it would leave
-	// the frame with nothing to paint, and the row cap is a budget, not a
-	// promise).
+	// the layout still fits. The first block whose head fits is the cut.
 	cut := max(0, n-transcriptKeepTail)
 	for cut > 0 && total-x.start[cut-1] <= transcriptCap {
 		cut--
 	}
+	// A single block taller than the cap is kept anyway: dropping it would
+	// leave the frame with nothing to paint, and the row cap is a budget, not
+	// a promise.
 	if cut == 0 {
-		return 0
+		return false
 	}
 	dropped := int(x.start[cut])
 	for _, b := range a.blocks[:cut] {
@@ -538,7 +540,7 @@ func (a *App) trimTranscript(total int32) int32 {
 		x.start = append(x.start, 0)
 	}
 	x.dirty = 0
-	return int32(dropped)
+	return true
 }
 
 // rowChrome is the decoration a block's rows share: the accent rail, and the

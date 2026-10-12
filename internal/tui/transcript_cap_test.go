@@ -412,3 +412,45 @@ func TestCompactThinkingCtrlOOpensTheBody(t *testing.T) {
 		t.Fatalf("Expanded reasoning stayed at %d rows (was %d):\n%s", len(got), len(collapsed), strings.Join(got, "\n"))
 	}
 }
+
+// The latch also holds once the ROW CAP is cutting, and this is the shape that
+// made the carry-down wrong. The cap trims the layout that is ON SCREEN — the
+// compact one while the mode is on — so the rows it removes are compact rows,
+// and subtracting them from the uncompacted height the latch reads drives that
+// height to zero: measured on this fixture, compactFullRows reached 0 after 400
+// turns and the auto latch released the mode it had set. The fixture is driven
+// past the threshold first (so the latch is the threshold's own, not a human's),
+// then past the cap, and the mode has to still be on at the end.
+func TestCompactLatchHoldsWhileTheCapTrims(t *testing.T) {
+	app := idxApp(120, 40)
+	w := app.contentWidth()
+	body := strings.Repeat("output line\n", 400)
+	turn := func() {
+		for i := range 5 {
+			id := fmt.Sprintf("c%d-%d", len(app.blocks), i)
+			app.AddToolBlock(id, "bash", `{"command":"seq 1 400"}`)
+			app.FinishTool(id, "bash", false, body, ToolOutcome{Dur: "70ms"})
+		}
+		app.sync(w)
+	}
+	// Past the threshold first: the fixture has to be in the auto-latched state
+	// before the cap starts cutting, or there is nothing for the carry-down to
+	// release.
+	for range 120 {
+		turn()
+	}
+	if app.CompactState() != "auto (on)" {
+		t.Skipf("the fixture did not reach the threshold's own latch (state %q, fullRows %d)",
+			app.CompactState(), app.compactFullRows)
+	}
+	for i := range 280 {
+		turn()
+		if !app.Compact() {
+			t.Fatalf("turn %d: the cap released the auto-latched compact mode (fullRows=%d, dropped=%d)",
+				120+i, app.compactFullRows, app.droppedRows)
+		}
+	}
+	if app.droppedRows == 0 {
+		t.Fatalf("the fixture never crossed the cap: %d blocks, %d rows", len(app.blocks), app.rowIdx.total())
+	}
+}
