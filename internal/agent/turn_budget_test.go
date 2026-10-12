@@ -84,6 +84,10 @@ func TestPostContentContinuationIsBoundedUnderInfiniteRetry(t *testing.T) {
 // The all-targets-down escalation, same contract: retry.infinite means "an
 // outage of any length is survived", not "no turn ever ends". A host that
 // never comes back must surface the error rather than hold the turn claim.
+//
+// The fixture is a REFUSED connection, not a connectivity outage: a link that
+// is down is deliberately unbounded (agent.outageMayNotEndATurn), so a
+// `network is unreachable` fixture would measure the wrong loop.
 func TestSilentRecoveryEscalationIsBoundedUnderInfiniteRetry(t *testing.T) {
 	down := fakeScript{err: errors.New("dial tcp 127.0.0.1:8080: connect: connection refused")}
 	calls := make([]fakeScript, maxSilentRecoveryRounds*(oneShotRetry().MaxRetries+1)+4)
@@ -107,7 +111,9 @@ func TestSilentRecoveryEscalationIsBoundedUnderInfiniteRetry(t *testing.T) {
 }
 
 // The health-check probe is the same loop one layer up, and the one most
-// likely to see a host that is simply gone. It gets the same ceiling.
+// likely to see a host that is simply gone. It gets the same ceiling — for a
+// dead HOST. A connectivity outage is the documented exception and is
+// unbounded (TestOutageHealthCheckIsUnbounded).
 func TestHealthCheckEscalationIsBoundedUnderInfiniteRetry(t *testing.T) {
 	health := make([]error, maxSilentRecoveryRounds+8)
 	for i := range health {

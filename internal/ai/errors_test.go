@@ -3,8 +3,10 @@ package ai
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/ai/sse"
@@ -130,6 +132,53 @@ func TestClassify(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := Classify(c.err); got != c.want {
 				t.Fatalf("Classify(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// IsNetworkOutage is what lets the agent ladder treat a dropped link as a
+// wait rather than a failure (agent.outageMayNotEndATurn). It has to be
+// narrow in BOTH directions: a missed outage ends the turn the fix exists
+// for, and a false positive retries a dead provider forever.
+func TestIsNetworkOutage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		// A dropped link: the kernel says there is no route, and net/http
+		// wraps that in an *net.OpError inside a *url.Error.
+		{"ENETUNREACH wrapped twice", &url.Error{Op: "Post", URL: "http://x", Err: &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}}, true},
+		{"EHOSTUNREACH", &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}, true},
+		// Measured on this machine: dialing an unroutable v6 address
+		// returns EHOSTUNREACH ("connect: no route to host"), which is why
+		// both errnos are listed rather than ENETUNREACH alone.
+		{"the real no-route dial error", func() error {
+			c, err := net.Dial("tcp", "[2001:db8::1]:80")
+			if c != nil {
+				_ = c.Close()
+			}
+			return err
+		}(), true},
+		{"ENETDOWN", &net.OpError{Op: "dial", Err: syscall.ENETDOWN}, true},
+		{"message only (a proxy quoting the kernel)", errors.New("agent: stream start: dial tcp: connect: network is unreachable"), true},
+		{"resolver unreachable", &net.DNSError{Err: "read udp: connection refused", Server: "8.8.8.8:53"}, true},
+		{"resolver said try again", &net.DNSError{Err: "server misbehaving", IsTemporary: true}, true},
+		// NOT an outage, deliberately:
+		{"connection refused (a dead provider)", errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"), false},
+		{"nxdomain for one host", &net.DNSError{Err: "no such host", Name: "api.example"}, false},
+		{"bare no such host", errors.New(`Post "https://api.example/v1": dial tcp: lookup api.example: no such host`), false},
+		{"i/o timeout (a wedged host looks the same)", errors.New("dial tcp 1.2.3.4:443: i/o timeout"), false},
+		{"an HTTP status error", &HTTPError{API: "a", Status: 503, Body: "no live pool"}, false},
+		{"a 429 body", &HTTPError{API: "a", Status: 429, Body: "provider rate limited; retry after 30s"}, false},
+		{"unrelated", errors.New("boom"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsNetworkOutage(c.err); got != c.want {
+				t.Fatalf("IsNetworkOutage(%v) = %v, want %v", c.err, got, c.want)
 			}
 		})
 	}

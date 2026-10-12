@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/FreePeak/xdev/internal/ai/sse"
 )
@@ -249,6 +250,49 @@ func Classify(err error) ErrClass {
 		return ClassTransient
 	}
 	return ClassUnknown
+}
+
+// outageRe matches the transport failures that mean "the request never
+// reached the provider": the machine has no route to the network at all.
+// `no such host` is deliberately NOT here even though connectionResetRe
+// carries it — that one is the DNS answer for a single dead hostname, and
+// the live shape it appears in is a gateway relaying a provider's own
+// name-resolution failure, which is not the local link being down.
+var outageRe = regexp.MustCompile(`(?i)(network is unreachable|no route to host|network is down|host is down|temporary failure in name resolution)`)
+
+// IsNetworkOutage reports whether err is a local connectivity failure — the
+// transport never opened a connection to the provider, so every target and
+// every retry will fail identically until the machine is back on the
+// network. That is a different thing from a transient provider blip, and
+// the recovery ladder treats it differently: an outage may not end a turn
+// (agent.oneTurnWithRecovery), because the request that failed is still a
+// perfectly valid request and the user's only action would be to resend it.
+//
+// Deliberately narrow. `connection refused` is excluded on purpose: that is
+// what a DEAD PROVIDER answers, and the ladder must still bound it (a
+// gateway on loopback that is not running is the case the existing
+// escalation bound was written for). So is a timeout: a wedged host and a
+// missing link look the same at the socket, and only the kernel's routing
+// verdict is unambiguous.
+func IsNetworkOutage(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, se := range []error{
+		syscall.ENETDOWN, syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENETRESET,
+	} {
+		if errors.Is(err, se) {
+			return true
+		}
+	}
+	// A DNS failure is an outage only when the resolver itself could not be
+	// reached or answered "try again"; NXDOMAIN for one name is a host that
+	// does not exist, which is a provider problem, not a link.
+	var d *net.DNSError
+	if errors.As(err, &d) && (d.IsTemporary || d.IsTimeout || d.Server != "") {
+		return true
+	}
+	return outageRe.MatchString(err.Error())
 }
 
 // Retriable reports whether backoff-and-retry can plausibly succeed.
