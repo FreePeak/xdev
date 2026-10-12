@@ -2601,6 +2601,16 @@ func (h *printHooks) OnStart(req ai.StreamRequest) {}
 
 func (h *printHooks) OnEvent(ev ai.Event) {
 	switch ev.Type {
+	case ai.EventStart:
+		// The gateway served a different model than the one asked for. It
+		// goes to stderr, never stdout: stdout is the answer, and the
+		// Telegram bridge forwards that stream verbatim to the chat. The
+		// bridge reads this exact line back out of the worker's combined
+		// output to caption the reply, so the bracketed form is a wire
+		// format, not a log line (ai.ParseModelSwitchNotice).
+		if n := ai.ModelSwitchNotice(ev.Model, ev.ServedBy); n != "" {
+			fmt.Fprintln(os.Stderr, n)
+		}
 	case ai.EventTextDelta:
 		fmt.Print(ev.Delta)
 	case ai.EventThinkingDelta:

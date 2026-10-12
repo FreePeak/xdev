@@ -577,10 +577,13 @@ func (a *App) dockFooter() (dockFold, bool) {
 	// a bare "high" under a path reads as a name of its own, and the divider
 	// already shows the pair beside each other. The section is the one never
 	// folded away, so the request outlives a busy transcript.
+	// The row names the SERVING leg when the wire reported a switch, the same
+	// reading the divider paints: two surfaces disagreeing about which model
+	// answered is worse than either one being wrong alone.
 	if l := a.thinkingLevel(); l != "" {
 		row := l
-		if a.st.Model != "" {
-			row = a.st.Model + " · " + l
+		if m := a.dividerModel(); m != "" {
+			row = m + " · " + l
 		}
 		f.rows = append(f.rows, dockRow{text: dockClip(row), muted: true})
 	}
