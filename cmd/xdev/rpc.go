@@ -12,6 +12,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/ext"
 	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/protocol"
 	"github.com/FreePeak/xdev/internal/rpc"
@@ -22,43 +23,61 @@ import (
 // runRPC serves the M6 embedder contract on stdio: JSONL frames in, one
 // response per command plus streamed agent events out (issue #7).
 func runRPC(opts printOptions) (exitCode int, err error) {
-	cwd, err := os.Getwd()
+	h, cleanup, err := newSessionCore(opts)
 	if err != nil {
 		return 2, err
+	}
+	defer cleanup()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	srv := rpc.New(os.Stdin, os.Stdout, h)
+	h.srv = rpcServer{srv}
+	if err := srv.Serve(ctx); err != nil && ctx.Err() == nil {
+		return 1, err
+	}
+	return 0, nil
+}
+
+// newSessionCore builds the one-agent-per-session core the transports share:
+// the provider, the live tool registry, the store, and the rpcHandler that
+// bridges both to a commandSink. runRPC binds the stdout JSONL transport on
+// top; runHeadless binds the HTTP/SSE service.
+func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, nil, err
 	}
 	cfg, err := config.LoadModelsLayered()
 	if err != nil {
-		return 2, err
+		return nil, nil, err
 	}
 	modelRef, effortRef, err := resolveModel(opts.Model, cfg, lastSettings())
 	if err != nil {
-		return 2, err
+		return nil, nil, err
 	}
 	provName, modelName, err := config.ParseModelRef(modelRef)
 	if err != nil {
-		return 2, err
+		return nil, nil, err
 	}
 	// The request-side thinking level: --thinking wins, else the persisted
 	// `thinking` key, else the model's own ":effort" (applyThinkingFlag's
 	// "auto" branch), with a non-reasoning model falling back to "auto".
 	if effortRef, err = applyThinkingFlag(thinkingForModel(thinkingLevel(lastSettings(), launch.Thinking), provName, modelName, cfg), effortRef); err != nil {
-		return 2, err
+		return nil, nil, err
 	}
 	pc, ok := cfg.Providers[provName]
 	if !ok {
-		return 2, fmt.Errorf("unknown provider %q", provName)
+		return nil, nil, fmt.Errorf("unknown provider %q", provName)
 	}
 	prov, err := buildProvider(provName, pc, modelName, cfg)
 	if err != nil {
-		return 2, err
+		return nil, nil, err
 	}
 
 	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
-	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
+	closeHub := func() { closeSharedHub() } // hub-started children are session-scoped (T3 #8)
 	mgr := attachMCP(context.Background(), reg, false, nil, nil)
-	if mgr != nil {
-		defer mgr.Close()
-	}
 	// The rebuild-time interruption notice names the calls free to repeat.
 	session.ReplaySafety = reg.ReplaySafe
 
@@ -69,7 +88,11 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {
-		return 2, fmt.Errorf("session: %w", err)
+		if mgr != nil {
+			mgr.Close()
+		}
+		closeHub()
+		return nil, nil, fmt.Errorf("session: %w", err)
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	wireTaskParent(reg, store)
@@ -98,43 +121,65 @@ func runRPC(opts printOptions) (exitCode int, err error) {
 		h.agent.FollowUp(inboxFollowUp(m))
 		return true
 	})
-	defer setInboxSink(nil)
 
 	// Extension processes: tools join the registry, and the manager is the
 	// agent's fail-closed policy interceptor; actions steer the live run.
-	if exts := attachExtensions(context.Background(), reg, h.agent.Steer, h.agent.FollowUp, cfg); exts != nil {
-		h.agent.Intercept = exts
-		defer exts.Close()
+	var exts *ext.Manager
+	if e := attachExtensions(context.Background(), reg, h.agent.Steer, h.agent.FollowUp, cfg); e != nil {
+		exts = e
+		h.agent.Intercept = e
 	}
-	defer func() {
+
+	cleanup := func() {
+		setInboxSink(nil)
+		if exts != nil {
+			exts.Close()
+		}
+		if mgr != nil {
+			mgr.Close()
+		}
+		closeHub()
 		h.mu.Lock()
-		st := h.store
-		h.mu.Unlock()
-		if cerr := st.Close(); cerr != nil {
+		defer h.mu.Unlock()
+		if cerr := h.store.Close(); cerr != nil {
 			logx.Errorf("session close: %v", cerr)
 		}
-	}()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-	h.srv = rpc.New(os.Stdin, os.Stdout, h)
-	if err := h.srv.Serve(ctx); err != nil && ctx.Err() == nil {
-		return 1, err
 	}
-	return 0, nil
+	return h, cleanup, nil
 }
+
+// commandSink is what a handler needs to answer: one terminal response per
+// prompt (correlated by id) and a stream of events in between. Both transports
+// implement it — stdout JSONL (rpc.Server) and the headless HTTP/SSE service
+// (headlessSink) — which is what lets one session core drive either without
+// branching.
+type commandSink interface {
+	Respond(id string, resp protocol.Response)
+	SendEvent(id string, ev protocol.Event)
+}
+
+// rpcServer is the stdio transport: the JSONL server owns the read loop, so it
+// is its own sink.
+type rpcServer struct{ srv *rpc.Server }
+
+func (s rpcServer) Respond(id string, resp protocol.Response) { s.srv.Respond(id, resp) }
+func (s rpcServer) SendEvent(id string, ev protocol.Event)    { s.srv.SendEvent(id, ev) }
 
 // rpcHandler implements rpc.Handler over one store + agent. One turn runs
 // at a time; prompt-while-running is refused (steer/follow_up queue into
 // the live turn instead). It doubles as the agent TurnHooks, forwarding
 // every stream event to the client.
 type rpcHandler struct {
-	srv *rpc.Server
+	srv commandSink
 
 	mu      sync.Mutex
 	running bool
 	curID   string
 	cancel  context.CancelFunc
+
+	// notify receives the lifecycle frames only the headless transport carries
+	// (nil on stdio RPC, where the contract has no frame for them yet).
+	notify headlessNotifier
 
 	store *session.Store
 	agent *agent.Agent
@@ -347,10 +392,46 @@ func (h *rpcHandler) OnToolResultMessage(m *ai.Message) {
 	}
 }
 
-// OnCompaction and OnTurnEnd: no RPC surface yet (v2 frames).
-func (h *rpcHandler) OnCompaction(before int64) {}
+// headlessNotifier is set by the headless transport: the ONE frame the SSE
+// stream should carry that the RPC contract does not have yet is the
+// "context is about to change" notice, because a client watching the stream
+// needs to know the history it just read is being replaced (the TUI paints a
+// system block for the same event; a remote client has no local peer to read).
+type headlessNotifier interface {
+	// NotifyCompaction maps to the SSE `session_compact` frame.
+	NotifyCompaction(before int64)
+	// NotifyTurnEnd maps to the SSE `turn_end` frame.
+	NotifyTurnEnd(reason ai.StopReason, err error)
+}
 
-func (h *rpcHandler) OnTurnEnd(s ai.StopReason, err error) {}
+// OnCompaction bridges the compaction notice to the headless stream when one
+// is attached. Stdio RPC has no frame for it yet (v2), so a bare rpcHandler
+// with no notifier behaves exactly as before.
+func (h *rpcHandler) OnCompaction(before int64) {
+	h.notifier().NotifyCompaction(before)
+}
+
+// OnTurnEnd bridges the terminal reason so a remote client can tell "the
+// model finished" from "the stream dropped". The response frame already
+// carries it for the prompt it answers; this covers a run whose terminal
+// message never arrives (abort), where the frame is all a client gets.
+func (h *rpcHandler) OnTurnEnd(s ai.StopReason, err error) {
+	h.notifier().NotifyTurnEnd(s, err)
+}
+
+// notifier is whichever transport attached one, or a no-op — the RPC contract
+// has no frames for these yet, and a stdio client must see no behaviour change.
+func (h *rpcHandler) notifier() headlessNotifier {
+	if h.notify != nil {
+		return h.notify
+	}
+	return nopNotifier{}
+}
+
+type nopNotifier struct{}
+
+func (nopNotifier) NotifyCompaction(int64)             {}
+func (nopNotifier) NotifyTurnEnd(ai.StopReason, error) {}
 
 // OnContinuation: same — the injected turn persists as an attributed
 // message entry, so readers of the store can still count it (#283).

@@ -50,10 +50,19 @@ import (
 
 // Service names, also the subcommands and the token file basenames.
 const (
-	serviceBroker  = "auth-broker"
-	serviceGateway = "auth-gateway"
-	serviceRelay   = "browser-relay"
+	serviceBroker       = "auth-broker"
+	serviceGateway      = "auth-gateway"
+	serviceRelay        = "browser-relay"
+	serviceHeadlessName = "headless"
 )
+
+// HeadlessRunner is the headless service's implementation, supplied by cmd/xdev
+// (the session core lives there; this package must not import it). A nil runner
+// means the subcommand is unavailable in this build.
+var HeadlessRunner func(args []string, version string) int
+
+// RegisterHeadless installs the headless runner.
+func RegisterHeadless(run func(args []string, version string) int) { HeadlessRunner = run }
 
 // Default (loopback-only) listen addresses.
 const (
@@ -72,6 +81,7 @@ const serveUsage = `xdev serve <service> — loopback services
   xdev serve auth-gateway  [--listen 127.0.0.1:4000] [--broker URL]
                            [--upstream '[scheme://]host=provider[:header]']...
   xdev serve browser-relay [--listen 127.0.0.1:9223] [--upstream ws://127.0.0.1:9222] [--token T]
+  xdev serve headless      [--listen 127.0.0.1:7717] [--token T]   an HTTP+SSE face on one session
 
 Every service binds loopback and requires a bearer token; the token is
 --token, ` + tokenEnv + `, or <data dir>/serve/<service>.token (generated 0600 on
@@ -85,7 +95,7 @@ explicit token: --listen 0.0.0.0:4000 without one refuses to start.
 // instead of reaching the model as a prompt (#104).
 func IsService(name string) bool {
 	switch name {
-	case serviceBroker, serviceGateway, serviceRelay:
+	case serviceBroker, serviceGateway, serviceRelay, serviceHeadlessName:
 		return true
 	}
 	return false
@@ -103,6 +113,12 @@ func Dispatch(args []string, version string) int {
 		return runGateway(args[1:], version)
 	case serviceRelay:
 		return runRelay(args[1:], version)
+	case serviceHeadlessName:
+		if HeadlessRunner == nil {
+			fmt.Fprintln(os.Stderr, "xdev serve headless: not available in this build")
+			return 2
+		}
+		return HeadlessRunner(args[1:], version)
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stderr, serveUsage)
 		return 0
