@@ -49,6 +49,13 @@ var sessionEffortMediumDeferred = []struct {
 	{"inbox", "read messages other sessions sent this one (mailbox)", []string{"mailbox", "agent"}},
 	{CheckpointToolName, "bookmark the session tree at this point", []string{"session", "rewind"}},
 	{RewindToolName, "return the session to an earlier checkpoint", []string{"session", "rewind"}},
+	// The code-graph tools register only when codeGraph.baseUrl is set, and
+	// the list skips unregistered names — so a session with no graph pays
+	// nothing for their presence here. They must be IN the ladder: the
+	// rebuild calls ResetDeferred, and a tool deferred outside these lists
+	// falls out of the catalog and lands in the eager schema.
+	{ImpactToolName, ImpactIndex, []string{"code", "graph", "impact"}},
+	{CodeQueryToolName, CodeQueryIndex, []string{"code", "graph", "search"}},
 }
 
 // sessionEffortHighDeferred is the rare long tail that stays behind the
@@ -67,6 +74,8 @@ var sessionEffortHighDeferred = []struct {
 	{"schedule_create", "create a session-local reminder", []string{"schedule"}},
 	{"schedule_list", "list active reminders in the current session", []string{"schedule"}},
 	{"schedule_delete", "delete an active reminder by id", []string{"schedule"}},
+	{ImpactToolName, ImpactIndex, []string{"code", "graph", "impact"}},
+	{CodeQueryToolName, CodeQueryIndex, []string{"code", "graph", "search"}},
 }
 
 // ApplySessionEffort rebuilds the deferred catalog for one effort rung.
