@@ -479,3 +479,65 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// TestHeadlessRefusesToClobberALiveRegistration pins the discovery contract a
+// second instance would break: publishing over a live server's registration
+// points every client at the newcomer and strands the first. writeRegistration
+// IfOwner existed for this and was only ever called by tests, so the guard now
+// runs in both production paths — and a stale file (dead pid) is still
+// replaced, which is the crash-recovery path.
+func TestHeadlessRefusesToClobberALiveRegistration(t *testing.T) {
+	dir := t.TempDir()
+	path := HeadlessRegistrationPath(dir)
+
+	first := HeadlessRegistration{ID: "a", URL: "http://127.0.0.1:1", PID: os.Getpid(), Version: "v1", Token: "t1"}
+	if err := publishRegistration(path, first); err != nil {
+		t.Fatalf("publishRegistration: %v", err)
+	}
+	// A live incumbent is protected (this process is alive).
+	second := HeadlessRegistration{ID: "b", URL: "http://127.0.0.1:2", PID: os.Getpid(), Version: "v1", Token: "t2"}
+	if err := publishRegistration(path, second); err == nil {
+		t.Fatal("a second instance must refuse to publish over a live one")
+	}
+	if cur, _ := readRegistration(path); cur.ID != "a" {
+		t.Errorf("registration still belongs to %q, want a", cur.ID)
+	}
+
+	// A stale file (a pid that cannot exist) is replaced, not refused.
+	dead := HeadlessRegistration{ID: "dead", URL: "http://127.0.0.1:3", PID: 1 << 30, Version: "v0", Token: "t0"}
+	if err := writeRegistration(path, dead); err != nil {
+		t.Fatalf("writeRegistration(stale): %v", err)
+	}
+	if err := publishRegistration(path, second); err != nil {
+		t.Errorf("a stale registration must be replaceable: %v", err)
+	}
+	if cur, _ := readRegistration(path); cur.ID != "b" {
+		t.Errorf("registration belongs to %q, want b", cur.ID)
+	}
+}
+
+// TestHeadlessRefusesAPromptWithNoSession pins the bound check: a server
+// still attaching answers 409 like steer/abort do, rather than accepting a
+// prompt that no turn will ever answer.
+func TestHeadlessRefusesAPromptWithNoSession(t *testing.T) {
+	h := newHeadless(t, Options{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Token: "tok"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = h.Run(ctx) }()
+	waitFor(t, func() bool { return h.Addr() != "" }, "the server to bind")
+
+	body, _ := json.Marshal(map[string]string{"id": "p1", "text": "ping"})
+	req, err := http.NewRequest(http.MethodPost, "http://"+h.Addr()+"/prompt", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+h.Token())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusConflict {
+		t.Errorf("POST /prompt with no session = %d, want 409", res.StatusCode)
+	}
+}

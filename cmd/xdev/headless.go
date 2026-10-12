@@ -317,8 +317,11 @@ Flags:
 		return 1
 	}
 
-	// Drive the prompt.
-	id := "attach"
+	// Drive the prompt. The id is minted per process, not the constant
+	// "attach": responses are broadcast to every /event subscriber and
+	// matched by id, so two concurrent attach clients sharing one id would
+	// each consume the other's answer (or its "a turn is already running").
+	id := fmt.Sprintf("attach-%d-%d", os.Getpid(), time.Now().UnixNano()%1e9)
 	body, _ := json.Marshal(map[string]string{"id": id, "text": text})
 	preq, _ := http.NewRequest(http.MethodPost, base+"/prompt", bytes.NewReader(body))
 	preq.Header.Set("Authorization", "Bearer "+found.Token)
@@ -386,7 +389,7 @@ Flags:
 				if !*quiet {
 					fmt.Fprintf(os.Stderr, "\n· context is being compacted\n")
 				}
-			case "server_overflow":
+			case "server.overflow":
 				fmt.Fprintln(os.Stderr, "xdev attach: fell behind the stream and lost frames")
 				return 1
 			}

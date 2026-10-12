@@ -161,7 +161,7 @@ func BindForTest(h *Headless) (func(), error) {
 	}
 	url := "http://" + ln.Addr().String()
 	regPath := HeadlessRegistrationPath(h.options.dataDir())
-	if err := writeRegistration(regPath, h.Registration(url)); err != nil {
+	if err := publishRegistration(regPath, h.Registration(url)); err != nil {
 		h.logf("%s: registration: %v", serviceHeadless, err)
 	}
 	stop := func() {
@@ -288,6 +288,13 @@ func (h *Headless) handlePrompt(maxBody int64) http.HandlerFunc {
 			}
 			in.ID = id
 		}
+		if h.driver == nil {
+			// Unbound is a real state while a client is still attaching, but
+			// accepting a prompt into it silently is a 10-minute hang on the
+			// client side: no turn runs, so no response frame ever comes.
+			httpError(w, http.StatusConflict, "no session bound to this server yet")
+			return
+		}
 		h.handler().Prompt(in.ID, in.Text)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": in.ID})
 	}
@@ -339,8 +346,12 @@ func (h *Headless) Run(ctx context.Context) error {
 	}
 	url := "http://" + ln.Addr().String()
 	regPath := HeadlessRegistrationPath(h.options.dataDir())
-	if err := writeRegistration(regPath, h.Registration(url)); err != nil {
-		h.logf("%s: registration: %v", serviceHeadless, err)
+	// Refusing here rather than logging-and-continuing: a server whose
+	// registration was never published is undiscoverable, which reads as
+	// "xdev attach is broken" instead of "a second instance owns the file".
+	if err := publishRegistration(regPath, h.Registration(url)); err != nil {
+		_ = h.ln.Close()
+		return fmt.Errorf("%s: %w", serviceHeadless, err)
 	}
 	h.logf("%s listening on %s (registration %s)", serviceHeadless, url, regPath)
 
@@ -416,6 +427,21 @@ func writeRegistrationIfOwner(path string, info HeadlessRegistration) error {
 	cur, err := readRegistration(path)
 	if err == nil && cur.ID != "" && cur.ID != info.ID {
 		return fmt.Errorf("registration %s belongs to %s (pid %d)", path, cur.ID, cur.PID)
+	}
+	return writeRegistration(path, info)
+}
+
+// publishRegistration writes the record unless a LIVE incumbent owns it. A
+// second server registering over a running one would point every client at
+// itself and strand the first — the hazard writeRegistrationIfOwner exists
+// for, which only its tests ever called. A stale file (dead pid) is replaced:
+// that is the crash-recovery path, and DiscoverHeadless already treats it as
+// not found. The pid check alone can be fooled by a recycled pid; when it is,
+// the failure mode is conservative (a refused clobber with the pid named),
+// never a stolen registration.
+func publishRegistration(path string, info HeadlessRegistration) error {
+	if cur, err := readRegistration(path); err == nil && cur.ID != "" && cur.ID != info.ID && processAlive(cur.PID) {
+		return fmt.Errorf("a live instance already owns this registration (pid %d)", cur.PID)
 	}
 	return writeRegistration(path, info)
 }

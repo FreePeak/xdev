@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -123,4 +125,28 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = old
 	_ = w.Close()
 	return <-done
+}
+
+// TestAttachClientSwitchesOnTheNameTheServerEmits is the one-string regression
+// behind a dropped fail frame: the server writes server.overflow, and the
+// client used to switch on "server_overflow", so a subscriber that fell behind
+// never saw the fail frame and waited out the 10-minute turn deadline. The two
+// names live in different packages with nothing tying them together, so the
+// cheapest guard is asserting the client's case label against the server's
+// literal — reading the source is the seam this bug actually has.
+func TestAttachClientSwitchesOnTheNameTheServerEmits(t *testing.T) {
+	server, err := os.ReadFile(filepath.Join("..", "..", "internal", "serve", "headless_stream.go"))
+	if err != nil {
+		t.Fatalf("read server source: %v", err)
+	}
+	if !bytes.Contains(server, []byte(`frame("server.overflow"`)) {
+		t.Fatal("internal/serve no longer emits server.overflow — update the client and this test")
+	}
+	client, err := os.ReadFile("headless.go")
+	if err != nil {
+		t.Fatalf("read client source: %v", err)
+	}
+	if !bytes.Contains(client, []byte(`case "server.overflow":`)) {
+		t.Fatal(`xdev attach switches on a name the server never emits — a lost-frames client would hang until the turn deadline`)
+	}
 }
