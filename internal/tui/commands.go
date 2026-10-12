@@ -127,6 +127,12 @@ type SettingsOps struct {
 	// the TUI with a turn in flight detaches it as a background job instead
 	// of killing it (opencode parity).
 	SetExitDetach func(on bool) error
+	// SetCompact persists the transcript's compact mode (the
+	// tui.compactTranscript key in the same layer the settings panel writes).
+	// Display only: every hidden row is still in the session JSONL, and the
+	// transcript-wide mode joins the per-block Ctrl+O state rather than
+	// replacing it.
+	SetCompact func(on bool) error
 }
 
 // PlanOps wires the /plan command to the live plan-mode state (lives in

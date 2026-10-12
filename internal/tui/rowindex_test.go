@@ -208,8 +208,13 @@ func TestFrameCostFollowsViewportNotSession(t *testing.T) {
 	big := idxApp(120, 40)
 	idxFill(big, 400, 300)
 	big.draw()
-	if big.totalLinesLocked() < 8*small.totalLinesLocked() {
-		t.Fatalf("fixture is not much longer: %d vs %d rows", big.totalLinesLocked(), small.totalLinesLocked())
+	// The big fixture is CAPPED (transcriptCap): a 400-turn session no longer
+	// renders 60k rows, which is the point of the cap. The fixture must still
+	// be materially longer than the small one, or the frame-cost comparison
+	// below compares two transcripts of the same size and asserts nothing.
+	bigRows, smallRows := big.totalLinesLocked(), small.totalLinesLocked()
+	if bigRows <= smallRows || bigRows < transcriptCap/2 {
+		t.Fatalf("fixture is not much longer: %d vs %d rows (cap %d)", bigRows, smallRows, transcriptCap)
 	}
 	// The frame is allowed to cost more for a longer session only through the
 	// per-block stamp scan (linear in blocks), never through the row count:

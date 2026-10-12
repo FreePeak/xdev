@@ -767,6 +767,17 @@ type TuiSettings struct {
 	// TabsIndicatorsOn, so a layer that omits the group keeps the shipped
 	// behaviour instead of blanking the strip.
 	Tabs TabSettings `yaml:"tabs"`
+	// CompactTranscript starts the session with the transcript's compact mode
+	// on: reasoning, tool calls, tool output and diffs collapse to one row
+	// each and only the conversation spine keeps its height. Default OFF — a
+	// *bool so unset stays "off" and an explicit true is the only way to start
+	// collapsed, which is the same shape as ExitDetach.
+	//
+	// It is a STARTING state, not a policy: the chord (Ctrl+G) and /settings
+	// override it for the session, and the row threshold turns the mode on by
+	// itself when a transcript grows past it (tui.compactAfterRows).
+	// `xdev config set tui.compactTranscript true`.
+	CompactTranscript *bool `yaml:"compactTranscript"`
 }
 
 // TabSettings is `tui.tabs`, spelled exactly as opencode's own config schema
@@ -1144,6 +1155,15 @@ func (s *Settings) ShowThinkingOn() bool {
 // unset follows the schema default (on), the same shape as ShowThinkingOn.
 func (s *Settings) RenderMermaidOn() bool {
 	return s == nil || s.RenderMermaid == nil || *s.RenderMermaid
+}
+
+// CompactTranscriptOn reports whether a session should START with the
+// transcript collapsed. Default OFF, the same shape as ShowThinkingOn: unset
+// (and a nil settings layer) reads as off, so a transcript a user never asked
+// to collapse never collapses itself — the row threshold is the only automatic
+// switch, and it is the TUI's own (tui.compactAfterRows).
+func (s *Settings) CompactTranscriptOn() bool {
+	return s != nil && s.Tui.CompactTranscript != nil && *s.Tui.CompactTranscript
 }
 
 // TuiExitDetachOn reports whether quitting the TUI should detach a live
@@ -1775,6 +1795,9 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Tui.ExitDetach != nil {
 		s.Tui.ExitDetach = layer.Tui.ExitDetach
 	}
+	if layer.Tui.CompactTranscript != nil {
+		s.Tui.CompactTranscript = layer.Tui.CompactTranscript
+	}
 	// Tui.Tabs was silently dropped here: the whole group had no merge arm,
 	// so `tui.tabs.mode: on` in a config layer parsed and then evaporated —
 	// the strip's visibility was decided by App.New's default alone, and
@@ -2364,6 +2387,7 @@ func List(s *Settings, globalPath string) []string {
 		"showThinking " + fmt.Sprint(s.ShowThinkingOn()),
 		"renderMermaid " + fmt.Sprint(s.RenderMermaidOn()),
 		"tui.exitDetach " + fmt.Sprint(s.TuiExitDetachOn()),
+		"tui.compactTranscript " + fmt.Sprint(s.CompactTranscriptOn()),
 		"sidebarMode " + s.SidebarModeOn(),
 		"thinking " + s.ThinkingLevel(),
 		"effort " + s.SessionEffort(),

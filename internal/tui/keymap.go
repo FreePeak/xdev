@@ -76,6 +76,7 @@ var BuiltinActions = []string{
 	"session.tab.reopen",      // C-shift-T: reopen the last closed session
 	"app.settings",            // Alt+,: the settings overlay (grok settings panel)
 	"send-now",                // F6: interrupt the live turn and run a queued message now (#157)
+	"compact-transcript",      // C-g: hide reasoning/tool output/diffs, keep the conversation core
 	"app.subagent.transcript", // Alt+B: the newest subagent's own transcript
 	// Session lifecycle (opencode session_new / session_list / session_delete),
 	// reachable single-key or behind the leader prefix.
@@ -157,6 +158,12 @@ func DefaultKeyMap() *KeyMap {
 			// is open (filter cycle); that branch is taken before this action
 			// is ever resolved.
 			"C-o": "expand",
+			// Ctrl+G: the transcript-wide compact mode. Ctrl+O is the per-box
+			// expand (one result, one reasoning box) and this is the whole
+			// transcript's, so the two are deliberately different chords: a
+			// user reaching for "hide the noise" must not be able to expand a
+			// single box by accident, and the reverse.
+			"C-g": "compact-transcript",
 			// Model selector. omp parity chord (app.model.select); Alt+M
 			// is deliverable in every terminal we target.
 			"A-m": "model-select",

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -49,6 +50,28 @@ const (
 // casualty because it is the only content that reaches tens of thousands of
 // rows; user prompts and assistant prose are never trimmed, and Ctrl+O
 // (Block.Expanded) opts a result out of the trim entirely.
+
+// transcriptCap is the most rows the row index keeps. Past it the OLDEST
+// blocks are dropped outright — their text, their render and their rows — so a
+// session that runs for hours costs what one that ran for minutes costs. The
+// session JSONL is the record; the transcript is a window on it, and the trim
+// chip (app.go drawTrimChip) is what says the window moved.
+//
+// It is a ROW budget, not a block count, because rows are what the reader
+// scrolls and what the renderer materializes; the two were measured together
+// on a 200-turn fixture (60k rows, ~40 MB of renders before the cap).
+const transcriptCap = 5000
+
+// transcriptKeepTail is how many of the newest blocks a trim never touches: the
+// live turn (the streaming assistant row, the calls it opened, their child
+// rows) has to survive, or the answer being written would lose the rows that
+// explain it.
+const transcriptKeepTail = 8
+
+// compactAfterRows is the row count past which the transcript hides thinking
+// and tool output on its own (compactAuto). Well under the cap: what a reader
+// feels first is the screen, and the cap is the memory backstop behind it.
+const compactAfterRows = 2000
 const (
 	toolRecentResults = 4
 	toolRecentHead    = 200
@@ -190,12 +213,19 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 			}
 		}
 	}
+	// The compact latch is settled by sync, before any stamp is computed: the
+	// mode is part of every box's stamp, so a frame that flipped it would
+	// otherwise paint one last full-height transcript.
 	return blockKey{
 		idx: i, kind: b.Kind, width: w, tlen: len(b.Text),
 		tool: b.ToolName, status: b.Status, stream: b.stream,
 		expanded: b.Expanded, age: age, spin: spin, trim: a.trimTier(i),
 		dlen: len(b.Diff), thinkOff: b.ThinkOff, focused: i == a.thinkFocus,
 		live: b.liveSeq, sub: b.subSeq, mermaid: a.renderMermaid,
+		// Compact mode decides this block's height without any field of the
+		// block moving, so a toggle has to re-stamp every row it collapses —
+		// the same rule the mermaid flag follows.
+		compact: a.compact,
 	}
 }
 
@@ -242,6 +272,70 @@ func (a *App) stampTiers() {
 	}
 }
 
+// collapsedAt names the block a transcript row belongs to when that row is a
+// box standing in for hidden content — a result/reasoning box collapsed by
+// compact mode, or a boxed row trimmed to its window — and -1 for every other
+// row. It is the hit-test behind "click the row to expand it", the pointer's
+// half of Ctrl+O.
+//
+// The row's OWN render decides: a box that painted a "hidden (Ctrl+O to
+// expand)" notice is a button, and one that painted every row it has is not.
+// Reading it back from the lines rather than re-deriving the rule is what keeps
+// the click and the paint from disagreeing — the same contract the subagent
+// child rows keep through blockRend.subs.
+func (a *App) collapsedAt(row int32) int {
+	bi := a.rowIdx.blockAt(row)
+	if bi < 0 || bi >= len(a.rowIdx.rend) {
+		return -1
+	}
+	b := a.blocks[bi]
+	switch b.Kind {
+	case KindThinking:
+		// A focused box is already open (it is the wheel's target), so a click
+		// on it means "give the wheel back", which selection.go's press
+		// already does by re-aiming thinkFocus. Only the collapsed states are
+		// buttons here: the one-row box and the Ctrl+O window.
+		if bi == a.thinkFocus || b.Expanded {
+			return -1
+		}
+	case KindToolDone:
+		if b.Expanded || !a.collapsedResult(bi, b) {
+			return -1
+		}
+	default:
+		return -1
+	}
+	for _, ln := range a.rowIdx.rend[bi].lines {
+		if strings.Contains(lineText(ln), "hidden (Ctrl+O to expand)") {
+			return bi
+		}
+	}
+	return -1
+}
+
+// collapsedResult reports whether block i's result box paints a window rather
+// than its whole body: compact mode collapses every result, and the aged trim
+// collapses one past the recent-results window. It is the same decision the
+// render makes, in the one place both can read it.
+func (a *App) collapsedResult(i int, b *Block) bool {
+	if a.compact {
+		return true
+	}
+	return a.trimTier(i) == tierAged
+}
+
+// lineText concatenates every run of a rendered line, so a reader gets the
+// whole visual row (a box splits each row into border/content/border runs)
+// instead of one run. The collapsedAt hit-test reads a painted row back
+// through it, which is why it lives here rather than in a test file.
+func lineText(ln line) string {
+	var b strings.Builder
+	for _, r := range ln.runs {
+		b.WriteString(r.text)
+	}
+	return b.String()
+}
+
 // --- reconciliation ------------------------------------------------------
 
 // clearRenderCache drops every cached render and the row layout. Every path
@@ -272,7 +366,10 @@ func (a *App) sync(w int) int32 {
 	if len(x.rend) < n {
 		x.grow(n)
 	}
-
+	// trimmed records that this pass moved the transcript's shape on its own —
+	// the compact latch or the row cap — which is what earns the one notice
+	// below. A frame that only re-rendered rows says nothing.
+	trimmed := false
 	from := int32(n)
 	for i := range n {
 		if x.rend[i].key != a.renderKey(i, a.blocks[i], w) {
@@ -284,8 +381,44 @@ func (a *App) sync(w int) int32 {
 		from = x.dirty // a direct blockLines call may have shifted row counts
 	}
 
+	total := a.reconcile(w, from)
+	// The compact latch is settled here, on the fresh row count, and the frame
+	// that flips it is the frame that paints it: the mode is part of every box's
+	// stamp, so a flip invalidates those rows and one more pass renders them
+	// collapsed. Only a mode CHANGE pays for that pass — a steady state falls
+	// straight through.
+	if a.compactAutoLatch(total) {
+		total = a.reconcile(w, a.firstBoxRow())
+		trimmed = true
+	}
+	// The row cap last, on the offsets just computed: a trim can only ever
+	// shrink the transcript, so it never invalidates the scan above.
+	if a.trimTranscript(total) {
+		total = a.rowIdx.total()
+		trimmed = true
+	}
+	// One notice per CHANGE, and only when something moved: sync runs on every
+	// paint, so a chatty path here would put a toast on screen forever. The
+	// toast is not a transcript block on purpose — a block would be the first
+	// row the next trim drops, which is a notice about a notice.
+	if trimmed && !a.trimNoticeOn {
+		a.trimNoticeOn = true
+		a.noteTranscriptTrimmed()
+	} else if !trimmed {
+		a.trimNoticeOn = false
+	}
+	return total
+}
+
+// reconcile renders every block from `from` to the end and returns the
+// transcript's row count. `from` is a hint, not a promise: the per-block
+// offsets before it are already exact, which is what makes a frame during a
+// streaming turn cost the tail instead of the session.
+func (a *App) reconcile(w int, from int32) int32 {
+	x := &a.rowIdx
+	n := int32(len(a.blocks))
 	total := x.start[from]
-	for i := from; i < int32(n); i++ {
+	for i := from; i < n; i++ {
 		b := a.blocks[i]
 		r := &x.rend[i]
 		r.lines = a.blockLines(int(i), b, w)
@@ -297,6 +430,88 @@ func (a *App) sync(w int) int32 {
 	}
 	x.dirty = int32(n)
 	return total
+}
+
+// firstBoxRow is the first block whose rendered height depends on compact mode
+// — a reasoning box or a finished result. Nothing above it carries the mode, so
+// a toggle re-renders from here rather than from the top of the session.
+func (a *App) firstBoxRow() int32 {
+	for i, b := range a.blocks {
+		if b.Kind == KindThinking || b.Kind == KindToolDone {
+			return int32(i)
+		}
+	}
+	return int32(len(a.blocks))
+}
+
+// --- the row cap ---------------------------------------------------------
+
+// trimTranscript drops the oldest blocks until the layout fits transcriptCap
+// rows, and reports how many blocks went and how many rows they carried.
+//
+// It runs at the END of sync, on the freshly computed offsets, and only when
+// the total is over the cap: the common frame pays one int compare. Everything
+// it drops is dropped from a.mu-held state in one pass, so no reader — the dock,
+// the sticky header, a hit-test, the scroll model — can observe a half-trimmed
+// transcript: they all run under the same lock, after this returns.
+//
+// The block-level tables move with the blocks (rend/start/tier and the per-block
+// stamps inside them), so a dropped block's render is released rather than
+// retained at an index nothing reads. The alternative — a growing offset into
+// an append-only slice — keeps every dropped render alive, which is the memory
+// this cap exists to bound.
+func (a *App) trimTranscript(total int32) bool {
+	if total <= transcriptCap {
+		return false
+	}
+	x := &a.rowIdx
+	n := len(a.blocks)
+	// Newest-first: keep the tail window unconditionally, then walk back while
+	// the layout still fits. The first block whose head fits is the cut; a
+	// single block taller than the cap is kept anyway (dropping it would leave
+	// the frame with nothing to paint, and the row cap is a budget, not a
+	// promise).
+	cut := max(0, n-transcriptKeepTail)
+	for cut > 0 && total-x.start[cut-1] <= transcriptCap {
+		cut--
+	}
+	if cut == 0 {
+		return false
+	}
+	dropped := int(x.start[cut])
+	for _, b := range a.blocks[:cut] {
+		if b.Kind == KindUser {
+			a.droppedUserRows++
+		}
+	}
+	a.blocks = append([]*Block(nil), a.blocks[cut:]...)
+	a.droppedRows += dropped
+	// allocation: the retained renders are exactly the ones worth keeping, and
+	// re-rendering the whole tail every trim would cost the frame this pass is
+	// meant to save.
+	m := copy(x.rend, x.rend[cut:])
+	x.rend = x.rend[:m]
+	x.tier = append(x.tier[:0], x.tier[cut:]...)
+	for i := range x.rend {
+		x.rend[i].key.idx = i
+		for j := range x.rend[i].subs {
+			x.rend[i].subs[j].block = i
+		}
+	}
+	// start[] is rebuilt from the shifted renders rather than sliced: start[i]
+	// counts rows of blocks BEFORE i, and the dropped prefix is exactly the
+	// offset every retained block loses.
+	base := x.start[cut]
+	m = copy(x.start, x.start[cut:])
+	x.start = x.start[:m]
+	for i := range x.start {
+		x.start[i] -= base
+	}
+	if len(x.start) == 0 {
+		x.start = append(x.start, 0)
+	}
+	x.dirty = 0
+	return true
 }
 
 // rowChrome is the decoration a block's rows share: the accent rail, and the

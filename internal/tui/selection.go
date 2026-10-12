@@ -381,10 +381,20 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		if !a.dockAt(x, y) {
 			a.linkClick = a.linkAt(x, y)
 			a.subID, a.subLabel = a.subChildAt(y)
+			// A collapsed row (compact mode, or a trim window) is a button:
+			// the press arms the box the row stands for, and a no-motion
+			// release expands it — the pointer's half of Ctrl+O, which stays
+			// the keyboard's. It arms the same way the other two affordances
+			// do, so a drag that starts on the row still selects text.
+			a.boxArm = -1
+			if bi := a.collapsedBoxAt(y); bi >= 0 {
+				a.boxArm = bi
+				a.linkClick, a.subID, a.subLabel, a.msgArmed = "", "", "", false
+			}
 			if a.subID != "" {
 				a.msgArmed = false
 			}
-			if _, bi := a.userRowAt(y); bi >= 0 && a.subID == "" {
+			if _, bi := a.userRowAt(y); bi >= 0 && a.subID == "" && a.boxArm < 0 {
 				a.msgArmed = true
 			}
 		}
@@ -408,24 +418,25 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 		a.selThumbTo(y)
 		a.poke()
 	case btn&tcell.Button1 != 0 && a.selDown: // drag
-		// Motion cancels both armed affordances: this gesture is a text
+		// Motion cancels every armed affordance: this gesture is a text
 		// selection, not a click that should open anything.
 		a.linkClick = ""
 		a.msgArmed = false
 		a.subID, a.subLabel = "", ""
+		a.boxArm = -1
 		a.selAutoScroll(y) // then name the row under the pointer, post-scroll
 		a.selEnd = a.selCornerAt(x, y)
 		a.selShown = true
-		a.poke()
-	case btn == tcell.ButtonNone && a.selThumbDrag: // thumb released
-		// Dropping the bar leaves the viewport where it was dragged and the
-		// highlight that was already up: the gesture was never a selection.
-		a.selThumbDrag = false
 		a.poke()
 	// A release is "no button at all", not merely "not Button1": the wheel
 	// constants are separate bits (mouse.go), so a horizontal wheel report —
 	// which the caller has no binding for and hands here — would otherwise end a
 	// drag in flight and drop the rows the user had already covered.
+	case btn == tcell.ButtonNone && a.selThumbDrag: // thumb released
+		// Dropping the bar leaves the viewport where it was dragged and the
+		// highlight that was already up: the gesture was never a selection.
+		a.selThumbDrag = false
+		a.poke()
 	case btn == tcell.ButtonNone && a.selDown: // release
 		a.selDown = false
 		a.selEdgeStop()
@@ -471,6 +482,23 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 					if id, label := a.subChildAt(a.selAnchor.y); id != "" {
 						a.openSubChildTranscript(id, label)
 					}
+				}
+			}
+			// A collapsed row expands on a no-motion release, and it is the
+			// FIRST claim on the click: the row is a button the eye can see
+			// (its "…" notice says so), so a link or a menu underneath it must
+			// not answer for it. Re-resolved here for the same reason the
+			// others are — the transcript can re-lay-out between press and
+			// release. It does NOT outrank them: the arm is dropped when a
+			// link or a subagent row claimed the press (above), so a row that
+			// carries both still answers to the more specific claim.
+			if a.boxArm >= 0 {
+				a.boxArm = -1
+				if bi := a.collapsedBoxAt(a.selAnchor.y); bi >= 0 {
+					a.selCache = nil
+					a.expandBox(bi)
+					a.poke()
+					break
 				}
 			}
 			if a.msgArmed {

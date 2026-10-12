@@ -328,16 +328,9 @@ func TestSystemBlockRendersEveryLine(t *testing.T) {
 	}
 }
 
-// lineText concatenates every run of a rendered line, so assertions read the
-// whole visual row (the tool box splits each row into border/content/border
-// runs) instead of one run.
-func lineText(ln line) string {
-	var b strings.Builder
-	for _, r := range ln.runs {
-		b.WriteString(r.text)
-	}
-	return b.String()
-}
+// lineText lives with the renderer now (rowindex.go): the collapsedAt
+// hit-test reads a painted row's text back to decide whether it is a button,
+// so the helper is production code rather than a test's convenience.
 
 // TestToolCallRowShowsNamedArgument pins omp's call row: the tool name and
 // the naming argument as a phrase, never the raw JSON the model sent.
