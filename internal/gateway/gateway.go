@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/memory"
 	"github.com/FreePeak/xdev/internal/session"
@@ -75,9 +76,11 @@ type Daemon struct {
 	workspace string
 	chunk     int
 	model     string
+	// badgeMu guards badgeLeg, the leg the bot's profile photo currently
+	// names. Uploading is a network call, so it is never held across one.
+	badgeMu  sync.Mutex
+	badgeLeg string
 }
-
-// Options configures a Daemon.
 type Options struct {
 	Settings *config.Settings
 	Version  string
@@ -438,7 +441,50 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 		_ = d.reply(ctx, chat, msg)
 		return
 	}
+	// The worker's own stderr carries the switch line when the gateway in
+	// front of it fell the request over to another model
+	// (ai.ModelSwitchNotice). Two things follow from it, in this order:
+	// the BADGE first — the bot's profile photo is what the chat header
+	// shows, and the user asked for the picture to change — then the line
+	// itself, so the answer is never attributed to the model they pinned.
+	if req, served, ok := ai.ParseModelSwitchNotice(res.logTail); ok {
+		d.applyModelBadge(ctx, served)
+		_ = d.reply(ctx, chat, switchCaption(req, served)+"\n\n"+res.answer)
+		return
+	}
 	_ = d.reply(ctx, chat, res.answer)
+}
+
+// switchCaption is the one line a switched answer is prefixed with. The
+// wording is ai.SwitchPhrase's, so the phone and the terminal cannot drift.
+func switchCaption(requested, served string) string {
+	return "⇄ " + ai.SwitchPhrase(requested, served)
+}
+
+// applyModelBadge points the bot's profile photo at the leg that just served,
+// which is the picture the chat header shows. Best-effort by design: a bot the
+// operator never granted photo rights must still answer the question, so a
+// refusal is logged and the turn continues. The last leg is remembered so a
+// chat that keeps landing on the same sibling does not re-upload on every
+// turn (Telegram refuses a photo it already has).
+func (d *Daemon) applyModelBadge(ctx context.Context, leg string) {
+	d.badgeMu.Lock()
+	same := d.badgeLeg == leg
+	d.badgeMu.Unlock()
+	if same {
+		return
+	}
+	jpeg := ModelBadgeJPEG(leg)
+	if jpeg == nil {
+		return
+	}
+	if err := d.tg.SetMyProfilePhoto(ctx, jpeg); err != nil {
+		d.logFn("gateway: profile photo for %s: %v", leg, err)
+		return
+	}
+	d.badgeMu.Lock()
+	d.badgeLeg = leg
+	d.badgeMu.Unlock()
 }
 
 func orNew(id string) string {

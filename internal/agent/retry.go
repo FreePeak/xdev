@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"time"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 // RetryPolicy bounds the pre-content retry ladder (omp TurnRecovery:
@@ -40,6 +42,23 @@ type RetryPolicy struct {
 // pass through the chain is survived; a hard failure misclassified as
 // transient still terminates. Infinite lifts the bound.
 const maxEscalationRounds = 2
+
+// outageMayNotEndATurn reports whether the ladder may keep retrying a
+// connectivity outage without a round budget. It rides retry.infinite, which
+// is the shipped default, and it is the whole point of that setting: an
+// outage is not a failure of the request, and the only thing that ends it is
+// the network coming back. Cancelling the turn still ends it (Esc, Ctrl+C,
+// --max-time, SIGINT) — the wait is a sleepBackoff, not a bare loop.
+//
+// What stays bounded: every other transient — a dead provider answering
+// `connection refused`, a wedged host that accepts and never answers, a
+// stream that keeps dying mid-frame. Those are failures OF THE REQUEST, and
+// a misclassified one must still terminate (maxSilentRecoveryRounds). Only
+// ai.IsNetworkOutage, which reads the kernel's own routing verdict, lifts
+// the bound.
+func (p RetryPolicy) outageMayNotEndATurn(err error) bool {
+	return p.Infinite && ai.IsNetworkOutage(err)
+}
 
 // DefaultRetryPolicy is the omp-shaped default ladder.
 func DefaultRetryPolicy() RetryPolicy {

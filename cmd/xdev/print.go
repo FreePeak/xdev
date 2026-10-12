@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/browser"
+	"github.com/FreePeak/xdev/internal/codegraph"
 	"github.com/FreePeak/xdev/internal/computer"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/dap"
@@ -32,6 +34,7 @@ import (
 	"github.com/FreePeak/xdev/internal/rules"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/skills"
+	"github.com/FreePeak/xdev/internal/testimpact"
 	"github.com/FreePeak/xdev/internal/tiny"
 	"github.com/FreePeak/xdev/internal/tool"
 	"github.com/FreePeak/xdev/internal/tts"
@@ -1783,6 +1786,14 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// M15: typesafe — System One evaluation (hosted Jev or local Laya);
 	// TYPESAFE_BASE_URL selects the endpoint and auth is optional.
 	reg.Register(typesafe.NewTool(settings.TypeSafeConfig()))
+	// regression_tests — the change→tests selector: `go list` gives the exact
+	// candidate set from the dependency graph, and the typesafe block's
+	// endpoint (hosted Jev or local Laya) ranks it. It selects, never runs.
+	// PRD §1 Goal 4 is a hard gate on the bundled prompt
+	// (cmd/xdev/prompt_test.go measures <1000 tokens), so this tool ships
+	// deferred: session effort at the default rung keeps it behind the
+	// catalog, where it costs nothing until the model asks for it.
+	reg.Register(testimpact.NewTool(cwd, settings.TypeSafeConfig()))
 	// The hub coordinates background subagents for this session (M11 #12).
 	hub := agent.NewHub()
 	sharedHub = hub
@@ -1867,6 +1878,33 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		lspTool := lsp.NewTool(cwd, settings)
 		reg.Register(lspTool)
 		lspTool.Prewarm()
+		// #263: hand the registry the same warm server the lsp tool owns, so
+		// edit/write can report type errors on the result instead of a turn
+		// later. It only answers for servers that are already running.
+		reg.SetDiagnosticsProvider(lspTool)
+	}
+	// #543: the `impact` tool — "what else does this edit touch?" — backed by
+	// an out-of-process LeanKG graph. Gated on a configured server so a run
+	// without one never advertises a tool it cannot answer.
+	if cgSettings := settings.CodeGraphConfig(); cgSettings.BaseURL != "" {
+		cgCfg := codegraph.Config{
+			BaseURL:   cgSettings.BaseURL,
+			Project:   cgSettings.Project,
+			ExpectDir: codeGraphExpectDir(cgSettings, cwd),
+		}
+		if cgSettings.Timeout != "" {
+			d, err := time.ParseDuration(cgSettings.Timeout)
+			if err != nil {
+				logx.Errorf("codeGraph.timeout: %v", err)
+			} else {
+				cgCfg.Timeout = d
+			}
+		}
+		reg.Register(&tool.ImpactTool{Graph: codegraph.New(cgCfg), CWD: cwd})
+		reg.Register(&tool.CodeQueryTool{Graph: codegraph.New(cgCfg), CWD: cwd})
+		// Deferral is the effort ladder's job (ApplySessionEffort below):
+		// a Defer here would be wiped by its ResetDeferred rebuild and the
+		// tools would land in the eager schema.
 	}
 	// M15 #68: local speech synthesis (macOS say, Linux spd-say/espeak-ng,
 	// Windows PowerShell SAPI), voice/rate from the tts: settings group. A
@@ -1912,6 +1950,23 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	}
 
 	return reg
+}
+
+// codeGraphExpectDir is the repository directory the LeanKG project selector
+// is expected to resolve to, which the client then verifies before trusting
+// any answer (see internal/codegraph). A configured expectDir wins; otherwise
+// it is the session's git root, and empty when git cannot say — an unset
+// expectation disables the check, which is the honest default for a directory
+// that is not a repository at all.
+func codeGraphExpectDir(s config.CodeGraphSettings, cwd string) string {
+	if s.ExpectDir != "" {
+		return s.ExpectDir
+	}
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // sharedHub is the session's agent hub (one per process, like
@@ -2546,6 +2601,16 @@ func (h *printHooks) OnStart(req ai.StreamRequest) {}
 
 func (h *printHooks) OnEvent(ev ai.Event) {
 	switch ev.Type {
+	case ai.EventStart:
+		// The gateway served a different model than the one asked for. It
+		// goes to stderr, never stdout: stdout is the answer, and the
+		// Telegram bridge forwards that stream verbatim to the chat. The
+		// bridge reads this exact line back out of the worker's combined
+		// output to caption the reply, so the bracketed form is a wire
+		// format, not a log line (ai.ParseModelSwitchNotice).
+		if n := ai.ModelSwitchNotice(ev.Model, ev.ServedBy); n != "" {
+			fmt.Fprintln(os.Stderr, n)
+		}
 	case ai.EventTextDelta:
 		fmt.Print(ev.Delta)
 	case ai.EventThinkingDelta:

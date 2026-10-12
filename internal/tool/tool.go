@@ -49,6 +49,11 @@ type Registry struct {
 	// MCP section as one block — the enabled server names, one per line.
 	// A live snapshot read when the dock builds, not a cached string.
 	MCPBlock func() string
+	// diagProvider is the warm language-server tier of the post-write
+	// verification ladder (verify.go, #263). Installed at wiring time by the
+	// lsp package; nil keeps the cheap parser-only behavior. Written once
+	// before any turn runs and read from the write path, never concurrently.
+	diagProvider DiagnosticsProvider
 }
 
 // NewRegistry returns an empty registry.

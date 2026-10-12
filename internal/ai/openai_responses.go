@@ -294,7 +294,7 @@ func (p *OpenAIResponsesProvider) streamAt(ctx context.Context, req StreamReques
 		defer resp.Body.Close()
 		defer cancel()
 		defer close(ch)
-		p.stream(sctx, resp.Body, model, ch, start)
+		p.stream(sctx, resp.Body, model, ch, start, servedByDecision(resp, model))
 	}()
 	return withWatchdog(ctx, cancel, ch, FirstProgressTimeout, IdleTimeout), nil
 }
@@ -307,7 +307,7 @@ type openaiRespToolCallState struct {
 	args  strings.Builder
 }
 
-func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model string, ch chan<- Event, start time.Time) {
+func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model string, ch chan<- Event, start time.Time, servedBy string) {
 	var (
 		emitted   bool
 		inText    bool
@@ -324,7 +324,7 @@ func (p *OpenAIResponsesProvider) stream(ctx context.Context, r io.Reader, model
 	emit := func(ev Event) {
 		if !emitted {
 			emitted = true
-			ch <- Event{Type: EventStart, Provider: p.name, API: p.API(), Model: model}
+			ch <- Event{Type: EventStart, Provider: p.name, API: p.API(), Model: model, ServedBy: servedBy}
 		}
 		if ttft == 0 {
 			switch ev.Type {

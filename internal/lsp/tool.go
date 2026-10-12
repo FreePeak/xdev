@@ -612,6 +612,46 @@ func renderDiagnostics(b *strings.Builder, path string, ds []Diagnostic) {
 	}
 }
 
+// DiagnosticsFor implements tool.DiagnosticsProvider: the post-write
+// verification ladder's rich tier (#263).
+//
+// Two deliberate constraints separate this from the `lsp diagnostics` tool
+// call above. It never LAUNCHES a server -- the write path asks after every
+// edit, and a cold handshake there would add seconds to the tool the model
+// trusts most -- so a file with no warm server reports ok=false and the
+// caller falls back to the cheap parser tier. And it answers from the cache
+// the server already published, taking wait as a ceiling rather than a
+// request, so a slow re-analysis costs the wait and not more.
+func (t *Tool) DiagnosticsFor(ctx context.Context, path string, wait time.Duration) ([]tool.Problem, bool) {
+	abs, err := t.absPath(path)
+	if err != nil {
+		return nil, false
+	}
+	cl, langID, warm := t.mgr.WarmClientFor(abs)
+	if !warm {
+		return nil, false
+	}
+	// The bytes on disk changed under the server; without this it would
+	// answer for the previous version of the file.
+	if err := cl.EnsureOpen(abs, langID); err != nil {
+		return nil, false
+	}
+	ds, seen := cl.DiagnosticsFor(ctx, abs, wait)
+	if !seen || len(ds) == 0 {
+		return nil, false
+	}
+	problems := make([]tool.Problem, 0, len(ds))
+	disp := displayPath(abs, t.CWD)
+	for _, d := range ds {
+		problems = append(problems, tool.Problem{
+			Severity: severityName(d.Severity),
+			Location: fmt.Sprintf("%s:%d:%d", disp, d.Range.Start.Line+1, d.Range.Start.Character+1),
+			Message:  strings.TrimSpace(d.Message),
+		})
+	}
+	return problems, true
+}
+
 func severityName(s int) string {
 	switch s {
 	case 1:

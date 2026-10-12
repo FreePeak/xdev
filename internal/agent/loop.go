@@ -1064,8 +1064,12 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// capped backoff — but only for maxSilentRecoveryRounds, so a
 			// host that never comes back cannot hold the turn claim for the
 			// life of the process (a7e17741, 2026-09-28). A bounded policy
-			// keeps its own finite escalation rounds.
-			if healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite) {
+			// keeps its own finite escalation rounds. A CONNECTIVITY outage
+			// (the machine has no route at all) is the one failure that is
+			// not about the host: it is survived without a round budget,
+			// because the user's only other action is to resend the same
+			// message once the network returns.
+			if policy.outageMayNotEndATurn(hcErr) || (healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite)) {
 				healthEscalation++
 				attempt = 0
 				d := policy.delay(healthEscalation)
@@ -1162,11 +1166,14 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// target. Rounds are bounded so a hard failure misclassified
 				// as transient still ends the turn (maxEscalationRounds);
 				// retry.infinite lifts that to maxSilentRecoveryRounds and
-				// announces each round on the event stream, so an outage of
-				// any length reads as waiting rather than hanging — while a
-				// turn still ends rather than pinning the session's single
-				// turn claim forever.
-				if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
+				// announces each round on the event stream, so a long outage
+				// reads as waiting rather than hanging — while a turn still
+				// ends rather than pinning the session's single turn claim
+				// forever. A CONNECTIVITY outage is the exception: it is
+				// survived however long it lasts, because the network coming
+				// back is what ends it and the user's only other action is
+				// to resend the same message.
+				if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite)) {
 					escalation++
 					attempt = 0
 					d := policy.delay(policy.MaxRetries + 1)
@@ -1267,8 +1274,12 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// hard failures; infinite retry is reserved for
 			// transport/transient outages — and even there only for
 			// maxSilentRecoveryRounds, so no turn pins the session's
-			// single turn claim (a7e17741, 2026-09-28).
-			if escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite) {
+			// single turn claim (a7e17741, 2026-09-28). The one exception
+			// is a connectivity outage, which is unbounded under
+			// retry.infinite (see outageMayNotEndATurn): no retry can
+			// succeed until the machine is back on the network, and the
+			// user has no better action than to wait for it.
+			if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite)) {
 				escalation++
 				attempt = 0
 				logx.Errorf("recovery: retrying %v from current context", ai.Classify(err))
@@ -1366,9 +1377,17 @@ func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duratio
 		}
 	}
 	data := map[string]any{
-		"round":           round,
-		"delaySeconds":    int(delay.Round(time.Second) / time.Second),
-		"remainingRounds": max(0, boundRounds(kind)-round),
+		"round":        round,
+		"delaySeconds": int(delay.Round(time.Second) / time.Second),
+	}
+	// An unbounded round has no ceiling to report, and the arithmetic would
+	// say "remainingRounds: 0" for a loop that is still climbing — the one
+	// thing the record exists to get right. (The only unbounded round is a
+	// connectivity outage under retry.infinite: outageMayNotEndATurn.)
+	if last != nil && ai.IsNetworkOutage(last) && a.Retry.withDefaults().Infinite {
+		data["unbounded"] = true
+	} else {
+		data["remainingRounds"] = max(0, boundRounds(kind)-round)
 	}
 	if last != nil {
 		data["error"] = last.Error()

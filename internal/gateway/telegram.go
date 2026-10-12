@@ -32,7 +32,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -107,7 +109,7 @@ type apiResponse struct {
 	ErrorCode   int             `json:"error_code"`
 }
 
-// call posts one Bot API method and decodes its result into out.
+// call posts one Bot API method as JSON and decodes its result into out.
 func (t *Telegram) call(ctx context.Context, method string, payload any, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -119,6 +121,14 @@ func (t *Telegram) call(ctx context.Context, method string, payload any, out any
 		return fmt.Errorf("telegram %s: %w", method, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return t.send(ctx, method, req, out)
+}
+
+// send performs one prepared request and decodes the Bot API envelope. It is
+// the half every method shares — the token masking, the bounded body read and
+// the ok:false decoding — split out so the multipart uploads reach the same
+// error handling as the JSON calls rather than reimplementing it.
+func (t *Telegram) send(ctx context.Context, method string, req *http.Request, out any) error {
 	resp, err := t.client().Do(req)
 	if err != nil {
 		// The transport error embeds the URL, and the URL carries the token
@@ -267,6 +277,80 @@ func (t *Telegram) SendMessage(ctx context.Context, chatID int64, text string) e
 	t.logf("telegram: %v; resending as plain text", err)
 	plain := map[string]any{"chat_id": chatID, "text": text}
 	return t.call(ctx, "sendMessage", plain, &sent)
+}
+
+// SendPhoto sends one JPEG with an optional caption. Used for the per-model
+// badge: the phone shows WHICH model answered before it shows the words, and
+// a caption is the only text Telegram lets ride a photo.
+//
+// Uploaded as multipart rather than as a file_id: Telegram's file_ids are
+// per-bot and are obtained by uploading once, so a bridge that only ever
+// sends these has nothing to reuse — and a cache of file_ids would be a
+// second state store to keep honest for no saved bytes.
+func (t *Telegram) SendPhoto(ctx context.Context, chatID int64, jpeg []byte, caption string) error {
+	fields := map[string]string{"chat_id": strconv.FormatInt(chatID, 10)}
+	if caption != "" {
+		fields["caption"] = ToTelegramHTML(caption)
+		fields["parse_mode"] = "HTML"
+	}
+	var sent SentMessage
+	err := t.callUpload(ctx, "sendPhoto", fields, "photo", "model.jpg", jpeg, &sent)
+	if err == nil || caption == "" || !isParseError(err) {
+		return err
+	}
+	// Same rule as SendMessage: a rejected caption costs the formatting,
+	// never the photo.
+	delete(fields, "parse_mode")
+	return t.callUpload(ctx, "sendPhoto", fields, "photo", "model.jpg", jpeg, &sent)
+}
+
+// SetMyProfilePhoto changes the bot's own profile photo, which is what a chat
+// with the bot shows in its header. Returns the API error unchanged so the
+// caller can decide whether a missing permission is worth reporting.
+//
+// Telegram refuses to reuse a photo it already has, so every call uploads.
+// The InputProfilePhoto object is passed as a field and refers to the upload
+// by its attach name.
+func (t *Telegram) SetMyProfilePhoto(ctx context.Context, jpeg []byte) error {
+	fields := map[string]string{
+		"photo": `{"type":"static","photo":"attach://` + profilePhotoField + `"}`,
+	}
+	return t.callUpload(ctx, "setMyProfilePhoto", fields, profilePhotoField, "profile.jpg", jpeg, nil)
+}
+
+// profilePhotoField is the multipart part name the InputProfilePhoto object
+// above attaches by. One constant, so the two cannot drift.
+const profilePhotoField = "photo_file"
+
+// callUpload posts one multipart/form-data method call: the text fields plus
+// exactly one file part. Kept beside call (rather than folded into it) because
+// the JSON path is what every other method uses and a branch there would make
+// each of them read as if it might upload.
+func (t *Telegram) callUpload(ctx context.Context, method string, fields map[string]string, fileField, fileName string, file []byte, out any) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			return fmt.Errorf("telegram %s: field %s: %w", method, k, err)
+		}
+	}
+	fw, err := mw.CreateFormFile(fileField, fileName)
+	if err != nil {
+		return fmt.Errorf("telegram %s: file part: %w", method, err)
+	}
+	if _, err := fw.Write(file); err != nil {
+		return fmt.Errorf("telegram %s: write file: %w", method, err)
+	}
+	if err := mw.Close(); err != nil {
+		return fmt.Errorf("telegram %s: close: %w", method, err)
+	}
+	endpoint := t.base() + "/bot" + t.Token + "/" + method
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
+	if err != nil {
+		return fmt.Errorf("telegram %s: %w", method, err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return t.send(ctx, method, req, out)
 }
 
 // SendChatAction posts one chat action — the bridge only ever needs "typing".

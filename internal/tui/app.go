@@ -31,7 +31,14 @@ type TabInfo struct {
 }
 
 type Status struct {
-	Model     string
+	Model string
+	// ServedBy is the leg that actually answered the LAST request, when it
+	// was not Model. A gateway in front of the provider can fall a combo
+	// through to a sibling leg mid-conversation, and the composer divider
+	// has to say so: a status row still claiming the model the user pinned
+	// is the one lie this field exists to prevent. Empty = no divergence
+	// reported (see ai.Event.ServedBy).
+	ServedBy  string
 	SessionID string
 	// TokensIn is the session's FRESH input — the provider's input
 	// exclusive of cache reads, which is the split every provider
@@ -671,12 +678,28 @@ func (a *App) hudCommand() string {
 }
 
 // SetStatusModel updates the status-line model name (wired by cmd on
-// /model switch).
+// /model switch). A deliberate switch also clears ServedBy: the previous
+// answer's serving leg says nothing about the model the user just chose, and
+// leaving it up would paint a divergence that no longer exists.
 func (a *App) SetStatusModel(m string) {
 	a.mu.Lock()
-	a.st.Model = m
+	a.st.Model, a.st.ServedBy = m, ""
 	a.mu.Unlock()
 	a.poke()
+}
+
+// SetServedBy records the leg that answered the last request ("" when the
+// wire reported no divergence). It re-paints the divider's model segment, so
+// a mid-conversation switch is visible the moment it happens rather than at
+// the next /model.
+func (a *App) SetServedBy(leg string) {
+	a.mu.Lock()
+	changed := a.st.ServedBy != leg
+	a.st.ServedBy = leg
+	a.mu.Unlock()
+	if changed {
+		a.poke()
+	}
 }
 
 // SetHandlers wires the send/cancel/quit callbacks. A text-only caller uses
@@ -6207,7 +6230,7 @@ func statusSegmentNames() []string {
 func (a *App) hudSegment(name string) (text, token string) {
 	switch strings.ToLower(name) {
 	case "model":
-		return a.st.Model, theme.StatusLineModel
+		return a.dividerModel(), a.dividerModelToken()
 	case pillToken:
 		// The token PILL, not the old ↑⇢↓ split: dsh's UsagePill button
 		// reads "{total} · Cache hit N%" and its dialog breaks out the
@@ -6450,7 +6473,10 @@ func (a *App) dividerParts() []hudPart {
 	if a.st.Running {
 		add("", a.spinFrame(), theme.AccentRunning)
 	}
-	add("model", a.st.Model, theme.StatusLineModel)
+	// The model segment carries the SERVING leg when the wire reported a
+	// switch: "model · high" claiming the pinned model while a sibling combo
+	// leg answers is the lie this badge exists to prevent.
+	add("model", a.dividerModel(), a.dividerModelToken())
 	// The reasoning level beside the model it applies to: the two are one
 	// request, and "which model" alone left the other half of it invisible.
 	// The bare rung, not "thinking <level>" — the model it sits beside says
@@ -6470,6 +6496,7 @@ func (a *App) dividerParts() []hudPart {
 	// and "off" carry no rank, so they are never folded away — "auto · max"
 	// still names the rung that pins the level an auto model will take, and
 	// "off" still says what it says beside any chip.
+	//
 	think := a.thinkingLevel()
 	effort := a.effortLabel()
 	if tr, tOK := config.EffortRank(think); tOK {
@@ -6514,6 +6541,35 @@ func (a *App) thinkingToken() string {
 		return theme.StatusLineModel
 	}
 }
+
+// dividerModel is the model segment's text: the leg that actually served the
+// last request when one was reported, else the pinned model. It leads with
+// the switch badge so a narrowed row that shortens the name still shows that
+// a switch happened — the badge is the part that must survive the cut.
+func (a *App) dividerModel() string {
+	if a.st.ServedBy == "" {
+		return a.st.Model
+	}
+	return modelSwitchBadge + modelLeaf(a.st.ServedBy)
+}
+
+// dividerModelToken paints the model segment: the serving leg wears the
+// warning ink, because a switch the user did not ask for is not a neutral
+// fact about the session — it is the answer to "why does this read
+// differently", and the status row is where that question gets asked.
+func (a *App) dividerModelToken() string {
+	if a.st.ServedBy != "" {
+		return theme.AccentError
+	}
+	return theme.StatusLineModel
+}
+
+// modelSwitchBadge leads the model segment when the serving leg differs from
+// the pinned model. One cell, unambiguous in every terminal (the one-cell
+// rule theme/symbols.go states for HUD glyphs), and the same glyph in every
+// symbol preset: a switch is a fact, not decoration, and the toast beside it
+// spells the word out.
+const modelSwitchBadge = "⇄ "
 
 // hudParts renders the configured segments (settings statusLine.segments),
 // in order, dropping the ones with nothing to show (an unwired cost or
