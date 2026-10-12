@@ -30,7 +30,7 @@ go 1.25.14
 
 ## 2. Run modes
 
-Routing is decided in `cmd/xdev/main.go:737`:
+Routing is decided in `cmd/xdev/main.go:808` (called at `main.go:693`):
 
 ```go
 func startupIsInteractive(prompt string, forcePrint, tty bool) bool {
@@ -83,7 +83,7 @@ work that makes the session persist across turns:
    `followUp` for the next run.
 2. **Persist the user message** — append a `MessageEntry` to the store.
 3. **Build a fresh `agent.Agent`** against the store (`startTurn` at
-   `cmd/xdev/tui.go:1559`). The agent is disposable — the `Store` is
+   `cmd/xdev/tui.go:2268`). The agent is disposable — the `Store` is
    the single source of truth.
 4. **Launch `ag.Run` on a goroutine** — the tcell renderer keeps
    running; streaming events flow back through `TurnHooks`. The model
@@ -102,7 +102,7 @@ work that makes the session persist across turns:
 ./xdev --resume <short-id> # resume a specific session by id prefix
 ```
 
-The resume picker (`cmd/xdev/tui.go:637`) lists sessions from
+The resume picker (`cmd/xdev/tui.go:3823`) lists sessions from
 `~/.xdev/agent/sessions/`, reading only the first 4 KiB + last 32 KiB
 per file (stat-cached). Subagent sessions (`titleSource: "subagent"`)
 are skipped — they're not user-resumable.
@@ -112,61 +112,73 @@ are skipped — they're not user-resumable.
 A hard <100 MB RSS budget is enforced by `debug.SetMemoryLimit`
 (`XDEV_MEMLIMIT` overrides it). A runaway turn degrades into "compact
 now" instead of an OOM kill — the compaction ladder fires at
-`memlimit.HighPressure` (`internal/agent/compact.go:394`).
+`memlimit.HighPressure` (`internal/agent/compact.go:585,610`).
 
-## 7. Session cost discipline (turn budget vs token budget)
+## 7. Session cost discipline
 
-The agent loop has **two** session budgets, but only one of them
-actually gates the run:
+Read 2026-10-12 against `origin/main`. A session has **three** bounds, and
+which ones you get depends on the mode — so "what stops a runaway session"
+has a different answer in the TUI than in `xdev --print`.
 
-- **Turn budget** (`MaxTurns`, default 200) — this is the real gate.
-  The run loop is `for turn := 0; limit == 0 || turn < limit; turn++`
-  (`internal/agent/loop.go:461`). `limit = effectiveMaxTurns()`.
-  Nothing else appears in that condition.
-- **Token budget** (`SessionTokenBudget`, default 5M) — this is a
-  *break clause*, not a gate. It is accumulated after each turn
-  completes (`spentSoFar += msg.Usage.TotalTokens` at
-  `loop.go:514`) and breaks the loop at `loop.go:516`.
+### 7.1 The turn cap is the only turn-gated bound
 
-Why this matters for a long-lived streaming session:
+`Agent.Run` is `for turn := 0; limit == 0 || turn < limit; turn++`
+(`internal/agent/loop.go:614`), with `limit = a.effectiveMaxTurns()` and
+`effectiveMaxTurns()` returning `a.MaxTurns` verbatim
+(`loop.go:492-494`). Nothing else is in that condition.
 
-1. **The token budget can't shorten a turn.** The check fires *after*
-   `oneTurnWithRecovery` returns, so a single turn that burns more than
-   the remaining budget (e.g. a long thinking block or a large tool
-   result) completes in full before the break fires. At minimum one
-   turn's worth of tokens leaks past the cap.
+- `--max-turns 0` (the flag default, `cmd/xdev/main.go:162`) means
+  **unbounded** — not 200, despite the flag's help text saying "0 =
+  default 200". `DefaultMaxTurns = 200` is retained only for historical
+  reference (`loop.go:150-152`).
+- When the cap bites, the run does NOT error: it injects one wrap-up turn
+  ("turn limit reached — wrap up the current step and report status",
+  attributed `turn-limit`, `loop.go:909`) and returns normally.
 
-2. **The token budget can't abort an in-flight stream.** There is no
-   per-call or per-delta accounting mid-stream. If the model streams
-   a 3M-token response and `SessionTokenBudget` is nearly exhausted,
-   the session keeps streaming until that response lands, then breaks
-   at the turn boundary.
+### 7.2 There is no session token budget — it was deliberately removed
 
-3. **The post-run wrap-up names it "turn budget" regardless of cause.**
-   When either budget is crossed, the run appends `TurnBudgetPrompt`
-   (`"turn budget reached — wrap up the current step and report status…"`,
-   `loop.go:131`) with `TurnBudgetAttribution` (`loop.go:138`) and emits
-   `turn_end` with `{"turn": limit}` (`loop.go:619`) — the turn number,
-   not the token position. A consumer of the event stream cannot
-   distinguish "stopped at 200 turns" from "stopped at 5M tokens".
+`SessionTokenBudget` **no longer exists**. `b282a39` (#605, "remove
+per-turn token budget limit from agent loop") deleted it, after the same
+change had already turned the session budget into a *per-turn* one. So all
+three findings this section used to record — "the token budget can't
+shorten a turn", "the token budget can't abort an in-flight stream",
+"`turn_end`'s `{"turn": limit}` can't distinguish token from turn cause" —
+are now moot for the budget itself:
 
-4. **The turn cap dominates in practice.** Setting `SessionTokenBudget =
-   1_000_000` but leaving `MaxTurns = 0` (unbounded) still gives you
-   the default 200 turns — the turn gate is the dominant bound for
-   most real sessions because turns are short relative to 1M tokens.
+- **The stream can't be cut short by any budget.** A turn runs to
+  completion (`oneTurnWithRecovery`); the only in-flight stop is user
+  cancellation.
+- **The per-turn token cap is also gone**, so a 3M-token response would
+  stream to completion.
+- The one remaining cost bound that can still spend unbounded money is a
+  goal's `TokenBudget` (`internal/agent/goal.go:60-61`), which emits a
+  reminder ("token budget: N of M remaining", `goal.go:182`) but does not
+  terminate the run.
 
-This is intentional: the token budget was added as **RCA #1**
-(`loop.go:450-452`) to stop sessions from burning millions of tokens
-before compaction or the turn cap kicked in. It was bolted onto the
-existing turn-gated loop as a break clause rather than replacing the
-turn gate, and the naming was never updated.
+### 7.3 What still bounds a runaway session
 
-If you need a hard token stop — abort mid-stream, report the budget as
-the cause, and skip the wrap-up turn — the loop condition at
-`loop.go:461` needs to consult `spentSoFar`, the provider call needs a
-context that aborts when the budget is crossed during streaming, and
-`turn_end` needs a `stopReason` that distinguishes `token_budget` from
-`turn_limit`.
+| Bound | Where | Effect |
+|---|---|---|
+| `--max-turns N` | `flag` → `loop.go:614` | the only run-ending gate |
+| `--max-tokens N` | provider-side output cap | bounds one response, not the run |
+| `debug.SetMemoryLimit` 100 MB default | `internal/memlimit` | GC pressure, then compaction |
+| `memory-limit` config key | `memlimit.ApplyFrom` (main.go:334) | same, higher or lower |
+| goal token budget | `internal/agent/goal.go` | reminder only, non-terminal |
+
+The practical consequence for a long-lived streaming session: **the turn
+cap is the whole story.** A TUI session that you let run with
+`--max-turns 0` will keep turning as long as the model keeps calling tools,
+and compaction (not a budget) is what keeps the context — and therefore the
+per-request cost — from growing without bound. The compaction ladder is
+also the path that reacts to memory pressure (`HighPressure`,
+`internal/agent/compact.go:585,610`), which is why a memory limit and the
+turn cap together bound the two things a session can run out of.
+
+If you need a hard token stop, the loop condition itself has to consult a
+running spend and the provider call has to take a context that aborts when
+that spend crosses the ceiling. That is a real gap since #605, and it is
+the shape of change to make deliberately rather than discover in
+production.
 
 ---
 
