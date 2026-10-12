@@ -224,3 +224,63 @@ func TestVerifyAcceptsTwoSpellingsOfOneDirectory(t *testing.T) {
 		t.Fatalf("a linked spelling of the bound directory must verify, got: %v", err)
 	}
 }
+
+// TestVerifyRetriesAfterATransientFailure pins the cache's real contract: a
+// server that is still starting (or restarted, or a first call whose context
+// was already cancelled) must not disable the graph tools for the whole
+// session. Only a SUCCESS and a configuration error the server itself
+// reported stick; a transport failure is re-probed on the next call.
+func TestVerifyRetriesAfterATransientFailure(t *testing.T) {
+	var up atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/status", func(w http.ResponseWriter, _ *http.Request) {
+		if !up.Load() {
+			// Connection-refused equivalent: the server is not answering yet.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"project_dir": "/repo"})
+	})
+	mux.HandleFunc("/api/v1/query", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"hits": []any{}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, Project: "xdev", ExpectDir: "/repo", Timeout: time.Second})
+
+	// First use: the server is down. The call fails...
+	if _, err := c.Query(context.Background(), Request{Query: "Target"}); err == nil {
+		t.Fatal("a down server must report unavailable on first use")
+	}
+	// ...then it comes up, and the next call must see it: the transient
+	// failure did not stick.
+	up.Store(true)
+	if _, err := c.Query(context.Background(), Request{Query: "Target"}); err != nil {
+		t.Fatalf("a transient verify failure disabled the tools for the session: %v", err)
+	}
+}
+
+// TestVerifyCachesAPermanentMisconfiguration: a server that ANSWERS and says
+// it is bound to another repository is a configuration error, not an outage —
+// re-asking it every turn would be pure latency. It sticks.
+func TestVerifyCachesAPermanentMisconfiguration(t *testing.T) {
+	var statusCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/status", func(w http.ResponseWriter, _ *http.Request) {
+		statusCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"project_dir": "/some-other-repo"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, Project: "xdev", ExpectDir: "/repo", Timeout: time.Second})
+	for i := 0; i < 3; i++ {
+		if _, err := c.Query(context.Background(), Request{Query: "Target"}); err == nil {
+			t.Fatalf("call %d: a server bound to another repository must be refused", i)
+		}
+	}
+	if got := statusCalls.Load(); got != 1 {
+		t.Fatalf("status probed %d times for a permanent misconfiguration; it must be cached", got)
+	}
+}

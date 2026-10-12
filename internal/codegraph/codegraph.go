@@ -200,8 +200,11 @@ func (c *Client) Query(ctx context.Context, req Request) ([]byte, error) {
 	return raw, nil
 }
 
-// Verify checks once per session that the server is up AND answering for the
-// repository this client thinks it is talking about.
+// Verify checks that the server is up AND answering for the repository this
+// client thinks it is talking about — once per session when the answer is
+// stable (a success, or a configuration error the server itself reported).
+// A transient failure is retried on the next call rather than sticking for
+// the session.
 //
 // The second half is not paranoia. A single-project LeanKG server ignores
 // ?project= entirely: the request succeeds, the response is a well-formed
@@ -218,11 +221,25 @@ func (c *Client) Verify(ctx context.Context) error {
 	if c.verifyDone {
 		return c.verifyErr
 	}
-	c.verifyDone, c.verifyErr = true, c.verifyOnce(ctx)
-	return c.verifyErr
+	err, permanent := c.verifyOnce(ctx)
+	// A SUCCESS sticks for the session — that is the point of the cache.
+	// A PERMANENT failure sticks too: the server answered and its answer
+	// says the configuration is wrong (bound elsewhere, or not the shape
+	// this client speaks), and re-asking a server that already answered
+	// will get the same answer. A TRANSIENT failure does NOT stick: a
+	// server that is still starting, one restart, or a first call whose
+	// context was already cancelled would otherwise disable the graph
+	// tools for the whole session with no way back.
+	if err == nil || permanent || ctx.Err() != nil {
+		c.verifyDone, c.verifyErr = true, err
+	}
+	return err
 }
 
-func (c *Client) verifyOnce(ctx context.Context) error {
+// verifyOnce probes the server once. The second return says whether the
+// failure is permanent (the server answered and the configuration is wrong)
+// or transient (the server did not answer, or the caller gave up).
+func (c *Client) verifyOnce(ctx context.Context) (error, bool) {
 	u := strings.TrimRight(c.cfg.BaseURL, "/") + "/api/v1/status"
 	if c.cfg.Project != "" {
 		u += "?project=" + url.QueryEscape(c.cfg.Project)
@@ -232,38 +249,41 @@ func (c *Client) verifyOnce(ctx context.Context) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return &UnavailableError{Reason: err.Error()}
+		return &UnavailableError{Reason: err.Error()}, false
 	}
 	res, err := c.hc.Do(req)
 	if err != nil {
-		return &UnavailableError{Reason: "no answer from " + c.cfg.BaseURL}
+		if ctx.Err() != nil {
+			return ctx.Err(), false
+		}
+		return &UnavailableError{Reason: "no answer from " + c.cfg.BaseURL}, false
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
-		return &UnavailableError{Reason: fmt.Sprintf("server said %s", res.Status)}
+		return &UnavailableError{Reason: fmt.Sprintf("server said %s", res.Status)}, false
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 	if err != nil {
-		return &UnavailableError{Reason: "status response interrupted"}
+		return &UnavailableError{Reason: "status response interrupted"}, false
 	}
 	if c.cfg.ExpectDir == "" {
-		return nil
+		return nil, false
 	}
 	var st struct {
 		ProjectDir string `json:"project_dir"`
 	}
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return &UnavailableError{Reason: "status response is not the shape this client expects"}
+		return &UnavailableError{Reason: "status response is not the shape this client expects"}, true
 	}
 	if st.ProjectDir == "" {
-		return &UnavailableError{Reason: "server did not report which repository it is bound to"}
+		return &UnavailableError{Reason: "server did not report which repository it is bound to"}, true
 	}
 	if !sameDir(st.ProjectDir, c.cfg.ExpectDir) {
 		return &UnavailableError{Reason: fmt.Sprintf(
 			"server is bound to %s, not %s — the project selector was ignored",
-			st.ProjectDir, c.cfg.ExpectDir)}
+			st.ProjectDir, c.cfg.ExpectDir)}, true
 	}
-	return nil
+	return nil, false
 }
 
 // sameDir reports whether two paths name the same directory.

@@ -148,7 +148,7 @@ func (a *Agent) runCompactLadder(ctx context.Context, span *compactionSpan) (*se
 			// adding a file list to shake would re-introduce the argument
 			// values its whole contract is to delete.
 			if name == MethodHandoff {
-				entry.Summary = withWorkingState(entry.Summary, extractWorkingState(span.msgs[:span.cut]))
+				entry.Summary = withWorkingState(entry.Summary, extractWorkingState(span.msgs[:span.cut()]))
 			}
 			return entry, nil
 		}

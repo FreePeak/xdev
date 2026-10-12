@@ -1893,8 +1893,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		}
 		reg.Register(&tool.ImpactTool{Graph: codegraph.New(cgCfg), CWD: cwd})
 		reg.Register(&tool.CodeQueryTool{Graph: codegraph.New(cgCfg), CWD: cwd})
-		reg.Defer(tool.ImpactToolName, tool.ImpactIndex, "code", "graph", "impact")
-		reg.Defer(tool.CodeQueryToolName, tool.CodeQueryIndex, "code", "graph", "search")
+		// Deferral is the effort ladder's job (ApplySessionEffort below):
+		// a Defer here would be wiped by its ResetDeferred rebuild and the
+		// tools would land in the eager schema.
 	}
 	// M15 #68: local speech synthesis (macOS say, Linux spd-say/espeak-ng,
 	// Windows PowerShell SAPI), voice/rate from the tts: settings group. A
