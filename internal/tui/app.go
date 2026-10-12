@@ -231,6 +231,11 @@ type App struct {
 	// re-laid-out cannot open a stale child). Empty = no child armed.
 	subID    string
 	subLabel string
+	// boxArm is the collapsed box row a press armed (compact mode, or a trim
+	// window): a no-motion release expands it. -1 = nothing armed. Like
+	// subID, it is re-resolved on the release, so a transcript that re-laid-out
+	// in between cannot expand a row that moved.
+	boxArm int
 
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
@@ -372,6 +377,32 @@ type App struct {
 	// rowIdx is the transcript's row layout and per-block render cache; the
 	// per-frame cost is the viewport, not the session (see rowindex.go).
 	rowIdx rowIndex
+	// droppedRows / droppedUserRows are the head the row cap cut off the top of
+	// this session (rowindex.go trimTranscript): rows already retired from the
+	// transcript, and how many of them were ❯ prompts. The ordinals the
+	// user-message seam counts by (msgmenu.go userRowAt) have to be absolute —
+	// a menu opened after a trim must name the store entry it always named, not
+	// one shifted by the rows that left the screen.
+	droppedRows     int
+	droppedUserRows int
+	// compact is the transcript's compact mode (settings tui.compactTranscript,
+	// the "compact-transcript" chord): reasoning, tool calls, tool output and
+	// diffs collapse to one row each and only the conversation spine — user
+	// prompts, assistant prose, system notices and errors — keeps its height.
+	// compactAuto records that the mode latched itself on past compactAfterRows;
+	// it is what lets the latch let go again once the transcript is trimmed
+	// back under the threshold.
+	compact bool
+	// compactLatch records which side of compactAfterRows the last sync saw, so
+	// the threshold fires on a CROSSING and not on every frame past it: the
+	// automatic switch is a default, and a human who turns it back off must not
+	// have it re-applied a frame later.
+	compactLatch bool
+	compactAuto  bool
+	// trimNoticeOn records that the trim notice is already up, so a session
+	// that keeps trimming says it once instead of on every frame. It clears
+	// the moment a pass moves nothing, which is what lets the next trim speak.
+	trimNoticeOn bool
 
 	sheenPhase int // welcome logo sheen sweep position (columns)
 	// startupNotice is a line of the welcome screen's own chrome — what
@@ -523,6 +554,7 @@ type blockKey struct {
 	stream   bool
 	expanded bool // box rows: the Ctrl+O state changed the row set
 	age      int64
+	compact  bool // transcript-wide compact mode: this block's height depends on it
 	spin     int  // the running frame this row paints: -1 when it paints none
 	trim     int8 // bounded middle trim: this block's render-window tier
 	dlen     int  // result box: a diff changes the row set without touching Text
@@ -572,6 +604,7 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		// No box is focused until a click names one: the wheel is the
 		// transcript's from the first frame.
 		thinkFocus: -1,
+		boxArm:     -1,
 	}
 }
 
@@ -1389,6 +1422,23 @@ func (a *App) ToggleBoxExpand() bool {
 	return found
 }
 
+// expandBox opens block i's box: the same Ctrl+O state ToggleBoxExpand flips,
+// aimed at the row a click landed on rather than at the newest box. Both land
+// on Block.Expanded, so the two cannot disagree about what "open" means, and
+// neither knows or cares whether the row was collapsed by compact mode or by
+// the trim window.
+func (a *App) expandBox(i int) {
+	a.mu.Lock()
+	if i >= 0 && i < len(a.blocks) {
+		switch a.blocks[i].Kind {
+		case KindThinking, KindToolDone:
+			a.blocks[i].Expanded = true
+		}
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
 // AddUsage folds token usage into the status line and measures the decode
 // rate the HUD's rate segment shows: the provider's own output-token count
 // over the window in which deltas actually arrived (omp's per-message math).
@@ -1406,6 +1456,7 @@ func (a *App) ToggleBoxExpand() bool {
 // to re-read — a prompt-cache hit still occupies those tokens, and an
 // input+output sum reads 90 % low on a cached conversation (the same total
 // agent.ContextTokens and compaction trigger on). total <= 0 (a provider that
+// reports none) falls back to in+out+cache.
 // reports none) falls back to in+out+cache.
 //
 // cache and thinking arrive as their own arguments because the split is the
@@ -2261,6 +2312,7 @@ func (a *App) Reset() {
 	a.st.TTFTSum, a.st.TTFTCount = 0, 0
 	a.closeWindow()
 	a.blocks = nil
+	a.droppedRows, a.droppedUserRows = 0, 0
 	a.thinkFocus = -1  // the focused box went with them
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
@@ -2777,8 +2829,11 @@ func (a *App) SettingsView(args string) error {
 	if fields[0] == "renderMermaid" {
 		return a.setMermaidSetting(fields[1:])
 	}
+	if fields[0] == "compactTranscript" || fields[0] == "compact" {
+		return a.setCompactSetting(fields[1:])
+	}
 	if fields[0] != "showThinking" {
-		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode|renderMermaid)", fields[0])
+		return fmt.Errorf("unknown setting %q (want showThinking|sidebarMode|renderMermaid|compactTranscript)", fields[0])
 	}
 	on := !a.Thinking()
 	if len(fields) == 2 {
@@ -2883,9 +2938,119 @@ func (a *App) setMermaidSetting(fields []string) error {
 	return nil
 }
 
-// Sidebar implements CommandAPI /sidebar [show|hide|auto]: the two-state
-// show/hide a human reaches for mid-session. Alt+S already walks the policy
-// through all three states, but that is a mode, not a switch — a bare toggle
+// setCompactSetting is /settings compactTranscript [on|off]: the same shape as
+// setMermaidSetting — a bare form reports rather than writes, and the value
+// lands on the one persisted key (tui.compactTranscript) through the same seam
+// the settings panel uses, so the two cannot disagree.
+func (a *App) setCompactSetting(fields []string) error {
+	if len(fields) == 0 {
+		a.AddSystemBlock("compactTranscript " + a.CompactState() +
+			" — reasoning, tool output and diffs collapse to one row each; Ctrl+O or a click expands a box")
+		return nil
+	}
+	if len(fields) > 1 {
+		return fmt.Errorf("usage: /settings compactTranscript [on|off]")
+	}
+	var on bool
+	switch fields[0] {
+	case "on", "true":
+		on = true
+	case "off", "false":
+		on = false
+	default:
+		return fmt.Errorf("usage: /settings compactTranscript [on|off]")
+	}
+	confirm := "compactTranscript " + fields[0]
+	if a.settingsOps != nil && a.settingsOps.SetCompact != nil {
+		if err := a.settingsOps.SetCompact(on); err != nil {
+			return err
+		}
+		confirm += " (saved to " + a.settingsOps.Path + ")"
+	}
+	a.SetCompact(on)
+	a.AddSystemBlock(confirm)
+	return nil
+}
+
+// SetCompact turns the transcript's compact mode on or off by hand. An explicit
+// choice clears the auto latch: a human who just turned the mode OFF must not
+// have it turn itself back on the next time the session crosses the row
+// threshold, and the converse holds too.
+func (a *App) SetCompact(on bool) {
+	a.mu.Lock()
+	a.compact, a.compactAuto = on, false
+	a.mu.Unlock()
+	a.poke()
+}
+
+// Compact reports whether the transcript is in compact mode.
+func (a *App) Compact() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.compact
+}
+
+// CompactState is the mode as the settings surfaces spell it: "on", "off", or
+// "auto (on)" — the state a session that was never told either way is in once
+// the threshold has flipped it.
+
+// ToggleCompact flips the transcript's compact mode and says so. It is the
+// chord's whole body: the state lives on the App, so no host seam is needed to
+// switch it — only to REMEMBER it, which is the settings row's business.
+func (a *App) ToggleCompact() {
+	a.mu.Lock()
+	on := !a.compact
+	a.compact, a.compactAuto = on, false
+	a.mu.Unlock()
+	if on {
+		a.setNotice("compact transcript — reasoning, tool output and diffs collapsed (Ctrl+G or Ctrl+O expands a box)")
+	} else {
+		a.setNotice("full transcript")
+	}
+	a.poke()
+}
+
+// the threshold has flipped it.
+func (a *App) CompactState() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.compactAuto:
+		return "auto (on)"
+	case a.compact:
+		return "on"
+	}
+	return "off"
+}
+
+// compactAutoLatch turns compact mode on by itself once the transcript is
+// longer than compactAfterRows, and lets go again once a trim has brought it
+// back under. It runs from sync, which every frame calls, so the mode follows
+// the session rather than a timer. It reports whether the mode moved, which is
+// the caller's signal that the boxes it collapsed still have to be rendered.
+//
+// A crossing is handled ONCE (compactLatch): the threshold turning the mode on
+// is a default, not a policy, so a human who turns it straight back off does
+// not have it turn itself on again on the next frame. compactAuto is what makes
+// the auto-on reversible — only a mode the THRESHOLD set is let go when the
+// transcript shrinks, never one a chord or the settings row chose.
+func (a *App) compactAutoLatch(total int32) bool {
+	was := a.compact
+	switch {
+	case total <= compactAfterRows:
+		a.compactLatch = false
+		if a.compactAuto {
+			a.compact, a.compactAuto = false, false
+		}
+	case !a.compactLatch:
+		a.compactLatch = true
+		if !a.compact {
+			a.compact, a.compactAuto = true, true
+		}
+	}
+	return a.compact != was
+}
+
 // is what "hide the sidebar, now" means — and it lands on the same persisted
 // key through the same seam /settings sidebarMode uses, so the two cannot
 // disagree.
@@ -2935,6 +3100,23 @@ func (a *App) poke() {
 	select {
 	case a.dirty <- struct{}{}:
 	default:
+	}
+}
+
+// noteTranscriptTrimmed says, once per change, that the transcript's head left
+// the window. Two things move it: the row cap (the oldest blocks are gone) and
+// the compact latch (the boxes collapsed themselves). Both are silent state
+// changes a reader would otherwise discover by scrolling, so the corner says
+// so — a toast rather than a block, because a block would be the first row the
+// next trim drops.
+//
+// Caller holds a.mu (sync runs under it, from paint).
+func (a *App) noteTranscriptTrimmed() {
+	switch {
+	case a.droppedRows > 0:
+		a.toast(ToastInfo, fmt.Sprintf("transcript trimmed — %d rows of older output dropped from this view (the session still has them)", a.droppedRows))
+	case a.compact:
+		a.toast(ToastInfo, "transcript is long — reasoning and tool output collapsed (Ctrl+G shows everything)")
 	}
 }
 
@@ -3397,6 +3579,12 @@ func (a *App) handleKey(ev tcell.Event) {
 		if running {
 			a.onCancel()
 		}
+		return
+	case "compact-transcript":
+		// Ctrl+G: the whole transcript's compact mode. The switch is a display
+		// choice, so it says what it did — a chord that silently changed every
+		// row on screen would read as a repaint bug.
+		a.ToggleCompact()
 		return
 	case "model-select":
 		a.OpenModelPicker()
@@ -4038,6 +4226,14 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		if !a.showThinking {
 			break
 		}
+		// Compact mode keeps the reasoning box's frame — the turn's own shape,
+		// and what the click expands — and drops its body: one row saying how
+		// much was hidden. The header (the spinner, "Thought for Xs") is the
+		// block's state, so it stays.
+		if a.compact {
+			lines = a.thinkBoxCompact(i, b, w)
+			break
+		}
 		lines = a.thinkBoxLines(i, b, w)
 	case KindTool:
 		// omp's call row: state bullet, bold tool name, and the naming
@@ -4085,9 +4281,20 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		}
 		// A call with no arguments at all names nothing, so it renders as the
 		// name alone — segs stays empty and there is no continuation to walk.
+		// Compact mode keeps the call row — it is one line of "what ran",
+		// which is the core the user asked to keep — and clips the phrase to
+		// that line instead of wrapping it into a block of its own. The name
+		// and the bullet (the state, the tool) never move.
 		var segs []string
+		budget := max(10, w-indent-width(elapsed))
+		if a.compact {
+			budget = max(10, w-indent-width(elapsed)-1)
+		}
 		if detail != "" {
-			segs = wrap(detail, max(10, w-indent-width(elapsed)))
+			segs = wrap(detail, budget)
+		}
+		if a.compact && len(segs) > 1 {
+			segs = []string{truncateCells(strings.Join(segs, " "), max(10, budget), "…")}
 		}
 		ln := textline(bullet+" ", bulletSt)
 		ln.runs = append(ln.runs, cell{text: name, style: nameSt})
@@ -4116,6 +4323,16 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// sees only the yield (TestSubagentYieldOnlyIsolation).
 		lines = append(lines, a.subLines(b, w, len(lines), &subs)...)
 	case KindToolDone:
+		// A finished result in compact mode is ONE row: the frame's top border
+		// carries the tool's name, the body is a single dim line saying how
+		// much output is behind it, and the footer's facts (wall time, exit)
+		// stay where they always were. The box keeps its frame so the shape of
+		// the turn is still readable — a compact transcript that erased the
+		// result boxes would leave no sign a command ever ran.
+		if a.compact && !b.Live && !b.Expanded {
+			lines = append(lines, a.toolBoxCompact(i, b, w)...)
+			break
+		}
 		lines = append(lines, a.toolBoxLines(i, b, w)...)
 	case KindSystem:
 		fg := theme.Gray
@@ -4378,6 +4595,51 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 	return append(out, boxBottom(box, border, w))
 }
 
+// thinkBoxCompact is the reasoning box in compact mode: the same frame and the
+// same state header as the full box, with one row standing in for the body.
+// The row counts what it hides and names the way to open it, so the box is a
+// button rather than a box that lost its text — the collapsedAt hit-test reads
+// exactly this notice back to decide a click expands it.
+//
+// The body is measured, not printed: thinkRows is what the full box wraps, and
+// its length is the honest "how much is behind this row".
+func (a *App) thinkBoxCompact(i int, b *Block, w int) []line {
+	box := a.th.Box()
+	focused := i == a.thinkFocus
+	border := tcell.StyleDefault.Foreground(a.cellColor(theme.ThinkFrame(a.th)))
+	if focused {
+		border = border.Bold(true)
+	}
+	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
+	inner := max(1, w-4)
+
+	hdr := "Thought"
+	switch {
+	case b.stream:
+		hdr = a.spinFrame() + " Thinking…"
+	case b.thinkDur > 0:
+		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
+	}
+	body := strings.TrimRight(b.Text, "\n")
+	if junkThinking(body) {
+		return []line{
+			boxTop(box, border, hdr, w),
+			boxRow(box, border, bodySt, junkReasoningNotice, inner),
+			boxBottom(box, border, w),
+		}
+	}
+	n := len(a.thinkRows(b, w))
+	notice := "… hidden (Ctrl+O to expand)"
+	if n > 0 {
+		notice = fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", n)
+	}
+	return []line{
+		boxTop(box, border, hdr, w),
+		boxRow(box, border, bodySt, notice, inner),
+		boxBottom(box, border, w),
+	}
+}
+
 // thinkBoxAt names the reasoning block painted on screen row y, or -1 when that
 // row carries no reasoning box (another kind of block, or chrome). Both the
 // click that focuses a box and the wheel that scrolls the focused one come
@@ -4402,6 +4664,29 @@ func (a *App) thinkBoxAt(y int) int {
 		return -1
 	}
 	return bi
+}
+
+// collapsedBoxAt names the collapsed box painted on screen row y, or -1 when
+// that row is not one. It is collapsedAt's screen-row half: the walk is
+// thinkBoxAt's (screen row → document row → block), with the same two
+// exceptions every other hit-test honours — a row under the sticky header
+// shows the pinned prompt, not the document row its index names, and a row
+// inside the dock belongs to the panel.
+//
+// Caller holds a.mu; selViewport syncs the layout this reads.
+func (a *App) collapsedBoxAt(y int) int {
+	if len(a.blocks) == 0 {
+		return -1
+	}
+	top, vp := a.selViewport()
+	hdr := a.transcriptTop()
+	if vp <= 0 || y < hdr || y >= hdr+vp {
+		return -1
+	}
+	if y-hdr < a.stickyHdr && a.stickyBlock >= 0 {
+		return -1
+	}
+	return a.collapsedAt(int32(top + y - hdr))
 }
 
 // subChildAt names the subagent child row painted on screen row y: its
@@ -4658,6 +4943,82 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 
 	out = append(out, boxBottom(box, border, w))
 	return out
+}
+
+// toolBoxCompact is the finished result's box in compact mode: the same frame
+// and the same footer facts, with the body reduced to one dim row that counts
+// what is behind it. The tool's name stays on the top border (a compact
+// transcript is still a list of what ran), the diff's row count is reported as
+// what it is, and the box keeps enough shape that the turn reads.
+//
+// The footer is shared with the full box, byte for byte: a compact transcript
+// must not be a second dialect of the same result — the wall time and the exit
+// code are the facts a reader scans for, and they are the last thing that may
+// differ between the two renders.
+func (a *App) toolBoxCompact(i int, b *Block, w int) []line {
+	borderCol, bodyCol := theme.AccentTool, theme.TextSecondary
+	if b.Err {
+		borderCol, bodyCol = theme.AccentError, theme.AccentError
+	}
+	box := a.th.Box()
+	border := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(borderCol)))
+	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(bodyCol)))
+	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	inner := max(1, w-4)
+
+	label := ""
+	if b.ToolName != "" && (i == 0 || a.blocks[i-1].Kind != KindTool || a.blocks[i-1].ToolName != b.ToolName) {
+		label = b.ToolName
+	}
+	out := []line{boxTop(box, border, label, w)}
+
+	// What the row stands for: the result's own output rows, or the diff's
+	// when the box would have painted one. The count is the honest "how much
+	// is behind this row" — the same number the window notice prints.
+	body := sanitizeOutput(strings.TrimRight(b.Text, "\n"))
+	n := 0
+	switch {
+	case b.Diff != "":
+		n = len(a.diffCells(sanitizeOutput(b.Diff), inner))
+	case b.ToolName == "bash" && DiffLooksUnified(body):
+		n = len(a.diffCells(body, inner))
+	default:
+		n = len(a.toolBodyRows(body, inner, bodySt, dimSt, a.toolOutputHL(b)))
+	}
+	notice := "… hidden (Ctrl+O to expand)"
+	switch {
+	case n > 0:
+		notice = fmt.Sprintf("… %d lines hidden (Ctrl+O to expand)", n)
+	case b.Err:
+		notice = "… error output hidden (Ctrl+O to expand)"
+	}
+	out = append(out, boxRow(box, border, dimSt, notice, inner))
+	out = append(out, a.toolBoxFooter(box, border, b, dimSt, inner)...)
+	return append(out, boxBottom(box, border, w))
+}
+
+// toolBoxFooter renders a result's footer rows: the wall time, a non-zero exit
+// code, the truncation warning. One home, because the compact box and the full
+// box must agree about the facts — a second copy is how they drift.
+func (a *App) toolBoxFooter(box theme.BoxChars, border tcell.Style, b *Block, dimSt tcell.Style, inner int) []line {
+	var notes []string
+	if b.Dur != "" {
+		notes = append(notes, "Wall: "+b.Dur)
+	}
+	if b.HasExit && b.Exit != 0 {
+		notes = append(notes, fmt.Sprintf("Exit: %d", b.Exit))
+	}
+	if b.Truncated {
+		notes = append(notes, "output truncated")
+	}
+	if len(notes) == 0 {
+		return nil
+	}
+	notesSt := dimSt
+	if b.Err {
+		notesSt = tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentError)))
+	}
+	return []line{boxRow(box, border, notesSt, "⟦"+strings.Join(notes, " | ")+"⟧", inner)}
 }
 
 // splitDiffHeader keeps the part of a tool's output that the diff cannot say:
@@ -5038,6 +5399,10 @@ func (a *App) paint() {
 	// the dock and every overlay, so a panel that covers the chip wins the click.
 	_, down := a.sm.Indicator(total, vp)
 	a.drawJumpChip(s, edge, top, vp, down)
+	// The row cap retires the top of the transcript, and a window that
+	// silently lost its head reads as a bug: trimTranscript announces it in
+	// the corner (a toast, not a block — a notice row would itself be the
+	// first thing the next trim drops).
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
 	composerTop := h - 1 - cRows

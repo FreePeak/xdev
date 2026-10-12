@@ -456,7 +456,7 @@ func settingsCategory(key string) string {
 		return "reasoning"
 	case "theme", "colorBlindMode":
 		return "appearance"
-	case "sidebarMode", "debugMouse":
+	case "sidebarMode", "debugMouse", "tui.compactTranscript":
 		return "ui"
 	case "approvalMode", "toolsApproval", "bashPatterns", "bash":
 		return "tools"
@@ -505,6 +505,8 @@ func (a *App) applySettingImmediate(key, value string) {
 		a.SetDockMode(value)
 	case "debugMouse":
 		a.SetDebugMouse(truthy())
+	case "tui.compactTranscript":
+		a.SetCompact(truthy())
 	case "tui.exitDetach":
 		// Takes effect on the next quit chord: cmd's SetExitDetach already
 		// refreshed lastSettings(), which SetQuitRunning reads live.

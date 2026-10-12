@@ -158,7 +158,13 @@ func (a *App) userRowAt(y int) (ord, block int) {
 	if bi < 0 || bi >= len(a.blocks) || a.blocks[bi].Kind != KindUser {
 		return -1, -1
 	}
-	n := 0
+	// The ordinal is ABSOLUTE: it counts the ❯ rows the row cap already retired
+	// off the top of this session (App.droppedUserRows) as well as the ones on
+	// screen, because the seam on the other side (SessionOps.UserEntryID) counts
+	// the store, which never loses a row. Without the offset a menu opened after
+	// a trim would name a later prompt's entry — a revert landing on the wrong
+	// turn.
+	n := a.droppedUserRows
 	for i := 0; i < bi; i++ {
 		if a.blocks[i].Kind == KindUser {
 			n++
@@ -344,10 +350,14 @@ func (a *App) closeMsgView() {
 	a.poke()
 }
 
-// countUserRows is how many user rows the live transcript carries, so the
-// surface can say "3 of 7" instead of a bare ordinal. Caller holds a.mu.
+// countUserRows is how many user rows the session carries, so the surface can
+// say "3 of 7" instead of a bare ordinal. The count is absolute for the same
+// reason the ordinal is (userRowAt): the rows the row cap retired are still
+// turns of this session, and "3 of 7" over a trimmed transcript that shows
+// four prompts would be the surface disagreeing with the store. Caller holds
+// a.mu.
 func (a *App) countUserRows() int {
-	n := 0
+	n := a.droppedUserRows
 	for _, b := range a.blocks {
 		if b.Kind == KindUser {
 			n++
