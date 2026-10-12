@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -26,12 +27,25 @@ import (
 
 var (
 	reFencedBlock = regexp.MustCompile("(?s)```([^\n]*)\n(.*?)```")
-	reInlineCode  = regexp.MustCompile("`([^`]+)`")
-	reLinkTag     = regexp.MustCompile(`\[([^\]]+)\]\(([^()\s]+)\)`)
-	reBoldPair    = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	reItalicPair  = regexp.MustCompile(`\*([^*\n]+)\*`)
-	reStrikePair  = regexp.MustCompile(`~~([^~]+)~~`)
-	reHeaderLine  = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	// Inline code matches the shortest span whose closing backtick does not
+	// itself open another span, and never across a line: `a `b`` renders as
+	// <code>a `b</code>, while `a\nb` is two paragraphs of prose.
+	//
+	// Both halves are load-bearing, and both were wrong before. The old
+	// `([^`]+)` closed on the FIRST inner backtick, so a message with two code
+	// spans on one line (`job `x`, … `y``) paired x's opener with y's opener
+	// and rendered everything between them as code — the exact shape a model
+	// produces when it quotes a test name and a flag in one sentence. Without
+	// the newline ban, one unpaired backtick pairs with another paragraphs
+	// later and turns the prose between them into a code block.
+	reInlineCode = regexp.MustCompile("`((?:[^`\\n]|`[^`\\s])+?)`")
+	reLinkTag    = regexp.MustCompile(`\[([^\]]+)\]\(([^()\s]+)\)`)
+	reBoldPair   = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	reItalicPair = regexp.MustCompile(`\*([^*\n]+)\*`)
+	reStrikePair = regexp.MustCompile(`~~([^~]+)~~`)
+	reHeaderLine = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	reTableSep   = regexp.MustCompile(`^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$`)
+	reTableRow   = regexp.MustCompile(`^\s*\|.*\|\s*$`)
 )
 
 // ToTelegramHTML renders markdown as Telegram's HTML subset: <pre>, <code>,
@@ -57,6 +71,14 @@ func ToTelegramHTML(text string) string {
 		blocks = append(blocks, "<pre><code"+cls+">"+escapeHTML(strings.TrimRight(g[2], "\n"))+"</code></pre>")
 		return blockPlaceholder(len(blocks) - 1)
 	})
+	// Tables next, before any inline span is claimed: a GFM pipe table is
+	// prose to Telegram, which draws no grid — the pipes arrive as literal
+	// characters. Each data row is rewritten into a bold heading plus
+	// "• header: value" bullets, which is what Hermes does for the phone
+	// (gateway/platforms/helpers.py convert_table_to_bullets). Running before
+	// the bold pass is deliberate: the "**heading**" this emits is then
+	// rendered by the ordinary bold rule, one wording for one construct.
+	text = convertTablesToBullets(text)
 	// Inline code: escaped verbatim.
 	text = reInlineCode.ReplaceAllStringFunc(text, func(m string) string {
 		return stashTag(&blocks, "<code>"+escapeHTML(reInlineCode.FindStringSubmatch(m)[1])+"</code>")
@@ -93,10 +115,127 @@ func ToTelegramHTML(text string) string {
 	// Paragraph breaks collapse to single newlines: the chat client already
 	// draws the blank line, and Telegram keeps both only for <pre>.
 	text = strings.ReplaceAll(text, "\n\n", "\n")
-	for i, b := range blocks {
-		text = strings.ReplaceAll(text, blockPlaceholder(i), b)
+	// Tokens NEST: an inline span inside a bold run ("**evidence: `x`**") is
+	// stashed as a bold tag whose body is the code token, and one ascending
+	// pass would insert that body only after its own index was already
+	// resolved — leaving the raw token in the message. Repeat until no token
+	// is left, bounded by the block count (each pass resolves one level).
+	for pass := 0; pass <= len(blocks) && strings.ContainsRune(text, '\x00'); pass++ {
+		for i, b := range blocks {
+			text = strings.ReplaceAll(text, blockPlaceholder(i), b)
+		}
 	}
 	return text
+}
+
+// convertTablesToBullets rewrites GFM pipe tables into a bold heading per row
+// plus "• header: value" bullets — the rendering Hermes sends to a phone
+// (gateway/platforms/helpers.py convert_table_to_bullets). A table inside a
+// fenced block is left alone: a code sample containing pipes is code.
+//
+// A table is recognised the way GFM defines one: a row containing a pipe whose
+// NEXT line is the |---|---| delimiter, followed by further pipe rows. The
+// delimiter is dropped — it carries no content.
+func convertTablesToBullets(text string) string {
+	if !strings.Contains(text, "|") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			out = append(out, line)
+			continue
+		}
+		if inFence || !strings.Contains(line, "|") || i+1 >= len(lines) || !reTableSep.MatchString(lines[i+1]) {
+			out = append(out, line)
+			continue
+		}
+		block := []string{line, lines[i+1]}
+		j := i + 2
+		for ; j < len(lines) && reTableRow.MatchString(lines[j]); j++ {
+			block = append(block, lines[j])
+		}
+		out = append(out, renderTableBlock(block))
+		i = j - 1
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderTableBlock is the per-row rendering: the heading is the row's own
+// label when the table carries a label column, else its first non-empty cell,
+// and every other cell becomes a bullet naming its column.
+func renderTableBlock(block []string) string {
+	if len(block) < 3 {
+		return strings.Join(block, "\n")
+	}
+	headers := splitTableRow(block[0])
+	if len(headers) < 2 {
+		return strings.Join(block, "\n")
+	}
+	// A label-column table has one more cell per row than it has headers; the
+	// first cell is then the heading rather than a value.
+	labelled := len(splitTableRow(block[2])) == len(headers)+1
+
+	groups := make([]string, 0, len(block)-2)
+	for n, row := range block[2:] {
+		cells := splitTableRow(row)
+		rawHeading, values := "", cells
+		if labelled {
+			if len(cells) > 0 {
+				rawHeading = cells[0]
+			}
+			values = cells[1:]
+		} else {
+			for _, c := range cells {
+				if c != "" {
+					rawHeading = c
+					break
+				}
+			}
+		}
+		if rawHeading == "" {
+			rawHeading = fmt.Sprintf("Row %d", n+1)
+		}
+		// Pad/truncate to the header count so a ragged row cannot shift a
+		// value under the wrong column name.
+		for len(values) < len(headers) {
+			values = append(values, "")
+		}
+		values = values[:len(headers)]
+
+		// The heading is bolded ONCE. A row label that already carries
+		// markdown bold ("**xdev**" in a | **Repo** | table) must be unwrapped
+		// first: emitting "****xdev****" leaves a stray '*' next to the bold
+		// pair, and that stray pairs with another one further down the message
+		// — turning everything between them into one italic run.
+		heading := reBoldPair.ReplaceAllString(rawHeading, "$1")
+		group := []string{"**" + heading + "**"}
+		for k, h := range headers {
+			if !labelled && values[k] == rawHeading {
+				continue // the heading already IS this cell
+			}
+			group = append(group, "• "+h+": "+values[k])
+		}
+		groups = append(groups, strings.Join(group, "\n"))
+	}
+	return strings.Join(groups, "\n\n")
+}
+
+// splitTableRow splits one pipe row into trimmed cells, dropping the optional
+// outer pipes.
+func splitTableRow(row string) []string {
+	s := strings.TrimSpace(row)
+	s = strings.TrimPrefix(s, "|")
+	s = strings.TrimSuffix(s, "|")
+	parts := strings.Split(s, "|")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
 }
 
 // stashTag appends a built tag to the guarded list and returns its token.

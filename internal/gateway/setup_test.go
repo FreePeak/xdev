@@ -129,7 +129,7 @@ func TestBotMenuDescribesActionNotMechanism(t *testing.T) {
 		seen[c.Command] = true
 	}
 	// Every menu command must be one the dispatcher answers.
-	for _, want := range []string{"help", "status", "new", "stop", "whoami"} {
+	for _, want := range []string{"help", "status", "new", "stop", "whoami", "model"} {
 		if !seen[want] {
 			t.Errorf("the dispatcher serves /%s but the menu omits it", want)
 		}

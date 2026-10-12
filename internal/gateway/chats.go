@@ -25,9 +25,13 @@ type Chats struct {
 type chatState struct {
 	sessionID string
 	title     string
-	updated   time.Time
-	busy      bool
-	worker    *worker
+	// model is the ref this chat's turns run on ("" = the daemon default).
+	// It is per CHAT, not per daemon: two chats on one bot are two people,
+	// and /model in one must not move the other's answers.
+	model   string
+	updated time.Time
+	busy    bool
+	worker  *worker
 }
 
 // NewChats opens the registry. path is gateway/sessions.json under the data
@@ -54,16 +58,18 @@ func NewChats(path string) (*Chats, error) {
 		if r.ChatID == 0 {
 			continue
 		}
-		c.state[r.ChatID] = &chatState{sessionID: r.SessionID, title: r.Title, updated: r.Updated}
+		c.state[r.ChatID] = &chatState{sessionID: r.SessionID, title: r.Title, model: r.Model, updated: r.Updated}
 	}
 	return c, nil
 }
 
 type chatRow struct {
-	ChatID    int64     `json:"chatId"`
-	SessionID string    `json:"sessionId"`
-	Title     string    `json:"title,omitempty"`
-	Updated   time.Time `json:"updated"`
+	ChatID    int64  `json:"chatId"`
+	SessionID string `json:"sessionId"`
+	Title     string `json:"title,omitempty"`
+	// Model is the chat's pinned model ref (/model), omitted when unset.
+	Model   string    `json:"model,omitempty"`
+	Updated time.Time `json:"updated"`
 }
 
 // Session returns the chat's session id (false when it never ran).
@@ -107,15 +113,57 @@ func (c *Chats) SetSession(chat int64, sessionID, title string) error {
 	if sessionID != "" {
 		st.updated = time.Now().UTC()
 	}
-	rows := make(map[string]chatRow, len(c.state))
-	for id, s := range c.state {
-		if s.sessionID == "" {
-			continue
-		}
-		rows[fmt.Sprint(id)] = chatRow{ChatID: id, SessionID: s.sessionID, Title: s.title, Updated: s.updated}
-	}
+	rows := c.rowsLocked()
 	c.mu.Unlock()
 
+	return c.persist(rows)
+}
+
+// SetModel pins the model this chat's turns run on. An empty ref clears it
+// back to the daemon default (/model default). Unlike SetSession this is
+// saved even for a chat with no session yet: choosing a model before the
+// first message is a normal thing to do.
+func (c *Chats) SetModel(chat int64, ref string) error {
+	c.mu.Lock()
+	st := c.state[chat]
+	if st == nil {
+		st = &chatState{}
+		c.state[chat] = st
+	}
+	st.model = ref
+	rows := c.rowsLocked()
+	c.mu.Unlock()
+
+	return c.persist(rows)
+}
+
+// Model returns the chat's pinned model ref ("" = the daemon default).
+func (c *Chats) Model(chat int64) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st := c.state[chat]; st != nil {
+		return st.model
+	}
+	return ""
+}
+
+// rowsLocked snapshots the map as the rows to persist. A chat with neither a
+// session nor a pinned model is dropped: it carries nothing to remember.
+// Caller holds c.mu.
+func (c *Chats) rowsLocked() map[string]chatRow {
+	rows := make(map[string]chatRow, len(c.state))
+	for id, s := range c.state {
+		if s.sessionID == "" && s.model == "" {
+			continue
+		}
+		rows[fmt.Sprint(id)] = chatRow{ChatID: id, SessionID: s.sessionID, Title: s.title, Model: s.model, Updated: s.updated}
+	}
+	return rows
+}
+
+// persist writes the map. A failure is returned, never fatal: losing the
+// pointer costs the next turn a fresh session, not the transcript.
+func (c *Chats) persist(rows map[string]chatRow) error {
 	raw, err := json.MarshalIndent(rows, "", "  ")
 	if err != nil {
 		return err

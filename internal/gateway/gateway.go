@@ -24,6 +24,7 @@ import (
 // at 100) and must describe the action, not the mechanism.
 var botMenu = []BotCommand{
 	{"help", "What this bot does and how to talk to it"},
+	{"model", "Show or switch the model for this chat"},
 	{"status", "Bot, workspace, memory and this chat's session"},
 	{"new", "Start a fresh session (the old one stays on disk)"},
 	{"stop", "Cancel the turn running right now"},
@@ -32,14 +33,16 @@ var botMenu = []BotCommand{
 
 // slashHelp is what /help answers. The set is the minimal useful one
 // Hermes' gateway exposes to chat users (gateway/run_busy.py:907-922):
-// status, help, stop, and a fresh session.
 const slashHelp = `xdev gateway — Telegram bridge
 
-  /help     this message
-  /status   bot, workspace, and this chat's session
-  /new      start a fresh session for this chat
-  /stop     cancel the running turn
-  /whoami   your Telegram user and chat id
+  /help            this message
+  /status          bot, workspace, and this chat's session
+  /model           show this chat's model and what else is available
+  /model <ref>     run this chat on another model (e.g. onegw/execution)
+  /model default   go back to the gateway's configured model
+  /new             start a fresh session for this chat
+  /stop            cancel the running turn
+  /whoami          your Telegram user and chat id
 
 Anything else is sent to the xdev agent as a prompt.`
 
@@ -75,7 +78,12 @@ type Daemon struct {
 	allowAll  bool
 	workspace string
 	chunk     int
-	model     string
+	// model is the daemon-wide default ref for gateway turns ("" = the run's
+	// configured default). A chat's own /model overrides it.
+	model string
+	// models loads the catalog /model resolves against (nil = read this
+	// machine's models.yml). A field so a test hands in a fixed catalog.
+	models func() (*config.Config, error)
 	// badgeMu guards badgeLeg, the leg the bot's profile photo currently
 	// names. Uploading is a network call, so it is never held across one.
 	badgeMu  sync.Mutex
@@ -153,6 +161,7 @@ func NewDaemon(opts Options) (*Daemon, error) {
 		workspace: ws,
 		chunk:     s.GatewayReplyChunk(),
 		model:     strings.TrimSpace(s.Gateway.Model),
+		models:    config.LoadModelsLayered,
 	}, nil
 }
 
@@ -285,6 +294,8 @@ func (d *Daemon) handle(ctx context.Context, u Update) {
 		_ = d.reply(ctx, chat, d.statusLine(chat))
 	case strings.HasPrefix(text, "/whoami"):
 		_ = d.reply(ctx, chat, whoami(m, chat))
+	case text == "/model", strings.HasPrefix(text, "/model "):
+		d.modelCommand(ctx, chat, text)
 	case strings.HasPrefix(text, "/new"):
 		if err := d.chats.Forget(chat); err != nil {
 			d.logFn("gateway: forget chat %d: %v", chat, err)
@@ -331,6 +342,13 @@ func (d *Daemon) statusLine(chat int64) string {
 		fmt.Fprintf(&b, "turn: running (pid %d)\n", w.pid)
 	} else {
 		b.WriteString("turn: idle\n")
+	}
+	// /status names the model too: "which model answered me?" is the question
+	// /model exists for, and the answer belongs on the status card as well.
+	if ref := d.modelFor(chat); ref != "" {
+		fmt.Fprintf(&b, "model: %s\n", ref)
+	} else {
+		b.WriteString("model: the run's configured default\n")
 	}
 	fmt.Fprintf(&b, "memory: %s\n", memoryNote(d.cfg))
 	return b.String()
@@ -634,14 +652,25 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
 	}
-	if d.model != "" {
-		args = append(args, "--model", d.model)
+	// The chat's own /model wins over the daemon-wide gateway.model, which
+	// wins over the run's configured default (no --model at all). Resolved
+	// here rather than at /model time so a config edit or a /new cannot leave
+	// a chat pinned to a ref the operator has since removed.
+	if ref := d.modelFor(chat); ref != "" {
+		args = append(args, "--model", ref)
+	}
+	// XDEV_MODEL carries the same choice to the worker's own subprocesses
+	// (advisor, titles, memory) the way an interactive /model does, so a chat
+	// pinned to a model does not quietly run its side passes on another.
+	env := os.Environ()
+	if ref := d.modelFor(chat); ref != "" {
+		env = append(env, "XDEV_MODEL="+ref)
 	}
 	args = append(args, text)
 
 	cmd := exec.Command(d.exe, args...)
 	cmd.Dir = d.workspace
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(env,
 		// Marks the child so `xdev ps` can classify it and a hook or an
 		// extension can tell a chat turn from an interactive one.
 		"XDEV_GATEWAY_CHAT="+strconv.FormatInt(chat, 10),

@@ -124,3 +124,104 @@ func TestIsParseErrorDistinguishesTelegramRefusals(t *testing.T) {
 		t.Error("an auth error is not a parse error")
 	}
 }
+
+// TestFormatTwoCodeSpansOnOneLine is the bug that made a whole answer read as
+// code: with `([^`]+)` the second span's OPENER was taken as the first span's
+// closer, so everything between them was escaped as code and the rest of the
+// line was left unparsed. Measured on a live turn (2026-10-12): a line naming
+// a bg job and a flag arrived as one giant <code> run.
+func TestFormatTwoCodeSpansOnOneLine(t *testing.T) {
+	got := ToTelegramHTML("job `alpha`, 2h cap, **exit 1, `--max-time`**) — pid\n")
+	if n := strings.Count(got, "<code>"); n != 2 {
+		t.Fatalf("want 2 code spans, got %d: %q", n, got)
+	}
+	for _, want := range []string{"<code>alpha</code>", "<code>--max-time</code>", "<b>exit 1, "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "**") {
+		t.Errorf("bold markers survived: %q", got)
+	}
+}
+
+// TestFormatInlineCodeNeverCrossesALine: an UNPAIRED backtick must not pair
+// with one paragraphs later — that turned the prose between them into one
+// code block (the same live turn).
+func TestFormatInlineCodeNeverCrossesALine(t *testing.T) {
+	got := ToTelegramHTML("a stray ` here\n\nand ordinary prose\n\nand a closing ` there\n")
+	if strings.Contains(got, "<code>") {
+		t.Errorf("an unpaired backtick swallowed the prose: %q", got)
+	}
+	if !strings.Contains(got, "ordinary prose") {
+		t.Errorf("the prose was lost: %q", got)
+	}
+}
+
+// TestFormatNestedTokensAreResolved: a code span inside a bold run is stashed
+// as a tag whose body is another token. One ascending substitution pass left
+// the inner token in the message as literal "\u0000BLOCK…\u0000" text.
+func TestFormatNestedTokensAreResolved(t *testing.T) {
+	got := ToTelegramHTML("**evidence: `xdev stats` commits**\n")
+	if strings.ContainsRune(got, '\x00') || strings.Contains(got, "BLOCK") {
+		t.Fatalf("a placeholder leaked: %q", got)
+	}
+	if !strings.Contains(got, "<b>") || !strings.Contains(got, "<code>xdev stats</code>") {
+		t.Errorf("the nesting did not render: %q", got)
+	}
+}
+
+// TestFormatTableBecomesBullets: Telegram draws no grid, so a GFM pipe table
+// reaches the phone as literal pipes. Each row becomes a bold heading plus
+// "• column: value" bullets — the shape Hermes sends
+// (gateway/platforms/helpers.py convert_table_to_bullets).
+func TestFormatTableBecomesBullets(t *testing.T) {
+	got := ToTelegramHTML("| Repo | Result |\n|---|---|\n| **xdev** | 7 commits |\n| **leankg** | 37 merged |\n")
+	if strings.Contains(got, "|") {
+		t.Errorf("the table reached the phone as pipes: %q", got)
+	}
+	if strings.Contains(got, "---") {
+		t.Errorf("the delimiter row survived: %q", got)
+	}
+	for _, want := range []string{"<b>xdev</b>", "• Result: 7 commits", "<b>leankg</b>", "• Result: 37 merged"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	// A row label that already carried markdown bold must not become
+	// "****xdev****": the stray '*' pairs with another one further down the
+	// message and turns everything between them into one italic run.
+	if strings.Contains(got, "**") {
+		t.Errorf("the row heading left a stray marker: %q", got)
+	}
+}
+
+// TestFormatLeavesTablesInsideCodeAlone: a fenced sample that contains pipes
+// is code, not a table.
+func TestFormatLeavesTablesInsideCodeAlone(t *testing.T) {
+	got := ToTelegramHTML("```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n")
+	if !strings.Contains(got, "<pre>") {
+		t.Fatalf("the fence was lost: %q", got)
+	}
+	if !strings.Contains(got, "| a | b |") {
+		t.Errorf("the code sample was rewritten: %q", got)
+	}
+}
+
+// TestFormatTableWithoutALabelColumn: a headerless table's first cell becomes
+// the heading and is not repeated as a bullet.
+func TestFormatTableWithoutALabelColumn(t *testing.T) {
+	got := ToTelegramHTML("| Name | Count |\n|---|---|\n| alpha | 3 |\n")
+	if strings.Contains(got, "|") {
+		t.Errorf("pipes survived: %q", got)
+	}
+	if !strings.Contains(got, "<b>alpha</b>") {
+		t.Errorf("the row heading is not the first cell: %q", got)
+	}
+	if strings.Contains(got, "• Name: alpha") {
+		t.Errorf("the heading was repeated as a bullet: %q", got)
+	}
+	if !strings.Contains(got, "• Count: 3") {
+		t.Errorf("the value bullet is missing: %q", got)
+	}
+}
