@@ -110,40 +110,6 @@ func isFullWordmark(art []string) bool {
 	return len(art) > 0 && &art[0] == &xdevLogo[0]
 }
 
-// --- Sheen sweep (welcome-screen logo) ---
-
-// Sheen band geometry, ported from omarchy-branding-about-animation:
-// two columns per row leans the band to ~45° on screen (a cell is
-// about twice as tall as wide), ±2 columns is its half-width, and the
-// rest pauses the sweep between passes. The phase advances one column
-// per 33ms welcome tick (~30fps, see App.Run) — Omarchy About's cadence.
-const (
-	sheenSlant = 2
-	sheenHalf  = 2
-	sheenRest  = 16
-)
-
-// sheenInBand reports whether logo cell (row, col) sits under the
-// sheen band at the given phase, for a logo of the given width and
-// row count (full wordmark or monogram).
-func sheenInBand(phase, row, col, logoW, rows int) bool {
-	if rows == 0 {
-		return false
-	}
-	period := logoW + (rows-1)*sheenSlant + 2*sheenHalf + 1 + sheenRest
-	at := phase%period - 2*sheenHalf
-	c := at - row*sheenSlant
-	return col >= c-sheenHalf && col <= c+sheenHalf
-}
-
-// sheenSweep is how many animation frames one sheen pass takes: the phase
-// wraps at this, so a session left on the welcome screen animates the logo once
-// and then stops, reaching true idle instead of sweeping forever.
-func sheenSweep() int {
-	rows := len(xdevLogo)
-	return logoWidth() + max(rows-1, 0)*sheenSlant + 2*sheenHalf + 1 + sheenRest
-}
-
 // gitBranch returns the current git branch name, "" when not a repo.
 func gitBranch(cwd string) string {
 	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output()
@@ -227,24 +193,14 @@ func (a *App) drawWelcome(s tcell.Screen, w, h int) {
 	}
 	logoX := max(2, (w-logoW)/2)
 
-	// Brand colour with the sheen riding across it (omarchy About
-	// branding): the assistant accent for the wordmark, and the lit
-	// band inverted — screen-bg ink on a TextPrimary plate — so the
-	// sweep reads as one continuous slab of light instead of broken
-	// bright cells in the art's gaps. The one colored element on an
-	// otherwise monochrome screen, like omarchy's green logo.
+	// The assistant accent for the wordmark: the one colored element on an
+	// otherwise monochrome screen, like omarchy's green logo. No sheen sweep —
+	// the start screen paints and then sits still.
 	base := st(a.th.Get(theme.AccentAssistant), false)
-	lit := tcell.StyleDefault.
-		Foreground(a.cellColor(a.th.Get(theme.BgTerminal))).
-		Background(a.cellColor(whiteC))
 	for r, ln := range logo {
-		c := 0
+		c := 0 // rune column: the art's half-block cells are multi-byte
 		for _, rn := range ln {
-			style := base
-			if sheenInBand(a.sheenPhase, r, c, logoW, len(logo)) {
-				style = lit
-			}
-			s.SetContent(logoX+c, y+r, rn, nil, style)
+			s.SetContent(logoX+c, y+r, rn, nil, base)
 			c++
 		}
 	}
