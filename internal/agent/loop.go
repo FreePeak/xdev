@@ -1199,7 +1199,12 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// A provider-rejected request can be retried only for the
 			// bounded escalation rounds. Never let retry.infinite turn
 			// the same rejected body into an outage-style replay loop.
-			if escalation < maxEscalationRounds {
+			//
+			// A vendor-tier gate (ai.IsVendorGate) is exempt from even
+			// that: the provider answered that THIS CLIENT is not the one
+			// it serves, so a rebuilt history is refused identically —
+			// retrying only delays a verdict the user has to act on.
+			if escalation < maxEscalationRounds && !ai.IsVendorGate(err) {
 				escalation++
 				attempt = 0
 				if a.Store != nil {

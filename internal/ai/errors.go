@@ -63,6 +63,42 @@ func retriablableStatus(s int) bool {
 	return s == 408 || s == 409 || s == 429 || s >= 500
 }
 
+// freeTierGateRe matches the body OpenCode answers when a request arrives
+// from outside its own client:
+//
+//	HTTP 403 {"error":{"code":"403","message":"OpenCode's free tier can only
+//	be used from within OpenCode. Download it at https://opencode.ai and keep
+//	building.","type":"FreeTierError"}}
+//
+// This is a posture verdict, not a credential one: the key is valid and the
+// upgrade path is a client change (a first-party UA/header pair) or a paid
+// tier, so no retry, no failover and no credential rotation can lift it. It
+// reached the client through a gateway that relays the upstream status
+// verbatim, so the same status also carries an expired key — the body is the
+// only thing that tells the two apart.
+//
+// Left in either of the classes that already retry a 403, the turn spent its
+// whole escalation ladder on a verdict nothing about the request can change:
+// measured at 62.6s of sleeping (maxSilentRecoveryRounds at the shipped
+// 500ms/8s ladder) before the user saw the provider's own words.
+//
+// ponytail: a body regex is a deliberate shortcut with a ceiling — a gateway
+// whose own 403 page happens to carry this vocabulary is trusted too, and the
+// upgrade path is a provider-reported error code on HTTPError instead of body
+// sniffing.
+var freeTierGateRe = regexp.MustCompile(`(?i)free tier|FreeTierError|can only be used from within`)
+
+// IsVendorGate reports whether err is a provider's "this client is not the
+// one I serve" verdict (freeTierGateRe). The recovery ladder consults it
+// before spending its bounded escalation rounds: those rounds exist for a
+// request the provider rejected on SHAPE, where a history rebuilt from the
+// session may serialize differently — a client-posture verdict is not about
+// the request at all, so the rebuilt one is refused identically.
+func IsVendorGate(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == 403 && freeTierGateRe.MatchString(he.Body)
+}
+
 // contextOverflowRe patterns match provider-specific overflow bodies
 // (omp pi-ai flags.ts:24 overflow regexes, subset + generic).
 var contextOverflowRe = []*regexp.Regexp{
@@ -196,6 +232,15 @@ func Classify(err error) ErrClass {
 			// rejected the request itself — retrying may succeed.
 			// A JSON-carrying 403 falls through to ClassAuthFailed.
 			return ClassTransient
+		case he.Status == 403 && freeTierGateRe.MatchString(he.Body):
+			// A vendor-tier gate (see freeTierGateRe). Every other 403 arm
+			// retries, rotates a credential or walks the failover chain,
+			// none of which can change the client that sent the request:
+			// end the run now, with the provider's own words. Deliberately
+			// ordered AFTER the server_error arm — a body reporting the
+			// upstream's own unparseable answer is a hiccup at the far end,
+			// and this vocabulary appearing in it must not swallow that retry.
+			return ClassBadRequest
 		case he.Status == 403:
 			return ClassAuthFailed
 		case he.Status == 400 || he.Status == 413 || he.Status == 422:

@@ -41,6 +41,20 @@ func TestClassify(t *testing.T) {
 		// same turn retried may succeed.
 		{"403 upstream server_error", &HTTPError{API: "openai-completions", Status: 403,
 			Body: `{"error":{"message":"Error from provider (openai): Upstream request failed: [server_error] Upstream response was not valid JSON","type":"server_error"}}`}, ClassTransient},
+		// A vendor-tier gate (live 2026-10-13: OpenCode's free tier answers
+		// any client that is not OpenCode itself). The credential is fine and
+		// the verdict is about WHO asked, so every 403 arm that retries,
+		// rotates a credential or walks the failover chain burns the turn on
+		// something no retry can change: this one classifies as the request
+		// the ladder may not replay at all.
+		{"403 free-tier gate", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `{"error":{"code":"403","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.","type":"FreeTierError"}}`}, ClassBadRequest},
+		// ...and the new arm must not swallow the neighbouring one: a body
+		// reporting the upstream's own unparseable answer is a hiccup at the
+		// far end even when it uses this vocabulary, so the server_error arm
+		// is matched first.
+		{"403 upstream server_error mentioning the free tier", &HTTPError{API: "openai-completions", Status: 403,
+			Body: `{"error":{"message":"free tier: upstream response was not valid JSON","type":"server_error"}}`}, ClassTransient},
 		{"500 server", &HTTPError{API: "a", Status: 500, Body: "boom"}, ClassTransient},
 		{"408 timeout", &HTTPError{API: "a", Status: 408, Body: "slow"}, ClassTransient},
 		{"400 overflow body", &HTTPError{API: "a", Status: 400, Body: "This model's maximum context length is 128000 tokens"}, ClassContextOverflow},
