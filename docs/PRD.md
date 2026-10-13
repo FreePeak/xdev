@@ -915,6 +915,35 @@ JSONL tree, and the subprocess trust boundary. Each phase ends with focused test
 same PR. A feature is not marked complete merely because a package or type exists: it needs a
 real consumer and evidence from a running xdev interaction.
 
+*Last updated: 2026-10-13 (fix/stale-children — an xdev that reaches idle, and one live run per session):*
+two reports, one measurement. **CPU:** an xdev left open never reached 0%. The UI loop ticked at
+33ms (30fps) and repainted on every one of those ticks for two things that do not need 30fps —
+the running spinner while a turn was open, and the welcome logo's sheen on an empty session. The
+sheen never stopped at all. Both now advance on `animEvery` ticks (4 × 33ms ≈ 7.6fps, an
+animation cadence, not a redraw one) and the sheen is BOUNDED (`sheenSweep`: it sweeps once and
+settles), so an empty session reaches true idle and a mid-turn session costs a quarter of what it
+did. Measured on the built binary in a real pty (`XDEV_AGENT_DIR` isolated, no keystrokes),
+sampled from `/proc`-free `ps -o time`: **idle welcome screen 1.46% → 0.15% of one core, and the
+bytes the TUI writes after the sweep fall from 1.03 MB to 0 per 13s window** — the old build
+repainted forever, the new one writes nothing at all. **Processes:** a `--bg`/detach-on-quit
+worker that resumed a session another worker already owned was never refused, so two detached
+workers appended turns to one session file and each held its own MCP stdio child set (measured
+2026-10-13: two live workers each on sessions `7c17dd49` and `cb01b9f9`; 21 atlassian-mcp + 20
+db-mcp-server children, 8 orphaned `--print` workers, 379 MB RSS — all of it reachable from one
+detach chord). `spawnBg` now refuses a second live run on a session (`bgSessionArgv` reads the
+`--resume`/`-r`/`--session` shape, `bgLiveOwner` matches the record's full id against the
+case-insensitive PREFIX `--resume` actually resolves) and names the owning job so the caller can
+`xdev bg stop` it. The old binary still spawns the duplicate; the new one refuses and points at
+the live job id.
+* `internal/tui/app.go` — `tickPeriod`/`animEvery`, `App.animTick`, `App.tickAnimate()`; the `Run`
+  tick's `if running || animate || stuck` is now `if animate || stuck` with the animations
+  reporting for themselves. `internal/tui/welcome.go` — `sheenSweep()`.
+* `cmd/xdev/bg.go` — `bgSessionArgv`, `bgLiveOwner`, and the refusal in `spawnBg`.
+* Pinned by `internal/tui/tick_anim_test.go` (one animation frame per `animEvery` ticks; the sheen
+  stops after one sweep, and an idle welcome moves nothing at all) and `cmd/xdev/bg_test.go`
+  (`TestSpawnBgRefusesASecondRunOnOneSession`, `TestBgLiveOwnerMatchesTheResumePrefix`,
+  `TestBgSessionArgvShapes`).
+
 *Last updated: 2026-10-12 (fix/model-switch-notice — a gateway served someone else's model, and every surface now says so):*
 onegw serves a combo by falling a request over to a sibling leg when its first target refuses. Nothing in the stream said so: the TUI kept painting the model the user pinned, print mode printed only the answer, and the Telegram bot answered under its own fixed face. The gateway half (`X-OneGW-Decision` gaining `request=` and `fallback=`, FreePeak/onegw#173) is what makes it knowable; this is the client half.
 

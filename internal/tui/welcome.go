@@ -136,6 +136,14 @@ func sheenInBand(phase, row, col, logoW, rows int) bool {
 	return col >= c-sheenHalf && col <= c+sheenHalf
 }
 
+// sheenSweep is how many animation frames one sheen pass takes: the phase
+// wraps at this, so a session left on the welcome screen animates the logo once
+// and then stops, reaching true idle instead of sweeping forever.
+func sheenSweep() int {
+	rows := len(xdevLogo)
+	return logoWidth() + max(rows-1, 0)*sheenSlant + 2*sheenHalf + 1 + sheenRest
+}
+
 // gitBranch returns the current git branch name, "" when not a repo.
 func gitBranch(cwd string) string {
 	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output()

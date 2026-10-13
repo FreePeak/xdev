@@ -116,6 +116,16 @@ type Status struct {
 	spinnerIdx int
 }
 
+// tickPeriod is the UI loop's own cadence, and animEvery how many of those
+// ticks one animation frame takes. They are separate because the two have
+// nothing to do with each other: 33ms is what a key's echo and a streaming row
+// want, ~7fps is what a spinner wants, and tying them together is what made an
+// open turn cost a third of a core for a glyph nobody can see move.
+const (
+	tickPeriod = 33 * time.Millisecond
+	animEvery  = 4 // 4 * 33ms ≈ 132ms ≈ 7.6fps
+)
+
 // App is the xdev TUI: scrollback of blocks + editor + status line, drawn
 // with the Grok-style accent rail. The model thread mutates state through
 // the exported mutators (mutex-guarded); the UI loop redraws at ~30fps and
@@ -421,6 +431,9 @@ type App struct {
 	trimNoticeOn bool
 
 	sheenPhase int // welcome logo sheen sweep position (columns)
+	// animTick counts loop ticks since the last animation frame, so the
+	// spinner and the sheen advance on animEvery rather than on every tick.
+	animTick int
 	// startupNotice is a line of the welcome screen's own chrome — what
 	// loaded, what broke (#272). It is deliberately NOT a transcript block:
 	// any block ends the welcome screen, so the report used to replace the
@@ -1838,6 +1851,40 @@ func (a *App) markRun(r bool) {
 	}
 }
 
+// tickAnimate advances the loop's animations for one 33ms tick and reports
+// whether that moved anything — which is what buys the frame, because a tick
+// that moved nothing has nothing to paint.
+//
+// The tick is 33ms because that is what a key's echo and a streaming row want.
+// Neither ANIMATION wants it: a braille spinner at ~7fps reads exactly like one
+// at 30, and the repaint it costs is the composer's whole width every frame
+// (markComposerDirty, by design). So the animations advance on animEvery ticks
+// instead of on every tick, and the frame they earn is the frame that paints.
+//
+// The sheen is not merely slowed but BOUNDED: it sweeps once and settles, so a
+// session left open on the start screen reaches true idle instead of animating
+// a logo forever. The spinner cannot be bounded — a turn that is open is
+// working — so its floor is one frame per animEvery, and a session parked
+// mid-turn costs that much and no more.
+//
+// Caller holds a.mu.
+func (a *App) tickAnimate() bool {
+	a.animTick++
+	if a.animTick < animEvery {
+		return false
+	}
+	a.animTick = 0
+	switch {
+	case a.st.Running:
+		a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(a.th.SpinnerFrames())
+		return true
+	case len(a.blocks) == 0 && a.sheenPhase < sheenSweep():
+		a.sheenPhase++
+		return true
+	}
+	return false
+}
+
 // askPause stops the clock while a question card waits for the human: it banks
 // the span a live run had open — the turn is still in flight, it is the answer
 // that is missing — and closes it, so nothing accrues while somebody reads.
@@ -3170,7 +3217,7 @@ func (a *App) noteTranscriptTrimmed() {
 // Run drives the UI until Quit. Callers own screen init/fini.
 func (a *App) Run() {
 	a.width, a.height = a.scr.Size()
-	tick := time.NewTicker(33 * time.Millisecond) // ~30fps
+	tick := time.NewTicker(tickPeriod)
 	defer tick.Stop()
 	a.beat()
 	a.startStallWatchdog()
@@ -3242,21 +3289,8 @@ func (a *App) Run() {
 			// a pasted path named.
 			stuck := a.flushStuckPaste()
 			a.mu.Lock()
-			running := a.st.Running
-			if running {
-				a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(a.th.SpinnerFrames())
-			}
-			// Welcome animation. The logo sheen advances one column
-			// per 33ms tick and redraws with it — a smooth sweep at
-			// ~30fps, the cadence omarchy's own About animation runs
-			// at (25ms frames) — while the welcome is visible (no
-			// blocks, nothing running). It stops once a block exists,
-			// so the only idle cost is the draw itself.
-			animate := false
-			if !running && len(a.blocks) == 0 {
-				a.sheenPhase++
-				animate = true
-			}
+			// The tick's animations, on their own cadence: see tickAnimate.
+			animate := a.tickAnimate()
 			// A toast is timed, and an idle UI does not repaint: the tick that
 			// finds one expired asks for the draw that drops it.
 			if a.toastsExpiring() {
@@ -3285,10 +3319,10 @@ func (a *App) Run() {
 					animate = true
 				}
 			}
-			// Nothing repaints for the HUD: a running draw keeps the time
-			// segment live, and idle, the number is a frozen total that needs
-			// no tick to stay correct.
-			if running || animate || stuck {
+			// Nothing else repaints for the HUD: an animating frame keeps the
+			// time segment live, and idle, the number is a frozen total that
+			// needs no tick to stay correct.
+			if animate || stuck {
 				a.draw()
 				a.logFrameAfterDraw()
 			}
