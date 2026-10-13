@@ -2384,6 +2384,9 @@ func declaredChainTargets(cfg *config.Config, primaryProv, primaryModel string) 
 			if pname == primaryProv && m.ID == primaryModel {
 				continue
 			}
+			if m.FailoverExcluded {
+				continue // pinned for identity/window, not a chain candidate (#642)
+			}
 			out = append(out, agent.ChainTarget{Provider: pname, Model: m.ID, ContextWindow: m.ContextWindow})
 		}
 	}
@@ -2409,6 +2412,14 @@ func defaultFailoverTargets(cfg *config.Config, primaryProv, primaryModel string
 		}
 		for _, m := range pc.Models {
 			if pname == primaryProv && m.ID == primaryModel {
+				continue
+			}
+			if m.FailoverExcluded {
+				// Deliberately outside the implicit chain (#642): the model
+				// is pinned for its declared window and for identity, not as
+				// an outage target. A declared retry.fallbackChains entry
+				// that names it is resolved through the chain engine instead
+				// (expandChainEntry), so an explicit order still wins.
 				continue
 			}
 			out = append(out, agent.FailoverTarget{Provider: prov, Model: m.ID, ContextWindow: m.ContextWindow})

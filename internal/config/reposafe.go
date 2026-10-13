@@ -67,7 +67,11 @@ var repoSafeProviderKeys = []string{"api", "models", "discovery", "toolsFormat"}
 // capability claim about the model, the same kind of data as `reasoning`
 // and `maxTokens` (it can only make xdev clamp a rung down, never spend
 // more), and a project vendoring its own model file needs to declare it.
-var repoSafeModelKeys = []string{"id", "name", "reasoning", "vision", "contextWindow", "maxTokens", "efforts"}
+// `failover` is allowed because it can only REMOVE a target from the
+// implicit chain — the same narrowing shape as a lowered contextWindow —
+// and a repo that vendors its own model file must be able to keep a
+// pinned alias out of the user's outage path.
+var repoSafeModelKeys = []string{"id", "name", "reasoning", "vision", "contextWindow", "maxTokens", "efforts", "failover"}
 
 // readYAMLLayer reads one configuration file; ok=false when it is absent.
 func readYAMLLayer(path string) (raw []byte, ok bool, err error) {

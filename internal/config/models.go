@@ -80,6 +80,16 @@ type ModelConfig struct {
 	Vision        bool `yaml:"vision,omitempty"`
 	ContextWindow int  `yaml:"contextWindow,omitempty"`
 	MaxTokens     int  `yaml:"maxTokens,omitempty"`
+	// FailoverExcluded pins the model for identity and its declared window
+	// WITHOUT joining the implicit outage chain (#641/#642). The motivating
+	// case is a gateway alias: onegw advertises its combos over /v1/models,
+	// so `execution` is a real route a user pins to declare its
+	// contextWindow — but a transient 429 on the primary must not silently
+	// move the session onto a route the operator never named as a failover
+	// target. Absent keeps today's behaviour (every pinned model is a
+	// candidate); a `retry.fallbackChains` entry naming the model still
+	// wins, because an explicit order is an explicit instruction.
+	FailoverExcluded bool `yaml:"failover,omitempty"`
 	// BaseURL/APIKey/Headers override the provider-level values per model.
 	BaseURL string            `yaml:"baseUrl,omitempty"`
 	APIKey  string            `yaml:"apiKey,omitempty"`
