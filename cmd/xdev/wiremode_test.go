@@ -142,6 +142,48 @@ func TestFailoverChainHonoursDeclaredOrder(t *testing.T) {
 	}
 }
 
+// #641/#642: a model pinned with `failover: false` keeps its declared window
+// and stays in the catalog, but never joins the implicit outage chain — the
+// reported bug was a transient 429 walking a session onto `onegw/planning`
+// then `onegw/execution`, two gateway COMBO names pinned only to declare
+// their contextWindow.
+func TestFailoverChainSkipsFailoverExcludedModels(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw": {API: "openai-completions", BaseURL: "http://127.0.0.1:1/v1", APIKey: "k",
+			Models: []config.ModelConfig{
+				{ID: "primary", ContextWindow: 200000},
+				{ID: "planning", ContextWindow: 200000, FailoverExcluded: true},
+				{ID: "execution", ContextWindow: 200000, FailoverExcluded: true},
+				{ID: "real-fallback", ContextWindow: 400000},
+			}},
+	}}
+	got := failoverChain(cfg, &config.Settings{}, "onegw", "primary")
+	if len(got) == 0 {
+		t.Skip("providers unbuildable in this environment")
+	}
+	// The flagged aliases are gone; the unflagged target is the whole chain.
+	if len(got) != 1 || got[0].Model != "real-fallback" {
+		var names []string
+		for _, t := range got {
+			names = append(names, t.Model)
+		}
+		t.Fatalf("implicit chain = %v, want exactly [real-fallback]", names)
+	}
+	// Declaring one explicitly is an explicit instruction and still wins:
+	// the flag governs the IMPLICIT chain only.
+	s := &config.Settings{Retry: config.RetrySettings{
+		FallbackChains: map[string][]string{"onegw/primary": {"onegw/execution"}},
+	}}
+	declared := failoverChain(cfg, s, "onegw", "primary")
+	if len(declared) != 1 || declared[0].Model != "execution" {
+		var names []string
+		for _, t := range declared {
+			names = append(names, t.Model)
+		}
+		t.Fatalf("declared chain = %v, want [execution] (explicit beats implicit)", names)
+	}
+}
+
 // A goal that only rides along with the next user-driven turn never runs: the
 // TUI (the one mode with a console) must opt into goal continuation, and the
 // unattended modes must not spend turns of their own after the prompt is
