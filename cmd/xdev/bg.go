@@ -236,6 +236,55 @@ func resolveBgID(query string) (string, error) {
 	}
 }
 
+// bgSessionArgv is the session id this argv resumes, or "" when it names none.
+// Only the two flag spellings the CLI actually accepts are read: --resume/-r/
+// --session, in the `--flag value` shape Go's flag package requires. A shape
+// that names no session (--continue, a fresh run) is "" and is never refused —
+// the guard exists for the detach path, which always resumes one.
+func bgSessionArgv(argv []string) string {
+	for i, a := range argv {
+		switch {
+		case a == "--resume" || a == "-resume" || a == "-r" || a == "--session":
+			if i+1 < len(argv) {
+				return argv[i+1]
+			}
+		case strings.HasPrefix(a, "--resume="), strings.HasPrefix(a, "-resume="):
+			return a[strings.IndexByte(a, '=')+1:]
+		}
+	}
+	return ""
+}
+
+// bgLiveOwner reports the running job already working on session id, if any.
+// A job whose process is gone is reconciled away rather than reported: the
+// question is which run holds the session RIGHT NOW.
+func bgLiveOwner(sessionID string) (bgStatus, bool) {
+	if sessionID == "" {
+		return bgStatus{}, false
+	}
+	all, err := listBgStatuses()
+	if err != nil {
+		return bgStatus{}, false
+	}
+	// The argv carries whatever the caller typed, which --resume resolves as a
+	// case-insensitive PREFIX; the record carries the full id the child opened.
+	// Comparing them for equality would never match a short prefix, which is
+	// exactly the shape the detach path spawns (`--resume 9275b9f4`).
+	q := strings.ToLower(strings.TrimSpace(sessionID))
+	for _, st := range all {
+		if st.ExitCode != nil {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(st.SessionID), q) {
+			continue
+		}
+		if bgAlive(st.PID) {
+			return st, true
+		}
+	}
+	return bgStatus{}, false
+}
+
 // spawnBg launches this binary as a detached print-mode worker and returns
 // the short job id. The parent returns as soon as the child is started; the
 // child owns the run and updates status.json on exit.
@@ -248,6 +297,17 @@ func spawnBg(prompt string, argv []string) (string, error) {
 		// SysProcAttr.Setsid is a Unix path. Windows needs CREATE_NEW_PROCESS_GROUP
 		// + a hidden window; leave that for a follow-up rather than ship a half path.
 		return "", fmt.Errorf("--bg is not supported on windows yet")
+	}
+	// One live run per session. Two detached workers resuming the same session
+	// file both append turns to it and both hold a full MCP child set, which is
+	// how a machine ends up with a dozen orphaned --print workers and their
+	// stdio servers after a few detach-on-quit hand-offs (measured 2026-10-13:
+	// two live workers each on sessions 7c17dd49 and cb01b9f9). The second
+	// caller is told which job holds it instead of racing it.
+	if sid := bgSessionArgv(argv); sid != "" {
+		if owner, ok := bgLiveOwner(sid); ok {
+			return "", fmt.Errorf("session %s already has a live background run (%s, pid %d) — `xdev bg stop %s` first", sid, owner.ID, owner.PID, owner.ID)
+		}
 	}
 	id := mintBgID()
 	if err := os.MkdirAll(bgJobDir(id), 0o700); err != nil {

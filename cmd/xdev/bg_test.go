@@ -224,3 +224,95 @@ func TestPruneBgEmpty(t *testing.T) {
 		t.Fatalf("empty prune render: %q", b.String())
 	}
 }
+
+// TestSpawnBgRefusesASecondRunOnOneSession is the guard the machine needed: two
+// detached workers resuming one session file both append turns to it and both
+// hold their own MCP child set, which is how a dozen orphaned --print workers
+// accumulate. The second caller gets the owner's id, not a race.
+func TestSpawnBgRefusesASecondRunOnOneSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dir)
+	const sid = "7c17dd49-3ed1-406c-99b8-18a4090f2ea0"
+
+	// A live owner, recorded the way a --bg child records itself.
+	self := os.Getpid()
+	if err := writeBgStatus(bgStatus{
+		ID: "aaaa1111", PID: self, SessionID: sid, Started: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bgLiveOwner(sid); !ok {
+		t.Fatal("a live job on the session must be found")
+	}
+
+	argv := []string{"--print", "--resume", sid, "--max-time", "2h"}
+	if got := bgSessionArgv(argv); got != sid {
+		t.Fatalf("bgSessionArgv = %q, want %q", got, sid)
+	}
+	if _, err := spawnBg("continue", argv); err == nil {
+		t.Fatal("a second run on a live session must be refused")
+	} else if !strings.Contains(err.Error(), "aaaa1111") {
+		t.Fatalf("the refusal must name the owning job, got: %v", err)
+	}
+
+	// A dead owner is not an owner: the guard must not block a restart after a
+	// crash, which is the whole point of the detach path. Clearing the live
+	// record first isolates the question.
+	if err := os.RemoveAll(bgJobDir("aaaa1111")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBgStatus(bgStatus{
+		ID: "bbbb2222", PID: 1 << 30, SessionID: sid, Started: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if owner, ok := bgLiveOwner(sid); ok {
+		t.Fatalf("a dead pid must not own the session, got %s", owner.ID)
+	}
+}
+
+// TestBgLiveOwnerMatchesTheResumePrefix is the bug the first cut of the guard
+// had: the caller passes what the user typed (`--resume 7c17dd49`), which
+// --resume resolves as a case-insensitive PREFIX, while the record holds the
+// full id the child opened. Comparing them for equality never matched, so the
+// guard let both workers through.
+func TestBgLiveOwnerMatchesTheResumePrefix(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dir)
+	const full = "7c17dd49-3ed1-406c-99b8-18a4090f2ea0"
+	if err := writeBgStatus(bgStatus{
+		ID: "cccc3333", PID: os.Getpid(), SessionID: full, Started: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"7c17dd49", "7C17DD49", full, "7c17"} {
+		owner, ok := bgLiveOwner(q)
+		if !ok || owner.ID != "cccc3333" {
+			t.Fatalf("bgLiveOwner(%q) = %+v, %v; want the live owner", q, owner, ok)
+		}
+	}
+	// A prefix of a DIFFERENT session is not the owner.
+	if _, ok := bgLiveOwner("99999999"); ok {
+		t.Fatal("an unrelated prefix must not match")
+	}
+}
+
+// TestBgSessionArgvShapes pins which argv shapes name a session. A shape that
+// names none must never be refused: the detach path always resumes one, but a
+// fresh --bg run does not.
+func TestBgSessionArgvShapes(t *testing.T) {
+	cases := map[string]string{
+		"--resume abc":         "abc",
+		"-r abc":               "abc",
+		"--session abc":        "abc",
+		"--resume=abc":         "abc",
+		"--continue":           "",
+		"fix the failing test": "",
+		"--resume":             "",
+	}
+	for in, want := range cases {
+		if got := bgSessionArgv(strings.Fields(in)); got != want {
+			t.Errorf("bgSessionArgv(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
