@@ -273,3 +273,65 @@ func TestWireAgentModeCarriesMemoryContext(t *testing.T) {
 		t.Fatal("MemoryContext set with no remote backend configured")
 	}
 }
+
+// #641/#642 follow-up: a gateway's OWN route names must never be implicit
+// failover legs, even when models.yml pins them for their declared window.
+// onegw advertises combos (execution, planning, dev) as BARE ids and every
+// model it fronts as a QUALIFIED "<provider>/<model>" id — so on a provider
+// with discovery, a bare id is one of the gateway's routes, not a model to
+// answer on. Pinning it must not make it an outage target: that is the
+// silent model switch this whole path exists to prevent.
+func TestFailoverChainSkipsGatewayRouteAliases(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw": {API: "openai-completions", BaseURL: "http://127.0.0.1:1/v1", APIKey: "k",
+			Discovery: &config.DiscoveryConfig{Type: config.DiscoveryOpenAIModels},
+			Models: []config.ModelConfig{
+				{ID: "opencode/deepseek-v4.1-flash", ContextWindow: 200000},
+				{ID: "planning", ContextWindow: 200000},
+				{ID: "execution", ContextWindow: 200000},
+				{ID: "dev", ContextWindow: 200000},
+			}},
+		// A provider that announces BARE ids only is not a gateway in this
+		// sense: its ids are models, and they stay chain candidates.
+		"ollama": {API: "openai-completions", BaseURL: "http://127.0.0.1:2/v1", APIKey: "k",
+			Discovery: &config.DiscoveryConfig{Type: config.DiscoveryOpenAIModels},
+			Models: []config.ModelConfig{
+				{ID: "qwen3", ContextWindow: 40000},
+			}},
+	}}
+	// The cache is keyed by provider NAME for the whole process: a sibling
+	// test's fixture for "onegw" or "ollama" must not answer this one.
+	resetProviderModelCache()
+	defer resetProviderModelCache()
+	got := failoverChain(cfg, &config.Settings{}, "onegw", "opencode/deepseek-v4.1-flash")
+	if len(got) == 0 {
+		t.Skip("providers unbuildable in this environment")
+	}
+	var names []string
+	for _, t2 := range got {
+		names = append(names, t2.Provider.Name()+"/"+t2.Model)
+	}
+	for _, banned := range []string{"onegw/planning", "onegw/execution", "onegw/dev"} {
+		for _, n := range names {
+			if n == banned {
+				t.Fatalf("gateway route alias %s is an implicit failover leg: %v", banned, names)
+			}
+		}
+	}
+	if names[0] != "ollama/qwen3" {
+		t.Fatalf("chain = %v, want the bare-id provider's own model leading", names)
+	}
+	// An EXPLICIT order naming a route alias still resolves: the rule
+	// governs the implicit chain only.
+	s := &config.Settings{Retry: config.RetrySettings{
+		FallbackChains: map[string][]string{"onegw/opencode/deepseek-v4.1-flash": {"onegw/execution"}},
+	}}
+	declared := failoverChain(cfg, s, "onegw", "opencode/deepseek-v4.1-flash")
+	if len(declared) != 1 || declared[0].Model != "execution" {
+		var d []string
+		for _, t2 := range declared {
+			d = append(d, t2.Model)
+		}
+		t.Fatalf("declared chain = %v, want [execution] (explicit beats implicit)", d)
+	}
+}

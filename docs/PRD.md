@@ -915,6 +915,35 @@ JSONL tree, and the subprocess trust boundary. Each phase ends with focused test
 same PR. A feature is not marked complete merely because a package or type exists: it needs a
 real consumer and evidence from a running xdev interaction.
 
+*Last updated: 2026-10-13 (fix/failover-combo-alias — a gateway's own route names are never implicit failover legs):*
+#641/#642 landed the per-model `failover: false`, which fixes the symptom only when the operator
+knows to write it: `~/.xdev/agent/models.yml` still pinned `planning`/`execution`/`dev` — onegw's
+COMBO names — as ordinary models, so the implicit outage chain was still exactly those three routes
+and a transient 429 still answered a request pinned to `onegw/opencode/deepseek-v4.1-flash` with a
+different route, silently. Measured on the built binary against a live onegw, isolated
+`XDEV_AGENT_DIR`: the stock `~/.local/bin/xdev` recorded four `model_change … fallback=true` entries
+(`onegw/planning`, `onegw/execution`, `onegw/dev`, plus a bogus pinned id) on one 429 run, while
+`failoverChain` for the same config returns them as targets.
+
+`gatewayRouteAlias` (`cmd/xdev/print.go`) now answers "is this pinned id one of the gateway's OWN
+routes?" and both implicit-chain builders (`defaultFailoverTargets`, `declaredChainTargets`) skip it
+through the shared `failoverEligible` — the same seam `failover: false` already used, so the flag and
+the rule cannot drift. The evidence is namespace shape, not a name list: a provider whose merged
+catalog holds a QUALIFIED id (`opencode/deepseek-v4.1-flash`) names its models after their
+providers, so its BARE ids are routes; and a provider that publishes a catalog AND states one
+`contextWindow` for every id it does not describe is a gateway — that second arm is what holds while
+discovery is failing, which is exactly when a gateway is being restarted. A local server announcing
+bare ids only (ollama, lm-studio) is not affected: no qualified id, no uniform window, so its bare
+ids stay chain candidates. Pinning a route still works and is still needed (it declares the combo's
+200K window; unpinned, discovery re-adds it at the provider's 1M), and an explicit
+`retry.fallbackChains` entry naming one still wins.
+
+Verified on the built binary against the live gateway with `planning`/`execution`/`dev` pinned: the
+primary resolved and answered with no switch, and the same config against a dead gateway (discovery
+failing) recorded zero `fallback=true` entries instead of four. Pinned by
+`TestFailoverChainSkipsGatewayRouteAliases` (`cmd/xdev/wiremode_test.go`), which fails on stock
+`origin/main` with `implicit chain = [onegw/planning onegw/execution onegw/dev …]`.
+
 *Last updated: 2026-10-13 (fix/stale-children — an xdev that reaches idle, and one live run per session):*
 two reports, one measurement. **CPU:** an xdev left open never reached 0%. The UI loop ticked at
 33ms (30fps) and repainted on every one of those ticks for two things that do not need 30fps —
