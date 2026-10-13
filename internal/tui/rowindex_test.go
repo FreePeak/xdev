@@ -142,11 +142,14 @@ func TestSettledBlocksSurviveTailMutations(t *testing.T) {
 	}
 }
 
-// The bounded middle trim: past the recent-results window, tool output
-// collapses first, and the conversation is never trimmed.
-func TestAgedToolOutputCollapsesFirst(t *testing.T) {
+// Every result renders the same way, however old it is: nothing ages a box out
+// of its full render, and the only bound on a result is the transcript's own
+// row cap (transcriptCap), which drops the oldest BLOCKS rather than eliding the
+// middle of one. The conversation spine keeps every row of its own text too —
+// the block separator is its air, and no window is drawn over it.
+func TestEveryResultKeepsItsRenderWindow(t *testing.T) {
 	app := idxApp(120, 40)
-	idxFill(app, toolRecentResults+3, 400)
+	idxFill(app, 6, 400)
 	w := app.contentWidth()
 	app.sync(w)
 
@@ -156,21 +159,14 @@ func TestAgedToolOutputCollapsesFirst(t *testing.T) {
 			results = append(results, b)
 		}
 	}
-	if len(results) < toolRecentResults+2 {
-		t.Fatalf("need more results than the recent window, got %d", len(results))
+	if len(results) < 3 {
+		t.Fatalf("need several results, got %d", len(results))
 	}
-	recent := len(app.blockLines(idxOf(app, results[len(results)-1]), results[len(results)-1], w))
-	agedIdx := idxOf(app, results[0])
-	aged := len(app.blockLines(agedIdx, results[0], w))
-	if aged >= recent {
-		t.Fatalf("aged result rendered %d rows, recent %d: nothing was trimmed", aged, recent)
+	newest := len(app.blockLines(idxOf(app, results[len(results)-1]), results[len(results)-1], w))
+	oldest := len(app.blockLines(idxOf(app, results[0]), results[0], w))
+	if oldest != newest {
+		t.Fatalf("the oldest result rendered %d rows, the newest %d: a result aged out", oldest, newest)
 	}
-	if !strings.Contains(joinedLines(app.blockLines(agedIdx, results[0], w)), "lines hidden") {
-		t.Error("collapsed result lost its hidden-line notice")
-	}
-	// The conversation spine is untouched: a user prompt keeps every row of its
-	// own text, however aged the session is. Nothing is trimmed from it, and the
-	// card adds no padding of its own — the block separator is its air.
 	for _, b := range app.blocks {
 		if b.Kind == KindUser {
 			want := len(wrap(strings.TrimRight(b.Text, "\n"), max(10, w-2*userBandMargin-2)))
@@ -182,15 +178,16 @@ func TestAgedToolOutputCollapsesFirst(t *testing.T) {
 	}
 }
 
-// Ctrl+O opts a result out of the trim entirely.
-func TestExpandedResultEscapesTrim(t *testing.T) {
+// Ctrl+O drops the render window for ONE result, and only for that one.
+func TestExpandedResultDropsItsWindow(t *testing.T) {
 	app := idxApp(120, 40)
-	idxFill(app, toolRecentResults+3, 400)
+	idxFill(app, 6, 400)
 	w := app.contentWidth()
 	app.sync(w)
-	first := app.blocks[4] // the oldest result, well past the window
-	if got := len(app.blockLines(4, first, w)); got > 20 {
-		t.Fatalf("oldest result rendered %d rows; expected the collapsed window", got)
+	first := app.blocks[4] // a result well past its window
+	windowed := len(app.blockLines(4, first, w))
+	if want := toolRecentHead + toolRecentTail + 1 + 3; windowed != want { // top + head + notice + tail + footer + bottom
+		t.Fatalf("windowed result rendered %d rows, want %d", windowed, want)
 	}
 	first.Expanded = true
 	if got := len(app.blockLines(4, first, w)); got < 400 {

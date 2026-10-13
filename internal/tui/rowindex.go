@@ -28,39 +28,35 @@ import (
 //     it, so a settled block costs one struct compare per frame;
 //   - cumulative row offsets (start), so the total row count is O(1) for the
 //     scroll keys and the viewport's first block is a binary search;
-//   - the bounded middle trim (tier), which collapses aged tool output before
-//     anything else, keeping the resident render proportional to the
-//     conversation rather than to how much output the session ran through.
+//   - the row cap (transcriptCap), which drops the OLDEST blocks outright so
+//     the resident render tracks the window instead of how long the session
+//     has been running.
 //
 // A superseded render is replaced in place, never kept alongside: the old
 // per-state map cache retained every intermediate render of a streaming block
 // (measured +1200 stale entries and 274 MB heap for one long assistant
 // message), which is the other half of why long sessions stopped responding.
 
-// trim tiers for one block's render window.
-const (
-	tierRecent int8 = iota // full render window
-	tierAged               // collapsed head+tail: the middle is trimmed
-)
-
-// Row budgets for the bounded middle trim. The newest tool results keep the
-// full omp frame; past that window a result collapses to a head+tail slice with
-// the elided row count between them, so scrolling a long session moves through
-// the conversation instead of through command output. Tool output is the first
-// casualty because it is the only content that reaches tens of thousands of
-// rows; user prompts and assistant prose are never trimmed, and Ctrl+O
-// (Block.Expanded) opts a result out of the trim entirely.
+// Row budgets for ONE result's render window. A finished result longer than
+// the window keeps its head and its tail with the elided row count between
+// them, and Ctrl+O (Block.Expanded) opts that box out of the window entirely.
+// Nothing else is windowed: thinking, tool calls, results that fit, user
+// prompts and assistant prose render every row they have.
 
 // transcriptCap is the most rows the row index keeps. Past it the OLDEST
 // blocks are dropped outright — their text, their render and their rows — so a
 // session that runs for hours costs what one that ran for minutes costs. The
 // session JSONL is the record; the transcript is a window on it, and the trim
-// chip (app.go drawTrimChip) is what says the window moved.
+// notice (app.go noteTranscriptTrimmed) is what says the window moved.
 //
 // It is a ROW budget, not a block count, because rows are what the reader
 // scrolls and what the renderer materializes; the two were measured together
 // on a 200-turn fixture (60k rows, ~40 MB of renders before the cap).
-const transcriptCap = 5000
+//
+// 10 000 is the shipped ceiling: high enough that a working session reads as
+// the whole conversation, while the cap still bounds a session that runs for
+// hours.
+const transcriptCap = 10000
 
 // transcriptKeepTail is how many of the newest blocks a trim never touches: the
 // live turn (the streaming assistant row, the calls it opened, their child
@@ -68,16 +64,9 @@ const transcriptCap = 5000
 // explain it.
 const transcriptKeepTail = 8
 
-// compactAfterRows is the row count past which the transcript hides thinking
-// and tool output on its own (compactAuto). Well under the cap: what a reader
-// feels first is the screen, and the cap is the memory backstop behind it.
-const compactAfterRows = 2000
 const (
-	toolRecentResults = 4
-	toolRecentHead    = 200
-	toolRecentTail    = 50
-	toolAgedHead      = 8
-	toolAgedTail      = 8
+	toolRecentHead = 200
+	toolRecentTail = 50
 	// thinkBoxCollapsed is an unfocused reasoning box's body height, and
 	// thinkBoxRows the height a click grows it to. Reasoning is the one block
 	// that can outgrow any screen, and a fixed twelve rows per thought pushed
@@ -118,7 +107,6 @@ type rowIndex struct {
 	w     int         // content width the renders were produced at
 	rend  []blockRend // parallel to App.blocks
 	start []int32     // start[i] = first row of block i; len(start) == len(rend)+1
-	tier  []int8      // parallel to App.blocks: trim tier per block
 	dirty int32       // first row offset that may be stale (0 = everything)
 	view  []rowView   // scratch buffer for the visible window
 }
@@ -127,7 +115,6 @@ type rowIndex struct {
 func (x *rowIndex) reset() {
 	x.rend = x.rend[:0]
 	x.start = append(x.start[:0], 0)
-	x.tier = x.tier[:0]
 	x.dirty = 0
 }
 
@@ -213,115 +200,13 @@ func (a *App) renderKey(i int, b *Block, w int) blockKey {
 			}
 		}
 	}
-	// The compact latch is settled by sync, before any stamp is computed: the
-	// mode is part of every box's stamp, so a frame that flipped it would
-	// otherwise paint one last full-height transcript.
 	return blockKey{
 		idx: i, kind: b.Kind, width: w, tlen: len(b.Text),
 		tool: b.ToolName, status: b.Status, stream: b.stream,
-		expanded: b.Expanded, age: age, spin: spin, trim: a.trimTier(i),
+		expanded: b.Expanded, age: age, spin: spin,
 		dlen: len(b.Diff), thinkOff: b.ThinkOff, focused: i == a.thinkFocus,
 		live: b.liveSeq, sub: b.subSeq, mermaid: a.renderMermaid,
-		// Compact mode decides this block's height without any field of the
-		// block moving, so a toggle has to re-stamp every row it collapses —
-		// the same rule the mermaid flag follows.
-		compact: a.compact,
 	}
-}
-
-// trimTier reports block i's render-window tier. An unstamped block reads as
-// tierRecent, so a caller that renders one block directly (a test, a preview)
-// gets the full frame rather than a collapsed one.
-func (a *App) trimTier(i int) int8 {
-	if i < 0 || i >= len(a.rowIdx.tier) {
-		return tierRecent
-	}
-	return a.rowIdx.tier[i]
-}
-
-// toolWindow is a finished result's collapsed render window for a tier.
-func toolWindow(tier int8) (head, tail int) {
-	if tier == tierAged {
-		return toolAgedHead, toolAgedTail
-	}
-	return toolRecentHead, toolRecentTail
-}
-
-// stampTiers walks the transcript backwards and assigns each block its trim
-// tier: the newest toolRecentResults results keep their full render window,
-// everything older collapses. Counting from the tail (rather than the head) is
-// what keeps the boundary stable while a turn streams: appending output flips
-// exactly one aged-out block.
-func (a *App) stampTiers() {
-	x := &a.rowIdx
-	n := len(a.blocks)
-	if cap(x.tier) < n {
-		x.tier = make([]int8, n)
-	} else {
-		x.tier = x.tier[:n]
-	}
-	results := 0
-	for i := n - 1; i >= 0; i-- {
-		x.tier[i] = tierRecent
-		if b := a.blocks[i]; b.Kind == KindToolDone && !b.Expanded {
-			if results >= toolRecentResults {
-				x.tier[i] = tierAged
-			}
-			results++
-		}
-	}
-}
-
-// collapsedAt names the block a transcript row belongs to when that row is a
-// box standing in for hidden content — a result/reasoning box collapsed by
-// compact mode, or a boxed row trimmed to its window — and -1 for every other
-// row. It is the hit-test behind "click the row to expand it", the pointer's
-// half of Ctrl+O.
-//
-// The row's OWN render decides: a box that painted a "hidden (Ctrl+O to
-// expand)" notice is a button, and one that painted every row it has is not.
-// Reading it back from the lines rather than re-deriving the rule is what keeps
-// the click and the paint from disagreeing — the same contract the subagent
-// child rows keep through blockRend.subs.
-func (a *App) collapsedAt(row int32) int {
-	bi := a.rowIdx.blockAt(row)
-	if bi < 0 || bi >= len(a.rowIdx.rend) {
-		return -1
-	}
-	b := a.blocks[bi]
-	switch b.Kind {
-	case KindThinking:
-		// A focused box is already open (it is the wheel's target), so a click
-		// on it means "give the wheel back", which selection.go's press
-		// already does by re-aiming thinkFocus. Only the collapsed states are
-		// buttons here: the one-row box and the Ctrl+O window.
-		if bi == a.thinkFocus || b.Expanded {
-			return -1
-		}
-	case KindToolDone:
-		if b.Expanded || !a.collapsedResult(bi, b) {
-			return -1
-		}
-	default:
-		return -1
-	}
-	for _, ln := range a.rowIdx.rend[bi].lines {
-		if strings.Contains(lineText(ln), "hidden (Ctrl+O to expand)") {
-			return bi
-		}
-	}
-	return -1
-}
-
-// collapsedResult reports whether block i's result box paints a window rather
-// than its whole body: compact mode collapses every result, and the aged trim
-// collapses one past the recent-results window. It is the same decision the
-// render makes, in the one place both can read it.
-func (a *App) collapsedResult(i int, b *Block) bool {
-	if a.compact {
-		return true
-	}
-	return a.trimTier(i) == tierAged
 }
 
 // lineText concatenates every run of a rendered line, so a reader gets the
@@ -362,13 +247,12 @@ func (a *App) sync(w int) int32 {
 		x.rend = x.rend[:n]
 		x.start = x.start[:n+1]
 	}
-	a.stampTiers() // the tier is part of the stamp, so it must precede the scan
 	if len(x.rend) < n {
 		x.grow(n)
 	}
 	// trimmed records that this pass moved the transcript's shape on its own —
-	// the compact latch or the row cap — which is what earns the one notice
-	// below. A frame that only re-rendered rows says nothing.
+	// the row cap — which is what earns the one notice below. A frame that only
+	// re-rendered rows says nothing.
 	trimmed := false
 	from := int32(n)
 	for i := range n {
@@ -382,42 +266,8 @@ func (a *App) sync(w int) int32 {
 	}
 
 	total := a.reconcile(w, from)
-	// The auto latch decides on the layout that is NOT compact
-	// (compactFullRows), never on the total this pass just measured: compact
-	// mode shrinks the very number the threshold reads, so a latch that read
-	// that number back flipped on, saw the shrunken total, flipped off, and
-	// flipped on again — every frame, with a full re-render and a toast per
-	// flip. A total measured with the mode off is the one input the mode
-	// cannot move.
-	if !a.compact {
-		a.compactFullRows = total
-	}
-	// The compact latch is settled here, on the fresh row count, and the frame
-	// that flips it is the frame that paints it: the mode is part of every box's
-	// stamp, so a flip invalidates those rows and one more pass renders them
-	// collapsed. Only a mode CHANGE pays for that pass — a steady state falls
-	// straight through.
-	if a.compactAutoLatch(a.compactFullRows) {
-		total = a.reconcile(w, a.firstBoxRow())
-		if !a.compact {
-			a.compactFullRows = total
-		}
-		trimmed = true
-	}
 	// The row cap last, on the offsets just computed: a trim can only ever
 	// shrink the transcript, so it never invalidates the scan above.
-	//
-	// A trim does NOT move compactFullRows, and that is deliberate. The cut is
-	// made on the layout that is ON SCREEN — the compact one, while the mode is
-	// on — and compactFullRows is the uncompacted height, so the rows the trim
-	// removed say nothing about the number the latch reads. Guessing (subtract
-	// the compact rows, say) drifts downward every trim, and a drifted-low
-	// measurement reads a long session as short and releases the mode it just
-	// latched — the oscillation this fix exists to remove. Keeping the last
-	// measurement taken with the mode OFF is both stable and honest: the cap
-	// (5 000) sits above the threshold (2 000), so a transcript the cap is
-	// cutting is long by construction, and Reset is what zeroes the
-	// measurement when the transcript really does start over.
 	if a.trimTranscript(total) {
 		total = a.rowIdx.total()
 		trimmed = true
@@ -457,18 +307,6 @@ func (a *App) reconcile(w int, from int32) int32 {
 	return total
 }
 
-// firstBoxRow is the first block whose rendered height depends on compact mode
-// — a reasoning box or a finished result. Nothing above it carries the mode, so
-// a toggle re-renders from here rather than from the top of the session.
-func (a *App) firstBoxRow() int32 {
-	for i, b := range a.blocks {
-		if b.Kind == KindThinking || b.Kind == KindToolDone {
-			return int32(i)
-		}
-	}
-	return int32(len(a.blocks))
-}
-
 // --- the row cap ---------------------------------------------------------
 
 // trimTranscript drops the oldest blocks until the layout fits transcriptCap
@@ -480,15 +318,11 @@ func (a *App) firstBoxRow() int32 {
 // the sticky header, a hit-test, the scroll model — can observe a half-trimmed
 // transcript: they all run under the same lock, after this returns.
 //
-// The block-level tables move with the blocks (rend/start/tier and the per-block
+// The block-level tables move with the blocks (rend/start and the per-block
 // stamps inside them), so a dropped block's render is released rather than
 // retained at an index nothing reads. The alternative — a growing offset into
 // an append-only slice — keeps every dropped render alive, which is the memory
 // this cap exists to bound.
-//
-// The cut is on the layout that is on screen — the compact one while the mode
-// is on — so it says nothing about the uncompacted height the latch reads;
-// sync's own comment is where that separation is spelled out.
 func (a *App) trimTranscript(total int32) bool {
 	if total <= transcriptCap {
 		return false
@@ -520,7 +354,6 @@ func (a *App) trimTranscript(total int32) bool {
 	// meant to save.
 	m := copy(x.rend, x.rend[cut:])
 	x.rend = x.rend[:m]
-	x.tier = append(x.tier[:0], x.tier[cut:]...)
 	for i := range x.rend {
 		x.rend[i].key.idx = i
 		for j := range x.rend[i].subs {
