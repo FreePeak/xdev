@@ -23,6 +23,12 @@ type fakeBot struct {
 	updates []Update
 	// sent records (chatID, text) per sendMessage.
 	sent []sentMsg
+	// edits records (messageID, text) per editMessageText — the streaming
+	// preview's only write path.
+	edits []sentEdit
+	// failEdit makes editMessageText answer 400 "not a parse problem", the
+	// shape of a permanent refusal the preview must seal on.
+	failEdit bool
 	// actions records (chatID, action) per sendChatAction.
 	actions []sentAction
 	// failAfter makes sendMessage fail once this many messages have been
@@ -44,8 +50,14 @@ type fakeBot struct {
 }
 
 type sentMsg struct {
-	Chat int64
-	Text string
+	Chat      int64
+	Text      string
+	MessageID int64
+}
+
+type sentEdit struct {
+	MessageID int64
+	Text      string
 }
 
 type sentAction struct {
@@ -127,10 +139,33 @@ func newFakeBot(t *testing.T) *fakeBot {
 			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry later"}`))
 			return
 		}
-		b.sent = append(b.sent, sentMsg{Chat: payload.ChatID, Text: payload.Text})
-		n := len(b.sent)
+		n := len(b.sent) + 1
+		b.sent = append(b.sent, sentMsg{Chat: payload.ChatID, Text: payload.Text, MessageID: int64(n)})
 		b.mu.Unlock()
 		writeOK(w, map[string]any{"message_id": int64(n)})
+	})
+	mux.HandleFunc("/bot"+b.token+"/editMessageText", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			MessageID int64  `json:"message_id"`
+			Text      string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.mu.Lock()
+		fail := b.failEdit
+		if !fail {
+			b.edits = append(b.edits, sentEdit{MessageID: payload.MessageID, Text: payload.Text})
+		}
+		b.mu.Unlock()
+		if fail {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry later"}`))
+			return
+		}
+		writeOK(w, map[string]any{"message_id": payload.MessageID})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -180,6 +215,13 @@ func (b *fakeBot) sentAll() []sentMsg {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]sentMsg(nil), b.sent...)
+}
+
+// sentEdits returns a copy of the recorded editMessageText calls.
+func (b *fakeBot) sentEdits() []sentEdit {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]sentEdit(nil), b.edits...)
 }
 
 func (b *fakeBot) url() string { return b.srv.URL }

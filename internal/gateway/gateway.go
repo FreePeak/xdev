@@ -375,16 +375,37 @@ func memoryNote(s *config.Settings) string {
 // and Telegram.SendMessage falls back to plain text when the API rejects a
 // parsed body — so a formatting quirk costs the italics, never the answer.
 func (d *Daemon) reply(ctx context.Context, chat int64, text string) error {
+	_, err := d.replySeen(ctx, chat, text, "")
+	return err
+}
+
+// replySeen is reply for a turn whose head the streaming preview already put in
+// the chat: the part the phone has seen is stripped, so the answer is not
+// delivered twice. seen is "" for every non-streaming caller (commands,
+// errors, a preview that never posted).
+func (d *Daemon) replySeen(ctx context.Context, chat int64, text, seen string) (string, error) {
 	text = strings.TrimRight(text, "\n")
+	seen = strings.TrimRight(seen, "\n")
+	// The preview and the final answer are the same text: the worker's stdout
+	// minus its trailing newline. Anything else (a switch caption, a failure
+	// tail) is not what was previewed, so nothing is stripped.
+	if seen != "" && strings.HasPrefix(text, seen) {
+		text = strings.TrimLeft(strings.TrimPrefix(text, seen), "\n")
+	}
 	if strings.TrimSpace(text) == "" {
+		if seen != "" {
+			// The whole answer is already on screen; the preview is the
+			// message, so there is nothing left to send.
+			return seen, nil
+		}
 		text = "(no answer)"
 	}
 	for _, part := range ChunkText(text, d.chunk) {
 		if err := d.tg.SendMessage(ctx, chat, part); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return nil
+	return text, nil
 }
 
 // startTyping keeps the chat's typing bubble alive while the turn runs, and
@@ -427,7 +448,7 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 
 	sessionID, _ := d.chats.Session(chat)
 	started := time.Now()
-	w, err := d.spawn(sessionID, chat, text)
+	w, err := d.spawn(ctx, sessionID, chat, text)
 	if err != nil {
 		d.logFn("gateway: spawn failed: %v", err)
 		_ = d.reply(ctx, chat, "Could not start a turn: "+err.Error())
@@ -436,9 +457,13 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 	d.chats.AttachWorker(chat, w)
 	d.logFn("gateway: chat %d turn started (pid %d, session %s)", chat, w.pid, orNew(sessionID))
 
+	// The answer streams: the worker's stdout is a pipe now (see spawn), the
+	// streamer edits the first bubble as the text grows, and typing keeps the
+	// chat's own indicator alive while the model is still silent.
 	stopTyping := startTyping(ctx, d.tg, chat, w.done, typingInterval)
 	res := w.wait()
 	stopTyping()
+	w.stream.finish()
 	d.chats.AttachWorker(chat, nil)
 	if sessionID == "" {
 		// A fresh conversation: the worker just created the session file.
@@ -467,10 +492,15 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 	// itself, so the answer is never attributed to the model they pinned.
 	if req, served, ok := ai.ParseModelSwitchNotice(res.logTail); ok {
 		d.applyModelBadge(ctx, served)
-		_ = d.reply(ctx, chat, switchCaption(req, served)+"\n\n"+res.answer)
+		// The caption is not what the preview showed, so nothing is stripped
+		// here: the switched answer is sent whole (the preview bubble, if any,
+		// already carried the plain text of it).
+		_, _ = d.replySeen(ctx, chat, switchCaption(req, served)+"\n\n"+res.answer, "")
 		return
 	}
-	_ = d.reply(ctx, chat, res.answer)
+	if _, err := d.replySeen(ctx, chat, res.answer, w.stream.previewed()); err != nil {
+		d.logFn("gateway: reply to chat %d: %v", chat, err)
+	}
 }
 
 // switchCaption is the one line a switched answer is prefixed with. The
@@ -550,10 +580,11 @@ func (d *Daemon) dataDirOf() string { return d.dataDir }
 
 // worker is a detached `xdev print` child running one chat turn.
 type worker struct {
-	pid  int
-	done chan struct{}
-	mu   sync.Mutex
-	res  workerResult
+	pid    int
+	done   chan struct{}
+	mu     sync.Mutex
+	res    workerResult
+	stream *streamer
 }
 
 type workerResult struct {
@@ -622,6 +653,8 @@ func (w *worker) wait() workerResult {
 	return w.res
 }
 
+// finish records the result and closes done, which is what releases wait() and
+// the streamer's ticker.
 func (w *worker) finish(res workerResult) {
 	w.mu.Lock()
 	w.res = res
@@ -629,10 +662,17 @@ func (w *worker) finish(res workerResult) {
 	close(w.done)
 }
 
-// spawn launches one print-mode turn. Output is captured, not streamed: a
-// chat wants the finished answer, and one send cannot interleave two turns'
-// partial text.
-func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, error) {
+// spawn launches one print-mode turn.
+//
+// stdout and stderr are separate pipes, not one buffer, because they carry
+// different things: stdout is the ANSWER, streamed to the chat as it arrives
+// (the worker already prints its deltas live — cmd/xdev/print.go
+// printHooks.OnEvent), and stderr is the diagnostics (thinking, the tool-call
+// trailer, the model-switch notice) that only the failure path and the switch
+// detector read. Both are bounded: a worker that prints without bound must not
+// grow an unbounded buffer, and the cap drops the OLDEST bytes so the answer
+// (written last) survives.
+func (d *Daemon) spawn(ctx context.Context, sessionID string, chat int64, text string) (*worker, error) {
 	// The model's answer must be the ONLY thing on stdout: the gateway
 	// forwards that stream verbatim to the chat, so thinking, banner lines
 	// and notices would be read as the answer. --hide-thinking keeps the
@@ -677,14 +717,15 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 		// A detached worker must not inherit a TTY sense of "interactive".
 		"TERM=dumb",
 	)
-	// stdout and stderr share one bounded buffer: the answer goes to the
-	// chat and the diagnostics to the failure message, so both are needed,
-	// and a worker that prints without bound must not grow an unbounded one.
-	// The cap drops the OLDEST bytes, so the answer (written last) survives
-	// and the prelude is what is lost.
-	var buf ringBuffer
-	buf.limit = workerOutputCap
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = &buf, &buf, nil
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	// stderr keeps the shared bounded ring: it is the diagnostic stream, read
+	// once the child exits, and the answer no longer travels through it.
+	var errBuf ringBuffer
+	errBuf.limit = workerOutputCap
+	cmd.Stderr, cmd.Stdin = &errBuf, nil
 	cmd.SysProcAttr = sysProcAttr()
 
 	w := &worker{pid: -1, done: make(chan struct{})}
@@ -692,10 +733,41 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 		return nil, err
 	}
 	w.pid = cmd.Process.Pid
+	// The streamer edits the first bubble as the answer grows. It is created
+	// here (not in turn) so the reader below can hand it every byte.
+	w.stream = newStreamer(ctx, d.tg, chat, d.logFn)
+	// A bounded copy of stdout, read on its own goroutine: the child's pipe
+	// must be drained while it runs or the worker blocks on a full buffer, and
+	// the same bytes are both streamed to the chat and kept for the final
+	// answer (so the send can strip what the preview already showed).
+	var out ringBuffer
+	out.limit = workerOutputCap
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := stdout.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				_, _ = out.Write(chunk)
+				w.stream.write(chunk)
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
 	go func() {
 		werr := cmd.Wait()
-		out := strings.TrimSpace(buf.String())
-		res := workerResult{answer: out, logTail: tail(out, workerLogTail)}
+		// Every byte the worker wrote has been read by now: Wait closes the
+		// pipe, and the reader above exits on the EOF that follows.
+		answer := strings.TrimSpace(out.String())
+		// stderr is where the switch notice lands — cmd/xdev/print.go writes
+		// it there, never on stdout, so it cannot pollute the answer. The log
+		// tail is therefore the diagnostics alone; folding the answer into it
+		// made every turn look like a model switch (the notice parser reads
+		// the tail) and echoed the whole answer into a failure message.
+		logs := strings.TrimSpace(errBuf.String())
+		res := workerResult{answer: answer, logTail: tail(logs, workerLogTail)}
 		if werr != nil {
 			res.exit = -1
 			var ee *exec.ExitError
