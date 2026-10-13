@@ -295,10 +295,11 @@ func TestHeadlessPromptDrivesTheHandler(t *testing.T) {
 
 // scriptedHeadlessHandler records the commands the server forwarded.
 type scriptedHeadlessHandler struct {
-	prompt func(id, text string)
-	steer  func(text string) error
-	abort  func() error
-	state  map[string]any
+	prompt  func(id, text string)
+	steer   func(text string) error
+	abort   func() error
+	state   map[string]any
+	history json.RawMessage
 }
 
 func (s *scriptedHeadlessHandler) Prompt(id, text string) {
@@ -320,6 +321,8 @@ func (s *scriptedHeadlessHandler) Abort() error {
 	}
 	return nil
 }
+
+func (s *scriptedHeadlessHandler) History() json.RawMessage { return s.history }
 
 func (s *scriptedHeadlessHandler) State() map[string]any {
 	if s.state != nil {
@@ -539,5 +542,56 @@ func TestHeadlessRefusesAPromptWithNoSession(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusConflict {
 		t.Errorf("POST /prompt with no session = %d, want 409", res.StatusCode)
+	}
+}
+
+// TestHeadlessServesTheWebClient pins the two things the browser client needs
+// from the server and that nothing else in the package covers: GET / answers
+// the embedded page WITHOUT a token (a browser navigating to the link cannot
+// attach a header, which is why the token rides the fragment), and GET
+// /history answers the driver's transcript in the same shape /export writes —
+// so the live page and the archive cannot drift.
+//
+// The negative half matters as much: the page is open, the DATA is not. If a
+// future route is added without the token, this fails.
+func TestHeadlessServesTheWebClient(t *testing.T) {
+	// A distinctive token: the substring check below must not pass by accident
+	// on the word "token" appearing in the page's own JavaScript.
+	const tok = "sekrit-a1b2c3"
+	h := newHeadless(t, Options{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Token: tok})
+	h.SetHandler(&scriptedHeadlessHandler{history: json.RawMessage(`{"title":"t","entries":[]}`)})
+
+	rec := doReq(t, h.Handler(), http.MethodGet, "/", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / without a token = %d, want 200 (a browser cannot send one)", rec.Code)
+	}
+	page := rec.Body.String()
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("GET / content-type = %q, want text/html", ct)
+	}
+	// The page must reach the routes it needs; a page that names a route the
+	// server does not serve is a dead button.
+	for _, want := range []string{"/history", "/event", "/prompt", "/abort"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page never mentions %s — that control would be dead", want)
+		}
+	}
+	if strings.Contains(page, tok) {
+		t.Error("the page must not contain the bearer token: it arrives in the fragment, which the server never sees")
+	}
+
+	// The transcript itself stays gated.
+	if rec := doReq(t, h.Handler(), http.MethodGet, "/history", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /history without a token = %d, want 401", rec.Code)
+	}
+	rec = doReq(t, h.Handler(), http.MethodGet, "/history", tok, nil)
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"title":"t","entries":[]}` {
+		t.Errorf("GET /history body = %s, want the driver's document verbatim", got)
+	}
+
+	// A root-only pattern: an unknown path is a 404, not the page. A page
+	// answered for every typo hides a broken client.
+	if rec := doReq(t, h.Handler(), http.MethodGet, "/nope", tok, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /nope = %d, want 404 (the page is registered as /{$})", rec.Code)
 	}
 }

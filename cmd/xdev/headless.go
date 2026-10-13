@@ -18,8 +18,10 @@ import (
 
 	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/protocol"
 	"github.com/FreePeak/xdev/internal/serve"
+	"github.com/FreePeak/xdev/internal/share"
 )
 
 // runHeadless serves one session over HTTP + SSE, so a client in ANOTHER
@@ -73,14 +75,15 @@ var (
 	headlessToken  string
 )
 
-// headlessUsage is printed by the serve dispatcher's help.
 const headlessUsage = `  xdev serve headless [--listen 127.0.0.1:7717] [--token T]
 
 An HTTP + SSE face on one live agent session, so a client in another process
-drives it: /info (open) reports the identity, POST /prompt runs a turn,
-GET /event streams the events, POST /steer and POST /abort reach the running
-turn, GET /state reports the session. The server publishes its url, pid,
-version and token to <data dir>/serve/headless.json (0600) for discovery.
+drives it. GET / is the web client — the server prints its link (the bearer
+token rides the URL fragment, which a browser never sends). /info (open)
+reports the identity, GET /history the durable transcript, POST /prompt runs a
+turn, GET /event streams the events, POST /steer and POST /abort reach the
+running turn, GET /state reports the session. The server publishes its url,
+pid, version and token to <data dir>/serve/headless.json (0600) for discovery.
 `
 
 // parseHeadlessFlags parses the subcommand's flags into printOptions.
@@ -100,9 +103,12 @@ func parseHeadlessFlags(args []string) (printOptions, int, error) {
 An HTTP + SSE face on one live agent session, so a client in another process
 drives it:
 
+  GET  /         the web client (open — a static asset; the token is in the
+                 URL fragment, printed on start, never sent to the server)
   GET  /info     identity (open — the probe a client runs before it has a token)
   POST /prompt   {"id":"p1","text":"..."} — returns at once; the turn streams
   GET  /event    SSE: server.connected first, then every event and the response
+  GET  /history  the durable transcript, in the shape /export writes
   POST /steer    {"text":"..."} — queues into the running turn
   POST /abort    cancels the running turn
   GET  /state    the session snapshot
@@ -166,6 +172,25 @@ func (d *headlessDriver) State() map[string]any {
 	}
 }
 
+// History is the durable transcript /history answers with, in the same
+// Document shape `xdev export` writes: one renderer for the export and the
+// live page, so the two cannot drift into different ideas of what an entry
+// looks like. The store never persists the system prompt, so the live one is
+// not in the archive either — the page shows what the session is, not what it
+// was primed with.
+//
+// Marshalled here (json.RawMessage) because the serve package must not import
+// the session or the renderer: the seam State already keeps.
+func (d *headlessDriver) History() json.RawMessage {
+	doc := share.FromStore(d.h.store, share.Options{})
+	b, err := json.Marshal(doc)
+	if err != nil {
+		logx.Errorf("headless history: %v", err)
+		return nil
+	}
+	return b
+}
+
 // headlessSink carries responses and events onto the SSE stream.
 type headlessSink struct{ srv *serve.Headless }
 
@@ -200,6 +225,31 @@ func (d headlessDriver) NotifyTurnEnd(reason ai.StopReason, err error) {
 		payload["error"] = err.Error()
 	}
 	d.s.Broadcast("turn_end", payload)
+}
+
+// NotifyToolResult publishes a tool result onto the SSE stream. Without it a
+// web client renders the assistant's tool CALL and then nothing: the result is
+// persisted to the store, but the stream is what the page is watching.
+//
+// The parts are re-kinded to tool_result so the page paints them with the same
+// rail and fold the export gives a result entry — share.PartsOf reports the
+// block kinds (a result is usually one text block), and a client that appended
+// them verbatim could not tell a tool's output from the model's prose.
+func (d headlessDriver) NotifyToolResult(m *ai.Message) {
+	if d.s == nil || m == nil {
+		return
+	}
+	parts := share.PartsOf(*m)
+	for i := range parts {
+		parts[i].Kind = "tool_result"
+		parts[i].Name = m.ToolName
+		parts[i].IsError = m.IsError
+	}
+	d.s.Broadcast("tool_result", map[string]any{
+		"id":    d.h.CurPromptID(),
+		"name":  m.ToolName,
+		"parts": parts,
+	})
 }
 
 // sseFrame is one parsed SSE frame from the server's /event stream.

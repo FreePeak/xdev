@@ -30,38 +30,44 @@ type Options struct {
 	Model string
 }
 
-// Document is one session transcript, ready to render.
+// Document is one session transcript, ready to render. The JSON tags are what
+// the live web client reads over `xdev serve headless`'s GET /history — the
+// export template addresses the fields by name, so the tags change nothing
+// there, and the page and the archive stay one shape.
 type Document struct {
-	SessionID    string
-	Title        string
-	Model        string
-	CWD          string
-	Created      string
-	Exported     string
-	LeafID       string
-	Source       string
-	SystemPrompt string
-	Entries      []Entry
+	SessionID    string  `json:"sessionId"`
+	Title        string  `json:"title"`
+	Model        string  `json:"model"`
+	CWD          string  `json:"cwd"`
+	Created      string  `json:"created"`
+	Exported     string  `json:"exported"`
+	LeafID       string  `json:"leafId"`
+	Source       string  `json:"source"`
+	SystemPrompt string  `json:"systemPrompt,omitempty"`
+	Entries      []Entry `json:"entries"`
 }
 
 // Entry is one session entry as the export shows it. Kind is the stable
-// discriminator (also the CSS class and the data-kind attribute).
+// discriminator (also the CSS class and the data-kind attribute). The JSON
+// tags are what the live web client reads over `xdev serve headless`'s
+// GET /history, so the export renderer and the live transcript cannot drift
+// into two shapes.
 type Entry struct {
-	ID        string
-	Kind      string
-	Title     string
-	Timestamp string
-	Note      string
-	Parts     []Part
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Timestamp string `json:"timestamp"`
+	Note      string `json:"note,omitempty"`
+	Parts     []Part `json:"parts"`
 }
 
 // Part is one rendered piece of an entry body.
 type Part struct {
-	Kind    string // text | thinking | tool_call | tool_result | data | image
-	Text    string
-	Name    string
-	CallID  string
-	IsError bool
+	Kind    string `json:"kind"` // text | thinking | tool_call | tool_result | data | image
+	Text    string `json:"text"`
+	Name    string `json:"name,omitempty"`
+	CallID  string `json:"callId,omitempty"`
+	IsError bool   `json:"isError,omitempty"`
 }
 
 // Entry kinds.
@@ -236,6 +242,11 @@ func messageParts(m ai.Message) []Part {
 	}
 	return parts
 }
+
+// PartsOf is messageParts for a single message — what the headless driver
+// publishes as the `tool_result` SSE frame (an export archive walks entries,
+// but a live stream sees one message at a time).
+func PartsOf(m ai.Message) []Part { return messageParts(m) }
 
 // indentJSON pretty-prints tool arguments; anything that is not JSON is
 // passed through verbatim (a partial stream can leave a truncated object).

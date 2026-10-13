@@ -1,24 +1,31 @@
 // Package serve, headless service: an HTTP + SSE face on a live agent
-// session, so a client (a TUI in another process, a script, a widget) drives
-// turns the way OpenCode's `opencode serve` lets its TUI drive a daemon.
+// session, so a client (a browser, a TUI in another process, a script, a
+// widget) drives turns the way OpenCode's `opencode serve` lets its TUI drive
+// a daemon.
 //
 // Why this exists next to `xdev rpc`: the RPC mode already carries the whole
 // contract, but over stdio, which makes the client a CHILD of the daemon. A
 // headless server inverts that: the session outlives any one client, and a
 // second client can attach to the same conversation. The wire is deliberately
-// small — four routes — because the surface a client actually needs is
-// prompt/steer/abort/state plus one event stream.
+// small — five routes plus the page — because the surface a client actually
+// needs is prompt/steer/abort/state/history plus one event stream.
 //
 // Posture is the one every service in this package shares (see serve.go):
 // loopback by default, bearer token on every route but the liveness probe,
-// bounded bodies. Two OpenCode mechanisms are adopted because they are what
+// bounded bodies. Three OpenCode mechanisms are adopted because they are what
 // makes an HTTP-ified agent usable rather than a toy:
 //
 //   - a REGISTRATION FILE (<data dir>/serve/headless.json, 0600) holding
 //     {id, url, pid, version, token}, so a client connects by reading a file
 //     instead of guessing a port (OpenCode's Service.register/Info contract);
 //   - `GET /info` stays open, because the client's very first act is a health
-//     probe it cannot yet authenticate.
+//     probe it cannot yet authenticate;
+//   - `GET /` serves the web client, and is open for the same reason /info is:
+//     it is a static asset carrying no session data, and a browser cannot
+//     attach a header to the navigation that fetches it. The token rides the
+//     URL FRAGMENT (which a browser never sends), exactly as `xdev share`
+//     carries its key.
+
 package serve
 
 import (
@@ -28,6 +35,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +85,12 @@ type HeadlessHandler interface {
 	Steer(text string) error
 	Abort() error
 	State() map[string]any
+	// History is the durable transcript, already marshalled in the export
+	// shape (internal/share's Document), so a client that reconnects after a
+	// dropped stream re-reads the session instead of trusting a stream that is
+	// volatile by contract. json.RawMessage keeps this package free of the
+	// session types, the same seam State keeps.
+	History() json.RawMessage
 }
 
 // HeadlessOptions configures the service.
@@ -111,14 +125,20 @@ func NewHeadless(opts HeadlessOptions) (*Headless, error) {
 		logf:    opts.Options.logf,
 		subs:    map[int64]*headlessSub{},
 	}
-	// One route stays open, and only one: a client's first act is the health
-	// probe it cannot yet authenticate with (OpenCode's /api/info). Everything
-	// else — including the event stream — goes through requireToken.
+	// The open routes are exactly the ones a browser reaches before it holds
+	// a credential: the identity probe, and the page itself (a static asset —
+	// its data all arrives over the token-gated routes below).
 	mux := h.mux(opts.maxBody())
 	h.h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/info" && r.URL.Host == "" {
-			h.handleInfo(w, r)
-			return
+		if r.URL.Host == "" {
+			switch r.URL.Path {
+			case "/info":
+				h.handleInfo(w, r)
+				return
+			case "/":
+				h.handleIndex(w, r)
+				return
+			}
 		}
 		requireToken(token, mux).ServeHTTP(w, r)
 	})
@@ -172,12 +192,16 @@ func BindForTest(h *Headless) (func(), error) {
 	return stop, nil
 }
 
-// mux is the route table. Four routes plus the open probe: anything more is a
-// surface a client has to learn, and the RPC contract already covers the rest.
+// mux is the route table. Five routes: anything more is a surface a client has
+// to learn, and the RPC contract already covers the rest. "/" is registered
+// here as "/{$}" so it matches the root and nothing else — a wildcard pattern
+// would swallow every unmatched path and answer the page for a typo.
 func (h *Headless) mux(maxBody int64) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", h.handleIndex)
 	mux.HandleFunc("GET /event", h.handleEvent)
 	mux.HandleFunc("GET /state", h.handleState)
+	mux.HandleFunc("GET /history", h.handleHistory)
 	mux.HandleFunc("POST /prompt", h.handlePrompt(maxBody))
 	mux.HandleFunc("POST /steer", h.handleSimpleCommand(maxBody, "text", func(text string) error {
 		return h.handler().Steer(text)
@@ -253,10 +277,24 @@ func (h *Headless) handler() HeadlessHandler {
 
 type unboundHandler struct{}
 
-func (unboundHandler) Prompt(string, string) {}
-func (unboundHandler) Steer(string) error    { return errors.New("no session bound to this server") }
-func (unboundHandler) Abort() error          { return errors.New("no session bound to this server") }
-func (unboundHandler) State() map[string]any { return map[string]any{} }
+func (unboundHandler) Prompt(string, string)    {}
+func (unboundHandler) Steer(string) error       { return errors.New("no session bound to this server") }
+func (unboundHandler) Abort() error             { return errors.New("no session bound to this server") }
+func (unboundHandler) State() map[string]any    { return map[string]any{} }
+func (unboundHandler) History() json.RawMessage { return nil }
+
+// handleHistory reports the durable transcript in the export shape
+// (internal/share's Document, supplied by the driver). The SSE stream is
+// liveness only — volatile by contract — so this is what a client reads after
+// a reconnect or an overflow, and what it renders the past from at all.
+func (h *Headless) handleHistory(w http.ResponseWriter, r *http.Request) {
+	doc := h.handler().History()
+	if doc == nil {
+		httpError(w, http.StatusConflict, "no session bound to this server yet")
+		return
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
 
 // handleState reports the session snapshot (what /state carries in RPC).
 func (h *Headless) handleState(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +392,7 @@ func (h *Headless) Run(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", serviceHeadless, err)
 	}
 	h.logf("%s listening on %s (registration %s)", serviceHeadless, url, regPath)
+	h.logf("web client: %s", h.WebLink())
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -397,6 +436,18 @@ func (h *Headless) Registration(url string) HeadlessRegistration {
 // directory the service tokens live in (0700).
 func HeadlessRegistrationPath(dataDir string) string {
 	return filepath.Join(dataDir, "serve", serviceHeadless+".json")
+}
+
+// WebLink is the URL a browser opens: the page, with the bearer token in the
+// FRAGMENT. A fragment is never sent to a server, so the token stays out of
+// access logs, out of a Referer, and out of the page's own fetch URLs; the
+// page reads it once and strips it from the address bar. Same mechanism
+// `xdev share` uses to carry its key. Empty before Run binds.
+func (h *Headless) WebLink() string {
+	if h.ln == nil {
+		return ""
+	}
+	return "http://" + h.ln.Addr().String() + "/#" + url.QueryEscape(h.token)
 }
 
 // writeRegistration publishes the record 0600 from creation: it carries the

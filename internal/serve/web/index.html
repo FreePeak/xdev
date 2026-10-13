@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="xdev serve headless">
+<title>xdev</title>
+<style>
+:root {
+  --bg: #fdfdfc; --fg: #1b1b1a; --dim: #6b6b66; --line: #e3e2dd;
+  --card: #ffffff; --side: #f6f5f1; --accent: #7a5cff;
+  --user: #2f6f4f; --assistant: #2b5d8a; --tool: #8a5a2b; --think: #6b6b66;
+  --warn: #a4462f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14141a; --fg: #e7e7ea; --dim: #9a9aa4; --line: #2c2c36;
+    --card: #1b1b22; --side: #20202a; --accent: #a892ff;
+    --user: #7cc79c; --assistant: #8ab8e8; --tool: #e0b070; --think: #9a9aa4;
+    --warn: #e8907a;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column;
+}
+header {
+  display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline;
+  padding: .5rem 1rem; border-bottom: 1px solid var(--line); background: var(--side);
+  font-size: .8rem; position: sticky; top: 0; z-index: 2;
+}
+header .title { font-weight: 600; }
+header .meta { color: var(--dim); overflow-wrap: anywhere; }
+header .spacer { flex: 1; }
+#conn { font-family: ui-monospace, monospace; font-size: .75rem; }
+#conn[data-state="live"] { color: var(--user); }
+#conn[data-state="down"], #conn[data-state="lost"] { color: var(--warn); }
+main { flex: 1; overflow-y: auto; padding: 1rem; }
+main > * { max-width: 60rem; margin-inline: auto; }
+.empty { color: var(--dim); text-align: center; padding: 3rem 0; }
+.entry { margin: 1rem 0; border: 1px solid var(--line); border-radius: 10px; background: var(--card); overflow: hidden; }
+.entry > header { position: static; display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline;
+  padding: .35rem .75rem; background: var(--side); border-bottom: 1px solid var(--line); font-size: .78rem; }
+.entry .kind { font-weight: 600; letter-spacing: .02em; }
+.entry time, .entry .note { color: var(--dim); }
+.entry .note { font-family: ui-monospace, monospace; font-size: .72rem; overflow-wrap: anywhere; }
+.entry.user .kind { color: var(--user); }
+.entry.assistant .kind { color: var(--assistant); }
+.entry.tool_result .kind, .entry.custom .kind { color: var(--tool); }
+.entry.system .kind { color: var(--accent); }
+.entry.error { border-color: var(--warn); }
+.part { margin: .5rem .75rem; background: var(--side); border-radius: 8px; }
+.part pre { margin: 0; padding: .55rem .7rem; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: .82rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.part.text { background: transparent; }
+.part.text pre { font: inherit; font-size: .92rem; }
+.part.thinking { border-left: 3px solid var(--think); }
+.part.thinking pre { color: var(--think); font-style: italic; }
+.part.tool_call { border-left: 3px solid var(--tool); }
+.part.tool_result { border-left: 3px solid var(--line); }
+.part.error { border-left: 3px solid var(--warn); }
+.part > .name { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--tool);
+  padding: .35rem .7rem 0; }
+.part[hidden] { display: none; }
+.part details > summary { cursor: pointer; padding: .35rem .7rem; font-size: .75rem;
+  font-family: ui-monospace, monospace; color: var(--dim); }
+footer { border-top: 1px solid var(--line); background: var(--side); padding: .5rem 1rem; }
+footer > div { max-width: 60rem; margin-inline: auto; display: flex; gap: .5rem; align-items: flex-end; }
+#prompt { flex: 1; resize: vertical; min-height: 2.6rem; max-height: 12rem; padding: .5rem .6rem;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg);
+  font: inherit; }
+#prompt:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button { padding: .5rem .9rem; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--fg); font: inherit; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button#send { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+#error { color: var(--warn); font-size: .78rem; max-width: 60rem; margin: .35rem auto 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title" id="title">xdev</span>
+  <span class="meta" id="model"></span>
+  <span class="meta" id="cwd"></span>
+  <span class="spacer"></span>
+  <span id="conn" data-state="connecting">connecting…</span>
+</header>
+<main id="transcript"><p class="empty">no turns yet — type below</p></main>
+<footer>
+  <div>
+    <textarea id="prompt" rows="1" placeholder="prompt — Enter sends, Shift+Enter newlines"></textarea>
+    <button id="send">Send</button>
+    <button id="steer" title="queue into the running turn">Steer</button>
+    <button id="abort" title="cancel the running turn">Stop</button>
+  </div>
+  <div id="error"></div>
+</footer>
+<script>
+// The token arrives in the URL fragment, which a browser never sends to the
+// server: the same trick `xdev share` uses for its key. It is read once, kept
+// in memory for the fetch calls below, and stripped from the address bar so a
+// screenshot or a copy-pasted URL does not leak it.
+//
+// Stripping it means a plain reload would lose it, so it is ALSO parked in
+// sessionStorage — scoped to this tab, cleared when the tab closes, never sent
+// anywhere. A reload keeps working; a new tab still needs the link.
+const FRAGMENT = decodeURIComponent((location.hash || "").replace(/^#/, ""));
+const TOKEN = FRAGMENT || sessionStorage.getItem("xdev-token") || "";
+if (FRAGMENT) sessionStorage.setItem("xdev-token", FRAGMENT);
+if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+
+const $ = (id) => document.getElementById(id);
+const transcript = $("transcript");
+const promptBox = $("prompt");
+const errorBox = $("error");
+const conn = $("conn");
+
+let running = false;
+let lastID = "";
+let stream = null;
+
+function auth(headers) {
+  return Object.assign({ Authorization: "Bearer " + TOKEN }, headers || {});
+}
+
+function api(path, init) {
+  return fetch(path, Object.assign({ headers: auth({ "Content-Type": "application/json" }) }, init || {}))
+    .then(async (res) => {
+      const text = await res.text();
+      let body = null;
+      try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+      if (!res.ok) {
+        throw new Error((body && (body.error || body.message)) || res.status + " " + res.statusText);
+      }
+      return body;
+    });
+}
+
+function showError(msg) { errorBox.textContent = msg || ""; }
+
+// --- rendering -------------------------------------------------------------
+// One entry node per transcript entry, keyed by the entry id the server sends.
+// A streamed assistant turn arrives as deltas into the node it opened, so the
+// DOM is appended to rather than rebuilt: the page never re-renders the whole
+// transcript for one token.
+
+const nodes = new Map();
+
+function kindClass(kind) {
+  return "entry " + (kind || "unknown").replace(/[^a-z_]/g, "");
+}
+
+function entryNode(entry) {
+  const el = document.createElement("section");
+  el.className = kindClass(entry.kind);
+  el.dataset.id = entry.id || "";
+  const head = document.createElement("header");
+  const kind = document.createElement("span");
+  kind.className = "kind";
+  kind.textContent = entry.title || entry.kind || "Entry";
+  head.appendChild(kind);
+  if (entry.timestamp) {
+    const t = document.createElement("time");
+    t.textContent = entry.timestamp;
+    head.appendChild(t);
+  }
+  if (entry.note) {
+    const note = document.createElement("span");
+    note.className = "note";
+    note.textContent = entry.note;
+    head.appendChild(note);
+  }
+  el.appendChild(head);
+  const body = document.createElement("div");
+  el.appendChild(body);
+  (entry.parts || []).forEach((p) => body.appendChild(partNode(p)));
+  return el;
+}
+
+// Long tool output is folded, exactly as the TUI folds it: the first lines are
+// what the reader wants, and a 30 KB file read is one click away.
+const FOLD_LINES = 14;
+
+function partNode(part) {
+  const el = document.createElement("div");
+  el.className = "part " + (part.kind || "text") + (part.isError ? " error" : "");
+  // A tool call names its tool; a tool RESULT names the tool it answered, so
+  // the reader can tell which call in a turn of several the output belongs to.
+  if (part.name && (part.kind === "tool_call" || part.kind === "tool_result")) {
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = part.name + (part.callId ? " · " + part.callId : "");
+    el.appendChild(name);
+  }
+  const text = part.text || "";
+  const lines = text.split("\n");
+  if (lines.length > FOLD_LINES) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = lines.length + " lines — show all";
+    const pre = document.createElement("pre");
+    pre.textContent = text;
+    details.appendChild(summary);
+    details.appendChild(pre);
+    el.appendChild(details);
+    return el;
+  }
+  const pre = document.createElement("pre");
+  pre.textContent = text;
+  el.appendChild(pre);
+  return el;
+}
+
+function partBody(el) {
+  return el.querySelector("div") || el;
+}
+
+function clearEmpty() {
+  const empty = transcript.querySelector(".empty");
+  if (empty) empty.remove();
+}
+
+function appendEntry(entry) {
+  clearEmpty();
+  const el = entryNode(entry);
+  transcript.appendChild(el);
+  if (entry.id) nodes.set(entry.id, el);
+  stickToBottom();
+  return el;
+}
+
+// streamedEntry opens (or reuses) the assistant node a delta belongs to. The
+// server correlates deltas by prompt id, so one id is one turn.
+function streamedEntry(id, kind, title) {
+  let el = nodes.get(id);
+  if (!el) {
+    el = appendEntry({ id: id, kind: kind, title: title, parts: [] });
+  }
+  return el;
+}
+
+function lastPart(el, kind) {
+  const parts = el.querySelectorAll(".part." + kind);
+  const last = parts[parts.length - 1];
+  return last || null;
+}
+
+function appendText(el, kind, delta) {
+  let part = lastPart(el, kind);
+  if (!part) {
+    part = partNode({ kind: kind, text: "" });
+    partBody(el).appendChild(part);
+  }
+  const pre = part.querySelector("pre");
+  pre.textContent += delta;
+  stickToBottom();
+}
+
+function toolPart(el, kind, name, callId) {
+  let part = lastPart(el, kind);
+  if (!part || part.dataset.callId !== (callId || "")) {
+    part = partNode({ kind: kind, name: name, callId: callId, text: "" });
+    part.dataset.callId = callId || "";
+    partBody(el).appendChild(part);
+  }
+  return part;
+}
+
+function stickToBottom() {
+  const near = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
+  if (near) transcript.scrollTop = transcript.scrollHeight;
+}
+
+// --- state -----------------------------------------------------------------
+
+function renderState(st) {
+  if (!st) return;
+  if (st.title) $("title").textContent = st.title;
+  $("model").textContent = st.model || "";
+  $("cwd").textContent = st.cwd || "";
+  setRunning(!!st.running);
+}
+
+function setRunning(on) {
+  running = on;
+  $("abort").disabled = !on;
+  $("steer").disabled = !on;
+  $("send").textContent = on ? "Queue" : "Send";
+}
+
+function refreshState() {
+  api("/state").then(renderState).catch((e) => showError(e.message));
+}
+
+// --- transcript ------------------------------------------------------------
+
+function loadHistory() {
+  api("/history").then((doc) => {
+    transcript.innerHTML = "";
+    nodes.clear();
+    if (doc && doc.title) $("title").textContent = doc.title;
+    if (doc && doc.model) $("model").textContent = doc.model;
+    if (doc && doc.cwd) $("cwd").textContent = doc.cwd;
+    const entries = (doc && doc.entries) || [];
+    if (!entries.length) {
+      transcript.innerHTML = '<p class="empty">no turns yet — type below</p>';
+      return;
+    }
+    entries.forEach((e) => {
+      const el = entryNode(e);
+      transcript.appendChild(el);
+      if (e.id) nodes.set(e.id, el);
+    });
+    transcript.scrollTop = transcript.scrollHeight;
+  }).catch((e) => showError("history: " + e.message));
+}
+
+// --- the stream ------------------------------------------------------------
+// SSE is VOLATILE BY CONTRACT: the server fails a subscriber that falls behind
+// rather than buffering for it. So a dropped stream is not an error to hide —
+// the page says so, re-reads the durable transcript over /history, and
+// reconnects. Liveness comes from the stream; truth comes from the store.
+
+function connect() {
+  if (stream) stream.close();
+  conn.dataset.state = "connecting";
+  conn.textContent = "connecting…";
+  stream = new EventSource("/event?token=" + encodeURIComponent(TOKEN));
+
+  stream.addEventListener("server.connected", () => {
+    conn.dataset.state = "live";
+    conn.textContent = "live";
+    showError("");
+  });
+  stream.addEventListener("server.overflow", () => {
+    conn.dataset.state = "lost";
+    conn.textContent = "fell behind — reloading";
+    loadHistory();
+    refreshState();
+  });
+  stream.addEventListener("error", () => {
+    // EventSource retries on its own; the label is what tells the user the
+    // page is not live right now.
+    conn.dataset.state = "down";
+    conn.textContent = "reconnecting…";
+  });
+  stream.addEventListener("event", (msg) => handleEvent(JSON.parse(msg.data)));
+  stream.addEventListener("response", (msg) => handleResponse(JSON.parse(msg.data)));
+  stream.addEventListener("turn_end", () => {
+    setRunning(false);
+    refreshState();
+  });
+  stream.addEventListener("session_compact", (msg) => {
+    const before = JSON.parse(msg.data || "{}").tokensBefore || 0;
+    appendEntry({
+      kind: "compaction", title: "Compaction",
+      note: "summary replaces history; ~" + before + " tokens before", parts: [],
+    });
+  });
+  // A tool result arrives AFTER the assistant message that asked for it: the
+  // store keeps the call in the assistant entry and the result as its own
+  // entry, while the page renders one node per turn. The frame carries the
+  // prompt id the turn was started with, which is the key that node is under,
+  // so the result lands in the turn it belongs to and not in whichever turn
+  // happens to be newest.
+  stream.addEventListener("tool_result", (msg) => {
+    const frame = JSON.parse(msg.data);
+    const el = nodes.get(frame.id) || nodes.get(lastID) || lastAssistant();
+    if (!el) return;
+    (frame.parts || []).forEach((p) => partBody(el).appendChild(partNode(p)));
+    stickToBottom();
+  });
+}
+
+// lastAssistant is the fallback target for a frame whose prompt id is no
+// longer in the map (the page was reloaded mid-turn): the newest assistant
+// node is where a result belongs.
+function lastAssistant() {
+  const all = transcript.querySelectorAll(".entry.assistant");
+  return all.length ? all[all.length - 1] : null;
+}
+
+function handleEvent(frame) {
+  const ev = frame.event || {};
+  const el = streamedEntry(frame.id, "assistant", "Assistant");
+  switch (ev.type) {
+    case "start":
+      if (ev.model) $("model").textContent = ev.model;
+      setRunning(true);
+      break;
+    case "text_start":
+      appendText(el, "text", ev.snapshot || "");
+      break;
+    case "text_delta":
+      appendText(el, "text", ev.delta || "");
+      break;
+    case "thinking_start":
+      appendText(el, "thinking", ev.snapshot || "");
+      break;
+    case "thinking_delta":
+      appendText(el, "thinking", ev.delta || "");
+      break;
+    case "toolcall_start":
+      toolPart(el, "tool_call", ev.toolName || "tool", ev.toolCallId);
+      break;
+    case "toolcall_delta": {
+      const part = toolPart(el, "tool_call", ev.toolName || "tool", ev.toolCallId);
+      const pre = part.querySelector("pre") || part.appendChild(document.createElement("pre"));
+      pre.textContent += ev.partialJson || "";
+      break;
+    }
+    case "toolcall_end": {
+      const part = toolPart(el, "tool_call", ev.toolName || "tool", ev.toolCallId);
+      const pre = part.querySelector("pre");
+      if (pre) pre.textContent = ev.partialJson || pre.textContent;
+      break;
+    }
+    case "error":
+      appendEntry({ kind: "assistant", title: "Error", note: ev.error || "", parts: [] });
+      setRunning(false);
+      break;
+    case "done":
+      setRunning(false);
+      break;
+  }
+}
+
+function handleResponse(frame) {
+  const resp = frame.response || {};
+  lastID = frame.id || lastID;
+  if (resp && resp.error) {
+    showError(resp.error);
+  } else {
+    showError("");
+  }
+  setRunning(false);
+  refreshState();
+}
+
+// --- commands --------------------------------------------------------------
+
+function send() {
+  const text = promptBox.value.trim();
+  if (!text) return;
+  const steer = running;
+  promptBox.value = "";
+  autoGrow();
+  showError("");
+  const path = steer ? "/steer" : "/prompt";
+  const body = steer ? { text: text } : { id: "web-" + Date.now(), text: text };
+  if (!steer) {
+    // The turn's node is opened here so the first delta lands in it even
+    // before the server's start frame arrives.
+    streamedEntry(body.id, "assistant", "Assistant");
+    appendEntry({ kind: "user", title: "User", parts: [{ kind: "text", text: text }] });
+  }
+  api(path, { method: "POST", body: JSON.stringify(body) }).catch((e) => showError(e.message));
+}
+
+function abort() {
+  api("/abort", { method: "POST", body: "{}" }).catch((e) => showError(e.message));
+}
+
+$("send").addEventListener("click", send);
+$("abort").addEventListener("click", abort);
+$("steer").addEventListener("click", send);
+
+function autoGrow() {
+  promptBox.style.height = "auto";
+  promptBox.style.height = Math.min(promptBox.scrollHeight, 190) + "px";
+}
+
+promptBox.addEventListener("input", autoGrow);
+promptBox.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+
+loadHistory();
+refreshState();
+connect();
+</script>
+</body>
+</html>
