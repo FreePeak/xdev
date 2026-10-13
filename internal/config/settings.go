@@ -233,6 +233,16 @@ type GatewaySettings struct {
 	// ReplyChunk bounds one sendMessage in UTF-16 code units
 	// (Telegram's limit is 4096; 0 = 4000).
 	ReplyChunk int `yaml:"replyChunk"`
+	// Stream paints the answer into the chat while the turn runs — the
+	// first chunk creates the message and later chunks edit it — instead
+	// of holding it all back until the worker exits. Pointer for the same
+	// reason as Enabled: the zero-skip merge cannot tell "unset" from
+	// "off", and an operator who turned it off must stay off.
+	Stream *bool `yaml:"stream"`
+	// StreamIntervalMs is how often the preview is repainted. 0 = the
+	// 1.5s default; the floor is 250ms, because Telegram's limiter is per
+	// chat and a faster loop spends the turn being refused.
+	StreamIntervalMs int `yaml:"streamIntervalMs"`
 	// Model overrides the session model for gateway turns ("" = session).
 	Model string `yaml:"model"`
 }
@@ -322,6 +332,27 @@ func (s *Settings) GatewayReplyChunk() int {
 		return s.Gateway.ReplyChunk
 	}
 	return 4000
+}
+
+// GatewayStream reports whether a running turn paints its answer into the
+// chat (default ON). Nil-safe like GatewayEnabled: the pointer is how a user
+// who turned it off stays off.
+func (s *Settings) GatewayStream() bool {
+	return s == nil || s.Gateway.Stream == nil || *s.Gateway.Stream
+}
+
+// GatewayStreamInterval is the preview repaint cadence (default 1.5s). The
+// floor is 250ms — below that the loop spends the turn being refused by
+// Telegram's per-chat limiter, which is worse than a slower paint.
+func (s *Settings) GatewayStreamInterval() time.Duration {
+	if s != nil && s.Gateway.StreamIntervalMs > 0 {
+		d := time.Duration(s.Gateway.StreamIntervalMs) * time.Millisecond
+		if d < 250*time.Millisecond {
+			return 250 * time.Millisecond
+		}
+		return d
+	}
+	return 1500 * time.Millisecond
 }
 
 // HindsightSettings is the `hindsight` group (memory: hindsight). Every key
@@ -1761,6 +1792,15 @@ func (s *Settings) merge(layer *Settings) error {
 		// Same plain-bool rule as Advisor: only a layer that turns it ON
 		// contributes.
 		s.Gateway.AllowedAll = true
+	}
+	if layer.Gateway.Stream != nil {
+		s.Gateway.Stream = layer.Gateway.Stream
+	}
+	if layer.Gateway.StreamIntervalMs != 0 {
+		if layer.Gateway.StreamIntervalMs < 0 {
+			return fmt.Errorf("gateway.streamIntervalMs must be >= 0, got %d", layer.Gateway.StreamIntervalMs)
+		}
+		s.Gateway.StreamIntervalMs = layer.Gateway.StreamIntervalMs
 	}
 	if layer.Gateway.Workspace != "" {
 		s.Gateway.Workspace = layer.Gateway.Workspace

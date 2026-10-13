@@ -3714,3 +3714,18 @@ Verified live end to end on this worktree (`internal/testimpact`, real `git`, re
 
 *Two pre-existing failures in `internal/tool` (`TestGlobMatchesRecursivePattern`, the three scan-cache invalidation tests) and one flaky `internal/browser` launch test are unrelated to this change and reproduce on clean `origin/main` (`ff419be`).*
 
+
+---
+
+*Last updated: 2026-10-13 (`feat/gateway-stream` — the next slice of the gateway parity goal: "port fully feature of the hermes gateway to my xdev gateway").* **The chat's answer now arrives while it is being written.** Before this, a Telegram turn was silent for its whole duration (a two-minute run was two minutes of nothing) and then landed as a run of 4096-character bubbles. Now the answer grows in ONE message: the first chunk `sendMessage`s it, later chunks `editMessageText` the same id every `gateway.streamIntervalMs` (default 1.5s), and the finished answer is edited INTO that message with any overflow as follow-ups.
+
+**Why stdout had to be split from stderr first.** The worker's two streams shared one `ringBuffer`, so the answer could not be told from the narration around it — the very thing a preview must never show. `spawn` now tees **stdout** into a preview (`io.MultiWriter` beside the existing ring buffer) and keeps a second buffer for stderr, which stays the diagnostics window and where the model-switch notice is read from. `logTail` is the concatenation, so the switch caption and the failure message are unchanged.
+
+- **A preview that outgrows 4096 UTF-16 units is CUT, not split** (`previewText`): splitting moves the edit target to a new message id and the next tick re-edits the whole text into it — the duplication loop Hermes documents at `adapter.py:3880`. The finished answer is split properly in `deliver`, where there is no next tick.
+- **One 429 ends the preview** and the answer still arrives when the turn ends. Hermes backs the interval off instead (`stream_consumer_transport.py:586`) — named in the code as the upgrade path, not built.
+- **Three 400s are success, not failure** (`isStaleEdit`): "message is not modified", a deleted message, an edit past the window. Anything else still surfaces.
+- **An identical final edit is skipped**: when the last paint already showed the whole answer, Telegram would answer that edit with "message is not modified", so `deliver` makes no call at all.
+- **The switch caption rides the same message as the answer** — a separate bubble would read as a second event.
+- **`gateway.stream: false`** restores the previous behaviour exactly (the preview is not even created). `gateway.streamIntervalMs` is the cadence, floored at 250ms because below that the loop spends the turn being rate-limited.
+
+**Verified against the built binary, not only in tests.** `go test -race ./internal/gateway/ ./internal/config/` green, plus `scripts/gateway-stream-drive.py`, which stands up a fake Bot API *and* a streaming openai-completions provider, runs the real `xdev gateway run`, and asserts on the recorded Bot API calls (one `sendMessage`, ≥2 `editMessageText` all addressing that message id, the final edit carrying the whole answer). Recorded run: `sendMessage=1 editMessageText=3`, final body `Fleet status / xdev 7 commits / be 3 commits / done.`, one message id throughout. The script is hermetic (`XDEV_AGENT_DIR` in a temp dir) and uses an invented token and provider key.

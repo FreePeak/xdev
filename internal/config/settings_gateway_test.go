@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestGatewaySettings pins the `gateway:` group end to end: an absent group
@@ -34,6 +35,8 @@ func TestGatewaySettings(t *testing.T) {
 		"  workspace: /tmp/gateway-ws",
 		"  replyChunk: 3500",
 		"  pollTimeout: 30",
+		"  stream: false",
+		"  streamIntervalMs: 2500",
 	}, "\n")
 	if err := os.WriteFile(overlay, []byte(body+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -56,6 +59,37 @@ func TestGatewaySettings(t *testing.T) {
 	}
 	if got := on.GatewayPollTimeout(); got != 30 {
 		t.Errorf("pollTimeout = %d, want 30", got)
+	}
+	// Streaming is ON unless a layer turns it off: an operator who wants the
+	// old "one reply at the end" behaviour sets it false, and the pointer is
+	// what makes that distinguishable from "unset".
+	if on.GatewayStream() {
+		t.Error("gateway.stream: false did not land — the choice would be ignored")
+	}
+	if got := on.GatewayStreamInterval(); got != 2500*time.Millisecond {
+		t.Errorf("streamIntervalMs = %s, want 2.5s", got)
+	}
+	fresh, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatalf("load fresh: %v", err)
+	}
+	if !fresh.GatewayStream() {
+		t.Error("streaming must default ON — the phone should see the answer grow")
+	}
+	if got := fresh.GatewayStreamInterval(); got != 1500*time.Millisecond {
+		t.Errorf("default stream interval = %s, want 1.5s", got)
+	}
+	// The floor: a sub-250ms cadence spends the turn being rate-limited.
+	fast := filepath.Join(t.TempDir(), "fast.yml")
+	if err := os.WriteFile(fast, []byte("gateway:\n  streamIntervalMs: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clamped, err := LoadSettings(cwd, []string{fast})
+	if err != nil {
+		t.Fatalf("load fast: %v", err)
+	}
+	if got := clamped.GatewayStreamInterval(); got != 250*time.Millisecond {
+		t.Errorf("a 1ms cadence was not clamped to the 250ms floor, got %s", got)
 	}
 
 	// Env override: how a supervisor authorizes a daemon without editing

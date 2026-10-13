@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,13 +19,22 @@ import (
 type fakeBot struct {
 	mu    sync.Mutex
 	token string
-
 	// updates are served one per getUpdates call.
 	updates []Update
 	// sent records (chatID, text) per sendMessage.
 	sent []sentMsg
+	// sentIDs is the message_id each sendMessage answered with, in order —
+	// the edit target the preview stores.
+	sentIDs []int64
+	// edited records every editMessageText the client sent.
+	edited []editedMsg
+	// editFails forces a per-method refusal, e.g. {"editMessageText": "…"}.
+	editFails map[string]string
 	// actions records (chatID, action) per sendChatAction.
 	actions []sentAction
+	// sendStdout is unused by the API itself; it is where a test records the
+	// answer its stand-in worker would print.
+	sendStdout string
 	// failAfter makes sendMessage fail once this many messages have been
 	// sent (0 = never fail), which is how a partial send is tested.
 	failAfter int
@@ -40,14 +50,26 @@ type fakeBot struct {
 	lastOffset  int64
 	lastTimeout int
 
+	// srv is the httptest server the handlers are mounted on.
 	srv *httptest.Server
 }
 
+// sentMsg is one recorded sendMessage: which chat, and the body it carried.
 type sentMsg struct {
 	Chat int64
 	Text string
 }
 
+// editedMsg is one recorded editMessageText: the message it addressed and the
+// body it carried — the pair the preview tests assert on.
+type editedMsg struct {
+	Chat      int64
+	MessageID int64
+	Text      string
+}
+
+// sentAction is one recorded sendChatAction: the typing bubble the bridge
+// keeps alive while a turn runs.
 type sentAction struct {
 	Chat   int64
 	Action string
@@ -128,9 +150,36 @@ func newFakeBot(t *testing.T) *fakeBot {
 			return
 		}
 		b.sent = append(b.sent, sentMsg{Chat: payload.ChatID, Text: payload.Text})
-		n := len(b.sent)
+		id := int64(1000 + len(b.sent))
+		b.sentIDs = append(b.sentIDs, id)
 		b.mu.Unlock()
-		writeOK(w, map[string]any{"message_id": int64(n)})
+		writeOK(w, map[string]any{"message_id": id})
+	})
+	mux.HandleFunc("/bot"+b.token+"/editMessageText", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			ChatID    int64  `json:"chat_id"`
+			MessageID int64  `json:"message_id"`
+			Text      string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.mu.Lock()
+		if desc := b.editFails["editMessageText"]; desc != "" {
+			b.mu.Unlock()
+			code := http.StatusBadRequest
+			if strings.HasPrefix(desc, "Too Many") {
+				code = http.StatusTooManyRequests
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":` + strconv.Itoa(code) + `,"description":"` + desc + `"}`))
+			return
+		}
+		b.edited = append(b.edited, editedMsg{Chat: payload.ChatID, MessageID: payload.MessageID, Text: payload.Text})
+		b.mu.Unlock()
+		writeOK(w, map[string]any{"message_id": payload.MessageID})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -182,6 +231,23 @@ func (b *fakeBot) sentAll() []sentMsg {
 	return append([]sentMsg(nil), b.sent...)
 }
 
+// sentID is the message_id the nth sendMessage answered with.
+func (b *fakeBot) sentID(n int) int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n < len(b.sentIDs) {
+		return b.sentIDs[n]
+	}
+	return 0
+}
+
+// editedAll is every editMessageText the client sent, in order: the preview
+// sequence the streaming tests assert on.
+func (b *fakeBot) editedAll() []editedMsg {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]editedMsg(nil), b.edited...)
+}
 func (b *fakeBot) url() string { return b.srv.URL }
 
 // conflictCount is how many 409s the fake bot has served (mutex-guarded read,

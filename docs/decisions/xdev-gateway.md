@@ -98,13 +98,33 @@ fresh install gets memory growth for free.
 ## 4. What this deliberately does NOT do (and why)
 
 - **No webhook mode.** Long polling needs no public URL, no TLS, no cert.
-- **No event streaming into the chat.** Print mode's reply arrives when the
-  turn ends; Hermes' edit-message streaming is a nice-to-have that doubles the
-  Bot API surface. `ponytail:` if this ships, it is a `sendMessage` per N
-  seconds replaced by `editMessageText`, ~20 lines behind the existing sender.
-- **No message editing, but yes the typing bubble.** The chat gets no
-  partial-answer edits (above), yet it is never left looking idle: while a
-  turn runs the daemon re-posts `sendChatAction` every 2s
+- **Streaming into the chat — SHIPPED 2026-10-13.** The `ponytail:` above was
+  the right forecast and the wrong size: the preview is `internal/gateway/stream.go`
+  (`preview` + `runPreview` + `deliver`), plus `SendMessageID`/`EditMessageText`
+  on the client. The worker's **stdout** is teed into a preview (`io.MultiWriter`
+  with the existing ring buffer) and painted into ONE message: the first chunk
+  `sendMessage`s it, later chunks `editMessageText` the same id at most every
+  `gateway.streamIntervalMs` (default 1.5s — Hermes' `DEFAULT_STREAMING_EDIT_INTERVAL`
+  is 0.8s, its turn runner uses 1.5s), and the finished answer is edited INTO
+  that message with any overflow as follow-ups. stderr is untouched: it stays
+  the diagnostics buffer and the place a model-switch notice is read from.
+  - Why stdout and not the ring buffer: the old single buffer held both streams,
+    so an answer could not be told from narration. Splitting them is what makes
+    "paint only what the model said" true by construction.
+  - A preview that outgrows 4096 UTF-16 units is CUT with a marker, never split:
+    splitting moves the edit target, and the next tick re-edits the whole text
+    into the new message — the duplication loop Hermes documents at
+    `adapter.py:3880`. The finished answer is split properly, where there is no
+    next tick.
+  - One 429 ends the preview (`flooded`): Telegram's limiter is per chat and
+    editing into it escalates the penalty. Hermes backs the interval off instead
+    (`stream_consumer_transport.py:586`) — the upgrade path if this ever trips.
+  - Three 400s are success, not failure: "message is not modified" (the text is
+    already on screen), a deleted message, and one past the edit window.
+  - `gateway.stream: false` restores the old behaviour exactly (one reply at the
+    end); the preview is not even created, so no API call changes.
+- **No message editing beyond the answer itself, but yes the typing bubble.**
+  While a turn runs the daemon re-posts `sendChatAction` every 2s
   (`startTyping`, `gateway.go`), the same keepalive Hermes' gateway runs.
   Cheap (one small POST per 2s), non-fatal on failure, and it stops with the
   worker — `/stop` included. Shipped 2026-10-11.
@@ -118,11 +138,11 @@ fresh install gets memory growth for free.
 
 | File | Role |
 |---|---|
-| `internal/gateway/telegram.go` | Bot API client: `getUpdates`, `sendMessage`, UTF-16 chunking |
-| `internal/gateway/lease.go` | per-chat lease, fail-closed |
-| `internal/gateway/session.go` | chat → session id map, one JSON file on disk |
-| `internal/gateway/daemon.go` | the run loop |
+| `internal/gateway/telegram.go` | Bot API client: `getUpdates`, `sendMessage`/`SendMessageID`, `editMessageText`, `sendChatAction`, UTF-16 chunking |
+| `internal/gateway/stream.go` | the answer preview: tee the worker's stdout, paint one message, finish it in place |
+| `internal/gateway/chats.go` | per-chat lease, session pointer, model pin |
+| `internal/gateway/gateway.go` | the run loop, the worker spawn, the reply path |
 | `internal/gateway/setup.go` | installer (config + launchd/systemd unit) |
-| `internal/gateway/*_test.go` | httptest Bot API server, chunking, lease, allowlist |
+| `internal/gateway/*_test.go` | httptest Bot API server, chunking, lease, allowlist, preview |
 | `cmd/xdev/gatewaycmd.go` | the `xdev gateway` subcommand |
 | `internal/config/settings.go` | the `gateway:` group + merge arm |

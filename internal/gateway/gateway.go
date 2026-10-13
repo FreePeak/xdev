@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +79,13 @@ type Daemon struct {
 	allowAll  bool
 	workspace string
 	chunk     int
+	// stream paints the answer into the chat while the turn runs
+	// (gateway.stream; ON unless turned off).
+	stream bool
+	// streamEvery is how often a running turn repaints its preview (0 =
+	// streamInterval). A field so a test drives the loop without waiting
+	// the production 1.5s per paint.
+	streamEvery time.Duration
 	// model is the daemon-wide default ref for gateway turns ("" = the run's
 	// configured default). A chat's own /model overrides it.
 	model string
@@ -149,19 +157,21 @@ func NewDaemon(opts Options) (*Daemon, error) {
 		ws = "."
 	}
 	return &Daemon{
-		tg:        &Telegram{Token: token, BaseURL: opts.BaseURL, Logf: opts.Logf},
-		cfg:       s,
-		chats:     chats,
-		exe:       exe,
-		dataDir:   opts.DataDir,
-		version:   opts.Version,
-		logf:      opts.Logf,
-		allow:     s.GatewayAllowedChats(),
-		allowAll:  s.GatewayAllowAll(),
-		workspace: ws,
-		chunk:     s.GatewayReplyChunk(),
-		model:     strings.TrimSpace(s.Gateway.Model),
-		models:    config.LoadModelsLayered,
+		tg:          &Telegram{Token: token, BaseURL: opts.BaseURL, Logf: opts.Logf},
+		cfg:         s,
+		chats:       chats,
+		exe:         exe,
+		dataDir:     opts.DataDir,
+		version:     opts.Version,
+		logf:        opts.Logf,
+		allow:       s.GatewayAllowedChats(),
+		allowAll:    s.GatewayAllowAll(),
+		workspace:   ws,
+		chunk:       s.GatewayReplyChunk(),
+		stream:      s.GatewayStream(),
+		streamEvery: s.GatewayStreamInterval(),
+		model:       strings.TrimSpace(s.Gateway.Model),
+		models:      config.LoadModelsLayered,
 	}, nil
 }
 
@@ -437,7 +447,28 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 	d.logFn("gateway: chat %d turn started (pid %d, session %s)", chat, w.pid, orNew(sessionID))
 
 	stopTyping := startTyping(ctx, d.tg, chat, w.done, typingInterval)
+	// The answer is painted into the chat while it is written, so a slow
+	// turn shows its progress instead of a silent chat and a wall of
+	// 4096-character bubbles at the end. The preview stops with the worker
+	// (w.done), and the finished answer is delivered after it. With
+	// gateway.stream off there is no preview at all: the answer arrives
+	// whole, which is what an operator who turned it off asked for.
+	var pv *preview
+	stopPreview := make(chan struct{})
+	var previewDone sync.WaitGroup
+	if d.stream {
+		pv = w.preview
+	}
+	if pv != nil {
+		previewDone.Add(1)
+		go func() {
+			defer previewDone.Done()
+			d.runPreview(ctx, chat, pv, stopPreview, w.done)
+		}()
+	}
 	res := w.wait()
+	close(stopPreview)
+	previewDone.Wait()
 	stopTyping()
 	d.chats.AttachWorker(chat, nil)
 	if sessionID == "" {
@@ -467,10 +498,10 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 	// itself, so the answer is never attributed to the model they pinned.
 	if req, served, ok := ai.ParseModelSwitchNotice(res.logTail); ok {
 		d.applyModelBadge(ctx, served)
-		_ = d.reply(ctx, chat, switchCaption(req, served)+"\n\n"+res.answer)
+		_ = d.deliver(ctx, chat, pv, switchCaption(req, served), res.answer)
 		return
 	}
-	_ = d.reply(ctx, chat, res.answer)
+	_ = d.deliver(ctx, chat, pv, "", res.answer)
 }
 
 // switchCaption is the one line a switched answer is prefixed with. The
@@ -548,12 +579,14 @@ func (d *Daemon) dataDirOf() string { return d.dataDir }
 
 // --- worker -----------------------------------------------------------------
 
-// worker is a detached `xdev print` child running one chat turn.
 type worker struct {
 	pid  int
 	done chan struct{}
 	mu   sync.Mutex
 	res  workerResult
+	// preview is the live view of this worker's stdout, painted into the
+	// chat while the turn runs (nil only for a hand-built test worker).
+	preview *preview
 }
 
 type workerResult struct {
@@ -629,9 +662,9 @@ func (w *worker) finish(res workerResult) {
 	close(w.done)
 }
 
-// spawn launches one print-mode turn. Output is captured, not streamed: a
-// chat wants the finished answer, and one send cannot interleave two turns'
-// partial text.
+// spawn launches one print-mode turn. Its stdout is the answer and is
+// painted into the chat while it is written (the preview); its stderr is
+// narration for the failure message, never for the answer.
 func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, error) {
 	// The model's answer must be the ONLY thing on stdout: the gateway
 	// forwards that stream verbatim to the chat, so thinking, banner lines
@@ -677,25 +710,36 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 		// A detached worker must not inherit a TTY sense of "interactive".
 		"TERM=dumb",
 	)
-	// stdout and stderr share one bounded buffer: the answer goes to the
-	// chat and the diagnostics to the failure message, so both are needed,
-	// and a worker that prints without bound must not grow an unbounded one.
-	// The cap drops the OLDEST bytes, so the answer (written last) survives
-	// and the prelude is what is lost.
-	var buf ringBuffer
-	buf.limit = workerOutputCap
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = &buf, &buf, nil
+	// Two bounded buffers, each capped the same way and each dropping the
+	// OLDEST bytes: `all` is both streams (the failure message's window, and
+	// where the model-switch notice on stderr is found) and `out` is stdout
+	// alone — the answer, which is what the chat is shown. A worker that
+	// prints without bound must not grow an unbounded buffer.
+	var all, out ringBuffer
+	all.limit, out.limit = workerOutputCap, workerOutputCap
+	var pv *preview
+	if d.stream {
+		pv = newPreview()
+		cmd.Stdout = io.MultiWriter(&out, previewWriter{pv})
+	} else {
+		cmd.Stdout = &out
+	}
+	cmd.Stderr = &all
+	cmd.Stdin = nil
 	cmd.SysProcAttr = sysProcAttr()
 
-	w := &worker{pid: -1, done: make(chan struct{})}
+	w := &worker{pid: -1, done: make(chan struct{}), preview: pv}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	w.pid = cmd.Process.Pid
 	go func() {
 		werr := cmd.Wait()
-		out := strings.TrimSpace(buf.String())
-		res := workerResult{answer: out, logTail: tail(out, workerLogTail)}
+		answer := strings.TrimSpace(out.String())
+		res := workerResult{
+			answer:  answer,
+			logTail: tail(strings.TrimSpace(all.String()+"\n"+answer), workerLogTail),
+		}
 		if werr != nil {
 			res.exit = -1
 			var ee *exec.ExitError
@@ -706,6 +750,17 @@ func (d *Daemon) spawn(sessionID string, chat int64, text string) (*worker, erro
 		w.finish(res)
 	}()
 	return w, nil
+}
+
+// previewWriter is the stdout half of a worker's output: it feeds the
+// preview so the chat can be painted while the turn runs. It never fails a
+// write — the answer also goes to the ring buffer, and a preview that cannot
+// be painted costs progress, not the answer.
+type previewWriter struct{ p *preview }
+
+func (w previewWriter) Write(b []byte) (int, error) {
+	w.p.write(string(b))
+	return len(b), nil
 }
 
 // workerLogTail bounds how much of a failed turn's output is sent back: a

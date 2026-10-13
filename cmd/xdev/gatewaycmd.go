@@ -50,9 +50,9 @@ const gatewayUsage = `xdev gateway — talk to xdev from Telegram
   xdev gateway send <chat> <text>   send a message without the model (test)
 
 Config lives in ` + "`gateway:`" + ` in config.yml (allowedChats, allowedAll,
-workspace, pollTimeout, leaseWait, replyChunk, model). The bot token never
-does: it comes from TELEGRAM_BOT_TOKEN or <data dir>/gateway.token (0600),
-which ` + "`xdev gateway setup`" + ` writes.
+workspace, pollTimeout, leaseWait, replyChunk, stream, streamIntervalMs, model).
+The bot token never does: it comes from TELEGRAM_BOT_TOKEN or
+<data dir>/gateway.token (0600), which ` + "`xdev gateway setup`" + ` writes.
 `
 
 func runGateway(args []string, version string) int {

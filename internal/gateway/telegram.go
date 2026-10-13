@@ -262,21 +262,78 @@ func (t *Telegram) GetUpdates(ctx context.Context, offset int64, timeout int) ([
 // form, the same text is resent with parse_mode omitted. The phone renders
 // it as text — a plain answer beats a lost one.
 func (t *Telegram) SendMessage(ctx context.Context, chatID int64, text string) error {
+	_, err := t.SendMessageID(ctx, chatID, text)
+	return err
+}
+
+// SendMessageID is SendMessage returning the message id, which is what a
+// streaming preview needs: the id IS the edit target for every later chunk.
+func (t *Telegram) SendMessageID(ctx context.Context, chatID int64, text string) (int64, error) {
 	rendered := ToTelegramHTML(text)
 	payload := map[string]any{"chat_id": chatID, "text": rendered, "parse_mode": "HTML"}
 	var sent SentMessage
 	err := t.call(ctx, "sendMessage", payload, &sent)
 	if err == nil {
-		return nil
+		return sent.MessageID, nil
 	}
 	if !isParseError(err) {
-		return err
+		return 0, err
 	}
 	// The API rejected the parsed form. Resend the same text as plain text;
 	// a readable answer matters more than its formatting.
 	t.logf("telegram: %v; resending as plain text", err)
 	plain := map[string]any{"chat_id": chatID, "text": text}
-	return t.call(ctx, "sendMessage", plain, &sent)
+	if err := t.call(ctx, "sendMessage", plain, &sent); err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
+}
+
+// EditMessageText rewrites one message in place — the streaming preview's
+// whole mechanism, and the reason a long answer does not arrive as a run of
+// separate bubbles.
+//
+// Three answers are NOT failures and must not be logged as ones:
+// "message is not modified" (the same text was already painted — the common
+// case when a tick fires between two tokens), a message the operator deleted
+// by hand, and a message too old to edit. All three are Telegram 400s whose
+// only honest response is to leave the chat alone; the finished answer is
+// delivered by a fresh send at the end of the turn either way.
+func (t *Telegram) EditMessageText(ctx context.Context, chatID, messageID int64, text string) error {
+	rendered := ToTelegramHTML(text)
+	payload := map[string]any{
+		"chat_id": chatID, "message_id": messageID,
+		"text": rendered, "parse_mode": "HTML",
+	}
+	err := t.call(ctx, "editMessageText", payload, nil)
+	if err == nil || isStaleEdit(err) {
+		return nil
+	}
+	if !isParseError(err) {
+		return err
+	}
+	t.logf("telegram: %v; resending the edit as plain text", err)
+	plain := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
+	err = t.call(ctx, "editMessageText", plain, nil)
+	if isStaleEdit(err) {
+		return nil
+	}
+	return err
+}
+
+// isStaleEdit reports the 400s that mean "this edit has nothing to do": the
+// text is already there, the message is gone, or it is past Telegram's edit
+// window. None of them is worth retrying or reporting.
+func isStaleEdit(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != http.StatusBadRequest {
+		return false
+	}
+	d := strings.ToLower(api.Description)
+	return strings.Contains(d, "not modified") ||
+		strings.Contains(d, "message to edit not found") ||
+		strings.Contains(d, "message can't be edited") ||
+		strings.Contains(d, "message is too old")
 }
 
 // SendPhoto sends one JPEG with an optional caption. Used for the per-model
