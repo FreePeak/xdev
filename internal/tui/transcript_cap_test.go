@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -215,14 +216,23 @@ func TestCompactCollapsesOutputAndKeepsTheSpine(t *testing.T) {
 	}
 
 	app.SetCompact(true)
-	// A reasoning box is a fixed frame either way (top rule, body, bottom
-	// rule): what compact mode changes is the BODY inside it, and the notice
-	// the box prints says how many rows went.
-	if got := len(rowsOfBlock(app, kindIndex(app, KindThinking))); got > fullThinking {
-		t.Fatalf("compact reasoning box grew: %d rows, full was %d", got, fullThinking)
+	// The reasoning box is EXEMPT: the mode never touches it. Collapsed it is
+	// one row — the newest thought — in either mode, and compact mode used to
+	// replace that row with a "… N rows hidden" notice at exactly the same
+	// height (measured: frame + one body row + frame, both ways), so the mode
+	// bought nothing and cost the reader the only line they came for. A long
+	// session therefore showed no thought anywhere.
+	if got, want := len(rowsOfBlock(app, kindIndex(app, KindThinking))), fullThinking; got != want {
+		t.Fatalf("compact mode changed the reasoning box: %d rows, full was %d", got, want)
 	}
 	if thinkRowsOf(app, kindIndex(app, KindThinking)) == 0 {
 		t.Fatal("the fixture's reasoning box has no body to hide")
+	}
+	// One line is still a button: the click's half of Ctrl+O does not depend
+	// on the notice, it reads the block's own render (collapsedAt).
+	box := rowsOfBlock(app, kindIndex(app, KindThinking))
+	if !strings.Contains(strings.Join(box, "\n"), "reasoning line two") {
+		t.Fatalf("the one thinking line is not the newest thought:\n%s", strings.Join(box, "\n"))
 	}
 	if got := len(rowsOfBlock(app, kindIndex(app, KindToolDone))); got >= fullResult {
 		t.Fatalf("compact result box rendered %d rows, full was %d", got, fullResult)
@@ -233,11 +243,6 @@ func TestCompactCollapsesOutputAndKeepsTheSpine(t *testing.T) {
 		if got := len(rowsOfBlock(app, kindIndex(app, k))); got != want {
 			t.Fatalf("compact mode changed a %v block: %d rows, want %d", k, got, want)
 		}
-	}
-	// The collapsed rows are buttons: they say so.
-	box := rowsOfBlock(app, kindIndex(app, KindThinking))
-	if !strings.Contains(strings.Join(box, "\n"), "hidden (Ctrl+O to expand)") {
-		t.Fatalf("compact reasoning box lost its notice:\n%s", strings.Join(box, "\n"))
 	}
 	call := rowsOfBlock(app, kindIndex(app, KindTool))
 	if len(call) != 1 {
@@ -343,6 +348,49 @@ func TestClickCollapsedRowExpandsIt(t *testing.T) {
 	}
 }
 
+// The click freeze, driven through the real event path: handleKey takes a.mu
+// around handleMouse (app.go), and expandBox — the box's own half of that
+// click — took it AGAIN, so the UI loop deadlocked against itself. Seven
+// recorded stalls (dumps/tui-stall-*.txt, from 2026-10-12T16:44 on) sit inside
+// expandBox -> sync.Mutex.Lock, and the user saw it as "the whole TUI and its
+// terminal freeze when I click a box". A bounded goroutine is what makes the
+// deadlock a failure rather than a hung test binary.
+func TestClickOnACollapsedBoxDoesNotDeadlock(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	defer scr.Fini()
+	compactFill(app)
+	app.SetCompact(true)
+	app.draw()
+
+	app.mu.Lock()
+	bi := kindIndex(app, KindToolDone)
+	top, _ := app.selViewport()
+	y := app.transcriptTop() + int(app.rowIdx.start[bi]) - top
+	app.mu.Unlock()
+	if y < app.transcriptTop() || y >= app.transcriptTop()+app.viewportLinesLocked() {
+		t.Skipf("the result box is off screen (row %d)", y)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// The real path: handleKey, which is where the wrapping lock lives.
+		app.handleKey(tcell.NewEventMouse(8, y, tcell.Button1, tcell.ModNone))
+		app.handleKey(tcell.NewEventMouse(8, y, tcell.ButtonNone, tcell.ModNone))
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the click deadlocked: expandBox took a.mu its caller already holds")
+	}
+	app.mu.Lock()
+	expanded := app.blocks[kindIndex(app, KindToolDone)].Expanded
+	app.mu.Unlock()
+	if !expanded {
+		t.Fatal("the click returned but never expanded the box")
+	}
+}
+
 // The auto latch must not oscillate. Its input is the row count with the mode
 // OFF (App.compactFullRows): the mode shrinks the very number the threshold
 // compares, so a latch that read the total it had just laid out flipped on
@@ -392,17 +440,17 @@ func wrapHeavyCalls(app *App, n int) {
 	}
 }
 
-// Ctrl+O opens a reasoning box in compact mode exactly as it opens a result:
-// the transcript-wide mode and the per-block state are independent, and a
-// compact box that ignored Expanded painted the notice it was told to dismiss.
-func TestCompactThinkingCtrlOOpensTheBody(t *testing.T) {
+// The one thinking line survives compact mode, and Ctrl+O still opens the box
+// past it: the transcript-wide mode never reaches a reasoning block, and the
+// per-block state is the only thing that changes its height.
+func TestCompactKeepsTheThinkingLine(t *testing.T) {
 	app := idxApp(120, 40)
 	compactFill(app)
 	app.SetCompact(true)
 	i := kindIndex(app, KindThinking)
 	collapsed := rowsOfBlock(app, i)
-	if !strings.Contains(strings.Join(collapsed, "\n"), "hidden (Ctrl+O to expand)") {
-		t.Fatalf("setup: the compact reasoning box is not collapsed:\n%s", strings.Join(collapsed, "\n"))
+	if !strings.Contains(strings.Join(collapsed, "\n"), "reasoning line two") {
+		t.Fatalf("compact mode hid the one thinking line:\n%s", strings.Join(collapsed, "\n"))
 	}
 	app.mu.Lock()
 	app.blocks[i].Expanded = true
