@@ -1459,15 +1459,22 @@ func (a *App) ToggleBoxExpand() bool {
 // on Block.Expanded, so the two cannot disagree about what "open" means, and
 // neither knows or cares whether the row was collapsed by compact mode or by
 // the trim window.
+//
+// Caller holds a.mu: its one caller is the no-motion release in selection.go,
+// which runs inside handleMouse with the lock already taken (app.go's mouse
+// branch). Taking it again here deadlocked the UI loop against itself — seven
+// recorded stalls (dumps/tui-stall-*.txt, from 2026-10-12T16:44 on) sit inside
+// expandBox -> sync.Mutex.Lock while the loop's own turn goroutine waited on
+// the same mutex, which is the "the whole TUI and its terminal freeze when I
+// click a box" report. The poke is the only part that wants the lock's absence,
+// so it is the only part that runs without it.
 func (a *App) expandBox(i int) {
-	a.mu.Lock()
 	if i >= 0 && i < len(a.blocks) {
 		switch a.blocks[i].Kind {
 		case KindThinking, KindToolDone:
 			a.blocks[i].Expanded = true
 		}
 	}
-	a.mu.Unlock()
 	a.poke()
 }
 
@@ -4264,18 +4271,16 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		if !a.showThinking {
 			break
 		}
-		// Compact mode keeps the reasoning box's frame — the turn's own shape,
-		// and what the click expands — and drops its body: one row saying how
-		// much was hidden. The header (the spinner, "Thought for Xs") is the
-		// block's state, so it stays. Ctrl+O (Block.Expanded) outranks the mode
-		// exactly as it does for a result box: a compact box has no body to
-		// drop, so one that ignored Expanded kept painting the very notice the
-		// click had just dismissed — the one box in the transcript whose
-		// affordance did nothing.
-		if a.compact && !b.Expanded {
-			lines = a.thinkBoxCompact(i, b, w)
-			break
-		}
+		// The box's height is the FOCUS, never the transcript's compact mode:
+		// collapsed it is one row — the newest thought — and a click grows it
+		// to thinkBoxRows (thinkBoxLines). Compact mode used to send this
+		// block to its own renderer, which replaced that one row with a
+		// "… N rows hidden" notice: the box was the same three rows tall
+		// either way (measured — frame, one body row, frame), so the mode
+		// bought nothing and cost the reader the only line they came for. A
+		// long session therefore hid its reasoning behind a notice about
+		// hiding it, in every box, with the newest thought nowhere on screen.
+		// The one thinking line is shown NO MATTER WHAT the mode says.
 		lines = a.thinkBoxLines(i, b, w)
 	case KindTool:
 		// omp's call row: state bullet, bold tool name, and the naming
@@ -4635,55 +4640,6 @@ func (a *App) thinkBoxLines(i int, b *Block, w int) []line {
 		out = append(out, boxRow(box, border, bodySt, wl, inner))
 	}
 	return append(out, boxBottom(box, border, w))
-}
-
-// thinkBoxCompact is the reasoning box in compact mode: the same frame and the
-// same state header as the full box, with one row standing in for the body.
-// The row counts what it hides and names the way to open it, so the box is a
-// button rather than a box that lost its text — the collapsedAt hit-test reads
-// exactly this notice back to decide a click expands it.
-//
-// The body is measured, not printed: thinkRows is what the full box wraps, and
-// its length is the honest "how much is behind this row".
-//
-// A box the user opened (Ctrl+O, Block.Expanded) never reaches here: the
-// caller keeps the full box for it, so the per-block state and the
-// transcript-wide mode stay independent. This is the collapsed render.
-func (a *App) thinkBoxCompact(i int, b *Block, w int) []line {
-	box := a.th.Box()
-	focused := i == a.thinkFocus
-	border := tcell.StyleDefault.Foreground(a.cellColor(theme.ThinkFrame(a.th)))
-	if focused {
-		border = border.Bold(true)
-	}
-	bodySt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
-	inner := max(1, w-4)
-
-	hdr := "Thought"
-	switch {
-	case b.stream:
-		hdr = a.spinFrame() + " Thinking…"
-	case b.thinkDur > 0:
-		hdr = fmt.Sprintf("Thought for %.1fs", b.thinkDur.Seconds())
-	}
-	body := strings.TrimRight(b.Text, "\n")
-	if junkThinking(body) {
-		return []line{
-			boxTop(box, border, hdr, w),
-			boxRow(box, border, bodySt, junkReasoningNotice, inner),
-			boxBottom(box, border, w),
-		}
-	}
-	n := len(a.thinkRows(b, w))
-	notice := "… hidden (Ctrl+O to expand)"
-	if n > 0 {
-		notice = fmt.Sprintf("… %d rows hidden (Ctrl+O to expand)", n)
-	}
-	return []line{
-		boxTop(box, border, hdr, w),
-		boxRow(box, border, bodySt, notice, inner),
-		boxBottom(box, border, w),
-	}
 }
 
 // thinkBoxAt names the reasoning block painted on screen row y, or -1 when that
