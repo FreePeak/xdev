@@ -430,9 +430,8 @@ type App struct {
 	// the moment a pass moves nothing, which is what lets the next trim speak.
 	trimNoticeOn bool
 
-	sheenPhase int // welcome logo sheen sweep position (columns)
 	// animTick counts loop ticks since the last animation frame, so the
-	// spinner and the sheen advance on animEvery rather than on every tick.
+	// spinner advances on animEvery rather than on every tick.
 	animTick int
 	// startupNotice is a line of the welcome screen's own chrome — what
 	// loaded, what broke (#272). It is deliberately NOT a transcript block:
@@ -1861,11 +1860,10 @@ func (a *App) markRun(r bool) {
 // (markComposerDirty, by design). So the animations advance on animEvery ticks
 // instead of on every tick, and the frame they earn is the frame that paints.
 //
-// The sheen is not merely slowed but BOUNDED: it sweeps once and settles, so a
-// session left open on the start screen reaches true idle instead of animating
-// a logo forever. The spinner cannot be bounded — a turn that is open is
-// working — so its floor is one frame per animEvery, and a session parked
-// mid-turn costs that much and no more.
+// The spinner cannot be bounded — a turn that is open is working — so its
+// floor is one frame per animEvery, and a session parked mid-turn costs that
+// much and no more. An empty transcript animates nothing at all, so the start
+// screen reaches true idle.
 //
 // Caller holds a.mu.
 func (a *App) tickAnimate() bool {
@@ -1874,12 +1872,8 @@ func (a *App) tickAnimate() bool {
 		return false
 	}
 	a.animTick = 0
-	switch {
-	case a.st.Running:
+	if a.st.Running {
 		a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(a.th.SpinnerFrames())
-		return true
-	case len(a.blocks) == 0 && a.sheenPhase < sheenSweep():
-		a.sheenPhase++
 		return true
 	}
 	return false

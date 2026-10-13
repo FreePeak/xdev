@@ -935,6 +935,7 @@ detach chord). `spawnBg` now refuses a second live run on a session (`bgSessionA
 case-insensitive PREFIX `--resume` actually resolves) and names the owning job so the caller can
 `xdev bg stop` it. The old binary still spawns the duplicate; the new one refuses and points at
 the live job id.
+
 * `internal/tui/app.go` — `tickPeriod`/`animEvery`, `App.animTick`, `App.tickAnimate()`; the `Run`
   tick's `if running || animate || stuck` is now `if animate || stuck` with the animations
   reporting for themselves. `internal/tui/welcome.go` — `sheenSweep()`.
@@ -943,6 +944,21 @@ the live job id.
   stops after one sweep, and an idle welcome moves nothing at all) and `cmd/xdev/bg_test.go`
   (`TestSpawnBgRefusesASecondRunOnOneSession`, `TestBgLiveOwnerMatchesTheResumePrefix`,
   `TestBgSessionArgvShapes`).
+
+*Last updated: 2026-10-13 (fix/no-welcome-anim — the welcome screen is static):* the start
+screen's wordmark no longer sweeps. The sheen was the only thing an empty session had left to
+animate (the earlier fix bounded it to one pass and slowed it to `animEvery`), and a logo that
+moves while nothing else does is decoration; the mark now paints its assistant accent and sits
+still, so an idle xdev writes no frames at all rather than 14 of them. Deleted with it:
+`sheenInBand`, `sheenSlant`/`sheenHalf`/`sheenRest`, `sheenSweep`, `App.sheenPhase`, the
+`tickAnimate` case that advanced it, and their three tests. `tickAnimate` keeps the spinner (a
+turn that is open is working) and is now an `if`, not a `switch` over one remaining case.
+Pinned by `internal/tui/tick_anim_test.go` (`TestWelcomeScreenAnimatesNothing`: an empty
+transcript moves no frame; `TestTickAnimatePrefersTheSpinner`).
+* `internal/tui/welcome.go` — `drawWelcome` paints the logo in `theme.AccentAssistant`.
+* `scripts/tui-shot.py` — the workaround that sampled `--tries` frames and kept the one caught
+  with the sweep off the mark is gone; one capture now suffices.
+
 
 *Last updated: 2026-10-12 (fix/model-switch-notice — a gateway served someone else's model, and every surface now says so):*
 onegw serves a combo by falling a request over to a sibling leg when its first target refuses. Nothing in the stream said so: the TUI kept painting the model the user pinned, print mode printed only the answer, and the Telegram bot answered under its own fixed face. The gateway half (`X-OneGW-Decision` gaining `request=` and `fallback=`, FreePeak/onegw#173) is what makes it knowable; this is the client half.
@@ -2879,7 +2895,7 @@ Regenerated with the repo's own generator, not a screen grab: `scripts/tui-shot.
 
 **What actually changed in the image.** The top bar is gone and row 0 belongs to the transcript again; the status row now reads `~/work/harvey/freepeak/xdev/.worktrees/tui-color-shot · docs/tui-color-shot` with the branch on the row; the welcome menu lists the four session commands with their `/`-keyed hints; the composer carries the model caption in its bottom border. The **palette is unchanged** — the frame's distinct colors are the seven GrokNight slots it always was, verified by counting `fill=` in the regenerated SVG: `#6c6c6c` ×259, `#505058` ×159, `#bb9af7` ×158, `#585858` ×49, `#e1e1e1` ×39, `#c8c8c8`, `#141414`. `#bb9af7` is `accent_assistant` (TokyoNight MAGENTA, §3.5) and `#141414` is `bg_base` — the same two the September shot carried.
 
-Method note for the next regeneration: `sheen_score` returns 0 only when the wordmark's sheen sweep is off the art, so a shot with a nonzero cost catches the mark half-inverted and unreadable. This run hit 0 on the second sampled frame.
+Method note, superseded: `sheen_score` and the `--tries` frame sampling it drove were removed with the welcome sheen (2026-10-13, `fix/no-welcome-anim`) — the start screen is static, so one capture is the frame.
 
 No `internal/` file touched; this is the image, not the renderer.
 
