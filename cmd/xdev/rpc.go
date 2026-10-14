@@ -309,6 +309,16 @@ func (h *rpcHandler) State() protocol.State {
 	}
 }
 
+// CurPromptID is the id of the turn in flight ("" when idle). A transport that
+// publishes a frame outside the event stream — the headless tool-result frame
+// — needs to correlate it with the turn the client started, and the stream
+// correlates by prompt id.
+func (h *rpcHandler) CurPromptID() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.curID
+}
+
 func (h *rpcHandler) SetModel(ref string) error {
 	// Route through the shared resolver so RPC accepts what the flag and
 	// /model accept (bare ids, provider/model refs, :effort) and a bad id fails
@@ -385,36 +395,46 @@ func (h *rpcHandler) OnMessageEnd(msg *ai.Message) {
 	}
 }
 
-// OnToolResultMessage persists the tool-result message.
+// OnToolResultMessage persists the tool-result message, and — on the headless
+// transport — publishes it: an event stream that shows the assistant's tool
+// CALL but never its result is a client watching half a turn. It rides the
+// notifier seam because a stdio RPC client reads the persisted entry instead
+// and must see no new frame.
 func (h *rpcHandler) OnToolResultMessage(m *ai.Message) {
 	if err := h.store.Append(&session.MessageEntry{Message: *m}); err != nil {
 		logx.Errorf("persist tool result: %v", err)
 	}
+	if h.notify != nil {
+		h.notify.NotifyToolResult(m)
+	}
 }
 
-// headlessNotifier is set by the headless transport: the ONE frame the SSE
-// stream should carry that the RPC contract does not have yet is the
-// "context is about to change" notice, because a client watching the stream
-// needs to know the history it just read is being replaced (the TUI paints a
-// system block for the same event; a remote client has no local peer to read).
+// headlessNotifier is set by the headless transport: the frames the SSE
+// stream should carry that the RPC contract does not have yet. A stdio client
+// reads the persisted entries instead, so a bare rpcHandler (nil notifier)
+// behaves exactly as before.
 type headlessNotifier interface {
-	// NotifyCompaction maps to the SSE `session_compact` frame.
+	// NotifyCompaction maps to the SSE `session_compact` frame: the history a
+	// client just read is being replaced by a summary plus the kept tail, and
+	// it has no local peer to learn that from (the TUI paints a system block
+	// for the same event).
 	NotifyCompaction(before int64)
-	// NotifyTurnEnd maps to the SSE `turn_end` frame.
+	// NotifyTurnEnd maps to the SSE `turn_end` frame: the terminal reason, so
+	// a client can tell "the model finished" from "the stream dropped" even
+	// when the terminal response frame never arrives (an abort).
 	NotifyTurnEnd(reason ai.StopReason, err error)
+	// NotifyToolResult maps to the SSE `tool_result` frame.
+	NotifyToolResult(m *ai.Message)
 }
 
 // OnCompaction bridges the compaction notice to the headless stream when one
-// is attached. Stdio RPC has no frame for it yet (v2), so a bare rpcHandler
-// with no notifier behaves exactly as before.
+// is attached.
 func (h *rpcHandler) OnCompaction(before int64) {
 	h.notifier().NotifyCompaction(before)
 }
 
-// OnTurnEnd bridges the terminal reason so a remote client can tell "the
-// model finished" from "the stream dropped". The response frame already
-// carries it for the prompt it answers; this covers a run whose terminal
-// message never arrives (abort), where the frame is all a client gets.
+// OnTurnEnd bridges the terminal reason to the headless stream when one is
+// attached.
 func (h *rpcHandler) OnTurnEnd(s ai.StopReason, err error) {
 	h.notifier().NotifyTurnEnd(s, err)
 }
@@ -432,6 +452,7 @@ type nopNotifier struct{}
 
 func (nopNotifier) NotifyCompaction(int64)             {}
 func (nopNotifier) NotifyTurnEnd(ai.StopReason, error) {}
+func (nopNotifier) NotifyToolResult(*ai.Message)       {}
 
 // OnContinuation: same — the injected turn persists as an attributed
 // message entry, so readers of the store can still count it (#283).
