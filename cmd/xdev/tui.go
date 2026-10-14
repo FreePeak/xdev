@@ -70,6 +70,20 @@ func tabsModeOn(s *config.Settings) string {
 }
 
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
+	// Some terminal managers provision their panes with TERM=dumb (herdr's
+	// default), which means tcell never marks the terminfo entry
+	// XTerm-like and never enables the advanced-keyboard protocol
+	// (CSI u / modifyOtherKeys). The consequence is that every chord
+	// opencode/xdev advertise that carries a modifier (Ctrl+Tab, Alt+],
+	// Ctrl+1..9) is simply never delivered, even though the downstream
+	// terminal (Ghostty, iTerm2, WezTerm, Kitty) supports them. If the
+	// terminal advertises 24-bit colour we know it is capable, so resolve
+	// a real $TERM name up front — same assumption tcell's own
+	// enableCsiU already encodes (tcell gates it on XTermLike).
+	if t, _ := os.LookupEnv("TERM"); (t == "" || t == "dumb" || t == "xterm") &&
+		strings.Contains(strings.ToLower(os.Getenv("COLORTERM")), "truecolor") {
+		_ = os.Setenv("TERM", "xterm-ghostty")
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return 2, err
