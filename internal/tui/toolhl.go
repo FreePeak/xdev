@@ -205,18 +205,23 @@ func shellRowHasInk(s string, sp langSpec) bool {
 // search is the fourth: rows are "path:line: text" (grep, ast_grep), painted
 // with the syntax palette's function/number/punctuation slots. paths is the
 // fifth: rows are bare file paths (glob), painted with the same function slot
-// a search row gives its path.
+// a search row gives its path. git is the sixth: rows are a git listing
+// (`git status`, `git log`) captured through bash, painted by their own shape
+// in gitout.go. todo is the seventh: rows are a task list, painted by their
+// own markers in todomarker.go.
 type toolHL struct {
 	lang     string
 	numbered bool // rows read "<line>: <source>", so the prefix is chrome
 	report   bool // prose the tool composed, not output it captured
 	search   bool // rows read "path:line: text" (grep, ast_grep)
 	paths    bool // rows are bare file paths (glob)
+	git      bool // rows are a git listing (gitout.go)
+	todo     bool // rows are a task list (todomarker.go)
 }
 
 // toolOutputHL decides how a finished tool result paints.
 //
-// Five answers, in this order:
+// Seven answers, in this order:
 //
 //   - the path is the exact answer and always wins: a `read` of a .go file is
 //     Go whatever the rows happen to contain;
@@ -227,10 +232,19 @@ type toolHL struct {
 //     one tool that falls to a heuristic, and ONLY bash — every other tool
 //     result carrying no path paints flat, because guessing a language for an
 //     unknown tool's output is how a log line ends up wearing a keyword colour;
+//   - a TASK LIST: a result whose rows open with the todo markers — the todo
+//     tool's own result, and /plan show's copy of the same list — paints each
+//     row's marker in its state's ink (todomarker.go). A shape test rather than
+//     a tool-name test, so a replayed list is covered too;
 //   - a SEARCH: grep and ast_grep return "path:line: text" rows. The path is
 //     the function slot, the line number the number slot, the colon the
 //     punctuation slot, and the matched text the body ink. The same shape
 //     every search tool returns, so one rule covers both;
+//   - a GIT listing: a bash result whose rows carry git's own vocabulary — a
+//     porcelain status row, a commit hash, a branch header — paints through
+//     gitout.go. It is a second bash arm rather than a language because a git
+//     listing carries no filename and clears no shell evidence, so
+//     LooksLikeShell refuses it by construction;
 //   - PATHS: glob returns one bare file path per row, which is the same path a
 //     search row already wears, so it wears the same ink. A row that is not a
 //     path (the tool's own "[showing N files]" footer, a blank) stays flat.
@@ -253,6 +267,12 @@ func (a *App) toolOutputHL(b *Block) toolHL {
 	if b.ToolName == taskToolName {
 		return toolHL{report: true}
 	}
+	if LooksLikeTodo(b.Text) {
+		return toolHL{todo: true}
+	}
+	if b.ToolName == "bash" && LooksLikeGit(b.Text) {
+		return toolHL{git: true}
+	}
 	if b.ToolName == "bash" && LooksLikeShell(b.Text) {
 		return toolHL{lang: shellLang}
 	}
@@ -272,7 +292,7 @@ var shellLang = normalizeLang("bash")
 
 // toolBodyRows lays a result body out into styled rows of inner width.
 //
-// Five paths, and the split is the whole safety story:
+// Seven paths, and the split is the whole safety story:
 //
 //   - nothing to colour (no language, an unknown extension, NO_COLOR, a theme
 //     that pins no syntax_* ink): wrap() and textline() exactly as this painted
@@ -287,10 +307,16 @@ var shellLang = normalizeLang("bash")
 //     hashes, a bullet as "•". That is the point — a subagent that wrote a
 //     structured report finally reads as one, with the md_* inks it was always
 //     painted with in an assistant block;
+//   - a task list: todoRow colours a row's leading marker in its state's ink.
+//     The rest of the row keeps the body ink, and a row with no marker (a phase
+//     name, the summary line) is untouched;
 //   - a search: splitSearchRow colours the path, line number and colon of a
 //     "path:line: text" row with the syntax palette's function/number/
 //     punctuation slots. The matched text keeps the body ink — it is the
 //     content, not the chrome;
+//   - a git listing: gitRow splits each row into the shape it matched (a
+//     porcelain state pair, a hash, a branch header) and paints that shape's
+//     own slots. A row matching nothing keeps the body ink;
 //   - paths: one bare file path per row, in the same function slot a search
 //     row gives its path, so a glob listing and a grep hit read as one palette.
 //     The tool's own "[showing N files]" footer is not a path and stays flat.
@@ -302,11 +328,17 @@ func (a *App) toolBodyRows(body string, inner int, bodySt, dimSt tcell.Style, hl
 		}
 		return out
 	}
-	if hl.search || hl.paths {
+	if hl.search || hl.paths || hl.git || hl.todo {
 		cs := a.mdStyle().code
 		row := a.searchRow
 		if hl.paths {
 			row = a.pathRow
+		}
+		if hl.git {
+			row = a.gitRow
+		}
+		if hl.todo {
+			row = a.todoRow
 		}
 		var out []line
 		for _, src := range strings.Split(body, "\n") {

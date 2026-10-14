@@ -908,6 +908,17 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	// foreground is the diff's own.
 	ds := a.diffStyle()
 	added, removed := ds.add.mark, ds.del.mark
+	// The todo markers' inks, resolved once per frame through the same codeStyle
+	// the transcript's tool boxes paint with (todomarker.go owns the
+	// marker->kind table, so the dock's TASKS rows and the todo tool's own
+	todoInk := func(src string) (tcell.Style, bool) {
+		_, _, k, ok := todoMarkerAt(src)
+		if !ok {
+			return ink, false
+			return ink, false
+		}
+		return inkOf(syntaxSlots[k], ink), true
+	}
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
 			s.SetContent(cx, y, ' ', nil, body)
@@ -948,6 +959,15 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 			// block a reader consults rather than scans.
 			drawText(s, x+dockPad, y, r.text, comment)
 		default:
+			// A task row's MARKER wears its state's ink and the rest of the row
+			// keeps the ordinary row ink, so the list's state reads down the
+			// column at a glance. Every other row is one run, as before.
+			if st, ok := todoInk(r.text); ok {
+				marker, rest, _, _ := todoMarkerAt(r.text)
+				drawText(s, x+dockPad, y, marker, st)
+				drawText(s, x+dockPad+width(marker), y, rest, ink)
+				break
+			}
 			drawText(s, x+dockPad, y, r.text, ink)
 		}
 	}
