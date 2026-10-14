@@ -613,12 +613,13 @@ func TestStickyHeaderPaintsOnce(t *testing.T) {
 }
 
 // TestStickyHeaderCarriesATopMargin is the request itself ("add margin top of
-// the top sticker latest user message"): the pinned prompt is a card, and a card
+// the top sticky latest user message"): the pinned prompt is a card, and a card
 // is not pressed against the top edge of the transcript — the session strip
 // above it and the answer that scrolled under it both need the air every other
-// block gets from the separator. The margin is the card's own: the band's
-// background and inset, no glyphs, so the prompt reads as floating off the top
-// rather than as a bar tacked to it.
+// block gets from the separator. So the request sits one row DOWN, on a row of
+// plain air: a card that painted its own band there read as a second, empty
+// line of the message, which is the one thing the card is not (#627's band is
+// what this pins away).
 //
 // The bottom edge stays unpadded (fix/sticky-no-pad): stickyGap is already the
 // row under the card, and one message must not disagree with itself.
@@ -660,25 +661,29 @@ func TestStickyHeaderCarriesATopMargin(t *testing.T) {
 	// The request starts one row lower than the transcript's top: the pinned
 	// prompt must not sit on the header's own first row any more.
 	if !blank(hdr) {
-		t.Fatalf("the pinned prompt is pressed against the top of the transcript: %q", screenRowText(scr, hdr, w))
+		t.Fatalf("the pinned prompt has no margin: %q", screenRowText(scr, hdr, w))
 	}
-	// The margin is the card's air: blank, and banded — the same background the
-	// prompt's rows carry — so it is a margin of the CARD, not of the pane.
-	if bg := bgAt(hdr, userBandInset); bg != band {
-		t.Fatalf("the pinned card has no air above it: the row above the prompt is not the band (%v)", bg)
+	// The margin is PANE air, not the card's own: blank and NOT the band over
+	// the card's own span — a banded pad row is the empty line of the card that
+	// #627 painted, and the one difference left between the pinned request and
+	// the inline one. The scrollbar's column at the right edge is chrome and
+	// carries its own background, so it is left out of the sweep.
+	app.mu.Lock()
+	barX, on := app.selBarX, app.selBarOn
+	app.mu.Unlock()
+	cardRight := w
+	if on {
+		cardRight = barX
 	}
-	// Bounded by the same two columns the banded prompt rows are: a full-bleed
-	// fill would be the bar fix/user-band-padding took off the card in the
-	// first place.
-	if bg := bgAt(hdr, userBandMargin-1); bg == band {
-		t.Fatalf("the pinned card's top margin runs off the pane: column %d is banded", userBandMargin-1)
+	for x := 0; x < cardRight; x++ {
+		if bgAt(hdr, x) == band {
+			t.Fatalf("the pinned card's top margin is still the band at column %d, want plain air", x)
+		}
 	}
-	// The band's right edge is bandLim-1, which the scrollbar takes a column
-	// from on a viewport that overflows — chrome_test's own assertion reads the
-	// card's right edge at w-1-userBandMargin with no scrollbar painted, so the
-	// pinned copy is checked on the same column the painter filled last.
-	if bg := bgAt(hdr, w-1-userBandMargin); bg != band && bgAt(hdr, w-2-userBandMargin) != band {
-		t.Fatalf("the pinned card's top margin stops short of the card's own right edge: %v", bg)
+	// The card's own rows below it DO carry it, so this is a margin of the
+	// card, not a different background: the prompt is banded where it should be.
+	if bg := bgAt(hdr+stickyMarginTop, userBandInset); bg != band {
+		t.Fatalf("the pinned prompt lost its band: row %d is not the band (%v)", hdr+stickyMarginTop, bg)
 	}
 	// The gap under the card is still the only air below it, and the margin is
 	// nothing but air: the header's row budget is exactly those three numbers.

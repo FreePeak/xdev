@@ -5021,16 +5021,15 @@ func (a *App) paint() {
 	// (stickyHdr/stickyVis/stickyBlock/stickyDoc) for exactly that.
 	sticky := computeSticky(int32(start), vp, a.stickyPrompts())
 	header := a.stickyHeaderRows(sticky, max(10, contentW-2))
-	// The header paints the prompt's own rows and the card's air: the margin
-	// row above it is the same blank banded row the inline card's own margins
-	// give it (fixed as a full-bleed bar in fix/user-band-padding), so a pinned
-	// prompt floats off the top of the transcript rather than being tacked to
-	// it. The one row after the text is the gap that says the header is not
-	// part of the stream, and both are zero when nothing is pinned.
-	margin := a.stickyMarginRow(sticky)
+	// The header paints the prompt's own rows; the blank row above (the
+	// margin) and the one below (the gap) are air and need no row of their own
+	// to draw — the fill supplies both, and both are zero when nothing is
+	// pinned. The margin is PANE air, not the card's own band: the pinned
+	// message is a card with ONE blank row above it, not a card that painted
+	// its own padding as a second, empty line (#627's band, reverted here).
 	view := make([]rowView, 0, max(sticky.rows, end-start))
 	for range sticky.margin {
-		view = append(view, margin)
+		view = append(view, rowView{})
 	}
 	view = append(view, header...)
 	for range sticky.rows - len(view) {

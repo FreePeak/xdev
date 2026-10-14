@@ -15,12 +15,13 @@ package tui
 // is hidden.
 const stickyMinHeight = 3
 
-// stickyMarginTop is the blank banded row the pinned prompt's card carries
-// ABOVE its text, so a scrolled-past request reads as a card floating off the
-// top of the transcript instead of a bar tacked to it. Inline, a sent message's
-// air comes from the block separator — which a pinned prompt has already
-// scrolled away from, and directly above a header is the session strip, so with
-// no margin the ❯ sits hard against it.
+// stickyMarginTop is the blank row the pinned prompt's card floats on ABOVE
+// its text: PANE air, not a pad row of the card. #627 tried the card's own
+// band there and read as a second, empty line of the message — the one thing
+// the card is not. The request ("add margin top of the top sticky latest user
+// message") survives untouched: the pinned prompt still starts one row below
+// the top of the transcript; it is the ROW that is plain now, so the request
+// floats off the top instead of sitting flush on the session strip above it.
 //
 // It is the only air the pinned copy paints above its text. The bottom edge
 // stays unpadded (fix/user-band-no-top-pad): stickyGap is already the row under
@@ -224,18 +225,4 @@ func (a *App) stickyHeaderRows(h stickyLayout, wrapW int) []rowView {
 	tail.text = truncateCells(tail.text, max(0, wrapW-used-2), "") + " …"
 	out[len(out)-1].ln = last
 	return out
-}
-
-// stickyMarginRow is the blank banded row the pinned prompt's card carries
-// above its text: the prompt's own first line with its runs dropped, so the
-// margin is the card's background and its own inset (userBandInset) at both
-// ends — the same margins the inline card floats in. With nothing pinned
-// (h.margin zero) the row is never painted.
-func (a *App) stickyMarginRow(h stickyLayout) rowView {
-	if h.block < 0 || h.block >= len(a.rowIdx.rend) || len(a.rowIdx.rend[h.block].lines) == 0 {
-		return rowView{}
-	}
-	ln := a.rowIdx.rend[h.block].lines[0]
-	ln.runs = nil
-	return rowView{ln: ln}
 }
