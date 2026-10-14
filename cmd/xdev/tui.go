@@ -441,12 +441,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Same shape as showThinking: display-only, and a diagram the renderer
 	// cannot draw falls back to the code band, so turning it off changes how a
 	// message looks and never what it says.
-	// The transcript's compact mode (settings tui.compactTranscript, the
-	// Ctrl+G chord). Display only, and a STARTING state: the chord and
-	// /settings override it for the session, and the row threshold
-	// (tui.compactAfterRows) turns the mode on by itself once a transcript is
-	// long enough for the full view to be the thing that lags.
-	app.SetCompact(lastSettings().CompactTranscriptOn())
 	app.SetRenderMermaid(lastSettings().RenderMermaidOn())
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
@@ -510,14 +504,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			lastSettings().Tui.ExitDetach = &v
 			return nil
 		},
-		SetCompact: func(on bool) error {
-			if err := config.Set(config.GlobalSettingsPath(), "tui.compactTranscript", fmt.Sprint(on)); err != nil {
-				return err
-			}
-			v := on
-			lastSettings().Tui.CompactTranscript = &v
-			return nil
-		},
 	})
 
 	// The tab-strip policy (tui.tabs.mode / tui.tabs.indicators) is applied
@@ -577,8 +563,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
 					Editable: true, Kind: "toggle"},
 				{Key: "renderMermaid", Label: "Render mermaid", Value: fmt.Sprint(s.RenderMermaidOn()),
-					Editable: true, Kind: "toggle"},
-				{Key: "tui.compactTranscript", Label: "Compact transcript", Value: fmt.Sprint(s.CompactTranscriptOn()),
 					Editable: true, Kind: "toggle"},
 				{Key: "tui.exitDetach", Label: "Detach on quit", Value: fmt.Sprint(s.TuiExitDetachOn()),
 					Editable: true, Kind: "toggle"},
@@ -644,12 +628,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			case "tui.exitDetach":
 				v := value == "true"
 				lastSettings().Tui.ExitDetach = &v
-			case "tui.compactTranscript":
-				v := value == "true"
-				lastSettings().Tui.CompactTranscript = &v
-				// The mode is the App's own display state, so a write takes
-				// effect on the next frame rather than the next process.
-				app.SetCompact(v)
 			case "tui.tabs.mode":
 				lastSettings().Tui.Tabs.Mode = value
 				// The strip is the only thing mode moves, and the App owns
