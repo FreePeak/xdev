@@ -260,23 +260,76 @@ func (t *Telegram) GetUpdates(ctx context.Context, offset int64, timeout int) ([
 //
 // There is still ONE attempt per message: if the API rejects the parsed
 // form, the same text is resent with parse_mode omitted. The phone renders
-// it as text — a plain answer beats a lost one.
+// it as plain text — a plain answer beats a lost one.
 func (t *Telegram) SendMessage(ctx context.Context, chatID int64, text string) error {
+	_, err := t.SendMessageID(ctx, chatID, text)
+	return err
+}
+
+// SendMessageID is SendMessage reporting the id of the bubble it created,
+// which is what the streaming path edits afterwards (see streamer.deliver).
+func (t *Telegram) SendMessageID(ctx context.Context, chatID int64, text string) (int64, error) {
 	rendered := ToTelegramHTML(text)
 	payload := map[string]any{"chat_id": chatID, "text": rendered, "parse_mode": "HTML"}
 	var sent SentMessage
 	err := t.call(ctx, "sendMessage", payload, &sent)
 	if err == nil {
+		return sent.MessageID, nil
+	}
+	if !isParseError(err) {
+		return 0, err
+	}
+	// The API rejected the parsed form. Resend the same text as plain text;
+	// a readable answer matters more than its formatting.
+	t.logf("telegram: %v; resending as plain text", err)
+	var plain SentMessage
+	if err := t.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, &plain); err != nil {
+		return 0, err
+	}
+	return plain.MessageID, nil
+}
+
+// EditMessageText replaces the body of a message this bot already sent, in the
+// same HTML dialect and with the same single plain-text retry SendMessage uses
+// — an edit is a send that happens to target an existing bubble, so the
+// formatting rules must not diverge between the two.
+//
+// "message is not modified" is Telegram's answer when the new body equals the
+// current one. That is a no-op, not a failure: the streaming path compares
+// against what it last wrote, and a duplicate must not read as a broken stream
+// (which would kill the preview for the rest of the turn).
+func (t *Telegram) EditMessageText(ctx context.Context, chatID, messageID int64, text string) error {
+	rendered := ToTelegramHTML(text)
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       rendered,
+		"parse_mode": "HTML",
+	}
+	err := t.call(ctx, "editMessageText", payload, nil)
+	if err == nil || isNotModified(err) {
 		return nil
 	}
 	if !isParseError(err) {
 		return err
 	}
-	// The API rejected the parsed form. Resend the same text as plain text;
-	// a readable answer matters more than its formatting.
-	t.logf("telegram: %v; resending as plain text", err)
-	plain := map[string]any{"chat_id": chatID, "text": text}
-	return t.call(ctx, "sendMessage", plain, &sent)
+	t.logf("telegram: %v; editing as plain text", err)
+	err = t.call(ctx, "editMessageText", map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       text,
+	}, nil)
+	if err != nil && !isNotModified(err) {
+		return err
+	}
+	return nil
+}
+
+// isNotModified reports Telegram's "nothing changed" refusal, the one 400 an
+// edit may answer and still be correct.
+func isNotModified(err error) bool {
+	var api *APIError
+	return errors.As(err, &api) && strings.Contains(strings.ToLower(api.Description), "not modified")
 }
 
 // SendPhoto sends one JPEG with an optional caption. Used for the per-model
