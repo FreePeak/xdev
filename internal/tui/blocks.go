@@ -114,7 +114,39 @@ const subRowsMax = 3
 func subRow(w int) int { return max(8, w-6) }
 
 // Width returns the display width of s in cells.
-func width(s string) int { return runewidth.StringWidth(s) }
+//
+// ASCII is answered by a byte scan: every printable ASCII byte is one cell and
+// every control byte is none, which is exactly what runewidth's table says, so
+// the fast path returns the same number rather than an approximation. ASCII is
+// the common case on the frame path — a wrapped prose line measures every word
+// (wrapLine), a box border measures itself, the status row measures each of its
+// segments — and StringWidth's grapheme walk costs several times the byte loop
+// for it. A streaming block re-renders whole on every delta (renderKey stamps
+// on len(b.Text)), so this measurement runs once per word per delta.
+func width(s string) int {
+	if n, ok := asciiWidth(s); ok {
+		return n
+	}
+	return runewidth.StringWidth(s)
+}
+
+// asciiWidth returns s's width in cells when every byte of it is ASCII, and
+// ok=false when any byte is not. Printable ASCII (0x20..0x7e) is one cell and a
+// control byte (0x00..0x1f, 0x7f) is zero, which is runewidth.StringWidth's own
+// answer for the whole range.
+func asciiWidth(s string) (int, bool) {
+	n := 0
+	for i := range len(s) {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			return 0, false
+		}
+		if c >= 0x20 && c != 0x7f {
+			n++
+		}
+	}
+	return n, true
+}
 
 // runeWidth is width() for a single rune the painter already has in hand.
 // width(string(r)) allocates a one-rune string per character per frame, and

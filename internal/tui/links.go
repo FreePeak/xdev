@@ -77,7 +77,15 @@ func isWebURL(raw string) bool {
 // URL. It scans the original string without copying, so long streamed lines
 // keep the renderer's linear cost.
 func webURLStart(s string) int {
+	// One byte decides whether a position can start a scheme at all, so the
+	// scan is a byte compare per position instead of a 7-byte fold plus a walk
+	// back over the preceding grapheme at every one of them. A streaming block
+	// re-renders whole on every delta (renderKey stamps on len(b.Text)), so this
+	// ran once per line per delta over the entire message.
 	for i := 0; i+7 <= len(s); i++ {
+		if s[i]|0x20 != 'h' {
+			continue
+		}
 		if !urlBoundary(s, i) {
 			continue
 		}
