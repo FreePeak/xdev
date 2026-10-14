@@ -915,10 +915,10 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 		_, _, k, ok := todoMarkerAt(src)
 		if !ok {
 			return ink, false
-		return ink, false
+			return ink, false
+		}
+		return inkOf(syntaxSlots[k], ink), true
 	}
-	return inkOf(syntaxSlots[k], ink), true
-}
 	for y := top; y < top+h; y++ {
 		for cx := x; cx < x+dockCols; cx++ {
 			s.SetContent(cx, y, ' ', nil, body)
