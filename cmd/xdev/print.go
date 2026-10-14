@@ -2257,6 +2257,72 @@ func bindScheduleState(reg *tool.Registry, store *session.Store) {
 	}
 }
 
+// gatewayRouteAlias reports whether one pinned model id on this provider is
+// one of the GATEWAY's own route names rather than a model to answer on.
+//
+// A gateway in front of other providers names every model it fronts after the
+// provider it belongs to — onegw's /v1/models answers
+// `opencode/deepseek-v4.1-flash`, `xai/grok-4.6`, … — and publishes its OWN
+// routes as bare ids (`execution`, `planning`, `dev`). So on such a provider a
+// bare id is a route, never an upstream model. Two pieces of evidence, either
+// sufficient, both cheap:
+//
+//   - the merged catalog (pinned + discovered) holds a QUALIFIED id, which
+//     only a gateway's namespace does;
+//   - the provider publishes a catalog AND states ONE window for every id it
+//     does not describe. That uniform answer is a gateway's; a local server
+//     announcing bare ids only (ollama, lm-studio) states no such thing, so
+//     its bare ids stay chain candidates. This arm is what holds while
+//     discovery is failing — the moment a gateway is being restarted is
+//     exactly when its routes must not become failover legs.
+//
+// Such a name must never join the IMPLICIT failover chain, however it is
+// pinned (#641): a transient 429 would answer a request the user pinned to
+// their own model with the gateway's OTHER route, silently — the switch the
+// user reports as "it keeps using the combo". Pinning the route stays
+// legitimate and keeps working: it declares the route's contextWindow (a combo
+// is not a model, and without a pin the window falls through to the provider
+// default, 5x too large for 200K legs) and keeps the id in the picker and in
+// `xdev models`. `failover: false` says the same thing for one model; this
+// rule says it for a name the config never had to list. An explicit
+// retry.fallbackChains entry naming it still wins — an explicit order is an
+// explicit instruction, and this rule governs the implicit chain only.
+func gatewayRouteAlias(name string, pc *config.ProviderConfig, model string) bool {
+	if pc == nil || pc.Discovery == nil || strings.Contains(model, "/") {
+		return false
+	}
+	// Evidence 1: the live catalog MIXES namespaces. A gateway names every
+	// model it fronts after the provider it belongs to, so a qualified id in
+	// the merged catalog (pinned + discovered) proves the provider is one and
+	// its bare ids are routes.
+	for _, m := range providerModels(name, pc) {
+		if strings.Contains(m.ID, "/") {
+			return true
+		}
+	}
+	// Evidence 2, for the case the live catalog cannot answer (discovery
+	// failed or answered empty — the moment a gateway is being restarted is
+	// exactly when its routes must not become failover legs): a provider that
+	// publishes a catalog AND states ONE window for every id it does not
+	// describe is a gateway in front of other providers. A local server that
+	// announces bare ids only (ollama, lm-studio) states no such uniform
+	// answer, and its bare ids stay chain candidates.
+	return pc.ContextWindow > 0
+}
+
+// failoverEligible is the one place both implicit-chain builders ask "may this
+// pinned model answer a request the user did not pin?".
+func failoverEligible(name string, pc *config.ProviderConfig, model string) bool {
+	if pc != nil {
+		for i := range pc.Models {
+			if pc.Models[i].ID == model && pc.Models[i].FailoverExcluded {
+				return false
+			}
+		}
+	}
+	return !gatewayRouteAlias(name, pc, model)
+}
+
 func wireTaskParentWithoutSchedule(reg *tool.Registry, store *session.Store) {
 	wireTaskParentState(reg, store, false)
 }
@@ -2384,8 +2450,12 @@ func declaredChainTargets(cfg *config.Config, primaryProv, primaryModel string) 
 			if pname == primaryProv && m.ID == primaryModel {
 				continue
 			}
-			if m.FailoverExcluded {
-				continue // pinned for identity/window, not a chain candidate (#642)
+			// Pinned for identity/window, not a chain candidate: either the
+			// operator said so per model (#642, `failover: false`), or the
+			// id is one of the gateway's own route names, which must never
+			// be handed a request the user pinned to their own model (#641).
+			if !failoverEligible(pname, pc, m.ID) {
+				continue
 			}
 			out = append(out, agent.ChainTarget{Provider: pname, Model: m.ID, ContextWindow: m.ContextWindow})
 		}
@@ -2414,12 +2484,14 @@ func defaultFailoverTargets(cfg *config.Config, primaryProv, primaryModel string
 			if pname == primaryProv && m.ID == primaryModel {
 				continue
 			}
-			if m.FailoverExcluded {
-				// Deliberately outside the implicit chain (#642): the model
-				// is pinned for its declared window and for identity, not as
-				// an outage target. A declared retry.fallbackChains entry
-				// that names it is resolved through the chain engine instead
-				// (expandChainEntry), so an explicit order still wins.
+			// Deliberately outside the implicit chain: either the operator
+			// flagged the model (#642, `failover: false`), or it is one of
+			// the gateway's own route names — a combo the user might pin for
+			// its declared window, which must never answer under someone
+			// else's name (#641). A declared retry.fallbackChains entry that
+			// names it is resolved through the chain engine instead
+			// (expandChainEntry), so an explicit order still wins.
+			if !failoverEligible(pname, pc, m.ID) {
 				continue
 			}
 			out = append(out, agent.FailoverTarget{Provider: prov, Model: m.ID, ContextWindow: m.ContextWindow})
