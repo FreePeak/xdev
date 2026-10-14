@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -597,8 +598,24 @@ func wrapLine(ln line, w int) []line {
 	var cur []cell
 	curW := 0
 	for _, r := range ln.runs {
-		words := strings.SplitAfter(r.text, " ")
-		for _, wd := range words {
+		text := r.text
+		// Words are walked by byte index rather than by
+		// strings.SplitAfter: the split allocated a slice and a substring per
+		// word of every run, which a streaming block paid once per word per
+		// delta over the whole message (measured: 6025 allocs and 1.9 ms for
+		// one 180 KB block, against 5 allocs for the render that produced it).
+		// The boundaries are the split's: a word runs to and including the next
+		// space, or to the end of the run.
+		for start := 0; start < len(text); {
+			end := start
+			for end < len(text) && text[end] != ' ' {
+				end++
+			}
+			if end < len(text) {
+				end++ // the space rides the word (SplitAfter's rule)
+			}
+			wd := text[start:end]
+			start = end
 			ww := width(wd)
 			if curW > 0 && curW+ww > w && wd != " " {
 				out = append(out, line{runs: cur, bg: ln.bg})
@@ -612,18 +629,9 @@ func wrapLine(ln line, w int) []line {
 			}
 			// Hard-break words longer than the line.
 			for ww > w {
-				runes := []rune(wd)
-				cut := 0
-				cw := 0
-				for cut < len(runes) && cw+width(string(runes[cut])) <= w {
-					cw += width(string(runes[cut]))
-					cut++
-				}
-				if cut == 0 {
-					cut = 1
-				}
-				out = append(out, line{runs: []cell{{text: string(runes[:cut]), style: r.style, chrome: r.chrome, link: r.link}}, bg: ln.bg})
-				wd = string(runes[cut:])
+				cut := cutAt(wd, w)
+				out = append(out, line{runs: []cell{{text: wd[:cut], style: r.style, chrome: r.chrome, link: r.link}}, bg: ln.bg})
+				wd = wd[cut:]
 				ww = width(wd)
 			}
 			if ww > 0 {
@@ -636,6 +644,29 @@ func wrapLine(ln line, w int) []line {
 		out = append(out, line{runs: cur, bg: ln.bg})
 	}
 	return out
+}
+
+// cutAt is the byte index in s where the line breaks when s is longer than the
+// line: the walk stops before the first rune that does not fit, and a single
+// rune wider than w is broken alone rather than dropped. It replaces the
+// []rune walk wrapLine used to do, which allocated a rune slice and a one-rune
+// string per rune of every over-long word.
+func cutAt(s string, w int) int {
+	i := 0
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if runeWidth(r) > w {
+			break // this rune does not fit in what is left of the line
+		}
+		w -= runeWidth(r)
+		i += size
+	}
+	if i == 0 {
+		// Nothing fit: break the first rune alone.
+		_, size := utf8.DecodeRuneInString(s)
+		return max(1, size)
+	}
+	return i
 }
 
 // --- GFM tables (omp semantics) ---
