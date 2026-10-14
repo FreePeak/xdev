@@ -53,7 +53,6 @@ func (p *GoogleVertexProvider) HealthCheck(ctx context.Context) error {
 	return healthCheckOneGet(ctx, p.httpClient, modelsProbeURL(p.baseURL), nil, APIGoogleVertex)
 }
 
-
 // Stream implements Provider.
 func (p *GoogleVertexProvider) Stream(ctx context.Context, req StreamRequest) (<-chan Event, error) {
 	if p.project == "" {

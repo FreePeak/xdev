@@ -356,6 +356,16 @@ type App struct {
 	queueSeq  int
 	queueHits []queueHit
 	queueFire func()
+	// agents is the live subagent strip above the composer (agentspanel.go):
+	// every running child at every depth, flat. agentHits is the last painted
+	// frame's click geometry (the queueHits contract), and agentOpen is an
+	// armed transcript open, run after a.mu is released — opening one takes
+	// the hub registry lock and fills the panel's view, which must not happen
+	// under the lock the transcript paints with.
+	agents        *agentPanel
+	agentHits     []agentPanelHit
+	agentOpen     *agentPanelHit
+	agentPanelOps *AgentPanelOps
 
 	keyq     chan tcell.Event
 	dirty    chan struct{}
@@ -599,7 +609,11 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),
 		sm:        newScrollModel(),
-		// No box is focused until a click names one: the wheel is the
+		// The subagent strip ships ON: it paints nothing until a child runs,
+		// so the cost of the default is zero on every session that never
+		// delegates, and a user watching a spawn should not have to discover
+		// a chord to see it.
+		agents: newAgentPanel(true),
 		// transcript's from the first frame.
 		thinkFocus: -1,
 	}
@@ -3246,6 +3260,15 @@ func (a *App) handleKey(ev tcell.Event) {
 			if a.handleTabStripMouse(m, press) {
 				return
 			}
+			// The subagent strip sits directly above the queue, over the
+			// transcript's tail: a click on a child's row opens that child's
+			// own transcript instead of anchoring a selection on the text it
+			// covers. Asked before the queue because it paints above it, so
+			// the row a person aimed at is the row that answers.
+			if a.agentPanelMouse(m, press) {
+				a.runPendingAgentOpen()
+				return // the UI loop repaints after handleKey
+			}
 			// The mid-turn queue (#157) sits above the composer, over the
 			// transcript's tail. It is a surface, not content, so a click on a
 			// row spends itself on the row instead of anchoring a selection
@@ -3483,6 +3506,17 @@ func (a *App) handleKey(ev tcell.Event) {
 		// The same path /hub takes; an unwired hub says so in the
 		// transcript rather than swallowing the chord.
 		_ = a.HubRoster()
+		return
+	case "app.agents.panel":
+		// The live strip above the composer. A toggle that is not wired (a
+		// headless host, a test) says so rather than swallowing the chord.
+		on, ok := a.AgentPanelToggle()
+		if !ok {
+			a.AddSystemBlock("· subagent panel is not wired in this session")
+			return
+		}
+		_, running := a.AgentPanelState()
+		a.AddSystemBlock("· " + agentPanelSummary(on, running))
 		return
 	case "app.subagent.transcript":
 		// The newest child a `task` call spawned, in its own transcript.
@@ -4910,6 +4944,11 @@ func (a *App) paint() {
 		a.drawSlashDropdown(composerTop)
 		a.drawAskCard(composerTop)
 		a.drawSettingsOverlay(composerTop)
+		// The subagent strip sits above the queue, which sits above the
+		// composer: both are chrome over the transcript's tail, and the strip
+		// is the newer, transient one — a running child outranks a pending
+		// prompt for the rows nearest the eye.
+		a.drawAgentPanel(a.queueTop(composerTop))
 		a.drawQueue(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
@@ -5179,6 +5218,12 @@ func (a *App) paint() {
 	// composer, so it goes after every overlay (an overlay is modal and owns
 	// its rows) and before the composer, whose top border must stay the edge
 	// of the box. It is chrome, not content, and publishes its own hit table.
+	// The subagent strip (agentspanel.go) goes above the queue for the same
+	// reason the queue goes above the composer: it is chrome over the
+	// transcript's tail, painted after every modal so a panel that owns its
+	// rows still wins, and before the queue so a running child's row is the
+	// one nearest the eye.
+	a.drawAgentPanel(a.queueTop(composerTop))
 	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)

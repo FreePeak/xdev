@@ -59,7 +59,8 @@ var BuiltinActions = []string{
 	"menu-prev", "menu-next", "menu-accept",
 	"history-prev", "history-next",
 	"redraw",
-	"expand", // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
+	"expand",           // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
+	"app.agents.panel", // Alt+P: the live running-subagent strip above the composer
 	"clear-input",
 	"app.session.tree",
 	"model-select",    // Alt+M: the /model selector (omp app.model.select)
@@ -157,6 +158,11 @@ func DefaultKeyMap() *KeyMap {
 			// is open (filter cycle); that branch is taken before this action
 			// is ever resolved.
 			"C-o": "expand",
+			// The live subagent strip (agentspanel.go): show or hide the
+			// running-children rows above the composer. Alt+P is the
+			// Alt+letter class the model / hub / dock selectors already use,
+			// and P is the initial that names this panel.
+			"A-p": "app.agents.panel",
 			// Model selector. omp parity chord (app.model.select); Alt+M
 			// is deliverable in every terminal we target.
 			"A-m": "model-select",

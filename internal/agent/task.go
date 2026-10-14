@@ -20,10 +20,11 @@ import (
 // ONLY the child's handoff — the child transcript never enters the
 // parent's context (PRD §5, yield-only isolation).
 //
-// Depth is capped structurally: ChildTools is the caller's restricted
-// list and never includes another TaskTool, so children cannot spawn
-// grandchildren (omp's task.maxRecursionDepth=1 shape; M11 adds the
-// configurable guard and the spawn-policy allowlist).
+// Depth is bounded by MaxDepth (default DefaultSubagentMaxDepth): a named
+// agent whose definition declares `task` in its tools gets its own TaskTool
+// while it is below the cap, and the guard at the top of Execute terminates
+// the chain. A child's tool set never carries the task tool by accident —
+// ChildTools excludes it, so the grant is explicit and depth-checked.
 type TaskTool struct {
 	Provider   ai.Provider
 	Model      string
@@ -54,8 +55,22 @@ type TaskTool struct {
 	AgentRoots string
 	// ExpandEffort resolves an agent's frontmatter thinkingLevel to a
 	// reasoning budget for the child (config.EffortBudget in production).
-	// nil keeps the parent's Thinking.
+	// nil keeps the parent's Thinking. The model can also ask for a rung
+	// directly on the call (`effort`), which resolves through this same
+	// seam — one vocabulary, one place that knows the ladder.
 	ExpandEffort func(level string) *ai.ThinkingBudget
+	// ModelFor resolves a model reference ("provider/model" or a bare id) to
+	// a provider and a model id for a child — the `model` argument on a
+	// spawn, or an agent definition's `model:` frontmatter. nil means "the
+	// parent's provider only": a definition that names another provider is
+	// then reported as unhonoured rather than silently run on the wrong one.
+	// The host wires it (cmd/xdev/print.go) with the same resolveModel +
+	// buildProvider pair -model uses, so a ref resolves identically.
+	ModelFor func(ref string) (ai.Provider, string, bool)
+	// MaxDepth bounds the spawn chain: 0 → DefaultSubagentMaxDepth. A child
+	// below the cap may spawn its own children, so the chain's length is one
+	// number the whole tree shares (each nested tool inherits it).
+	MaxDepth int
 	// Depth counts how deep in the spawn chain we are. 0 = top-level
 	// agent. omp: task.maxRecursionDepth=2; a child at the cap loses the
 	// task tool (structurally guaranteed since ChildTools excludes it).
@@ -139,6 +154,24 @@ func oneLine(s string) string {
 	return s
 }
 
+// resolveChildModel turns a model reference into the provider and model id a
+// child runs on. The host wires ModelFor (cmd/xdev/print.go) with the same
+// resolveModel + buildProvider pair `-model` uses, so a reference resolves
+// exactly the way the launch flag does — one resolver, one set of rules.
+//
+// A nil resolver (print/rpc/acp hosts that never wired one, and every test)
+// has no way to build a second provider, so the reference is refused and the
+// caller reports it in the handoff. Silently keeping the parent's model would
+// make the child report a model it never ran on — the #272 failure this
+// codebase keeps re-learning.
+func (t *TaskTool) resolveChildModel(ref string) (ai.Provider, string, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || t.ModelFor == nil {
+		return nil, "", false
+	}
+	return t.ModelFor(ref)
+}
+
 // discoverAgents resolves the definitions this spawn can name. A pinned
 // Agents set wins (tests, in-process callers); otherwise the roots are
 // re-read, so a file written mid-session is immediately spawnable — the
@@ -203,6 +236,8 @@ func (t *TaskTool) Parameters() json.RawMessage {
   "type": "object",
   "properties": {
     "agent": {"type": "string", "description": "named agent type to dispatch; the available definitions and their descriptions are listed at the end of this tool description (omit for the default shape)"},
+    "model": {"type": "string", "description": "model for this child, \"provider/model\" or a bare id; takes precedence over the agent definition's model frontmatter, else the parent's model is used. Set it only when the user or the task explicitly calls for a different model — a child that does not need one should inherit, so its prompt cache is shared"},
+    "effort": {"type": "string", "enum": ["minimal", "low", "medium", "high", "xhigh", "max"], "description": "reasoning effort for this child; omitted = the agent definition's thinkingLevel, else the parent's effort. Set it only when the user or the task asks for a specific level — \"low\" for mechanical, checkable work, \"high\" when one well-specified piece needs more reasoning than the work around it"},
     "prompt": {"type": "string", "description": "the task, self-contained: state the goal, the files/paths involved, and the expected result. Use this for one job, or tasks[] for independent jobs that can run at once."},
     "context": {"type": "string", "description": "batch only: shared framing prepended to every item in tasks[]"},
     "tasks": {
@@ -214,6 +249,8 @@ func (t *TaskTool) Parameters() json.RawMessage {
           "task": {"type": "string", "description": "this item's assignment, self-contained (alias: prompt)"},
           "agent": {"type": "string", "description": "named agent type for this item"},
           "name": {"type": "string", "description": "short label for this item's child session"},
+          "model": {"type": "string", "description": "model override for this item's child (see the top-level model)"},
+          "effort": {"type": "string", "enum": ["minimal", "low", "medium", "high", "xhigh", "max"], "description": "reasoning effort for this item's child (see the top-level effort)"},
           "schema": {"type": "object", "description": "JSON Schema this item's result must satisfy"},
           "strict": {"type": "boolean", "description": "grant this item one correction turn on schema mismatch"},
           "max_turns": {"type": "integer", "description": "turn cap for this item's child"}
@@ -291,7 +328,8 @@ func (t *TaskTool) executeBatch(ctx context.Context, a taskArgs) (tool.Result, e
 			// watching, so it is labelled the way its own report
 			// section already is (`batchItemLabel`) instead of
 			// arriving nameless.
-			Name:   childLabel(item.Name, item.Agent, i),
+			Name:  childLabel(item.Name, item.Agent, i),
+			Model: item.Model, Effort: item.Effort,
 			Schema: item.Schema, Strict: item.Strict, MaxTurns: item.MaxTurns,
 			Background: a.Background,
 		})
@@ -351,9 +389,14 @@ func batchItemLabel(i int, item taskItem) string {
 // batch by default, and rejecting it with "prompt is required" made the whole
 // feature look broken (parity finding T3 #1).
 type taskArgs struct {
-	Prompt     string          `json:"prompt"`
-	Agent      string          `json:"agent"` // named agent type (optional)
-	Name       string          `json:"name"`  // session label (optional)
+	Prompt string `json:"prompt"`
+	Agent  string `json:"agent"` // named agent type (optional)
+	Name   string `json:"name"`  // session label (optional)
+	// Model and Effort override the agent definition (and the parent) for
+	// THIS spawn. Both are the model's own request, so an unresolvable value
+	// is reported in the handoff rather than silently ignored.
+	Model      string          `json:"model"`
+	Effort     string          `json:"effort"`
 	Schema     json.RawMessage `json:"schema"`
 	Strict     bool            `json:"strict"`
 	MaxTurns   int             `json:"max_turns"`
@@ -371,6 +414,8 @@ type taskItem struct {
 	Agent    string          `json:"agent"`
 	Task     string          `json:"task"`
 	Prompt   string          `json:"prompt"`
+	Model    string          `json:"model"`
+	Effort   string          `json:"effort"`
 	Schema   json.RawMessage `json:"schema"`
 	Strict   bool            `json:"strict"`
 	MaxTurns int             `json:"max_turns"`
@@ -393,11 +438,20 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		return tool.Result{Text: "task: no provider configured for subagents", IsError: true}, nil
 	}
 
-	// Depth guard: omp task.maxRecursionDepth=2. At the cap, the child
-	// has no ChildTools with a TaskTool and cannot spawn further.
-	const maxDepth = 2
+	// Depth guard. The cap is the WHOLE chain's, so every nested task tool
+	// carries the same number (see the nested grant below); a child at the
+	// cap is refused here and never receives a task tool of its own.
+	maxDepth := t.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = DefaultSubagentMaxDepth
+	}
 	if t.Depth >= maxDepth {
-		return tool.Result{Text: "task: recursion depth limit reached (cannot spawn deeper)", IsError: true}, nil
+		// The refusal names the fix, the way Claude Code's own depth refusal
+		// does: a model told only "cannot spawn deeper" retries the same call,
+		// and the user never learns the chain is configurable.
+		return tool.Result{Text: fmt.Sprintf(
+			"task: subagent nesting limit reached (depth %d of %d) — do this work directly with your own tools, or raise taskMaxDepth in settings",
+			t.Depth, maxDepth), IsError: true}, nil
 	}
 
 	// Resolved per spawn so a mid-session .xdev/agents addition is usable
@@ -414,8 +468,13 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 	}
 
 	// Resolve the agent definition (if named) and apply its restrictions.
+	// Precedence for model and effort, both Claude Code's and the one a user
+	// expects: the call's own argument, then the definition's frontmatter,
+	// then the parent's. The two overrides are applied AFTER the definition
+	// block below, which is what makes the call win.
 	agentSystem := t.System
 	agentTools := t.ChildTools
+	agentProvider := t.Provider
 	agentModel := t.Model
 	agentThinking := t.Thinking
 	// What the definition asked for that this binary cannot do, rendered
@@ -482,18 +541,23 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				note := fmt.Sprintf("agent %q: frontmatter model %q is not a model ref — parent model kept", def.Name, def.Model)
 				logx.Warnf("%s", note)
 				agentNotes = append(agentNotes, note)
+			} else if p, m, ok := t.resolveChildModel(def.Model); ok {
+				agentProvider, agentModel = p, m
 			} else {
-				agentModel = def.Model
+				note := fmt.Sprintf("agent %q: frontmatter model %q could not be resolved — parent model kept", def.Name, def.Model)
+				logx.Warnf("%s", note)
+				agentNotes = append(agentNotes, note)
 			}
 		}
-		// Recursive spawn (omp task.maxRecursionDepth semantics): a child
-		// below the cap gets its own task tool so it can dispatch further
-		// (still-capped) children. The child inherits the resolved agent
-		// name, so ITS spawns policy governs the next level. The depth
-		// guard at the top of this function terminates the chain.
+		// Recursive spawn: a child below the cap gets its own task tool so it
+		// can dispatch further (still-capped) children. The child inherits
+		// the resolved agent name, so ITS spawns policy governs the next
+		// level, and it inherits MaxDepth, so the whole chain shares one cap
+		// instead of each level re-deriving it. The guard at the top of this
+		// function terminates the chain.
 		if slices.Contains(def.Tools, "task") && t.Depth+1 < maxDepth {
 			agentTools = append(agentTools, &TaskTool{
-				Provider:        t.Provider,
+				Provider:        agentProvider,
 				Model:           agentModel,
 				CWD:             t.CWD,
 				ChildTools:      t.ChildTools,
@@ -510,15 +574,52 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				Agents:       t.Agents,
 				AgentRoots:   t.AgentRoots,
 				ExpandEffort: t.ExpandEffort,
+				ModelFor:     t.ModelFor,
+				MaxDepth:     maxDepth,
 				Depth:        t.Depth + 1,
 				AgentName:    agentArg,
 				Hub:          t.Hub,
 				ChildAdvisor: t.ChildAdvisor,
+				// The grandchild's progress has to reach the same display
+				// seam the child's does, or a chain is invisible in the panel
+				// and in the transcript: the events arrive with no call row
+				// of their own, so dropping them here loses the whole level.
+				OnEvent: t.OnEvent,
 			})
+			// The child can delegate, so say so — and ONLY then. A child that
+			// received no task tool must not be told about one: an advertised
+			// capability that does nothing is the #272 failure, one level down.
+			agentSystem = agentSystem + "\n\n" + SubagentChainPrompt
 		}
-		// The granted set, once, for --verbose: which tools the child of a
-		// named agent actually holds is otherwise invisible to the author.
-		logx.Debugf("task: agent %q granted %s", def.Name, strings.Join(toolNames(agentTools), ", "))
+	}
+
+	// The CALL's own overrides win over the definition (Claude Code's
+	// precedence: the tool argument, then the agent definition, then the
+	// parent). Applied here, after the definition block, so there is exactly
+	// one order and no branch can invert it.
+	if ref := strings.TrimSpace(a.Model); ref != "" {
+		if p, m, ok := t.resolveChildModel(ref); ok {
+			agentProvider, agentModel = p, m
+		} else {
+			note := fmt.Sprintf("model %q could not be resolved — parent model kept", ref)
+			logx.Warnf("task: %s", note)
+			agentNotes = append(agentNotes, note)
+		}
+	}
+	if lvl := strings.TrimSpace(a.Effort); lvl != "" {
+		switch {
+		case t.ExpandEffort == nil:
+			agentNotes = append(agentNotes, fmt.Sprintf("effort %q ignored (host supplies no effort resolver)", lvl))
+		default:
+			if b := t.ExpandEffort(lvl); b != nil {
+				agentThinking = b
+			} else {
+				note := fmt.Sprintf("unsupported effort %q (want %s) — parent effort kept",
+					lvl, strings.Join(config.EffortLevels, "|"))
+				logx.Warnf("task: %s", note)
+				agentNotes = append(agentNotes, note)
+			}
+		}
 	}
 
 	mt := a.MaxTurns
@@ -527,7 +628,7 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 	}
 	spec := SubagentSpec{
 		Name: a.Name, Prompt: a.Prompt, System: agentSystem,
-		Provider: t.Provider, Model: agentModel, Tools: agentTools,
+		Provider: agentProvider, Model: agentModel, Tools: agentTools,
 		CWD: t.CWD, DataDir: t.DataDir, MaxTurns: mt, MaxTokens: t.MaxTokens,
 		Output:          &SubagentOutput{Schema: a.Schema, Strict: a.Strict},
 		ParentSessionID: t.ParentSessionID,

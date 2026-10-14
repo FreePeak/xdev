@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,14 @@ import (
 
 // DefaultSubagentMaxTurns bounds a child run (children do one job).
 const DefaultSubagentMaxTurns = 30
+
+// DefaultSubagentMaxDepth bounds a spawn chain: the top-level session (depth
+// 0), its child (1), and one more level below that (2) — a child at depth 2
+// is refused and never receives a task tool. It is Claude Code's shipped
+// default (CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = 3), and it is a default
+// rather than a constant because a user raises it per session (settings
+// taskMaxDepth) without a rebuild.
+const DefaultSubagentMaxDepth = 3
 
 // SubagentSpec configures one child run.
 type SubagentSpec struct {
@@ -502,11 +511,26 @@ func childSystem(spec SubagentSpec, cwd string) string {
 }
 
 // schema returns the configured output schema (nil-safe).
+//
+// A literal JSON null is empty, not a schema. It arrives by the batch path:
+// executeBatch re-marshals each item into a taskArgs, and a nil
+// json.RawMessage marshals as the four bytes `null`, so a batch item with no
+// `schema` gave the child's yield tool `{"result": null}` — a schema every
+// strict provider rejects at stream start ("null is not of types
+// boolean, object"), which killed the whole child before its first turn. The
+// guard belongs here, at the one place every spawn path shares, rather than
+// at the batch marshaller: a null can arrive from any caller.
 func (o *SubagentOutput) schema() json.RawMessage {
-	if o == nil {
+	if o == nil || isJSONNull(o.Schema) {
 		return nil
 	}
 	return o.Schema
+}
+
+// isJSONNull reports whether raw is the JSON literal null (with any
+// surrounding whitespace), which is what a nil RawMessage round-trips to.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
 
 // validateTopLevel is a deliberately minimal JSON Schema checker: it
