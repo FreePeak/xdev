@@ -452,13 +452,13 @@ func buildSettingsCategories(rows []SettingsRow) []string {
 func settingsCategory(key string) string {
 	parts := strings.SplitN(key, ".", 2)
 	switch parts[0] {
-	case "showThinking", "thinking", "effort":
+	case "showThinking", "thinking":
 		return "reasoning"
-	case "theme", "colorBlindMode", "renderMermaid":
+	case "theme", "colorBlindMode":
 		return "appearance"
-	case "sidebarMode", "debugMouse", "tui":
+	case "sidebarMode", "debugMouse":
 		return "ui"
-	case "approvalMode", "toolsApproval", "bashPatterns", "bash", "ask":
+	case "approvalMode", "toolsApproval", "bashPatterns", "bash":
 		return "tools"
 	case "memory", "memoryPipeline", "memoryMnemopi", "hindsight":
 		return "memory"
@@ -487,10 +487,10 @@ func toggleBoolValue(v string) string {
 }
 
 // applySettingImmediate applies the settings that can take effect without a
-// restart. Keys whose Write already goes through a live command seam
-// (theme → Theme, thinking → ThinkingLevel, effort → Effort, …) are not
-// repeated here: the Write is the apply. Display-only keys still flip App
-// state here so a toggle takes effect on the next frame.
+// restart. Everything else in the panel is still written — persisting the
+// choice is the point — but a value only the next turn reads (thinking, the
+// model, approval) cannot be pushed into the running session from here: the
+// turn reads it once, at agent construction.
 func (a *App) applySettingImmediate(key, value string) {
 	truthy := func() bool {
 		on, _ := settingsTruthy(value)
@@ -508,11 +508,6 @@ func (a *App) applySettingImmediate(key, value string) {
 	case "tui.exitDetach":
 		// Takes effect on the next quit chord: cmd's SetExitDetach already
 		// refreshed lastSettings(), which SetQuitRunning reads live.
-	case "theme", "thinking", "effort", "compaction.contextWindow",
-		"ask.autoAnswer", "approvalMode", "colorBlindMode":
-		// Live apply is the Write path (Theme / ThinkingLevel / Effort /
-		// ContextWindow / AutoAnswer / agent.Policy / SetTheme). Doing it
-		// again here would double-notice and double-write.
 	}
 }
 

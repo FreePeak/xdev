@@ -1831,7 +1831,9 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		// the startup snapshot.
 		AgentRoots: cwd,
 		// Frontmatter thinkingLevel: an effort name becomes the child's
-		// reasoning budget (#272: parsed, then dropped on the floor).
+		// reasoning budget (#272: parsed, then dropped on the floor). The
+		// task tool's own `effort` argument resolves through the same seam,
+		// so the ladder is spelled in one place.
 		ExpandEffort: func(level string) *ai.ThinkingBudget {
 			tokens, ok := config.EffortBudget(strings.TrimSpace(level))
 			if !ok {
@@ -1839,6 +1841,43 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 			}
 			return &ai.ThinkingBudget{Tokens: tokens}
 		},
+		// A child's `model` (or an agent definition's `model:`) resolves with
+		// the SAME resolveModel + buildProvider pair `-model` uses, so a ref
+		// means one thing in this binary. Cross-provider children need their
+		// own client, which is exactly what buildProvider returns; a ref that
+		// cannot be built reports false and the caller keeps the parent's
+		// model and says so in the handoff.
+		ModelFor: func(ref string) (ai.Provider, string, bool) {
+			cfg, cerr := modelsConfig()
+			if cerr != nil {
+				logx.Debugf("task: model %q: %v", ref, cerr)
+				return nil, "", false
+			}
+			resolved, _, err := resolveModel(ref, cfg, settings)
+			if err != nil {
+				logx.Debugf("task: model %q: %v", ref, err)
+				return nil, "", false
+			}
+			pName, mName, err := config.ParseModelRef(resolved)
+			if err != nil {
+				return nil, "", false
+			}
+			pc, ok := cfg.Providers[pName]
+			if !ok {
+				return nil, "", false
+			}
+			p, err := buildProvider(pName, pc, mName, cfg)
+			if err != nil {
+				logx.Debugf("task: model %q: provider unavailable: %v", ref, err)
+				return nil, "", false
+			}
+			return p, mName, true
+		},
+		// The spawn chain's cap: settings taskMaxDepth, else the built-in
+		// default (agent.DefaultSubagentMaxDepth, Claude Code's 3). settings
+		// is nil for pre-main callers (tests, tooling), which is why the
+		// dereference is guarded rather than assumed.
+		MaxDepth: taskMaxDepth(settings),
 	})
 	reg.Register(&agent.HubTool{Hub: hub})
 	// M11 #42: cross-session mailbox — persisted agent-to-agent channel,
@@ -2003,6 +2042,27 @@ func lastSettings() *config.Settings {
 		return &config.Settings{}
 	}
 	return loadedSettings
+}
+
+// modelsConfig is the models layer main() resolved (loadedModels), with a
+// load-on-demand fallback for callers that run without main (tests, tooling).
+// One home for "where do providers come from", so the task tool's ModelFor and
+// every run mode cannot disagree about which providers exist.
+func modelsConfig() (*config.Config, error) {
+	if loadedModels != nil {
+		return loadedModels, nil
+	}
+	return config.LoadModelsLayered()
+}
+
+// taskMaxDepth reads the spawn-chain cap from settings, tolerating a nil
+// settings (pre-main callers). 0 keeps the task tool's own default, so there
+// is exactly one place that knows the built-in number.
+func taskMaxDepth(s *config.Settings) int {
+	if s == nil {
+		return 0
+	}
+	return s.TaskMaxDepth
 }
 
 // persistDefaultModel makes a model switch sticky: the next xdev process (a

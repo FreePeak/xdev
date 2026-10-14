@@ -51,6 +51,13 @@ func mustGetwd() string {
 // with the run modes (they need defaultModel).
 var loadedSettings *config.Settings
 
+// loadedModels is the layered models.yml main() resolved, shared with the run
+// modes so a subagent's model reference resolves against the SAME layer the
+// session launched from. Re-loading it inside a running session would read a
+// file that may have changed under it — the task tool's ModelFor resolves a
+// child's model, and "which providers exist" must not move mid-turn.
+var loadedModels *config.Config
+
 // appliedLimit is the process memory limit actually set, for the usage
 // footer (the closure runs before the value exists).
 var appliedLimit int64
@@ -297,6 +304,13 @@ func main() {
 	// models.yml and credential lookup see these values.
 	for _, key := range config.LoadEnv(mustGetwd()) {
 		logx.Debugf("env: %s set from .env", key)
+	}
+	// The models layer, resolved once: the run modes and the task tool's
+	// ModelFor both read it, so "which providers exist" cannot move mid-session.
+	if mcfg, merr := config.LoadModelsLayered(); merr == nil {
+		loadedModels = mcfg
+	} else {
+		logx.Debugf("models config: %v", merr)
 	}
 
 	// --- layered settings (M9 #10): defaults ← global ← project ← -config
