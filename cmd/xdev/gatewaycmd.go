@@ -115,6 +115,19 @@ func gatewayRun(args []string, version string) int {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		return 2
 	}
+	// Single instance, before the first request: two pollers on one token are
+	// the 409 the daemon reports, and nothing in the poll loop can tell a rival
+	// daemon from a stray getUpdates. The lock is what makes "one poller" a
+	// property of the process rather than a hope about how it was launched —
+	// a KeepAlive unit, `gateway start`, and a hand-typed `gateway run` all
+	// land here. A killed daemon releases it with the process, so there is no
+	// stale-lock case to clear.
+	lock, err := gateway.AcquireRunLock(dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xdev:", err)
+		return 2
+	}
+	defer lock.Release()
 	if err := gateway.WritePID(dataDir); err != nil {
 		logf("gateway: pid file: %v", err)
 	}

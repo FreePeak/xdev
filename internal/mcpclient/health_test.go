@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestProbeHTTPHappyPath: a health endpoint that returns 200
 // makes IsHealthy report true.
 func TestProbeHTTPHappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -162,6 +164,52 @@ func TestStartAutoPassesEnv(t *testing.T) {
 	if string(got) != "reached" {
 		t.Fatalf("autoStart.env did not reach the process: got %q", got)
 	}
+}
+
+// TestStartAutoLeavesNoZombie pins the reap. The existing test above calls
+// cmd.Wait() itself, which hides the defect: StartAuto must already have a
+// reaper attached, so a child that exits is collected whether or not the
+// caller ever looks at it. Without the reap the child stays <defunct> for the
+// life of the process — measured 2026-10-14 as a 40-minute zombie inside a
+// live TUI — and no amount of process counting from outside sees it, because
+// it is not running.
+func TestStartAutoLeavesNoZombie(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sc := &ServerConfig{
+		URL: srv.URL + "/mcp",
+		AutoStart: &AutoStartConfig{
+			Command:   "/bin/sh",
+			Args:      []string{"-c", "exit 0"},
+			HealthURL: srv.URL,
+		},
+	}
+	cmd, err := sc.StartAuto()
+	if err != nil {
+		t.Fatalf("StartAuto: %v", err)
+	}
+	// The caller never waits. The child exits on its own; a zombie is what is
+	// left if nothing reaped it.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !zombie(cmd.Process.Pid) {
+			return // reaped: exactly what this test is for
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("auto-started child pid %d is still a zombie: StartAuto did not reap it", cmd.Process.Pid)
+}
+
+// zombie reports whether pid is a defunct process (macOS/Linux: state Z).
+func zombie(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false // gone entirely
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 // TestLoadConfigAutoStartEnv: the autoStart block's env survives YAML
