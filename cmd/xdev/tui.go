@@ -321,10 +321,28 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}()
 
 	// Screen.
-	th := theme.LoadNamed(themeName, theme.CustomDir())
-	if lastSettings().ColorBlindMode {
-		th = theme.ApplyColorBlindMode(th)
+	// baseTheme is the palette without the color-blind remap; th is what the
+	// screen paints. Keeping them separate means a colorBlindMode toggle can
+	// re-derive th from the base instead of stacking the remap on a copy that
+	// already has it (or failing to peel it off when the mode turns off).
+	baseTheme := theme.LoadNamed(themeName, theme.CustomDir())
+	// themeLabel is what the user configured — "auto" or a concrete name.
+	// Declared here so the settings overlay and /theme share one source of
+	// truth for the value the panel shows and the write path updates.
+	themeLabel := themeName
+	if themeLabel == "" {
+		themeLabel = "auto"
 	}
+	// applyTheme runs every resolved palette through the color-blind remap
+	// (settings colorBlindMode) so startup, /theme, the settings panel and
+	// live reload agree.
+	applyTheme := func(t *theme.Theme) *theme.Theme {
+		if lastSettings().ColorBlindMode {
+			return theme.ApplyColorBlindMode(t)
+		}
+		return t
+	}
+	th := applyTheme(baseTheme)
 	// The settings the shell had before tcell took the tty, captured here so
 	// the restore has a path that does NOT go through tcell's screen mutex: a
 	// UI loop wedged in a write holds that mutex for the whole flush, so
@@ -547,18 +565,25 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
-	// Settings overlay (Alt+,): the settings this session already has a live
-	// seam for. The panel owns its key handling and rendering; what is wired
-	// here is the two things only cmd can do — read the layered values the
-	// session actually resolved, and persist a change to the global layer the
-	// way `xdev config set` does. Rows are declared once, with the live apply
-	// each one performs, so the three callbacks cannot drift apart: a setting
-	// with no seam here has no row, which is why the overlay shows the
-	// resolved state rather than a generic editor of the config file.
+	// Settings overlay (Alt+, / bare /settings): every editable row has a live
+	// seam. Write goes through the same door the matching slash command uses
+	// (Theme, ThinkingLevel, Effort, ContextWindow, AutoAnswer, agent.Policy)
+	// so a change here and a change there cannot disagree, and the value
+	// takes effect immediately — no restart. A row with no seam stays
+	// read-only (defaultModel, memory, advisor): those need a picker or a
+	// restart, and the panel is not a generic config editor.
 	app.SetSettingsOverlayOps(&tui.SettingsOverlayOps{
 		Path: config.GlobalSettingsPath(),
 		Read: func() []tui.SettingsRow {
 			s := lastSettings()
+			themeVal := s.Theme
+			if themeVal == "" {
+				themeVal = themeLabel
+			}
+			approvalVal := s.ApprovalMode
+			if approvalVal == "" {
+				approvalVal = "yolo"
+			}
 			rows := []tui.SettingsRow{
 				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
 					Editable: true, Kind: "toggle"},
@@ -566,51 +591,99 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Editable: true, Kind: "toggle"},
 				{Key: "tui.exitDetach", Label: "Detach on quit", Value: fmt.Sprint(s.TuiExitDetachOn()),
 					Editable: true, Kind: "toggle"},
-				// thinking is a select, not a toggle: the vocabulary is the
-				// level ladder, and it lives behind one door (ThinkingOps.Set)
-				// so a level set here and a level set by /thinking cannot
-				// disagree about the wire.
+				{Key: "ask.autoAnswer", Label: "Auto-answer asks", Value: fmt.Sprint(s.AskAutoAnswerOn()),
+					Editable: true, Kind: "toggle"},
+				{Key: "colorBlindMode", Label: "Color-blind mode", Value: fmt.Sprint(s.ColorBlindMode),
+					Editable: true, Kind: "toggle"},
+				{Key: "debugMouse", Label: "Debug mouse", Value: fmt.Sprint(s.DebugMouse),
+					Editable: true, Kind: "toggle"},
+				// thinking is a select: the vocabulary is the level ladder, and
+				// it lives behind ThinkingOps.Set so /thinking and the panel
+				// cannot disagree about the wire.
 				{Key: "thinking", Label: "Thinking level", Value: s.ThinkingLevel(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ThinkingLevels...)},
-				// The context window is a select for the same reason thinking
-				// is: the vocabulary is the ladder of sizes, and /context
-				// writes the same key through the same door, so the panel and
-				// the command cannot disagree about the value in force.
 				{Key: "compaction.contextWindow", Label: "Context window", Value: s.CompactionContextWindowOn(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ContextWindowChoices...)},
 				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
 					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
-				// The session effort rung is a select for the same reason
-				// thinking is: the vocabulary is the ladder, and /effort and
-				// Shift-Tab write the same key through the same door
-				// (EffortOps.Set), so the panel cannot disagree about it.
 				{Key: "effort", Label: "Session effort", Value: s.SessionEffort(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.SessionEffortLevels...)},
-				// The tab strip is a view of the tabset, not the tabset: the
-				// chords and /tabs keep working with it hidden. Both
-				// spellings are opencode's own values, so a config pasted from
-				// its tui.json lands unchanged.
 				{Key: "tui.tabs.mode", Label: "Session tabs", Value: tabsModeOn(s),
 					Editable: true, Kind: "select", Options: []string{"auto", "on", "off"}},
 				{Key: "tui.tabs.indicators", Label: "Tab badges", Value: s.TabsIndicators(),
 					Editable: true, Kind: "select", Options: []string{"status", "numbers"}},
-				{Key: "theme", Label: "Theme", Value: s.Theme, Editable: false, Kind: "text"},
-				{Key: "approvalMode", Label: "Approval mode", Value: s.ApprovalMode, Editable: false, Kind: "text"},
+				// Theme cycles the AvailableThemes list (auto + builtins +
+				// customs). The write goes through ThemeOps.Set so /theme and
+				// the panel share one live seam.
+				{Key: "theme", Label: "Theme", Value: themeVal,
+					Editable: true, Kind: "select", Options: theme.AvailableThemes(theme.CustomDir())},
+				// Approval mode is the live agent policy. agentPolicy() reads
+				// lastSettings each agent build; folding here + rewriting
+				// every live agent makes the next tool call see the new mode.
+				{Key: "approvalMode", Label: "Approval mode", Value: approvalVal,
+					Editable: true, Kind: "select", Options: []string{"yolo", "write", "always-ask"}},
 				{Key: "defaultModel", Label: "Model", Value: s.DefaultModel, Editable: false, Kind: "text"},
 				{Key: "memory", Label: "Memory", Value: s.Memory, Editable: false, Kind: "text"},
 				{Key: "advisor", Label: "Advisor", Value: fmt.Sprint(s.Advisor), Editable: false, Kind: "text"},
-				{Key: "colorBlindMode", Label: "Color-blind mode", Value: fmt.Sprint(s.ColorBlindMode), Editable: false, Kind: "text"},
-				{Key: "debugMouse", Label: "Debug mouse", Value: fmt.Sprint(s.DebugMouse),
-					Editable: true, Kind: "toggle"},
 			}
 			return rows
 		},
 		Write: func(key, value string) error {
-			// The one write path: the global layer, exactly what
-			// `xdev config set` edits. config.Set validates the key against
-			// the schema and round-trips the file before it lands, so a bad
-			// value fails here instead of quarantining the user's config on
-			// the next start.
+			// Keys with a live command seam go through that seam first: the
+			// seam owns persist + in-memory fold + live apply, so a second
+			// config.Set here would double-write and double-notice. Keys
+			// without a seam still use the one write path below.
+			switch key {
+			case "theme":
+				// ThemeOps is wired later in this function; the overlay cannot
+				// open before Run, so the ops are present by the time a user
+				// presses Enter.
+				return app.Theme(value)
+			case "thinking":
+				return app.ThinkingLevel(value)
+			case "effort":
+				return app.Effort(value)
+			case "compaction.contextWindow":
+				return app.ContextWindow(value)
+			case "ask.autoAnswer":
+				if value == "true" {
+					return app.AutoAnswer("yes")
+				}
+				return app.AutoAnswer("no")
+			case "approvalMode":
+				if _, err := config.ParseApprovalMode(value); err != nil {
+					return err
+				}
+				if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
+					return err
+				}
+				lastSettings().ApprovalMode = value
+				// Every registered agent, not just the next turn: a tool call
+				// already in flight reads Policy on the agent it holds.
+				pol := agentPolicy()
+				for _, ag := range tabs.liveAgents() {
+					if ag != nil {
+						ag.Policy = pol
+					}
+				}
+				return nil
+			case "colorBlindMode":
+				if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
+					return err
+				}
+				lastSettings().ColorBlindMode = value == "true"
+				// Re-derive from the base palette so turning the mode off
+				// peels the remap rather than leaving a remapped copy in place.
+				th = applyTheme(baseTheme)
+				app.SetTheme(th)
+				return nil
+				return nil
+			}
+			// The one write path for display-only / strip keys: the global
+			// layer, exactly what `xdev config set` edits. config.Set
+			// validates the key against the schema and round-trips the file
+			// before it lands, so a bad value fails here instead of
+			// quarantining the user's config on the next start.
 			if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
 				return err
 			}
@@ -630,30 +703,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				lastSettings().Tui.ExitDetach = &v
 			case "tui.tabs.mode":
 				lastSettings().Tui.Tabs.Mode = value
-				// The strip is the only thing mode moves, and the App owns
-				// that flag, so a write takes effect on the next frame
-				// rather than the next process.
 				applyTabPolicy()
 			case "tui.tabs.indicators":
 				lastSettings().Tui.Tabs.Indicators = value
 				applyTabPolicy()
-			case "thinking":
-				lastSettings().Thinking = value
-			case "effort":
-				// Same seam /effort and Shift-Tab go through, so a rung set in
-				// the panel re-deferrs the live catalog exactly like the
-				// command does (the row writes the key; the fold below is what
-				// makes the next turn see the new surface).
-				if err := app.Effort(value); err != nil {
-					return err
-				}
 			case "sidebarMode":
 				lastSettings().SidebarMode = value
-			case "compaction.contextWindow":
-				// config.Set already rejected a value outside the vocabulary,
-				// so this fold only ever sees a canonical one.
-				lastSettings().Compaction.ContextWindow = value
-				applyContextPin()
 			case "debugMouse":
 				lastSettings().DebugMouse = value == "true"
 			}
@@ -1974,34 +2029,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// what /vibe reads as a conflict, so a placeholder would refuse to enter
 	// director mode in every fresh session. The objective is the user's to
 	// name — `/goal <objective>` — and the state stays empty until then.
-	// applyTheme runs every resolved palette through the color-blind remap
-	// (settings colorBlindMode) so startup, /theme and live reload agree.
-	applyTheme := func(t *theme.Theme) *theme.Theme {
-		if lastSettings().ColorBlindMode {
-			return theme.ApplyColorBlindMode(t)
-		}
-		return t
-	}
+	// applyTheme + themeLabel were declared with the screen above so the
+	// settings overlay and /theme share one source of truth.
 	if themeName != "" {
 		stopWatch := theme.Watch(theme.CustomDir(), themeName, func(nt *theme.Theme) {
-			app.SetTheme(applyTheme(nt))
+			baseTheme = nt
+			th = applyTheme(nt)
+			app.SetTheme(th)
 		})
 		defer stopWatch()
-	}
-	// themeLabel is what the user configured — "auto" (the polarity-detected
-	// palette) or a concrete theme. /theme reports and writes it, so the
-	// value /settings shows ("theme auto") is restorable instead of dead and
-	// a switch survives a restart instead of evaporating at exit.
-	themeLabel := themeName
-	if themeLabel == "" {
-		themeLabel = "auto"
 	}
 	app.SetThemeOps(&tui.ThemeOps{
 		Current: func() string {
 			if themeLabel == "auto" {
-				return "auto (" + th.Name + ")"
+				return "auto (" + baseTheme.Name + ")"
 			}
-			return th.Name
+			return baseTheme.Name
 		},
 		List: func() []string { return theme.AvailableThemes(theme.CustomDir()) },
 		Set: func(name string) error {
@@ -2016,17 +2059,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				known := false
 				for _, avail := range theme.AvailableThemes(theme.CustomDir()) {
 					if avail == name {
-						app.SetTheme(applyTheme(nt))
-						th = nt
-						return nil
+						known = true
+						break
 					}
 				}
 				if !known {
 					return fmt.Errorf("unknown theme %q", name)
 				}
 			}
-			app.SetTheme(applyTheme(nt))
-			th = nt
+			baseTheme = nt
+			th = applyTheme(nt)
+			app.SetTheme(th)
 			themeLabel = name
 			if err := config.Set(config.GlobalSettingsPath(), "theme", name); err != nil {
 				// The palette switched; only saving failed. Say which, rather
