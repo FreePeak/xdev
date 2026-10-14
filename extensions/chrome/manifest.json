@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "xdev Browser",
+  "version": "0.1.0",
+  "description": "Lets the xdev coding agent drive tabs in this Chrome profile over a local native-messaging bridge (CDP-compatible).",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAySj/Ya1NWBs8xIVGk7jBnclPwWg8LumwPo3uiEux6SHEcPW82bSgwtY8B53JTHIArUIi0yWPqFr/iJrvP7l1yJjgGsjNhZos7ghyhK3KjdTKtc44uJ8LMKXkkh9rf/3/i1V+2rqbnPYpc1veH830StNYoTGNXw9DTlftWD+IXVZdfz6889PIrSByQfljqUEyUu1lHI9T5ycOZZYbDiTWSPz8L2OQOi/OdOyPOYc5b2ILwXKUmUrzhzrP9aLvE38MtXD51a56Afc0cyITpJQxUdNelYrwb6SsUoPufsRsg91RamZbTkgdZuUBub+BC+xiVjNROJpxoD6AigVqUotyWQIDAQAB",
+  "icons": {
+    "128": "icon-128.png"
+  },
+  "action": {
+    "default_title": "xdev Browser",
+    "default_icon": {
+      "128": "icon-128.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "debugger",
+    "tabs",
+    "nativeMessaging",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}

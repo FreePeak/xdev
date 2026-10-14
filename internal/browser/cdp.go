@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // maxDiscoveryBytes caps the /json/list response: a browser with a hundred
@@ -213,12 +214,39 @@ func resolveEndpoint(configured string) string {
 		base = strings.TrimSpace(os.Getenv(envEndpoint))
 	}
 	if base == "" {
+		// Prefer the xdev Chrome extension bridge when it is already listening
+		// (personal profile via chrome.debugger). Fall back to Chrome's default
+		// remote-debugging port otherwise.
+		if chromeBridgeAlive() {
+			return chromeBridgeEndpoint
+		}
 		return defaultEndpoint
 	}
 	if !strings.Contains(base, "://") {
 		base = "http://" + base
 	}
 	return strings.TrimRight(base, "/")
+}
+
+// chromeBridgeEndpoint is the CDP face of `xdev chrome host` / the native host.
+const chromeBridgeEndpoint = "http://127.0.0.1:9224"
+
+// chromeBridgeAlive is a cheap loopback probe: 200 on /healthz means the
+// extension bridge is up. Failures are silent — the default 9222 path still
+// works for --remote-debugging-port and autolaunch.
+func chromeBridgeAlive() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, chromeBridgeEndpoint+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // discoveryURL appends the /json/list path unless the caller already gave a
@@ -285,8 +313,8 @@ func unreachableErr(endpoint string, err error, autolaunch bool) error {
 			"--remote-debugging-port=9222 (Chrome 136+ also needs a non-default --user-data-dir=<dir>), "+
 			"then retry — browser.autolaunch: false turns the launch off", endpoint, err, envBinary)
 	}
-	return fmt.Errorf("browser: no Chrome DevTools endpoint at %s (%v); start Chrome/Chromium with "+
-		"--remote-debugging-port=9222 (Chrome 136+ also needs a non-default --user-data-dir=<dir>), "+
+	return fmt.Errorf("browser: no Chrome DevTools endpoint at %s (%v); run `xdev chrome install` and load the extension, "+
+		"or start Chrome/Chromium with --remote-debugging-port=9222 (Chrome 136+ also needs a non-default --user-data-dir=<dir>), "+
 		"then retry — or set browser.cdpUrl / $%s to the right endpoint", endpoint, err, envEndpoint)
 }
 

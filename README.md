@@ -317,12 +317,11 @@ nothing per turn.
 The rest of the surface: `grep`/`glob` (the host's `rg` is used when present),
 `eval` (a persistent Python kernel; a `.ipynb` reads and edits as cell blocks),
 `ast_grep`/`ast_edit`, `lsp`, `debug` (DAP over stdio: dlv, debugpy, lldb-dap),
-`browser` (CDP: attaches to a Chrome you started, else launches one **headless**
-on a private profile and closes it again after 5 idle minutes — a browser xdev
-starts never takes a window; `browser.autolaunch: false` keeps it attach-only,
-`browser.idleExit: <seconds>` tunes the idle exit, `0` keeps the browser for
-the whole session),
-`web_search`, `github`, `gmail`, `security_scan`, `computer`, `tts`, `generate_image`,
+`browser` (CDP: prefers the xdev Chrome extension bridge at `127.0.0.1:9224`
+after `xdev chrome install` so the agent drives your real logged-in tabs; else
+attaches to a Chrome you started with `--remote-debugging-port`, else launches
+one **headless** on a private profile and closes it after 5 idle minutes —
+`browser.autolaunch: false` keeps it attach-only, `browser.idleExit` tunes exit),
 `checkpoint` / `rewind`, `todo`, `ask`, `task` + `hub` + `send_message` /
 `inbox` for subagents and cross-session mail, and the memory and skill tools.
 MCP servers and subprocess extensions register into that same registry, so they

@@ -69,7 +69,7 @@ var subcommands = map[string]bool{
 	"print": true, "tui": true, "rpc": true, "acp": true, "config": true,
 	"lsp-config": true, "say": true, "plugin": true, "join": true,
 	"login": true, "logout": true, "version": true, "serve": true,
-	"stats": true, "memory": true, "gateway": true, "share": true,
+	"stats": true, "memory": true, "gateway": true, "chrome": true, "share": true,
 	"update": true, "setup": true, "bench": true,
 	// Wave 9 CLI suite (#34).
 	"models": true, "search": true, "commit": true, "compress": true,
@@ -146,6 +146,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev share [id|path]         serve an E2E-encrypted view-only snapshot
   xdev serve <svc>             auth-broker | auth-gateway | browser-relay (each also works bare)
   xdev gateway <sub>            Telegram bridge: setup | start | stop | status | logs | run | uninstall
+  xdev chrome <sub>             Chrome extension bridge: install | uninstall | status | host
   xdev install <name>          alias of "plugin install"
   xdev say [--voice V] [--rate N] [--dry-run] "text"  speak text aloud (local TTS)
   xdev update [--channel C]    check for and install updates (stable | canary)
@@ -160,6 +161,13 @@ Flags:
 `
 
 func main() {
+	// Chrome launches the native host with this flag (wrapper script). Must run
+	// before FlagSet parse so unknown-flag handling never swallows it.
+	for _, a := range os.Args[1:] {
+		if a == "--chrome-native-host" {
+			os.Exit(runChrome([]string{"host"}))
+		}
+	}
 	fs := flag.NewFlagSet("xdev", flag.ContinueOnError)
 	configOverlays := repeatable{}
 	fs.Var(&configOverlays, "config", "extra config file layered over the defaults (repeatable)")
@@ -681,6 +689,9 @@ func main() {
 	}
 	if mode == "gateway" {
 		os.Exit(runGateway(args, version))
+	}
+	if mode == "chrome" {
+		os.Exit(runChrome(args))
 	}
 	if mode == "token" {
 		os.Exit(runToken(args))

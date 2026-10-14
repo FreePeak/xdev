@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>xdev Browser</title>
+  <style>
+    body { font: 13px/1.4 system-ui, sans-serif; margin: 12px; min-width: 260px; color: #e8e8e8; background: #1a1b1e; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    .row { margin: 6px 0; }
+    .ok { color: #6ddb8d; }
+    .bad { color: #f07178; }
+    button { margin-top: 8px; padding: 6px 10px; border: 0; border-radius: 6px; background: #2f6fed; color: white; cursor: pointer; }
+    code { font-size: 11px; background: #2a2b2f; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>xdev Browser</h1>
+  <div class="row">Native host: <span id="state">…</span></div>
+  <div class="row">Attached tabs: <span id="tabs">0</span></div>
+  <div class="row" id="err"></div>
+  <div class="row">Agent CDP: <code>http://127.0.0.1:9224</code></div>
+  <button id="reconnect">Reconnect</button>
+  <script src="popup.js"></script>
+</body>
+</html>
