@@ -2,10 +2,10 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +67,65 @@ func ReadPID(dataDir string) int {
 
 // RemovePID deletes the pid record (the daemon's own exit path).
 func RemovePID(dataDir string) { _ = os.Remove(PIDPath(dataDir)) }
+
+// --- single-instance lock ---------------------------------------------------
+
+// LockPath is the daemon's run lock (gateway/gateway.lock). It is separate from
+// the pid file: the pid file is a record other commands READ (`gateway status`,
+// `xdev ps`), and this is a lock the kernel HOLDS, so it is released by the
+// process dying however it dies — including SIGKILL, where no cleanup code runs
+// and a stale pid file would otherwise look like a live daemon.
+func LockPath(dataDir string) string { return filepath.Join(dataDir, "gateway", "gateway.lock") }
+
+// RunLock is the held lock. Release it (or exit) to let another daemon start.
+type RunLock struct{ f *os.File }
+
+// AcquireRunLock takes the daemon's single-instance lock. It fails when another
+// live process holds it, which is the one thing that must not happen twice:
+// two pollers on one bot token is the 409 Conflict the daemon reports, and the
+// second one is a rival that answers every poll with a conflict while both
+// spend a request every 8s. Nothing in the poll loop can tell a rival from a
+// stray getUpdates, so the guard belongs here, before the first request.
+//
+// The lock is advisory and per-inode, so it is taken on a file under the data
+// dir that only this command creates. A lock file left behind by a killed
+// daemon is harmless: the kernel dropped the lock with the process, and the
+// next Acquire succeeds.
+func AcquireRunLock(dataDir string) (*RunLock, error) {
+	if err := os.MkdirAll(filepath.Dir(LockPath(dataDir)), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(LockPath(dataDir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockFile(f); err != nil {
+		_ = f.Close()
+		if errors.Is(err, ErrLockHeld) {
+			if pid := ReadPID(dataDir); pid > 0 {
+				return nil, fmt.Errorf("gateway: another daemon is already polling this bot token (pid %d) — stop it first (`xdev gateway stop`): %w", pid, ErrLockHeld)
+			}
+			return nil, fmt.Errorf("gateway: another daemon is already polling this bot token — stop it first (`xdev gateway stop`): %w", ErrLockHeld)
+		}
+		return nil, err
+	}
+	return &RunLock{f: f}, nil
+}
+
+// Release drops the lock and closes the file. Safe on a nil receiver so a
+// deferred Release needs no branch at the call site.
+func (l *RunLock) Release() {
+	if l == nil || l.f == nil {
+		return
+	}
+	_ = unlockFile(l.f)
+	_ = l.f.Close()
+	l.f = nil
+}
+
+// ErrLockHeld is what lockFile reports when another live process holds the
+// lock. It is the only failure AcquireRunLock treats as "a daemon is running".
+var ErrLockHeld = errors.New("gateway: run lock held by another process")
 
 // FormatChatList renders an allowlist deterministically for status output.
 func FormatChatList(ids []int64) string {

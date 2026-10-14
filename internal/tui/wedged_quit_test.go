@@ -163,6 +163,11 @@ func TestWatchdogGivesUpOnALoopThatNeverRecovers(t *testing.T) {
 	app.SetStallDumpDir(filepath.Join(t.TempDir(), "dumps"))
 	app.SetStallExitAfter(150 * time.Millisecond)
 	app.beat()
+	// The give-up clock is the WEDGE path — a loop blocked on something only a
+	// kill releases. This test binary's goroutine 1 is idle, which the
+	// starvation check correctly reads as "leave it alone", so the branch under
+	// test has to be told the loop is blocked.
+	blockedLoop(t)
 
 	var restored bool
 	app.SetStallRestore(func() { restored = true })
@@ -268,4 +273,16 @@ func stubStallExit(t *testing.T) <-chan struct{} {
 	}
 	t.Cleanup(func() { exitProcess = orig })
 	return exited
+}
+
+// blockedLoop makes loopStarvedFn report a BLOCKED loop for the duration of one
+// test. The give-up clock only fires for that kind (stall_starved_test.go), and
+// a test binary's goroutine 1 is idle — so every test of the exit path has to
+// say which branch it means rather than inherit whichever one this process
+// happens to be in.
+func blockedLoop(t *testing.T) {
+	t.Helper()
+	prev := loopStarvedFn
+	loopStarvedFn = func() bool { return false }
+	t.Cleanup(func() { loopStarvedFn = prev })
 }

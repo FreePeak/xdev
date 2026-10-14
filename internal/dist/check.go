@@ -176,6 +176,13 @@ func CheckEnabled() bool {
 // spawnCheck runs `<this binary> update --check` in its own session. A variable
 // so the check test counts spawns and asserts the throttle without reaching for
 // the network.
+//
+// The child is reaped on its own goroutine. It is detached and outlives nothing
+// in particular — it exits within checkSpawnTimeout — but a Start with no Wait
+// leaves a zombie for as long as the xdev that spawned it lives, and an xdev
+// session lives for hours. Measured 2026-10-14: a 40-minute defunct child of a
+// live TUI, whose only spawn that minute was this one. Process.Release is NOT
+// the fix — it forgets the pid, and the kernel keeps the zombie either way.
 var spawnCheck = func(version string) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -185,7 +192,12 @@ var spawnCheck = func(version string) error {
 	if ch := strings.TrimSpace(os.Getenv("XDEV_CHANNEL")); ch != "" {
 		args = append(args, "--channel", ch)
 	}
-	return detachedCommand(exe, args).Start()
+	cmd := detachedCommand(exe, args)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // ReportCheck prints the recorded check and who owns the checking — the body of

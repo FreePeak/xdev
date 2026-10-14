@@ -72,6 +72,11 @@ func TestWatchdogDumpSurvivesTheGiveUpPath(t *testing.T) {
 	app.beat()
 	exited := stubStallExit(t)
 	app.SetStallRestore(func() {})
+	// This is the WEDGE path: the give-up clock is for a loop blocked on
+	// something only a kill releases. A test binary's goroutine 1 is idle, so
+	// without this the starvation check correctly refuses the exit and the test
+	// would be asserting the wrong branch.
+	blockedLoop(t)
 
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })

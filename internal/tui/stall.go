@@ -5,8 +5,64 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
+
+// The loop's OWN stack is what tells a wedge from a starvation, and the answer
+// is only readable from ANOTHER goroutine: a stack captured by the loop itself
+// shows the loop `[running]`, because it is running — that is why it can ask.
+// The watchdog asks, so the state it reads is the real one. A wedged loop is
+// parked somewhere it cannot leave — inside the tty write, or holding a mutex —
+// and only a kill ends it. A starved loop is `[runnable]` in the scheduler, or
+// sitting in its own `select` with nothing to do, and it comes back on its own
+// the moment the machine gives it a slice. The exit below is the wrong answer
+// for the second kind, and the second kind is most of what is recorded: of 324
+// dumps under ~/.xdev/agent/dumps, 206 name a stall of 90s or more and
+// goroutine 1 is `[select]` in App.Run in 105 of those — a loop with nothing to
+// do, blamed for the machine being busy.
+//
+// The check is a substring over the loop's own `runtime.Stack` output rather
+// than a new field: the dump already carries the answer, and a state this
+// decision reads must be the same state the file records.
+
+// loopStarved reports whether goroutine 1 is runnable or idle rather than
+// blocked. It must be called from a goroutine OTHER than the UI loop — the
+// watchdog is the only caller, and that is why.
+func loopStarved() bool {
+	buf := make([]byte, 1<<16)
+	n := runtime.Stack(buf, true) // true: every goroutine, so goroutine 1 is in it
+	return stackLooksStarved(string(buf[:n]))
+}
+
+// loopStarvedFn is loopStarved behind a variable, so a test can model a loop
+// that IS parked in a syscall — which a test cannot do from inside that loop.
+// Production never writes it.
+var loopStarvedFn = loopStarved
+
+// stackLooksStarved is the decision, split from the capture so it can be tested
+// against the exact stacks the dumps hold instead of against whatever this
+// process happens to be doing.
+func stackLooksStarved(stack string) bool {
+	i := strings.Index(stack, "goroutine 1 [")
+	if i < 0 {
+		return false // no goroutine 1 in the capture: do not excuse the exit
+	}
+	line := stack[i:min(len(stack), i+64)]
+	// The states that mean "the loop is not blocked on anything only a kill can
+	// release": runnable (the scheduler has not run it), select (idle with
+	// nothing to do), and a plain channel receive. Every one of them comes back
+	// on its own the moment the machine gives the process a slice. What is
+	// deliberately NOT here: `syscall` (parked in the tty write) and
+	// `sync.Mutex.Lock` — the two shapes that need the escape hatch, and 22 and
+	// 8 of the recorded dumps.
+	for _, s := range []string{"[runnable]", "[select]", "[chan receive]"} {
+		if strings.Contains(line, s) {
+			return true
+		}
+	}
+	return false
+}
 
 // The UI loop is single-goroutine by design: Run calls handleKey and draw
 // inline (app.go). That is what makes the TUI cheap to reason about, and it is
@@ -199,8 +255,14 @@ func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop 
 			if beat == dumpedForBeat {
 				// Already reported for this beat, but the exit clock keeps
 				// running: a loop that never recovers must not hold the
-				// process forever.
-				if a.stallExitAfter > 0 && at.Sub(condemnedAt) >= a.stallExitAfter {
+				// process forever. A loop that is only STARVED is not that
+				// loop — see loopStarved — and killing it is what put this
+				// session in a resume loop: the keepalive watchdog sees the
+				// session file free, resumes it, and the new process pays the
+				// same starvation with a fresh MCP child set. So the exit is
+				// held for a loop that is blocked, and a starved one is left
+				// to recover (its own quit chord still works).
+				if a.stallExitAfter > 0 && at.Sub(condemnedAt) >= a.stallExitAfter && !loopStarvedFn() {
 					a.exitWedgedLoop(at.Sub(time.Unix(0, beat)))
 					return
 				}

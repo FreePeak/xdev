@@ -158,7 +158,14 @@ func openBrowser(u string) error {
 		fmt.Println(u)
 		return nil
 	}
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// The opener hands the URL to a browser and exits within milliseconds, so
+	// a Start with no Wait parks a defunct child for the life of this process.
+	// Nothing here waits on the browser (it is not ours), only on the opener.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 func commandExists(name string) bool {
