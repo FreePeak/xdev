@@ -300,8 +300,15 @@ func effortResolver(level string) *ai.ThinkingBudget {
 	return &ai.ThinkingBudget{Tokens: tokens}
 }
 
+// A definition's model: now goes through the host's ModelFor resolver (the
+// same resolveModel + buildProvider pair -model uses), so a cross-provider
+// child gets the provider that ref names instead of a model id on the
+// parent's wire.
 func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
 	p := &fakeProvider{calls: []fakeScript{
+		{events: yieldEvents(`{"result":"ok"}`)},
+	}}
+	child := &fakeProvider{calls: []fakeScript{
 		{events: yieldEvents(`{"result":"ok"}`)},
 	}}
 	tt := &TaskTool{
@@ -311,6 +318,12 @@ func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
 			Model: "other/child-model", ThinkingLevel: "high",
 		}},
 		ExpandEffort: effortResolver,
+		ModelFor: func(ref string) (ai.Provider, string, bool) {
+			if ref != "other/child-model" {
+				t.Errorf("resolver asked for %q", ref)
+			}
+			return child, "child-model", true
+		},
 	}
 	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"thinker"}`))
 	if err != nil {
@@ -319,18 +332,87 @@ func TestTaskToolAppliesDeclaredModelAndEffort(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("spawn failed: %q", res.Text)
 	}
-	if len(p.gotReqs) != 1 {
-		t.Fatalf("child requests = %d", len(p.gotReqs))
+	if len(p.gotReqs) != 0 {
+		t.Fatalf("the child ran on the PARENT provider: %d request(s)", len(p.gotReqs))
 	}
-	req := p.gotReqs[0]
-	if req.Model != "other/child-model" {
-		t.Fatalf("frontmatter model not applied to the child request: %q", req.Model)
+	if len(child.gotReqs) != 1 {
+		t.Fatalf("child requests = %d", len(child.gotReqs))
+	}
+	req := child.gotReqs[0]
+	if req.Model != "child-model" {
+		t.Fatalf("resolved model not applied to the child request: %q", req.Model)
 	}
 	if req.Thinking == nil || req.Thinking.Tokens != config.EffortTokens["high"] {
 		t.Fatalf("thinkingLevel not applied: %+v", req.Thinking)
 	}
 	if strings.Contains(res.Text, "warnings:") {
 		t.Fatalf("clean definition must warn about nothing: %q", res.Text)
+	}
+}
+
+// A definition that names a model this host cannot resolve keeps the parent's
+// model and SAYS SO. Silently forwarding the ref would 404 one turn later on
+// the parent's wire (the "@role" failure #272 fixed); silently dropping it
+// would let the child report a model it never ran on.
+func TestTaskToolUnresolvableModelKeepsParentAndSaysSo(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	tt := &TaskTool{
+		Provider: p, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}},
+		Agents: []AgentDefinition{{Name: "a", Description: "d", Model: "nope/nope"}},
+	}
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"a"}`))
+	if len(p.gotReqs) != 1 || p.gotReqs[0].Model != "parent-model" {
+		t.Fatalf("model = %+v, want the parent's", p.gotReqs)
+	}
+	if !strings.Contains(res.Text, "nope/nope") {
+		t.Fatalf("handoff must report the unresolved model: %q", res.Text)
+	}
+}
+
+// The CALL's own model/effort win over the definition — Claude Code's
+// precedence (tool argument → definition → parent). This is the feature the
+// model needs: a chain where one level is mechanical and the next is not.
+func TestTaskToolCallOverridesDefinitionModelAndEffort(t *testing.T) {
+	parent := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	child := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	tt := &TaskTool{
+		Provider: parent, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}},
+		Agents: []AgentDefinition{{
+			Name: "thinker", Description: "d",
+			Model: "other/from-def", ThinkingLevel: "low",
+		}},
+		ExpandEffort: effortResolver,
+		ModelFor: func(string) (ai.Provider, string, bool) {
+			return child, "from-call", true
+		},
+	}
+	res, err := tt.Execute(context.Background(), json.RawMessage(
+		`{"prompt":"go","agent":"thinker","model":"other/from-call","effort":"max"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("spawn failed: %q", res.Text)
+	}
+	if len(child.gotReqs) != 1 {
+		t.Fatalf("child requests = %d", len(child.gotReqs))
+	}
+	if got := child.gotReqs[0].Model; got != "from-call" {
+		t.Fatalf("call model not applied over the definition: %q", got)
+	}
+	if got := child.gotReqs[0].Thinking; got == nil || got.Tokens != config.EffortTokens["max"] {
+		t.Fatalf("call effort not applied over the definition: %+v", got)
+	}
+}
+
+// A host with no ModelFor cannot build a second provider, so a model the
+// child asked for is reported rather than silently ignored.
+func TestTaskToolWithoutResolverReportsTheModel(t *testing.T) {
+	p := &fakeProvider{calls: []fakeScript{{events: yieldEvents(`{"result":"ok"}`)}}}
+	tt := &TaskTool{Provider: p, Model: "parent-model", ChildTools: []tool.Tool{echoTool{}}}
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go","model":"other/x"}`))
+	if !strings.Contains(res.Text, "other/x") {
+		t.Fatalf("unresolved model must be reported: %q", res.Text)
 	}
 }
 

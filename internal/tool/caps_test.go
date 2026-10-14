@@ -101,9 +101,9 @@ func TestClassifyStillCoreFourOnly(t *testing.T) {
 
 type undeclaredStub struct{ name string }
 
-func (u undeclaredStub) Name() string                 { return u.name }
-func (u undeclaredStub) Description() string          { return "stub" }
-func (u undeclaredStub) Parameters() json.RawMessage  { return json.RawMessage(`{}`) }
+func (u undeclaredStub) Name() string                { return u.name }
+func (u undeclaredStub) Description() string         { return "stub" }
+func (u undeclaredStub) Parameters() json.RawMessage { return json.RawMessage(`{}`) }
 func (u undeclaredStub) Execute(context.Context, json.RawMessage) (Result, error) {
 	return Result{}, nil
 }

@@ -2,8 +2,8 @@ package sse
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"

@@ -70,6 +70,20 @@ func tabsModeOn(s *config.Settings) string {
 }
 
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
+	// Some terminal managers provision their panes with TERM=dumb (herdr's
+	// default), which means tcell never marks the terminfo entry
+	// XTerm-like and never enables the advanced-keyboard protocol
+	// (CSI u / modifyOtherKeys). The consequence is that every chord
+	// opencode/xdev advertise that carries a modifier (Ctrl+Tab, Alt+],
+	// Ctrl+1..9) is simply never delivered, even though the downstream
+	// terminal (Ghostty, iTerm2, WezTerm, Kitty) supports them. If the
+	// terminal advertises 24-bit colour we know it is capable, so resolve
+	// a real $TERM name up front — same assumption tcell's own
+	// enableCsiU already encodes (tcell gates it on XTermLike).
+	if t, _ := os.LookupEnv("TERM"); (t == "" || t == "dumb" || t == "xterm") &&
+		strings.Contains(strings.ToLower(os.Getenv("COLORTERM")), "truecolor") {
+		_ = os.Setenv("TERM", "xterm-ghostty")
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return 2, err
@@ -321,28 +335,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	}()
 
 	// Screen.
-	// baseTheme is the palette without the color-blind remap; th is what the
-	// screen paints. Keeping them separate means a colorBlindMode toggle can
-	// re-derive th from the base instead of stacking the remap on a copy that
-	// already has it (or failing to peel it off when the mode turns off).
-	baseTheme := theme.LoadNamed(themeName, theme.CustomDir())
-	// themeLabel is what the user configured — "auto" or a concrete name.
-	// Declared here so the settings overlay and /theme share one source of
-	// truth for the value the panel shows and the write path updates.
-	themeLabel := themeName
-	if themeLabel == "" {
-		themeLabel = "auto"
+	th := theme.LoadNamed(themeName, theme.CustomDir())
+	if lastSettings().ColorBlindMode {
+		th = theme.ApplyColorBlindMode(th)
 	}
-	// applyTheme runs every resolved palette through the color-blind remap
-	// (settings colorBlindMode) so startup, /theme, the settings panel and
-	// live reload agree.
-	applyTheme := func(t *theme.Theme) *theme.Theme {
-		if lastSettings().ColorBlindMode {
-			return theme.ApplyColorBlindMode(t)
-		}
-		return t
-	}
-	th := applyTheme(baseTheme)
 	// The settings the shell had before tcell took the tty, captured here so
 	// the restore has a path that does NOT go through tcell's screen mutex: a
 	// UI loop wedged in a write holds that mutex for the whole flush, so
@@ -460,6 +456,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// cannot draw falls back to the code band, so turning it off changes how a
 	// message looks and never what it says.
 	app.SetRenderMermaid(lastSettings().RenderMermaidOn())
+	// The live subagent strip (settings subagentPanel, default on). Display
+	// only, the same shape showThinking/renderMermaid have: it changes what
+	// the user sees of a running child, never what the model receives.
+	app.SetAgentPanelEnabled(lastSettings().SubagentPanelOn())
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
@@ -565,25 +565,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		},
 	})
 
-	// Settings overlay (Alt+, / bare /settings): every editable row has a live
-	// seam. Write goes through the same door the matching slash command uses
-	// (Theme, ThinkingLevel, Effort, ContextWindow, AutoAnswer, agent.Policy)
-	// so a change here and a change there cannot disagree, and the value
-	// takes effect immediately — no restart. A row with no seam stays
-	// read-only (defaultModel, memory, advisor): those need a picker or a
-	// restart, and the panel is not a generic config editor.
+	// Settings overlay (Alt+,): the settings this session already has a live
+	// seam for. The panel owns its key handling and rendering; what is wired
+	// here is the two things only cmd can do — read the layered values the
+	// session actually resolved, and persist a change to the global layer the
+	// way `xdev config set` does. Rows are declared once, with the live apply
+	// each one performs, so the three callbacks cannot drift apart: a setting
+	// with no seam here has no row, which is why the overlay shows the
+	// resolved state rather than a generic editor of the config file.
 	app.SetSettingsOverlayOps(&tui.SettingsOverlayOps{
 		Path: config.GlobalSettingsPath(),
 		Read: func() []tui.SettingsRow {
 			s := lastSettings()
-			themeVal := s.Theme
-			if themeVal == "" {
-				themeVal = themeLabel
-			}
-			approvalVal := s.ApprovalMode
-			if approvalVal == "" {
-				approvalVal = "yolo"
-			}
 			rows := []tui.SettingsRow{
 				{Key: "showThinking", Label: "Show thinking", Value: fmt.Sprint(s.ShowThinkingOn()),
 					Editable: true, Kind: "toggle"},
@@ -591,99 +584,51 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					Editable: true, Kind: "toggle"},
 				{Key: "tui.exitDetach", Label: "Detach on quit", Value: fmt.Sprint(s.TuiExitDetachOn()),
 					Editable: true, Kind: "toggle"},
-				{Key: "ask.autoAnswer", Label: "Auto-answer asks", Value: fmt.Sprint(s.AskAutoAnswerOn()),
-					Editable: true, Kind: "toggle"},
-				{Key: "colorBlindMode", Label: "Color-blind mode", Value: fmt.Sprint(s.ColorBlindMode),
-					Editable: true, Kind: "toggle"},
-				{Key: "debugMouse", Label: "Debug mouse", Value: fmt.Sprint(s.DebugMouse),
-					Editable: true, Kind: "toggle"},
-				// thinking is a select: the vocabulary is the level ladder, and
-				// it lives behind ThinkingOps.Set so /thinking and the panel
-				// cannot disagree about the wire.
+				// thinking is a select, not a toggle: the vocabulary is the
+				// level ladder, and it lives behind one door (ThinkingOps.Set)
+				// so a level set here and a level set by /thinking cannot
+				// disagree about the wire.
 				{Key: "thinking", Label: "Thinking level", Value: s.ThinkingLevel(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ThinkingLevels...)},
+				// The context window is a select for the same reason thinking
+				// is: the vocabulary is the ladder of sizes, and /context
+				// writes the same key through the same door, so the panel and
+				// the command cannot disagree about the value in force.
 				{Key: "compaction.contextWindow", Label: "Context window", Value: s.CompactionContextWindowOn(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.ContextWindowChoices...)},
 				{Key: "sidebarMode", Label: "Sidebar", Value: s.SidebarModeOn(),
 					Editable: true, Kind: "select", Options: []string{"auto", "show", "hide"}},
+				// The session effort rung is a select for the same reason
+				// thinking is: the vocabulary is the ladder, and /effort and
+				// Shift-Tab write the same key through the same door
+				// (EffortOps.Set), so the panel cannot disagree about it.
 				{Key: "effort", Label: "Session effort", Value: s.SessionEffort(),
 					Editable: true, Kind: "select", Options: append([]string(nil), config.SessionEffortLevels...)},
+				// The tab strip is a view of the tabset, not the tabset: the
+				// chords and /tabs keep working with it hidden. Both
+				// spellings are opencode's own values, so a config pasted from
+				// its tui.json lands unchanged.
 				{Key: "tui.tabs.mode", Label: "Session tabs", Value: tabsModeOn(s),
 					Editable: true, Kind: "select", Options: []string{"auto", "on", "off"}},
 				{Key: "tui.tabs.indicators", Label: "Tab badges", Value: s.TabsIndicators(),
 					Editable: true, Kind: "select", Options: []string{"status", "numbers"}},
-				// Theme cycles the AvailableThemes list (auto + builtins +
-				// customs). The write goes through ThemeOps.Set so /theme and
-				// the panel share one live seam.
-				{Key: "theme", Label: "Theme", Value: themeVal,
-					Editable: true, Kind: "select", Options: theme.AvailableThemes(theme.CustomDir())},
-				// Approval mode is the live agent policy. agentPolicy() reads
-				// lastSettings each agent build; folding here + rewriting
-				// every live agent makes the next tool call see the new mode.
-				{Key: "approvalMode", Label: "Approval mode", Value: approvalVal,
-					Editable: true, Kind: "select", Options: []string{"yolo", "write", "always-ask"}},
+				{Key: "theme", Label: "Theme", Value: s.Theme, Editable: false, Kind: "text"},
+				{Key: "approvalMode", Label: "Approval mode", Value: s.ApprovalMode, Editable: false, Kind: "text"},
 				{Key: "defaultModel", Label: "Model", Value: s.DefaultModel, Editable: false, Kind: "text"},
 				{Key: "memory", Label: "Memory", Value: s.Memory, Editable: false, Kind: "text"},
 				{Key: "advisor", Label: "Advisor", Value: fmt.Sprint(s.Advisor), Editable: false, Kind: "text"},
+				{Key: "colorBlindMode", Label: "Color-blind mode", Value: fmt.Sprint(s.ColorBlindMode), Editable: false, Kind: "text"},
+				{Key: "debugMouse", Label: "Debug mouse", Value: fmt.Sprint(s.DebugMouse),
+					Editable: true, Kind: "toggle"},
 			}
 			return rows
 		},
 		Write: func(key, value string) error {
-			// Keys with a live command seam go through that seam first: the
-			// seam owns persist + in-memory fold + live apply, so a second
-			// config.Set here would double-write and double-notice. Keys
-			// without a seam still use the one write path below.
-			switch key {
-			case "theme":
-				// ThemeOps is wired later in this function; the overlay cannot
-				// open before Run, so the ops are present by the time a user
-				// presses Enter.
-				return app.Theme(value)
-			case "thinking":
-				return app.ThinkingLevel(value)
-			case "effort":
-				return app.Effort(value)
-			case "compaction.contextWindow":
-				return app.ContextWindow(value)
-			case "ask.autoAnswer":
-				if value == "true" {
-					return app.AutoAnswer("yes")
-				}
-				return app.AutoAnswer("no")
-			case "approvalMode":
-				if _, err := config.ParseApprovalMode(value); err != nil {
-					return err
-				}
-				if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
-					return err
-				}
-				lastSettings().ApprovalMode = value
-				// Every registered agent, not just the next turn: a tool call
-				// already in flight reads Policy on the agent it holds.
-				pol := agentPolicy()
-				for _, ag := range tabs.liveAgents() {
-					if ag != nil {
-						ag.Policy = pol
-					}
-				}
-				return nil
-			case "colorBlindMode":
-				if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
-					return err
-				}
-				lastSettings().ColorBlindMode = value == "true"
-				// Re-derive from the base palette so turning the mode off
-				// peels the remap rather than leaving a remapped copy in place.
-				th = applyTheme(baseTheme)
-				app.SetTheme(th)
-				return nil
-				return nil
-			}
-			// The one write path for display-only / strip keys: the global
-			// layer, exactly what `xdev config set` edits. config.Set
-			// validates the key against the schema and round-trips the file
-			// before it lands, so a bad value fails here instead of
-			// quarantining the user's config on the next start.
+			// The one write path: the global layer, exactly what
+			// `xdev config set` edits. config.Set validates the key against
+			// the schema and round-trips the file before it lands, so a bad
+			// value fails here instead of quarantining the user's config on
+			// the next start.
 			if err := config.Set(config.GlobalSettingsPath(), key, value); err != nil {
 				return err
 			}
@@ -703,12 +648,30 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				lastSettings().Tui.ExitDetach = &v
 			case "tui.tabs.mode":
 				lastSettings().Tui.Tabs.Mode = value
+				// The strip is the only thing mode moves, and the App owns
+				// that flag, so a write takes effect on the next frame
+				// rather than the next process.
 				applyTabPolicy()
 			case "tui.tabs.indicators":
 				lastSettings().Tui.Tabs.Indicators = value
 				applyTabPolicy()
+			case "thinking":
+				lastSettings().Thinking = value
+			case "effort":
+				// Same seam /effort and Shift-Tab go through, so a rung set in
+				// the panel re-deferrs the live catalog exactly like the
+				// command does (the row writes the key; the fold below is what
+				// makes the next turn see the new surface).
+				if err := app.Effort(value); err != nil {
+					return err
+				}
 			case "sidebarMode":
 				lastSettings().SidebarMode = value
+			case "compaction.contextWindow":
+				// config.Set already rejected a value outside the vocabulary,
+				// so this fold only ever sees a canonical one.
+				lastSettings().Compaction.ContextWindow = value
+				applyContextPin()
 			case "debugMouse":
 				lastSettings().DebugMouse = value == "true"
 			}
@@ -1284,6 +1247,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	}
 	if sessionHub != nil {
+		// The strip hangs off the hub the same way the roster does: its click
+		// path (OpenSubChild) needs st.ops.Transcript, which is exactly what
+		// this ops block provides. Wired here, while the hub is configured, so
+		// a session without a hub never paints an agent panel it cannot open.
+		app.SetAgentPanelOps(&tui.AgentPanelOps{
+			OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
+		})
+		// An unused but always-on default: the strip still paints even with no
+		// hub, because its child events do not need one — the fork is the
+		// transcript, not the roster.
+		_ = len("")
 		// The dock's roster must move when a child settles after the turn that
 		// started it is long over — the only other thing that would repaint it is
 		// polling the panel at frame rate, which is the exact cost #283/#284 closed.
@@ -1319,6 +1293,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Park:   sessionHub.Park,
 			Kill:   sessionHub.Cancel,
 			Revive: func(id string) bool { return sessionHub.Revive(id, "") == nil },
+		})
+		// The live subagent strip (agentspanel.go) hangs off the hub only for
+		// its click path: a row opens the child's own transcript through the
+		// SAME surface /hub's Enter uses, so there is one Esc contract for "I
+		// am looking at a child" and no second renderer for the same rows.
+		app.SetAgentPanelOps(&tui.AgentPanelOps{
+			OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
 		})
 	}
 	// The dock's sources (#291 §1). Each is one block whose first line is its
@@ -2029,22 +2010,34 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// what /vibe reads as a conflict, so a placeholder would refuse to enter
 	// director mode in every fresh session. The objective is the user's to
 	// name — `/goal <objective>` — and the state stays empty until then.
-	// applyTheme + themeLabel were declared with the screen above so the
-	// settings overlay and /theme share one source of truth.
+	// applyTheme runs every resolved palette through the color-blind remap
+	// (settings colorBlindMode) so startup, /theme and live reload agree.
+	applyTheme := func(t *theme.Theme) *theme.Theme {
+		if lastSettings().ColorBlindMode {
+			return theme.ApplyColorBlindMode(t)
+		}
+		return t
+	}
 	if themeName != "" {
 		stopWatch := theme.Watch(theme.CustomDir(), themeName, func(nt *theme.Theme) {
-			baseTheme = nt
-			th = applyTheme(nt)
-			app.SetTheme(th)
+			app.SetTheme(applyTheme(nt))
 		})
 		defer stopWatch()
+	}
+	// themeLabel is what the user configured — "auto" (the polarity-detected
+	// palette) or a concrete theme. /theme reports and writes it, so the
+	// value /settings shows ("theme auto") is restorable instead of dead and
+	// a switch survives a restart instead of evaporating at exit.
+	themeLabel := themeName
+	if themeLabel == "" {
+		themeLabel = "auto"
 	}
 	app.SetThemeOps(&tui.ThemeOps{
 		Current: func() string {
 			if themeLabel == "auto" {
-				return "auto (" + baseTheme.Name + ")"
+				return "auto (" + th.Name + ")"
 			}
-			return baseTheme.Name
+			return th.Name
 		},
 		List: func() []string { return theme.AvailableThemes(theme.CustomDir()) },
 		Set: func(name string) error {
@@ -2059,17 +2052,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				known := false
 				for _, avail := range theme.AvailableThemes(theme.CustomDir()) {
 					if avail == name {
-						known = true
-						break
+						app.SetTheme(applyTheme(nt))
+						th = nt
+						return nil
 					}
 				}
 				if !known {
 					return fmt.Errorf("unknown theme %q", name)
 				}
 			}
-			baseTheme = nt
-			th = applyTheme(nt)
-			app.SetTheme(th)
+			app.SetTheme(applyTheme(nt))
+			th = nt
 			themeLabel = name
 			if err := config.Set(config.GlobalSettingsPath(), "theme", name); err != nil {
 				// The palette switched; only saving failed. Say which, rather
@@ -3139,8 +3132,16 @@ type taskChildSink struct {
 	ids map[string]string // child label -> the `task` call id it belongs to
 }
 
-// onEvent is the TaskTool.OnEvent callback: one child moment, straight to
-// the transcript.
+// onEvent is the TaskTool.OnEvent callback: one child moment, to the
+// transcript rows AND to the live subagent strip.
+//
+// Two surfaces, one event, on purpose. The transcript rows are per-CALL: they
+// hang under the `task` call that spawned the child, which is right for a
+// foreground spawn and impossible for a chain (a grandchild's events arrive
+// with no call row of their own — its parent's call lives inside the child's
+// session). The strip is the flat, always-on view of every running child at
+// every depth. Neither can do the other's job, so the same callback feeds both
+// rather than growing a second event seam.
 func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 	callID := s.callID(ev.Label)
 	switch ev.Kind {
@@ -3157,10 +3158,13 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 		}
 		s.mu.Unlock()
 		s.app.AddTaskChild(callID, ev.Label, ev.Agent, ev.Model)
+		s.app.AgentPanelStart(ev.Label, ev.Agent, ev.Model, ev.TranscriptID)
 	case agent.SubagentTool:
 		s.app.UpdateTaskChild(callID, ev.Label, ev.Tool, string(ev.Args), ev.Status)
+		s.app.AgentPanelUpdate(ev.Label, ev.Tool, string(ev.Args))
 	case agent.SubagentEnd:
 		s.app.FinishTaskChild(callID, ev.Label, ev.Status, ev.Dur)
+		s.app.AgentPanelSettle(ev.Label)
 	}
 	// The id the child's own transcript is readable under, when a hub tracked
 	// it (every event carries it). Without one the row stays narration only:
@@ -3168,6 +3172,7 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 	// open nothing.
 	if ev.TranscriptID != "" {
 		s.app.SetTaskChildTranscript(callID, ev.Label, ev.TranscriptID)
+		s.app.AgentPanelSetTranscript(ev.Label, ev.TranscriptID)
 	}
 }
 

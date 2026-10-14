@@ -177,18 +177,22 @@ func TestFindAgent(t *testing.T) {
 }
 
 // TestTaskToolDepthGuard pins the recursion limit: a task tool at the
-// depth cap refuses to spawn further children.
+// default depth cap (DefaultSubagentMaxDepth) refuses to spawn further
+// children, and the refusal names the knob that raises it.
 func TestTaskToolDepthGuard(t *testing.T) {
 	tt := &TaskTool{
 		Provider: &fakeProvider{},
-		Depth:    2,
+		Depth:    DefaultSubagentMaxDepth,
 	}
 	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"go"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.IsError || !strings.Contains(res.Text, "depth limit") {
+	if !res.IsError || !strings.Contains(res.Text, "nesting limit") {
 		t.Fatalf("depth cap must refuse: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "taskMaxDepth") {
+		t.Fatalf("the refusal must name the setting that raises the cap: %q", res.Text)
 	}
 }
 
@@ -314,18 +318,31 @@ func TestSpawnPolicyMatrix(t *testing.T) {
 }
 
 func TestDepthCapBlocksAtExecute(t *testing.T) {
-	// A child at the cap (depth 2) cannot spawn, regardless of policy.
-	tt := newMatrixTool("root-open", 2)
+	// A child AT the cap cannot spawn, regardless of policy.
+	tt := newMatrixTool("root-open", DefaultSubagentMaxDepth)
 	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
-	if !res.IsError || !strings.Contains(res.Text, "depth limit") {
+	if !res.IsError || !strings.Contains(res.Text, "nesting limit") {
 		t.Fatalf("cap must block: %q", res.Text)
 	}
 	// One below the cap is allowed to try (provider exhausted = not a
 	// depth error).
-	tt2 := newMatrixTool("root-open", 1)
+	tt2 := newMatrixTool("root-open", DefaultSubagentMaxDepth-1)
 	res2, _ := tt2.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
-	if strings.Contains(res2.Text, "depth limit") {
-		t.Fatalf("depth 1 must be allowed to spawn: %q", res2.Text)
+	if strings.Contains(res2.Text, "nesting limit") {
+		t.Fatalf("depth %d must be allowed to spawn: %q", DefaultSubagentMaxDepth-1, res2.Text)
+	}
+}
+
+// TestTaskToolMaxDepthIsConfigurable pins the knob: a host that raises
+// MaxDepth moves the cap for the WHOLE chain, so the same depth that the
+// default refuses is allowed here — and the nested tool the child receives
+// carries the same number rather than re-deriving the default.
+func TestTaskToolMaxDepthIsConfigurable(t *testing.T) {
+	tt := newMatrixTool("root-open", DefaultSubagentMaxDepth)
+	tt.MaxDepth = DefaultSubagentMaxDepth + 2
+	res, _ := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"x","agent":"worker"}`))
+	if strings.Contains(res.Text, "nesting limit") {
+		t.Fatalf("a raised MaxDepth must admit the spawn: %q", res.Text)
 	}
 }
 
@@ -363,6 +380,72 @@ func TestNamedAgentBelowCapGetsChildTaskTool(t *testing.T) {
 	// ("recursion-proven"), not calls[2] ("worker-done").
 	if !strings.Contains(res.Text, "worker-done") {
 		t.Fatalf("child did not run a task tool (worker yield script not consumed): %q", res.Text)
+	}
+}
+
+// A chain of three levels actually runs: the root spawns the worker, the
+// worker spawns the leaf, and the leaf's yield is what proves the middle
+// level had a live task tool. Three scripts in order, one per level, and the
+// ROOT's result is the middle level's own yield — reachable only if the
+// grandchild consumed its script first.
+//
+// This is the depth the default cap now admits (3) and the one the old
+// hardcoded cap of 2 refused, so it is also the regression guard for the
+// configurable MaxDepth.
+func TestSubagentChainOfThreeLevelsRuns(t *testing.T) {
+	prov := fakeProvider{calls: []fakeScript{
+		// The worker (depth 1) spawns the leaf (depth 2).
+		{events: toolCallEvents("task", `{"prompt":"deepest","agent":"leaf"}`)},
+		// The leaf yields its result to the worker.
+		{events: yieldEvents(`{"result":"grandchild-ran"}`)},
+		// The worker yields its own result to the root.
+		{events: yieldEvents(`{"result":"worker-done"}`)},
+	}}
+	tt := &TaskTool{
+		Provider: &prov, Model: "m",
+		Agents:     matrixAgents(),
+		ChildTools: []tool.Tool{&tool.ReadTool{}},
+		MaxTurns:   2,
+	}
+	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"start","agent":"worker"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("three-level chain failed: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "worker-done") {
+		t.Fatalf("the middle level never yielded — its task tool did not run: %q", res.Text)
+	}
+}
+
+// A tighter cap removes the grant instead of failing at call time: with
+// MaxDepth=1 the worker still spawns, but its own declared `task` is withheld
+// (the grant condition is Depth+1 < maxDepth), and the handoff NAMES the
+// dropped tool rather than letting the definition look honoured (#272).
+func TestSubagentChainWithholdsTheToolAboveATightCap(t *testing.T) {
+	prov := fakeProvider{calls: []fakeScript{
+		{events: yieldEvents(`{"result":"worker-done"}`)},
+	}}
+	tt := &TaskTool{
+		Provider: &prov, Model: "m",
+		Agents:     matrixAgents(),
+		ChildTools: []tool.Tool{&tool.ReadTool{}},
+		MaxTurns:   2,
+		MaxDepth:   1, // the worker (depth 1) is at the cap: no task tool
+	}
+	res, err := tt.Execute(context.Background(), json.RawMessage(`{"prompt":"start","agent":"worker"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("the worker must still run: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "worker-done") {
+		t.Fatalf("worker did not complete: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "task") || !strings.Contains(res.Text, "warnings:") {
+		t.Fatalf("the withheld task tool must be reported: %q", res.Text)
 	}
 }
 

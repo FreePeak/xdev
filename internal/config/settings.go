@@ -620,6 +620,13 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
+	// SubagentPanel renders the live running-subagent strip above the
+	// composer. A nil pointer means "unset in this layer", the same shape
+	// ShowThinking uses and for the same reason: the default is ON, and a
+	// plain bool could never express an explicit false through the zero-skip
+	// merge. Display only — it changes what the user sees of a child, never
+	// what the model receives (the yield-only contract is untouched).
+	SubagentPanel *bool `yaml:"subagentPanel"`
 	// SidebarMode is the context dock's display policy (issue #291 §1):
 	// "auto" follows the width rule (open at >=120 columns), "show" pins it
 	// open, "hide" pins it shut. Display only, like ShowThinking, and a plain
@@ -663,6 +670,13 @@ type Settings struct {
 	// advisor to spawned subagents: "off" (the default), "on" (the
 	// advisorModel), or an explicit model reference.
 	TaskAgentAdvisor string `yaml:"taskAgentAdvisor"`
+	// TaskMaxDepth bounds the subagent spawn chain (M11): the top-level
+	// session is depth 0, so 3 allows a child and one level below it — the
+	// same default Claude Code ships (CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).
+	// 0 = the built-in default. A child below the cap gets its own task tool
+	// only when its agent definition declares `task` in its tools, so raising
+	// this cannot make an agent spawn that was not authored to.
+	TaskMaxDepth int `yaml:"taskMaxDepth"`
 	// TTSR is the stream-rules group (M11 #35): rule conditions are
 	// matched against the assistant deltas; see internal/agent/ttsr.go.
 	TTSR *TTSRSettings `yaml:"ttsr"`
@@ -1132,6 +1146,12 @@ func defaultSettings() *Settings {
 		// explicit opt-out.
 		Memory: "local",
 	}
+}
+
+// SubagentPanelOn reports whether the live subagent strip renders; unset
+// follows the schema default (on), the same shape ShowThinkingOn has.
+func (s *Settings) SubagentPanelOn() bool {
+	return s == nil || s.SubagentPanel == nil || *s.SubagentPanel
 }
 
 // ShowThinkingOn reports whether thinking output should be displayed;
@@ -1769,6 +1789,9 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.ShowThinking != nil {
 		s.ShowThinking = layer.ShowThinking
 	}
+	if layer.SubagentPanel != nil {
+		s.SubagentPanel = layer.SubagentPanel
+	}
 	if layer.RenderMermaid != nil {
 		s.RenderMermaid = layer.RenderMermaid
 	}
@@ -1829,11 +1852,17 @@ func (s *Settings) merge(layer *Settings) error {
 		}
 		s.TTS.Rate = layer.TTS.Rate
 	}
+	// A depth of 0 means "unset in this layer", so only a real number moves
+	// the cap — the same zero-skip rule the other int keys use.
+	if layer.TaskMaxDepth != 0 {
+		s.TaskMaxDepth = layer.TaskMaxDepth
+	}
 	if layer.Plugins.Marketplaces != nil {
 		s.Plugins.Marketplaces = append([]string(nil), layer.Plugins.Marketplaces...)
 	}
 	if layer.TaskAgentAdvisor != "" {
 		s.TaskAgentAdvisor = layer.TaskAgentAdvisor
+
 	}
 	if layer.TTSR != nil {
 		if s.TTSR == nil {

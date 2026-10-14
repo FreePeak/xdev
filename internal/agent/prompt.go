@@ -106,6 +106,17 @@ Rules:
 - Finish by calling the yield tool exactly once, as your last action, with the result the caller asked for.
 - Your transcript is not visible to the caller — put everything it needs into the yield result.`
 
+// SubagentChainPrompt is appended to a child's system prompt only when the
+// child actually received a task tool (it is below the chain cap AND its
+// definition declares `task`). A child that cannot spawn must not be told
+// about a capability it does not have — that is the "advertised surface that
+// does nothing" failure the whole #272 thread is about, one level down.
+//
+// It is appended in SpawnChild rather than shipped in every definition
+// prompt, so the one place that knows whether the grant happened is the one
+// place that says so.
+const SubagentChainPrompt = `You can delegate further: you hold the same task tool your caller used, so spawn a child for a slice that means reading a lot of code or that can run beside your own work. Nesting is capped — at the cap the tool refuses and names the setting that raises it, so do not retry a refused spawn; do the work yourself instead. A child sees none of your conversation: give it a self-contained brief and say exactly what its result must contain.`
+
 // SystemPromptOverrides discovers SYSTEM.md/APPEND_SYSTEM.md/
 // PERSONALITY.md/TITLE_SYSTEM.md from the project directory first, then
 // the user data dir. No ancestor walk — unlike AGENTS.md, system prompts
