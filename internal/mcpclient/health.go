@@ -128,6 +128,13 @@ func (sc *ServerConfig) StartAuto() (*exec.Cmd, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("autoStart: %w", err)
 	}
+	// Reap on the caller's behalf: a Start with no Wait leaves a defunct child
+	// in the process table for as long as this xdev lives (measured: a server
+	// that exits immediately — a bound port, a missing env var — was a zombie
+	// for 40 minutes inside a live TUI). Release is not the fix: it drops the
+	// pid and the kernel keeps the zombie. The returned *exec.Cmd is still the
+	// caller's to kill, and Wait is safe to call exactly once from here.
+	go func() { _ = cmd.Wait() }()
 	timeout := sc.AutoStart.HealthTimeoutSec
 	if timeout <= 0 {
 		timeout = 30
