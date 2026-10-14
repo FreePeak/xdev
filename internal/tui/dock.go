@@ -915,7 +915,6 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 		_, _, k, ok := todoMarkerAt(src)
 		if !ok {
 			return ink, false
-			return ink, false
 		}
 		return inkOf(syntaxSlots[k], ink), true
 	}
