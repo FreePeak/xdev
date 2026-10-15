@@ -81,6 +81,7 @@ var subcommands = map[string]bool{
 	"worktree": true, "wt": true,
 	// Repository hook trust (#241): the review and the decision.
 	"trust": true, "distrust": true,
+	"tmux": true,
 	// `xdev help` prints usage; without this entry the word falls through
 	// to print mode and is sent to the model as a prompt.
 	"help": true,
@@ -506,6 +507,9 @@ func main() {
 	if mode == "install" {
 		// omp's `install <name>` is `plugin install <name>`.
 		os.Exit(marketplace.Run(append([]string{"install"}, args...), os.Stdout, os.Stderr, settings.Plugins.Marketplaces))
+	}
+	if mode == "tmux" {
+		os.Exit(runTmux(args))
 	}
 	if mode == "join" {
 		// Collab guest: mirror a shared session (M14 #59).
