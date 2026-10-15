@@ -172,7 +172,7 @@ func (x *rowIndex) blockAt(r int32) int {
 // other block keeps its render.
 //
 // A row that PAINTS the running frame carries the frame index instead: the
-// index moves every 33ms tick, so without it in the stamp a cached row kept
+// index moves every 25ms tick, so without it in the stamp a cached row kept
 // the glyph it was first rendered with. That is why the tool bullet crawled at
 // one frame a second (only `age` moved), the reasoning box froze outright (it
 // had neither `age` nor any stamp), and a subagent's child rows never moved at

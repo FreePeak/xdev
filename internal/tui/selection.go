@@ -208,7 +208,7 @@ func abs(n int) int {
 
 // selEdgeDelay and selEdgeStep shape the held-drag edge auto-scroll: once the
 // pointer has sat on the transcript's first or last row for selEdgeDelay, the
-// viewport moves selEdgeStep rows per UI tick (33ms). A terminal's edge drag
+// viewport moves selEdgeStep rows per UI tick (25ms). A terminal's edge drag
 // scrolls continuously because the pointer keeps reporting motion even when it
 // cannot move further; tcell strips the SGR motion bit, so a parked pointer
 // sends nothing at all and the old one-row-per-event scroll stalled the instant

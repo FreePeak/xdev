@@ -118,17 +118,17 @@ type Status struct {
 
 // tickPeriod is the UI loop's own cadence, and animEvery how many of those
 // ticks one animation frame takes. They are separate because the two have
-// nothing to do with each other: 33ms is what a key's echo and a streaming row
-// want, ~7fps is what a spinner wants, and tying them together is what made an
+// nothing to do with each other: 25ms (40fps) is what a key's echo and a streaming row
+// want, ~20fps is what a spinner wants, and tying them together is what made an
 // open turn cost a third of a core for a glyph nobody can see move.
 const (
-	tickPeriod = 33 * time.Millisecond
-	animEvery  = 4 // 4 * 33ms ≈ 132ms ≈ 7.6fps
+	tickPeriod = 25 * time.Millisecond
+	animEvery  = 4 // 4 * 25ms = 100ms ≈ 10fps
 )
 
 // App is the xdev TUI: scrollback of blocks + editor + status line, drawn
 // with the Grok-style accent rail. The model thread mutates state through
-// the exported mutators (mutex-guarded); the UI loop redraws at ~30fps and
+// the exported mutators (mutex-guarded); the UI loop redraws at ~40fps and
 // on every key event.
 type App struct {
 	scr tcell.Screen
@@ -1809,11 +1809,11 @@ func (a *App) markRun(r bool) {
 	}
 }
 
-// tickAnimate advances the loop's animations for one 33ms tick and reports
+// tickAnimate advances the loop's animations for one 25ms tick and reports
 // whether that moved anything — which is what buys the frame, because a tick
 // that moved nothing has nothing to paint.
 //
-// The tick is 33ms because that is what a key's echo and a streaming row want.
+// The tick is 25ms because that is what a key's echo and a streaming row want.
 // Neither ANIMATION wants it: a braille spinner at ~7fps reads exactly like one
 // at 30, and the repaint it costs is the composer's whole width every frame
 // (markComposerDirty, by design). So the animations advance on animEvery ticks
