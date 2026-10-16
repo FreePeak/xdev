@@ -29,7 +29,7 @@ theme: auto             # groknight | grokday | catppuccin | dracula | gruvbox |
                        # | one-dark | one-light | rose-pine | tokyo-night | auto
 approvalMode: yolo      # always-ask | write | yolo
 maxTurns: 0             # agent turns per run; 0 = unbounded (no cap)
-memoryLimit: 104857600  # bytes; hard RSS backstop (default 100 MB)
+memoryLimit: 1073741824  # bytes; live-heap backstop for forced compaction (default 1 GiB)
 showThinking: true      # render reasoning output
 personality: default    # default | friendly | pragmatic | none
 memory: local           # local (MEMORY.md + learned.md under the data dir) | off | mnemopi | hindsight

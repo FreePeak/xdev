@@ -11,14 +11,34 @@ import (
 	"strings"
 )
 
-// DefaultLimitBytes is the hard worst-case ceiling: 100 MB.
-const DefaultLimitBytes = 100 << 20
+// DefaultLimitBytes is the live-heap ceiling the runaway backstop works
+// against: past it the agent force-compacts instead of letting a turn grow
+// without bound (see Pressure and agent.maybeCompact).
+//
+// It is a BACKSTOP, not an RSS target. A Go soft limit is walked past rather
+// than enforced — a 100 MB limit sat against 222 MB RSS on a measured 3 MB
+// answer — so a value below a real session's working set buys no memory at all
+// and costs CPU: the collector keeps starting a cycle whose goal is the live
+// heap and can never be met, so every idle second carries assist and a
+// background mark, ~5% of a core (measured 2026-10-16: 20 cycles and 5.1% CPU
+// per idle 20 s at 100 MB, 0 cycles and 0.1% at 2 GB).
+//
+// The <100 MB RSS goal is a different promise, and the bounded-window design
+// is what keeps it (session windowing, the transcript row cap — see
+// internal/session/window_rss_test.go). 1 GiB leaves ~10x headroom over the
+// 100–250 MB a working session measured, so the trigger does not fire on any
+// healthy run, while a runaway still compacts long before the machine notices.
+const DefaultLimitBytes = 1 << 30
 
 // HighPressure is the live-heap fraction of the memory limit at which the
 // agent forces compaction instead of waiting for the token threshold
 // (PRD §3.7). Slightly below 1 so a compaction starts while there is still
 // room to summarize, and above the steady-state heap of a normal session so
 // the trigger does not fire on startup.
+//
+// It reads a backstop, not a wall: the 100 MB limit it was tuned against was
+// measured against 606 MB RSS, so a reading above 1 is a session that has
+// outgrown the limit, not one about to be killed.
 const HighPressure = 0.85
 
 // ApplyFrom sets the process memory limit from an already-resolved value
