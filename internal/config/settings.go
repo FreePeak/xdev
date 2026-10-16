@@ -529,9 +529,13 @@ type Settings struct {
 	Prewalk PrewalkSettings `yaml:"prewalk"`
 	// Models tunes runtime model switching (models.cycle): the ordered
 	// patterns Ctrl+P / --models cycles through.
-	Models      ModelsSettings `yaml:"models"`
-	MemoryLimit int64          `yaml:"memoryLimit"`
-	MaxTurns    int            `yaml:"maxTurns"`
+	Models ModelsSettings `yaml:"models"`
+	// MemoryLimit is the live-heap ceiling the runaway backstop compacts
+	// against (memlimit.DefaultLimitBytes). It is a backstop, not an RSS
+	// target: set it below a real session's working set and the collector
+	// spends a core share chasing a goal it cannot reach.
+	MemoryLimit int64 `yaml:"memoryLimit"`
+	MaxTurns    int   `yaml:"maxTurns"`
 	// BranchSummary tunes the note written when the tree selector abandons a
 	// branch (#83). Enabled defaults true (omp's branchSummary.enabled);
 	// ReserveTokens caps the summary request's output.
@@ -1128,7 +1132,7 @@ func defaultSettings() *Settings {
 	return &Settings{
 		Theme:              "auto",
 		ApprovalMode:       "yolo",
-		MemoryLimit:        100 << 20,
+		MemoryLimit:        1 << 30,
 		MaxTurns:           0,
 		Compaction:         CompactionSettings{MethodOrder: DefaultCompactionMethodOrder},
 		ToolsApproval:      map[string]string{},

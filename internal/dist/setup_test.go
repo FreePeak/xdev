@@ -72,8 +72,8 @@ func TestSetupStarterConfigLoads(t *testing.T) {
 	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 0 || s.Memory != "local" {
 		t.Errorf("starter config resolved to %+v, want the shipped defaults", s)
 	}
-	if s.MemoryLimit != 100<<20 {
-		t.Errorf("memoryLimit = %d, want %d", s.MemoryLimit, int64(100<<20))
+	if s.MemoryLimit != 1<<30 {
+		t.Errorf("memoryLimit = %d, want %d", s.MemoryLimit, int64(1<<30))
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "config.yml")); err != nil {
 		t.Fatal(err)

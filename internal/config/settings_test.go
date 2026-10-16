@@ -69,7 +69,7 @@ toolsApproval:
 		t.Errorf("toolsApproval must merge per key: %v", s.ToolsApproval)
 	}
 	// Defaults still show through where nothing set them.
-	if s.MemoryLimit != 100<<20 {
+	if s.MemoryLimit != 1<<30 {
 		t.Errorf("memoryLimit default lost: %d", s.MemoryLimit)
 	}
 	if s.Memory != "local" {
