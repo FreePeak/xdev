@@ -555,6 +555,9 @@ type Settings struct {
 	// Bash is the `bash` group (M13 #56): the compound-command opt-in and
 	// the external interceptor.
 	Bash BashSettings `yaml:"bash"`
+	// StreamingToolExecution enables stream-time execution of read-only
+	// tools (M3 #421). Default off.
+	StreamingToolExecution bool `yaml:"streamingToolExecution"`
 	// Memory selects the long-term memory backend (M12 F1, M15 #73): "local"
 	// (default; MEMORY.md + learned.md under the data dir, with the
 	// memory:// read seam and the learn tool), "mnemopi" (local SQLite store

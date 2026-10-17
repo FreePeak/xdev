@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -418,6 +419,16 @@ type Agent struct {
 	// are matched against the configured rules, which may abort the turn
 	// or fold a reminder into a tool result. See ttsr.go.
 	TTSR *TTSR
+
+	// StreamingToolExecution enables starting read-only tool calls while the
+	// model is still streaming its tool call (M3, #421). Default off.
+	StreamingToolExecution bool
+
+	// streamToolResults holds results of read-only tools started during
+	// streaming, keyed by tool call id. Cleared per turn.
+	streamToolResults map[string]tool.Result
+	streamToolMu      sync.Mutex
+	streamToolWG      *sync.WaitGroup
 
 	// PlanMode is the read-only sub-state (nil = plain mode). While
 	// active, mutating tools are denied and propose is the exit; see
@@ -1575,6 +1586,12 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	a.requestMu.Lock()
 	a.requestStart = time.Now()
 	a.requestMu.Unlock()
+	// Reset per-turn streaming tool state.
+	a.streamToolMu.Lock()
+	a.streamToolResults = map[string]tool.Result{}
+	a.streamToolWG = &sync.WaitGroup{}
+	a.streamToolMu.Unlock()
+
 	req := a.liveRequest(system, history, a.toolDefs())
 	a.Hooks.OnStart(req)
 
@@ -1659,6 +1676,7 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		case ai.EventToolcallEnd:
 			if tc := toolCalls[ev.StreamIndex]; tc != nil {
 				tc.Arguments = json.RawMessage(ev.PartialJSON)
+				a.startStreamTool(ctx, *tc)
 			}
 		case ai.EventDone:
 			closeBlock()
@@ -1774,10 +1792,58 @@ func guardToolParams(name string, raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
+func (a *Agent) streamingToolExecutionEnabled() bool {
+	if a.StreamingToolExecution {
+		return true
+	}
+	v := strings.TrimSpace(os.Getenv("XDEV_STREAM_TOOLS"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
+}
+
+func (a *Agent) startStreamTool(ctx context.Context, call ai.ToolCallBlock) {
+	if !a.streamingToolExecutionEnabled() {
+		return
+	}
+	if !tool.IsReadOnly(call.Name, call.Arguments) {
+		return
+	}
+	t, ok := a.Tools.Get(call.Name)
+	if !ok {
+		return
+	}
+	a.streamToolMu.Lock()
+	wg := a.streamToolWG
+	a.streamToolMu.Unlock()
+	if wg == nil {
+		return
+	}
+	wg.Add(1)
+	go func(c ai.ToolCallBlock, tt tool.Tool) {
+		defer wg.Done()
+		res, err := a.executeTool(ctx, tt, c.Arguments)
+		if err != nil {
+			res = tool.Result{Text: err.Error(), IsError: true}
+		}
+		a.streamToolMu.Lock()
+		if a.streamToolResults == nil {
+			a.streamToolResults = map[string]tool.Result{}
+		}
+		a.streamToolResults[c.ID] = res
+		a.streamToolMu.Unlock()
+	}(call, t)
+}
+
 // runTools executes calls concurrently (bounded), returning toolResult
 // messages IN CALL ORDER.
 func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Message {
 	out := make([]ai.Message, len(calls))
+	// Wait for any read-only tools started during streaming.
+	a.streamToolMu.Lock()
+	swg := a.streamToolWG
+	a.streamToolMu.Unlock()
+	if swg != nil {
+		swg.Wait()
+	}
 	sem := make(chan struct{}, MaxToolWorkers)
 	var wg sync.WaitGroup
 	for i := range calls {
@@ -1786,6 +1852,15 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			a.streamToolMu.Lock()
+			res, reused := a.streamToolResults[calls[i].ID]
+			a.streamToolMu.Unlock()
+			if reused {
+				a.Hooks.OnToolStart(calls[i])
+				a.Hooks.OnToolEnd(calls[i], res, 0)
+				out[i] = a.redactToolMessage(toolResultMsg(calls[i], res, 0))
+				return
+			}
 			out[i] = a.redactToolMessage(a.runOneTool(ctx, calls[i]))
 		}(i)
 	}
