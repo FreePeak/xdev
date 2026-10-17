@@ -144,10 +144,13 @@ func (a *App) openSubChildTranscript(id, label string) bool {
 func (a *App) openNewestSubChildTranscript() bool {
 	a.mu.Lock()
 	id, label := a.newestSubChild()
-	a.mu.Unlock()
 	if id == "" {
+		// F3: soft-fail with feedback instead of silent no-op.
+		a.setNotice("no subagent running — Alt+B opens the newest tracked child")
+		a.mu.Unlock()
 		return false
 	}
+	a.mu.Unlock()
 	return a.openSubChildTranscript(id, label)
 }
 

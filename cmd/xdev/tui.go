@@ -855,6 +855,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		ts.id = t.id
 		ts.setFocused(true)
 		wireTaskParent(reg, t.store)
+		// F2: rebind the subagent hub on every session switch so a swapped
+		// store/reg never leaves a stale OnEvent or hub ops.
+		if tt, ok := reg.Get(agent.TaskToolName); ok {
+			if taskTool, isTask := tt.(*agent.TaskTool); isTask {
+				taskTool.OnEvent = (&taskChildSink{app: app}).onEvent
+			}
+		}
+		if ht, ok := reg.Get(agent.HubToolName); ok {
+			if hb, ok := ht.(*agent.HubTool); ok && hb.Hub != nil {
+				app.SetAgentPanelOps(&tui.AgentPanelOps{
+					OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
+				})
+			}
+		}
 		// A resumed session that still carries its mechanical
 		// `print <timestamp>` stamp names itself from the prompt that
 		// opened it, once, here — every surface (tab strip, dock slot,
@@ -1301,6 +1315,21 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		app.SetAgentPanelOps(&tui.AgentPanelOps{
 			OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
 		})
+		// F1: assert single hub identity — the task tool and the session hub
+		// must share one *agent.Hub, otherwise Transcript(id) resolves to
+		// nothing and the child is unopenable. Log once instead of panicking.
+		if tt, ok := reg.Get(agent.TaskToolName); ok {
+			if taskTool, isTask := tt.(*agent.TaskTool); isTask && taskTool.Hub != sessionHub {
+				logx.Warnf("subagent: task tool hub != session hub (open will fail)")
+			}
+		}
+		// F2: bind OnEvent alongside the hub (was ~500 lines later), so an
+		// early task call already has its transcript sink wired.
+		if tt, ok := reg.Get(agent.TaskToolName); ok {
+			if taskTool, isTask := tt.(*agent.TaskTool); isTask {
+				taskTool.OnEvent = (&taskChildSink{app: app}).onEvent
+			}
+		}
 	}
 	// The dock's sources (#291 §1). Each is one block whose first line is its
 	// heading, and each reads state this session already keeps: the plan and its
@@ -1734,11 +1763,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// the child, and the child speaks only to the model. These events are
 	// the human's half — the transcript shows what each child is doing —
 	// and they never reach the parent's context.
-	if tt, ok := reg.Get(agent.TaskToolName); ok {
-		if taskTool, isTask := tt.(*agent.TaskTool); isTask {
-			taskTool.OnEvent = (&taskChildSink{app: app}).onEvent
-		}
-	}
+	// (OnEvent is bound alongside the hub above, in the sessionHub block.)
 	// /auto-answer: the ask card's answer policy, flipped live and persisted
 	// to the same global layer `xdev config set ask.autoAnswer` edits. The
 	// in-memory fold is what the sink above reads, so the very next question
