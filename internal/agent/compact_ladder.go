@@ -26,9 +26,10 @@ const (
 	// MethodHandoff is the ladder member name the provider summarize (and the
 	// M5 #23 handoff-document variant) records on its entry, so a caller that
 	// builds the entry itself can tag it without a magic string.
-	MethodHandoff = "handoff"
-	methodShake   = "shake"
-	methodSoft    = "soft"
+	MethodHandoff      = "handoff"
+	methodShake        = "shake"
+	methodSoft         = "soft"
+	methodMicrocompact = "microcompact"
 )
 
 // compactTriggers are the methodOrder members that decide WHEN to compact
@@ -52,11 +53,12 @@ var compactMethodOverrides = map[string]compactMethodFunc{}
 
 // compactMethods are the built-in members.
 var compactMethods = map[string]compactMethodFunc{
-	MethodHandoff:     methodHandoffRun,
-	methodRemote:      methodRemoteRun,
-	methodSnapcompact: methodSnapcompactRun,
-	methodShake:       methodShakeRun,
-	methodSoft:        methodSoftRun,
+	MethodHandoff:      methodHandoffRun,
+	methodRemote:       methodRemoteRun,
+	methodSnapcompact:  methodSnapcompactRun,
+	methodShake:        methodShakeRun,
+	methodSoft:         methodSoftRun,
+	methodMicrocompact: methodMicrocompactRun,
 }
 
 // RegisterCompactionMethod installs fn as the ladder member name (one of
