@@ -458,14 +458,15 @@ func TestComposerIsBoxed(t *testing.T) {
 	}
 
 	text := screenText(scr)
-	if !strings.Contains(text, "╭") || !strings.Contains(text, "╰") {
-		t.Fatalf("composer lost its box:\n%s", text)
+	if !strings.Contains(text, "❯ hello there") {
+		t.Fatalf("draft row is not framed by the prompt:\n%s", text)
 	}
-	if !strings.Contains(text, "│ ❯ hello there") {
-		t.Fatalf("draft row is not framed by side borders:\n%s", text)
+	if !strings.Contains(text, "test/free") {
+		t.Fatalf("model name left the divider:\n%s", text)
 	}
-	if !strings.Contains(text, "╰ test/free") {
-		t.Fatalf("model name left the bottom border:\n%s", text)
+	// No side borders or corners: the composer is a fill band framed by top/bottom rules.
+	if strings.Contains(text, "│ ❯") || strings.Contains(text, "╭") || strings.Contains(text, "╰") {
+		t.Fatalf("composer kept a boxed frame:\n%s", text)
 	}
 }
 
