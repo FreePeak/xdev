@@ -48,7 +48,7 @@ const DefaultCompactionMethodOrder = "threshold,overflow,promotion"
 // order the user lists them (agent owns the implementations).
 var CompactionMethodNames = []string{
 	"threshold", "overflow", "promotion",
-	"remote", "snapcompact", "handoff", "shake", "soft",
+	"remote", "snapcompact", "handoff", "shake", "soft", "microcompact",
 }
 
 // MethodOrderSetting is the compaction.methodOrder value: a comma-separated

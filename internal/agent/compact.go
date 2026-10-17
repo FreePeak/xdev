@@ -576,6 +576,11 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 	if rebuilt, ok := a.applyAsyncCompaction(history); ok {
 		return rebuilt
 	}
+	// Pre-request tier (microcompact): clear stale tool results before paying
+	// for a summary. Cheap, deterministic, no provider call.
+	if cleared, changed := microcompactToolResults(history, defaultMicrocompactKeepRecent); changed {
+		history = cleared
+	}
 	if !a.compactionDue(history) {
 		return history
 	}
