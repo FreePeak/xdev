@@ -188,14 +188,14 @@ func TestSelectionHighlightsTheComposer(t *testing.T) {
 
 			y := composerRow(app)
 			app.mu.Lock()
-			drag(app, 5, y, 16, y)
+			drag(app, 3, y, 14, y)
 			app.mu.Unlock()
 			if got := string(scr.GetClipboardData()); got != "welcome text" {
 				t.Fatalf("clipboard = %q, want %q", got, "welcome text")
 			}
 			app.draw()
 
-			for x := 5; x <= 16; x++ {
+			for x := 3; x <= 14; x++ {
 				if _, _, attr := cellStyle(scr, x, y).Decompose(); attr&tcell.AttrReverse == 0 {
 					t.Fatalf("composer cell (%d,%d) is not highlighted after the release", x, y)
 				}

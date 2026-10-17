@@ -83,16 +83,12 @@ func TestComposerStopsAtTheSidebar(t *testing.T) {
 	if avail != edge-8 {
 		t.Fatalf("the editor wraps at %d, want the pane's %d", avail, edge-8)
 	}
-	// The box's top border, its right edge and its divider all stop inside the
-	// pane (the border sits two cells in); nothing paints a composer border
-	// under the panel.
+	// The box's top rule stops inside the pane (the rule spans cols 1..w-2);
+	// nothing paints a composer border under the panel.
 	yTop := 40 - 1 - cRows
 	row := dockRowText(scr, yTop-1, 0)
-	if !strings.Contains(row, "╮") {
-		t.Fatalf("the composer lost its right border: %q", row)
-	}
-	if ch, _, _, _ := scr.GetContent(edge-2, yTop-1); ch != '╮' {
-		t.Fatalf("the box's right edge is %q at column %d, want the border at %d", ch, edge-2, edge-2)
+	if !strings.Contains(row, "─") {
+		t.Fatalf("the composer lost its top rule: %q", row)
 	}
 	for _, x := range []int{edge - 1, edge} {
 		if ch, _, _, _ := scr.GetContent(x, yTop-1); ch != ' ' {

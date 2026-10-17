@@ -5617,12 +5617,10 @@ func (a *App) drawComposer(yTop int) {
 	}
 	ms := a.mdStyle()
 
-	// Top border: ╭────╮ (1-cell inset on each side, like grok's box).
-	drawText(a.scr, 1, yTop-1, box.TopLeft, bs)
-	for x := 2; x < w-2; x++ {
+	// Top border: ────── (full-width rule, no corners).
+	for x := 1; x < w-1; x++ {
 		a.scr.SetContent(x, yTop-1, boxRune(box.Horizontal), nil, bs)
 	}
-	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
 	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
 	// above counts the draft rows the window hides, and says whether the ❯
@@ -5630,17 +5628,14 @@ func (a *App) drawComposer(yTop int) {
 	// belongs with the hidden head instead.
 	lines, curRow, curCol, above, _ := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
-	vert := boxRune(box.Vertical)
 	for i, ln := range lines {
 		y := yTop + i
-		a.scr.SetContent(1, y, vert, nil, bs)
-		a.scr.SetContent(w-2, y, vert, nil, bs)
 		if i == 0 && above == 0 {
-			drawText(a.scr, 3, y, "❯ ", promptStyle)
+			drawText(a.scr, 1, y, "❯ ", promptStyle)
 		} else {
-			drawText(a.scr, 3, y, "  ", promptStyle)
+			drawText(a.scr, 1, y, "  ", promptStyle)
 		}
-		drawText(a.scr, 5, y, ln, ms.body)
+		drawText(a.scr, 3, y, ln, ms.body)
 	}
 	// Blank the space between the last text row and the right border so a
 	// short line cannot leave stale cells from a previous longer draft. The
@@ -5648,13 +5643,13 @@ func (a *App) drawComposer(yTop int) {
 	// trailing pad composerAvail() reserves, so a full row's last rune keeps
 	// its air instead of touching the frame.
 	for i, ln := range lines {
-		x := 5 + width(ln)
-		if x == 5 && a.ed.Text() == "" {
+		x := 3 + width(ln)
+		if x == 3 && a.ed.Text() == "" {
 			// grok's "Type a message…": an empty prompt is not a blank void.
 			// Drawn here, after the text row, because the fill below would
 			// otherwise blank it back to spaces.
 			ph := "Type a message…"
-			drawText(a.scr, 5, yTop+i, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+			drawText(a.scr, 3, yTop+i, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
 			x += width(ph)
 		}
 		for ; x < w-3; x++ {
@@ -5662,7 +5657,7 @@ func (a *App) drawComposer(yTop int) {
 		}
 	}
 
-	// Info divider bottom border: ╰─ ⠋ model · high · plan ─────── ▲n▼n ─╯
+	// Info divider bottom border: ─ ⠋ model · high · plan ───────
 	//
 	// Each part wears its own ink: model, reasoning level and mode are three
 	// different questions (which model, how hard is it thinking, what is it
@@ -5686,13 +5681,11 @@ func (a *App) drawComposer(yTop int) {
 		return n
 	}
 	infoW := measure(parts)
-	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
-	for x := 2; x < w-2; x++ {
+	for x := 1; x < w-1; x++ {
 		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
 	// infoX is where the phrase starts: the leading space the one-string
-	// version carried lives at 2, so the text itself begins at 3 — "╰ model"
-	// and not "╰model", which is the framing the box border buys.
+	// version carried lives at 2, so the text itself begins at 3.
 	const infoX = 3
 	// The model is the one part that degrades instead of leaving: its
 	// "provider/" prefix is a routing detail the row never needed, so a
@@ -5730,10 +5723,8 @@ func (a *App) drawComposer(yTop int) {
 	// "draft ▲n" put a second number in the corner of the one box the user is
 	// reading their own words in. A field that chatters about itself while you
 	// type is not a field.
-	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
-
 	// Cursor: blinking block at the editor position inside the painted window.
-	cx := 5 + curCol
+	cx := 3 + curCol
 	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
 }
 

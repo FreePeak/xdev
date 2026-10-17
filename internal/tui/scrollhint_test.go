@@ -7,11 +7,10 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// dividerRow returns the composer's info divider (the ╰─ model ─╯ row) from a
+// dividerRow returns the composer's info divider (the ─ model ─ row) from a
 // rendered screen: the bottom rows are the status row, the divider, and the
-// prompt above it — so the divider is the second line counting back from the
-// end of what was actually drawn; TrimRight drops blank rows, so instead of a
-// fixed index the divider is the last row that opens a box corner.
+// prompt above it — so the divider is the last row that is a horizontal rule
+// carrying text (the top rule is dashes only).
 func dividerRow(t *testing.T, scr tcell.SimulationScreen) string {
 	t.Helper()
 	rows := strings.Split(strings.TrimRight(screenText(scr), "\n"), "\n")
@@ -19,8 +18,20 @@ func dividerRow(t *testing.T, scr tcell.SimulationScreen) string {
 		t.Fatalf("screen too short to have a composer: %q", strings.Join(rows, "|"))
 	}
 	for i := len(rows) - 1; i >= 0; i-- {
-		if strings.Contains(rows[i], "╰") {
-			return rows[i]
+		r := rows[i]
+		if !strings.Contains(r, "─") {
+			continue
+		}
+		// A rule that carries text (model/level) is the divider; the top
+		// border is dashes and spaces only.
+		stripped := strings.Map(func(c rune) rune {
+			if c == '─' || c == ' ' {
+				return -1
+			}
+			return c
+		}, r)
+		if stripped != "" {
+			return r
 		}
 	}
 	t.Fatalf("no composer divider on screen: %q", strings.Join(rows, "|"))
@@ -52,7 +63,7 @@ func TestNoScrollCountOnTheDivider(t *testing.T) {
 		t.Fatalf("the first transcript row lost its content: %q", rows[0])
 	}
 	divider := dividerRow(t, scr)
-	if !strings.Contains(divider, "╰") {
+	if !strings.Contains(divider, "─") {
 		t.Fatalf("expected the info divider, got %q", divider)
 	}
 	if strings.Contains(divider, "▲") || strings.Contains(divider, "▼") {
