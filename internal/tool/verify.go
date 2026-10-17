@@ -6,6 +6,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -82,6 +83,11 @@ func (r *Registry) VerifyAfterWrite(ctx context.Context, path string) string {
 		// diagnostics, and the parse error is the more actionable line.
 		return note
 	}
+	if note := verifyExternal(ctx, path); note != "" {
+		// A compiler-level failure (format, type, syntax the stdlib parser
+		// cannot see) is more actionable than a warm language server's note.
+		return note
+	}
 	if r == nil || r.diagProvider == nil {
 		return ""
 	}
@@ -130,6 +136,72 @@ func renderProblems(problems []Problem) string {
 	}
 	b.WriteString(" -- fix these before the next build")
 	return capVerifyMessage(b.String())
+}
+
+// verifyExternal runs a language-specific external check when the tool is
+// installed. It is best-effort: a missing tool, a timeout, or an unreadable
+// file all yield "", never an error. The point is catching what the stdlib
+// parser cannot (formatting, type errors) without making the write path depend
+// on a toolchain being present.
+func verifyExternal(ctx context.Context, path string) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.Size() == 0 || st.Size() > verifyMaxBytes {
+		return ""
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go":
+		return runExternal(ctx, "gofmt", []string{"-l", path}, "gofmt")
+	case ".ts", ".tsx":
+		return runExternal(ctx, "tsc", []string{"--noEmit", "--skipLibCheck", path}, "tsc")
+	case ".py":
+		for _, py := range []string{"python3", "python"} {
+			if _, err := exec.LookPath(py); err == nil {
+				return runExternal(ctx, py, []string{"-m", "py_compile", path}, "py_compile")
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// verifyExternalTimeout bounds the subprocess so a slow toolchain cannot hold
+// the model's turn open.
+const verifyExternalTimeout = 10 * time.Second
+
+// runExternal executes one external check, returning an advisory note on
+// failure and "" otherwise. A missing binary is silent.
+func runExternal(ctx context.Context, tool string, args []string, label string) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+	bin, err := exec.LookPath(tool)
+	if err != nil {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, verifyExternalTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, bin, args...)
+	out, err := cmd.CombinedOutput()
+	if cctx.Err() != nil {
+		// Cancellation or timeout: never report; the write already succeeded.
+		return ""
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if err == nil && trimmed == "" {
+		return ""
+	}
+	msg := trimmed
+	if msg == "" && err != nil {
+		msg = err.Error()
+	}
+	if msg == "" {
+		return ""
+	}
+	return label + ": " + capVerifyMessage(msg)
 }
 
 // verifyTier0 parses the file on disk with the standard library. It reports ""

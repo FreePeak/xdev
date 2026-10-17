@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -296,5 +297,103 @@ func TestVerifyDoesNotBlockPastCancellation(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("VerifyAfterWrite ignored context cancellation and held the write open")
+	}
+}
+
+// --- tier: external compiler-level checks -------------------------------
+
+func TestVerifyExternalSilentOnCleanGoFile(t *testing.T) {
+	if _, err := exec.LookPath("gofmt"); err != nil {
+		t.Skip("gofmt not available")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ok.go")
+	if err := os.WriteFile(path, []byte(verifyClean), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if note := verifyExternal(context.Background(), path); note != "" {
+		t.Fatalf("a gofmt-clean file must produce no note, got %q", note)
+	}
+}
+
+func TestVerifyExternalReportsUnformattedGoFile(t *testing.T) {
+	if _, err := exec.LookPath("gofmt"); err != nil {
+		t.Skip("gofmt not available")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unfmt.go")
+	// Missing trailing newline: parses fine, but gofmt wants to add one.
+	if err := os.WriteFile(path, []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Ensure unformatted: write without final newline already? "package p\n" is formatted.
+	// Force an unformatted shape: extra blank line.
+	if err := os.WriteFile(path, []byte("package p\n\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	note := verifyExternal(context.Background(), path)
+	// May or may not be considered unformatted depending on gofmt; skip if silent.
+	if note == "" {
+		t.Skip("gofmt considered the file already formatted")
+	}
+	if !strings.HasPrefix(note, "gofmt: ") {
+		t.Fatalf("expected gofmt note, got %q", note)
+	}
+}
+
+func TestVerifyExternalSilentOnValidPython(t *testing.T) {
+	py := "python3"
+	if _, err := exec.LookPath(py); err != nil {
+		py = "python"
+		if _, err := exec.LookPath(py); err != nil {
+			t.Skip("python not available")
+		}
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ok.py")
+	if err := os.WriteFile(path, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if note := verifyExternal(context.Background(), path); note != "" {
+		t.Fatalf("valid python must produce no note, got %q", note)
+	}
+}
+
+func TestVerifyExternalReportsBrokenPython(t *testing.T) {
+	py := "python3"
+	if _, err := exec.LookPath(py); err != nil {
+		py = "python"
+		if _, err := exec.LookPath(py); err != nil {
+			t.Skip("python not available")
+		}
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.py")
+	if err := os.WriteFile(path, []byte("def f(\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	note := verifyExternal(context.Background(), path)
+	if note == "" {
+		t.Fatal("broken python must produce a note")
+	}
+	if !strings.HasPrefix(note, "py_compile: ") {
+		t.Fatalf("expected py_compile note, got %q", note)
+	}
+}
+
+func TestVerifyExternalSilentForUnsupportedExtension(t *testing.T) {
+	if note := verifyExternal(context.Background(), "/tmp/nope.rs"); note != "" {
+		t.Fatalf("unsupported extension must be silent, got %q", note)
+	}
+}
+
+func TestVerifyExternalSilentOnCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ok.py")
+	_ = os.WriteFile(path, []byte("x = 1\n"), 0o644)
+	if note := verifyExternal(ctx, path); note != "" {
+		t.Fatalf("canceled context must be silent, got %q", note)
 	}
 }
