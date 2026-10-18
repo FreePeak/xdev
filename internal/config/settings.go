@@ -513,6 +513,11 @@ type Settings struct {
 	// Tui is the interactive TUI group (tui.*). Nested so `xdev config set
 	// tui.exitDetach` walks a real struct path (settingsKeyOK / KnownFields).
 	Tui TuiSettings `yaml:"tui"`
+	// Notifications is the session-failure alert group (notifications.*). A
+	// nested struct, not a map, so `xdev config set notifications.errors` walks
+	// a real path (settingsKeyOK / KnownFields) and a typo is caught at load
+	// instead of silently blocking notifications forever.
+	Notifications NotificationSettings `yaml:"notifications"`
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
@@ -788,6 +793,42 @@ type TuiSettings struct {
 	// TabsIndicatorsOn, so a layer that omits the group keeps the shipped
 	// behaviour instead of blanking the strip.
 	Tabs TabSettings `yaml:"tabs"`
+}
+
+// NotificationSettings is the `notifications` group: which session outcomes
+// interrupt the human, and through what.
+//
+// It exists because a session that fails while the human is looking elsewhere
+// is a run that was silently wasted. xdev already knows the job failed — the
+// only question left is whether anyone is told.
+//
+// Each switch is a *bool for the same reason `tui.exitDetach` is one: the
+// merge arm skips a nil pointer, so "unset" stays on the shipped default and
+// an explicit false is the only way to turn an axis off. Every read goes
+// through the matching On accessor so the default lives in exactly one place.
+type NotificationSettings struct {
+	// Errors alerts when a turn fails outright. Default ON: this is the one
+	// axis the group exists for, and a failure nobody sees is precisely the
+	// case it was added to fix, so it must not be off for a default install.
+	Errors *bool `yaml:"errors"`
+	// Agent alerts when a turn completes successfully. Default OFF: success
+	// is the expected outcome, and an alert for the expected outcome trains
+	// the human to ignore the channel. It has to earn the default by catching
+	// something they would otherwise miss.
+	Agent *bool `yaml:"agent"`
+	// Subagents alerts when a subagent fails, even though the parent turn may
+	// recover and keep going. Default ON: opencode stays quiet here, but a
+	// swallowed subagent failure resurfaces much later as a wrong answer whose
+	// real cause was already known and already thrown away.
+	Subagents *bool `yaml:"subagents"`
+	// Sound asks for a terminal bell alongside the visible alert. Default OFF:
+	// a bell interrupts whatever the human is doing in another window, so it
+	// is opt-in, and it stays inert until a sound transport exists.
+	Sound *bool `yaml:"sound"`
+	// Command is a program to hand the event to, as JSON on stdin. The empty
+	// default means "no command transport", which is also what keeps a default
+	// install from spawning a process per failure.
+	Command string `yaml:"command"`
 }
 
 // TabSettings is `tui.tabs`, spelled exactly as opencode's own config schema
@@ -1181,6 +1222,57 @@ func (s *Settings) TuiExitDetachOn() bool {
 		return true
 	}
 	return *s.Tui.ExitDetach
+}
+
+// NotificationsErrorsOn reports whether a failed turn interrupts the human.
+// Default ON: this is the axis the group exists for, so only an explicit
+// `notifications.errors: false` silences it.
+func (s *Settings) NotificationsErrorsOn() bool {
+	if s == nil || s.Notifications.Errors == nil {
+		return true
+	}
+	return *s.Notifications.Errors
+}
+
+// NotificationsAgentOn reports whether a successful turn interrupts the human.
+// Default OFF: success is the expected outcome and an alert for it is noise,
+// so the axis has to be turned on deliberately.
+func (s *Settings) NotificationsAgentOn() bool {
+	if s == nil || s.Notifications.Agent == nil {
+		return false
+	}
+	return *s.Notifications.Agent
+}
+
+// NotificationsSubagentsOn reports whether a failed subagent interrupts the
+// human even when the parent turn keeps going. Default ON: opencode is silent
+// here, but a swallowed subagent failure is invisible until it resurfaces as a
+// wrong answer with its cause already discarded.
+func (s *Settings) NotificationsSubagentsOn() bool {
+	if s == nil || s.Notifications.Subagents == nil {
+		return true
+	}
+	return *s.Notifications.Subagents
+}
+
+// NotificationsSoundOn reports whether the alert also rings the terminal bell.
+// Default OFF: a bell interrupts another window's work, so it is opt-in. It is
+// inert until a sound transport exists — nothing reads this yet.
+func (s *Settings) NotificationsSoundOn() bool {
+	if s == nil || s.Notifications.Sound == nil {
+		return false
+	}
+	return *s.Notifications.Sound
+}
+
+// NotificationsCommand returns the program to hand a failure to, JSON on
+// stdin, or "" when none is configured. The empty default is also the guard
+// that keeps a default install from spawning a process per failure.
+func (s *Settings) NotificationsCommand() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.Notifications.Command)
 }
 
 // SidebarModeOn reports the effective context-dock policy: unset follows the
@@ -1820,6 +1912,24 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Tui.Tabs.Indicators != "" {
 		s.Tui.Tabs.Indicators = layer.Tui.Tabs.Indicators
 	}
+	// Notifications arms, one per axis: same zero-skip rule, so a layer that
+	// names only notifications.errors leaves the other axes on their shipped
+	// defaults (F2's "a partial file changes only the keys it names").
+	if layer.Notifications.Errors != nil {
+		s.Notifications.Errors = layer.Notifications.Errors
+	}
+	if layer.Notifications.Agent != nil {
+		s.Notifications.Agent = layer.Notifications.Agent
+	}
+	if layer.Notifications.Subagents != nil {
+		s.Notifications.Subagents = layer.Notifications.Subagents
+	}
+	if layer.Notifications.Sound != nil {
+		s.Notifications.Sound = layer.Notifications.Sound
+	}
+	if layer.Notifications.Command != "" {
+		s.Notifications.Command = layer.Notifications.Command
+	}
 	if layer.SidebarMode != "" {
 		s.SidebarMode = layer.SidebarMode
 	}
@@ -2409,6 +2519,10 @@ func List(s *Settings, globalPath string) []string {
 		"memory " + memoryOrDefault(s.Memory),
 		"memoryPipeline " + memoryOrDefault(s.MemoryPipeline),
 		"compaction.experimentalContextManagement " + fmt.Sprint(s.ExperimentalContextManagement),
+		"notifications.errors " + fmt.Sprint(s.NotificationsErrorsOn()),
+		"notifications.agent " + fmt.Sprint(s.NotificationsAgentOn()),
+		"notifications.subagents " + fmt.Sprint(s.NotificationsSubagentsOn()),
+		"notifications.sound " + fmt.Sprint(s.NotificationsSoundOn()),
 		"autolearn.enabled " + fmt.Sprint(s.AutolearnOn()),
 		"ttsr.scanThinking " + fmt.Sprint(s.TTSR.ScanThinkingOn()),
 		"ttsr.disabledRules " + strings.Join(ttsrDisabledList(s.TTSR), ","),
