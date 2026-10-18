@@ -33,9 +33,12 @@ func TestWorkerArgs(t *testing.T) {
 	if !hasFlagValue(args, "--append-system-prompt", chatStyle) {
 		t.Errorf("missing --append-system-prompt with chatStyle, got %v", args)
 	}
-	// The style has to name the two shapes ToTelegramHTML can render, or the
-	// renderer has nothing to do with a table or a command.
-	for _, want := range []string{"table", "code block"} {
+	// The style has to name the two shapes ToTelegramHTML can render, and cap
+	// the table width: the renderer turns each row into a bold name plus one
+	// bullet PER REMAINING CELL, so a four-column row costs four lines on a
+	// phone. An unbounded "use a table when it fits" would make a reply longer,
+	// not shorter — the opposite of the point.
+	for _, want := range []string{"table", "code block", "two or three columns"} {
 		if !strings.Contains(chatStyle, want) {
 			t.Errorf("chatStyle does not mention %q: %q", want, chatStyle)
 		}

@@ -671,7 +671,7 @@ func (w *worker) finish(res workerResult) {
 // still ramble. Ceiling: reply length is only as good as the model's
 // compliance. Upgrade path: post-process the final answer (summarise or
 // clip) in the streamer, where the whole reply is already in hand.
-const chatStyle = "This turn is answered in a phone chat. Reply with the result of the work and nothing else: no preamble, no restating the request, no narration of steps taken or planned. Keep it as short as it can be while still complete, and prefer short bullet lines over paragraphs. Format data as a markdown table when it fits two or more columns, and put shell commands in fenced code blocks."
+const chatStyle = "This turn is answered in a phone chat. Reply with the result of the work and nothing else: no preamble, no restating the request, no narration of steps taken or planned. Keep it as short as it can be while still complete, and prefer short bullet lines over paragraphs. A markdown table is the best shape for data that fits two or three columns — each row renders as one short bullet group on the phone, so a wider table reads longer, not shorter; use bullets beyond that. Put shell commands in fenced code blocks."
 
 // workerArgs is the argv for one chat turn: the flags that shape the reply,
 // then the positional prompt. The chat's own /model wins over the daemon-wide
