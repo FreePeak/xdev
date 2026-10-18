@@ -6,11 +6,34 @@
 Related:
 
 - `docs/research/opencode-internals.md` (v1.18.28 inventory — **version-stale**, see §1.0)
+- `docs/research/opencode-v2-spec.md` (the v2 re-baseline this plan's §2.5 and §3 were corrected against)
 - `docs/plans/2026-10-14-open-subagent-session-in-main-tui.md` (format mirror; source of the "no second transcript renderer" constraint)
 - `cmd/xdev/tabset.go` — **the multi-session mechanism this plan reuses, not rebuilds**
 - `internal/ai/types.go` — **the block model this plan maps onto**
 - `internal/agent/task.go:21` — the yield-only isolation precedent behind D3
 - `docs/decisions/live-subagent-view.md`, `docs/decisions/xdev-gateway.md`
+
+---
+
+## Implementation status (as of PR #672, branch `feat/opencode-attach`)
+
+| Slice | State |
+|---|---|
+| 0 — re-baseline opencode v2 | done — `docs/research/opencode-v2-spec.md` |
+| 1 — control plane | done — `internal/opencode/client.go` |
+| 2 — workflow presets | done — `internal/config/workflow.go`, `xdev workflow` |
+| 3 — event stream | done — `internal/opencode/events.go` |
+| 4 — part→block adapter | done — `internal/opencode/adapter.go` |
+| 5 — sessions as tabs | done — `internal/opencode/bridge.go` |
+| 6 — session roster | **data layer + CLI done** (`registry.go`, `xdev workflow sessions`); the **TUI dock pane is still gated** on the in-flight TUI WIP |
+
+Three things implementation changed relative to this plan. All three are recorded where they were discovered rather than papered over:
+
+1. **§2.5's "byte-identical wire shape" was half right.** v2 replaced v1's flat `parts` array with a `type`-discriminated message union, and a user message's text is a plain string rather than a content list. The assistant side still matches exactly. See §2.5 and the spec's §4.
+2. **§3's declared event envelope is wrong in three places.** The live stream uses `type` (not `event`), an object `data` (not a JSON-encoded string), and adds `created`, `location` and `durable`. Do not generate a client from that operation's declared schema. See `docs/research/opencode-v2-spec.md` §3.
+3. **Slice 5 needed no `tabset.go` change at all.** `tabset.open()` already takes a `*session.Store`, so a bridged session *is* a tab — a smaller change than the plan assumed, and one that kept the slice out of the TUI files that are mid-flight.
+
+`R3` (no xdev model ever receives opencode transcript content) is enforced structurally: the adapter's only outputs are `session.Entry` values destined for a `Store`, and the client exposes no method that returns transcript content to a model-callable surface.
 
 ---
 
