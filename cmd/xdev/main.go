@@ -82,6 +82,10 @@ var subcommands = map[string]bool{
 	// Repository hook trust (#241): the review and the decision.
 	"trust": true, "distrust": true,
 	"tmux": true,
+	// `xdev workflow` drives the user's named presets (plan Slice 2).
+	// Without this entry the word falls through to print mode and is sent
+	// to the model as a prompt.
+	"workflow": true,
 	// `xdev help` prints usage; without this entry the word falls through
 	// to print mode and is sent to the model as a prompt.
 	"help": true,
@@ -134,6 +138,8 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev login | logout          Claude Pro/Max and Codex OAuth (PKCE browser flow)
   xdev lsp-config [list|validate]  language servers, resolved binaries
   xdev memory <sub>            show | stats | lessons | add | edit | export | import | scratchpad | clear
+  xdev workflow <sub>          named presets: list | show <name> | run <name> [text]
+  xdev tmux [name]             run the TUI inside tmux so it survives terminal close
   xdev stats [--summary|--json|--serve]  usage over the local session store
   xdev usage [--provider P]    provider accounts/limits + observed usage
   xdev token <sub>             list | show | rotate the per-install service tokens
@@ -617,6 +623,10 @@ func main() {
 
 	if mode == "config" {
 		os.Exit(runConfig(args, settings))
+	}
+
+	if mode == "workflow" {
+		os.Exit(runWorkflow(args, os.Stdout, os.Stderr, settings))
 	}
 
 	if mode == "lsp-config" {

@@ -210,6 +210,15 @@ type Location struct {
 	Directory string `json:"directory"`
 }
 
+// PermissionRule is opencode's Permission.Rule. All three fields are required
+// there, and Effect is one of allow / deny / ask — opencode rejects anything
+// else, so a bad value surfaces as a server error rather than a silent no-op.
+type PermissionRule struct {
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Effect   string `json:"effect"`
+}
+
 // SessionInfo is one row of opencode's session list. It carries everything a
 // roster row needs — title, agent, model, cost, tokens, outcome, idle — so a
 // session list never has to read messages.
@@ -242,6 +251,9 @@ type CreateRequest struct {
 	Model    *ModelRef      `json:"model,omitempty"`
 	Location *Location      `json:"location,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// Permissions overrides opencode's ruleset for this session only. Nil
+	// leaves opencode's own rules in place, which is the common case.
+	Permissions []PermissionRule `json:"permissions,omitempty"`
 
 	// Directory is sugar for Location.Directory. It never appears on the
 	// wire itself, so a caller cannot set both and silently disagree.
