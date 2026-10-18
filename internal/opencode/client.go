@@ -343,6 +343,33 @@ type promptRequest struct {
 	Text string `json:"text"`
 }
 
+// Messages returns a session's messages as raw JSON, oldest first.
+//
+// Raw on purpose. The adapter is the only thing that should know opencode's
+// message shape, so nothing here decodes a message into a typed struct that
+// would need updating every time opencode adds a variant.
+//
+// This is also the only durable record of a session's content: the deltas off
+// the event stream are ephemeral, so a reconnect heals from here (F2).
+func (c *Client) Messages(ctx context.Context, id string) ([]json.RawMessage, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("%w: session id is required", ErrInvalidRequest)
+	}
+	out, err := c.exec(ctx, "api", "session.message.list", "--param", "sessionID="+id)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := decodeObject(out)
+	if err != nil {
+		return nil, err
+	}
+	var msgs []json.RawMessage
+	if err := unwrap(obj, &msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
 // Prompt sends a user turn. opencode runs the turn asynchronously, so this
 // returns once the request is accepted, not once the turn finishes.
 func (c *Client) Prompt(ctx context.Context, id, text string) error {
