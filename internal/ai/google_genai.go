@@ -313,16 +313,16 @@ func (p *GoogleGenAIProvider) streamAt(ctx context.Context, req StreamRequest, u
 	// gateway queue + prefill — the wait the user feels (#283; see the
 	// full comment in anthropic.go).
 	start := time.Now()
-	sctx, cancel := context.WithCancel(ctx)
+	sctx, cancel := context.WithCancelCause(ctx)
 	resp, err := wirePost(sctx, p.httpClient, url, headers, body, p.API())
 	if err != nil {
-		cancel()
+		cancel(nil)
 		return nil, err
 	}
 	ch := make(chan Event, 64)
 	go func() {
 		defer resp.Body.Close()
-		defer cancel()
+		defer cancel(nil)
 		defer close(ch)
 		p.stream(sctx, resp.Body, model, ch, start, servedByDecision(resp, model))
 	}()

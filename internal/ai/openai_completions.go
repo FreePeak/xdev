@@ -277,16 +277,16 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, req StreamReques
 	// gateway queue + prefill — the wait the user feels (#283; see the
 	// full comment in anthropic.go).
 	start := time.Now()
-	sctx, cancel := context.WithCancel(ctx)
+	sctx, cancel := context.WithCancelCause(ctx)
 	resp, err := wirePost(sctx, p.httpClient, p.baseURL+"/chat/completions", p.headers(), body, APIOpenAICompletions)
 	if err != nil {
-		cancel() // no goroutine will own it on this path
+		cancel(nil) // no goroutine will own it on this path
 		return nil, err
 	}
 	ch := make(chan Event, 64)
 	go func() {
 		defer resp.Body.Close()
-		defer cancel()
+		defer cancel(nil)
 		defer close(ch)
 		p.stream(sctx, resp.Body, model, ch, start, servedByDecision(resp, model))
 	}()
