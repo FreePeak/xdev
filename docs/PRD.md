@@ -3918,10 +3918,16 @@ existing `--no-title`/`--hide-thinking` that already keep the turn's title and r
 (reasoning goes to stderr, and `--allow-home` stops the temp-dir switch from relocating a turn whose
 workspace is `$HOME`).
 The style asks for the result and nothing else: no preamble, no restating the request, no narration,
-short bullet lines, a markdown table when data fits two or more columns, shell commands in fenced
-code blocks. Those last two are why this is a correctness fix and not a tone preference — markdown
-is what `format.ToTelegramHTML` renders into Telegram's HTML subset (`<pre><code>` for a fence,
-`convertTablesToBullets` for a pipe table), so a table that arrives as prose has no shape to render.
+short bullet lines, a markdown table when the data fits two or three columns, shell commands in
+fenced code blocks. Those last two are why this is a correctness fix and not a tone preference —
+markdown is what `format.ToTelegramHTML` renders into Telegram's HTML subset (`<pre><code>` for a
+fence, `convertTablesToBullets` for a pipe table), so a table that arrives as prose has no shape to
+render.
+The width cap is measured, not guessed: `convertTablesToBullets` emits each row as a bold name plus
+one bullet PER REMAINING CELL, so a four-column row costs four lines on a phone
+(`<b>claude-502/</b>` + "• Size: 22G" + "• What: sessions" + "• Owner: nobody") where a two-column
+row costs two. An unbounded "use a table when it fits" therefore makes a reply *longer*, which is
+why the style names the ceiling.
 Folding the argv into `workerArgs` also fixed a latent flag bug: the flag list was assembled inline
 and the positional prompt appended last, which is the order Go's `flag` package requires (it stops at
 the first non-flag argument).
