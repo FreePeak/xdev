@@ -67,18 +67,64 @@ Unknown `service get` keys error rather than returning empty, so key discovery i
 ## 3. The event stream
 
 ```
-event.subscribe    GET  /api/event
+event.subscribe    GET    /api/event
 ```
 
-SSE, per `x-effect-stream: {"encoding": "sse"}`. Envelope:
+Declared SSE per `x-effect-stream: {"encoding": "sse"}`. **The declared envelope does not match what the server actually sends.** Captured from the live stream:
 
-```json
-{ "id": "string|null", "event": "string", "data": "V2EventEncoded" }
+```
+: heartbeat
+
+data: {"id":"evt_14e1d058c001CLCjRQoJsL7tiB","created":1792311887244,
+       "type":"session.reasoning.delta",
+       "location":{"directory":"/Users/linh.doan/.config/opencode"},
+       "data":{"sessionID":"ses_…","assistantMessageID":"msg_…",
+               "ordinal":0,"delta":"Let me re-ground:"}}
+
+data: {"id":"evt_…","created":…,"type":"session.tool.input.started",
+       "location":{…},"data":{…},
+       "durable":{"aggregateID":"ses_…","seq":2586,"version":1}}
 ```
 
-- `event` and `data` are required; `id` is optional.
-- `V2EventEncoded` is `{type: "string", contentMediaType: "application/json"}` — **a JSON-encoded string**, so `data` needs a second parse to reach the payload.
-- The optional `id` is what a reconnect should resume from (plan F2).
+Three places the spec is wrong:
+
+| spec says | actually |
+|---|---|
+| the field is `event` | the field is **`type`** |
+| `data` is `V2EventEncoded`, a JSON-encoded **string** | `data` is an **object**; no second parse needed |
+| envelope is `{id?, event, data}` | it also carries **`created`**, **`location`**, **`durable`** |
+
+So: do not generate a client from this operation's declared schema.
+
+**Framing is bare `data:` lines**, not the `event:`/`id:` SSE fields — the identifier lives inside the JSON. Idle keepalive arrives as an SSE comment, `: heartbeat`.
+
+**`durable` is the reconciliation key, and it is not always there.** In a 28-event sample, 18 carried it. Per session it is `{aggregateID, seq, version}`, with `seq` monotonic and `version` for idempotency. Events *without* it — every `*.delta` — are ephemeral and cannot be replayed. That is the shape of F2: a reconnect reconciles from `session.message.list`, not by replaying deltas, because the deltas that would fill the gap are gone.
+
+### 3.1 Event types observed
+
+Namespaced `server.*`, `project.*`, `session.*`, `shell.*`:
+
+```
+server.connected              data {}
+project.updated
+session.created               {sessionID, slug, version, projectID, location, subpath, title, agent}
+session.step.started|streamed|ended
+session.reasoning.started|delta|ended          delta carries {ordinal, delta}
+session.tool.input.started|ended               {id, name}
+session.tool.called                            {id, input, executed}
+session.tool.success                           {id, content[], metadata, executed}
+session.usage.updated                          {sessionID, cost, tokens{input,output,reasoning,cache}}
+session.synthetic
+session.compaction.started
+shell.exited | shell.deleted
+```
+
+Payload shapes worth pinning:
+
+- `session.tool.called.input` is the tool's parsed **object** input.
+- `session.tool.success.content` is `[{"type":"text","text":"…"}]` — the same `Tool.Content` union as the REST message model.
+- `session.usage.updated` is the live cost/token roll-up, and matches `Session.Info.tokens` exactly.
+- `location.directory` on the envelope says **which project** an event belongs to, so one stream can serve several working directories.
 
 **The CLI cannot carry this stream.** Verified:
 

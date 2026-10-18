@@ -56,3 +56,52 @@ func TestLiveReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveStream is opt-in: XDEV_OPENCODE_LIVE=1 go test ./internal/opencode/
+//
+// It only subscribes. opencode publishes a global stream, so an idle server
+// still emits server.connected and heartbeat traffic — proving the endpoint,
+// the Basic auth and the frame parser against the installed binary without
+// prompting anything or creating a session.
+func TestLiveStream(t *testing.T) {
+	if os.Getenv("XDEV_OPENCODE_LIVE") != "1" {
+		t.Skip("set XDEV_OPENCODE_LIVE=1 to run against the installed opencode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	c := New()
+	ep, err := c.Discover(ctx)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	s := &Stream{Endpoint: ep}
+
+	frames := make(chan Event, 256)
+	sctx, scancel := context.WithCancel(ctx)
+	go func() {
+		_ = s.Run(sctx, func(e Event) {
+			select {
+			case frames <- e:
+			default:
+			}
+		})
+	}()
+
+	// Give the subscription a moment, then stop.
+	time.Sleep(2 * time.Second)
+	scancel()
+
+	select {
+	case e := <-frames:
+		t.Logf("first frame: type=%s id=%s durable=%v", e.Type, e.ID, e.Durable != nil)
+		if e.Type == "" {
+			t.Error("frame decoded with an empty type")
+		}
+		if s.Undecodable > 0 {
+			t.Errorf("%d frames failed to decode against the live server", s.Undecodable)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no frames arrived on the live stream within 3s")
+	}
+}
