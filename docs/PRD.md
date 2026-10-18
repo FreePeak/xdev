@@ -3909,6 +3909,8 @@ Verified on the built binary through a real pty with `scripts/tui-sticky-padding
 
 **Verified:** `go test ./internal/memlimit/ ./internal/config/ ./internal/dist/ ./internal/session/ ./internal/agent/` green (`internal/tui`'s `TestDockTodoMarkersWearTheirOwnInks` fails identically on `origin/main` before this change — unrelated); both binaries driven through the same six-turn pty session with GODEBUG=gctrace=1: before 15.4% idle CPU / 20 cycles / 606 MB RSS, after 0.2% / 0 cycles / 867 MB RSS.
 
+*Last updated: 2026-10-18 (`docs/plan-tui-revamp` — user request: continue the TUI revamp work).* **Plan only:** [plans/2026-10-18-tui-revamp.md](plans/2026-10-18-tui-revamp.md), five workstreams (WS-1 overlay router, WS-2 key-handler split, WS-3 tool grouping + caches, WS-4 config hot-reload, WS-5 generation guard). The plan exists because none of the 8 phases in `docs/research/2026-10-06-tui-refactor-omp-opencode-grok.md` landed while `app.go` grew 5,889 → 6,512 lines. **Verified:** every symbol and line number in the plan re-checked against `origin/main` `d2fa6c1`; line numbers re-anchored from the authoring checkout (which was 42 lines ahead of `origin/main` and not committed).
+
 *Last updated: 2026-10-18 (gateway chat style — a chat turn reads like a reply, not a transcript):*
 The bridge spawns each Telegram turn as `xdev print` and forwards the worker's stdout verbatim to the
 chat, so a turn that narrates itself lands on a phone as noise: "I'll start by…" preamble, the
