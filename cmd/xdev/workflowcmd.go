@@ -17,10 +17,14 @@ Usage:
   xdev workflow list                 list the presets your config declares
   xdev workflow show <name>          print one preset, including its context budget
   xdev workflow run <name> [text]    create an opencode session from a preset and prompt it
+  xdev workflow sessions [dir]       roster: the opencode sessions xdev can see
 
 xdev ships no presets of its own. Everything listed here comes from
 workflow.presets in your config (~/.xdev/agent/config.yml, or the XDG root
 after 'xdev config init-xdg').
+
+xdev attaches to the opencode you already run — it starts nothing, stops
+nothing, and changes nothing in opencode's own config.
 `
 
 // runWorkflow implements the `xdev workflow` subcommand.
@@ -49,6 +53,8 @@ func runWorkflow(args []string, stdout, stderr *os.File, settings *config.Settin
 		}
 		text := strings.Join(args[2:], " ")
 		return workflowRun(stdout, stderr, settings, args[1], text)
+	case "sessions":
+		return workflowSessions(stdout, stderr, args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, workflowUsage)
 		return 0
@@ -196,5 +202,58 @@ func workflowRun(stdout, stderr *os.File, settings *config.Settings, name, text 
 	}
 	fmt.Fprintf(stdout, "session %s  agent %s\n", sess.ID, sess.Agent)
 	fmt.Fprintf(stdout, "  watch it from the TUI, or `xdev workflow show %s` for its budget\n", name)
+	return 0
+}
+
+// workflowSessions prints the roster: every opencode session xdev can see,
+// with the status a dock row needs.
+//
+// It reads Session.Info only. No message is fetched, so this is cheap enough
+// to run on a timer, and it changes nothing on opencode's side.
+func workflowSessions(stdout, stderr *os.File, args []string) int {
+	directory := ""
+	if len(args) > 0 {
+		directory = args[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	c := opencode.New()
+	if _, err := c.Discover(ctx); err != nil {
+		fmt.Fprintln(stderr, "xdev workflow sessions:", err)
+		fmt.Fprintln(stderr, "  start opencode's server with `opencode service start`, then retry")
+		return 1
+	}
+	rows, err := c.ListSessions(ctx, directory)
+	if err != nil {
+		fmt.Fprintln(stderr, "xdev workflow sessions:", err)
+		return 1
+	}
+	if len(rows) == 0 {
+		if directory != "" {
+			fmt.Fprintf(stdout, "No opencode sessions in %s.\n", directory)
+		} else {
+			fmt.Fprintln(stdout, "No opencode sessions.")
+		}
+		return 0
+	}
+	for _, r := range rows {
+		title := r.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		model := r.Model.ProviderID + "/" + r.Model.ID
+		if r.Model.Variant != "" {
+			model += ":" + r.Model.Variant
+		}
+		outcome := r.Outcome
+		if outcome == "" {
+			outcome = "-"
+		}
+		fmt.Fprintf(stdout, "%-26s %-38s %-6s %-26s $%.4f in=%-9d out=%-7d %s\n",
+			r.ID, oneLine(title), r.Agent, model, r.Cost,
+			r.Tokens.Input, r.Tokens.Output, outcome)
+	}
+	fmt.Fprintf(stdout, "\n%d session(s)\n", len(rows))
 	return 0
 }
