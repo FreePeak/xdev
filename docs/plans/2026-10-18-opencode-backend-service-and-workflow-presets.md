@@ -116,28 +116,33 @@ The web-UI handler routes `/api`, `/api/*`, `/auth/*`, `/openapi.json` to the AP
 
 `docs/research/opencode-internals.md` §4.1 (schema unchanged in v2 for these types):
 
-| opencode part | key fields |
+| opencode message (v2) | key fields |
 |---|---|
-| `text` | `text` |
-| `reasoning` | `text` |
-| `tool` | `tool`, `state:{status, input, output, error, attachments}` |
-| `step-start` / `step-finish` | — (assistant turn boundaries) |
-| `file` | `mime`, `url`, `filename` |
-| `patch` | `files:[{filePath, type, patch, additions, deletions}]` |
-| `compaction` | v2: first-class message with status/reason/recent |
+| `Session.Message.User` | `text` is a **plain string**, not a content list; plus `files`, `agents`, `skills` |
+| `Session.Message.Assistant` | `agent`, `model`, and `content[]` of Text \| Reasoning \| Tool |
+| `…Assistant.Text` | `{type:"text", text, state?}` |
+| `…Assistant.Reasoning` | `{type:"reasoning", text, state?, time}` |
+| `…Assistant.Tool` | `{type:"tool", id, name, executed, state}` |
+| tool `state` | `Streaming` (input is a partial **string**) \| `Running` \| `Completed` \| `Error` |
+| `…Compaction` | `Running` / `Completed` / `Failed` |
 
 Compare `internal/ai/types.go`:
 
 ```go
 type Block interface{ blockType() string }
 type TextBlock struct{ Text string `json:"text"` }
-// wire: {"type":"text","text":"..."}   ← byte-identical to opencode's text part
+// wire: {"type":"text","text":"..."}   <- identical to opencode's assistant text item
 type ThinkingBlock struct{ Thinking string `json:"thinking"`; ... }
-// opencode's reasoning part carries the same payload under the key "text"
+// opencode's reasoning item carries the same payload under the key "text"
 type ToolCallBlock struct{ ... }  // id, name, arguments, partialArgs, streamIndex, intent
 ```
 
-`{"type":"text","text":...}` is **the same wire shape on both sides**. The adapter is a rename and a re-wrap, not a translation.
+The mapping is **asymmetric**. Slice 0 corrected an earlier draft of this section that claimed it was uniform:
+
+- **assistant side** — `{"type":"text","text":…}` is the same wire shape on both sides, so text and reasoning are a rename each, and tools carry *more* state than xdev's block.
+- **user side** — `Session.Message.User.text` is a flat string. It needs a one-line wrap into a single `TextBlock`.
+
+"Map, don't build a second renderer" survives this correction and is arguably strengthened. But it must not be implemented on the v1 `parts` mental model. Full detail, including two spec gotchas (the spec declares **no** security schemes, and SSE `data` is a JSON-encoded string needing a second parse), is in [`docs/research/opencode-v2-spec.md`](../research/opencode-v2-spec.md).
 
 ---
 
