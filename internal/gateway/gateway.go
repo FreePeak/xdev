@@ -662,6 +662,34 @@ func (w *worker) finish(res workerResult) {
 	close(w.done)
 }
 
+// chatStyle is the system-prompt tail the gateway adds to every chat turn: a
+// short, result-first answer with no narration. It is a prompt and not a post
+// filter because the worker streams its answer live (printHooks.OnEvent), so
+// there is nothing to trim after the fact.
+//
+// ponytail: a prompt is a heuristic, not a guarantee — a stubborn turn can
+// still ramble. Ceiling: reply length is only as good as the model's
+// compliance. Upgrade path: post-process the final answer (summarise or
+// clip) in the streamer, where the whole reply is already in hand.
+const chatStyle = "This turn is answered in a phone chat. Reply with the result of the work and nothing else: no preamble, no restating the request, no narration of steps taken or planned. Keep it as short as it can be while still complete, and prefer short bullet lines over paragraphs. Format data as a markdown table when it fits two or more columns, and put shell commands in fenced code blocks."
+
+// workerArgs is the argv for one chat turn: the flags that shape the reply,
+// then the positional prompt. The chat's own /model wins over the daemon-wide
+// gateway.model, which wins over the run's configured default (no --model at
+// all) — resolved per turn rather than at /model time so a config edit or a
+// /new cannot leave a chat pinned to a ref the operator has since removed.
+func workerArgs(sessionID, ref, text string) []string {
+	args := []string{"--print", "--no-title", "--hide-thinking", "--allow-home",
+		"--append-system-prompt", chatStyle}
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	}
+	if ref != "" {
+		args = append(args, "--model", ref)
+	}
+	return append(args, text)
+}
+
 // spawn launches one print-mode turn.
 //
 // stdout and stderr are separate pipes, not one buffer, because they carry
@@ -673,32 +701,28 @@ func (w *worker) finish(res workerResult) {
 // grow an unbounded buffer, and the cap drops the OLDEST bytes so the answer
 // (written last) survives.
 func (d *Daemon) spawn(ctx context.Context, sessionID string, chat int64, text string) (*worker, error) {
-	// The model's answer must be the ONLY thing on stdout: the gateway
-	// forwards that stream verbatim to the chat, so thinking, banner lines
-	// and notices would be read as the answer. --hide-thinking keeps the
-	// reasoning off stdout (it still lands in the worker's stderr log), and
-	// --allow-home keeps a turn whose workspace IS $HOME (the common
-	// gateway.workspace default) in $HOME instead of a temp dir — the temp
-	// switch exists so a human's interactive run does not scatter files in
-	// $HOME, which a configured bridge has already opted into.
-	// The daemon falls back to $HOME when gateway.workspace is unset; the
-	// temp-dir switch is for a human run, not for a configured bridge, so it
-	// is opted out of (the gateway turn is the un-attended case that switch
-	// was never meant for).
-	// Flags BEFORE the positional: Go's flag package stops at the first
-	// non-flag argument, so `xdev print --allow-home X` would parse
-	// "--allow-home" as part of the prompt and never see the switch.
-	args := []string{"--print", "--no-title", "--hide-thinking", "--allow-home"}
-	if sessionID != "" {
-		args = append(args, "--resume", sessionID)
-	}
-	// The chat's own /model wins over the daemon-wide gateway.model, which
-	// wins over the run's configured default (no --model at all). Resolved
-	// here rather than at /model time so a config edit or a /new cannot leave
-	// a chat pinned to a ref the operator has since removed.
-	if ref := d.modelFor(chat); ref != "" {
-		args = append(args, "--model", ref)
-	}
+	// The worker's stdout IS the reply: the gateway forwards it verbatim to
+	// the chat, so anything else on that stream would be read as the answer.
+	// --hide-thinking keeps the reasoning on stderr (and in the worker's own
+	// log), --no-title drops the session title, and --allow-home stops the
+	// temp-dir switch from relocating a turn whose workspace IS $HOME (the
+	// usual gateway.workspace default, which the operator opted into when
+	// they configured the bridge — that switch is for an interactive run).
+	//
+	// chatStyle rides along on every turn so the answer reads like a reply
+	// instead of a transcript: stdout is forwarded verbatim, so a turn that
+	// narrates its own steps or restates the request is pure noise on a
+	// phone. The formatting half is not cosmetic — markdown tables and fenced
+	// commands are what ToTelegramHTML turns into readable HTML (a pipe table
+	// becomes bullets, a fence becomes <pre><code>), so a table that arrives
+	// as prose gets no shape at all. --append-system-prompt is print mode's
+	// seam for this and appends AFTER the personality tail, so it adds voice
+	// without dropping the base prompt.
+	//
+	// Flags come before the positional prompt: Go's flag package stops at the
+	// first non-flag argument, so a flag placed after the prompt would be
+	// swallowed into the prompt instead of parsed.
+	args := workerArgs(sessionID, d.modelFor(chat), text)
 	// XDEV_MODEL carries the same choice to the worker's own subprocesses
 	// (advisor, titles, memory) the way an interactive /model does, so a chat
 	// pinned to a model does not quietly run its side passes on another.
@@ -706,7 +730,6 @@ func (d *Daemon) spawn(ctx context.Context, sessionID string, chat int64, text s
 	if ref := d.modelFor(chat); ref != "" {
 		env = append(env, "XDEV_MODEL="+ref)
 	}
-	args = append(args, text)
 
 	cmd := exec.Command(d.exe, args...)
 	cmd.Dir = d.workspace

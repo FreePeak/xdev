@@ -3908,3 +3908,24 @@ Verified on the built binary through a real pty with `scripts/tui-sticky-padding
 *Last updated: 2026-10-16 (`fix/tui-gc-cpu` — user report: "xdev consumes lots of CPU").* **Root cause: the shipped `memoryLimit` default (100 MB) sat below a working session's live heap, so the Go collector never stopped — a soft limit is walked past, never enforced, so the only effect was GC running forever against a goal it could not reach. Measured on the shipped binary: 15.4% of one core idle (20 GC cycles per 20 s) after six 3 MB turns, with the process at 606 MB RSS and 312 MB live — the limit never held anything. Raising the default to 1 GiB (`memlimit.DefaultLimitBytes`, `config.settings.MemoryLimit`, the `xdev setup` starter template) drops the same session to 0.2% CPU and 0 GC cycles, and the `compaction: memory pressure N% of the process limit` force-compaction storm it caused goes away (4 pressure compactions in 5 turns, reading 199–394% of a 100 MB limit).** The <100 MB RSS goal is unchanged and remains the bounded-window design's job (session windowing, the transcript row cap, `internal/session/window_rss_test.go`); `memoryLimit` is documented as a runaway backstop, not an RSS target, and `XDEV_MEMLIMIT` still overrides it for anyone who wants the old ceiling.
 
 **Verified:** `go test ./internal/memlimit/ ./internal/config/ ./internal/dist/ ./internal/session/ ./internal/agent/` green (`internal/tui`'s `TestDockTodoMarkersWearTheirOwnInks` fails identically on `origin/main` before this change — unrelated); both binaries driven through the same six-turn pty session with GODEBUG=gctrace=1: before 15.4% idle CPU / 20 cycles / 606 MB RSS, after 0.2% / 0 cycles / 867 MB RSS.
+
+*Last updated: 2026-10-18 (gateway chat style — a chat turn reads like a reply, not a transcript):*
+The bridge spawns each Telegram turn as `xdev print` and forwards the worker's stdout verbatim to the
+chat, so a turn that narrates itself lands on a phone as noise: "I'll start by…" preamble, the
+request restated back, step-by-step commentary. `chatStyle` (`internal/gateway/gateway.go`, passed by
+the new `workerArgs`) now rides along on every turn as `--append-system-prompt`, alongside the
+existing `--no-title`/`--hide-thinking` that already keep the turn's title and reasoning off stdout
+(reasoning goes to stderr, and `--allow-home` stops the temp-dir switch from relocating a turn whose
+workspace is `$HOME`).
+The style asks for the result and nothing else: no preamble, no restating the request, no narration,
+short bullet lines, a markdown table when data fits two or more columns, shell commands in fenced
+code blocks. Those last two are why this is a correctness fix and not a tone preference — markdown
+is what `format.ToTelegramHTML` renders into Telegram's HTML subset (`<pre><code>` for a fence,
+`convertTablesToBullets` for a pipe table), so a table that arrives as prose has no shape to render.
+Folding the argv into `workerArgs` also fixed a latent flag bug: the flag list was assembled inline
+and the positional prompt appended last, which is the order Go's `flag` package requires (it stops at
+the first non-flag argument).
+Evidence: `TestWorkerArgs` (`internal/gateway/worker_args_test.go`) fails on stock — it asserts the
+prompt stays last, that the style is present and names the two renderable shapes, and that
+`--no-title`/`--hide-thinking`/`--allow-home` survive. Green in `go test ./internal/gateway/
+./cmd/xdev/` plus `go build ./...`.
