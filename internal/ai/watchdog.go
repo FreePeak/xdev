@@ -50,7 +50,7 @@ var ErrWatchdogAborted = errors.New("stream watchdog: no progress")
 // TUI) read to close — so a caller-cancel that raced the source teardown
 // must not swallow the terminal event. Every source event is forwarded
 // verbatim and the channel closes exactly when the source closes.
-func withWatchdog(_ context.Context, cancel context.CancelFunc, ch <-chan Event, first, idle time.Duration) <-chan Event {
+func withWatchdog(_ context.Context, cancel context.CancelCauseFunc, ch <-chan Event, first, idle time.Duration) <-chan Event {
 	out := make(chan Event, 64)
 	go func() {
 		defer close(out)
@@ -97,7 +97,7 @@ func withWatchdog(_ context.Context, cancel context.CancelFunc, ch <-chan Event,
 					continue
 				}
 				aborted = true
-				cancel()
+				cancel(ErrWatchdogAborted)
 				out <- Event{Type: EventError, Err: fmt.Errorf("%w (first=%s idle=%s)", ErrWatchdogAborted, first, idle)}
 				// Keep reading the source in THIS goroutine (no second
 				// drain goroutine) and arm the grace window: if the source

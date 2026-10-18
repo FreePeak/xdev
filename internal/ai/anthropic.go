@@ -297,10 +297,10 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 	// (#283: stamping it after the headers made xdev's own metrics show
 	// 7.3 s steps while users waited 17 s).
 	start := time.Now()
-	sctx, cancel := context.WithCancel(ctx)
+	sctx, cancel := context.WithCancelCause(ctx)
 	body, err := p.buildRequest(req)
 	if err != nil {
-		cancel()
+		cancel(nil)
 		return nil, err
 	}
 	model := req.Model
@@ -316,19 +316,19 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 		disableCacheMarkers("endpoint rejected cache_control")
 		req.Cache = CacheOpts{}
 		if body, err = p.buildRequest(req); err != nil {
-			cancel()
+			cancel(nil)
 			return nil, err
 		}
 		resp, err = wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
 	}
 	if err != nil {
-		cancel() // no goroutine will own it on this path
+		cancel(nil) // no goroutine will own it on this path
 		return nil, err
 	}
 	ch := make(chan Event, 64)
 	go func() {
 		defer resp.Body.Close()
-		defer cancel()
+		defer cancel(nil)
 		defer close(ch)
 		p.stream(sctx, resp.Body, model, ch, start, servedByDecision(resp, model))
 	}()
@@ -559,6 +559,18 @@ func (p *AnthropicProvider) stream(ctx context.Context, r io.Reader, model strin
 			return
 		}
 	}
+}
+
+// cancelError renders the cause of a canceled request context. When the
+// watchdog aborted the stream (context.Cause == ErrWatchdogAborted) the
+// error carries the sentinel so the M5 ladder classifies it transient and
+// retries; a bare cancel (user abort) still surfaces as context.Canceled,
+// which the ladder must not retry.
+func cancelError(ctx context.Context) error {
+	if c := context.Cause(ctx); c != nil {
+		return c
+	}
+	return contextErr(ctx)
 }
 
 // contextErr resolves the cause of a canceled context.
