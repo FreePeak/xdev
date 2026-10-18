@@ -177,6 +177,12 @@ func DefaultKeyMap() *KeyMap {
 			// Alt+A (the hub) and Alt+M (models) already use. Opening nothing
 			// is silence, like ctrl+o on an empty transcript.
 			"A-b": "app.subagent.transcript",
+			// Enter the strip with the keyboard: the same Alt+letter class
+			// the toggle (A-p) and the hub (A-a) use, but F is for "focus",
+			// and it is a different action from the toggle — toggling hides
+			// the rows, focusing puts the keyboard on them. A chord that
+			// does both would have to ask which state it is in.
+			"A-f": "app.agents.focus",
 			"C-r": "history-prev",
 			// omp's app.clipboard.pasteImage. This is NOT the ordinary paste —
 			// the terminal owns that and bracketed paste delivers it (see

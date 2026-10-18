@@ -176,3 +176,170 @@ func TestAgentPanelSitsAboveTheQueue(t *testing.T) {
 		t.Fatalf("strip top %d must sit above the queue top %d", strip, queue)
 	}
 }
+
+// A settled child STAYS on the strip, dim and still: the strip is this
+// session's record of what ran, and a row that vanished the moment its
+// child did would read as a bug. It is marked done, so the count of
+// RUNNING children drops to zero while the row itself remains.
+func TestAgentPanelKeepsASettledChild(t *testing.T) {
+	app, _ := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "")
+	if _, n := app.AgentPanelState(); n != 1 {
+		t.Fatalf("running = %d, want 1", n)
+	}
+	app.AgentPanelSettle("scout")
+	app.mu.Lock()
+	rows := app.agents.snapshot()
+	app.mu.Unlock()
+	if len(rows) != 1 {
+		t.Fatalf("rows after settle = %d, want 1 (settled rows persist)", len(rows))
+	}
+	if !rows[0].Done {
+		t.Fatal("settled row is not marked done")
+	}
+	if rows[0].End.IsZero() {
+		t.Fatal("settled row has no end time")
+	}
+}
+
+// The keyboard can enter the strip with Alt+F: the newest row is the one a
+// person watching would open, and from there arrows walk the list, Enter
+// opens a child, and Esc leaves. The strip's own focus state is what the
+// painter marks, so the test reads it directly rather than the painted
+// frame.
+func TestAgentPanelAltFFocusesTheNewestRow(t *testing.T) {
+	app, _ := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "fg-7")
+	app.AgentPanelStart("leaf", "sonic", "", "fg-8")
+	app.draw()
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
+	if !app.agentPanelFocused {
+		t.Fatal("Alt+F did not put the keyboard on the strip")
+	}
+	app.mu.Lock()
+	focus := app.agents.focused()
+	app.mu.Unlock()
+	if focus != "leaf" {
+		t.Fatalf("focused row = %q, want the newest child \"leaf\"", focus)
+	}
+}
+
+// Alt+F on a strip with nothing to focus is silence — the chord must not
+// claim to have done something, the same rule ctrl+o uses on a transcript
+// with no box.
+func TestAgentPanelAltFWithNothingToFocusIsSilence(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.draw()
+	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
+	app.draw()
+	if strings.Contains(screenText(scr), "not wired") {
+		t.Fatalf("Alt+F with no running child must be silent:\n%s", screenText(scr))
+	}
+}
+
+// Arrows walk the strip while it is focused, wrapping at the ends, and Enter
+// opens the focused child's transcript — the same surface a click opens, so
+// the keyboard and the mouse cannot drift into opening different children.
+func TestAgentPanelArrowsWalkAndEnterOpens(t *testing.T) {
+	app, _ := panelScreen(t)
+	app.AgentPanelStart("task", "task", "", "fg-7")
+	app.AgentPanelStart("scout", "scout", "", "fg-8")
+	app.AgentPanelStart("leaf", "sonic", "", "fg-9")
+	app.draw()
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
+	app.mu.Lock()
+	focus := app.agents.focused()
+	app.mu.Unlock()
+	if focus != "leaf" {
+		t.Fatalf("initial focus = %q, want \"leaf\" (newest)", focus)
+	}
+
+	// Down moves toward the oldest and clamps there: the strip is a short
+	// band, so an arrow that runs off the end stays at the last row rather
+	// than wrapping to the other end.
+	for i := 0; i < 5; i++ {
+		app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	app.mu.Lock()
+	focus = app.agents.focused()
+	app.mu.Unlock()
+	if focus != "task" {
+		t.Fatalf("after 5 Down (clamp) focus = %q, want the oldest \"task\"", focus)
+	}
+
+	// Up moves toward the newest and clamps there: from "task" two presses
+	// reach "leaf".
+	for i := 0; i < 5; i++ {
+		app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	}
+	app.mu.Lock()
+	focus = app.agents.focused()
+	app.mu.Unlock()
+	if focus != "leaf" {
+		t.Fatalf("after 5 Up (clamp) focus = %q, want the newest \"leaf\"", focus)
+	}
+
+	// Up moves toward the newest; from "leaf" one Up stays at "leaf".
+	app.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	app.mu.Lock()
+	focus = app.agents.focused()
+	app.mu.Unlock()
+	if focus != "leaf" {
+		t.Fatalf("after Up from the newest focus = %q, want \"leaf\"", focus)
+	}
+
+	// Enter opens the focused child's transcript in the panel surface.
+	app.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	app.draw()
+	ui := hubUI(app)
+	if !app.HubRosterOpen() || ui.viewID != "fg-9" {
+		t.Fatalf("panel = %+v, want the focused child's fg-9", ui)
+	}
+}
+
+// Esc leaves the strip: the editor's arrows then do their usual work, and the
+// strip can be re-entered with the chord. One Esc is "I am done looking at
+// the strip", not "close the whole app".
+func TestAgentPanelEscLeavesTheStrip(t *testing.T) {
+	app, _ := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "fg-7")
+	app.draw()
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
+	if !app.agentPanelFocused {
+		t.Fatal("Alt+F did not focus the strip")
+	}
+	app.handleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if app.agentPanelFocused {
+		t.Fatal("Esc did not leave the strip")
+	}
+	app.mu.Lock()
+	if app.agents.focused() != "" {
+		t.Fatal("Esc did not blur the strip")
+	}
+	app.mu.Unlock()
+}
+
+// Arrow-down from an empty composer with nothing to recall enters the strip
+// instead of scrolling the transcript past its tail — the opencode shape,
+// where the strip is a list the composer's arrow walks into. A session that
+// never spawns a child is unaffected: the strip has no rows and the block
+// falls through to the editor as before.
+func TestAgentPanelDownFromComposerEntersTheStrip(t *testing.T) {
+	app, _ := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "fg-7")
+	app.draw()
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	if !app.agentPanelFocused {
+		t.Fatal("Down from an empty composer did not enter the strip")
+	}
+	app.mu.Lock()
+	focus := app.agents.focused()
+	app.mu.Unlock()
+	if focus != "scout" {
+		t.Fatalf("focused row = %q, want \"scout\"", focus)
+	}
+}

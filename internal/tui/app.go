@@ -362,10 +362,15 @@ type App struct {
 	// armed transcript open, run after a.mu is released — opening one takes
 	// the hub registry lock and fills the panel's view, which must not happen
 	// under the lock the transcript paints with.
-	agents        *agentPanel
-	agentHits     []agentPanelHit
-	agentOpen     *agentPanelHit
-	agentPanelOps *AgentPanelOps
+	agents *agentPanel
+	// agentPanelFocused is the keyboard's presence on the strip: while true
+	// the strip owns Up/Down/Enter/Esc and the editor's arrows do their
+	// usual work only after the strip is left. It is the App's half of the
+	// contract; the strip itself still decides WHICH row is focused.
+	agentPanelFocused bool
+	agentHits         []agentPanelHit
+	agentOpen         *agentPanelHit
+	agentPanelOps     *AgentPanelOps
 
 	keyq     chan tcell.Event
 	dirty    chan struct{}
@@ -3355,6 +3360,16 @@ func (a *App) handleKey(ev tcell.Event) {
 	if a.handleMsgMenuKey(key) {
 		return
 	}
+	// The live subagent strip is a keyboard target like the queue: a chord
+	// enters it, arrows move the selection, Enter opens the focused child's
+	// transcript, and Esc leaves it. It sits between the message menu (which
+	// is modal and above it) and the status popup: both of those outrank it,
+	// and the editor's arrows only reach the strip after every modal has had
+	// its say. The strip's own focus state decides WHICH row is on; this
+	// block only decides WHETHER the strip is on.
+	if a.handleAgentPanelKey(key) {
+		return
+	}
 
 	// The pill popup takes Esc before the double-Esc rewind ladder: a panel
 	// over the transcript is dismissed by the same chord every other panel
@@ -3517,6 +3532,17 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 		_, running := a.AgentPanelState()
 		a.AddSystemBlock("· " + agentPanelSummary(on, running))
+		return
+	case "app.agents.focus":
+		// Put the keyboard on the strip: the newest row is the one a person
+		// watching would open, and from there arrows walk the list, Enter
+		// opens a child, and Esc leaves. Nothing to focus is silence, like
+		// ctrl+o on a transcript with no box — the chord must not claim to
+		// have done something.
+		if !a.agentPanelFocus() {
+			a.AddSystemBlock("· no running child to focus")
+			return
+		}
 		return
 	case "app.subagent.transcript":
 		// The newest child a `task` call spawned, in its own transcript.
@@ -3783,7 +3809,44 @@ func (a *App) handleKey(ev tcell.Event) {
 			return
 		}
 	}
+	// The live subagent strip takes the arrows while it is focused: it is a
+	// list, so Up/Down move the selection and Enter opens the focused
+	// child's transcript. It is checked before the editor's scroll block
+	// because a focused strip is a keyboard target, and the editor's arrows
+	// only do their usual work once the strip is left (Esc).
+	if a.agents != nil && a.agents.enabled() && a.agentPanelFocused {
+		switch key.Key() {
+		case tcell.KeyUp:
+			a.agents.focusMove(-1)
+			a.poke()
+			return
+		case tcell.KeyDown:
+			a.agents.focusMove(1)
+			a.poke()
+			return
+		case tcell.KeyEnter:
+			a.agentPanelOpen()
+			a.poke()
+			return
+		}
+	}
 
+	// Arrow-down from an empty composer with nothing to scroll: if the
+	// subagent strip has rows, the down arrow enters it instead of scrolling
+	// the transcript past its tail. This is the opencode shape — the strip
+	// is a list the composer's arrow walks into — and it is the only
+	// default-on path into keyboard focus, so a session that never spawns
+	// a child is unaffected (the strip has no rows and the block falls
+	// through to the editor as before). It is gated on an empty composer
+	// and no history so that a draft or a recall still does their usual
+	// thing: the strip is chrome, and an arrow that already means
+	// something in the editor should not be stolen.
+	if !running && !menuOpen && strings.TrimSpace(a.ed.Text()) == "" && !a.ed.HasHistory() && a.agents != nil && a.agents.enabled() && a.agents.hasRows() && !a.agentPanelFocused && key.Key() == tcell.KeyDown {
+		if a.agentPanelFocus() {
+			a.poke()
+			return
+		}
+	}
 	// Empty editor with nothing to recall: arrows scroll the transcript.
 	// Once history exists, Up/Down belong to the editor (omp/Claude Code:
 	// Up recalls the previous prompt whether or not the box is empty);
