@@ -6020,6 +6020,12 @@ var statusSegments = map[string]bool{
 	// sessions is the open-tab count with busy/unread marks — the whole
 	// signal the multi-session TUI needs without a painted tab strip.
 	"sessions": true,
+	// subagent is the running-foreground-child chip: "subagent · N" while N
+	// TaskTool children are live on the hub, "subagent · Alt+B" when the count
+	// is zero but the roster has a settled row to reopen. It is the one
+	// discoverability signal the plan's D2 asks for — without it a user who
+	// has never been shown the Alt+B chord has no hint that the panel exists.
+	"subagent": true,
 }
 
 // defaultStatusSegments is the shipped layout: the two dsh composer pills,
@@ -6201,6 +6207,17 @@ func (a *App) hudSegment(name string) (text, token string) {
 			text += fmt.Sprintf(" ✦%d", unread)
 		}
 		return text, theme.StatusLineSep
+	case "subagent":
+		// D2 chip. "subagent · N" while N TaskTool children are live on the
+		// hub, "subagent · Alt+B" when the count is zero but the roster still
+		// holds a settled row to reopen. The chord is only worth advertising
+		// while there is something to open — a chip that reads "0" teaches
+		// nobody anything.
+		n := a.AgentPanelForegroundCount()
+		if n <= 0 {
+			return "subagent · Alt+B", theme.StatusLineSep
+		}
+		return fmt.Sprintf("subagent · %d", n), theme.StatusLineSep
 	case "debugmouse":
 		return a.debugMouseLine, theme.StatusLineSep
 	}

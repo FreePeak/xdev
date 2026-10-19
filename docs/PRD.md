@@ -928,6 +928,7 @@ JSONL tree, and the subprocess trust boundary. Each phase ends with focused test
 same PR. A feature is not marked complete merely because a package or type exists: it needs a
 real consumer and evidence from a running xdev interaction.
 
+*Last updated: 2026-10-19 (fix/open-subagent-session — F1–F5 + D1: same-process TaskTool subagent panel transcript):*
 *Last updated: 2026-10-13 (fix/failover-combo-alias — a gateway's own route names are never implicit failover legs):*
 #641/#642 landed the per-model `failover: false`, which fixes the symptom only when the operator
 knows to write it: `~/.xdev/agent/models.yml` still pinned `planning`/`execution`/`dev` — onegw's
