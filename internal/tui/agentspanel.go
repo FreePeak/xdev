@@ -56,6 +56,12 @@ type agentPanelRow struct {
 	// (Hub.TrackForeground's "fg-N"). Empty when nothing tracked it, which is
 	// exactly when the row must not offer to open one.
 	TranscriptID string
+	// End and Done mark a child that finished. A settled row is kept, not
+	// removed: the strip is this session's record of what ran, and a row that
+	// vanished the moment its child did would read as a bug. Done rows paint
+	// dim and still, so only a live row moves.
+	End  time.Time
+	Done bool
 	// seq is the arrival order, so two children that started in the same
 	// millisecond still have a stable order to sort by.
 	seq int
@@ -80,6 +86,11 @@ type agentPanel struct {
 	rows []agentPanelRow
 	next int
 	on   bool
+	// focus is the label of the row the keyboard is on ("" when the strip is
+	// not focused) — see focused/focusMove. It is the panel's own state, not
+	// the App's: the App only asks whether the strip is focused, and the
+	// strip decides which row that is.
+	focus string
 }
 
 func newAgentPanel(on bool) *agentPanel { return &agentPanel{on: on} }
@@ -147,18 +158,21 @@ func (p *agentPanel) update(label, tool, args string) {
 	r.Tool, r.Args = tool, args
 }
 
-// settle removes a child: the panel lists what is RUNNING, and a finished
-// child's row is the transcript's business (its call row and its result box).
-// Keeping settled rows here would make the strip a second, worse transcript.
+// settle marks a child finished: it stays on the strip, dim and still, so the
+// strip is this session's record of what ran. A row that vanished the moment
+// its child did would read as a bug, and a strip that only ever showed
+// running children would be a spinner that forgets. The transcript owns the
+// child's call row and result box; the strip owns the flat list.
 func (p *agentPanel) settle(label string) {
 	if p == nil || label == "" {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for i, r := range p.rows {
-		if r.Label == label {
-			p.rows = append(p.rows[:i], p.rows[i+1:]...)
+	for i := range p.rows {
+		if p.rows[i].Label == label {
+			p.rows[i].Done = true
+			p.rows[i].End = time.Now()
 			return
 		}
 	}
@@ -212,6 +226,100 @@ func (p *agentPanel) hasRows() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.rows) > 0
+}
+
+// --- keyboard focus -------------------------------------------------------
+//
+// The strip is a keyboard target like the queue: a chord enters it, arrows
+// move the selection, Enter opens the focused child, Esc leaves it. The
+// focus is the strip's own state (not the App's): the App only asks whether
+// the strip is focused, and the strip decides which row that is, so the
+// painter and the key path read one source of truth.
+
+// focused reports whether the strip is currently the keyboard target. It is
+// read by the painter (to mark the row) and by the key path (to decide
+// whether arrows belong to the strip or to the editor).
+func (p *agentPanel) focused() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.focus
+}
+
+// focusNewest moves the keyboard onto the newest row: the strip paints newest
+// first, so that is index 0. It is the chord's activation — the same row a
+// person watching would open — and idempotent when the strip is empty.
+func (p *agentPanel) focusNewest() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.rows) == 0 {
+		p.focus = ""
+		return
+	}
+	p.focus = p.rows[len(p.rows)-1].Label
+}
+
+// blur leaves the strip: the next arrow falls through to the editor, which
+// does its usual work (scroll, history, multi-row walk).
+func (p *agentPanel) blur() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.focus = ""
+	p.mu.Unlock()
+}
+
+// focusMove steps the focus by delta rows (-1 up, +1 down), wrapping at the
+// ends of the strip. The strip paints newest first, so "up" (toward the
+// newest) is toward index 0 and "down" is toward the oldest. A delta that
+// lands off the end wraps to the other end, the way a list does.
+func (p *agentPanel) focusMove(delta int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.rows) == 0 {
+		p.focus = ""
+		return
+	}
+	if p.focus == "" {
+		p.focus = p.rows[len(p.rows)-1].Label
+	}
+	// rows is stored oldest-first; the strip paints newest-first, so the
+	// painted order is the reverse of the stored order.
+	idx := -1
+	for i := len(p.rows) - 1; i >= 0; i-- {
+		if p.rows[i].Label == p.focus {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		p.focus = p.rows[len(p.rows)-1].Label
+		return
+	}
+	n := len(p.rows)
+	// Painted position: 0 = newest = stored index n-1. Moving "up" (toward
+	// the newest, delta -1) decreases the painted position, which increases
+	// the stored index. Both ends clamp rather than wrap: the strip is a
+	// short band at the bottom of the screen, and an arrow that runs off
+	// the end stays on the last row instead of teleporting the selection to
+	// the other end, which would read as a bug.
+	painted := (n - 1) - idx
+	painted += delta
+	if painted < 0 {
+		painted = 0
+	} else if painted > n-1 {
+		painted = n - 1
+	}
+	p.focus = p.rows[n-1-painted].Label
 }
 
 // --- wiring ---------------------------------------------------------------
@@ -494,12 +602,19 @@ func (a *App) SetAgentPanelOps(ops *AgentPanelOps) {
 }
 
 // AgentPanelState reports the strip's state for a test or a status read:
-// whether it is on, and how many children it is listing.
+// whether it is on, and how many children are still RUNNING (a settled row
+// persists on the strip but is not running, so the notice "N running" stays
+// honest while the strip keeps its record).
 func (a *App) AgentPanelState() (on bool, running int) {
 	if a.agents == nil {
 		return false, 0
 	}
-	return a.agents.enabled(), len(a.agents.snapshot())
+	for _, r := range a.agents.snapshot() {
+		if !r.Done {
+			running++
+		}
+	}
+	return a.agents.enabled(), running
 }
 
 // agentPanelSummary is the one-line state a notice prints.
@@ -521,4 +636,130 @@ func agentPanelRowText(r agentPanelRow) string {
 		parts = append(parts, r.Tool)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// --- App-level keyboard entry ---------------------------------------------
+//
+// The strip's own state (focus) lives on the panel; the App's half is a
+// boolean saying whether the strip is the keyboard target at all. The split
+// is the same one the queue uses: the queue owns its own rows and the App
+// only knows it is open.
+
+// handleAgentPanelKey owns the keys while the strip is the keyboard target.
+// It is modal on the same terms as the message menu above it: every key is
+// swallowed, because the strip is chrome over the composer and a key that
+// fell through would land in the editor. Ctrl+C is handed back so the app
+// can still quit (see handleMsgMenuKey).
+//
+// The strip is NOT always focused: it has to be entered first (the chord
+// below), and while it is not the arrows do their usual editor work. This
+// function therefore answers the strip's own keys only when the strip is
+// focused, and reports false otherwise so the editor can have the rest.
+func (a *App) handleAgentPanelKey(key *tcell.EventKey) bool {
+	if a.agents == nil || !a.agents.enabled() || !a.agentPanelFocused {
+		return false
+	}
+	switch key.Key() {
+	case tcell.KeyEsc:
+		// Leave the strip. The editor's arrows then do their usual work
+		// (scroll, history, multi-row walk), and the strip can be re-entered
+		// with the chord. One Esc is "I am done looking at the strip", not
+		// "close the whole app" — that stays Ctrl+C.
+		a.agentPanelFocused = false
+		a.agents.blur()
+		a.poke()
+		return true
+	case tcell.KeyEnter:
+		// Open the focused child's transcript. Nothing focused is silence,
+		// like ctrl+o on a transcript with no box — the chord must not claim
+		// to have opened something.
+		a.agentPanelOpen()
+		a.poke()
+		return true
+	case tcell.KeyUp:
+		a.agents.focusMove(-1)
+		a.poke()
+		return true
+	case tcell.KeyDown:
+		a.agents.focusMove(1)
+		a.poke()
+		return true
+	case tcell.KeyCtrlC:
+		return false
+	}
+	return true
+}
+
+// agentPanelHitFor returns the hit geometry the strip painted for one row, or
+// nil when the strip is not on screen or the row is not painted. The keyboard
+// resolves a focused row to its screen rectangle this way, so Enter opens the
+// same child a click would.
+func (a *App) agentPanelHitFor(label string) *agentPanelHit {
+	for _, h := range a.agentHits {
+		if h.label == label {
+			return &h
+		}
+	}
+	return nil
+}
+
+// agentPanelFocus is the keyboard's entry into the strip: it moves the focus
+// onto the newest row (the one a person watching would open) and reports
+// whether the strip had anything to focus. It is the chord's activation, the
+// same way focusNewest is the panel's own.
+func (a *App) agentPanelFocus() bool {
+	if a.agents == nil || !a.agents.enabled() || !a.agents.hasRows() {
+		return false
+	}
+	a.agents.focusNewest()
+	a.agentPanelFocused = true
+	return true
+}
+
+// agentPanelMove steps the keyboard focus by delta rows (-1 up, +1 down),
+// wrapping at the ends of the strip. It reports whether the strip was
+// focused; an unfocused strip ignores the chord (the key falls through to the
+// editor, where Up/Down do their usual work).
+func (a *App) agentPanelMove(delta int) bool {
+	if a.agents == nil || !a.agents.enabled() || !a.agents.hasRows() {
+		return false
+	}
+	if a.agents.focused() == "" {
+		a.agents.focusNewest()
+	}
+	a.agents.focusMove(delta)
+	return true
+}
+
+// agentPanelOpen opens the focused child's transcript, if any. It is the Enter
+// chord: the click path arms an open and runs it unlocked, and this does the
+// same thing without a click. Nothing to open is silence, like ctrl+o on a
+// transcript with no box.
+func (a *App) agentPanelOpen() {
+	if a.agents == nil || !a.agents.enabled() {
+		return
+	}
+	focus := a.agents.focused()
+	if focus == "" {
+		a.agents.focusNewest()
+		focus = a.agents.focused()
+	}
+	if focus == "" {
+		return
+	}
+	a.runPendingAgentOpenFor(focus)
+}
+
+// runPendingAgentOpenFor arms and runs an open for one strip row, the unlocked
+// half of the click path. The click path resolves the row to a hit (which
+// carries the transcript id) under a.mu and defers the open; the keyboard
+// does the same resolution here, so the two cannot drift into opening
+// different children.
+func (a *App) runPendingAgentOpenFor(label string) {
+	h := a.agentPanelHitFor(label)
+	if h == nil {
+		return
+	}
+	a.agentOpen = &agentPanelHit{label: h.label, id: h.id}
+	a.runPendingAgentOpen()
 }
