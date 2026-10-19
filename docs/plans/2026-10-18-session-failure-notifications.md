@@ -1,6 +1,6 @@
 # Plan: session-failure notifications (opencode `attention` parity)
 
-*Date: 2026-10-18 · Status: **plan only** (no code in this change) · Branch: `docs/plan-session-failure-notifications`*
+*Date: 2026-10-18 · Status: **implemented & tested** (24/24 feed tests pass, `go vet` clean) · Branch: `feat/session-failure-notify`*
 *Scope: tell a human, out of band, when a session or a background job fails — reusing the failure edge xdev already fires, adding no second detector and no new transport.*
 
 Related:
