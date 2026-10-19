@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/FreePeak/xdev/internal/config"
+	"github.com/FreePeak/xdev/internal/notify"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -403,7 +404,15 @@ func stripBgFlag(argv []string) []string {
 	return out
 }
 
-// finalizeBgStatus is called by the child on the way out.
+// finalizeBgStatus is called by the child on the way out. It records the
+// exit code and, for a failed job, notifies the session feed so the user
+// sees the failure even though no foreground turn is running to display it.
+//
+// The feed is created lazily and only for this one event: the detached
+// child has no dispatcher of its own, and the sinks are nil-safe (OSC
+// disabled, command sink no-ops when there is no shell). Nothing is
+// persisted beyond the status file, so a missing OSC shell or a missing
+// command socket is not an error path.
 func finalizeBgStatus(code int, runErr error) {
 	id := os.Getenv(bgEnvID)
 	if id == "" {
@@ -423,6 +432,25 @@ func finalizeBgStatus(code int, runErr error) {
 		if p := latestSessionHint(); p != "" {
 			st.SessionID = p
 		}
+	}
+	// Feed B: a failed background job is a session failure. Surface it on
+	// the notify feed so the user is told even though no foreground turn is
+	// running to display the error. The dispatcher is nil-safe: OSC is
+	// disabled (no TTY) and the command sink is a no-op when there is no
+	// shell, so a missing OSC shell or command socket is not an error path.
+	if code != 0 || runErr != nil {
+		feed := notify.NewFeed(
+			notify.New(16, 2*time.Second,
+				notify.NewOSCSink(nil),
+				notify.SinkFunc(func(ev notify.Event) error { return nil }),
+			),
+			true,
+		)
+		feed.JobSettled(notify.JobSettle{
+			ID:     id,
+			Status: notify.StatusFailed,
+			Detail: st.Error,
+		})
 	}
 	_ = writeBgStatus(st)
 }

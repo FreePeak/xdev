@@ -176,6 +176,16 @@ func fallbackValue(s *config.Settings, key string) string {
 			return "off"
 		}
 		return s.Memory
+	case "notifications.errors":
+		return fmt.Sprint(s.NotificationsErrorsOn())
+	case "notifications.agent":
+		return fmt.Sprint(s.NotificationsAgentOn())
+	case "notifications.subagents":
+		return fmt.Sprint(s.NotificationsSubagentsOn())
+	case "notifications.sound":
+		return fmt.Sprint(s.NotificationsSoundOn())
+	case "notifications.command":
+		return s.NotificationsCommand()
 	}
 	return ""
 }
