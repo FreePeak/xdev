@@ -285,6 +285,17 @@ func (a *App) SetAgentPanelEnabled(on bool) {
 	a.poke()
 }
 
+// AgentPanelForegroundCount reports how many children the panel still lists,
+// i.e. how many are running or just settled with a transcript to reopen. The
+// status line reads it for the "subagent · Alt+B" chip: the chord is only
+// worth advertising while there is something to open.
+func (a *App) AgentPanelForegroundCount() int {
+	if a == nil || a.agents == nil {
+		return 0
+	}
+	return len(a.agents.snapshot())
+}
+
 // --- painting -------------------------------------------------------------
 
 // agentPanelRows is the strip's height in rows, 0 when it paints nothing.
@@ -389,12 +400,6 @@ func (a *App) drawAgentPanel(queueTop int) {
 			phrase = truncateCells(phrase, budget-(x-1), "…")
 			drawText(s, x, y, phrase, textSt)
 		}
-		// The clock is right-aligned against the model column, so a row's
-		// numbers line up down the strip.
-		ex := w - 1 - rightW - width(elapsed)
-		if ex > x+width(phrase) {
-			drawText(s, ex, y, elapsed, dim)
-		}
 		if right != "" {
 			drawText(s, w-1-width(right), y, right, dim)
 		}
@@ -402,6 +407,18 @@ func (a *App) drawAgentPanel(queueTop int) {
 		// show through this one.
 		for bx := x + width(phrase); bx < w-1-rightW; bx++ {
 			s.SetContent(bx, y, ' ', nil, textSt)
+		}
+		// A row the host tracked has a transcript to open. Paint the ⎿
+		// tick at the right edge of this row's text area — the same glyph
+		// the transcript's own child rows wear, so "openable" reads the
+		// same in both places. It sits on the row line (the clock is a
+		// separate bottom line), so it is visible before the mouse moves
+		// and cannot collide with the model column.
+		if r.TranscriptID != "" {
+			tickX := w - 2 - rightW
+			if tickX > x+width(phrase) {
+				drawText(s, tickX, y, "⎿", dim)
+			}
 		}
 		// Only a child a host tracked has a transcript to open; a row with
 		// nothing to show is never clickable.

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -298,5 +299,39 @@ func TestSubagentChordPicksTheNewestOfABatch(t *testing.T) {
 	app.mu.Unlock()
 	if ui := hubUI(app); ui.viewID != "fg-1" {
 		t.Fatalf("click opened %q, want the clicked sibling fg-1", ui.viewID)
+	}
+}
+
+// F5: a settled child is still openable from its call-row child hit. The row
+// is the settled one — its status is "ok", its transcript id is still set,
+// and the hub still holds the store — so the click that opened it while it was
+// live opens it again. Without this a user who closed a finished subagent's
+// transcript has no way back: the row is gone from the roster and the chord
+// only knows the newest, which may be a different child.
+func TestSubagentSettledChildIsStillOpenableFromItsCallRow(t *testing.T) {
+	app := subTranscriptApp(t)
+	app.SetHubOps(subAgentOps("fg-7"))
+
+	// Finish the child — settle it with its terminal status and wall time.
+	app.FinishTaskChild("c1", "scout", "ok", 123*time.Millisecond)
+	app.draw()
+
+	// The settled row is still on the call row, still named "scout", and still
+	// carries the transcript id it had while it was live.
+	y := subRowScreenY(t, app, "scout")
+	app.mu.Lock()
+	id, _ := app.subChildAt(y)
+	app.mu.Unlock()
+	if id != "fg-7" {
+		t.Fatalf("settled child row resolves to %q, want fg-7 still on the call row", id)
+	}
+
+	// And the click that opened it while it was live opens it again.
+	app.mu.Lock()
+	press(app, 6, y)
+	release(app, 6, y)
+	app.mu.Unlock()
+	if ui := hubUI(app); ui.viewID != "fg-7" || ui.viewName != "scout" {
+		t.Fatalf("click on a settled child opened %+v, want the settled child's transcript", ui)
 	}
 }
