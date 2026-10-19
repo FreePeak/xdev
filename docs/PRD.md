@@ -3909,6 +3909,36 @@ Verified on the built binary through a real pty with `scripts/tui-sticky-padding
 
 **Verified:** `go test ./internal/memlimit/ ./internal/config/ ./internal/dist/ ./internal/session/ ./internal/agent/` green (`internal/tui`'s `TestDockTodoMarkersWearTheirOwnInks` fails identically on `origin/main` before this change — unrelated); both binaries driven through the same six-turn pty session with GODEBUG=gctrace=1: before 15.4% idle CPU / 20 cycles / 606 MB RSS, after 0.2% / 0 cycles / 867 MB RSS.
 
+*Last updated: 2026-10-18 (`docs/plan-tui-revamp` — user request: continue the TUI revamp work).* **Plan only:** [plans/2026-10-18-tui-revamp.md](plans/2026-10-18-tui-revamp.md), five workstreams (WS-1 overlay router, WS-2 key-handler split, WS-3 tool grouping + caches, WS-4 config hot-reload, WS-5 generation guard). The plan exists because none of the 8 phases in `docs/research/2026-10-06-tui-refactor-omp-opencode-grok.md` landed while `app.go` grew 5,889 → 6,512 lines. **Verified:** every symbol and line number in the plan re-checked against `origin/main` `d2fa6c1`; line numbers re-anchored from the authoring checkout (which was 42 lines ahead of `origin/main` and not committed).
+
+*Last updated: 2026-10-18 (gateway chat style — a chat turn reads like a reply, not a transcript):*
+The bridge spawns each Telegram turn as `xdev print` and forwards the worker's stdout verbatim to the
+chat, so a turn that narrates itself lands on a phone as noise: "I'll start by…" preamble, the
+request restated back, step-by-step commentary. `chatStyle` (`internal/gateway/gateway.go`, passed by
+the new `workerArgs`) now rides along on every turn as `--append-system-prompt`, alongside the
+existing `--no-title`/`--hide-thinking` that already keep the turn's title and reasoning off stdout
+(reasoning goes to stderr, and `--allow-home` stops the temp-dir switch from relocating a turn whose
+workspace is `$HOME`).
+The style asks for the result and nothing else: no preamble, no restating the request, no narration,
+short bullet lines, a markdown table when the data fits two or three columns, shell commands in
+fenced code blocks. Those last two are why this is a correctness fix and not a tone preference —
+markdown is what `format.ToTelegramHTML` renders into Telegram's HTML subset (`<pre><code>` for a
+fence, `convertTablesToBullets` for a pipe table), so a table that arrives as prose has no shape to
+render.
+The width cap is measured, not guessed: `convertTablesToBullets` emits each row as a bold name plus
+one bullet PER REMAINING CELL, so a four-column row costs four lines on a phone
+(`<b>claude-502/</b>` + "• Size: 22G" + "• What: sessions" + "• Owner: nobody") where a two-column
+row costs two. An unbounded "use a table when it fits" therefore makes a reply *longer*, which is
+why the style names the ceiling.
+Folding the argv into `workerArgs` also fixed a latent flag bug: the flag list was assembled inline
+and the positional prompt appended last, which is the order Go's `flag` package requires (it stops at
+the first non-flag argument).
+Evidence: `TestWorkerArgs` (`internal/gateway/worker_args_test.go`) fails on stock — it asserts the
+prompt stays last, that the style is present and names the two renderable shapes, and that
+`--no-title`/`--hide-thinking`/`--allow-home` survive. Green in `go test ./internal/gateway/
+./cmd/xdev/` plus `go build ./...`.
+
+
 *Last updated: 2026-10-19 (`fix/subagent-open-session` — the live subagent strip is now a keyboard target, and a click on a row opens that child's transcript over the main pane).*
 
 **What the user asked for:** the subagent strip above the composer (the `task`-call children, flat across every depth) was paint-only — a click on a row did nothing, and there was no keyboard path into it. The transcript rows under a `task` call already opened a child's session, but a grandchild had no call row of its own, so the strip was the only place a chain was visible and it was dead on arrival.

@@ -11,8 +11,8 @@ import (
 func TestWatchdogFirstProgressAbort(t *testing.T) {
 	// stop is the CALLER's ctx (never canceled here); sctx is the stream's
 	// own ctx, which the watchdog cancels on expiry — mirroring adapters.
-	sctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	sctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	src := make(chan Event) // never emits
 	out := withWatchdog(context.Background(), cancel, src, 40*time.Millisecond, time.Hour)
 
@@ -36,8 +36,8 @@ func TestWatchdogFirstProgressAbort(t *testing.T) {
 }
 
 func TestWatchdogIdleAbortAfterProgress(t *testing.T) {
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	src := make(chan Event, 4)
 	out := withWatchdog(context.Background(), cancel, src, time.Hour, 60*time.Millisecond)
 
@@ -62,7 +62,7 @@ func TestWatchdogIdleAbortAfterProgress(t *testing.T) {
 }
 
 func TestWatchdogPassesThroughCleanStream(t *testing.T) {
-	sctx, cancel := context.WithCancel(context.Background())
+	sctx, cancel := context.WithCancelCause(context.Background())
 	src := make(chan Event, 3)
 	src <- Event{Type: EventTextDelta, Delta: "a"}
 	src <- Donef(StopReasonStop, nil, nil)
@@ -101,13 +101,13 @@ func TestWatchdogAbortClassifiesTransient(t *testing.T) {
 // terminal done/error event on the floor. Only the caller's ctx may end
 // the relay early.
 func TestWatchdogForwardsTerminalEventDespiteStreamTeardown(t *testing.T) {
-	_, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancelCause(context.Background())
 	src := make(chan Event, 2)
 	src <- Event{Type: EventTextDelta, Delta: "x"}
 	src <- Donef(StopReasonStop, nil, nil)
 	close(src)
 	out := withWatchdog(context.Background(), cancel, src, time.Hour, time.Hour)
-	cancel() // adapter teardown races the relay, as in the real adapters
+	cancel(nil) // adapter teardown races the relay, as in the real adapters
 
 	var got []Event
 	for ev := range out {
@@ -125,8 +125,8 @@ func TestWatchdogBackPressureDoesNotAbort(t *testing.T) {
 	// delivery resumes) aborted a stream that was healthy at the socket —
 	// each episode costing a backoff, a retry and one injected fake-user
 	// continuation turn. Delivery starvation must never become a verdict.
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	src := make(chan Event, 64) // same capacity as the relay's own buffer
 	out := withWatchdog(context.Background(), cancel, src, 20*time.Millisecond, 60*time.Millisecond)
 
@@ -164,5 +164,37 @@ func TestWatchdogBackPressureDoesNotAbort(t *testing.T) {
 	}
 	if got != n {
 		t.Fatalf("delivered %d of %d events", got, n)
+	}
+}
+
+// Regression: the watchdog cancels the per-request context with the sentinel
+// cause so that the adapter's body-reader error path (which sees a bare
+// context.Canceled on the reader) can recover the sentinel via context.Cause.
+// Without this, the reader emits a bare context.Canceled, Classify leaves it as
+// ClassUnknown, and the M5 ladder treats a retriable stall as a terminal user
+// abort — the turn dies instead of retrying.
+func TestWatchdogCancelCauseIsSentinel(t *testing.T) {
+	sctx, cancel := context.WithCancelCause(context.Background())
+	// The watchdog calls cancel(ErrWatchdogAborted); simulate exactly that.
+	cancel(ErrWatchdogAborted)
+
+	if c := context.Cause(sctx); c != ErrWatchdogAborted {
+		t.Fatalf("context.Cause = %v, want ErrWatchdogAborted", c)
+	}
+	// The adapter's reader only ever sees context.Canceled; cancelError must
+	// recover the sentinel so the emitted event classifies as transient.
+	adapterErr := cancelError(sctx)
+	if !errors.Is(adapterErr, ErrWatchdogAborted) {
+		t.Fatalf("adapter error = %v, want ErrWatchdogAborted", adapterErr)
+	}
+	if Classify(adapterErr) != ClassTransient {
+		t.Fatalf("Classify = %v, want ClassTransient", Classify(adapterErr))
+	}
+	// A genuine user cancel (no cause) must still classify as terminal so the
+	// ladder does not retry an aborted run.
+	userCtx, ucancel := context.WithCancel(context.Background())
+	ucancel()
+	if Classify(cancelError(userCtx)) == ClassTransient {
+		t.Fatal("user cancel classified transient, want terminal")
 	}
 }
