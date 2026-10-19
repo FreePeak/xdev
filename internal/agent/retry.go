@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/session"
 )
 
 // RetryPolicy bounds the pre-content retry ladder (omp TurnRecovery:
@@ -186,4 +187,36 @@ func sleepBackoff(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+
+// sessionUnfinished reports whether the session still has work that has not
+// been completed — i.e. the last persisted message is a user message with no
+// assistant answer yet, or an active goal (not completed/dropped/budget-
+// exhausted) remains. While this is true, retry bounds are lifted so the
+// agent keeps retrying forever instead of giving up; cancellation (Esc/
+// Ctrl+C) and terminal error classes (auth, bad request, vendor gate,
+// unrecoverable context overflow) still stop.
+func (a *Agent) sessionUnfinished() bool {
+	if a.Goals != nil {
+		if v, ok := a.Goals.View(); ok && v.Goal.Status == GoalActive {
+			return true
+		}
+	}
+	if a.Store == nil {
+		return false
+	}
+	entries := a.Store.Entries()
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if me, ok := e.(*session.MessageEntry); ok {
+			if me.Message.Role == "user" {
+				return true
+			}
+			if me.Message.Role == "assistant" {
+				return false
+			}
+		}
+	}
+	return false
 }

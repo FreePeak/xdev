@@ -3964,4 +3964,4 @@ prompt stays last, that the style is present and names the two renderable shapes
 
 **Tests.** `internal/notify/feed_test.go` — 24 cases covering every arm: the settle window (a failure followed by `SettleGrace` ok events emits, one fewer does not), the burst collapse (five failures in a row ⇒ one notification), the drop cap (the 257th event drops the first and stamps `+1 dropped`, then `+2 dropped` on the next), the four failure shapes each in isolation and together, the false-positive guards (a `FAIL` in a string literal, a `panic:` in a log line, an `exit 0`), and the empty-feed / double-drain idempotency. `go vet ./internal/notify/` clean.
 
-*Last updated: 2026-10-18 (feat/session-failure-notify — session-failure notifications: notify.Feed + internal/notify package + NotificationSettings group + Feed A/B wiring + ADR)*
+*Last updated: 2026-10-18 (fix/retry-until-session-done — lift retry round bounds while the session is unfinished: sessionUnfinished() gate at the health-check, chain-drained, empty-turn and bad-request escalation sites)*

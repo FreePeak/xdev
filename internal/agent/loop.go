@@ -820,7 +820,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				continue
 			}
 			if isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
-				if a.Retry.RetryAllErrors && emptyRetries < maxEmptyTurnRecoveries {
+				if a.Retry.RetryAllErrors && (emptyRetries < maxEmptyTurnRecoveries || a.sessionUnfinished()) {
 					// Retry-all-errors (#331 follow-up): the model
 					// answered nothing, but we keep going — rebuild
 					// context from the persisted history, wait a
@@ -1080,7 +1080,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// not about the host: it is survived without a round budget,
 			// because the user's only other action is to resend the same
 			// message once the network returns.
-			if policy.outageMayNotEndATurn(hcErr) || (healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite)) {
+			if policy.outageMayNotEndATurn(hcErr) || (healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite || a.sessionUnfinished())) || (healthEscalation >= maxEscalationRounds && a.sessionUnfinished()) {
 				healthEscalation++
 				attempt = 0
 				d := policy.delay(healthEscalation)
@@ -1184,7 +1184,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// survived however long it lasts, because the network coming
 				// back is what ends it and the user's only other action is
 				// to resend the same message.
-				if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite)) {
+				if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite || a.sessionUnfinished())) || (escalation >= maxEscalationRounds && a.sessionUnfinished()) {
 					escalation++
 					attempt = 0
 					d := policy.delay(policy.MaxRetries + 1)
@@ -1215,7 +1215,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// that: the provider answered that THIS CLIENT is not the one
 			// it serves, so a rebuilt history is refused identically —
 			// retrying only delays a verdict the user has to act on.
-			if escalation < maxEscalationRounds && !ai.IsVendorGate(err) {
+			if (escalation < maxEscalationRounds || a.sessionUnfinished()) && !ai.IsVendorGate(err) {
 				escalation++
 				attempt = 0
 				if a.Store != nil {
@@ -1295,7 +1295,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// retry.infinite (see outageMayNotEndATurn): no retry can
 			// succeed until the machine is back on the network, and the
 			// user has no better action than to wait for it.
-			if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite)) {
+			if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite || a.sessionUnfinished())) || (escalation >= maxEscalationRounds && a.sessionUnfinished()) {
 				escalation++
 				attempt = 0
 				logx.Errorf("recovery: retrying %v from current context", ai.Classify(err))
