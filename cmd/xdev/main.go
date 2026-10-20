@@ -122,6 +122,7 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
   xdev bg <list|logs|stop|rm|prune>  manage detached jobs
   xdev tui                     interactive TUI (Grok-CLI look)
   xdev rpc                     JSONL-over-stdio RPC server (embedders)
+  xdev tmux <sub>              boot the TUI in a named tmux session: attach | list | kill
   xdev acp                     ACP server on stdio (editors)
   xdev join "<link>"           mirror a shared session (collab guest)
   xdev config <sub>            settings: list | get K | set K V | reset K | path
