@@ -45,6 +45,14 @@ type Registry struct {
 	tools   map[string]Tool
 	snaps   map[string]*fileSnapshot
 	catalog *Catalog
+	// stickyDefer holds the deferrals that survive ResetDeferred: the wide
+	// remote surfaces (an MCP server past the tool threshold) that no effort
+	// rung may re-open. The effort ladder owns the BUILT-IN deferrals and
+	// rebuilds them from scratch on every rung change; a remote surface is
+	// not the ladder's to decide — 27 database tools belong behind
+	// tool_search at every rung, and the ladder's reset used to put them
+	// back in the eager schema.
+	stickyDefer map[string]Entry
 	// MCPBlock is set by cmd/xdev from the mcp.yml config: the sidebar's
 	// MCP section as one block — the enabled server names, one per line.
 	// A live snapshot read when the dock builds, not a cached string.
@@ -106,6 +114,10 @@ func (r *Registry) Remove(names ...string) []string {
 			continue
 		}
 		delete(r.tools, n)
+		// A removed tool must not come back through the sticky set: the
+		// deferral is re-applied by ResetDeferred, so the entry has to go
+		// or the name would reappear in the catalog with no tool behind it.
+		delete(r.stickyDefer, n)
 		if r.catalog != nil {
 			r.catalog.drop(n)
 		}
