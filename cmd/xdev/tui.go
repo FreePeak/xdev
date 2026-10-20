@@ -3311,6 +3311,15 @@ func (h *tuiHooks) OnEvent(ev ai.Event) {
 			h.ts.paint(func() { h.ts.app.AddSystemBlock(ev.Err.Error()) })
 			break
 		}
+		// A verdict the ladder is riding out (a credential denial, a
+		// client-posture gate) while the session is unfinished is the same
+		// shape: it says which verdict and how long the wait is, once per
+		// round, instead of collapsing into the generic blip below.
+		var verdict *agent.VerdictRetryError
+		if errors.As(ev.Err, &verdict) {
+			h.ts.paint(func() { h.ts.app.AddSystemBlock(ev.Err.Error()) })
+			break
+		}
 		// A transient blip is being retried by the recovery ladder: the
 		// wire error would flash once per attempt, so it collapses to a
 		// notice. Repeated transient errors in one turn count up:

@@ -2784,6 +2784,14 @@ func (h *printHooks) OnEvent(ev ai.Event) {
 			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
 			break
 		}
+		// A verdict the ladder is riding out (a credential denial, a
+		// client-posture gate) while the session is unfinished: one line
+		// per round, saying which verdict and how long the wait is.
+		var verdict *agent.VerdictRetryError
+		if errors.As(ev.Err, &verdict) {
+			fmt.Fprintf(os.Stderr, "\n[%v]\n", ev.Err)
+			break
+		}
 		// The recovery ladder retries transient wire errors; printing the
 		// full message once per attempt is noise (and alarming).
 		// Repeated errors count up: "stream error: retrying", then

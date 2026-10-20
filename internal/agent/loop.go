@@ -1233,7 +1233,22 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// that: the provider answered that THIS CLIENT is not the one
 			// it serves, so a rebuilt history is refused identically —
 			// retrying only delays a verdict the user has to act on.
-			if (escalation < maxEscalationRounds || a.sessionUnfinished()) && !ai.IsVendorGate(err) {
+			//
+			// The session-unfinished gate overrides both: the turn is not
+			// done, so the ladder keeps going. The user can switch client
+			// or start a paid tier while the turn waits, and the next
+			// attempt picks it up. Cancellation (Esc/Ctrl+C) still ends it.
+			if a.sessionUnfinished() {
+				escalation++
+				attempt = 0
+				hist, serr := a.retryUnfinished(ctx, policy, history, escalation, badRequestReason(err), err)
+				history = hist
+				if serr != nil {
+					return nil, history, serr
+				}
+				continue
+			}
+			if escalation < maxEscalationRounds && !ai.IsVendorGate(err) {
 				escalation++
 				attempt = 0
 				if a.Store != nil {
@@ -1299,7 +1314,28 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// work. Fail fast and let the user fix the key, which is
 			// what ClassAuthFailed has always been documented to mean
 			// (internal/ai/errors.go: "401/403 — fail fast").
-			return nil, history, err
+			//
+			// The session-unfinished gate is the exception: the turn is
+			// not done, so the ladder keeps going. The failover chain may
+			// carry another credential, and the user can fix the key while
+			// the turn waits — the next attempt picks it up. Only
+			// cancellation (Esc/Ctrl+C) ends it.
+			if !a.sessionUnfinished() {
+				return nil, history, err
+			}
+			if nxt := a.nextFailoverTarget(); nxt > 0 {
+				a.switchTarget(nxt, "recovery")
+				attempt = 0
+				continue
+			}
+			escalation++
+			attempt = 0
+			hist, serr := a.retryUnfinished(ctx, policy, history, escalation, "credential rejected", err)
+			history = hist
+			if serr != nil {
+				return nil, history, serr
+			}
+			continue
 		default:
 			// Unknown failures rebuild history from the persisted session
 			// and re-send on the current context. ClassBadRequest and
@@ -1359,6 +1395,16 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	}
 }
 
+// badRequestReason names the verdict a rejected request carries, so a round
+// that waits on one says which kind it is: the provider refused THIS client
+// (a posture gate) or refused the request itself.
+func badRequestReason(err error) string {
+	if ai.IsVendorGate(err) {
+		return "client gate refused the request"
+	}
+	return "provider rejected the request"
+}
+
 // noticeAllTargetsDown raises one unbounded-wait round on the event stream
 // (retry.infinite only). Nil-safe: modes that never install hooks stay quiet
 // and keep their logx line.
@@ -1416,9 +1462,10 @@ func (a *Agent) persistRecoveryNotice(kind string, round int, delay time.Duratio
 	}
 	// An unbounded round has no ceiling to report, and the arithmetic would
 	// say "remainingRounds: 0" for a loop that is still climbing — the one
-	// thing the record exists to get right. (The only unbounded round is a
-	// connectivity outage under retry.infinite: outageMayNotEndATurn.)
-	if last != nil && ai.IsNetworkOutage(last) && a.Retry.withDefaults().Infinite {
+	// thing the record exists to get right. (The unbounded rounds are a
+	// connectivity outage under retry.infinite — outageMayNotEndATurn —
+	// and a verdict ridden out while the session is unfinished.)
+	if kind == "recovery_unfinished_verdict" || (last != nil && ai.IsNetworkOutage(last) && a.Retry.withDefaults().Infinite) {
 		data["unbounded"] = true
 	} else {
 		data["remainingRounds"] = max(0, boundRounds(kind)-round)
