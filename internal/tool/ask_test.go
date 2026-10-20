@@ -354,6 +354,81 @@ func TestAskChatNoteEndsTheTurn(t *testing.T) {
 	}
 }
 
+// A host with NO user at the other end — a print/rpc/acp one-shot — cannot
+// answer a question, so the question must not spend a wait it can never end.
+// The result is the same honest no-answer a skipped TUI card returns, and it
+// must arrive NOW: the old path blocked on ctx.Done() and only the 10-minute
+// tool deadline ever ended it, which told the model "its result is unknown"
+// instead of "nobody answered".
+func TestAskNoUserSinkAnswersNobodyWithoutWaiting(t *testing.T) {
+	at := NewAskTool(time.Hour, false)
+	at.Sink = NewUnanswerableAskSink(time.Hour, false)
+	args := `{"question":"which db?","options":[{"label":"sqlite"},{"label":"postgres"}],"recommended":"sqlite"}`
+	start := time.Now()
+	res, err := at.Execute(context.Background(), json.RawMessage(args))
+	elapsed := time.Since(start)
+	if err != nil || res.IsError {
+		t.Fatalf("ask errored: %q %v", res.Text, err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("a host with no user waited %v for an answer nobody can give", elapsed)
+	}
+	if !strings.Contains(res.Text, "no answer") {
+		t.Fatalf("result = %q, want the honest no-answer", res.Text)
+	}
+	// The recommendation is the MODEL's guess, not the user's answer (#451).
+	if strings.Contains(res.Text, "sqlite") || strings.Contains(res.Text, "postgres") {
+		t.Fatalf("result = %q, must not decide the question for the user", res.Text)
+	}
+}
+
+// Auto-answer is the explicit opt-in and it still works where there is no
+// user: the recommendation answers after ask.timeout, exactly as the headless
+// sink does. Turning the no-user path into "nobody ever answers" would take
+// that opt-in with it.
+func TestAskNoUserSinkStillAutoAnswers(t *testing.T) {
+	const wait = 50 * time.Millisecond
+	at := NewAskTool(wait, true)
+	at.Sink = NewUnanswerableAskSink(wait, true)
+	args := `{"question":"which db?","options":[{"label":"sqlite"}],"recommended":"sqlite"}`
+	res, err := at.Execute(context.Background(), json.RawMessage(args))
+	if err != nil || res.IsError {
+		t.Fatalf("ask errored: %q %v", res.Text, err)
+	}
+	var got struct {
+		Selected []string `json:"selected"`
+	}
+	if err := json.Unmarshal([]byte(res.Text), &got); err != nil {
+		t.Fatalf("answer is not the selected-shape JSON: %q", res.Text)
+	}
+	if len(got.Selected) != 1 || got.Selected[0] != "sqlite" {
+		t.Fatalf("selected = %v, want [sqlite]", got.Selected)
+	}
+}
+
+// A batch is one interruption, not N: a no-user host must not spend a wait
+// per question either, and every question in it is unanswered.
+func TestAskNoUserSinkBatchAnswersNobodyWithoutWaiting(t *testing.T) {
+	at := NewAskTool(time.Hour, false)
+	at.Sink = NewUnanswerableAskSink(time.Hour, false)
+	args := `{"questions":[{"question":"q1","options":[{"label":"a"}],"recommended":"a"},{"question":"q2","options":[{"label":"b"}],"recommended":"b"}]}`
+	start := time.Now()
+	res, err := at.Execute(context.Background(), json.RawMessage(args))
+	elapsed := time.Since(start)
+	if err != nil || res.IsError {
+		t.Fatalf("ask errored: %q %v", res.Text, err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("a no-user batch waited %v", elapsed)
+	}
+	if strings.Contains(res.Text, `"a"`) || strings.Contains(res.Text, `"b"`) {
+		t.Fatalf("result = %q, must not answer for the user", res.Text)
+	}
+	if !strings.Contains(res.Text, "no answer") {
+		t.Fatalf("result = %q, want the honest no-answer", res.Text)
+	}
+}
+
 // TestAskParametersRootUnionIsObjectTyped pins the schema the provider
 // sees: a root anyOf with untyped branches is the 400
 // "ask: tool parameter root must be an object type". Both shapes the

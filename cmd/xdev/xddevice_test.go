@@ -17,7 +17,7 @@ func TestXDProposeDevicesInRegistry(t *testing.T) {
 	pm := &agent.PlanMode{}
 	pm.SetActive(true)
 	pm.Publish("1. patch planmode.go\n2. run the tests")
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, pm)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, pm, false)
 
 	rt, ok := reg.Get("read")
 	if !ok {
@@ -52,9 +52,15 @@ func TestXDProposeDevicesInRegistry(t *testing.T) {
 	}
 }
 
-// The ask tool rides the shipped registry with the headless default sink.
+// The ask tool rides the shipped registry. A print-mode registry has no user
+// at the other end, so it installs the no-user sink: a nil sink selects the
+// tool's own headless default, which WAITS for a human — the 10-minute
+// tool deadline was the only thing that ever ended that wait, and the model
+// was told its result was unknown.
+//
+// The behaviour itself is pinned by TestRegistryWithoutAUserAnswersNobody.
 func TestAskToolRegistered(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, &agent.PlanMode{})
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, &agent.PlanMode{}, false)
 	got, ok := reg.Get(tool.AskToolName)
 	if !ok {
 		t.Fatal("ask tool missing from the registry")
@@ -63,8 +69,8 @@ func TestAskToolRegistered(t *testing.T) {
 	if !isAsk {
 		t.Fatalf("ask registry entry is %T", got)
 	}
-	if at.Sink != nil {
-		t.Fatal("print-mode registry must leave the sink unset (headless policy)")
+	if at.Sink == nil {
+		t.Fatal("print-mode registry must not leave the sink unset: a nil sink is the waiting headless default")
 	}
 	if at.Timeout <= 0 {
 		t.Fatalf("ask timeout = %v, want the settings default", at.Timeout)

@@ -2,10 +2,14 @@ package tool
 
 // AskTool: structured mid-task clarification (M11 #36, omp `ask`). The
 // model asks a question with labelled options; a host-provided AskSink
-// answers it (the TUI overlay card is #46's scope). Without a sink —
-// headless print runs — nobody answers, so the default policy WAITS for the
-// human. Answering from the recommendation is opt-in (ask.autoAnswer): a
-// question the user never sees must not be answered for them.
+// answers it (the TUI overlay card is #46's scope). Without a sink the
+// default policy WAITS for the human. Answering from the recommendation is
+// opt-in (ask.autoAnswer): a question the user never sees must not be
+// answered for them.
+//
+// A host with no user at all — a print/rpc/acp one-shot — installs
+// NewUnanswerableAskSink instead: the wait could never end in an answer, so
+// the question returns the honest no-answer a skipped card returns.
 
 import (
 	"bytes"
@@ -408,6 +412,14 @@ func intFromJSON(raw json.RawMessage) int {
 type headlessAskSink struct {
 	timeout    time.Duration
 	autoAnswer bool
+	// noUser is true for a host with no user at the other end: a
+	// print/rpc/acp one-shot, where nobody can pick an option and nobody
+	// is watching the terminal to answer in chat. A wait there can never
+	// end in an answer, so it must not happen.
+	//
+	// The zero value is a host WITH a user, so a struct literal that
+	// forgets to say otherwise keeps the waiting behaviour.
+	noUser bool
 }
 
 // NewHeadlessAskSink returns the wait→recommended policy sink; the
@@ -416,10 +428,29 @@ func NewHeadlessAskSink(timeout time.Duration, autoAnswer bool) AskSink {
 	return headlessAskSink{timeout: timeout, autoAnswer: autoAnswer}
 }
 
+// NewUnanswerableAskSink returns the answer path for a host with no user: a
+// print/rpc/acp one-shot, where the question is asked and nobody can answer
+// it. It returns the same honest no-answer a skipped TUI card returns —
+// never the recommendation, which is the MODEL's guess (#451) — so the run
+// records that the question went unanswered instead of stalling until the
+// tool deadline reports an unknown result.
+//
+// Auto-answer is still the explicit opt-in: with it on, the recommendation
+// answers after ask.timeout, exactly as the headless sink does.
+func NewUnanswerableAskSink(timeout time.Duration, autoAnswer bool) AskSink {
+	return headlessAskSink{timeout: timeout, autoAnswer: autoAnswer, noUser: true}
+}
+
 // wait is the whole headless policy in one place, because Ask and AskBatch
 // must never disagree on how long they waited: with auto-answer off there is
 // no timer, so the only thing that ends the wait is the turn itself.
+//
+// A host with no user skips the wait entirely: there is no answer to wait
+// for, so waiting would only spend the tool deadline.
 func (s headlessAskSink) wait(ctx context.Context) error {
+	if s.noUser {
+		return nil
+	}
 	if !s.autoAnswer {
 		<-ctx.Done()
 		return ctx.Err()
@@ -442,6 +473,11 @@ func (s headlessAskSink) Ask(ctx context.Context, req AskRequest) (AskResponse, 
 	if err := s.wait(ctx); err != nil {
 		return AskResponse{}, err
 	}
+	if !s.autoAnswer {
+		// Nobody answered. The recommendation is not the user's answer, so
+		// the tool reports no answer and the model proceeds on its own.
+		return AskResponse{}, nil
+	}
 	return AskResponse{Labels: append([]string(nil), req.Recommended...)}, nil
 }
 
@@ -453,6 +489,10 @@ func (s headlessAskSink) AskBatch(ctx context.Context, reqs []AskRequest) ([]Ask
 	}
 	out := make([]AskResponse, 0, len(reqs))
 	for _, req := range reqs {
+		if !s.autoAnswer {
+			out = append(out, AskResponse{})
+			continue
+		}
 		out = append(out, AskResponse{Labels: append([]string(nil), req.Recommended...)})
 	}
 	return out, nil

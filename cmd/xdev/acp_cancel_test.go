@@ -53,7 +53,7 @@ func TestACPCancelStopsToolExecution(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	p := &cancelLeakProvider{started: make(chan struct{}), release: make(chan struct{})}
-	reg := newToolRegistry(cwd, p, "stub", "m", lastSettings(), nil, nil)
+	reg := newToolRegistry(cwd, p, "stub", "m", lastSettings(), nil, nil, false)
 	h := newACPHandler(cwd, &config.Config{}, p, "stub", "m", reg, func() string { return "sys" }, nil, 0, 0)
 	t.Cleanup(h.close)
 	c := startACPClient(t, h)

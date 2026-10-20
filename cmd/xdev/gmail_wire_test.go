@@ -24,7 +24,7 @@ func TestGmailToolWiredThroughRegistry(t *testing.T) {
 	// Empty PATH so lookPath("gog") fails inside the tool.
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
 
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	it, ok := reg.Get("gmail")
 	if !ok {
 		t.Fatal("gmail not registered")

@@ -25,7 +25,7 @@ func registerGoal(reg *tool.Registry) *agent.GoalState {
 // it to that session, and tool calls persist goal_updated entries — and a
 // session switch rebinds to the new session's (empty) goal.
 func TestGoalToolWiredThroughRegistry(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	// The shared builder deliberately carries no goal: the tool's state must
 	// be the one bound to the live session, so it is registered per run mode.
 	if _, ok := reg.Get(agent.GoalToolName); ok {
@@ -89,7 +89,7 @@ func TestGoalToolWiredThroughRegistry(t *testing.T) {
 // was the TUI having no goal tool at all, so every /goal answered "goal not
 // wired". This pins the registration+bind contract the TUI relies on.
 func TestTUIGoalToolIsRegisteredAndBound(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	gs := registerGoal(reg)
 	store := session.OpenMem("/proj", "goal seam")
 	t.Cleanup(func() { _ = store.Close() })

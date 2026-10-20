@@ -12,7 +12,7 @@ import (
 // an op runs through the real registry (no adapter binary is needed for the
 // status/adapter-resolution paths).
 func TestDebugToolWiredThroughRegistry(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	dt, ok := reg.Get("debug")
 	if !ok {
 		t.Fatal("debug tool not registered")

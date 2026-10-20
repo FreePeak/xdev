@@ -20,7 +20,7 @@ func TestComputerToolWiredThroughRegistry(t *testing.T) {
 	// Default: settings nil (pre-main callers) and an unconfigured
 	// Settings both leave desktop control off.
 	for _, settings := range []*config.Settings{nil, {}} {
-		reg := newToolRegistry(t.TempDir(), nil, "p", "m", settings, nil, nil)
+		reg := newToolRegistry(t.TempDir(), nil, "p", "m", settings, nil, nil, false)
 		ct, ok := reg.Get("computer")
 		if !ok {
 			t.Fatal("computer tool not registered")
@@ -40,7 +40,7 @@ func TestComputerToolWiredThroughRegistry(t *testing.T) {
 	// Enabled through the settings layer the registry is handed.
 	on := true
 	settings := &config.Settings{Computer: config.ComputerSettings{Enabled: &on}}
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", settings, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", settings, nil, nil, false)
 	ct, ok := reg.Get("computer")
 	if !ok {
 		t.Fatal("computer tool not registered")
@@ -58,7 +58,7 @@ func TestComputerToolWiredThroughRegistry(t *testing.T) {
 // reaches the parent, not a subagent's tool list (a scoped child must not
 // drive the developer's machine).
 func TestComputerToolIsParentOnly(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	tt, ok := reg.Get("task")
 	if !ok {
 		t.Fatal("task tool not registered")

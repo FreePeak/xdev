@@ -480,7 +480,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- tools ---
 	planMode := &agent.PlanMode{}
 	planMode.SetActive(opts.Plan || opts.PlanYolo)
-	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef), planMode)
+	reg := newToolRegistry(cwd, prov, provName, modelName, settings, effortBudget(effortRef), planMode, false)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 
 	// MCP servers (optional; absent config = nothing happens).
@@ -1735,7 +1735,7 @@ func memoryComplete(cfg *config.Config, settings *config.Settings) func(context.
 // rule:// read seam.
 var noRulesFlag bool
 
-func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode) *tool.Registry {
+func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, settings *config.Settings, thinking *ai.ThinkingBudget, planMode *agent.PlanMode, userPresent bool) *tool.Registry {
 	registerURISchemes()
 	// M13 #49: github tool + pr://issue:// reader URLs. One instance per
 	// registry so the URL cache and the pr_checkout registry are shared.
@@ -1752,6 +1752,19 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	tool.RegisterWriteDevice("xd", "reject", planMode.RejectDevice)
 	pol := settingsPolicy(settings)
 	reg := tool.NewRegistry()
+	// ask is the parent's channel to the user; children (ChildTools below)
+	// deliberately omit it — a scoped subagent has no user.
+	//
+	// A host with no user (a print/rpc/acp one-shot) must not leave the wait
+	// on: nobody is at the other end, so the wait could only end at the tool
+	// deadline, which reports an unknown result rather than an unanswered
+	// question. Such a host gets the no-user answer path, which returns the
+	// same honest no-answer a skipped TUI card returns. The TUI declares
+	// userPresent and owns the card, which owns the wait.
+	ask := tool.NewAskTool(settings.AskTimeout(), settings.AskAutoAnswerOn())
+	if !userPresent {
+		ask.Sink = tool.NewUnanswerableAskSink(ask.Timeout, ask.AutoAnswer)
+	}
 	for _, t := range []tool.Tool{
 		tool.NewReadTool(),
 		tool.NewWriteTool(),
@@ -1764,9 +1777,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		eval.NewTool(cwd),
 		ghTool,
 		gmailTool,
-		// ask is the parent's channel to the user; children (ChildTools
-		// below) deliberately omit it — a scoped subagent has no user.
-		tool.NewAskTool(settings.AskTimeout(), settings.AskAutoAnswerOn()),
+		ask,
 	} {
 		reg.Register(t)
 	}

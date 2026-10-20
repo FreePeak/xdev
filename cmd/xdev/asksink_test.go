@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/tool"
 	"github.com/FreePeak/xdev/internal/tui"
 )
@@ -110,6 +113,75 @@ func TestAskCardSinkSkipDoesNotWaitAgain(t *testing.T) {
 	}
 	if ops.calls != 1 {
 		t.Fatalf("card consulted %d times", ops.calls)
+	}
+}
+
+// A mode with NO user — a print/rpc/acp one-shot — must not leave the ask
+// tool waiting for a human who does not exist. The registry is where the mode
+// declares it, so the wait cannot come back by accident: the old path blocked
+// until the 10-minute tool deadline and then reported "its result is
+// unknown", which reads like a lost side effect, not like "nobody answered".
+func TestRegistryWithoutAUserAnswersNobody(t *testing.T) {
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, &agent.PlanMode{}, false)
+	got, ok := reg.Get(tool.AskToolName)
+	if !ok {
+		t.Fatal("ask tool missing from the registry")
+	}
+	at, isAsk := got.(*tool.AskTool)
+	if !isAsk {
+		t.Fatalf("ask registry entry is %T", got)
+	}
+	args := `{"question":"which db?","options":[{"label":"sqlite"}],"recommended":"sqlite"}`
+	done := make(chan tool.Result, 1)
+	go func() {
+		res, err := at.Execute(context.Background(), json.RawMessage(args))
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		if res.IsError {
+			t.Fatalf("ask errored: %q", res.Text)
+		}
+		if !strings.Contains(res.Text, "no answer") {
+			t.Fatalf("result = %q, want the honest no-answer", res.Text)
+		}
+		if strings.Contains(res.Text, "sqlite") {
+			t.Fatalf("result = %q, must not decide the question for the user", res.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a host with no user must not wait for an answer nobody can give")
+	}
+}
+
+// The TUI has a user, so its registry keeps the waiting policy: the card owns
+// the wait, and when the card has no room to draw the human answers in chat.
+// The no-user path must not leak into the interactive host.
+func TestRegistryWithAUserKeepsWaiting(t *testing.T) {
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, &agent.PlanMode{}, true)
+	got, ok := reg.Get(tool.AskToolName)
+	if !ok {
+		t.Fatal("ask tool missing from the registry")
+	}
+	at, isAsk := got.(*tool.AskTool)
+	if !isAsk {
+		t.Fatalf("ask registry entry is %T", got)
+	}
+	args := `{"question":"which db?","options":[{"label":"sqlite"}],"recommended":"sqlite"}`
+	done := make(chan tool.Result, 1)
+	go func() {
+		res, err := at.Execute(context.Background(), json.RawMessage(args))
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		t.Fatalf("an interactive host answered nobody: %q", res.Text)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
