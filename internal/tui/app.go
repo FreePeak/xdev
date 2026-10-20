@@ -5697,9 +5697,14 @@ func (a *App) drawComposer(yTop int) {
 	ms := a.mdStyle()
 
 	// Top border: ────── (full-width rule, no corners).
-	for x := 1; x < w-1; x++ {
-		a.scr.SetContent(x, yTop-1, boxRune(box.Horizontal), nil, bs)
-	}
+	//
+	// It ramps from the accent ink to the border ink. This is the one
+	// full-width surface in the TUI that carries no text, so the ramp costs
+	// nothing legible — and the frame is where the eye lands when it comes
+	// back to type, so the accent belongs at the prompt end of it.
+	a.gradientRule(yTop-1, 1, w-2,
+		a.th.Get(theme.AccentAssistant), a.th.Get(theme.PromptBorderActive),
+		boxRune(box.Horizontal), bs)
 
 	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
 	// above counts the draft rows the window hides, and says whether the ❯
