@@ -483,7 +483,8 @@ type Agent struct {
 	// to notice a model that is paying a full round trip to re-ask the same
 	// question. Single-goroutine Run like the rest of this struct — the chain
 	// is advanced on the loop's own goroutine, never from a tool worker.
-	repeats repeatChain
+	repeats     repeatChain
+	repeatBreak bool // set when the repeat guard vetoes further continuation
 
 	steerMu  sync.Mutex
 	steering []Steering
@@ -644,6 +645,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		steering := a.drainSteering()
 		if len(steering) > 0 {
 			a.repeats = repeatChain{}
+			a.repeatBreak = false
 		}
 		for _, s := range steering {
 			m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
@@ -903,6 +905,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			a.Hooks.OnToolResultMessage(&rm)
 		}
 		a.prewalkNote(results)
+		// Repeat guard veto: an identical tool call repeated past the highest
+		// threshold ends the run instead of looping forever. Retry/network
+		// handling (oneTurnWithRecovery) is independent and keeps working.
+		if a.repeatBreak {
+			emit("turn_end", map[string]any{"turn": turn})
+			return msg, nil
+		}
 		// Plan-only run (headless -plan): the proposal is the deliverable,
 		// so the run ends at this boundary rather than continuing toward
 		// implementation it was never allowed to start.

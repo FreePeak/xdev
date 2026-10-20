@@ -317,7 +317,7 @@ func TestSettingsAbsentFilesAreNotErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing layers must be skipped: %v", err)
 	}
-	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 0 {
+	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 200 {
 		t.Fatalf("defaults lost: %+v", s)
 	}
 }
