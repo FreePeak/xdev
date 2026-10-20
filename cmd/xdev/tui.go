@@ -185,7 +185,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// startup, so a later /thinking flip reaches the parent turn and vibe
 	// workers but not already-built task children — they follow --thinking and
 	// the persisted key only. Rebuild the registry if that ever matters.
-	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode)
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), planMode, true)
 	defer closeSharedHub() // hub-started children are session-scoped (T3 #8)
 	// Rebuild-time interruption notice names the calls that are free to
 	// repeat (tool.Replayer). Set against reg, which MCP/extension tools join

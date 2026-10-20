@@ -18,7 +18,7 @@ func TestAliasWiredToMailboxIdentity(t *testing.T) {
 	if err := config.SetAlias("worker"); err != nil {
 		t.Fatal(err)
 	}
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	raw, ok := reg.Get(agent.InboxToolName)
 	if !ok {
 		t.Fatal("inbox tool not registered")

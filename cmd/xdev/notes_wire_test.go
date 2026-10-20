@@ -21,7 +21,7 @@ func TestNotesToolsWiredThroughRegistry(t *testing.T) {
 	// The tools are gated behind compaction.experimentalContextManagement
 	// (#88, matching omp's opt-in), so the settings enable it here.
 	reg := newToolRegistry(t.TempDir(), nil, "p", "m",
-		&config.Settings{ExperimentalContextManagement: true}, nil, nil)
+		&config.Settings{ExperimentalContextManagement: true}, nil, nil, false)
 	nt, ok := reg.Get(agent.ContextNotesToolName)
 	if !ok {
 		t.Fatal("context_notes not registered")
@@ -107,7 +107,7 @@ func TestNotesToolsGatedOffByDefault(t *testing.T) {
 		"unset": {},
 		"off":   {ExperimentalContextManagement: false},
 	} {
-		reg := newToolRegistry(t.TempDir(), nil, "p", "m", s, nil, nil)
+		reg := newToolRegistry(t.TempDir(), nil, "p", "m", s, nil, nil, false)
 		if _, ok := reg.Get(agent.ContextNotesToolName); ok {
 			t.Errorf("%s: context_notes registered with the gate off", name)
 		}

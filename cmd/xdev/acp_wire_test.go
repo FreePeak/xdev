@@ -162,7 +162,7 @@ func TestACPModeDrivesTheAgentLoop(t *testing.T) {
 		},
 	}}
 
-	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil)
+	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil, false)
 	h := newACPHandler(cwd, &config.Config{}, prov, "stub", "m", reg, func() string { return "system" }, nil, 0, 0)
 	t.Cleanup(h.close)
 	c := startACPClient(t, h)
@@ -262,7 +262,7 @@ func TestACPCancelStopsTheRun(t *testing.T) {
 	blocked := make(chan struct{})
 	// A provider that never yields: the turn can only end by cancellation.
 	slow := &blockingProvider{started: blocked}
-	reg := newToolRegistry(cwd, slow, "stub", "m", lastSettings(), nil, nil)
+	reg := newToolRegistry(cwd, slow, "stub", "m", lastSettings(), nil, nil, false)
 	h := newACPHandler(cwd, &config.Config{}, slow, "stub", "m", reg, func() string { return "system" }, nil, 0, 0)
 	t.Cleanup(h.close)
 	c := startACPClient(t, h)
@@ -336,7 +336,7 @@ func TestACPModeWiresTheDeferredCatalog(t *testing.T) {
 		},
 	}}
 
-	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil)
+	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil, false)
 	h := newACPHandler(cwd, &config.Config{}, prov, "stub", "m", reg, func() string { return "system" }, nil, 0, 0)
 	t.Cleanup(h.close)
 	c := startACPClient(t, h)

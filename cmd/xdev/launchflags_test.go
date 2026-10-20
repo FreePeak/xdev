@@ -336,25 +336,25 @@ func TestRegistryHonorsToolFlags(t *testing.T) {
 	cwd := t.TempDir()
 
 	withLaunch(t, launchFlags{})
-	all := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil)
+	all := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil, false)
 	names := all.Names()
 	if !contains(names, "lsp") || !contains(names, "bash") {
 		t.Fatalf("baseline registry missing tools: %v", names)
 	}
 
 	withLaunch(t, launchFlags{NoLSP: true})
-	if got := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil).Names(); contains(got, "lsp") {
+	if got := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil, false).Names(); contains(got, "lsp") {
 		t.Fatalf("--no-lsp must drop the lsp tool, got %v", got)
 	}
 
 	withLaunch(t, launchFlags{Tools: []string{"read", "bash"}})
-	got := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil).Names()
+	got := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil, false).Names()
 	if strings.Join(got, ",") != "bash,read" {
 		t.Fatalf("--tools allowlist must leave exactly its names, got %v", got)
 	}
 
 	withLaunch(t, launchFlags{NoTools: true})
-	if got := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil).Names(); len(got) != 0 {
+	if got := newToolRegistry(cwd, nil, "p", "m", nil, nil, nil, false).Names(); len(got) != 0 {
 		t.Fatalf("--no-tools must leave no built-in tools, got %v", got)
 	}
 }

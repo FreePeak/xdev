@@ -24,7 +24,7 @@ func TestImageGenToolWiredThroughRegistry(t *testing.T) {
 		t.Setenv(k, "")
 	}
 
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	it, ok := reg.Get(tool.ImageGenToolName)
 	if !ok {
 		t.Fatal("generate_image not registered")

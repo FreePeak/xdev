@@ -16,7 +16,7 @@ import (
 // them to the active session, and a rewind through the registry moves that
 // store's leaf — a session switch rebinds, so the old checkpoints are gone.
 func TestCheckpointToolsWiredThroughRegistry(t *testing.T) {
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	cpt, ok := reg.Get(tool.CheckpointToolName)
 	if !ok {
 		t.Fatal("checkpoint tool not registered")

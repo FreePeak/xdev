@@ -14,7 +14,7 @@ import (
 // in it, so every scanner must report a skip instead of failing the tool.
 func TestSecurityScanWiredThroughRegistry(t *testing.T) {
 	dir := t.TempDir()
-	reg := newToolRegistry(dir, nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(dir, nil, "p", "m", nil, nil, nil, false)
 	scan, ok := reg.Get("security_scan")
 	if !ok {
 		t.Fatal("security_scan not registered in the tool registry")

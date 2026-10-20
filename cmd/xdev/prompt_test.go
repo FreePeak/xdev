@@ -79,7 +79,7 @@ func TestPromptBudgetWithLateRegistrants(t *testing.T) {
 	// (~/.agent/rules, ~/.xdev/agent/rules) so the developer's own
 	// rulebook does not count against PRD §1 Goal 4.
 	t.Setenv("HOME", t.TempDir())
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	for i := range 3 {
 		reg.Register(verboseTool{name: fmt.Sprintf("late_%d", i)})
 	}
@@ -95,7 +95,7 @@ func TestPromptBudgetWithLateRegistrants(t *testing.T) {
 
 func TestBundledPromptStaysUnderBudget(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // ambient rules are user content, not bundled prose
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
 	tokens := len([]rune(got)) / 4
 	if tokens >= maxPromptTokens {
@@ -268,7 +268,7 @@ func TestPersonalityPresetReachesThePrompt(t *testing.T) {
 // ON case still leaves it inside PRD §1 Goal 4's budget.
 func TestFanoutGuidanceIsOptIn(t *testing.T) {
 	loadedSettings = nil
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	build := func(on bool) string {
 		t.Helper()
 		loadedSettings = &config.Settings{}
@@ -305,7 +305,7 @@ func TestFanoutGuidanceNeedsTheTaskTool(t *testing.T) {
 	loadedSettings.TypeSafe.Fanout = true
 	t.Cleanup(func() { loadedSettings = nil })
 
-	full := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil)
+	full := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
 	with := promptFn("BASE", t.TempDir(), full, "")()
 	if !strings.Contains(with, agent.FanoutGuidance) {
 		t.Fatal("parent registry has task but the block is missing")

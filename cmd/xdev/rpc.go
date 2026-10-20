@@ -75,7 +75,7 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 		return nil, nil, err
 	}
 
-	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil)
+	reg := newToolRegistry(cwd, prov, provName, modelName, lastSettings(), effortBudget(effortRef), nil, false)
 	closeHub := func() { closeSharedHub() } // hub-started children are session-scoped (T3 #8)
 	mgr := attachMCP(context.Background(), reg, false, nil, nil)
 	// The rebuild-time interruption notice names the calls free to repeat.

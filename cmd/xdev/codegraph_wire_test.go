@@ -17,7 +17,7 @@ func newGraphTestRegistry(t *testing.T, s *config.Settings) *tool.Registry {
 	// nil provider/model: newToolRegistry only stores them for tool
 	// constructors that need a live provider (imagegen, computer). The
 	// registration decisions under test never dial out.
-	return newToolRegistry(t.TempDir(), nil, "test", "test-model", s, nil, nil)
+	return newToolRegistry(t.TempDir(), nil, "test", "test-model", s, nil, nil, false)
 }
 
 func TestImpactIsAbsentWithoutAConfiguredGraph(t *testing.T) {
@@ -83,7 +83,7 @@ func TestCodeGraphExpectDirFallsBackToGitRoot(t *testing.T) {
 // pi-minimalism goal is measured against.
 func TestNoGraphMeansNoGraphProse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	reg := newToolRegistry(t.TempDir(), nil, "p", "m", &config.Settings{}, nil, nil)
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", &config.Settings{}, nil, nil, false)
 	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
 	if strings.Contains(got, "impact") {
 		t.Fatalf("a run without a code graph must not mention the tool:\n%s", got)
@@ -101,7 +101,7 @@ func TestGraphPromptCarriesTheGuidanceAndStaysBounded(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	reg := newToolRegistry(t.TempDir(), nil, "p", "m", &config.Settings{
 		CodeGraph: config.CodeGraphSettings{BaseURL: "http://127.0.0.1:9700", Project: "xdev"},
-	}, nil, nil)
+	}, nil, nil, false)
 	got := promptFn(basePrompt(printOptions{}, t.TempDir()), t.TempDir(), reg, "")()
 	if !strings.Contains(got, "impact") {
 		t.Fatal("a configured graph must be discoverable in the prompt")
