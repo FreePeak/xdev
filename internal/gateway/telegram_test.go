@@ -140,8 +140,8 @@ func newFakeBot(t *testing.T) *fakeBot {
 	})
 	mux.HandleFunc("/bot"+b.token+"/sendMessage", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			ChatID     int64          `json:"chat_id"`
-			Text       string         `json:"text"`
+			ChatID      int64        `json:"chat_id"`
+			Text        string       `json:"text"`
 			ReplyMarkup inlineMarkup `json:"reply_markup"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -185,8 +185,8 @@ func newFakeBot(t *testing.T) *fakeBot {
 	})
 	mux.HandleFunc("/bot"+b.token+"/editMessageText", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			MessageID   int64         `json:"message_id"`
-			Text        string        `json:"text"`
+			MessageID   int64        `json:"message_id"`
+			Text        string       `json:"text"`
 			ReplyMarkup inlineMarkup `json:"reply_markup"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
