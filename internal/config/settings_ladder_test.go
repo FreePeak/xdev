@@ -63,7 +63,7 @@ func TestCompactionIdleAndAsyncKeys(t *testing.T) {
 // order is the trigger list, and the M5 #24 members are accepted by the
 // parser (agent.ParseMethodOrder) without widening the default.
 func TestCompactionMethodNamesVocabulary(t *testing.T) {
-	want := []string{"threshold", "overflow", "promotion", "remote", "snapcompact", "handoff", "shake", "soft"}
+	want := []string{"threshold", "overflow", "promotion", "remote", "snapcompact", "handoff", "shake", "soft", "microcompact"}
 	if len(CompactionMethodNames) != len(want) {
 		t.Fatalf("vocabulary = %v, want %v", CompactionMethodNames, want)
 	}

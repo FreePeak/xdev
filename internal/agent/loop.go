@@ -831,7 +831,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				continue
 			}
 			if isEmptyAssistant(*msg) && len(queued) == 0 && cont == "" {
-				if a.Retry.RetryAllErrors && (emptyRetries < maxEmptyTurnRecoveries || a.sessionUnfinished()) {
+				if a.Retry.RetryAllErrors && emptyRetries < maxEmptyTurnRecoveries {
 					// Retry-all-errors (#331 follow-up): the model
 					// answered nothing, but we keep going — rebuild
 					// context from the persisted history, wait a
@@ -1098,7 +1098,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// not about the host: it is survived without a round budget,
 			// because the user's only other action is to resend the same
 			// message once the network returns.
-			if policy.outageMayNotEndATurn(hcErr) || (healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite || a.sessionUnfinished())) || (healthEscalation >= maxEscalationRounds && a.sessionUnfinished()) {
+			if policy.outageMayNotEndATurn(hcErr) || (healthEscalation < maxSilentRecoveryRounds && (healthEscalation < maxEscalationRounds || policy.Infinite)) {
 				healthEscalation++
 				attempt = 0
 				d := policy.delay(healthEscalation)
@@ -1202,7 +1202,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				// survived however long it lasts, because the network coming
 				// back is what ends it and the user's only other action is
 				// to resend the same message.
-				if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite || a.sessionUnfinished())) || (escalation >= maxEscalationRounds && a.sessionUnfinished()) {
+				if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite)) {
 					escalation++
 					attempt = 0
 					d := policy.delay(policy.MaxRetries + 1)
@@ -1227,18 +1227,31 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		case ai.ClassBadRequest:
 			// A provider-rejected request can be retried only for the
 			// bounded escalation rounds. Never let retry.infinite turn
-			// the same rejected body into an outage-style replay loop.
+			// the same rejected body into an outage-style replay loop:
+			// the provider refused THIS body, and the same body is
+			// refused identically.
 			//
-			// A vendor-tier gate (ai.IsVendorGate) is exempt from even
-			// that: the provider answered that THIS CLIENT is not the one
-			// it serves, so a rebuilt history is refused identically —
-			// retrying only delays a verdict the user has to act on.
+			// The vendor-tier gate (ai.IsVendorGate) is the one verdict
+			// that is about the CLIENT rather than the request: the
+			// provider answered that THIS CLIENT is not the one it
+			// serves, so a rebuilt history is refused identically — the
+			// user has to act (switch client, start a paid tier). While
+			// the session is unfinished the turn waits for that action,
+			// and the next attempt picks it up. Cancellation (Esc/Ctrl+C)
+			// still ends it.
 			//
-			// The session-unfinished gate overrides both: the turn is not
-			// done, so the ladder keeps going. The user can switch client
-			// or start a paid tier while the turn waits, and the next
-			// attempt picks it up. Cancellation (Esc/Ctrl+C) still ends it.
-			if a.sessionUnfinished() {
+			// A request-side verdict (a 400) stays BOUNDED, even while
+			// the session is unfinished: each escalation round REBUILDS
+			// the history from the store before it re-sends, and that
+			// rebuild is the repair (a tool result that answered no live
+			// call, a tool output that carried no text). Bounded, because
+			// the rebuild is the repair; unbounded, because the repair
+			// would then never come — the same rejected body, forever.
+			//
+			// The tier gate is the client-side verdict, so it waits for
+			// the user's action — bounded by the same escalation rounds,
+			// for the same reason the credential verdict above is.
+			if a.sessionUnfinished() && (ai.IsVendorGate(err) || escalation < maxEscalationRounds) {
 				escalation++
 				attempt = 0
 				hist, serr := a.retryUnfinished(ctx, policy, history, escalation, badRequestReason(err), err)
@@ -1320,6 +1333,11 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// carry another credential, and the user can fix the key while
 			// the turn waits — the next attempt picks it up. Only
 			// cancellation (Esc/Ctrl+C) ends it.
+			//
+			// BOUNDED, by the same escalation rounds the transient ladder
+			// uses: the bound is what keeps a verdict from pinning the
+			// session's single turn claim forever. Past it the provider's
+			// own words surface and the user acts.
 			if !a.sessionUnfinished() {
 				return nil, history, err
 			}
@@ -1327,6 +1345,9 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 				a.switchTarget(nxt, "recovery")
 				attempt = 0
 				continue
+			}
+			if escalation >= maxEscalationRounds {
+				return nil, history, err
 			}
 			escalation++
 			attempt = 0
@@ -1349,7 +1370,7 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 			// retry.infinite (see outageMayNotEndATurn): no retry can
 			// succeed until the machine is back on the network, and the
 			// user has no better action than to wait for it.
-			if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite || a.sessionUnfinished())) || (escalation >= maxEscalationRounds && a.sessionUnfinished()) {
+			if policy.outageMayNotEndATurn(err) || (escalation < maxSilentRecoveryRounds && (escalation < maxEscalationRounds || policy.Infinite)) {
 				escalation++
 				attempt = 0
 				logx.Errorf("recovery: retrying %v from current context", ai.Classify(err))
