@@ -150,19 +150,23 @@ func (d *Daemon) catalog(cfg *config.Config) []string {
 
 // providerModels is a provider's pinned models plus whatever its discovery
 // endpoint lists.
+//
+// The discovery result already carries the pinned models — DiscoverModels
+// layers the pinned entries under the discovered ones, pinned winning on a
+// collision — so the pinned list is NOT prepended to it: that listed every
+// pinned model twice, which in the picker is a duplicate button.
 func (d *Daemon) providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig {
-	out := pc.Models
 	if pc.Discovery == nil {
-		return out
+		return pc.Models
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), config.DiscoveryTimeout)
 	defer cancel()
 	found, err := config.DiscoverModels(ctx, pc)
 	if err != nil {
 		d.logFn("gateway: discovery %s: %v", name, err)
-		return out
+		return pc.Models
 	}
-	return append(append([]config.ModelConfig(nil), out...), found...)
+	return found
 }
 
 // expandBareID resolves a bare model id against the catalog, the same
