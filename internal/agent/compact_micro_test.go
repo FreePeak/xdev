@@ -11,9 +11,9 @@ func TestMicrocompactToolResultsKeepsNewest5(t *testing.T) {
 	msgs := make([]ai.Message, 0, 8)
 	for i := 0; i < 8; i++ {
 		msgs = append(msgs, ai.Message{
-			Role:    ai.RoleToolResult,
+			Role:     ai.RoleToolResult,
 			ToolName: "read",
-			Content: []ai.Block{ai.TextBlock{Text: strings.Repeat("x", 2000)}},
+			Content:  []ai.Block{ai.TextBlock{Text: strings.Repeat("x", 2000)}},
 		})
 	}
 	cleared, changed := microcompactToolResults(msgs, 5)

@@ -201,6 +201,30 @@ var modelVerdictRe = regexp.MustCompile(`(?i)model_not_found|model not found|no 
 // body sniffing.
 var upstreamRefusalRe = regexp.MustCompile(`(?i)upstream (request (failed|could not be processed)|response was not valid json)`)
 
+// toolPairingRe matches a 400 whose body names a TOOL-PAIRING defect: the
+// request's tool calls and tool results do not pair up. Live 2026-10-20
+// through onegw → OpenCode Zen (MiniMax M3.1 Flash Free, the Go lane):
+//
+//	HTTP 400 {"error":{"code":"400","message":"Upstream request failed: [bad_request_error] invalid params, tool call id is invalid (2013)","type":"server_error"}}
+//	HTTP 400 {... "invalid params, tool result does not follow tool call (2013)" ...}
+//	HTTP 400 {... "invalid params, tool result's tool id(call_function_…) not found" ...}
+//
+// The verdict is about the REQUEST, not the moment: the same body replays
+// the same rejection, so a transient classification sends the ladder back
+// to the same rejected history for as long as the run lasts (with
+// retry.infinite: "all targets down — retrying in 7s", round after round,
+// every target healthy and every request doomed). It is also REPAIRABLE:
+// the ClassBadRequest branch rebuilds the history from the store before it
+// retries, and a rebuild that pairs each result with the turn it follows
+// drops the offending result.
+//
+// Ordered BEFORE upstreamRefusalRe: the body of a relayed upstream refusal
+// carries "upstream request failed" too, and that generic relay wording
+// must not swallow the specific verdict. The narrow tool-pairing wording
+// is what separates the two: the relay is transient, the pairing defect
+// is the request's own.
+var toolPairingRe = regexp.MustCompile(`(?i)tool (call id is invalid|result does not follow tool call|result'?s tool id)`)
+
 // toolNameTooLongRe matches a 400 the gateway rejects because a tool
 // name exceeds the provider's 64-character ceiling. Names come from
 // external sources (MCP servers, extension binaries) that xdev does
@@ -246,6 +270,13 @@ func Classify(err error) ErrClass {
 		case he.Status == 400 || he.Status == 413 || he.Status == 422:
 			if bodyIndicatesOverflow(he.Body) {
 				return ClassContextOverflow
+			}
+			if toolPairingRe.MatchString(he.Body) {
+				// A pairing defect lives in the request's own shape: the
+				// same body is rejected the same way every time. It is a
+				// bad request (and a repairable one — the ladder rebuilds
+				// the history before it retries), not an outage.
+				return ClassBadRequest
 			}
 			if malformedRequestRe.MatchString(he.Body) || toolNameTooLongRe.MatchString(he.Body) || upstreamRefusalRe.MatchString(he.Body) {
 				return ClassTransient

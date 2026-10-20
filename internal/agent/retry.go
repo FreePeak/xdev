@@ -210,7 +210,6 @@ func sleepBackoff(ctx context.Context, d time.Duration) error {
 	}
 }
 
-
 // sessionUnfinished reports whether the session still has work that has not
 // been completed — i.e. the last persisted message is a user message with no
 // assistant answer yet, or an active goal (not completed/dropped/budget-

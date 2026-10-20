@@ -2072,6 +2072,16 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		_ = started
 		out := cached
 		out.Content = append([]ai.Block(nil), cached.Content...)
+		// The cached result answers the call that produced it, so it
+		// carries that call's id. Re-stamp the identity for THIS call: a
+		// provider pairs a result with its call by id, so handing back the
+		// earlier id leaves the current call unanswered and the earlier one
+		// answered twice — a history strict upstreams reject ("invalid
+		// params, tool call id is invalid", MiniMax 2013). The duration is
+		// the earlier call's too, and this one has not run.
+		out.ToolCallID = call.ID
+		out.ToolName = call.Name
+		out.DurationMS = 0
 		return out
 	}
 	a.toolResultCacheMu.Unlock()

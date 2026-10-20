@@ -37,9 +37,11 @@ type ContextResult struct {
 //   - The latest model_change in the path wins for Model.
 //   - Dangling tool calls are neutralized: assistant toolCall blocks whose
 //     results are not in the path are dropped from the assistant message
-//     (text/thinking kept); toolResult messages referencing unseen call ids
-//     are dropped. An assistant turn left with no content at all carries
-//     UnansweredToolCallNotice instead of an empty shell.
+//     (text/thinking kept); toolResult messages that answer no live call —
+//     a stale id from an earlier turn, a duplicated answer — are dropped. A
+//     call and its result are paired per turn: the result answers the
+//     assistant turn it follows. An assistant turn left with no content at
+//     all carries UnansweredToolCallNotice instead of an empty shell.
 //   - branch_summary entries convert to a user message carrying their summary
 //     text so the model knows what was abandoned.
 //
@@ -166,22 +168,58 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 	}
 
 	// Convert the chain to messages with tool-call neutralization.
-	// First pass: collect answered toolCall ids per assistant message.
-	answered := map[string]bool{}
-	for _, e := range chain {
-		me, ok := e.(*MessageEntry)
-		if !ok || me.Message.Role != ai.RoleToolResult {
-			continue
-		}
-		if me.Message.ToolCallID != "" {
-			answered[me.Message.ToolCallID] = true
+	//
+	// Pairing is PER TURN: a tool result answers the calls of the
+	// assistant turn it follows, and each call is answered at most once.
+	// Both sides of a pair have to agree, so the pairing is computed
+	// before emission: a result that answers no live call is dropped, and
+	// a call with no result in its own turn is dropped with it.
+	//
+	// A result whose id names a call of an EARLIER turn belongs to no
+	// turn. That is a stale id — the agent's per-run dedup cache hands a
+	// repeated call the result of the earlier, identical call, so the id
+	// is the earlier call's — or a duplicated answer. Either way the
+	// upstream pairs a result with its call by id, and a history carrying
+	// a result that answers no live call is rejected outright
+	// ("invalid params, tool call id is invalid", MiniMax 2013) — and
+	// because the offending turn is already in the session, every retry
+	// replays the same rejected request.
+	answered := map[string]bool{}   // call id -> a result in its own turn answers it
+	keepResult := map[string]bool{} // result entry id -> the result answers its turn
+	{
+		var open []string // call ids asked by the assistant turn in progress
+		for _, e := range chain {
+			t, ok := e.(*MessageEntry)
+			if !ok {
+				continue
+			}
+			switch t.Message.Role {
+			case ai.RoleAssistant:
+				open = nil
+				for _, b := range t.Message.Content {
+					if tc, ok := b.(ai.ToolCallBlock); ok {
+						open = append(open, tc.ID)
+					}
+				}
+			case ai.RoleToolResult:
+				id := t.Message.ToolCallID
+				idx := -1
+				for i, o := range open {
+					if o == id {
+						idx = i
+						break
+					}
+				}
+				if idx < 0 {
+					continue // answers no call of the turn it follows
+				}
+				open = append(open[:idx], open[idx+1:]...)
+				answered[id] = true
+				keepResult[t.Envelope().ID] = true
+			}
 		}
 	}
 
-	// Track toolCall ids actually present in prior assistant messages so
-	// orphan toolResults can be dropped in one sweep (a toolResult must
-	// follow the assistant message that issued the call).
-	seenCalls := map[string]bool{}
 	var out []ai.Message
 	// entryIDs is parallel to out: source entry per message ("" for
 	// synthesized messages such as compaction summaries).
@@ -217,16 +255,11 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 				if len(dropped) > 0 && len(m.Content) == 0 {
 					m.Content = []ai.Block{ai.TextBlock{Text: unansweredToolCallText(dropped)}}
 				}
-				for _, b := range m.ToolCalls() {
-					if answered[b.ID] {
-						seenCalls[b.ID] = true
-					}
-				}
 				out = append(out, m)
 				entryIDs = append(entryIDs, e.Envelope().ID)
 			case ai.RoleToolResult:
-				if m.ToolCallID != "" && !seenCalls[m.ToolCallID] {
-					continue // orphan result: no prior assistant issued the call
+				if !keepResult[e.Envelope().ID] {
+					continue // answers no live call: no assistant turn asked for it
 				}
 				// Heal on rebuild: a session stored while the Responses encoder
 				// omitted an empty `output` would otherwise re-send the same
