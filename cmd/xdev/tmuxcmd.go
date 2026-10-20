@@ -11,11 +11,12 @@ import (
 // survives terminal close, and supports re-attaching from 2+ terminals.
 //
 // Usage:
-//   xdev tmux                # new detached session named "xdev" (or attach if one exists)
-//   xdev tmux <name>         # use a custom session name
-//   xdev tmux attach [name]  # attach an existing session
-//   xdev tmux list           # list sessions
-//   xdev tmux kill [name]    # kill a session
+//
+//	xdev tmux                # new detached session named "xdev" (or attach if one exists)
+//	xdev tmux <name>         # use a custom session name
+//	xdev tmux attach [name]  # attach an existing session
+//	xdev tmux list           # list sessions
+//	xdev tmux kill [name]    # kill a session
 func runTmux(args []string) int {
 	tm, err := exec.LookPath("tmux")
 	if err != nil {
@@ -34,11 +35,15 @@ func runTmux(args []string) int {
 		return runExit(cmd.Run())
 	case len(args) > 0 && args[0] == "kill":
 		name := session
-		if len(args) > 1 { name = args[1] }
+		if len(args) > 1 {
+			name = args[1]
+		}
 		return runExit(exec.Command(tm, "kill-session", "-t", name).Run())
 	case len(args) > 0 && (args[0] == "attach" || args[0] == "a"):
 		name := session
-		if len(args) > 1 { name = args[1] }
+		if len(args) > 1 {
+			name = args[1]
+		}
 		cmd := exec.Command(tm, "attach", "-t", name)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		return runExit(cmd.Run())
@@ -61,6 +66,8 @@ func runTmux(args []string) int {
 }
 
 func runExit(err error) int {
-	if err != nil { return 1 }
+	if err != nil {
+		return 1
+	}
 	return 0
 }
