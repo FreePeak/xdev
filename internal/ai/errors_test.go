@@ -83,6 +83,20 @@ func TestClassify(t *testing.T) {
 		// replaying it can only replay the same rejection.
 		{"400 gateway shape rejection, no upstream named", &HTTPError{API: "openai-completions", Status: 400,
 			Body: `{"error":{"code":"400","message":"invalid request","type":"invalid_request_error"}}`}, ClassBadRequest},
+		// A tool-PAIRING verdict (live 2026-10-20: onegw → OpenCode Zen,
+		// MiniMax M3.1 Flash Free). The body is a relayed upstream refusal —
+		// "upstream request failed" — but it names a defect in the request's
+		// own shape: a tool result that answers no live call. The same body
+		// replays the same rejection, so a transient class would send the
+		// ladder back to it forever ("all targets down", every target
+		// healthy). A bad request is right: the ladder rebuilds the history
+		// before it retries, and the rebuild drops the offending result.
+		{"400 tool call id is invalid", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Upstream request failed: [bad_request_error] invalid params, tool call id is invalid (2013)","type":"server_error"}}`}, ClassBadRequest},
+		{"400 tool result does not follow tool call", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Upstream request failed: [bad_request_error] invalid params, tool result does not follow tool call (2013)","type":"server_error"}}`}, ClassBadRequest},
+		{"400 tool result's tool id not found", &HTTPError{API: "openai-completions", Status: 400,
+			Body: `{"error":{"code":"400","message":"Upstream request failed: [bad_request_error] invalid params, tool result's tool id(call_function_v5z079wbauxu_1) not found","type":"server_error"}}`}, ClassBadRequest},
 		// A 404 is a dead route unless the body is a gateway relaying an
 		// upstream verdict about the MODEL. Live 2026-09-18: `onegw/xdev`
 		// left its upstream's catalog and every turn ended on
