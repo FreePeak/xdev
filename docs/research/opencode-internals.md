@@ -1,5 +1,15 @@
 # OpenCode Internals — Deep Primary-Source Research (v1.18.28)
 
+> **⚠️ Version-stale. Written against 1.18.28; the installed binary is 2.0.32.**
+> For the v2 API surface, the message model, the event stream and the auth
+> contract, read [`opencode-v2-spec.md`](opencode-v2-spec.md) instead — it was
+> re-derived from the shipped OpenAPI spec on 2026-10-18. The biggest break:
+> **v2 replaced the flat `parts` array with a `type`-discriminated message
+> union**, and a user message's text is a plain string, not a content list.
+> The tool inventory (§2), permission model (§5), storage (§6) and compaction
+> (§7) below are still broadly accurate; treat §4 (Message & Part Format) as
+> superseded.
+
 > **Source**: opencode binary at `~/.opencode/bin/opencode` (144 MB Mach-O arm64, Bun-compiled); `~/.local/share/opencode/opencode.db` (SQLite); `~/.config/opencode/opencode.json` config; embedded JS extracted via `strings` + mmap search. All prompts/tools quoted verbatim below; file paths marked `[BIN#<byte-offset>]`. Version: `opencode --version` = 1.18.28; npm plugin `@opencode-ai/plugin@1.14.22`, `@kilocode/plugin@7.2.20`.
 
 **Existing research baseline**: No prior opencode-specific docs in-repo. This is a fresh full inventory. Cross-checked against `parity-*.md` claims; corrections noted where found.

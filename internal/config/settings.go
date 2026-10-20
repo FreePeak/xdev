@@ -518,6 +518,9 @@ type Settings struct {
 	// a real path (settingsKeyOK / KnownFields) and a typo is caught at load
 	// instead of silently blocking notifications forever.
 	Notifications NotificationSettings `yaml:"notifications"`
+	// Workflow holds the user's named presets (workflow.presets). xdev
+	// ships none of its own: the list is exactly what the config declares.
+	Workflow WorkflowSettings `yaml:"workflow"`
 	// StatusLine configures the TUI HUD (M12 F5, omp's status-line
 	// segment model): statusLine.segments lists the segments to render,
 	// in order. Unset keeps the shipped layout.
@@ -1600,6 +1603,12 @@ func LoadSettings(cwd string, overlays []string) (*Settings, error) {
 			return nil, fmt.Errorf("config: %s: %w", l.path, err)
 		}
 	}
+	// Validated after every layer lands, not per layer: a preset may name an
+	// agent a closer layer supplies, and a broken preset should be reported
+	// once, against the file the user actually has to edit.
+	if err := s.Validate(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
 	s.ignoredProject = ignored
 	return s, nil
 }
@@ -1737,6 +1746,13 @@ func (s *Settings) merge(layer *Settings) error {
 			// A layer that lists segments means exactly that list.
 			s.StatusLine.Segments = append([]string(nil), layer.StatusLine.Segments...)
 		}
+	}
+	if layer.Workflow.Presets != nil {
+		// Same rule as statusLine.segments: a layer that lists presets
+		// means exactly that list. Presets are names a user chose, so
+		// merging them by union would resurrect a preset they deliberately
+		// removed in a closer layer.
+		s.Workflow.Presets = append([]WorkflowPreset(nil), layer.Workflow.Presets...)
 	}
 	if layer.DefaultModel != "" {
 		s.DefaultModel = layer.DefaultModel
