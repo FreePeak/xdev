@@ -463,7 +463,12 @@ func Register(reg *tool.Registry, tools []tool.Tool) {
 			// implementation could.
 			continue
 		}
-		reg.Defer(t.Name(), index, searchTags(t)...)
+		// Sticky: the effort ladder rebuilds the deferred set on every rung
+		// change, and a plain Defer was wiped by that rebuild — which put
+		// every tool of a wide server back in the eager schema, re-sent on
+		// every request. The ladder owns the BUILT-IN deferrals; a remote
+		// surface is not its to re-open.
+		reg.DeferSticky(t.Name(), index, searchTags(t)...)
 	}
 }
 

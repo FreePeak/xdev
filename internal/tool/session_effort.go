@@ -82,6 +82,10 @@ var sessionEffortHighDeferred = []struct {
 // ApplySessionEffort rebuilds the deferred catalog for one effort rung.
 // Unknown effort folds to the default. Tools not registered are skipped — a
 // --no-lsp build must not panic on a missing name.
+//
+// Sticky deferrals (the wide remote surfaces) survive the rebuild: the
+// ladder owns the built-in set, and a remote surface that is too wide to
+// advertise at one rung is too wide at every rung.
 func ApplySessionEffort(r *Registry, effort string) {
 	if r == nil {
 		return
@@ -92,6 +96,9 @@ func ApplySessionEffort(r *Registry, effort string) {
 		for _, name := range r.Names() {
 			if sessionEffortLowEager[name] || isBridgeTool(name) {
 				continue
+			}
+			if r.isSticky(name) {
+				continue // already deferred, with its own index
 			}
 			r.Defer(name, indexFor(r, name), "effort", "low")
 		}

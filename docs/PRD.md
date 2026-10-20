@@ -4063,3 +4063,26 @@ and over the store: 1,894 real user turns, 2,970 harness-injected turns (**1.57 
 **Tests.** `internal/tool/readonly_test.go` — the classifier table gains the read form of all six verbs and their mutating neighbours (`git branch -a --verbose --no-abbrev`, `git worktree list`, `git remote -v`, `git stash list`, `git tag -l`, `git config --get` against `git branch -D`, `git worktree add`, `git remote remove`, `git stash`, `git tag -d`, `git config k v`). `internal/agent/continuation_scope_test.go` — `TestKeepGoingDoesNotCarryAnEarlierTasksMutationIntoALaterQuestion` (a question after an earlier task's edit gets no nudge), `TestKeepGoingStillFiresForWorkInsideTheCurrentTask`, `TestKeepGoingStillFiresForAResumedSession`, `TestTaskFloorIgnoresSyntheticUserMessages`. `internal/ai/effort_wire_test.go` — `TestOpenAIWireEffortLadderStopsAtHigh`. `internal/tool/classifier_corpus_test.go` — `TestNoDestructiveGitSpellingIsEverClassifiedAsARead` replays the whole local store through the classifier and asserts the one property that must never break: a segment running a destructive git verb is never reported as a read (2,122 such segments in this store, none of them a read; skipped when there is no store, so it costs nothing in CI).
 
 *Last updated: 2026-10-21 (fix/keep-going-gate-task-scope — a plain question is no longer answered twice: the read form of six git verbs is a read, the gate's scope is the current task, and the nudge is shorter and capped at 2)*
+
+**A wide remote surface stays out of the eager schema.** The deferred-tool catalog is how a long tool tail stays cheap: a catalogued tool leaves the eager schema (the one whose JSON schema is re-sent on **every** request) and is reached through `tool_search` / `tool_describe` / `tool_call` instead. `mcpclient.Register` applied that rule to a remote server whose own tool count passes the threshold — 12 — which is the right call for a server that ships 27 tool schemas. But the effort ladder then **wiped the deferral**: `tool.ApplySessionEffort` calls `ResetDeferred` and rebuilds the set from its own tables, because a rung change must not leave names from the previous rung behind, and the rebuild knew nothing about the remote surface. So every tool of a wide server landed back in the eager schema, and the ladder — whose whole job is to make a session's tool surface fit the ask — was the thing that undid it.
+
+The code already documents the hazard, for the code-graph tools: *"a Defer here would be wiped by its ResetDeferred rebuild and the tools would land in the eager schema."* The MCP path was simply ordered the wrong way round. `cmd/xdev/print.go` registers the MCP tools and applies the ladder; the ladder won.
+
+**The deferral is sticky now.** A remote surface that is too wide to advertise at one rung is too wide at every rung, and the ladder does not re-open it: `Registry.DeferSticky` records the deferral outside the ladder's own tables, and `ResetDeferred` re-applies it. The built-in set stays the ladder's to decide — a sticky entry is a floor, never a ceiling, and the `low` rung still defers everything it does not list. A removed tool cannot come back through the sticky set.
+
+Measured over a registry carrying one 27-tool remote server:
+
+```
+                    eager   remote in the eager schema
+low                  11      0
+medium               25      0        (was 52 / 27)
+high                 28      0        (was 55 / 27)
+xhigh                28      0        (was 55 / 27)
+max                  28      0        (was 55 / 27)
+```
+
+The 27 schemas that no longer ride every request are a database server's `query_*` / `execute_*` / `transaction_*` / `performance_*` — carried by a session working on an unrelated Go repository.
+
+**Tests.** `internal/mcpclient/sticky_wide_test.go` — `TestWideRemoteSurfaceStaysDeferredAfterTheEffortLadder` (a wide surface is deferred at every rung, and the test fails with the fix removed: *"rung medium: eager defs after the ladder = 27, want 0 — the ladder re-opened the remote surface"*), `TestNarrowRemoteSurfaceStaysEagerAfterTheEffortLadder` (hiding three tools would be a usability regression for no measurable gain, so the threshold keeps the small case direct), `TestWideRemoteSurfaceStaysRunnableAfterTheEffortLadder` (a deferral is discovery, not a boundary — the tool stays registered and runnable, and the policy judges the real tool name). `internal/tool/sticky_defer_test.go` — the sticky set survives the rebuild, keeps its own index line, does not block the built-in set, and cannot outlive a removed tool. `cmd/xdev/tool_surface_test.go` — `TestMeasureTheEagerToolSurfacePerRung` and `TestMeasureTheEagerToolSurfaceWithoutTheStickyDeferral`, the two columns of the table above, measured on the real registry.
+
+*Last updated: 2026-10-21 (fix/deferred-remote-surface — a wide MCP surface stays behind the deferred catalog at every effort rung, instead of the ladder's rebuild putting 27 irrelevant schemas back into the request)*

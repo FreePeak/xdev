@@ -347,6 +347,41 @@ func (r *Registry) Defer(name, index string, tags ...string) {
 	r.Catalog().Defer(name, index, tags...)
 }
 
+// DeferSticky defers a tool AND records the deferral as sticky, so
+// ResetDeferred re-applies it.
+//
+// The sticky set is the wide REMOTE surfaces: an MCP server whose tool count
+// passes the catalog threshold. The effort ladder owns the built-in
+// deferrals and rebuilds them from scratch whenever the rung changes, which
+// used to wipe a remote surface's deferral and put every one of its tools
+// back in the eager schema — the 27 database tools of a server that has
+// nothing to do with the repository being worked on, re-sent on every
+// request. A remote surface is not the ladder's to re-open: if it is too
+// wide to advertise at one rung it is too wide at every rung.
+//
+// The ladder still owns the BUILT-IN set, and the low rung still defers
+// everything it does not list — a sticky entry is a floor, never a ceiling.
+func (r *Registry) DeferSticky(name, index string, tags ...string) {
+	r.Defer(name, index, tags...)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stickyDefer == nil {
+		r.stickyDefer = map[string]Entry{}
+	}
+	r.stickyDefer[name] = Entry{Name: name, Index: index, Tags: tags}
+}
+
+// isSticky reports whether name carries a sticky deferral.
+func (r *Registry) isSticky(name string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.stickyDefer[name]
+	return ok
+}
+
 // Deferred returns the catalogued tools, ordered by name: exactly the set the
 // prompt index lists and Defs omits. Empty when no catalog is configured, so
 // a catalog-free prompt is unchanged.
@@ -363,14 +398,28 @@ func (r *Registry) Deferred() []Entry {
 // ResetDeferred clears every deferred entry so ApplySessionEffort can rebuild
 // the catalog for a new rung without leftover names from the previous one.
 // Registered tools stay registered; only the deferred view is wiped.
+//
+// Sticky deferrals are re-applied: they are the wide remote surfaces, and
+// the ladder's rebuild is not allowed to re-open them. The sticky set is
+// copied out under the registry lock before the catalog lock is taken, so
+// the documented order (registry → catalog) holds.
 func (r *Registry) ResetDeferred() {
 	if r == nil {
 		return
 	}
+	r.mu.RLock()
+	sticky := make(map[string]Entry, len(r.stickyDefer))
+	for k, v := range r.stickyDefer {
+		sticky[k] = v
+	}
+	r.mu.RUnlock()
 	c := r.Catalog()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	clear(c.entries)
+	for name, e := range sticky {
+		c.entries[name] = e
+	}
 }
 
 // deferred reports whether name is behind the catalog. Callers hold r.mu (the
