@@ -779,12 +779,17 @@ func providerKeys(cfg *config.Config) []string {
 }
 
 // buildProvider constructs the wire adapter for a provider config.
+//
+// The transport carries ForceAttemptHTTP2 because a provider can answer HTTP/2
+// while the client speaks HTTP/1.1: the opencode-go endpoint does (measured
+// 2026-10-20), and the client then read its frames as a malformed response.
 func buildProvider(name string, pc *config.ProviderConfig, modelName string, cfg *config.Config) (ai.Provider, error) {
 	hc := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        8,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
 		},
 	}
 	headers := map[string]string{}

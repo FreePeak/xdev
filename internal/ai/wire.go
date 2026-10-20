@@ -18,6 +18,14 @@ import (
 // wireHTTPClient is the shared transport for every wire adapter: no overall
 // timeout (streams legitimately run for minutes), but bounded dial, TLS
 // handshake (30s) and response-header (5m) phases so dead endpoints fail.
+//
+// ForceAttemptHTTP2 is on because this transport has a custom dialer: Go skips
+// the automatic HTTP/2 setup for a transport that has one, and a client that
+// offers no ALPN gets whatever the server picks. The opencode-go endpoint
+// answers HTTP/2 (measured 2026-10-20), so an HTTP/1.1 client read its frames
+// as a malformed response and every call failed with "net/http: HTTP/1.x
+// transport connection broken". With the flag on, Go offers h2 and falls back
+// to HTTP/1.1 for a server that does not.
 var wireHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -29,6 +37,7 @@ var wireHTTPClient = &http.Client{
 		ResponseHeaderTimeout: 5 * time.Minute,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
 	},
 }
 
