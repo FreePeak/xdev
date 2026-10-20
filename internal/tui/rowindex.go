@@ -46,8 +46,9 @@ import (
 // transcriptCap is the most rows the row index keeps. Past it the OLDEST
 // blocks are dropped outright — their text, their render and their rows — so a
 // session that runs for hours costs what one that ran for minutes costs. The
-// session JSONL is the record; the transcript is a window on it, and the trim
-// notice (app.go noteTranscriptTrimmed) is what says the window moved.
+// session JSONL is the record; the transcript is a window on it, and the window
+// moves silently: the reader scrolls, the head is gone, the session still has
+// every row.
 //
 // It is a ROW budget, not a block count, because rows are what the reader
 // scrolls and what the renderer materializes; the two were measured together
@@ -250,10 +251,6 @@ func (a *App) sync(w int) int32 {
 	if len(x.rend) < n {
 		x.grow(n)
 	}
-	// trimmed records that this pass moved the transcript's shape on its own —
-	// the row cap — which is what earns the one notice below. A frame that only
-	// re-rendered rows says nothing.
-	trimmed := false
 	from := int32(n)
 	for i := range n {
 		if x.rend[i].key != a.renderKey(i, a.blocks[i], w) {
@@ -268,20 +265,8 @@ func (a *App) sync(w int) int32 {
 	total := a.reconcile(w, from)
 	// The row cap last, on the offsets just computed: a trim can only ever
 	// shrink the transcript, so it never invalidates the scan above.
-	if a.trimTranscript(total) {
-		total = a.rowIdx.total()
-		trimmed = true
-	}
-	// One notice per CHANGE, and only when something moved: sync runs on every
-	// paint, so a chatty path here would put a toast on screen forever. The
-	// toast is not a transcript block on purpose — a block would be the first
-	// row the next trim drops, which is a notice about a notice.
-	if trimmed && !a.trimNoticeOn {
-		a.trimNoticeOn = true
-		a.noteTranscriptTrimmed()
-	} else if !trimmed {
-		a.trimNoticeOn = false
-	}
+	a.trimTranscript(total)
+	total = a.rowIdx.total()
 	return total
 }
 
@@ -340,7 +325,7 @@ func (a *App) reconcile(w int, from int32) int32 {
 // --- the row cap ---------------------------------------------------------
 
 // trimTranscript drops the oldest blocks until the layout fits transcriptCap
-// rows, and reports whether it moved anything.
+// rows.
 //
 // It runs at the END of sync, on the freshly computed offsets, and only when
 // the total is over the cap: the common frame pays one int compare. Everything
@@ -353,9 +338,9 @@ func (a *App) reconcile(w int, from int32) int32 {
 // retained at an index nothing reads. The alternative — a growing offset into
 // an append-only slice — keeps every dropped render alive, which is the memory
 // this cap exists to bound.
-func (a *App) trimTranscript(total int32) bool {
+func (a *App) trimTranscript(total int32) {
 	if total <= transcriptCap {
-		return false
+		return
 	}
 	x := &a.rowIdx
 	n := len(a.blocks)
@@ -369,16 +354,14 @@ func (a *App) trimTranscript(total int32) bool {
 	// leave the frame with nothing to paint, and the row cap is a budget, not
 	// a promise.
 	if cut == 0 {
-		return false
+		return
 	}
-	dropped := int(x.start[cut])
 	for _, b := range a.blocks[:cut] {
 		if b.Kind == KindUser {
 			a.droppedUserRows++
 		}
 	}
 	a.blocks = append([]*Block(nil), a.blocks[cut:]...)
-	a.droppedRows += dropped
 	// allocation: the retained renders are exactly the ones worth keeping, and
 	// re-rendering the whole tail every trim would cost the frame this pass is
 	// meant to save.
@@ -403,7 +386,6 @@ func (a *App) trimTranscript(total int32) bool {
 		x.start = append(x.start, 0)
 	}
 	x.dirty = 0
-	return true
 }
 
 // rowChrome is the decoration a block's rows share: the accent rail, and the

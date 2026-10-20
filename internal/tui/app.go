@@ -404,18 +404,13 @@ type App struct {
 	// rowIdx is the transcript's row layout and per-block render cache; the
 	// per-frame cost is the viewport, not the session (see rowindex.go).
 	rowIdx rowIndex
-	// droppedRows / droppedUserRows are the head the row cap cut off the top of
-	// this session (rowindex.go trimTranscript): rows already retired from the
-	// transcript, and how many of them were ❯ prompts. The ordinals the
-	// user-message seam counts by (msgmenu.go userRowAt) have to be absolute —
-	// a menu opened after a trim must name the store entry it always named, not
-	// one shifted by the rows that left the screen.
-	droppedRows     int
+	// droppedUserRows is the head the row cap cut off the top of this session
+	// (rowindex.go trimTranscript): how many ❯ prompts are no longer on
+	// screen. The ordinals the user-message seam counts by (msgmenu.go
+	// userRowAt) have to be absolute — a menu opened after a trim must name the
+	// store entry it always named, not one shifted by the rows that left the
+	// screen.
 	droppedUserRows int
-	// trimNoticeOn records that the trim notice is already up, so a session
-	// that keeps trimming says it once instead of on every frame. It clears
-	// the moment a pass moves nothing, which is what lets the next trim speak.
-	trimNoticeOn bool
 
 	// animTick counts loop ticks since the last animation frame, so the
 	// spinner advances on animEvery rather than on every tick.
@@ -2361,7 +2356,7 @@ func (a *App) Reset() {
 	a.st.TTFTSum, a.st.TTFTCount = 0, 0
 	a.closeWindow()
 	a.blocks = nil
-	a.droppedRows, a.droppedUserRows = 0, 0
+	a.droppedUserRows = 0
 	a.thinkFocus = -1  // the focused box went with them
 	a.msgArmed = false // so did the armed menu row: its block is gone
 	a.msgm = nil       // a menu over replayed-away blocks is not a menu
@@ -3037,19 +3032,6 @@ func (a *App) poke() {
 	select {
 	case a.dirty <- struct{}{}:
 	default:
-	}
-}
-
-// noteTranscriptTrimmed says, once per change, that the transcript's head left
-// the window: the row cap dropped the oldest blocks, a silent state change a
-// reader would otherwise discover by scrolling, so the corner says so — a toast
-// rather than a block, because a block would be the first row the next trim
-// drops.
-//
-// Caller holds a.mu (sync runs under it, from paint).
-func (a *App) noteTranscriptTrimmed() {
-	if a.droppedRows > 0 {
-		a.toast(ToastInfo, fmt.Sprintf("transcript trimmed — %d rows of older output dropped from this view (the session still has them)", a.droppedRows))
 	}
 }
 
@@ -5273,10 +5255,11 @@ func (a *App) paint() {
 	// the dock and every overlay, so a panel that covers the chip wins the click.
 	_, down := a.sm.Indicator(total, vp)
 	a.drawJumpChip(s, edge, top, vp, down)
-	// The row cap retires the top of the transcript, and a window that
-	// silently lost its head reads as a bug: trimTranscript announces it in
-	// the corner (a toast, not a block — a notice row would itself be the
-	// first thing the next trim drops).
+	// The row cap retires the top of the transcript, and the window moves
+	// silently: the session JSONL still holds every row, so what leaves the
+	// screen is a view limit, not a loss. Nothing is announced here on
+	// purpose — a notice row would itself be the first thing the next trim
+	// drops, and a toast fired on every trim is noise the reader cannot act on.
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
 	composerTop := h - 1 - cRows
