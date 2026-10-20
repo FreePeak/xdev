@@ -4016,3 +4016,27 @@ prompt stays last, that the style is present and names the two renderable shapes
 **Tests.** The 36 hanging tests pass again (`internal/agent`: 31s, green — it was a 600s timeout before). The full suite on this branch is down to two environment-dependent failures that also fail on `main` in this sandbox: `TestIsNetworkOutage/the_real_no-route_dial_error` (the IPv6 no-route dial does not time out here) and `TestLaunchBrowserIsHeadless` (a flake under the full suite's load; green in isolation on both trees).
 
 *Last updated: 2026-10-20 (fix/retry-budgets-bounded — the session-unfinished gate covers the client-side verdicts; the turn budgets are budgets again, and the suite is green)*
+
+**A turn the provider will not answer must surface, not spin.** Live 2026-10-20: a session whose history had grown to 322 tool results (a 663 KB request) sat in the retry ladder for **4h50m** — the transport's 5-minute header budget per attempt, the SAME body every time, and the "all targets down" notice for a provider that was perfectly healthy. The turn never ended, and the user never learned why: not even the question reached the session file, because a turn that never completes writes nothing.
+
+**The silence is a request verdict, not an outage.** `ai.IsHeaderTimeout` reads the transport's own wording ("timeout awaiting response headers"): the provider WAS asked and stayed silent about THIS body. An outage means the request never left the machine, so the same request would work later; a silent provider was asking, and the body is what it could not serve. So the recovery is a **smaller** request — compaction, the same move the overflow path makes — and never a replay of the same bytes.
+
+**Repair once, then say so.** The ladder compacts and rebuilds the history when the provider stays silent, and retries with the smaller body. If the repair did not shrink the request (nothing to compact, compaction failed, or the rebuild came out the same size), the turn ENDS with the provider's verdict: the same body would be silent again, and a replay is a loop with no exit. One repair per turn — a second silence means the body is not what the provider choked on.
+
+**The wait is visible.** The stream watchdog (`ai.FirstProgressTimeout`) bounds the wait AFTER the headers arrive, so the header wait itself — the five minutes where a provider can go quiet — had no voice at all. A turn now announces it ("the provider has not answered yet (1m30s, 53 messages in the request) — still waiting") on the event stream and in the session file, because a turn that waits here writes no assistant message and the record would otherwise end at the user's question.
+
+**Verified live**, against a provider that accepts the request and never answers:
+
+```
+old binary (v0.4.342), 7 minutes:      5 requests, every one the identical 66,617 bytes,
+                                       still spinning when the timeout killed it, no output
+patched binary:                        1 request, the silence announced at 1m30s, the turn
+                                       ended with the provider's verdict
+patched binary, 208 KB history:        request 1 = 208,400 bytes (silent) → repair →
+                                       request 2 = 97,439 bytes (the compacted history) →
+                                       still silent → the turn ended
+```
+
+**Tests.** `internal/ai/errors_test.go` — `TestIsHeaderTimeout` pins the wording and the neighbours it must not swallow (a refusal, an outage, a plain deadline). `internal/agent/header_timeout_test.go` — `TestHeaderTimeoutEndsTheTurnInsteadOfReplayingIt` (the turn ends; the body is not replayed), `TestHeaderTimeoutRepairsTheRequestWhenCompactionShrinksIt` (the retried request is measurably smaller), `TestHeaderTimeoutNoticeIsPersisted` (the record survives the turn). `internal/agent/silent_provider_test.go` — `TestSilentProviderIsAnnounced` (the announcement reaches the event stream and the session file).
+
+*Last updated: 2026-10-20 (fix/silent-provider — a turn the provider will not answer surfaces with the provider's verdict instead of replaying the same body for hours; the wait is announced while it lasts)*

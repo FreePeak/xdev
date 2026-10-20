@@ -20,6 +20,34 @@ func TestHTTPErrorFormat(t *testing.T) {
 	}
 }
 
+// TestIsHeaderTimeout pins the verdict the recovery ladder reads: the
+// response headers never arrived.
+//
+// It is a REQUEST verdict, not an outage one — the provider was asked and
+// stayed silent about THAT body, so the repair is a smaller request
+// (compaction) and a replay of the same bytes is a loop with no exit.
+// Live 2026-10-20: a 663 KB request sat in that silence for 4h50m, the
+// same body every attempt, and the turn never ended.
+func TestIsHeaderTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"the transport's own wording", errors.New("net/http: timeout awaiting response headers"), true},
+		{"wrapped by the provider", errors.New("openai-completions: Post \"http://127.0.0.1:8080/v1/chat/completions\": net/http: timeout awaiting response headers"), true},
+		{"another timeout", errors.New("context deadline exceeded"), false},
+		{"a refusal", &HTTPError{API: "a", Status: 400, Body: "invalid request"}, false},
+		{"a network outage", errors.New("network is unreachable"), false},
+	}
+	for _, tc := range cases {
+		if got := IsHeaderTimeout(tc.err); got != tc.want {
+			t.Errorf("%s: IsHeaderTimeout(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
 func TestClassify(t *testing.T) {
 	cases := []struct {
 		name string

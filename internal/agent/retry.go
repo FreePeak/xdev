@@ -101,6 +101,24 @@ func (e *AllTargetsDownError) Error() string {
 
 func (e *AllTargetsDownError) Unwrap() error { return e.LastErr }
 
+// SilentProviderError is the voice of a request the provider has not
+// answered yet: the turn is waiting on the response headers, and the
+// screen says so instead of showing an unexplained spinner.
+//
+// It is not a failure — the wait has a ceiling (the transport's header
+// budget) and the turn continues either way. It is the announcement that
+// the wait is a wait, so the person watching knows the turn is alive and
+// what it is waiting for.
+type SilentProviderError struct {
+	Waited   time.Duration
+	Messages int
+}
+
+func (e *SilentProviderError) Error() string {
+	return fmt.Sprintf("the provider has not answered yet (%s, %d messages in the request) — still waiting",
+		e.Waited.Truncate(time.Second), e.Messages)
+}
+
 // VerdictRetryError is the voice of a verdict the ladder is riding out
 // because the session is not finished: the provider refused the request
 // (a credential denial, a client-posture gate, a rejected body) and the
