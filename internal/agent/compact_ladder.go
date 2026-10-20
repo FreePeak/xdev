@@ -100,25 +100,49 @@ func lookupCompactMethod(name string) compactMethodFunc {
 }
 
 // RecordedMethod returns the name a compaction record carries for a ladder
-// member. It follows omp's record contract (omp
-// packages/coding-agent/src/session/compaction-methods.ts): remote, handoff
-// and soft name themselves on the record, snapcompact and shake do not — a
-// record must not claim a provider round trip that never happened, and these
-// two rungs are pure local work (a snapshot and an elision).
+// member. It follows omp's record contract: the record names the member that
+// produced it. omp writes the selected member verbatim — `method: Q ?
+// undefined : P` (omp
+// packages/coding-agent/src/session/session-maintenance.ts:763, the manual
+// /compact loop) and `method: T ? undefined : f` (same file :3079, the auto
+// loop), with the snapcompact rescue writing `method: "snapcompact"` (same
+// file :2383); the record writer stores the value as it comes
+// (omp packages/coding-agent/src/session/session-manager.ts:2339-2356).
+// `undefined` there means the compaction came from an extension hook, not
+// that the member was unnamed.
+//
+// One deliberate divergence: omp's shake rewrites the history in place and
+// writes NO compaction record at all (omp
+// packages/coding-agent/src/session/session-maintenance.ts:3245-3300), while
+// xdev's shake persists the retained context like every other rung — so the
+// xdev record names the rung that produced it. A member outside omp's five
+// (xdev's microcompact extension) names nothing.
 func RecordedMethod(member string) string {
 	switch member {
-	case methodRemote, MethodHandoff, methodSoft:
+	case methodRemote, methodSnapcompact, MethodHandoff, methodShake, methodSoft:
 		return member
 	}
 	return ""
 }
 
 // products is compaction.methodOrder restricted to the members that produce a
-// retained context, in order. An order with no product — the shipped default
-// `threshold,overflow,promotion`, which only names triggers — means omp's
-// ladder: remote, snapcompact, handoff, shake, soft, of which the first
-// applicable one runs (see compactMethodApplicable). A configured order is
-// never rewritten: the products it names are used in the order it names them.
+// retained context, in order.
+//
+// omp's vocabulary: `methodOrder` holds the five PRODUCT members only —
+// remote, snapcompact, handoff, shake, soft (omp
+// packages/coding-agent/src/session/compaction-methods.ts:29-54) — and omp
+// filters anything else out of it, which would leave the order empty and
+// disable compaction (omp
+// packages/coding-agent/src/session/session-maintenance.ts:13-15). xdev's
+// shipped order names TRIGGERS instead: `threshold,overflow,promotion` are
+// xdev's own names for WHEN to compact, not omp members (omp's triggers are
+// the reason argument of runAutoCompaction: idle/threshold/overflow/
+// incomplete, omp packages/coding-agent/src/session/session-maintenance.ts:
+// 2559). So xdev draws its own line: an order that names no product means
+// omp's ladder — remote, snapcompact, handoff, shake, soft, of which the
+// first applicable one runs (see compactMethodApplicable) — and an order
+// that names products is never rewritten: those products are used in the
+// order it names them.
 func (c CompactionConfig) products() []string {
 	var out []string
 	for _, m := range c.methods() {
@@ -134,51 +158,83 @@ func (c CompactionConfig) products() []string {
 }
 
 // compactMethodApplicable reports whether a ladder member can run against the
-// compaction input, and why not when it cannot. These are omp's per-member
+// active model, and why not when it cannot. These are omp's per-member
 // applicability rules (omp
-// packages/coding-agent/src/session/compaction-methods.ts):
+// packages/coding-agent/src/session/compaction-methods.ts:70-84, and the same
+// rules in the loops that pick the member — omp
+// packages/coding-agent/src/session/session-maintenance.ts:19-21, :552 and
+// :2578-2596):
 //
-//	remote      — needs a remote compaction endpoint
-//	snapcompact — needs an image in the input
+//	remote      — a configured remote compaction endpoint OR a provider that
+//	              supports native compaction
+//	snapcompact — the active model declares image input
 //	handoff, shake, soft — always
 //
 // An inapplicable member is skipped, not failed: the ladder falls through to
 // the next member, exactly as omp does. An overridden member decides for
 // itself — the override may implement the rung differently (the M5 #23
 // handoff-document variant is the model).
-func (a *Agent) compactMethodApplicable(name string, msgs []ai.Message) (bool, string) {
+func (a *Agent) compactMethodApplicable(name string) (bool, string) {
 	if _, overridden := compactMethodOverrides[name]; overridden {
 		return true, ""
 	}
 	switch name {
 	case methodRemote:
-		// The remote rung is provider-native streaming compaction: it needs
-		// an endpoint to talk to. xdev ships no setting for one and no
-		// transport speaks it, so the rung never applies here — the ladder
-		// falls through instead of dressing a local summary up as a remote
-		// one.
+		// omp's remote rung applies with a configured remote compaction
+		// endpoint OR a provider that supports native compaction — `hde`
+		// ORs the two (omp
+		// packages/coding-agent/src/session/compaction-methods.ts:70-72;
+		// the provider-native half is the Responses /compact endpoint, the
+		// v2 streaming compaction transport and Anthropic's server
+		// compaction). xdev has NEITHER: there is no remote-endpoint
+		// setting, and no transport here speaks provider-native compaction
+		// (`internal/ai/openai_responses.go` has no /responses/compact, and
+		// nothing in internal/ implements the other two). So the rung never
+		// applies and the ladder falls through instead of dressing a local
+		// summary up as a remote one. The comment is the reason nobody
+		// re-adds the rung: the moment xdev gains either half, this check
+		// has to come back.
 		who := "the active provider"
 		if a.Provider != nil {
 			who = a.Provider.Name()
 		}
 		return false, fmt.Sprintf("remote (provider-native streaming) not supported by %s", who)
 	case methodSnapcompact:
-		if !messagesContainImage(msgs) {
-			return false, "snapcompact needs an image in the compaction input"
+		// The rung renders the discarded span as a bitmap, so it needs a
+		// model that can read one: the ACTIVE MODEL's declared input
+		// modalities, not an image somewhere in the conversation (omp
+		// `u?.input?.includes("image") === true`, omp
+		// packages/coding-agent/src/session/compaction-methods.ts:77, and
+		// `t?.input.includes("image")` in the applicability rule at omp
+		// packages/coding-agent/src/session/session-maintenance.ts:20).
+		// xdev's model metadata carries the same declaration (models.yml
+		// `vision: true`), read through the agent's Vision hook.
+		if !modelAcceptsImages(a) {
+			return false, fmt.Sprintf("snapcompact needs a vision-capable model (%s is text-only)", modelLabel(a))
 		}
 	}
 	return true, ""
+}
+
+// modelLabel names the active model for a message about it: the model id when
+// there is one, a neutral phrase when there is not (the offline CLI path runs
+// a member without an agent).
+func modelLabel(a *Agent) string {
+	if a == nil || a.Model == "" {
+		return "the active model"
+	}
+	return a.Model
 }
 
 // firstProductIsHandoff reports whether the provider summarize is the member
 // the ladder would pick — the only member whose round trip is worth
 // backgrounding (see the async trigger in compact_async.go). The walk is the
 // ladder's own: the first APPLICABLE member decides, so a rung that cannot
-// run (no endpoint for remote, no image for snapcompact) never counts as the
-// pick.
-func (a *Agent) firstProductIsHandoff(history []ai.Message) bool {
+// run (no remote compaction for remote, a text-only model for snapcompact)
+// never counts as the pick.
+func (a *Agent) firstProductIsHandoff() bool {
 	for _, name := range a.compaction().products() {
-		if ok, _ := a.compactMethodApplicable(name, history); !ok {
+		if ok, _ := a.compactMethodApplicable(name); !ok {
 			continue
 		}
 		return name == MethodHandoff
@@ -187,16 +243,16 @@ func (a *Agent) firstProductIsHandoff(history []ai.Message) bool {
 }
 
 // runCompactLadder tries the configured products in order and returns the
-// entry the first successful member produced (its Method names it, where the
-// record contract says a member names itself). A member that does not apply to
-// the input is skipped, a failing member is logged, and the ladder continues
-// down the list; only when every member failed does the caller see an error —
+// entry the first successful member produced (its Method names the member
+// that produced it). A member that does not apply to the active model is
+// skipped, a failing member is logged, and the ladder continues down the
+// list; only when every member failed does the caller see an error —
 // compaction then degrades to the pre-compaction behavior instead of
 // persisting a half-result.
 func (a *Agent) runCompactLadder(ctx context.Context, span *compactionSpan) (*session.CompactionEntry, error) {
 	var lastErr error
 	for _, name := range a.compaction().products() {
-		if ok, reason := a.compactMethodApplicable(name, span.msgs); !ok {
+		if ok, reason := a.compactMethodApplicable(name); !ok {
 			logx.Infof("compaction: %s — falling through", reason)
 			continue
 		}
