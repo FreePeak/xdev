@@ -215,6 +215,10 @@ func (a *Advisor) Feed(ctx context.Context, primaryHistory []ai.Message) {
 		Tools:    a.Tools,
 		Model:    a.Model,
 		MaxTurns: 4,
+		// The reviewer reads the same tools the parent does, so it gets
+		// the same bound: an oversized result goes to a file instead of
+		// into the review's context.
+		Offload: NewFileOffloader(),
 	}
 	hist := []ai.Message{
 		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "delta to review:\n\n" + delta}}},

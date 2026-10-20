@@ -256,6 +256,12 @@ func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, sett
 		ag.WireEvalKernel(reg)
 	}
 	ag.Redactor = redactorFor(cwd)
+	// #115 left the artifact-offload backend to land with the seam. It
+	// lands here: every build site (print/tui/rpc/acp) goes through this
+	// function, so one line gives every session the bound — an oversized
+	// tool result goes to a file and the model keeps the head plus the
+	// path to the rest.
+	ag.Offload = agent.NewFileOffloader()
 	// #83: snapcompact's bitmap only helps a model that can read images.
 	ag.Vision = func() bool { return modelVision(cfg, provider, model) }
 	// M5 #25 depth (#84): arm the fallback state so the reserve policy,

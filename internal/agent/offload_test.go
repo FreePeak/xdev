@@ -17,6 +17,10 @@ type fakeOffloader struct {
 	fail  bool
 }
 
+// Fits mirrors the shipped backend's byte policy — the fake has no row cap
+// of its own, so the byte gate is all it can answer.
+func (o *fakeOffloader) Fits(text string) bool { return len(text) <= OffloadThresholdBytes }
+
 func (o *fakeOffloader) Offload(toolName, callID, text string) (string, bool, error) {
 	o.calls++
 	if o.fail {
