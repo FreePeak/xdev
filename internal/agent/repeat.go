@@ -142,6 +142,14 @@ func (a *Agent) repeatNotice(msg *ai.Message, call ai.ToolCallBlock) {
 	if count == 0 {
 		return
 	}
+	// Veto: once the guard's highest threshold is reached, stop the run
+	// instead of only nudging. The notice alone is ignored by a model that
+	// is already stuck, so a hard break is required to end a tool-call loop.
+	// Retry/network-error handling lives in oneTurnWithRecovery and is
+	// unaffected: this only stops an identical-call loop.
+	if count >= repeatThresholds[len(repeatThresholds)-1] {
+		a.repeatBreak = true
+	}
 	notice := repeatReminder(call.Name, count, call.Arguments)
 	if notice == "" {
 		return

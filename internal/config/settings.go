@@ -1177,7 +1177,7 @@ func defaultSettings() *Settings {
 		Theme:              "auto",
 		ApprovalMode:       "yolo",
 		MemoryLimit:        1 << 30,
-		MaxTurns:           0,
+		MaxTurns:           200,
 		Compaction:         CompactionSettings{MethodOrder: DefaultCompactionMethodOrder},
 		ToolsApproval:      map[string]string{},
 		Hooks:              map[string]any{},
