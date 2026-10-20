@@ -56,6 +56,7 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	p := &fakeProvider{}
 	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact"))
 	a.Vision = func() bool { return true } // the bitmap path needs a vision model
+	appendMsg(t, s, imageMsg())            // the rung applies to an image input
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
@@ -64,8 +65,10 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 		t.Fatalf("compaction entries = %d, want 1", len(entries))
 	}
 	entry := entries[0]
-	if entry.Method != methodSnapcompact {
-		t.Fatalf("method = %q, want %q", entry.Method, methodSnapcompact)
+	// snapcompact is local work: the record names no method, because a
+	// record must not claim a provider call that never happened (omp).
+	if entry.Method != "" {
+		t.Fatalf("snapcompact is no provider call: method = %q, want empty", entry.Method)
 	}
 	img := imageBlockOf(t, entry.Summary)
 	if img.Source.Type != "base64" || img.Source.MediaType != "image/png" {
@@ -99,6 +102,7 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	p2 := &fakeProvider{}
 	a2, s2, _ := storeAgent(t, p2, ladderConfig("snapcompact"))
 	a2.Vision = func() bool { return true }
+	appendMsg(t, s2, imageMsg())
 	ladderFixture(t, s2)
 	_ = a2.maybeCompact(context.Background(), ladderHistory(t, s2))
 	again := compactionEntries(s2)
@@ -108,6 +112,15 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	if data := imageBlockOf(t, again[0].Summary).Source.Data; data != img.Source.Data {
 		t.Fatal("snapcompact must be deterministic: the same span produced different bytes")
 	}
+}
+
+// imageMsg is a user message carrying an image block — the input shape that
+// makes omp's snapcompact rung applicable.
+func imageMsg() ai.Message {
+	return ai.Message{Role: ai.RoleUser, Content: []ai.Block{
+		ai.TextBlock{Text: "here is the screenshot"},
+		ai.ImageBlock{Source: ai.ImageSource{Type: "base64", MediaType: "image/png", Data: "aGVsbG8="}},
+	}}
 }
 
 // imageBlockOf returns the image block of a retained summary, failing the test
@@ -160,7 +173,8 @@ func TestSnapcompactTextOnlyForNonVisionModels(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{}
 	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact"))
-	a.Vision = nil // unknown capability must take the text path
+	a.Vision = nil              // unknown capability must take the text path
+	appendMsg(t, s, imageMsg()) // the rung applies to an image input
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 

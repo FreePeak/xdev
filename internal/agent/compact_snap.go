@@ -33,6 +33,20 @@ const (
 	snapTextFallbackChars = 6000
 )
 
+// messagesContainImage reports whether the messages carry an image block —
+// omp's snapcompact applicability test: the rung snapshots an image, so an
+// input without one has nothing to snapshot.
+func messagesContainImage(msgs []ai.Message) bool {
+	for i := range msgs {
+		for _, b := range msgs[i].Content {
+			if _, ok := b.(ai.ImageBlock); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // methodSnapcompactRun retains the span as a bitmap plus a short caption. The
 // caption is what a text-only provider (or a human reading the session) sees;
 func methodSnapcompactRun(a *Agent, _ context.Context, span *compactionSpan) (*session.CompactionEntry, error) {

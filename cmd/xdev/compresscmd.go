@@ -227,7 +227,10 @@ func compressSession(ctx context.Context, path, method string, keepRecent int64,
 		Summary:          summary,
 		FirstKeptEntryID: &anchor,
 		TokensBefore:     plan.TokensBefore,
-		Method:           method,
+		// The same record contract the ladder uses: a member that never
+		// calls a provider names nothing, so the record cannot claim a
+		// round trip that never happened.
+		Method: agent.RecordedMethod(method),
 	}
 	if err := store.Append(entry); err != nil {
 		return nil, fmt.Errorf("persist compaction: %w", err)

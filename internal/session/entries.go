@@ -111,8 +111,9 @@ type CompactionEntry struct {
 	FirstKeptEntryID *string // nil → only the summary survives
 	TokensBefore     int64
 	// Method names the compaction ladder member that produced Summary
-	// (M5 #24): handoff|snapcompact|shake|soft. "" for entries written
-	// before the ladder recorded it.
+	// (M5 #24): remote|handoff|soft, per omp's record contract. "" for the
+	// members that make no provider round trip (snapcompact, shake) and for
+	// entries written before the ladder recorded it.
 	Method string
 }
 

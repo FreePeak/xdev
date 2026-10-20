@@ -587,7 +587,7 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 	// Async hands the provider round-trip to a goroutine; the deterministic
 	// members are already cheap, so they stay on this goroutine. Memory
 	// pressure never defers: the OOM backstop must act now.
-	if a.compaction().Async && a.firstProductIsHandoff() && memPressure() < memlimit.HighPressure {
+	if a.compaction().Async && a.firstProductIsHandoff(history) && memPressure() < memlimit.HighPressure {
 		if a.compactAsync != nil {
 			// One job at a time: it lands at a later boundary, and blocking
 			// here on a second summarize would defeat the whole trigger.
