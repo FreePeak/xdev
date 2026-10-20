@@ -1058,6 +1058,11 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 	continued := 0
 	escalation, healthEscalation := 0, 0
 	interrupted := 0
+	// headerRepaired records that this turn already shrank its request
+	// once after the provider stayed silent. One repair per turn: a
+	// second silence means the body is not what the provider choked on,
+	// and a third attempt would only replay it.
+	headerRepaired := false
 	for {
 		// Health-check the active provider before spending a turn: a dead
 		// host is not a transient blip, and the backoff ladder burns
@@ -1137,6 +1142,48 @@ func (a *Agent) oneTurnWithRecovery(ctx context.Context, system string, history 
 		// backoff ladder burns its attempts on a target that cannot serve.
 		if a.recoverUsageLimit(err) {
 			attempt = 0
+			continue
+		}
+		// A request the provider never answered (the response headers never
+		// arrived) is not a blip: the same body will be silent again,
+		// because the body is what it could not serve. The repair is a
+		// SMALLER request — compaction, the same move the overflow path
+		// makes — and the rule is the same: repair once, and if the repair
+		// did not shrink the request, say so instead of replaying the same
+		// bytes.
+		//
+		// Live 2026-10-20: a session whose history had grown to 322 tool
+		// results (a 663 KB request) sat in this ladder for 4h50m — the
+		// transport's 5-minute header budget per attempt, the same body
+		// every time, and the "all targets down" notice for a provider
+		// that was perfectly healthy. The turn never ended and the user
+		// never learned why: not even the question reached the session
+		// file, because a turn that never completes writes nothing.
+		if ai.IsHeaderTimeout(err) {
+			// The record comes first: a turn that ends here writes no
+			// assistant message, so the session file would otherwise end at
+			// the user's question and say nothing about the silence.
+			a.persistRecoveryNotice("recovery_header_timeout", 1, policy.delay(1), err)
+			if headerRepaired {
+				// The repaired (smaller) request was silent too. The body
+				// is not the problem any more and there is no second
+				// repair to try: surface the provider's silence.
+				return nil, history, err
+			}
+			repaired := a.shrinkRequest(ctx, history)
+			if repaired == nil {
+				// Nothing to shrink (no store, compaction failed, or the
+				// rebuild came out the same size): the same body would be
+				// silent again, and a replay is a loop with no exit.
+				return nil, history, err
+			}
+			headerRepaired = true
+			history = repaired
+			attempt = 0
+			logx.Errorf("recovery: the provider did not answer a %d-byte request; compacted and retrying", requestBytes(history))
+			if serr := sleepBackoff(ctx, policy.delay(1)); serr != nil {
+				return nil, history, serr
+			}
 			continue
 		}
 		switch ai.Classify(err) {
@@ -1555,6 +1602,56 @@ func (a *Agent) noticeContinuationRetry(d time.Duration) {
 	a.Hooks.OnEvent(ai.Errorf(&ContinuationRetryError{Delay: d}))
 }
 
+// shrinkRequest compacts the session and returns the rebuilt history when
+// that made the request SMALLER, and nil when it did not.
+//
+// nil is the important answer: it means the same body would be sent again,
+// and a body the provider stayed silent on will be silent on again. The
+// caller surfaces the error instead of replaying it — the same rule the
+// tool-pairing verdict follows (a deterministic rejection is not an
+// outage), applied to the request's SIZE.
+//
+// The compaction is the same one the overflow path forces
+// (recoverOverflow): the provider just proved, by staying silent, that
+// the context does not fit the way it was.
+func (a *Agent) shrinkRequest(ctx context.Context, history []ai.Message) []ai.Message {
+	if a.Store == nil {
+		return nil
+	}
+	before := requestBytes(history)
+	rebuilt := a.recoverOverflow(ctx)
+	if rebuilt == nil {
+		return nil
+	}
+	if requestBytes(rebuilt) >= before {
+		return nil // the rebuild is not smaller: nothing was gained
+	}
+	return rebuilt
+}
+
+// requestBytes is a cheap proxy for the size of a request on the wire: the
+// total text length of its messages. It is not the exact byte count (the
+// encoder adds JSON framing and the tool schemas), but it moves with the
+// thing that matters — a compaction that replaced a hundred tool results
+// with a summary shrinks it by orders of magnitude, and a rebuild that
+// changed nothing does not.
+func requestBytes(msgs []ai.Message) int {
+	n := 0
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			switch v := b.(type) {
+			case ai.TextBlock:
+				n += len(v.Text)
+			case ai.ThinkingBlock:
+				n += len(v.Thinking)
+			case ai.ToolCallBlock:
+				n += len(v.ID) + len(v.Name) + len(v.Arguments)
+			}
+		}
+	}
+	return n
+}
+
 // recoverOverflow forces a compaction (ignoring the threshold — the
 // provider just proved the context does not fit) and returns the rebuilt
 // history. nil means compaction was impossible or failed.
@@ -1663,6 +1760,66 @@ func (a *Agent) healthCheckProvider(ctx context.Context) error {
 	return hc.HealthCheck(ctx)
 }
 
+// slowRequestBudget is how long a request may wait for its response
+// headers before the turn says so.
+//
+// It is the gap the stream watchdog does not cover: ai's
+// FirstProgressTimeout bounds the wait AFTER the headers arrive, and the
+// header wait itself (the transport's 5-minute ResponseHeaderTimeout) had
+// no voice at all. Live 2026-10-20: a turn sat in that wait for 4h50m
+// across many attempts and the user saw an unexplained spinner — the
+// session file had no record of it either.
+//
+// A var, not a const: a test shortens it to a millisecond.
+var slowRequestBudget = 90 * time.Second
+
+// announceSilentProvider speaks up when the provider has not answered a
+// request within the budget: once on the event stream (the screen) and
+// once in the session file (the record that survives the turn).
+//
+// It is a notice, not an error: the turn is still waiting, and the wait
+// has a ceiling (the transport's header budget). What was missing was
+// the explanation.
+func (a *Agent) announceSilentProvider(stop <-chan struct{}, msgs int) {
+	t := time.NewTimer(slowRequestBudget)
+	defer t.Stop()
+	select {
+	case <-stop:
+		return
+	case <-t.C:
+	}
+	a.persistSilentProviderNotice(slowRequestBudget, msgs)
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&SilentProviderError{Waited: slowRequestBudget, Messages: msgs}))
+}
+
+// persistSilentProviderNotice records a provider that has not answered yet.
+// A CustomEntry, like every other recovery notice: it never reaches the
+// model as a turn, and it is readable by a human with jq.
+func (a *Agent) persistSilentProviderNotice(waited time.Duration, msgs int) {
+	if a == nil || a.Store == nil {
+		return
+	}
+	// A store with auto-persist enabled materializes on the first ASSISTANT
+	// message, so a turn that has not produced one yet wrote its notice
+	// into memory and lost it. This notice describes exactly that turn.
+	if a.Store.Path() == "" && a.Store.AutoPath() != "" {
+		if _, err := a.Store.EnsureOnDisk(a.Store.AutoPath(), a.Store.Options()); err != nil {
+			logx.Errorf("persist silent-provider notice: materialize session: %v", err)
+			return
+		}
+	}
+	data := map[string]any{
+		"waitedSeconds": int(waited.Round(time.Second) / time.Second),
+		"messages":      msgs,
+	}
+	if err := a.Store.Append(&session.CustomEntry{CustomType: "recovery_silent_provider", Data: data}); err != nil {
+		logx.Errorf("persist silent-provider notice: %v", err)
+	}
+}
+
 // oneTurn streams one assistant message.
 func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message) (*ai.Message, error) {
 	// A child context aborts the provider stream on a TTSR interrupt; the
@@ -1681,7 +1838,16 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 	req := a.liveRequest(system, history, a.toolDefs())
 	a.Hooks.OnStart(req)
 
+	// The header wait has no watchdog: the stream watchdog (ai's
+	// FirstProgressTimeout) starts once the headers ARRIVE, so a provider
+	// that never answers left the screen on a spinner with nothing to say
+	// why — and nothing in the session file either, because a turn that
+	// never completes writes nothing. The announcement below is that
+	// missing voice: it fires while the turn is still waiting.
+	silent := make(chan struct{})
+	go a.announceSilentProvider(silent, len(req.Messages))
 	ch, err := a.Provider.Stream(sctx, req)
+	close(silent)
 	if err != nil {
 		return nil, fmt.Errorf("agent: stream start: %w", err)
 	}

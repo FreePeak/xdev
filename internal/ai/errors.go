@@ -336,6 +336,27 @@ func Classify(err error) ErrClass {
 // name-resolution failure, which is not the local link being down.
 var outageRe = regexp.MustCompile(`(?i)(network is unreachable|no route to host|network is down|host is down|temporary failure in name resolution)`)
 
+// IsHeaderTimeout reports whether a request failed because the RESPONSE
+// HEADERS never arrived: the transport's ResponseHeaderTimeout fired
+// (internal/ai/wire.go's budget). The provider was asked and stayed silent
+// about THIS body.
+//
+// It is not an outage verdict, and the difference is the whole point: an
+// outage means the request never left the machine, so the same request
+// would work later. A silent provider was ASKING — the same body will be
+// silent again, because the body is what it could not serve. So the
+// recovery is a SMALLER request (the same move the overflow path makes),
+// never a replay of the same bytes.
+func IsHeaderTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The transport's own wording: "net/http: timeout awaiting response
+	// headers". Matched on the phrase, not the whole string, so the
+	// provider's api prefix (wirePost wraps it) does not matter.
+	return strings.Contains(err.Error(), "timeout awaiting response headers")
+}
+
 // IsNetworkOutage reports whether err is a local connectivity failure — the
 // transport never opened a connection to the provider, so every target and
 // every retry will fail identically until the machine is back on the
