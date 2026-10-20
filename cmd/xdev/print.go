@@ -1806,7 +1806,7 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	// govulncheck, semgrep, gitleaks); a missing binary is reported, not fatal.
 	reg.Register(tool.NewSecurityScanTool(cwd))
 	// M15: typesafe — System One evaluation (hosted Jev or local Laya);
-	// TYPESAFE_BASE_URL selects the endpoint and auth is optional.
+	// DECISION_BASE_URL selects the endpoint and auth is optional.
 	reg.Register(typesafe.NewTool(settings.TypeSafeConfig()))
 	// regression_tests — the change→tests selector: `go list` gives the exact
 	// candidate set from the dependency graph, and the typesafe block's

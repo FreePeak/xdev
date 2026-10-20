@@ -708,7 +708,7 @@ type Settings struct {
 	WebSearch WebSearchSettings `yaml:"webSearch"`
 	// TypeSafe configures the typesafe tool (M15): the System One model,
 	// API root, optional bearer key, and request timeout. The endpoint and
-	// key may also come from TYPESAFE_BASE_URL/TYPESAFE_API_KEY.
+	// key may also come from DECISION_BASE_URL/DECISION_API_KEY.
 	TypeSafe TypeSafeSettings `yaml:"typesafe"`
 	// Browser configures the browser tool (M13 #50): the CDP discovery
 	// endpoint of a Chrome, and whether xdev may start one on it when
