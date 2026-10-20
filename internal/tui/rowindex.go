@@ -110,6 +110,11 @@ type rowIndex struct {
 	start []int32     // start[i] = first row of block i; len(start) == len(rend)+1
 	dirty int32       // first row offset that may be stale (0 = everything)
 	view  []rowView   // scratch buffer for the visible window
+	// built says the layout holds a render for every block it indexes. A
+	// reset (resize, theme swap, /clear, transcript rewrite) clears it: the
+	// next sync BUILDS the window from the newest block backwards instead of
+	// extending a layout that no longer exists.
+	built bool
 }
 
 // reset drops every render (resize, theme swap, /clear, transcript rewrite).
@@ -117,6 +122,7 @@ func (x *rowIndex) reset() {
 	x.rend = x.rend[:0]
 	x.start = append(x.start[:0], 0)
 	x.dirty = 0
+	x.built = false
 }
 
 // grow extends the per-block tables to n blocks, leaving the new slots
@@ -251,22 +257,81 @@ func (a *App) sync(w int) int32 {
 	if len(x.rend) < n {
 		x.grow(n)
 	}
-	from := int32(n)
-	for i := range n {
-		if x.rend[i].key != a.renderKey(i, a.blocks[i], w) {
-			from = int32(i)
+	// A layout that holds nothing yet is BUILT; one that holds a layout is
+	// EXTENDED. Which one this is decides who retires the head.
+	var total int32
+	if !x.built {
+		// A layout that holds nothing yet — the first paint, a resize, a theme
+		// swap — is BUILT, not extended: the window is decided from the newest
+		// block backwards, so the blocks the cap retires are never rendered.
+		total = a.buildWindow(w)
+	} else {
+		from := int32(n)
+		for i := range n {
+			if x.rend[i].key != a.renderKey(i, a.blocks[i], w) {
+				from = int32(i)
+				break
+			}
+		}
+		if x.dirty < from {
+			from = x.dirty // a direct blockLines call may have shifted row counts
+		}
+
+		total = a.reconcile(w, from)
+		// The row cap last, on the offsets just computed: a trim can only ever
+		// shrink the transcript, so it never invalidates the scan above.
+		a.trimTranscript(total)
+		total = a.rowIdx.total()
+	}
+	return total
+}
+
+// buildWindow renders the transcript's window and retires the blocks that
+// cannot be in it.
+//
+// The row cap is a budget on what the reader scrolls, so the window is
+// decided BEFORE the render. Rendering every block of a long session and then
+// retiring the ones the cap drops is what put a 19 MB session's first paint
+// at 1.5 GB of allocations: the Go heap ballooned to ~450 MB between GCs and
+// RSS to ~500 MB (measured 2026-10-20). Walking the newest blocks backwards
+// and stopping at the cap renders only the window.
+//
+// The cut is the one the post-render trim made: the newest blocks that fit in
+// transcriptCap rows, with the newest transcriptKeepTail blocks kept whole —
+// the live turn's rows explain the answer being written, so they survive even
+// when they overrun the cap.
+func (a *App) buildWindow(w int) int32 {
+	x := &a.rowIdx
+	n := len(a.blocks)
+	kept := int32(0)
+	cut := n
+	for i := n - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		r := &x.rend[i]
+		r.lines = a.blockLines(i, b, w)
+		r.key = a.renderKey(i, b, w)
+		r.rail, r.railS, r.ts = a.rowChrome(b)
+		r.rows = int32(len(r.lines)) + 1
+		// The tail window is kept whole: the rows of the turn being written
+		// explain it, so they survive even when they overrun the cap.
+		if kept+r.rows > transcriptCap && n-i >= transcriptKeepTail {
+			cut = i + 1
 			break
 		}
+		kept += r.rows
+		cut = i
 	}
-	if x.dirty < from {
-		from = x.dirty // a direct blockLines call may have shifted row counts
+	a.retireHead(cut)
+	// The offsets are the retained blocks' rows: the window this pass built.
+	total := int32(0)
+	x.start = x.start[:0]
+	x.start = append(x.start, 0)
+	for i := range x.rend {
+		total += x.rend[i].rows
+		x.start = append(x.start, total)
 	}
-
-	total := a.reconcile(w, from)
-	// The row cap last, on the offsets just computed: a trim can only ever
-	// shrink the transcript, so it never invalidates the scan above.
-	a.trimTranscript(total)
-	total = a.rowIdx.total()
+	x.dirty = int32(len(x.rend))
+	x.built = true
 	return total
 }
 
@@ -319,7 +384,36 @@ func (a *App) reconcile(w int, from int32) int32 {
 		}
 	}
 	x.dirty = int32(n)
+	x.built = true
 	return total
+}
+
+// retireHead drops the first cut blocks from the transcript and the row index:
+// the blocks leave the view, their renders leave the index, and the stamps are
+// renumbered to the blocks that stay.
+func (a *App) retireHead(cut int) bool {
+	if cut <= 0 {
+		return false
+	}
+	x := &a.rowIdx
+	for _, b := range a.blocks[:cut] {
+		if b.Kind == KindUser {
+			a.droppedUserRows++
+		}
+	}
+	a.blocks = append([]*Block(nil), a.blocks[cut:]...)
+	// allocation: the retained renders are exactly the ones worth keeping, and
+	// re-rendering the whole tail every trim would cost the frame this pass is
+	// meant to save.
+	m := copy(x.rend, x.rend[cut:])
+	x.rend = x.rend[:m]
+	for i := range x.rend {
+		x.rend[i].key.idx = i
+		for j := range x.rend[i].subs {
+			x.rend[i].subs[j].block = i
+		}
+	}
+	return true
 }
 
 // --- the row cap ---------------------------------------------------------
@@ -356,28 +450,12 @@ func (a *App) trimTranscript(total int32) {
 	if cut == 0 {
 		return
 	}
-	for _, b := range a.blocks[:cut] {
-		if b.Kind == KindUser {
-			a.droppedUserRows++
-		}
-	}
-	a.blocks = append([]*Block(nil), a.blocks[cut:]...)
-	// allocation: the retained renders are exactly the ones worth keeping, and
-	// re-rendering the whole tail every trim would cost the frame this pass is
-	// meant to save.
-	m := copy(x.rend, x.rend[cut:])
-	x.rend = x.rend[:m]
-	for i := range x.rend {
-		x.rend[i].key.idx = i
-		for j := range x.rend[i].subs {
-			x.rend[i].subs[j].block = i
-		}
-	}
+	a.retireHead(cut)
 	// start[] is rebuilt from the shifted renders rather than sliced: start[i]
 	// counts rows of blocks BEFORE i, and the dropped prefix is exactly the
 	// offset every retained block loses.
 	base := x.start[cut]
-	m = copy(x.start, x.start[cut:])
+	m := copy(x.start, x.start[cut:])
 	x.start = x.start[:m]
 	for i := range x.start {
 		x.start[i] -= base
