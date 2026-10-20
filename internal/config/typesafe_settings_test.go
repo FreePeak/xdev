@@ -10,15 +10,15 @@ import (
 
 func TestTypeSafeSettings(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("TYPESAFE_BASE_URL", "http://env.example")
-	t.Setenv("TYPESAFE_API_KEY", "hosted-key")
-	t.Setenv("LAYA_API_KEY", "")
+	t.Setenv("DECISION_BASE_URL", "http://env.example")
+	t.Setenv("DECISION_API_KEY", "service-key")
+	t.Setenv("DECISION_KEY_FILE", filepath.Join(t.TempDir(), "absent"))
 	dir := t.TempDir()
 	t.Setenv("XDEV_AGENT_DIR", dir)
 	cwd := t.TempDir()
 	writeFile(t, GlobalSettingsPath(), `typesafe:
-  baseUrl: ${TYPESAFE_BASE_URL}
-  apiKey: ${TYPESAFE_API_KEY}
+  baseUrl: ${DECISION_BASE_URL}
+  apiKey: ${DECISION_API_KEY}
   model: english
   timeout: 3s
 `)
@@ -28,7 +28,7 @@ func TestTypeSafeSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := s.TypeSafeConfig()
-	if cfg.BaseURL != "http://env.example" || cfg.APIKey != "hosted-key" || cfg.Model != "english" || cfg.Timeout != 3*time.Second {
+	if cfg.BaseURL != "http://env.example" || cfg.APIKey != "service-key" || cfg.Model != "english" || cfg.Timeout != 3*time.Second {
 		t.Fatalf("TypeSafeConfig = %+v", cfg)
 	}
 }
@@ -36,9 +36,9 @@ func TestTypeSafeSettings(t *testing.T) {
 func TestTypeSafeLocalSettings(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
-	t.Setenv("TYPESAFE_BASE_URL", "")
-	t.Setenv("TYPESAFE_API_KEY", "")
-	t.Setenv("LAYA_API_KEY", "local-key")
+	t.Setenv("DECISION_BASE_URL", "")
+	t.Setenv("DECISION_API_KEY", "local-key")
+	t.Setenv("DECISION_KEY_FILE", filepath.Join(t.TempDir(), "absent"))
 	cwd := t.TempDir()
 	writeFile(t, GlobalSettingsPath(), `typesafe:
   baseUrl: http://127.0.0.1:8000
@@ -58,9 +58,9 @@ func TestTypeSafeLocalSettings(t *testing.T) {
 func TestTypeSafeOverlayKeepsUnsetFields(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
-	t.Setenv("TYPESAFE_BASE_URL", "")
-	t.Setenv("TYPESAFE_API_KEY", "")
-	t.Setenv("LAYA_API_KEY", "")
+	t.Setenv("DECISION_BASE_URL", "")
+	t.Setenv("DECISION_API_KEY", "")
+	t.Setenv("DECISION_KEY_FILE", filepath.Join(t.TempDir(), "absent"))
 	cwd := t.TempDir()
 	writeFile(t, GlobalSettingsPath(), `typesafe:
   baseUrl: http://127.0.0.1:8000
@@ -84,13 +84,13 @@ func TestTypeSafeOverlayKeepsUnsetFields(t *testing.T) {
 func TestTypeSafeEndpointOverrideDropsOldKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
-	t.Setenv("TYPESAFE_BASE_URL", "")
-	t.Setenv("TYPESAFE_API_KEY", "")
-	t.Setenv("LAYA_API_KEY", "")
+	t.Setenv("DECISION_BASE_URL", "")
+	t.Setenv("DECISION_API_KEY", "")
+	t.Setenv("DECISION_KEY_FILE", filepath.Join(t.TempDir(), "absent"))
 	cwd := t.TempDir()
 	writeFile(t, GlobalSettingsPath(), `typesafe:
-  baseUrl: https://typesafe-staging.example
-  apiKey: hosted-key
+  baseUrl: https://decision-staging.example
+  apiKey: service-key
 `)
 	overlay := writeFile(t, filepath.Join(t.TempDir(), "local.yml"), `typesafe:
   baseUrl: http://127.0.0.1:8000

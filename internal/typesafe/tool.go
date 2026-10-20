@@ -10,17 +10,18 @@ import (
 // ToolName is the name the model calls.
 const ToolName = "typesafe"
 
-// Tool evaluates text/state against typed questions using TypeSafe's
-// hosted System One API or a self-hosted Laya-compatible endpoint. It
-// returns calibrated probabilities and typed answers the code can combine.
+// Tool evaluates text/state against typed questions using the System One
+// decision service. It returns calibrated probabilities and typed answers the
+// code can combine.
 //
 // Arguments:
 //   - state: the content to evaluate (string, object, or array)
 //   - questions: map of typed questions (noul/choice/score)
-//   - model (optional): model id; hosted defaults to "jev-latest"; Laya accepts its checkpoint names
+//   - model (optional): model id; the service serves the checkpoint it has
+//     loaded and ignores this
 //
-// TYPESAFE_BASE_URL or typesafe.baseUrl selects the endpoint.
-// TYPESAFE_API_KEY or typesafe.apiKey is optional for keyless local servers.
+// DECISION_BASE_URL or typesafe.baseUrl selects the endpoint.
+// DECISION_API_KEY, DECISION_KEY_FILE or typesafe.apiKey supplies the bearer.
 type Tool struct {
 	Settings Settings
 }
@@ -33,7 +34,7 @@ func NewTool(s Settings) *Tool {
 func (t *Tool) Name() string { return ToolName }
 
 func (t *Tool) Description() string {
-	return "evaluate text/state against typed questions using TypeSafe System One or a self-hosted Laya endpoint; returns calibrated probabilities and typed answers"
+	return "evaluate text/state against typed questions using the System One decision service; returns calibrated probabilities and typed answers"
 }
 
 func (t *Tool) Parameters() json.RawMessage {
@@ -50,7 +51,7 @@ func (t *Tool) Parameters() json.RawMessage {
     },
     "model": {
       "type": "string",
-      "description": "model that handles the request (hosted default: jev-latest; Laya auto-routes when omitted)"
+      "description": "model that handles the request; the service serves the checkpoint it has loaded and ignores this"
     }
   },
   "required": ["state", "questions"]

@@ -2,6 +2,7 @@ package typesafe
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -11,14 +12,14 @@ import (
 // for the same reason WebSearchSettings lives in internal/websearch.
 type Settings struct {
 	// BaseURL optionally overrides the API root. Empty uses
-	// TYPESAFE_BASE_URL when set, otherwise the hosted TypeSafe API.
+	// DECISION_BASE_URL when set, otherwise the decision service.
 	BaseURL string `yaml:"baseUrl"`
 	// APIKey optionally holds the bearer token for POST /v1/systemone.
-	// Empty is valid for a local Laya sidecar that does not require auth.
+	// Empty is valid for an endpoint that does not require auth.
 	APIKey string `yaml:"apiKey"`
 	// Model is the System One model that handles the request.
-	// Hosted Jev defaults to "jev-latest"; a custom Laya endpoint
-	// auto-routes when this is empty.
+	// The decision service serves the checkpoint it has loaded and ignores
+	// this, so it is empty by default.
 	Model string `yaml:"model"`
 	// Timeout bounds one request.
 	Timeout time.Duration `yaml:"timeout"`
@@ -30,23 +31,20 @@ type Settings struct {
 	Fanout bool `yaml:"fanout"`
 }
 
-// Config returns settings with environment fallbacks and defaults. A custom
-// endpoint uses LAYA_API_KEY, never the hosted TYPESAFE_API_KEY implicitly;
-// this keeps a configured Laya gateway from receiving a TypeSafe secret.
+// Config returns settings with environment fallbacks and defaults.
+//
+// The only backend is the decision service, so there is no hosted endpoint to
+// fall back to and no second key to keep straight: the bearer comes from
+// DECISION_API_KEY, or from the key file DECISION_KEY_FILE points at.
 func (s Settings) Config() Settings {
 	if strings.TrimSpace(s.BaseURL) == "" {
-		s.BaseURL = os.Getenv("TYPESAFE_BASE_URL")
+		s.BaseURL = os.Getenv("DECISION_BASE_URL")
 	}
-	hosted := hostedEndpoint(s.BaseURL)
 	if strings.TrimSpace(s.APIKey) == "" {
-		if hosted {
-			s.APIKey = os.Getenv("TYPESAFE_API_KEY")
-		} else {
-			s.APIKey = os.Getenv("LAYA_API_KEY")
-		}
+		s.APIKey = os.Getenv("DECISION_API_KEY")
 	}
-	if s.Model == "" && hosted {
-		s.Model = DefaultModel
+	if strings.TrimSpace(s.APIKey) == "" {
+		s.APIKey = decisionKeyFile()
 	}
 	if s.Timeout <= 0 {
 		s.Timeout = DefaultTimeout
@@ -54,7 +52,21 @@ func (s Settings) Config() Settings {
 	return s
 }
 
-func hostedEndpoint(raw string) bool {
-	base := strings.TrimRight(strings.TrimSpace(raw), "/")
-	return base == "" || base == defaultBaseURL
+// decisionKeyFile reads the bearer token from the key file. The token is a
+// secret, so its normal home is a file with owner-only permissions rather
+// than the environment of a shell.
+func decisionKeyFile() string {
+	path := strings.TrimSpace(os.Getenv("DECISION_KEY_FILE"))
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(home, ".config", "decision", "api_key")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }

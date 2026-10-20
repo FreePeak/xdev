@@ -14,19 +14,19 @@ import (
 	"time"
 )
 
-// defaultBaseURL is the hosted API root. baseURL remains a test seam
+// defaultBaseURL is the decision service root. baseURL remains a test seam
 // for tests that construct Evaluator directly.
-const defaultBaseURL = "https://api.typesafe.ai"
+const defaultBaseURL = "https://decision.freepeak.dev"
 
 var baseURL = defaultBaseURL
 
 // resolveBaseURL applies endpoint precedence after config.LoadEnv runs:
-// explicit settings, then TYPESAFE_BASE_URL, then the hosted API.
+// explicit settings, then DECISION_BASE_URL, then the decision service.
 func resolveBaseURL(configured string) string {
 	if v := strings.TrimSpace(configured); v != "" {
 		return v
 	}
-	if v := strings.TrimSpace(os.Getenv("TYPESAFE_BASE_URL")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("DECISION_BASE_URL")); v != "" {
 		return v
 	}
 	return baseURL
@@ -36,9 +36,9 @@ func resolveBaseURL(configured string) string {
 const systemOnePath = "/v1/systemone"
 
 // DefaultModel is the model the tool sends when the caller omits one.
-// Local Laya servers accept "english", "multilingual", or
-// "typed-decisions"; the hosted Jev API accepts "jev-latest".
-const DefaultModel = "jev-latest"
+// The decision service serves the checkpoint it has loaded and ignores the
+// field, so the request names no model.
+const DefaultModel = ""
 
 // DefaultTimeout bounds one request to the API.
 const DefaultTimeout = 10 * time.Second
@@ -72,8 +72,11 @@ const (
 // {0: 0.0201, 1: 0.0161, 2: 0.9637} for the same text wrapped in one key.
 // A genuinely multi-part state stays an object, which is what it is for.
 type EvalRequest struct {
-	State     any            `json:"state"`
-	Model     string         `json:"model"`
+	State any `json:"state"`
+	// Model is omitted when empty: the decision service serves the checkpoint
+	// it has loaded, and naming a model in the request is a claim the client
+	// cannot keep.
+	Model     string         `json:"model,omitempty"`
 	Questions map[string]any `json:"questions"`
 }
 
