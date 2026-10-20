@@ -40,7 +40,7 @@ func TestTranscriptCapDropsTheOldestBlocks(t *testing.T) {
 	app.mu.Lock()
 	last := app.blocks[len(app.blocks)-1]
 	firstKind := app.blocks[0].Kind
-	dropped := app.droppedRows
+	dropped := app.droppedUserRows
 	app.mu.Unlock()
 	if !strings.Contains(last.Text, "L") {
 		t.Fatalf("the newest block was dropped: %q", last.Text)
@@ -75,10 +75,10 @@ func TestTranscriptCapLeavesShortSessionsAlone(t *testing.T) {
 	idxFill(app, 3, 20)
 	app.sync(app.contentWidth())
 	app.mu.Lock()
-	blocks, dropped := len(app.blocks), app.droppedRows
+	blocks, dropped := len(app.blocks), app.droppedUserRows
 	app.mu.Unlock()
 	if dropped != 0 {
-		t.Fatalf("a short session dropped %d rows", dropped)
+		t.Fatalf("a short session dropped %d prompt rows", dropped)
 	}
 	if blocks != 15 { // 3 turns × 5 blocks (user, assistant, system, call, result)
 		t.Fatalf("blocks = %d, want 15", blocks)
@@ -138,7 +138,7 @@ func TestResetClearsTheDroppedHead(t *testing.T) {
 	capFill(app, 400, 60)
 	app.sync(app.contentWidth())
 	app.mu.Lock()
-	if app.droppedRows == 0 {
+	if app.droppedUserRows == 0 {
 		app.mu.Unlock()
 		t.Fatal("the fixture dropped nothing")
 	}
@@ -147,8 +147,8 @@ func TestResetClearsTheDroppedHead(t *testing.T) {
 	app.Reset()
 	app.mu.Lock()
 	defer app.mu.Unlock()
-	if app.droppedRows != 0 || app.droppedUserRows != 0 {
-		t.Fatalf("reset kept droppedRows=%d droppedUserRows=%d", app.droppedRows, app.droppedUserRows)
+	if app.droppedUserRows != 0 {
+		t.Fatalf("reset kept droppedUserRows=%d", app.droppedUserRows)
 	}
 }
 
