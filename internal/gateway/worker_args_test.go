@@ -51,6 +51,13 @@ func TestWorkerArgs(t *testing.T) {
 		t.Errorf("missing --model %s, got %v", model, args)
 	}
 
+	// A turn must not live forever. A plain print run has no wall-clock
+	// ceiling of its own (only --bg children get one), so a worker that
+	// wedged would hold its chat for good.
+	if !hasFlagValue(args, "--max-time", workerMaxTime) {
+		t.Errorf("missing --max-time %s, got %v", workerMaxTime, args)
+	}
+
 	// A fresh chat has neither, and neither flag may appear with an empty value
 	// (the worker would parse "" as the model or session).
 	fresh := workerArgs("", "", text)

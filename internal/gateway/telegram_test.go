@@ -31,9 +31,14 @@ type fakeBot struct {
 	failEdit bool
 	// actions records (chatID, action) per sendChatAction.
 	actions []sentAction
+	// answers records one answerCallbackQuery per closed tap.
+	answers []sentAnswer
 	// failAfter makes sendMessage fail once this many messages have been
 	// sent (0 = never fail), which is how a partial send is tested.
 	failAfter int
+	// failFirst makes the first N sendMessage calls answer 429, the shape
+	// of a link that is rate-limiting right now.
+	failFirst int
 	// conflictOnce makes the first getUpdates answer 409 — the shape of
 	// "another client poked this token just now".
 	conflictOnce bool
@@ -53,11 +58,22 @@ type sentMsg struct {
 	Chat      int64
 	Text      string
 	MessageID int64
+	// Keyboard is the inline keyboard the message carried, if any.
+	Keyboard [][]InlineButton
 }
 
 type sentEdit struct {
 	MessageID int64
 	Text      string
+	// Keyboard is the inline keyboard the edit carried, if any.
+	Keyboard [][]InlineButton
+}
+
+// sentAnswer is one answerCallbackQuery: the tap that was closed and what
+// the user was told.
+type sentAnswer struct {
+	ID   string
+	Text string
 }
 
 type sentAction struct {
@@ -124,14 +140,23 @@ func newFakeBot(t *testing.T) *fakeBot {
 	})
 	mux.HandleFunc("/bot"+b.token+"/sendMessage", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			ChatID int64  `json:"chat_id"`
-			Text   string `json:"text"`
+			ChatID     int64          `json:"chat_id"`
+			Text       string         `json:"text"`
+			ReplyMarkup inlineMarkup `json:"reply_markup"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		b.mu.Lock()
+		if b.failFirst > 0 {
+			b.failFirst--
+			b.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1"}`))
+			return
+		}
 		if b.failAfter > 0 && len(b.sent) >= b.failAfter {
 			b.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
@@ -140,14 +165,29 @@ func newFakeBot(t *testing.T) *fakeBot {
 			return
 		}
 		n := len(b.sent) + 1
-		b.sent = append(b.sent, sentMsg{Chat: payload.ChatID, Text: payload.Text, MessageID: int64(n)})
+		b.sent = append(b.sent, sentMsg{Chat: payload.ChatID, Text: payload.Text, MessageID: int64(n), Keyboard: payload.ReplyMarkup.buttons()})
 		b.mu.Unlock()
 		writeOK(w, map[string]any{"message_id": int64(n)})
 	})
+	mux.HandleFunc("/bot"+b.token+"/answerCallbackQuery", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			ID   string `json:"callback_query_id"`
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.mu.Lock()
+		b.answers = append(b.answers, sentAnswer{ID: payload.ID, Text: payload.Text})
+		b.mu.Unlock()
+		writeOK(w, true)
+	})
 	mux.HandleFunc("/bot"+b.token+"/editMessageText", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			MessageID int64  `json:"message_id"`
-			Text      string `json:"text"`
+			MessageID   int64         `json:"message_id"`
+			Text        string        `json:"text"`
+			ReplyMarkup inlineMarkup `json:"reply_markup"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -156,7 +196,7 @@ func newFakeBot(t *testing.T) *fakeBot {
 		b.mu.Lock()
 		fail := b.failEdit
 		if !fail {
-			b.edits = append(b.edits, sentEdit{MessageID: payload.MessageID, Text: payload.Text})
+			b.edits = append(b.edits, sentEdit{MessageID: payload.MessageID, Text: payload.Text, Keyboard: payload.ReplyMarkup.buttons()})
 		}
 		b.mu.Unlock()
 		if fail {
@@ -171,6 +211,31 @@ func newFakeBot(t *testing.T) *fakeBot {
 	t.Cleanup(srv.Close)
 	b.srv = srv
 	return b
+}
+
+// inlineMarkup is the reply_markup in the shape the Bot API sends it, so a
+// test can read what buttons a message offered.
+type inlineMarkup struct {
+	InlineKeyboard [][]struct {
+		Text         string `json:"text"`
+		CallbackData string `json:"callback_data"`
+	} `json:"inline_keyboard"`
+}
+
+// buttons is the markup as the package's own type.
+func (m inlineMarkup) buttons() [][]InlineButton {
+	if len(m.InlineKeyboard) == 0 {
+		return nil
+	}
+	out := make([][]InlineButton, 0, len(m.InlineKeyboard))
+	for _, row := range m.InlineKeyboard {
+		buttons := make([]InlineButton, 0, len(row))
+		for _, b := range row {
+			buttons = append(buttons, InlineButton{Text: b.Text, CallbackData: b.CallbackData})
+		}
+		out = append(out, buttons)
+	}
+	return out
 }
 
 func writeOK(w http.ResponseWriter, result any) {
@@ -224,6 +289,26 @@ func (b *fakeBot) sentEdits() []sentEdit {
 	return append([]sentEdit(nil), b.edits...)
 }
 
+// sentAnswers returns a copy of the recorded answerCallbackQuery calls.
+func (b *fakeBot) sentAnswers() []sentAnswer {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]sentAnswer(nil), b.answers...)
+}
+
+// keyboardOf returns the inline keyboard the last message to the chat
+// carried.
+func (b *fakeBot) keyboardOf(chat int64) [][]InlineButton {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := len(b.sent) - 1; i >= 0; i-- {
+		if b.sent[i].Chat == chat {
+			return b.sent[i].Keyboard
+		}
+	}
+	return nil
+}
+
 func (b *fakeBot) url() string { return b.srv.URL }
 
 // conflictCount is how many 409s the fake bot has served (mutex-guarded read,
@@ -236,6 +321,17 @@ func (b *fakeBot) conflictCount() int {
 
 func textUpdate(text string, chat int64) Update {
 	return Update{UpdateID: time.Now().UnixNano(), Message: &Message{Text: text, Chat: Chat{ID: chat, Type: "private"}, From: &User{ID: chat, Username: "tester"}}}
+}
+
+// callbackUpdate is a tap on an inline button: the payload the button
+// carried, on the message the button sits under.
+func callbackUpdate(data string, chat int64) Update {
+	return Update{UpdateID: time.Now().UnixNano(), CallbackQuery: &CallbackQuery{
+		ID:   "cb-1",
+		Data: data,
+		Message: &Message{MessageID: 11, Text: "the list", Chat: Chat{ID: chat, Type: "private"},
+			From: &User{ID: chat, Username: "tester"}},
+	}}
 }
 
 // TestTypingKeepsTheBubbleAliveDuringATurn is the reported behaviour: while a
@@ -498,5 +594,46 @@ func TestCallMasksTokenToAnUnreachableAPI(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "111111111:TESTtest") {
 		t.Errorf("the error leaked the token: %v", err)
+	}
+}
+
+// TestSendHasItsOwnTimeout: a send that hangs must not hold the caller for
+// the long-poll budget. The client's two-minute timeout is right for
+// getUpdates, which holds the connection on purpose, and wrong for every
+// other method: a command reply that waits two minutes on a dead link stops
+// the bridge from reading the next message.
+func TestSendHasItsOwnTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		writeOK(w, true)
+	}))
+	t.Cleanup(srv.Close)
+
+	tg := &Telegram{Token: "111111111:TESTtestTESTtestTESTtestTESTtestTESTtest",
+		BaseURL: srv.URL, HTTPClient: srv.Client(), SendTimeout: 150 * time.Millisecond}
+	start := time.Now()
+	err := tg.SendMessage(context.Background(), 1, "hello")
+	if err == nil {
+		t.Fatal("a hanging send must fail")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("send took %s — it waited for the long-poll budget instead of its own", d)
+	}
+}
+
+// TestLongPollKeepsItsOwnBudget: the timeout that bounds a send must not
+// bound the poll, or every quiet poll would look like a failure and the
+// daemon would spin on backoff.
+func TestLongPollKeepsItsOwnBudget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(700 * time.Millisecond)
+		writeOK(w, []Update{})
+	}))
+	t.Cleanup(srv.Close)
+
+	tg := &Telegram{Token: "111111111:TESTtestTESTtestTESTtestTESTtestTESTtest",
+		BaseURL: srv.URL, HTTPClient: srv.Client(), SendTimeout: 100 * time.Millisecond}
+	if _, err := tg.GetUpdates(context.Background(), 0, 1); err != nil {
+		t.Fatalf("a long poll must not be cut short by the send timeout: %v", err)
 	}
 }

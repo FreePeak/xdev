@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,12 +39,14 @@ const slashHelp = `xdev gateway — Telegram bridge
 
   /help            this message
   /status          bot, workspace, and this chat's session
-  /model           show this chat's model and what else is available
+  /model           show this chat's model and the list to pick from
   /model <ref>     run this chat on another model (e.g. onegw/execution)
   /model default   go back to the gateway's configured model
   /new             start a fresh session for this chat
   /stop            cancel the running turn
   /whoami          your Telegram user and chat id
+
+  /model also comes with buttons: tap one to switch this chat to it.
 
 Anything else is sent to the xdev agent as a prompt.`
 
@@ -88,6 +92,16 @@ type Daemon struct {
 	// names. Uploading is a network call, so it is never held across one.
 	badgeMu  sync.Mutex
 	badgeLeg string
+	// turns is the per-chat queue of pending turns. The poll loop pushes and
+	// goes back to polling: a turn that takes minutes must not stop the
+	// bridge from answering, and must not make /stop unreachable.
+	turns *turnQueue
+	// sendBackoff is the pause before the first send retry (0 = the
+	// default). A field so a test does not have to wait a real second.
+	sendBackoff time.Duration
+	// ctx is the daemon's run context, set by Run. The queue's runners use
+	// it, so a shutdown cancels the turns in flight.
+	ctx context.Context
 }
 type Options struct {
 	Settings *config.Settings
@@ -108,6 +122,14 @@ func (d *Daemon) logFn(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "xdev gateway: "+format+"\n", args...)
+}
+
+// backoff is the pause before the first send retry.
+func (d *Daemon) backoff() time.Duration {
+	if d.sendBackoff > 0 {
+		return d.sendBackoff
+	}
+	return DefaultSendBackoff
 }
 
 // TokenPath is the 0600 file `xdev gateway setup` writes and the daemon reads
@@ -148,7 +170,7 @@ func NewDaemon(opts Options) (*Daemon, error) {
 	if ws == "" {
 		ws = "."
 	}
-	return &Daemon{
+	d := &Daemon{
 		tg:        &Telegram{Token: token, BaseURL: opts.BaseURL, Logf: opts.Logf},
 		cfg:       s,
 		chats:     chats,
@@ -162,7 +184,11 @@ func NewDaemon(opts Options) (*Daemon, error) {
 		chunk:     s.GatewayReplyChunk(),
 		model:     strings.TrimSpace(s.Gateway.Model),
 		models:    config.LoadModelsLayered,
-	}, nil
+	}
+	// The queue runs a turn off the poll goroutine, so the bridge keeps
+	// answering while a turn is in flight.
+	d.turns = newTurnQueue(d.runTurn)
+	return d, nil
 }
 
 // BotName reports the bot identity (also the token check setup runs).
@@ -173,6 +199,10 @@ func (d *Daemon) TokenMask() string { return MaskToken(d.tg.Token) }
 
 // Run polls until ctx is done.
 func (d *Daemon) Run(ctx context.Context) error {
+	// The queue's runners need the daemon's context: a shutdown must cancel
+	// the turns in flight rather than leave them answering a chat nobody is
+	// listening to any more.
+	d.ctx = ctx
 	me, err := d.tg.GetMe(ctx)
 	if err != nil {
 		return fmt.Errorf("gateway: %w (is the bot token valid?)", err)
@@ -185,6 +215,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := WriteStatus(d.dataDir, Status{PID: os.Getpid(), Version: d.version, BotName: me.Username, Workspace: d.workspace, Started: time.Now().UTC()}); err != nil {
 		d.logFn("gateway: status file: %v", err)
 	}
+	// A turn the previous run had in flight lost its answer to the restart.
+	// The chat is told, because "no answer" and "still working" look the
+	// same from a phone.
+	d.reportLostTurns(ctx)
 	// Register the "/" menu. A failure here is a warning, never fatal: the
 	// menu is a convenience, and a bridge that must see its commands typed
 	// still works.
@@ -273,6 +307,13 @@ func allowAllNote(all bool) string {
 
 // handle authorizes and routes one update.
 func (d *Daemon) handle(ctx context.Context, u Update) {
+	// A tap on an inline button arrives as its own update: the user picked
+	// something out of a list the bot sent, so there is nothing to authorize
+	// beyond the chat the button sits in.
+	if u.CallbackQuery != nil {
+		d.callback(ctx, u.CallbackQuery)
+		return
+	}
 	m := u.Message
 	chat := m.Chat.ID
 	if !allowed(chat, d.allow, d.allowAll) {
@@ -314,9 +355,81 @@ func (d *Daemon) handle(ctx context.Context, u Update) {
 		}
 		_ = d.reply(ctx, chat, "Stopped.")
 	default:
-		d.turn(ctx, chat, text)
+		// The turn runs on the chat's own runner, not on the poll goroutine:
+		// a turn that takes minutes must not stop the bridge from reading
+		// the next message, and must not make /stop unreachable.
+		d.queue().push(chat, text)
 	}
 }
+
+// queue is the daemon's turn queue. A daemon built by hand (a test) has
+// none, so it gets one here — the poll loop is the only caller.
+func (d *Daemon) queue() *turnQueue {
+	if d.turns == nil {
+		d.turns = newTurnQueue(d.runTurn)
+	}
+	return d.turns
+}
+
+// runTurn is the queue's worker: one chat's turn, on the daemon's context.
+func (d *Daemon) runTurn(chat int64, text string) {
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.turn(ctx, chat, text)
+}
+
+// markPending records a turn in flight, so a daemon that dies before the
+// answer lands can report the loss on its next start.
+func (d *Daemon) markPending(chat int64, sessionID, text string) {
+	turns := ReadPending(d.dataDir)
+	turns[chat] = PendingTurn{Chat: chat, Session: sessionID, Text: text, Started: time.Now().UTC()}
+	if err := WritePending(d.dataDir, turns); err != nil {
+		d.logFn("gateway: record the pending turn for chat %d: %v", chat, err)
+	}
+}
+
+// finishPending clears the record of a turn that ended — unless the daemon
+// is going down. A cancelled context means the answer never reached the
+// chat, so the record has to survive for the next start to report.
+func (d *Daemon) finishPending(chat int64) {
+	if d.ctx != nil && d.ctx.Err() != nil {
+		return
+	}
+	turns := ReadPending(d.dataDir)
+	if _, ok := turns[chat]; !ok {
+		return
+	}
+	delete(turns, chat)
+	if err := WritePending(d.dataDir, turns); err != nil {
+		d.logFn("gateway: clear the pending turn for chat %d: %v", chat, err)
+	}
+}
+
+// reportLostTurns tells the chats whose turn was lost to a restart. The
+// answer existed and was dropped; the user is owed the truth about it.
+//
+// The record is cleared per chat, right after that chat's notice: a record
+// left behind would have the next start repeat the notice, and "your turn
+// was lost" repeated once is a second loss the user has to think about.
+func (d *Daemon) reportLostTurns(ctx context.Context) {
+	turns := ReadPending(d.dataDir)
+	if len(turns) == 0 {
+		return
+	}
+	for chat, t := range turns {
+		d.logFn("gateway: chat %d lost a turn to a restart (%s)", chat, shortID(t.Session))
+		_ = d.sendText(ctx, chat, lostTurnNotice)
+		delete(turns, chat)
+		if err := WritePending(d.dataDir, turns); err != nil {
+			d.logFn("gateway: clear the pending turn for chat %d: %v", chat, err)
+		}
+	}
+}
+
+// lostTurnNotice is what a chat is told when its turn was lost to a restart.
+const lostTurnNotice = "The gateway restarted while your turn was running, so that answer never arrived. Send it again."
 
 func whoami(m *Message, chat int64) string {
 	var b strings.Builder
@@ -401,11 +514,82 @@ func (d *Daemon) replySeen(ctx context.Context, chat int64, text, seen string) (
 		text = "(no answer)"
 	}
 	for _, part := range ChunkText(text, d.chunk) {
-		if err := d.tg.SendMessage(ctx, chat, part); err != nil {
+		if err := d.sendText(ctx, chat, part); err != nil {
 			return "", err
 		}
 	}
 	return text, nil
+}
+
+// sendAttempts is how many times one message is sent before it is given up
+// on: the first try, then two more after a pause.
+const sendAttempts = 3
+
+// DefaultSendBackoff is the pause before the first retry.
+const DefaultSendBackoff = time.Second
+
+// sendText sends one message to the chat, retrying a transient failure.
+//
+// Telegram's own refusals (400/401/403) are permanent and are not retried:
+// the same message would fail the same way. A transport error, a 429 or a 5xx
+// is the link having a moment, and the answer is worth a few more tries —
+// the daemon's log shows this link failing for minutes at a time, and the
+// answer is already in hand when it does. The retry is bounded, so a dead
+// network costs seconds rather than minutes, and it stops the moment the
+// daemon's context is cancelled: a shutdown is not a network problem.
+func (d *Daemon) sendText(ctx context.Context, chat int64, text string) error {
+	return d.sendTextKeyboard(ctx, chat, text, nil)
+}
+
+// sendTextKeyboard is sendText with an inline keyboard under the message.
+func (d *Daemon) sendTextKeyboard(ctx context.Context, chat int64, text string, kb InlineKeyboard) error {
+	backoff := d.backoff()
+	var err error
+	for attempt := 1; attempt <= sendAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+		if _, err = d.tg.SendMessageKeyboard(ctx, chat, text, kb); err == nil {
+			return nil
+		}
+		if !retryableSend(err) {
+			return err
+		}
+		d.logFn("gateway: send to chat %d failed (%v); retrying", chat, err)
+	}
+	return err
+}
+
+// retryableSend reports whether a failed send is worth another attempt: a
+// transport error (no answer ever reached us), Telegram's rate limit, or a
+// server-side failure. Everything else — a bad token, a chat the bot cannot
+// write to, a malformed request — would fail exactly the same way next time.
+func retryableSend(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A cancelled daemon is not a network problem: the turn is over.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var api *APIError
+	if errors.As(err, &api) {
+		return api.Code == http.StatusTooManyRequests || api.Code >= 500 || api.HTTPStatus >= 500
+	}
+	// An answer that never was a Bot API envelope: the edge or a proxy
+	// answered instead. A 5xx there is the same "try again" moment.
+	var httpErr *httpError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status == http.StatusTooManyRequests || httpErr.Status >= 500
+	}
+	// No HTTP status was ever reached: the request got no answer.
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
 }
 
 // startTyping keeps the chat's typing bubble alive while the turn runs, and
@@ -448,6 +632,12 @@ func (d *Daemon) turn(ctx context.Context, chat int64, text string) {
 
 	sessionID, _ := d.chats.Session(chat)
 	started := time.Now()
+	// The turn is recorded before the worker starts: a daemon that dies now
+	// has to be able to tell the chat that the answer was lost. The record
+	// is cleared when the turn ends — unless the daemon is going down, which
+	// is exactly the case the next start has to report.
+	d.markPending(chat, sessionID, text)
+	defer d.finishPending(chat)
 	w, err := d.spawn(ctx, sessionID, chat, text)
 	if err != nil {
 		d.logFn("gateway: spawn failed: %v", err)
@@ -673,6 +863,15 @@ func (w *worker) finish(res workerResult) {
 // clip) in the streamer, where the whole reply is already in hand.
 const chatStyle = "This turn is answered in a phone chat. Reply with the result of the work and nothing else: no preamble, no restating the request, no narration of steps taken or planned. Keep it as short as it can be while still complete, and prefer short bullet lines over paragraphs. A markdown table is the best shape for data that fits two or three columns — each row renders as one short bullet group on the phone, so a wider table reads longer, not shorter; use bullets beyond that. Put shell commands in fenced code blocks."
 
+// workerMaxTime is the wall-clock ceiling of one chat turn.
+//
+// A plain `xdev --print` run has no ceiling of its own — only a --bg child
+// gets the 2h default (cmd/xdev/main.go:801) — so a worker that wedged on a
+// provider or a blocked tool would hold its chat for good. This is the same
+// 2h the background runs use, and it is a backstop: /stop is the way a turn
+// is cancelled on purpose.
+const workerMaxTime = "2h"
+
 // workerArgs is the argv for one chat turn: the flags that shape the reply,
 // then the positional prompt. The chat's own /model wins over the daemon-wide
 // gateway.model, which wins over the run's configured default (no --model at
@@ -680,7 +879,7 @@ const chatStyle = "This turn is answered in a phone chat. Reply with the result 
 // /new cannot leave a chat pinned to a ref the operator has since removed.
 func workerArgs(sessionID, ref, text string) []string {
 	args := []string{"--print", "--no-title", "--hide-thinking", "--allow-home",
-		"--append-system-prompt", chatStyle}
+		"--append-system-prompt", chatStyle, "--max-time", workerMaxTime}
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
 	}

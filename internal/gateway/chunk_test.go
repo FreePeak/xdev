@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A 5000-char reply to a 120-char replyChunk must arrive as ~42 sendMessage
@@ -43,6 +44,7 @@ func TestReplyStopsAtFirstFailedChunk(t *testing.T) {
 	b.queue(textUpdate("anything", 7))
 	d := newTestDaemon(t, b, []int64{7})
 	d.chunk = 10 // 50 units → 5 chunks
+	d.sendBackoff = 10 * time.Millisecond
 	b.failAfter = 3
 	err := d.reply(context.Background(), 7, strings.Repeat("a", 50))
 	if err == nil {

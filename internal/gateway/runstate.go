@@ -192,6 +192,71 @@ func DaemonStatus(dataDir string) string {
 	}
 }
 
+// --- pending turns ------------------------------------------------------------
+
+// PendingPath is the file that records the turns in flight
+// (gateway/pending.json).
+func PendingPath(dataDir string) string { return filepath.Join(dataDir, "gateway", "pending.json") }
+
+// PendingTurn is one turn the daemon had in flight: the chat it belongs to,
+// the session it was running in, and the question it was answering.
+//
+// The record exists so a daemon that died mid-turn can say so on its next
+// start. The answer was produced — the worker's stdout had it — and then it
+// was dropped when the context was cancelled, and a user who was told
+// nothing has no way to tell that from a turn that is still running.
+type PendingTurn struct {
+	Chat    int64     `json:"chat"`
+	Session string    `json:"session,omitempty"`
+	Text    string    `json:"text"`
+	Started time.Time `json:"started"`
+}
+
+// ReadPending reads the turns in flight. A missing or unreadable file is an
+// empty map: losing the record costs one notice, never the daemon.
+func ReadPending(dataDir string) map[int64]PendingTurn {
+	out := map[int64]PendingTurn{}
+	raw, err := os.ReadFile(PendingPath(dataDir))
+	if err != nil || len(raw) == 0 {
+		return out
+	}
+	var rows map[string]PendingTurn
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return out
+	}
+	for _, r := range rows {
+		if r.Chat != 0 {
+			out[r.Chat] = r
+		}
+	}
+	return out
+}
+
+// WritePending records the turns in flight. An empty map clears the file.
+func WritePending(dataDir string, turns map[int64]PendingTurn) error {
+	path := PendingPath(dataDir)
+	if len(turns) == 0 {
+		_ = os.Remove(path)
+		return nil
+	}
+	rows := make(map[string]PendingTurn, len(turns))
+	for id, t := range turns {
+		rows[strconv.FormatInt(id, 10)] = t
+	}
+	raw, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // ParseChatList parses a comma/space-separated allowlist of numeric chat
 // ids. A non-numeric entry is an error rather than a silently dropped one:
 // dropping one entry turns a working bridge into one that refuses its owner,
