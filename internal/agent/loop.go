@@ -486,6 +486,12 @@ type Agent struct {
 	repeats     repeatChain
 	repeatBreak bool // set when the repeat guard vetoes further continuation
 
+	// toolResultCache dedups identical tool calls within one run: a repeat
+	// with the same name+args returns the cached result instead of
+	// re-executing. Keyed by name + canonical args.
+	toolResultCache   map[string]ai.Message
+	toolResultCacheMu sync.Mutex
+
 	steerMu  sync.Mutex
 	steering []Steering
 	// windowPin is the live /context override (compaction.contextWindow),
@@ -614,6 +620,8 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// same shape as the TTSR interrupt budget and maxEscalationRounds).
 	nudges := 0
 	promptConts := 0
+	a.toolResultCache = map[string]ai.Message{}
+	a.repeatBreak = false
 	// resumeFloor is where this run's own history begins: everything before it
 	// was rebuilt from the store by a resume or a compaction. The prompt
 	// continuation guard below needs the boundary because the two questions it
@@ -646,6 +654,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		if len(steering) > 0 {
 			a.repeats = repeatChain{}
 			a.repeatBreak = false
+			a.toolResultCache = map[string]ai.Message{}
 		}
 		for _, s := range steering {
 			m := ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: s.Text}}}
@@ -1999,6 +2008,22 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	started := time.Now()
 	call.Name = ai.ScrubToolName(call.Name)
 	call.Arguments = ai.ScrubToolArgs(call.Arguments)
+	// Per-run dedup: an identical call already executed this run reuses its
+	// cached result instead of re-running the tool. This prevents the model
+	// from paying for the same work twice even when it ignores the repeat
+	// guard's notice.
+	cacheKey := call.Name + "\x00" + canonicalArgs(call.Arguments)
+	a.toolResultCacheMu.Lock()
+	if cached, ok := a.toolResultCache[cacheKey]; ok {
+		a.toolResultCacheMu.Unlock()
+		a.Hooks.OnToolStart(call)
+		a.Hooks.OnToolEnd(call, tool.Result{Text: cached.Text(), IsError: false}, 0)
+		_ = started
+		out := cached
+		out.Content = append([]ai.Block(nil), cached.Content...)
+		return out
+	}
+	a.toolResultCacheMu.Unlock()
 	a.Hooks.OnToolStart(call)
 	// The plan-mode exit tool lives outside the registry (it is exposed
 	// only while the sub-state is live), so route it before lookup.
@@ -2192,7 +2217,18 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		}
 	}
 	a.Hooks.OnToolEnd(call, res, dur)
-	return toolResultMsg(call, res, dur)
+	msg := toolResultMsg(call, res, dur)
+	// Deep-copy content so later repeatNotice decorations don't mutate the
+	// cached entry (slices share backing arrays).
+	cached := msg
+	cached.Content = append([]ai.Block(nil), msg.Content...)
+	a.toolResultCacheMu.Lock()
+	if a.toolResultCache == nil {
+		a.toolResultCache = map[string]ai.Message{}
+	}
+	a.toolResultCache[cacheKey] = cached
+	a.toolResultCacheMu.Unlock()
+	return msg
 }
 
 // toolResultMsg builds the toolResult message for one finished call. Every
