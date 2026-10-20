@@ -564,7 +564,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
 	hooks := agent.TurnHooks(ph)
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: agent.CompactionConfig{ContextWindow: pinnedWindow(cfg, provName, modelName), Methods: agent.HandoffOrder(settings.CompactionMethodOrder())}, Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}

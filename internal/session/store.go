@@ -663,6 +663,8 @@ func entryTypeOf(e Entry) string {
 		return TypeCheckpoint
 	case *ScheduleChangedEntry:
 		return TypeScheduleChange
+	case *ThinkingLevelChangeEntry:
+		return TypeThinkingLevelChange
 	default:
 		return ""
 	}
@@ -690,6 +692,8 @@ func setEnvelope(e Entry, env Envelope) {
 	case *CheckpointEntry:
 		t.Env = env
 	case *ScheduleChangedEntry:
+		t.Env = env
+	case *ThinkingLevelChangeEntry:
 		t.Env = env
 	}
 }

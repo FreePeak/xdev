@@ -69,6 +69,35 @@ func tabsModeOn(s *config.Settings) string {
 	}
 }
 
+// appendThinkingLevel records the request-side reasoning level in the
+// session (omp thinking_level_change): the transcript then says which
+// thinking level produced which part of it, so a resumed session can tell
+// instead of guessing.
+//
+// The level is the one the next request carries; configured says the user
+// asked for that level, rather than it following the model role's ":effort".
+func appendThinkingLevel(store *session.Store, level string, configured bool) {
+	if store == nil {
+		return
+	}
+	if err := store.Append(&session.ThinkingLevelChangeEntry{ThinkingLevel: level, Configured: configured}); err != nil {
+		logx.Errorf("thinking level entry: %v", err)
+	}
+}
+
+// compactionConfigFor builds the agent's compaction config for one model: the
+// window is that model's (or the pinned one), the method order is the
+// caller's, and the two trigger overrides come from the settings — the
+// absolute pin and the percentage pin, both 0 when unset.
+func compactionConfigFor(window int, s *config.Settings, methods []string) agent.CompactionConfig {
+	return agent.CompactionConfig{
+		ContextWindow:    window,
+		Methods:          methods,
+		ThresholdTokens:  s.CompactionThresholdTokens(),
+		ThresholdPercent: s.CompactionThresholdPercent(),
+	}
+}
+
 func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// Some terminal managers provision their panes with TERM=dumb (herdr's
 	// default), which means tcell never marks the terminfo entry
@@ -175,6 +204,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		modelMu.Lock()
 		defer modelMu.Unlock()
 		return live.level
+	}
+	// thinkingState reads the reasoning state in force: the request-side
+	// level the next turn carries, and whether the user pinned it. A level
+	// that merely follows the model role's ":effort" (or the effort rung's
+	// default) is not configured.
+	thinkingState := func() (level string, configured bool) {
+		modelMu.Lock()
+		defer modelMu.Unlock()
+		return live.effort, live.level != "" && live.level != "auto"
 	}
 
 	// Tools + system prompt (shared with print mode).
@@ -691,6 +729,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if _, err := applyThinkingFlag(level, ""); err != nil {
 				return err
 			}
+			beforeLevel, beforeConfigured := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "thinking", level); err != nil {
 				return err
 			}
@@ -708,6 +747,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			live.effort, live.level = le, level
 			modelMu.Unlock()
 			lastSettings().Thinking = level
+			// The level in force changed: the transcript says so (omp
+			// thinking_level_change), so a resume knows which level produced
+			// which part of it. A re-set of the same level changes nothing
+			// and says nothing.
+			if afterLevel, afterConfigured := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
+				appendThinkingLevel(storeOf(), afterLevel, afterConfigured)
+			}
 			return nil
 		},
 	})
@@ -799,7 +845,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Tools:      reg,
 			Model:      lm,
 			Store:      s,
-			Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
+			Compaction: compactionConfigFor(modelWindow(cfg, lpn, lm), lastSettings(), agent.HandoffOrder(lastSettings().CompactionMethodOrder())),
 			PlanMode:   planMode,
 			Handoff:    handoffSettings(),
 		}
@@ -1890,6 +1936,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !config.IsSessionEffort(name) {
 				return fmt.Errorf("effort: want %s", strings.Join(config.SessionEffortLevels, "|"))
 			}
+			beforeLevel, beforeConfigured := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "effort", name); err != nil {
 				return err
 			}
@@ -1909,6 +1956,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				if err != nil {
 					return err
 				}
+			}
+			// The reasoning budget in force moved with the rung: the
+			// transcript says so (omp thinking_level_change). A rung that
+			// leaves the level alone (a pinned /thinking, or the same rung
+			// again) changes nothing and says nothing.
+			if afterLevel, afterConfigured := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
+				appendThinkingLevel(storeOf(), afterLevel, afterConfigured)
 			}
 			return nil
 		},
@@ -2329,7 +2383,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				MaxTurns:   opts.MaxTurns,
 				Model:      lm,
 				Store:      turnStore,
-				Compaction: agent.CompactionConfig{ContextWindow: modelWindow(cfg, lpn, lm), Methods: agent.HandoffOrder(lastSettings().CompactionMethodOrder())},
+				Compaction: compactionConfigFor(modelWindow(cfg, lpn, lm), lastSettings(), agent.HandoffOrder(lastSettings().CompactionMethodOrder())),
 				Failovers:  failoverChain(cfg, lastSettings(), lpn, lm),
 				Thinking:   effortBudget(le),
 				// Intercept set below from exts (only when non-nil).

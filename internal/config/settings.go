@@ -94,6 +94,13 @@ type CompactionSettings struct {
 	// place of the window its catalog states: "auto" (or empty) hands each
 	// model back its own declared window. Vocabulary: ContextWindowChoices.
 	ContextWindow string `yaml:"contextWindow"`
+	// ThresholdTokens pins the compaction trigger to an absolute token
+	// count (omp compaction.thresholdTokens); 0 = unset, the head-room
+	// threshold decides.
+	ThresholdTokens int `yaml:"thresholdTokens"`
+	// ThresholdPercent pins the compaction trigger to a percentage of the
+	// context window, 1..99 (omp compaction.thresholdPercent); 0 = unset.
+	ThresholdPercent int `yaml:"thresholdPercent"`
 }
 
 // HandoffSettings holds the handoff-document knobs (M5 #23).
@@ -1422,6 +1429,34 @@ func (s *Settings) CompactionContextWindow() int {
 	return contextWindowTokens[v]
 }
 
+// CompactionThresholdTokens returns the absolute compaction trigger, 0 for
+// unset (nil-safe: an absent layer means "the head-room threshold decides").
+func (s *Settings) CompactionThresholdTokens() int64 {
+	if s == nil {
+		return 0
+	}
+	return int64(s.Compaction.ThresholdTokens)
+}
+
+// CompactionThresholdPercent returns the percentage compaction trigger, 0 for
+// unset (nil-safe).
+func (s *Settings) CompactionThresholdPercent() int {
+	if s == nil {
+		return 0
+	}
+	return s.Compaction.ThresholdPercent
+}
+
+// compactionThresholdOrUnset renders a trigger override for the settings
+// list: "unset" when nothing is pinned, so a raw 0 never reads as "compact
+// at zero tokens".
+func compactionThresholdOrUnset(v int64) string {
+	if v <= 0 {
+		return "unset"
+	}
+	return strconv.FormatInt(v, 10)
+}
+
 // CompactionContextWindowOn is the value a select row displays: the pin in
 // the vocabulary's own spelling, so a row never shows a raw file value.
 func (s *Settings) CompactionContextWindowOn() string {
@@ -1812,6 +1847,24 @@ func (s *Settings) merge(layer *Settings) error {
 			return fmt.Errorf("compaction.contextWindow %q: want %s", v, strings.Join(ContextWindowChoices, "|"))
 		}
 		s.Compaction.ContextWindow = norm
+	}
+	// The two compaction triggers are validated here for the same reason
+	// the window is: a threshold nobody asked for silently moving the
+	// compaction point is worse than a failed start. 0 means "unset" in
+	// both, so a layer can only narrow the trigger, never widen it into
+	// nonsense (a percent outside 1..99 has no meaning, and a negative
+	// token count is not a threshold).
+	if layer.Compaction.ThresholdTokens != 0 {
+		if layer.Compaction.ThresholdTokens < 0 {
+			return fmt.Errorf("compaction.thresholdTokens %d: want a whole number of tokens (0 = unset)", layer.Compaction.ThresholdTokens)
+		}
+		s.Compaction.ThresholdTokens = layer.Compaction.ThresholdTokens
+	}
+	if layer.Compaction.ThresholdPercent != 0 {
+		if layer.Compaction.ThresholdPercent < 1 || layer.Compaction.ThresholdPercent > 99 {
+			return fmt.Errorf("compaction.thresholdPercent %d: want 1..99 (0 = unset)", layer.Compaction.ThresholdPercent)
+		}
+		s.Compaction.ThresholdPercent = layer.Compaction.ThresholdPercent
 	}
 	for k, v := range layer.ToolsApproval {
 		s.ToolsApproval[k] = v
@@ -2369,6 +2422,30 @@ func Set(path, key, value string) error {
 		}
 		value = canon
 	}
+	// The two compaction triggers are numbers with a range, so they are
+	// checked here for the same reason: a value the next start would
+	// reject (or a percent that means nothing) must fail at the keystroke,
+	// not at the next start.
+	if key == "compaction.thresholdTokens" {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: compaction.thresholdTokens must be a whole number of tokens, got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("config: compaction.thresholdTokens must not be negative, got %d", n)
+		}
+		value = strconv.Itoa(n)
+	}
+	if key == "compaction.thresholdPercent" {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("config: compaction.thresholdPercent must be a whole number, got %q", value)
+		}
+		if n < 0 || n > 99 {
+			return fmt.Errorf("config: compaction.thresholdPercent must be 1..99 (0 = unset), got %d", n)
+		}
+		value = strconv.Itoa(n)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -2554,6 +2631,8 @@ func List(s *Settings, globalPath string) []string {
 		"compaction.idleAfter " + idleAfterOrDefault(s.Compaction.IdleAfter),
 		"compaction.async " + fmt.Sprint(s.CompactionAsyncOn()),
 		"compaction.contextWindow " + s.CompactionContextWindowOn(),
+		"compaction.thresholdTokens " + compactionThresholdOrUnset(s.CompactionThresholdTokens()),
+		"compaction.thresholdPercent " + compactionThresholdOrUnset(int64(s.CompactionThresholdPercent())),
 		"retry.infinite " + fmt.Sprint(s.InfiniteRetry()),
 		"typesafe.fanout " + fmt.Sprint(s.TypeSafe.Fanout),
 	}

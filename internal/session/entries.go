@@ -75,7 +75,28 @@ const (
 	// CustomType is "branch" with data {"to":entryID}); it is how Open
 	// reconstructs the leaf pointer across restarts.
 	TypeBranch = "branch"
+
+	// TypeThinkingLevelChange records the reasoning level in force from
+	// this point of the transcript on (omp thinking_level_change): a state
+	// record, not a message. A resumed session can therefore tell which
+	// thinking level produced which part of the transcript.
+	TypeThinkingLevelChange = "thinking_level_change"
 )
+
+// ThinkingLevelChangeEntry records the reasoning level in force at a point
+// in the transcript (omp thinking_level_change).
+// Wire: {"type":"thinking_level_change",...,"thinkingLevel":"high","configured":true}.
+//
+// ThinkingLevel is the request-side level the next turn carries ("" when the
+// request pins none). Configured says the user asked for that level, rather
+// than it following the model role's ":effort" default.
+type ThinkingLevelChangeEntry struct {
+	Env           Envelope
+	ThinkingLevel string
+	Configured    bool
+}
+
+func (e *ThinkingLevelChangeEntry) Envelope() Envelope { return e.Env }
 
 // ErrUnknownEntryType marks a structurally valid entry whose "type" is not
 // part of the model. ParseEntry returns (nil, ErrUnknownEntryType) for it;
@@ -104,12 +125,25 @@ func (e *ModelChangeEntry) Envelope() Envelope { return e.Env }
 
 // CompactionEntry replaces pre-compaction history with a summary message.
 // Wire: {"type":"compaction",...,"summary":{...},"firstKeptEntryId":...,
-// "tokensBefore":N,"method":"handoff"}.
+// "tokensBefore":N,"tokensAfter":N,"shortSummary":"...","method":"handoff"}.
+//
+// tokensAfter and shortSummary are optional on the wire: an entry written
+// before them existed (or by a writer that has no kept window to measure)
+// simply omits them, and a reader takes the zero value.
 type CompactionEntry struct {
 	Env              Envelope
 	Summary          ai.Message
 	FirstKeptEntryID *string // nil → only the summary survives
 	TokensBefore     int64
+	// TokensAfter is the size of the context that SURVIVES the compaction
+	// (omp rule 27): the summary plus the window the compaction kept. It
+	// is what the next request carries, so a reader can see what the
+	// compaction freed. 0 when the entry carries no measurement.
+	TokensAfter int64
+	// ShortSummary is a one-line rendering of Summary, so a reader (the
+	// TUI, a resume, omp) can see what the compaction was about without
+	// reading the whole summary. "" when there is none.
+	ShortSummary string
 	// Method names the compaction ladder member that produced Summary
 	// (M5 #24): handoff|snapcompact|shake|soft. "" for entries written
 	// before the ladder recorded it.
@@ -254,10 +288,9 @@ func (e *CheckpointEntry) Envelope() Envelope { return e.Env }
 
 // UnknownEntry preserves an entry type outside xdev's parsed set while
 // keeping the parent chain intact — real omp files carry title_change /
-// thinking_level_change / service_tier_change entries mid-chain, and
-// dropping them from the tree would sever the leaf→root walk. The raw line
-// is kept verbatim so a full rewrite round-trips byte-exactly; context
-// conversion ignores these nodes.
+// service_tier_change entries mid-chain, and dropping them from the tree
+// would sever the leaf→root walk. The raw line is kept verbatim so a full
+// rewrite round-trips byte-exactly; context conversion ignores these nodes.
 type UnknownEntry struct {
 	Env       Envelope
 	EntryType string
@@ -326,7 +359,11 @@ type entryWire struct {
 	Summary          json.RawMessage       `json:"summary,omitempty"`
 	FirstKeptEntryID *string               `json:"firstKeptEntryId,omitempty"`
 	TokensBefore     *int64                `json:"tokensBefore,omitempty"`
+	TokensAfter      *int64                `json:"tokensAfter,omitempty"`
+	ShortSummary     *string               `json:"shortSummary,omitempty"`
 	Method           *string               `json:"method,omitempty"`
+	ThinkingLevel    *string               `json:"thinkingLevel,omitempty"`
+	Configured       *bool                 `json:"configured,omitempty"`
 	CustomType       string                `json:"customType,omitempty"`
 	Data             map[string]any        `json:"data,omitempty"`
 	Goal             *GoalPayload          `json:"goal,omitempty"`
@@ -359,10 +396,24 @@ func MarshalEntry(e Entry) ([]byte, error) {
 		w.FirstKeptEntryID = t.FirstKeptEntryID
 		tokens := t.TokensBefore
 		w.TokensBefore = &tokens
+		if t.TokensAfter > 0 {
+			after := t.TokensAfter
+			w.TokensAfter = &after
+		}
+		if t.ShortSummary != "" {
+			short := t.ShortSummary
+			w.ShortSummary = &short
+		}
 		if t.Method != "" {
 			method := t.Method
 			w.Method = &method
 		}
+	case *ThinkingLevelChangeEntry:
+		w.Type = TypeThinkingLevelChange
+		level := t.ThinkingLevel
+		w.ThinkingLevel = &level
+		configured := t.Configured
+		w.Configured = &configured
 	case *BranchSummaryEntry:
 		w.Type = TypeBranchSummary
 		w.Summary = mustMarshal(t.Summary)
@@ -424,8 +475,23 @@ func ParseEntry(line []byte) (Entry, error) {
 		if w.TokensBefore != nil {
 			e.TokensBefore = *w.TokensBefore
 		}
+		if w.TokensAfter != nil {
+			e.TokensAfter = *w.TokensAfter
+		}
+		if w.ShortSummary != nil {
+			e.ShortSummary = *w.ShortSummary
+		}
 		if w.Method != nil {
 			e.Method = *w.Method
+		}
+		return e, nil
+	case TypeThinkingLevelChange:
+		e := &ThinkingLevelChangeEntry{Env: env}
+		if w.ThinkingLevel != nil {
+			e.ThinkingLevel = *w.ThinkingLevel
+		}
+		if w.Configured != nil {
+			e.Configured = *w.Configured
 		}
 		return e, nil
 	case TypeBranchSummary:

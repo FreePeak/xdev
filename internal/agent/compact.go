@@ -14,14 +14,11 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 )
 
-// DefaultCompactionRatio is the fraction of the context window
-// that triggers compaction: compaction fires when this fraction
-// of the window is used, freeing space before it overflows.
-const DefaultCompactionRatio = 0.80
-
 const (
 	// DefaultReserveTokens is the context head-room a compaction aims to
-	// free up to; the effective reserve is never below 15% of the window.
+	// free up to when nothing is configured (omp's 16384). The effective
+	// reserve is max(15% of the window, this), so the shipped reserve
+	// never reserves less than 15% of the window.
 	DefaultReserveTokens = 16384
 	// DefaultKeepRecentTokens is the recent tail a compaction preserves.
 	DefaultKeepRecentTokens = 20000
@@ -100,27 +97,89 @@ type CompactionConfig struct {
 	// provider summarize (handoff) has a round-trip worth backgrounding,
 	// so the deterministic methods stay synchronous.
 	Async bool
+	// ThresholdTokens pins the compaction trigger to an absolute token
+	// count (omp compaction.thresholdTokens); 0 = unset, the head-room
+	// threshold decides.
+	ThresholdTokens int64
+	// ThresholdPercent pins the compaction trigger to a percentage of the
+	// context window, 1..99 (omp compaction.thresholdPercent); 0 = unset.
+	ThresholdPercent int
 }
 
+// reserve is the context head-room a compaction frees up to (omp rule 25).
+//
+// omp's formula, copied as it stands:
+//
+//	raw  = max(floor(window*0.15), reserveTokens ?? 16384)
+//	min  = max(1, floor(window*0.15))
+//	effective = min, when the reserve is UNSET and raw >= window-min,
+//	            or when raw >= window
+//	            raw otherwise
+//
+// The 15% floor is the rule: a compaction must leave the session room to
+// breathe, and the shipped reserve (16384) is the floor of that rule, not a
+// replacement for it. The two collapse cases are the window's own: a window
+// so small that the shipped reserve would swallow it, and a reserve at or
+// above the whole window, both fall back to the plain 15%.
 func (c CompactionConfig) reserve() int64 {
-	r := c.ReserveTokens
-	if r <= 0 {
-		r = DefaultReserveTokens
+	w := int64(c.ContextWindow)
+	if w <= 0 {
+		return DefaultReserveTokens
 	}
-	// Effective reserve ≥ 20% of the window: with a 20% head-room
-	// the 80% threshold trigger fires before the window overflows
-	// and forces a provider-error recovery (RCA #1).
-	if w := int64(c.ContextWindow); w > 0 && r < w*20/100 {
-		r = w * 20 / 100
+	minReserve := max(int64(1), w*15/100)
+	r := minReserve
+	if c.ReserveTokens > 0 {
+		r = max(r, c.ReserveTokens)
+	} else {
+		r = max(r, DefaultReserveTokens)
+	}
+	// An UNSET reserve that would leave less than its own 15% of the
+	// window collapses to the 15%, and so does a reserve that eats the
+	// whole window.
+	if (c.ReserveTokens <= 0 && r >= w-minReserve) || r >= w {
+		return minReserve
 	}
 	return r
 }
 
+// baseWindow is the window a percentage trigger is measured against. omp
+// measures it against min(contextWindow, baseWindowTokens); baseWindowTokens
+// is not wired yet, so the seam is this one line.
+func (c CompactionConfig) baseWindow(w int64) int64 {
+	return w
+}
+
+// threshold is the token count at which a compaction fires (omp rule 25):
+// the used context must be STRICTLY above it.
+//
+// The precedence is omp's:
+//
+//	thresholdTokens  — an absolute pin; a pin at or above the window
+//	                   falls back to the head-room threshold
+//	thresholdPercent — a percentage of the window, clamped to 1..99
+//	head-room        — the window minus the effective reserve
 func (c CompactionConfig) threshold() int64 {
-	if c.ContextWindow <= 0 {
+	w := int64(c.ContextWindow)
+	if w <= 0 {
 		return 0
 	}
-	return int64(c.ContextWindow) - c.reserve()
+	if c.ThresholdTokens > 0 {
+		if c.ThresholdTokens >= w {
+			return c.headroom(w)
+		}
+		return min(w-1, max(int64(1), c.ThresholdTokens))
+	}
+	if c.ThresholdPercent > 0 {
+		pct := min(99, max(1, c.ThresholdPercent))
+		return c.baseWindow(w) * int64(pct) / 100
+	}
+	return c.headroom(w)
+}
+
+// headroom is the default threshold: the window minus the effective reserve,
+// never below 0 and never above the window minus one token.
+func (c CompactionConfig) headroom(w int64) int64 {
+	return max(int64(0), min(w-1, w-c.reserve()))
 }
 
 func (c CompactionConfig) keepRecent() int64 {
@@ -398,17 +457,56 @@ func (a *Agent) compact(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return a.persistCompaction(entry)
+	return a.persistCompaction(entry, span.msgs[span.cut():])
 }
 
 // persistCompaction appends a ladder result to the session store and tells the
 // hook bus how big the context was before it (the entry carries that number).
-func (a *Agent) persistCompaction(entry *session.CompactionEntry) error {
+//
+// The record is filled HERE, at the one point where a compaction enters the
+// store: the surviving context is measured once and the summary gets its
+// one-line rendering, so every path that persists a compaction says the same
+// thing about itself.
+func (a *Agent) persistCompaction(entry *session.CompactionEntry, kept []ai.Message) error {
+	fillCompactionRecord(entry, kept)
 	if err := a.Store.Append(entry); err != nil {
 		return fmt.Errorf("compaction: persist: %w", err)
 	}
 	a.notifyCompaction(entry)
 	return nil
+}
+
+// fillCompactionRecord completes a compaction entry with the omp-parity
+// record (omp rule 27): the token count of the context that SURVIVES the
+// compaction, and a one-line rendering of the summary.
+//
+// The surviving size is measured with the estimator and not with the
+// provider's reported usage: the usage that rides the kept messages describes
+// the request BEFORE the compaction, so reporting it here would claim the
+// compaction freed nothing. The estimate is the same unit the estimator floor
+// uses everywhere else, and it is the size the NEXT request will carry.
+func fillCompactionRecord(entry *session.CompactionEntry, kept []ai.Message) {
+	entry.ShortSummary = compactionShortSummary(entry.Summary)
+	post := make([]ai.Message, 0, len(kept)+1)
+	post = append(post, entry.Summary)
+	post = append(post, kept...)
+	entry.TokensAfter = estimateTokens(post)
+}
+
+// compactionShortSummary renders a summary as ONE line: the text is
+// flattened, trimmed, and cut at 120 characters on a rune boundary. A summary
+// with no text yields "" — the field is optional on the wire, and an empty
+// one says less than a line of noise.
+func compactionShortSummary(m ai.Message) string {
+	text := strings.Join(strings.Fields(m.Text()), " ")
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) > 120 {
+		return string(runes[:119]) + "…"
+	}
+	return text
 }
 
 // notifyCompaction is the one emission point a compaction passes through, so
