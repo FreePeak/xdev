@@ -171,12 +171,36 @@ const PromptContinuationAttribution = "prompt-continuation"
 // mutated the workspace and the model yields with text and no tool calls.
 // The user asked for Claude-style keep-going on unfinished edits, not a
 // "should I continue?" pause — and not a push past a finished report.
-const PromptContinuationPrompt = "the user's request is not finished: take the next concrete step now with tools. Do not ask the user to approve or continue. If this turn already delivered the answer or report the user asked for, say so in one sentence and stop. Do not start implementing after a research or report request."
+//
+// The text is what the person READS when the harness talks over them, so it
+// is short on purpose. The earlier wording was a 5-clause paragraph that
+// opened the session transcript and made a plain question feel like the
+// harness was scolding: "the user's request is not finished: take the next
+// concrete step now with tools. Do not ask the user to approve or continue…"
+// That was the complaint in the field report (session 0b6b1cff: "this is too
+// much over engineer and overwhelm").
+//
+// Three clauses, and the middle one is the one that matters: the nudge must
+// be able to END. "If this turn already delivered the answer or report the
+// user asked for, say so in one sentence and stop" is the escape hatch, and
+// "Do not start implementing after a research or report request" is what
+// stops the report from turning into a worktree. Both are pinned by
+// TestPromptContinuationPromptLetsAReportStop.
+const PromptContinuationPrompt = "continue the unfinished work: take the next concrete step with tools. " +
+	"If this turn already delivered the answer or report the user asked for, say so in one sentence and stop. " +
+	"Do not start implementing after a research or report request."
 
 // maxPromptContinuations bounds keep-going without /goal. A completed
 // answer after tools still gets at most this many nudges; two consecutive
 // text-only yields after a nudge end the run.
-const maxPromptContinuations = 8
+//
+// It was 8. The cap was never the binding constraint — the per-run
+// lastWasPromptCont guard already ends a run after one nudge that the model
+// answered with text — so the number was dead weight that only looked like
+// permission. Two is what the mechanism can actually spend: a nudge that the
+// model answers with more work, and a nudge that the model answers with a
+// final sentence.
+const maxPromptContinuations = 2
 
 // callMutated reports whether one already-issued tool call changed
 // anything. It is the single definition of "mid-task" the keep-going gate
@@ -211,6 +235,37 @@ func callMutated(c ai.ToolCallBlock) bool {
 		return !tool.BashCallIsReadOnly(c.Arguments)
 	}
 	return !caps.ReadOnly
+}
+
+// taskFloor is the index of the last REAL user turn in history — the boundary
+// the keep-going gate uses to decide "is this run still mid-task?".
+//
+// Everything before it belongs to an EARLIER ask. The gate used to scan the
+// whole session, which meant one mutating call anywhere in the session armed
+// the nudge for every later turn, so a plain question asked after any earlier
+// edit was treated as unfinished work. The scope is the current task: work
+// done inside this ask still counts (a run that edited a file and then
+// yielded owes a summary), an earlier ask's edit does not.
+//
+// A real user turn is a user-role message with no synthetic attribution. The
+// synthetic ones — the keep-going nudge, the goal continuation, the provider
+// cut-off recovery, the empty-turn nudge — are all user-role messages the
+// person never typed, and counting them as task boundaries would let the
+// harness's own messages re-arm the gate.
+//
+// 0 when no real user turn is in history (a run started with tool calls
+// only): the whole history is the task then, which is the old behavior.
+func taskFloor(history []ai.Message) int {
+	floor := 0
+	for i, h := range history {
+		if h.Role != ai.RoleUser {
+			continue
+		}
+		if h.Attribution == "" || h.Attribution == "user" {
+			floor = i
+		}
+	}
+	return floor
 }
 
 // ErrEmptyTurn is the failure voice of a model that answered nothing
@@ -783,8 +838,31 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 				// after the nudge at all. A nudge in the persisted tail is a
 				// previous run's unfinished business, not an answer this run
 				// received, so it must not count as one.
+				//
+				// The scope is THIS TASK, not the whole session. The gate
+				// used to scan every message ever sent, so a single
+				// mutating call in turn 1 armed the nudge for every later
+				// turn — including a plain question. Measured on the
+				// field-report session (0b6b1cff): "brief me this
+				// session" ran `git branch -a`, the gate called it a
+				// mutation, and the nudge fired after the brief was
+				// already delivered, producing a SECOND brief. The next
+				// question ("which code in xdev trigger this?") was
+				// nudged the same way, and the model's own reasoning at
+				// that point was "Now I should stop implementing. But the
+				// system prompt says take the next concrete step —
+				// conflicting."
+				//
+				// A task boundary is the right scope: work done inside
+				// the current ask still arms the gate (a run that edited
+				// a file and then yielded owes a summary — the case the
+				// all-history scan was written for), while an EARLIER
+				// task's edit cannot make a NEW question look
+				// mid-task. The resumed-session case still works: the
+				// prior run's tool call sits after its own user message,
+				// so it is inside the task boundary and counts.
 				mutated := false
-				for _, h := range history {
+				for _, h := range history[min(len(history), taskFloor(history)):] {
 					if h.Role != ai.RoleAssistant {
 						continue
 					}

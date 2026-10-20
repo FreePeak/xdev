@@ -74,9 +74,9 @@ var readOnlyHeads = map[string]bool{
 // readOnlyGitSubs are the git subcommands with no mutating form worth
 // modelling. Anything that can write from its own arguments is left out on
 // purpose — `branch`, `tag`, `remote`, `config`, `stash`, `worktree` and
-// `reflog` all have a destructive spelling, and parsing their flags to tell
-// `git branch` from `git branch -D` is not worth the risk in a gate whose
-// whole job is a heuristic.
+// `reflog` all have a destructive spelling. The ones that DO have a read-only
+// form are judged by their arguments in readOnlyGitBranch / readOnlyGitWorktree
+// below rather than being listed here whole-sale.
 var readOnlyGitSubs = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true,
 	"rev-parse": true, "rev-list": true, "describe": true, "blame": true,
@@ -86,6 +86,181 @@ var readOnlyGitSubs = map[string]bool{
 	"annotate": true, "whatchanged": true, "diff-tree": true,
 	"diff-index": true, "diff-files": true, "cherry": true,
 	"merge-base": true, "verify-commit": true, "verify-tag": true,
+	"check-ignore": true, "symbolic-ref": true, "merge-tree": true,
+}
+
+// gitRemoteReadSubs are the `git remote` subcommands that only read. The
+// others — add, remove, rename, set-url, prune, update, set-head — write.
+var gitRemoteReadSubs = map[string]bool{
+	"":     true, // bare `git remote` lists
+	"show": true, "get-url": true,
+}
+
+// gitStashReadSubs are the `git stash` subcommands that only read. The bare
+// form (`git stash`) PUSHES the working tree, so it is not one of them.
+var gitStashReadSubs = map[string]bool{
+	"list": true, "show": true,
+}
+
+// readOnlyGitRemote reports whether a `git remote` invocation is a pure read.
+// `git remote -v` is the form a session runs to see where the repo points.
+func readOnlyGitRemote(args []string) bool {
+	if len(args) == 0 {
+		return true // bare `git remote` lists
+	}
+	sub := args[0]
+	if strings.HasPrefix(sub, "-") {
+		return true // -v, --verbose and friends only change the listing
+	}
+	return gitRemoteReadSubs[sub]
+}
+
+// readOnlyGitStash reports whether a `git stash` invocation is a pure read.
+// `git stash list` is the form a session runs; the bare `git stash` stashes,
+// which is a write.
+func readOnlyGitStash(args []string) bool {
+	if len(args) == 0 {
+		return false // bare `git stash` pushes the working tree
+	}
+	sub := args[0]
+	if strings.HasPrefix(sub, "-") {
+		return false
+	}
+	return gitStashReadSubs[sub]
+}
+
+// readOnlyGitTag reports whether a `git tag` invocation is a pure read.
+// `git tag` and `git tag -l <pattern>` list; `git tag -d` removes and a bare
+// `git tag <name>` creates.
+func readOnlyGitTag(args []string) bool {
+	for _, a := range args {
+		if a == "-d" || a == "--delete" {
+			return false
+		}
+		if a == "-l" || a == "--list" {
+			return true
+		}
+	}
+	// A bare `git tag` lists. A bare `git tag <name>` creates.
+	return len(args) == 0
+}
+
+// readOnlyGitConfig reports whether a `git config` invocation is a pure read.
+// `git config --get <key>` and a bare `git config <key>` read one value;
+// `git config <key> <value>` WRITES one, which is the shape the table in
+// this file's tests pins as a write.
+func readOnlyGitConfig(args []string) bool {
+	positional := 0
+	for _, a := range args {
+		switch a {
+		case "--get", "--get-all", "--get-regexp", "--list", "-l", "--get-color", "--get-colorbool":
+			continue // read verbs
+		case "--unset", "--unset-all", "--add", "--remove-section", "--rename-section", "--edit":
+			return false // write verbs
+		}
+		if strings.HasPrefix(a, "-") {
+			continue // a display flag
+		}
+		positional++
+	}
+	// One key is a read; a key and a value is a write.
+	return positional <= 1
+}
+
+// gitBranchWriteShort are the SHORT flag letters of `git branch` that write.
+// A cluster is judged letter by letter, so `-dv` (delete and list) is a write
+// even though neither "dv" nor "d" alone would be a plausible flag.
+var gitBranchWriteShort = "dDmMcCf"
+
+// gitBranchWriteLong are the LONG `git branch` flags that write: the
+// deletions, the renames, the copies, and the upstream setters.
+var gitBranchWriteLong = map[string]bool{
+	"--delete": true, "--move": true, "--copy": true,
+	"--force": true, "--set-upstream-to": true, "--unset-upstream": true,
+	"--edit-description": true,
+}
+
+// gitBranchQueryValueFlags are the read-only `git branch` flags that take a
+// value. The value is not a branch name, so it must not be read as one:
+// `git branch --contains HEAD` is a query, while `git branch HEAD~1` CREATES a
+// branch called HEAD~1.
+var gitBranchQueryValueFlags = map[string]bool{
+	"--contains": true, "--no-contains": true,
+	"--merged": true, "--no-merged": true,
+	"--points-at": true,
+	"--format":    true, "--sort": true,
+	"--color": true, "--no-color": true,
+}
+
+// readOnlyGitBranch reports whether a `git branch` invocation is a pure read.
+//
+// `git branch` with no arguments lists branches, and the list forms only read.
+// The destructive spellings (-d/--delete, -m/--move, -c/--copy, -f/--force)
+// and the upstream setters are NOT reads. A bare branch NAME is a CREATE
+// (`git branch feat/x`), not a list.
+//
+// The destructive set is a DENYLIST, and that is deliberate. An allowlist
+// would have to name every display flag git grows — --no-abbrev, --column,
+// --sort, --format, --contains — and the live test showed what that costs:
+// the agent's own orientation command
+// `git branch -a --verbose --no-abbrev` missed the allowlist, was read as a
+// mutation, and the keep-going gate fired on a question that was already
+// answered. A denylist names the flags that WRITE, and everything else is
+// the read it looks like.
+//
+// The dangerous direction is still covered: the write flags are enumerated,
+// a short cluster is judged letter by letter, and a bare name is a create.
+func readOnlyGitBranch(args []string) bool {
+	valueNext := false
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			if valueNext {
+				valueNext = false
+				continue // this argument is the previous flag's value
+			}
+			return false // a bare name creates a branch
+		}
+		if valueNext {
+			valueNext = false
+			continue
+		}
+		if strings.HasPrefix(a, "--") {
+			name := a
+			if i := strings.IndexByte(name, '='); i >= 0 {
+				name = name[:i]
+			}
+			if gitBranchWriteLong[name] {
+				return false
+			}
+			if gitBranchQueryValueFlags[name] && !strings.Contains(a, "=") {
+				valueNext = true
+			}
+			continue
+		}
+		// A short flag or a cluster of them: judge every letter.
+		for _, c := range a[1:] {
+			if strings.ContainsRune(gitBranchWriteShort, c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readOnlyGitWorktreeSubs is the one `git worktree` subcommand that only
+// reads. Every other one writes: add creates a worktree, remove and prune
+// delete one, move relocates one, and lock/unlock/repair touch its metadata.
+var readOnlyGitWorktreeSubs = map[string]bool{"list": true}
+
+// readOnlyGitWorktree reports whether a `git worktree` invocation is a pure
+// read. `git worktree list` is the form a session actually runs while
+// orienting itself, and it is the exact command that armed the keep-going
+// gate in the field report this file was written for.
+func readOnlyGitWorktree(args []string) bool {
+	if len(args) == 0 {
+		return false // bare `git worktree` is not a read
+	}
+	return readOnlyGitWorktreeSubs[args[0]]
 }
 
 // readOnlySegment judges one already-split segment.
@@ -128,10 +303,31 @@ func readOnlyGit(args []string) bool {
 		case strings.HasPrefix(a, "-"):
 			continue // a valueless global flag (--no-pager, --bare, -P)
 		default:
-			return readOnlyGitSubs[a]
+			return readOnlyGitSub(a, args[i+1:])
 		}
 	}
 	return false
+}
+
+// readOnlyGitSub judges one git subcommand by name, dispatching the verbs
+// whose read-only form has to be told apart from their mutating one.
+func readOnlyGitSub(sub string, rest []string) bool {
+	switch sub {
+	case "branch":
+		return readOnlyGitBranch(rest)
+	case "worktree":
+		return readOnlyGitWorktree(rest)
+	case "remote":
+		return readOnlyGitRemote(rest)
+	case "stash":
+		return readOnlyGitStash(rest)
+	case "tag":
+		return readOnlyGitTag(rest)
+	case "config":
+		return readOnlyGitConfig(rest)
+	default:
+		return readOnlyGitSubs[sub]
+	}
 }
 
 // hasFlagContaining reports whether args carry a short flag cluster naming

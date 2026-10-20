@@ -51,6 +51,76 @@ func TestReadOnlyCommandClassifiesShellLines(t *testing.T) {
 		{"git tag -d v1", false, "tag can delete — not in the read set"},
 		{"git stash", false, "stash writes and clears the worktree"},
 		{"git config user.name x", false, "config writes"},
+
+		// The read-only forms of the two verbs that HAVE a destructive
+		// spelling. These are the commands a session runs while orienting
+		// itself, and they are what armed the keep-going gate on a plain
+		// question: the gate read `git branch -a` as a mutation, so the
+		// nudge fired after the answer was already delivered.
+		{"git branch", true, "bare branch lists"},
+		{"git branch -a", true, "listing every branch is a read"},
+		{"git branch --list", true, "the explicit list form"},
+		{"git branch --show-current", true, "which branch am I on"},
+		{"git branch --contains HEAD", true, "a query, and HEAD is the flag's value"},
+		{"git branch -r", true, "listing remotes is a read"},
+		{"git worktree list", true, "listing worktrees is a read"},
+		{"git worktree list --porcelain", true, "the machine form is still a read"},
+
+		// The live test's own command. An allowlist of read-only flags
+		// missed --no-abbrev, called the whole line a mutation, and the
+		// gate fired on the question anyway — so the destructive set is a
+		// denylist and the display flags are simply reads.
+		{"git branch -a --verbose --no-abbrev", true, "the live test's orientation command"},
+		{"git branch -a --verbose --no-abbrev && echo --- && git worktree list && echo --- && git status --porcelain=v1 -b", true, "the whole compound line is reads"},
+		{"git branch --column", true, "a display flag is a read"},
+		{"git branch --sort=-committerdate", true, "a flag with an inline value is a read"},
+		{"git branch -vv", true, "a repeated short display flag is a read"},
+		{"git for-each-ref --format='%(refname)' refs/heads", true, "the read-only way to list refs"},
+
+		// …and the neighbouring spellings that must stay mutating.
+		{"git branch feat/x", false, "a bare name CREATES a branch"},
+		{"git branch -m old new", false, "move renames"},
+		{"git branch -M old new", false, "forced move renames"},
+		{"git branch -c src dst", false, "copy duplicates"},
+		{"git branch -C src dst", false, "forced copy duplicates"},
+		{"git branch -d feat/x", false, "delete removes"},
+		{"git branch -D feat/x", false, "forced delete removes"},
+		{"git branch -dv", false, "a cluster carrying d is a delete"},
+		{"git branch --delete feat/x", false, "the long spelling of delete"},
+		{"git branch --move old new", false, "the long spelling of move"},
+		{"git branch --set-upstream-to origin/main", false, "upstream setters write config"},
+		{"git branch --unset-upstream", false, "and so does the unsetter"},
+		{"git worktree add .worktrees/x", false, "add creates a worktree"},
+		{"git worktree remove .worktrees/x", false, "remove deletes one"},
+		{"git worktree prune", false, "prune deletes stale ones"},
+		{"git worktree move a b", false, "move relocates one"},
+		{"git worktree", false, "bare worktree is not a read"},
+
+		// The other read-only forms the session store shows being run
+		// every day: `git remote -v` (724 uses), `git stash list` (1217
+		// uses), `git tag` (126), `git config --get` (258). Each has a
+		// destructive spelling too, so each is judged by its arguments.
+		{"git remote -v", true, "listing the remotes is a read"},
+		{"git remote", true, "bare remote lists"},
+		{"git remote show origin", true, "showing one remote is a read"},
+		{"git remote get-url origin", true, "reading a url is a read"},
+		{"git remote add upstream x", false, "add writes the config"},
+		{"git remote remove origin", false, "remove writes the config"},
+		{"git remote set-url origin y", false, "set-url writes the config"},
+		{"git stash list", true, "listing the stashes is a read"},
+		{"git stash show", true, "showing one stash is a read"},
+		{"git stash", false, "bare stash PUSHES the working tree"},
+		{"git stash push -m x", false, "push writes a stash"},
+		{"git tag", true, "bare tag lists"},
+		{"git tag -l 'v*'", true, "the explicit list form"},
+		{"git tag -d v1", false, "deleting a tag is a write"},
+		{"git tag v2", false, "a bare name creates a tag"},
+		{"git config --get user.name", true, "reading one key is a read"},
+		{"git config user.name", true, "a bare key is a read too"},
+		{"git config user.name x", false, "a key and a value is a write"},
+		{"git config --unset user.name", false, "unset writes"},
+		{"git check-ignore build/x", true, "asking about an ignore rule is a read"},
+		{"git symbolic-ref HEAD", true, "resolving a ref is a read"},
 		{"sed -i 's/a/b/' file.go", false, "in-place edit"},
 		{"sed -ni p file.go", false, "a flag cluster still carries the i"},
 		{"sort -o out.txt in.txt", false, "output to a file"},
