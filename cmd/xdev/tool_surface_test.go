@@ -103,3 +103,63 @@ func TestMeasureTheEagerToolSurfaceWithoutTheStickyDeferral(t *testing.T) {
 		t.Logf("rung %-6s eager=%-4d remote-eager=%d", rung, len(reg.Defs()), remoteEager)
 	}
 }
+
+// The order the TUI actually uses, which is the order that matters.
+//
+// newToolRegistry applies the effort ladder; THEN the MCP servers connect
+// and register their tools (attachMCP → finishMCP → mcpclient.Register),
+// and a wide server is deferred. So at STARTUP the remote surface's
+// deferral held — the ladder had already run.
+//
+// The break is the ladder's SECOND run. /effort and Shift-Tab re-apply it
+// on the LIVE registry (cmd/xdev/tui.go's EffortOps.Set →
+// tool.ApplySessionEffort), and that rebuild knew nothing about the remote
+// surface — so every one of the 27 tools came back to the eager set on the
+// very next turn, with no restart and nothing in the transcript to show
+// why.
+//
+// This test walks that exact order, and it FAILS with the old non-sticky
+// deferral:
+//
+//	after a second /effort change, 27 remote tools are back in the eager schema
+func TestTheTUILadderRerunKeepsTheRemoteSurfaceDeferred(t *testing.T) {
+	reg := newToolRegistry(t.TempDir(), nil, "p", "m", nil, nil, nil, false)
+
+	// The MCP servers connect and register their tools.
+	var remote []tool.Tool
+	for i := 0; i < 27; i++ {
+		remote = append(remote, remoteStub{
+			name: "db_query_thing" + string(rune('a'+i)),
+			desc: "a database operation that is nothing to do with the repository being worked on",
+		})
+	}
+	for _, t2 := range remote {
+		reg.Register(t2)
+		reg.DeferSticky(t2.Name(), "a database operation", "mcp")
+	}
+
+	// /effort low → the ladder re-runs on the live registry.
+	tool.ApplySessionEffort(reg, "low")
+
+	remoteEager := 0
+	for _, d := range reg.Defs() {
+		if len(d.Name) > 3 && d.Name[:3] == "db_" {
+			remoteEager++
+		}
+	}
+	if remoteEager != 0 {
+		t.Fatalf("after an /effort change, %d remote tools are back in the eager schema", remoteEager)
+	}
+
+	// Shift-Tab again, up the ladder: still deferred.
+	tool.ApplySessionEffort(reg, "high")
+	remoteEager = 0
+	for _, d := range reg.Defs() {
+		if len(d.Name) > 3 && d.Name[:3] == "db_" {
+			remoteEager++
+		}
+	}
+	if remoteEager != 0 {
+		t.Fatalf("after a second /effort change, %d remote tools are back in the eager schema", remoteEager)
+	}
+}
