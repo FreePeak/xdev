@@ -678,9 +678,12 @@ func cutAt(s string, w int) int {
 // border overhead is subtracted from the terminal width first. Alignment
 // colons are accepted and ignored (everything renders flush-left).
 
-// tableFrame is the grid's border glyph set. Tables always draw sharp,
-// whatever the chrome box style is; the ascii preset degenerates every
-// junction to +.
+// tableFrame is the grid's border glyph set. The outline follows the
+// THEME's box style — round by default, sharp or ascii when the theme says
+// so — so a table does not read as a different app from the boxes around it.
+// The inner junctions stay square: a rounded outer corner with a square
+// junction is the shape every rounded-border tool uses, and a grid has
+// corners at every crossing.
 type tableFrame struct {
 	topLeft, teeDown, topRight     string
 	teeLeft, cross, teeRight       string
@@ -689,7 +692,7 @@ type tableFrame struct {
 }
 
 func (a *App) tableFrame() tableFrame {
-	b := a.th.BoxSharp()
+	b := a.th.Box()
 	f := tableFrame{
 		topLeft: b.TopLeft, teeDown: "┬", topRight: b.TopRight,
 		teeLeft: "├", cross: "┼", teeRight: "┤",
