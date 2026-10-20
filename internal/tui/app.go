@@ -515,6 +515,11 @@ type App struct {
 	// a click is tested against the chip that is actually on screen
 	// (selection.go press).
 	jump panelRect
+	// cursorStyle is the cursor shape the last frame chose. tcell's
+	// simulation screen drops SetCursorStyle (it is a no-op there), so this
+	// record is how the choice is observable in a test — the same reason the
+	// jump chip and the picker's hit rows are recorded.
+	cursorStyle tcell.CursorStyle
 	// Pasted images (paste.go): the payloads the chips in the composer name,
 	// the bracketed-paste window, and the clipboard reader. All three are
 	// UI-thread-owned exactly like the editor beside them — no lock covers
@@ -5808,7 +5813,20 @@ func (a *App) drawComposer(yTop int) {
 	// reading their own words in. A field that chatters about itself while you
 	// type is not a field.
 	// Cursor: blinking block at the editor position inside the painted window.
+	//
+	// The SHAPE is the app's, not the terminal's default: a block cursor is
+	// what makes the input read as a prompt rather than a plain text field.
+	//
+	// The COLOUR is deliberately the terminal's. tcell paints a cursor colour
+	// as an OSC 12 sequence (ESC ] 12 ; #rrggbb BEL) on every frame, and a
+	// pane-style renderer that only speaks CSI reads that payload as
+	// printable text — the box's placeholder would arrive as
+	// "12;#bb9af7Type a message…". The block shape is a CSI sequence every
+	// renderer already understands, so the shape is taken and the colour is
+	// left alone.
 	cx := 3 + curCol
+	a.cursorStyle = tcell.CursorStyleBlinkingBlock
+	a.scr.SetCursorStyle(a.cursorStyle)
 	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
 }
 
