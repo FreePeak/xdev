@@ -105,10 +105,10 @@ func TestCompressSessionCompactsDeterministically(t *testing.T) {
 	if compaction == nil {
 		t.Fatal("no compaction entry in the session file")
 	}
-	// shake is local work: the record names no method (omp's contract) — a
-	// record must not claim a provider call that never happened.
-	if compaction.Method != "" {
-		t.Fatalf("compaction method = %q, want empty", compaction.Method)
+	// The persisted record names the member that produced it (omp's
+	// contract): the CLI ran shake, and the entry says so.
+	if compaction.Method != "shake" {
+		t.Fatalf("compaction method = %q, want shake", compaction.Method)
 	}
 	if compaction.FirstKeptEntryID == nil || *compaction.FirstKeptEntryID != done.Anchor {
 		t.Fatalf("anchor = %v, want %s", compaction.FirstKeptEntryID, done.Anchor)

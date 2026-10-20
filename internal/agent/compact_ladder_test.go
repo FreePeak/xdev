@@ -201,10 +201,10 @@ func TestLadderShakeElidesBodiesKeepsSkeleton(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("compaction entries = %d, want 1", len(entries))
 	}
-	// shake is local work: the record names no method, because a record must
-	// not claim a provider call that never happened (omp's contract).
-	if entries[0].Method != "" {
-		t.Fatalf("shake is no provider call: method = %q, want empty", entries[0].Method)
+	// The record names the member that produced it (omp's contract): the
+	// elision kept the span locally, and the entry says which rung did it.
+	if entries[0].Method != methodShake {
+		t.Fatalf("method = %q, want %q", entries[0].Method, methodShake)
 	}
 	text := entries[0].Summary.Text()
 	if !strings.Contains(text, "[tool read(offset,path)]") {
@@ -565,9 +565,10 @@ func TestLadderProducts(t *testing.T) {
 
 // ---- omp ladder parity: default order, applicability, recorded method -----
 
-// TestLadderDefaultOrderRunsHandoff is the common case: no remote endpoint
-// and no image in the input, so the first applicable member of omp's ladder
-// is the provider summarize — and the record names it.
+// TestLadderDefaultOrderRunsHandoff is the common case: the active model is
+// text-only, so neither remote nor snapcompact applies and the first
+// applicable member of omp's ladder is the provider summarize — and the
+// record names it.
 func TestLadderDefaultOrderRunsHandoff(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
@@ -588,8 +589,12 @@ func TestLadderDefaultOrderRunsHandoff(t *testing.T) {
 }
 
 // TestLadderRemoteNeverApplies pins omp's remote applicability: the rung
-// needs a remote compaction endpoint, xdev configures none, so it falls
-// through to the next member instead of faking a remote summary.
+// applies with a configured remote endpoint OR a provider that supports
+// native compaction (omp `hde`,
+// packages/coding-agent/src/session/compaction-methods.ts:70-72). xdev has
+// neither — no endpoint setting, no native-compaction transport — so the rung
+// never applies and the ladder falls through to the next member instead of
+// faking a remote summary.
 func TestLadderRemoteNeverApplies(t *testing.T) {
 	stubPressure(t, 0)
 	logs := captureLogs(t)
@@ -610,16 +615,19 @@ func TestLadderRemoteNeverApplies(t *testing.T) {
 	}
 }
 
-// TestLadderSnapcompactAppliesWithAnImage pins omp's snapcompact
-// applicability: an image in the compaction input makes the rung applicable,
-// so it wins over the summarize — and it calls no provider, so the record
-// names no method.
-func TestLadderSnapcompactAppliesWithAnImage(t *testing.T) {
+// TestLadderSnapcompactAppliesForAVisionModel pins omp's snapcompact
+// applicability: the rung needs the ACTIVE MODEL to declare image input
+// (omp `u?.input?.includes("image") === true`,
+// packages/coding-agent/src/session/compaction-methods.ts:77), not an image
+// in the conversation — so a vision model takes the rung even when the
+// discarded span holds no image, and the record names the rung that produced
+// it (omp writes `method: "snapcompact"`,
+// packages/coding-agent/src/session/session-maintenance.ts:2383).
+func TestLadderSnapcompactAppliesForAVisionModel(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{}
 	a, s, _ := storeAgent(t, p, CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5})
-	a.Vision = func() bool { return true }
-	appendMsg(t, s, imageMsg())
+	a.Vision = func() bool { return true } // the model declares image input
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
@@ -627,8 +635,8 @@ func TestLadderSnapcompactAppliesWithAnImage(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("compaction entries = %d, want 1", len(entries))
 	}
-	if entries[0].Method != "" {
-		t.Fatalf("snapcompact is no provider call: method = %q, want empty", entries[0].Method)
+	if entries[0].Method != methodSnapcompact {
+		t.Fatalf("method = %q, want %q", entries[0].Method, methodSnapcompact)
 	}
 	if len(p.gotReqs) != 0 {
 		t.Fatalf("snapcompact must not call the provider, got %d calls", len(p.gotReqs))
@@ -636,10 +644,13 @@ func TestLadderSnapcompactAppliesWithAnImage(t *testing.T) {
 	imageBlockOf(t, entries[0].Summary)
 }
 
-// TestLadderSnapcompactSkippedWithoutAnImage pins the other side: without an
-// image the rung has nothing to snapshot, so the ladder falls through to the
-// summarize.
-func TestLadderSnapcompactSkippedWithoutAnImage(t *testing.T) {
+// TestLadderSnapcompactSkippedForATextOnlyModel pins the other side: a model
+// that does not declare image input cannot read the bitmap the rung produces,
+// so the rung does not apply and the ladder falls through to the summarize —
+// with the reason in the log (omp refuses the same rung outright:
+// "snapcompact cannot run locally: <id> is text-only.",
+// packages/coding-agent/src/session/session-maintenance.ts:619-621).
+func TestLadderSnapcompactSkippedForATextOnlyModel(t *testing.T) {
 	stubPressure(t, 0)
 	logs := captureLogs(t)
 	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
@@ -654,14 +665,14 @@ func TestLadderSnapcompactSkippedWithoutAnImage(t *testing.T) {
 	if entries[0].Method != MethodHandoff {
 		t.Fatalf("method = %q, want %q", entries[0].Method, MethodHandoff)
 	}
-	if !strings.Contains(logs.String(), "snapcompact") {
+	if !strings.Contains(logs.String(), "text-only") {
 		t.Errorf("the skipped rung must say why, logs:\n%s", logs.String())
 	}
 }
 
 // TestLadderConfiguredOrderSkipsInapplicableMembers pins that a configured
-// order is honoured verbatim, but a member that does not apply to the input is
-// skipped rather than run.
+// order is honoured verbatim, but a member that does not apply is skipped
+// rather than run — here snapcompact, because the active model is text-only.
 func TestLadderConfiguredOrderSkipsInapplicableMembers(t *testing.T) {
 	stubPressure(t, 0)
 	logs := captureLogs(t)
@@ -677,7 +688,7 @@ func TestLadderConfiguredOrderSkipsInapplicableMembers(t *testing.T) {
 	if entries[0].Method != MethodHandoff {
 		t.Fatalf("method = %q, want %q", entries[0].Method, MethodHandoff)
 	}
-	if !strings.Contains(logs.String(), "snapcompact") {
+	if !strings.Contains(logs.String(), "snapcompact") || !strings.Contains(logs.String(), "text-only") {
 		t.Errorf("the skipped rung must say why, logs:\n%s", logs.String())
 	}
 }

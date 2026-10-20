@@ -50,13 +50,14 @@ func TestSnapFontGlyphs(t *testing.T) {
 
 // TestSnapcompactAttachesDeterministicImage pins snapcompact end to end: the
 // entry carries a decodable PNG plus a caption, the same span always encodes
-// to the same bytes, and the kept tail stays in the live context.
+// to the same bytes, and the kept tail stays in the live context. The record
+// names the rung that produced it (omp writes `method: "snapcompact"`,
+// packages/coding-agent/src/session/session-maintenance.ts:2383).
 func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{}
 	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact"))
 	a.Vision = func() bool { return true } // the bitmap path needs a vision model
-	appendMsg(t, s, imageMsg())            // the rung applies to an image input
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
@@ -65,10 +66,8 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 		t.Fatalf("compaction entries = %d, want 1", len(entries))
 	}
 	entry := entries[0]
-	// snapcompact is local work: the record names no method, because a
-	// record must not claim a provider call that never happened (omp).
-	if entry.Method != "" {
-		t.Fatalf("snapcompact is no provider call: method = %q, want empty", entry.Method)
+	if entry.Method != methodSnapcompact {
+		t.Fatalf("method = %q, want %q", entry.Method, methodSnapcompact)
 	}
 	img := imageBlockOf(t, entry.Summary)
 	if img.Source.Type != "base64" || img.Source.MediaType != "image/png" {
@@ -102,7 +101,6 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	p2 := &fakeProvider{}
 	a2, s2, _ := storeAgent(t, p2, ladderConfig("snapcompact"))
 	a2.Vision = func() bool { return true }
-	appendMsg(t, s2, imageMsg())
 	ladderFixture(t, s2)
 	_ = a2.maybeCompact(context.Background(), ladderHistory(t, s2))
 	again := compactionEntries(s2)
@@ -112,15 +110,6 @@ func TestSnapcompactAttachesDeterministicImage(t *testing.T) {
 	if data := imageBlockOf(t, again[0].Summary).Source.Data; data != img.Source.Data {
 		t.Fatal("snapcompact must be deterministic: the same span produced different bytes")
 	}
-}
-
-// imageMsg is a user message carrying an image block — the input shape that
-// makes omp's snapcompact rung applicable.
-func imageMsg() ai.Message {
-	return ai.Message{Role: ai.RoleUser, Content: []ai.Block{
-		ai.TextBlock{Text: "here is the screenshot"},
-		ai.ImageBlock{Source: ai.ImageSource{Type: "base64", MediaType: "image/png", Data: "aGVsbG8="}},
-	}}
 }
 
 // imageBlockOf returns the image block of a retained summary, failing the test
@@ -168,22 +157,27 @@ func TestSnapGlyphRenderingIsPixelFaithful(t *testing.T) {
 }
 
 // #83: a text-only model cannot read a bitmap, so the rung keeps the dropped
-// span as text instead of shipping base64 nothing will decode.
+// span as text instead of shipping base64 nothing will decode. The ladder
+// never picks the rung for such a model (omp gates it on the model's declared
+// image input), so this is the FORCED path — `xdev compress --method
+// snapcompact`, which runs one member and skips the applicability check.
 func TestSnapcompactTextOnlyForNonVisionModels(t *testing.T) {
-	stubPressure(t, 0)
-	p := &fakeProvider{}
-	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact"))
-	a.Vision = nil              // unknown capability must take the text path
-	appendMsg(t, s, imageMsg()) // the rung applies to an image input
-	ladderFixture(t, s)
-	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
-
-	entries := compactionEntries(s)
-	if len(entries) != 1 {
-		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	logs := captureLogs(t)
+	msgs := []ai.Message{
+		userText("the first thing that happened"),
+		userText("the second thing that happened"),
+		userText("the tail that stays"),
+	}
+	plan, err := PlanCompaction(msgs, []string{"e1", "e2", "e3"}, 1)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	summary, err := plan.Compact(context.Background(), methodSnapcompact, nil, "")
+	if err != nil {
+		t.Fatalf("compact: %v", err)
 	}
 	var img, text int
-	for _, b := range entries[0].Summary.Content {
+	for _, b := range summary.Content {
 		switch b.(type) {
 		case ai.ImageBlock:
 			img++
@@ -197,7 +191,12 @@ func TestSnapcompactTextOnlyForNonVisionModels(t *testing.T) {
 	if text == 0 {
 		t.Fatal("the text-only form dropped the retained detail entirely")
 	}
-	if !strings.Contains(entries[0].Summary.Text(), "text-only model") {
-		t.Fatalf("the caption must say why there is no bitmap: %s", entries[0].Summary.Text())
+	if !strings.Contains(summary.Text(), "text-only model") {
+		t.Fatalf("the caption must say why there is no bitmap: %s", summary.Text())
+	}
+	// The fallback is announced: a rung that cannot do its job says so
+	// instead of quietly producing something else.
+	if !strings.Contains(logs.String(), "text-only") {
+		t.Errorf("the text-only fallback must be announced, logs:\n%s", logs.String())
 	}
 }

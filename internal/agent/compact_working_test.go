@@ -170,9 +170,9 @@ func TestWorkingStateIsNotInjectedIntoShake(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("compaction entries = %d, want 1", len(entries))
 	}
-	// shake is local work: the record names no method (omp's contract).
-	if entries[0].Method != "" {
-		t.Fatalf("shake is no provider call: method = %q, want empty", entries[0].Method)
+	// The record names the member that produced it (omp's contract).
+	if entries[0].Method != methodShake {
+		t.Fatalf("method = %q, want %q", entries[0].Method, methodShake)
 	}
 	text := entries[0].Summary.Text()
 	if strings.Contains(text, "Working state") {
