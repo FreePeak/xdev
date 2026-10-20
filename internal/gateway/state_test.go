@@ -155,6 +155,63 @@ func newTestChats(t *testing.T) *Chats {
 	return c
 }
 
+// blockingWorker writes an executable that stands in for a slow xdev worker:
+// it ignores the gateway's flags and waits until the gate file appears. The
+// test decides when the turn ends, so the assertion is about ordering and
+// not about a sleep.
+func blockingWorker(t *testing.T, gate string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "worker.sh")
+	script := "#!/bin/sh\nwhile [ ! -f \"" + gate + "\" ]; do sleep 0.05; done\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTurnDoesNotBlockThePollLoop: a chat message whose worker is still
+// running must not stop the bridge from answering the next one. The daemon
+// handled updates on the poll goroutine, so a slow turn froze every chat on
+// the bot and made /stop unreachable — the one command that exists to cancel
+// a turn could not be read exactly when it was needed.
+func TestTurnDoesNotBlockThePollLoop(t *testing.T) {
+	b := newFakeBot(t)
+	b.queue(textUpdate("slow question", 5))
+	d := newTestDaemon(t, b, []int64{5})
+	gate := filepath.Join(t.TempDir(), "release")
+	d.exe = blockingWorker(t, gate)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	go func() { _ = d.Run(ctx) }()
+
+	// Wait for the turn to start: the typing action is the first thing a
+	// running turn does.
+	if !waitFor(t, 10*time.Second, func() bool { return b.actionCount() > 0 }) {
+		t.Fatal("the turn never started")
+	}
+
+	// The next message must be answered while the worker is still running.
+	// The worker only exits once the gate appears, so a reply here proves
+	// the poll loop was free.
+	b.queue(textUpdate("/status", 5))
+	if !waitFor(t, 10*time.Second, func() bool {
+		for _, m := range b.sentTo(5) {
+			if strings.Contains(m, "workspace:") {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("the poll loop was blocked by the running turn — /status was never answered")
+	}
+
+	// Let the worker finish so the test does not leave it running.
+	if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // newTestDaemon wires a daemon against the fake bot with a workspace under
 // the temp dir, so a test never touches the real one.
 func newTestDaemon(t *testing.T, b *fakeBot, allowed []int64) *Daemon {

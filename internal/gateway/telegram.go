@@ -74,8 +74,30 @@ type Telegram struct {
 	BaseURL string
 	// HTTPClient is the transport (tests inject one).
 	HTTPClient *http.Client
+	// SendTimeout bounds one call that is not a long poll (0 = the
+	// default). The client's own two-minute timeout exists for getUpdates,
+	// which holds the connection on purpose; every other method is a
+	// request-and-answer, and one that has not answered in this budget is
+	// not going to.
+	SendTimeout time.Duration
 	// Logf receives lifecycle lines.
 	Logf func(format string, args ...any)
+}
+
+// DefaultSendTimeout bounds one Bot API call that is not a long poll.
+//
+// The poll loop reads commands on the goroutine that also polls, so a send
+// that hangs is a wedged bridge: the loop stops reading, /stop stops being
+// reachable, and the next message is not seen. A Telegram answer takes
+// milliseconds; fifteen seconds is already a link having a bad day.
+const DefaultSendTimeout = 15 * time.Second
+
+// sendTimeout is the effective per-call budget.
+func (t *Telegram) sendTimeout() time.Duration {
+	if t.SendTimeout > 0 {
+		return t.SendTimeout
+	}
+	return DefaultSendTimeout
 }
 
 func (t *Telegram) base() string {
@@ -129,6 +151,17 @@ func (t *Telegram) call(ctx context.Context, method string, payload any, out any
 // the ok:false decoding — split out so the multipart uploads reach the same
 // error handling as the JSON calls rather than reimplementing it.
 func (t *Telegram) send(ctx context.Context, method string, req *http.Request, out any) error {
+	// Every method but the long poll gets its own deadline. getUpdates holds
+	// the connection for pollTimeout+slack on purpose, so the client's
+	// two-minute timeout is right for it and wrong for everything else: a
+	// send that waited that long would stall the poll loop, and the poll
+	// loop is where the commands are read.
+	if method != "getUpdates" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.sendTimeout())
+		defer cancel()
+		req = req.WithContext(ctx)
+	}
 	resp, err := t.client().Do(req)
 	if err != nil {
 		// The transport error embeds the URL, and the URL carries the token
@@ -146,7 +179,9 @@ func (t *Telegram) send(ctx context.Context, method string, req *http.Request, o
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// A non-JSON body is the shape a proxy or a wrong base URL leaves
 		// behind; echoing the first bytes names it instead of a parse error.
-		return fmt.Errorf("telegram %s: HTTP %d: %s", method, resp.StatusCode, clip(string(raw), telegramErrBodyCap))
+		// The status is kept, because a 5xx from the edge is a link having
+		// a moment and a caller may want to try again.
+		return &httpError{Method: method, Status: resp.StatusCode, Body: clip(string(raw), telegramErrBodyCap)}
 	}
 	if !env.OK {
 		msg := env.Description
@@ -181,6 +216,20 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("telegram %s: HTTP %d: %s", e.Method, e.HTTPStatus, e.Description)
 }
 
+// httpError is a non-2xx answer whose body was not a Bot API envelope: the
+// shape a proxy, an edge, or a wrong base URL leaves behind. The status is
+// carried because a 5xx is a link having a moment — the same moment a
+// transport error is — and a caller may want to try again.
+type httpError struct {
+	Method string
+	Status int
+	Body   string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("telegram %s: HTTP %d: %s", e.Method, e.Status, e.Body)
+}
+
 // IsConflict reports whether err is the 409 a second getUpdates causes.
 //
 // Telegram's rule: a new getUpdates terminates the previous long poll, and
@@ -196,8 +245,39 @@ func IsConflict(err error) bool {
 
 // Update is one inbound update, narrowed to the fields the bridge uses.
 type Update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *Message `json:"message"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *Message       `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"`
+}
+
+// CallbackQuery is a tap on an inline button: the button's payload and the
+// message it sits under.
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	Data    string   `json:"data"`
+	Message *Message `json:"message"`
+}
+
+// InlineButton is one button of an inline keyboard.
+type InlineButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+// InlineKeyboard is the rows of buttons under a message.
+type InlineKeyboard [][]InlineButton
+
+// markup is the keyboard in the shape the Bot API wants.
+func (k InlineKeyboard) markup() map[string]any {
+	rows := make([][]map[string]string, 0, len(k))
+	for _, row := range k {
+		buttons := make([]map[string]string, 0, len(row))
+		for _, b := range row {
+			buttons = append(buttons, map[string]string{"text": b.Text, "callback_data": b.CallbackData})
+		}
+		rows = append(rows, buttons)
+	}
+	return map[string]any{"inline_keyboard": rows}
 }
 
 // Message is an inbound message.
@@ -238,7 +318,7 @@ func (t *Telegram) GetUpdates(ctx context.Context, offset int64, timeout int) ([
 	payload := map[string]any{
 		"offset":          offset,
 		"timeout":         timeout,
-		"allowed_updates": []string{"message"},
+		"allowed_updates": []string{"message", "callback_query"},
 	}
 	var updates []Update
 	if err := t.call(ctx, "getUpdates", payload, &updates); err != nil {
@@ -269,8 +349,25 @@ func (t *Telegram) SendMessage(ctx context.Context, chatID int64, text string) e
 // SendMessageID is SendMessage reporting the id of the bubble it created,
 // which is what the streaming path edits afterwards (see streamer.deliver).
 func (t *Telegram) SendMessageID(ctx context.Context, chatID int64, text string) (int64, error) {
+	return t.sendMessage(ctx, chatID, text, nil)
+}
+
+// SendMessageKeyboard sends a message with an inline keyboard under it, and
+// reports the id of the bubble it created. The keyboard is what turns a list
+// of models into a list a phone user can pick from with one tap.
+func (t *Telegram) SendMessageKeyboard(ctx context.Context, chatID int64, text string, kb InlineKeyboard) (int64, error) {
+	return t.sendMessage(ctx, chatID, text, kb)
+}
+
+// sendMessage is the shared body of the two senders: HTML-rendered, with the
+// plain-text retry when the API refuses the parsed form, and with the
+// keyboard attached to whichever form is sent.
+func (t *Telegram) sendMessage(ctx context.Context, chatID int64, text string, kb InlineKeyboard) (int64, error) {
 	rendered := ToTelegramHTML(text)
 	payload := map[string]any{"chat_id": chatID, "text": rendered, "parse_mode": "HTML"}
+	if len(kb) > 0 {
+		payload["reply_markup"] = kb.markup()
+	}
 	var sent SentMessage
 	err := t.call(ctx, "sendMessage", payload, &sent)
 	if err == nil {
@@ -282,11 +379,15 @@ func (t *Telegram) SendMessageID(ctx context.Context, chatID int64, text string)
 	// The API rejected the parsed form. Resend the same text as plain text;
 	// a readable answer matters more than its formatting.
 	t.logf("telegram: %v; resending as plain text", err)
-	var plain SentMessage
-	if err := t.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, &plain); err != nil {
+	plain := map[string]any{"chat_id": chatID, "text": text}
+	if len(kb) > 0 {
+		plain["reply_markup"] = kb.markup()
+	}
+	var plainSent SentMessage
+	if err := t.call(ctx, "sendMessage", plain, &plainSent); err != nil {
 		return 0, err
 	}
-	return plain.MessageID, nil
+	return plainSent.MessageID, nil
 }
 
 // EditMessageText replaces the body of a message this bot already sent, in the
@@ -299,12 +400,27 @@ func (t *Telegram) SendMessageID(ctx context.Context, chatID int64, text string)
 // against what it last wrote, and a duplicate must not read as a broken stream
 // (which would kill the preview for the rest of the turn).
 func (t *Telegram) EditMessageText(ctx context.Context, chatID, messageID int64, text string) error {
+	return t.editMessageText(ctx, chatID, messageID, text, nil)
+}
+
+// EditMessageKeyboard replaces the body of a message AND the keyboard under
+// it. The picker edits itself in place: a tap re-marks the chosen model
+// where the list already is, instead of sending a second list.
+func (t *Telegram) EditMessageKeyboard(ctx context.Context, chatID, messageID int64, text string, kb InlineKeyboard) error {
+	return t.editMessageText(ctx, chatID, messageID, text, kb)
+}
+
+// editMessageText is the shared body of the two editors.
+func (t *Telegram) editMessageText(ctx context.Context, chatID, messageID int64, text string, kb InlineKeyboard) error {
 	rendered := ToTelegramHTML(text)
 	payload := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
 		"text":       rendered,
 		"parse_mode": "HTML",
+	}
+	if len(kb) > 0 {
+		payload["reply_markup"] = kb.markup()
 	}
 	err := t.call(ctx, "editMessageText", payload, nil)
 	if err == nil || isNotModified(err) {
@@ -314,15 +430,29 @@ func (t *Telegram) EditMessageText(ctx context.Context, chatID, messageID int64,
 		return err
 	}
 	t.logf("telegram: %v; editing as plain text", err)
-	err = t.call(ctx, "editMessageText", map[string]any{
+	plain := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
 		"text":       text,
-	}, nil)
+	}
+	if len(kb) > 0 {
+		plain["reply_markup"] = kb.markup()
+	}
+	err = t.call(ctx, "editMessageText", plain, nil)
 	if err != nil && !isNotModified(err) {
 		return err
 	}
 	return nil
+}
+
+// AnswerCallbackQuery closes a tap: Telegram shows the text as a toast over
+// the button. Without the answer the button keeps spinning on the phone.
+func (t *Telegram) AnswerCallbackQuery(ctx context.Context, id, text string) error {
+	payload := map[string]any{"callback_query_id": id}
+	if text != "" {
+		payload["text"] = text
+	}
+	return t.call(ctx, "answerCallbackQuery", payload, nil)
 }
 
 // isNotModified reports Telegram's "nothing changed" refusal, the one 400 an
@@ -602,5 +732,18 @@ func maskTokenInError(err error, token string) error {
 	if !strings.Contains(msg, token) {
 		return err
 	}
-	return errors.New(strings.ReplaceAll(msg, token, MaskToken(token)))
+	return &maskedError{msg: strings.ReplaceAll(msg, token, MaskToken(token)), err: err}
 }
+
+// maskedError is an error whose message hides the bot token while its chain
+// still names what really happened. The plain rewrite this replaced threw the
+// chain away, and a caller that classifies errors — a retry on a transport
+// failure, a check for a deadline — needs it: without it every network
+// failure looks alike and none of them can be told from a refusal.
+type maskedError struct {
+	msg string
+	err error
+}
+
+func (e *maskedError) Error() string { return e.msg }
+func (e *maskedError) Unwrap() error { return e.err }

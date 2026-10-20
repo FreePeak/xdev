@@ -37,7 +37,14 @@ func (d *Daemon) loadModels() (*config.Config, error) {
 func (d *Daemon) modelCommand(ctx context.Context, chat int64, text string) {
 	arg := strings.TrimSpace(strings.TrimPrefix(text, "/model"))
 	if arg == "" {
-		_ = d.reply(ctx, chat, d.modelReport(chat))
+		// The list comes with a picker: one button per model, so choosing
+		// is a tap instead of typing a ref nobody wants to type on a phone.
+		// The catalog is built once: the discovery behind it is a network
+		// round trip per provider, and the poll loop is waiting.
+		cat := d.catalogRefs()
+		if err := d.sendTextKeyboard(ctx, chat, d.modelReport(chat, cat), d.modelKeyboard(chat, cat)); err != nil {
+			d.logFn("gateway: model list for chat %d: %v", chat, err)
+		}
 		return
 	}
 	if arg == "default" || arg == "reset" {
@@ -143,19 +150,23 @@ func (d *Daemon) catalog(cfg *config.Config) []string {
 
 // providerModels is a provider's pinned models plus whatever its discovery
 // endpoint lists.
+//
+// The discovery result already carries the pinned models — DiscoverModels
+// layers the pinned entries under the discovered ones, pinned winning on a
+// collision — so the pinned list is NOT prepended to it: that listed every
+// pinned model twice, which in the picker is a duplicate button.
 func (d *Daemon) providerModels(name string, pc *config.ProviderConfig) []config.ModelConfig {
-	out := pc.Models
 	if pc.Discovery == nil {
-		return out
+		return pc.Models
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), config.DiscoveryTimeout)
 	defer cancel()
 	found, err := config.DiscoverModels(ctx, pc)
 	if err != nil {
 		d.logFn("gateway: discovery %s: %v", name, err)
-		return out
+		return pc.Models
 	}
-	return append(append([]config.ModelConfig(nil), out...), found...)
+	return found
 }
 
 // expandBareID resolves a bare model id against the catalog, the same
@@ -197,10 +208,29 @@ func (d *Daemon) modelFor(chat int64) string {
 	return d.model
 }
 
+// modelCatalog is the catalog /model lists, with the reason it may be empty.
+// The reason matters: "no models configured" would send the operator to add
+// a models.yml they already have, and the real fault is in it.
+type modelCatalog struct {
+	refs []string
+	err  error
+}
+
+// catalogRefs builds the catalog once. The discovery behind it is a network
+// round trip per provider, and the poll loop is waiting for the answer.
+func (d *Daemon) catalogRefs() modelCatalog {
+	cfg, err := d.loadModels()
+	if err != nil {
+		d.logFn("gateway: models.yml: %v", err)
+		return modelCatalog{err: err}
+	}
+	return modelCatalog{refs: d.catalog(cfg)}
+}
+
 // modelReport is what bare /model answers: the model in force, and the
 // catalog to choose from. The list is capped — a chat message is not a
 // picker, and a gateway serving 100+ ids would otherwise flood the phone.
-func (d *Daemon) modelReport(chat int64) string {
+func (d *Daemon) modelReport(chat int64, cat modelCatalog) string {
 	var b strings.Builder
 	current := d.modelFor(chat)
 	switch {
@@ -211,21 +241,19 @@ func (d *Daemon) modelReport(chat int64) string {
 	default:
 		b.WriteString("model: the run's configured default\n")
 	}
-	cfg, err := d.loadModels()
-	if err != nil {
-		fmt.Fprintf(&b, "\ncould not read models.yml: %v", err)
+	if cat.err != nil {
+		fmt.Fprintf(&b, "\ncould not read models.yml: %v", cat.err)
 		return b.String()
 	}
-	refs := d.catalog(cfg)
-	if len(refs) == 0 {
+	if len(cat.refs) == 0 {
 		b.WriteString("\nno models configured: add models.yml (or run `xdev setup`)")
 		return b.String()
 	}
 	const shown = 20
-	b.WriteString("\navailable (send /model <ref>):\n")
-	for i, ref := range refs {
+	b.WriteString("\navailable (tap one, or send /model <ref>):\n")
+	for i, ref := range cat.refs {
 		if i == shown {
-			fmt.Fprintf(&b, "  … %d more (see `xdev models`)\n", len(refs)-shown)
+			fmt.Fprintf(&b, "  … %d more (see `xdev models`)\n", len(cat.refs)-shown)
 			break
 		}
 		mark := "  "
@@ -235,4 +263,100 @@ func (d *Daemon) modelReport(chat int64) string {
 		fmt.Fprintf(&b, "%s%s\n", mark, ref)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// modelPickPrefix marks a button payload as a model pick, so a button of
+// another kind can never be mistaken for a model ref.
+const modelPickPrefix = "m:"
+
+// maxModelButtons is how many models the picker offers. A phone shows a
+// keyboard under the message and scrolls it, but a list of twenty is a wall:
+// the text above the keyboard carries the full catalog.
+const maxModelButtons = 8
+
+// maxCallbackData is Telegram's cap on a button's payload (64 bytes). A ref
+// longer than that cannot be a button, so it stays a type-it choice.
+const maxCallbackData = 64
+
+// modelKeyboard is the picker under the /model list: one button per model,
+// the one in force first and marked, then the rest of the catalog.
+//
+// A tap carries the ref as the payload, so choosing is one tap instead of
+// typing a ref nobody wants to type on a phone.
+func (d *Daemon) modelKeyboard(chat int64, cat modelCatalog) InlineKeyboard {
+	current := d.modelFor(chat)
+	pinned := d.chats.Model(chat)
+	var rows InlineKeyboard
+	if current != "" && len(current) <= maxCallbackData {
+		rows = append(rows, []InlineButton{{Text: "→ " + current, CallbackData: modelPickPrefix + current}})
+	}
+	for _, ref := range cat.refs {
+		if ref == current || len(ref) > maxCallbackData {
+			continue
+		}
+		rows = append(rows, []InlineButton{{Text: ref, CallbackData: modelPickPrefix + ref}})
+		if len(rows) >= maxModelButtons {
+			break
+		}
+	}
+	if pinned != "" {
+		rows = append(rows, []InlineButton{{Text: "↩ back to the gateway's model", CallbackData: modelPickPrefix + "default"}})
+	}
+	return rows
+}
+
+// callback answers a tap on an inline button. The only buttons the bridge
+// has are the model picker, so the payload is a model ref.
+func (d *Daemon) callback(ctx context.Context, q *CallbackQuery) {
+	if q == nil {
+		return
+	}
+	ref, ok := strings.CutPrefix(q.Data, modelPickPrefix)
+	if !ok {
+		// A button this build does not know: close the tap so it does not
+		// keep spinning, and say nothing else.
+		_ = d.tg.AnswerCallbackQuery(ctx, q.ID, "")
+		return
+	}
+	if q.Message == nil {
+		_ = d.tg.AnswerCallbackQuery(ctx, q.ID, "")
+		return
+	}
+	chat := q.Message.Chat.ID
+	if !allowed(chat, d.allow, d.allowAll) {
+		_ = d.tg.AnswerCallbackQuery(ctx, q.ID, "Not authorized.")
+		return
+	}
+	if ref == "default" || ref == "reset" {
+		if err := d.chats.SetModel(chat, ""); err != nil {
+			d.logFn("gateway: clear model for chat %d: %v", chat, err)
+			_ = d.tg.AnswerCallbackQuery(ctx, q.ID, "Could not save the model choice.")
+			return
+		}
+		d.answerModelPick(ctx, q, chat, "This chat now uses "+d.modelFor(chat)+".")
+		return
+	}
+	resolved, err := d.resolveModelArg(ref)
+	if err != nil {
+		d.logFn("gateway: model pick for chat %d: %v", chat, err)
+		_ = d.tg.AnswerCallbackQuery(ctx, q.ID, err.Error())
+		return
+	}
+	if err := d.chats.SetModel(chat, resolved); err != nil {
+		d.logFn("gateway: pin model for chat %d: %v", chat, err)
+		_ = d.tg.AnswerCallbackQuery(ctx, q.ID, "Could not save the model choice.")
+		return
+	}
+	d.answerModelPick(ctx, q, chat, "This chat now runs on "+resolved+".")
+}
+
+// answerModelPick closes a pick: the toast over the button says what was
+// chosen, and the list under it is re-marked in place so the user sees the
+// new arrow without a second list arriving.
+func (d *Daemon) answerModelPick(ctx context.Context, q *CallbackQuery, chat int64, note string) {
+	_ = d.tg.AnswerCallbackQuery(ctx, q.ID, note)
+	cat := d.catalogRefs()
+	if err := d.tg.EditMessageKeyboard(ctx, chat, q.Message.MessageID, d.modelReport(chat, cat), d.modelKeyboard(chat, cat)); err != nil {
+		d.logFn("gateway: re-mark the model list for chat %d: %v", chat, err)
+	}
 }
