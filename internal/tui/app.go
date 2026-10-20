@@ -4713,8 +4713,21 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	// cells land on the same column as a plain one. Runs past the interior
 	// budget are cut here rather than allowed to push the right border out of
 	// alignment.
+	//
+	// The frame is the same on every row, so it is built once here rather
+	// than per row: a window of 10 000 rows that grew its own borders and
+	// its own pad paid for 10 000 copies of the same two-byte string and the
+	// same run of spaces. The runs slice is sized once too, for the row's own
+	// runs plus the frame's three cells: growing it while it fills reallocates
+	// and copies, and those copies were half of what the window cost
+	// (measured: 20 MB for a 10 000-row window, of which 6.5 MB was the frame
+	// and 9 MB the growth).
+	leftEdge := cell{text: box.Vertical + " ", style: border, chrome: true}
+	rightEdge := cell{text: " " + box.Vertical, style: border, chrome: true}
+	padN, padText := -1, ""
 	cellRow := func(ln line) line {
-		framed := line{runs: []cell{{text: box.Vertical + " ", style: border, chrome: true}}}
+		framed := line{runs: make([]cell, 0, len(ln.runs)+3)}
+		framed.runs = append(framed.runs, leftEdge)
 		col := 0
 		for _, r := range ln.runs {
 			if col >= inner {
@@ -4727,9 +4740,12 @@ func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 			col += width(r.text)
 		}
 		if col < inner {
-			framed.runs = append(framed.runs, cell{text: strings.Repeat(" ", inner-col), chrome: true})
+			if n := inner - col; n != padN {
+				padN, padText = n, strings.Repeat(" ", n)
+			}
+			framed.runs = append(framed.runs, cell{text: padText, chrome: true})
 		}
-		framed.runs = append(framed.runs, cell{text: " " + box.Vertical, style: border, chrome: true})
+		framed.runs = append(framed.runs, rightEdge)
 		return framed
 	}
 

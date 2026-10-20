@@ -289,10 +289,30 @@ func (a *App) sync(w int) int32 {
 // transcript's row count. `from` is a hint, not a promise: the per-block
 // offsets before it are already exact, which is what makes a frame during a
 // streaming turn cost the tail instead of the session.
+//
+// The row cap is a bound on the renders HELD, not only on the rows kept, so
+// the pass releases the renders the cap has already decided to drop instead of
+// waiting for the trim that follows it. A block is dropped when the rows from
+// it to the end of the transcript pass the cap; the pass knows the rows from
+// it to the block it just rendered, which is a lower bound on that sum, so a
+// block whose lower bound is already over the cap is dropped for certain and
+// its render can go now. The newest transcriptKeepTail blocks are never
+// dropped, so they are never released.
+//
+// Without this the pass held the whole session's renders at once and the trim
+// gave them back afterwards: measured 204 000 lines (420 MB of heap) for an
+// 800-block transcript, against a 10 000-row cap that keeps 40 of those
+// blocks. The bound the PRD states (§3.7, "the 10 000-row cap is the whole
+// bound") is on the renders held, and this is what makes it true.
 func (a *App) reconcile(w int, from int32) int32 {
 	x := &a.rowIdx
 	n := int32(len(a.blocks))
 	total := x.start[from]
+	// win is the rows of the blocks whose renders are held, from the release
+	// pointer to the last one rendered.
+	win := total
+	release := int32(0)
+	keepFrom := n - transcriptKeepTail // the trim never drops the newest tail
 	for i := from; i < n; i++ {
 		b := a.blocks[i]
 		r := &x.rend[i]
@@ -302,6 +322,16 @@ func (a *App) reconcile(w int, from int32) int32 {
 		r.rows = int32(len(r.lines)) + 1
 		total += r.rows
 		x.start[i+1] = total
+		win += r.rows
+		for release < i && win > transcriptCap && release < keepFrom {
+			win -= x.start[release+1] - x.start[release]
+			// The render is released, not the row count: the offsets stay,
+			// because the trim still has to say how many rows it dropped.
+			x.rend[release].lines = nil
+			x.rend[release].subs = nil
+			x.rend[release].key = blockKey{}
+			release++
+		}
 	}
 	x.dirty = int32(n)
 	return total
