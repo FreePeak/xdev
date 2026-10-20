@@ -153,6 +153,45 @@ func TestFileOffloaderReportsAFailedSpill(t *testing.T) {
 	}
 }
 
+// A result of many SHORT rows is small in bytes and huge in rows. The byte
+// gate alone would let it through, so the row cap has to answer too — the
+// seam's Fits is what the caller asks, and the backend owns both limits.
+func TestOffloadResultBoundsARowHeavyResult(t *testing.T) {
+	f, _ := spillDir(t)
+	a := &Agent{Offload: f}
+	call := aiToolCall("bash", "{}")
+
+	// 3000 rows of 4 bytes: 12 KB, far under the byte cap, three times over
+	// the row cap.
+	rows := strings.Repeat("row\n", 3000)
+	if len(rows) >= OffloadThresholdBytes {
+		t.Fatalf("the fixture is %d bytes, it must stay UNDER the byte cap to isolate the row cap", len(rows))
+	}
+	bound := a.offloadResult(call, tool.Result{Text: rows})
+	if !strings.Contains(bound.Text, "full output saved to") {
+		t.Fatalf("a row-heavy result was kept verbatim: %d bytes", len(bound.Text))
+	}
+	if len(bound.Text) >= len(rows) {
+		t.Fatalf("the result carries %d bytes, the tool produced %d", len(bound.Text), len(rows))
+	}
+}
+
+// A result that fits BOTH caps stays in the conversation untouched.
+func TestOffloadResultKeepsAResultThatFitsBothCaps(t *testing.T) {
+	f, _ := spillDir(t)
+	a := &Agent{Offload: f}
+	call := aiToolCall("bash", "{}")
+
+	fits := strings.Repeat("row\n", 100)
+	if !f.Fits(fits) {
+		t.Fatal("a small result does not fit the backend's limits")
+	}
+	got := a.offloadResult(call, tool.Result{Text: fits})
+	if got.Text != fits {
+		t.Fatalf("a result that fits was rewritten: %q", got.Text)
+	}
+}
+
 // The seam and the shipped backend work together: an oversized result in a
 // turn comes back as the head plus the path, and a result that fits is left
 // alone.

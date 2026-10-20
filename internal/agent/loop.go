@@ -2292,7 +2292,7 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 // rows). The gate is asked before anything is spilled, so the common small
 // result never reaches the disk.
 func (a *Agent) offloadResult(call ai.ToolCallBlock, res tool.Result) tool.Result {
-	if a.Offload == nil || res.IsError || len(res.Text) <= OffloadThresholdBytes {
+	if a.Offload == nil || res.IsError || a.Offload.Fits(res.Text) {
 		return res
 	}
 	stub, ok, err := a.Offload.Offload(call.Name, call.ID, res.Text)

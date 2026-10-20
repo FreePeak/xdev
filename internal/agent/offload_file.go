@@ -69,17 +69,49 @@ func NewFileOffloader() FileOffloader {
 	}
 }
 
-// Offload persists text out of band and returns the stub the conversation
-// carries. It declines (ok=false) a result that already fits the limits — the
-// cheap majority never reaches the disk.
-func (f FileOffloader) Offload(toolName, callID, text string) (string, bool, error) {
-	maxLines, maxBytes := f.MaxLines, f.MaxBytes
+// Fits reports whether a result stays in the conversation verbatim.
+//
+// Both limits answer: the byte one and the ROW one. A result of 10 000
+// short lines is small in bytes and huge in rows, so a byte-only rule
+// would let it through — and a caller that applied its own byte rule
+// instead of asking would make this method's row half dead.
+//
+// It allocates nothing: the row count is a newline count, not a split.
+func (f FileOffloader) Fits(text string) bool {
+	maxLines, maxBytes := f.limits()
+	return countLines(text) <= maxLines && len(text) <= maxBytes
+}
+
+// limits are this backend's two caps, defaulted when unset.
+func (f FileOffloader) limits() (maxLines, maxBytes int) {
+	maxLines, maxBytes = f.MaxLines, f.MaxBytes
 	if maxLines <= 0 {
 		maxLines = offloadLines
 	}
 	if maxBytes <= 0 {
 		maxBytes = offloadBytes
 	}
+	return maxLines, maxBytes
+}
+
+// countLines is how many real lines a text has: a text ending in "\n"
+// does not count its trailing empty piece.
+func countLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	n := strings.Count(text, "\n")
+	if !strings.HasSuffix(text, "\n") {
+		n++
+	}
+	return n
+}
+
+// Offload persists text out of band and returns the stub the conversation
+// carries. It declines (ok=false) a result that already fits the limits — the
+// cheap majority never reaches the disk.
+func (f FileOffloader) Offload(toolName, callID, text string) (string, bool, error) {
+	maxLines, maxBytes := f.limits()
 	lines := strings.Split(text, "\n")
 	// A text ending in "\n" splits into a trailing empty element; drop it so
 	// the count is the number of real lines.
