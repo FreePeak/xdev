@@ -101,6 +101,27 @@ func (e *AllTargetsDownError) Error() string {
 
 func (e *AllTargetsDownError) Unwrap() error { return e.LastErr }
 
+// VerdictRetryError is the voice of a verdict the ladder is riding out
+// because the session is not finished: the provider refused the request
+// (a credential denial, a client-posture gate, a rejected body) and the
+// turn waits for the next attempt instead of ending on it. Raised through
+// TurnHooks.OnEvent once per round, so a turn that waits on a verdict reads
+// as waiting and not as hung. It Unwraps to the provider's own error, so a
+// reader can tell which verdict it was.
+type VerdictRetryError struct {
+	Round   int           // 1-based retry round just started
+	Delay   time.Duration // backoff before the next attempt
+	Reason  string        // what the provider said about this client
+	LastErr error         // the provider's verdict
+}
+
+func (e *VerdictRetryError) Error() string {
+	return fmt.Sprintf("%s — retrying in %s (round %d: %v)",
+		e.Reason, e.Delay.Round(time.Second), e.Round, e.LastErr)
+}
+
+func (e *VerdictRetryError) Unwrap() error { return e.LastErr }
+
 // EmptyTurnRetryError is the voice of an unbounded empty-turn wait
 // (retry.retryAllErrors): once the nudge budget is spent, the loop keeps
 // rebuilding context and re-running. Raised through TurnHooks.OnEvent so
@@ -195,8 +216,7 @@ func sleepBackoff(ctx context.Context, d time.Duration) error {
 // assistant answer yet, or an active goal (not completed/dropped/budget-
 // exhausted) remains. While this is true, retry bounds are lifted so the
 // agent keeps retrying forever instead of giving up; cancellation (Esc/
-// Ctrl+C) and terminal error classes (auth, bad request, vendor gate,
-// unrecoverable context overflow) still stop.
+// Ctrl+C) and an unrecoverable context overflow still stop.
 func (a *Agent) sessionUnfinished() bool {
 	if a.Goals != nil {
 		if v, ok := a.Goals.View(); ok && v.Goal.Status == GoalActive {
@@ -219,4 +239,40 @@ func (a *Agent) sessionUnfinished() bool {
 		}
 	}
 	return false
+}
+
+// retryUnfinished re-runs the ladder after a verdict that re-sending the
+// same request cannot repair — a credential denial, a client-posture gate, a
+// provider-rejected body — while the session still has work that has not
+// been answered. The turn is not done, so the ladder keeps waiting: the user
+// can fix the key, switch client or start a paid tier while the turn waits,
+// and the next attempt picks it up. Cancellation (Esc/Ctrl+C) still ends it.
+//
+// The round is announced on the event stream and in the session file, so a
+// turn that waits on a verdict reads as waiting and not as hung. Returns
+// the rebuilt history and the error that ends the turn, if any.
+func (a *Agent) retryUnfinished(ctx context.Context, policy RetryPolicy, history []ai.Message, round int, reason string, err error) ([]ai.Message, error) {
+	d := policy.delay(round)
+	if a.Store != nil {
+		if res, buildErr := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{}); buildErr == nil {
+			history = res.Messages
+		}
+	}
+	a.persistRecoveryNotice("recovery_unfinished_verdict", round, d, err)
+	a.noticeVerdictRetry(round, d, reason, err)
+	if serr := sleepBackoff(ctx, d); serr != nil {
+		return history, serr
+	}
+	return history, nil
+}
+
+// noticeVerdictRetry raises one verdict round on the event stream: the
+// provider refused the request and the turn is waiting for the next
+// attempt. Same contract as noticeAllTargetsDown and noticeEmptyTurnRetry —
+// nil-safe, so a mode that installs no hooks stays quiet.
+func (a *Agent) noticeVerdictRetry(round int, d time.Duration, reason string, err error) {
+	if a == nil || a.Hooks == nil {
+		return
+	}
+	a.Hooks.OnEvent(ai.Errorf(&VerdictRetryError{Round: round, Delay: d, Reason: reason, LastErr: err}))
 }

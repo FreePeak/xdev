@@ -53,4 +53,23 @@ func TestAllTargetsDownPrintsVerbatim(t *testing.T) {
 	}
 }
 
+// A verdict round is the same shape: the turn is waiting on a credential or
+// a client-posture gate, and the line says which verdict and how long the
+// wait is — not the per-attempt blip.
+func TestVerdictRetryPrintsVerbatim(t *testing.T) {
+	verdict := ai.Event{Type: ai.EventError, Err: &agent.VerdictRetryError{
+		Round: 2, Delay: 8 * time.Second, Reason: "credential rejected",
+		LastErr: errors.New("HTTP 401 invalid api key"),
+	}}
+	out := captureStderr(t, func() { (&printHooks{}).OnEvent(verdict) })
+	for _, want := range []string{"credential rejected", "round 2", "invalid api key"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("announcement display = %q, want it to name %q", out, want)
+		}
+	}
+	if strings.Contains(out, "stream error: retrying") {
+		t.Fatalf("the round announcement collapsed to the per-attempt notice: %q", out)
+	}
+}
+
 func boolPtr(b bool) *bool { return &b }
