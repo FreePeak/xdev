@@ -343,3 +343,24 @@ func TestAgentPanelDownFromComposerEntersTheStrip(t *testing.T) {
 		t.Fatalf("focused row = %q, want \"scout\"", focus)
 	}
 }
+
+// D1: a tracked child — one the host has a transcript for — wears the ⎿ tick
+// next to its model column, so the row reads as openable before the mouse
+// moves. An untracked child wears nothing, because offering an open it cannot
+// perform is worse than offering nothing.
+func TestAgentPanelOpenableRowWearsATick(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "free", "fg-7")
+	app.draw()
+
+	if !strings.Contains(screenText(scr), "⎿") {
+		t.Fatalf("an openable strip row must wear the ⎿ tick:\n%s", screenText(scr))
+	}
+
+	app2, scr2 := panelScreen(t)
+	app2.AgentPanelStart("scout", "scout", "", "")
+	app2.draw()
+	if strings.Contains(screenText(scr2), "⎿") {
+		t.Fatalf("an untracked row must not wear the ⎿ tick:\n%s", screenText(scr2))
+	}
+}
