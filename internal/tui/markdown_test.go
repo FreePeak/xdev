@@ -5,10 +5,15 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
-// TestMarkdownTableRendersGrid pins the omp grid: sharp corners, a full rule
-// between every pair of rows, bold flush-left header, content-width columns.
+// TestMarkdownTableRendersGrid pins the omp grid: a full rule between every
+// pair of rows, bold flush-left header, content-width columns. The corners
+// follow the THEME's box style — round by default, like every other surface
+// xdev draws, so a table is not the one thing in the TUI with a different
+// voice.
 func TestMarkdownTableRendersGrid(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	src := "| Name | Cmd |\n| --- | --- |\n| xdev | go build |\n| qa | make test |"
@@ -16,13 +21,13 @@ func TestMarkdownTableRendersGrid(t *testing.T) {
 	lines := app.renderMarkdown(src, 80)
 	app.mu.Unlock()
 	want := strings.Join([]string{
-		"┌──────┬───────────┐",
+		"╭──────┬───────────╮",
 		"│ Name │ Cmd       │",
 		"├──────┼───────────┤",
 		"│ xdev │ go build  │",
 		"├──────┼───────────┤",
 		"│ qa   │ make test │",
-		"└──────┴───────────┘",
+		"╰──────┴───────────╯",
 	}, "\n")
 	if got := strings.TrimSuffix(joinedLines(lines), "\n"); got != want {
 		t.Fatalf("table grid:\n%s\nwant:\n%s", got, want)
@@ -33,6 +38,40 @@ func TestMarkdownTableRendersGrid(t *testing.T) {
 	}
 	if _, _, attr := lines[3].runs[1].style.Decompose(); attr&tcell.AttrBold != 0 {
 		t.Error("body cell must not be bold")
+	}
+}
+
+// TestMarkdownTableFollowsThemeBoxStyle: the table's outline is the theme's
+// own box style, the same rule the tool box already follows (chrome_test.go
+// TestBoxStyleFromTheme). A theme that asks for sharp gets sharp, the ascii
+// preset degenerates to +-|, and the default stays round.
+func TestMarkdownTableFollowsThemeBoxStyle(t *testing.T) {
+	src := "| A | B |\n| --- | --- |\n| x | y |"
+
+	app, _ := newTestApp(t, 80, 24)
+	app.mu.Lock()
+	lines := app.renderMarkdown(src, 80)
+	app.mu.Unlock()
+	if joined := joinedLines(lines); !strings.Contains(joined, "╭") || strings.Contains(joined, "┌") {
+		t.Fatalf("the default theme's table is not round:\n%s", joined)
+	}
+
+	sharp := &theme.Theme{Name: "sharp", Dark: true, Slots: map[string]theme.Color{}, Symbols: theme.Symbols{Box: "sharp"}}
+	app.SetTheme(sharp)
+	app.mu.Lock()
+	lines = app.renderMarkdown(src, 80)
+	app.mu.Unlock()
+	if joined := joinedLines(lines); !strings.Contains(joined, "┌") || strings.Contains(joined, "╭") {
+		t.Fatalf("a sharp theme's table is not sharp:\n%s", joined)
+	}
+
+	ascii := &theme.Theme{Name: "ascii", Dark: true, Slots: map[string]theme.Color{}, Symbols: theme.Symbols{Preset: "ascii"}}
+	app.SetTheme(ascii)
+	app.mu.Lock()
+	lines = app.renderMarkdown(src, 80)
+	app.mu.Unlock()
+	if joined := joinedLines(lines); !strings.Contains(joined, "+") || strings.Contains(joined, "╭") || strings.Contains(joined, "┌") {
+		t.Fatalf("the ascii preset's table is not +-|:\n%s", joined)
 	}
 }
 
@@ -47,7 +86,7 @@ func TestMarkdownTableShrinksToFit(t *testing.T) {
 	lines := app.renderMarkdown(src, 40)
 	app.mu.Unlock()
 	joined := joinedLines(lines)
-	if !strings.Contains(joined, "┌") {
+	if !strings.Contains(joined, "╭") {
 		t.Fatalf("expected a grid at 40 cols, got:\n%s", joined)
 	}
 	for n, ln := range lines {
@@ -69,7 +108,7 @@ func TestMarkdownTableNarrowFallsBack(t *testing.T) {
 	lines := app.renderMarkdown(src, 8)
 	app.mu.Unlock()
 	joined := joinedLines(lines)
-	if strings.Contains(joined, "┌") || !strings.Contains(joined, "| Name | Cmd |") {
+	if strings.Contains(joined, "╭") || !strings.Contains(joined, "| Name | Cmd |") {
 		t.Fatalf("narrow table must fall back to raw lines, got:\n%s", joined)
 	}
 }
@@ -81,7 +120,7 @@ func TestMarkdownTableNeedsDelimiter(t *testing.T) {
 	lines := app.renderMarkdown("a | b\nc | d", 80)
 	app.mu.Unlock()
 	joined := joinedLines(lines)
-	if strings.Contains(joined, "┌") || !strings.Contains(joined, "a | b") {
+	if strings.Contains(joined, "╭") || !strings.Contains(joined, "a | b") {
 		t.Fatalf("non-table pipe lines were boxed:\n%s", joined)
 	}
 }
