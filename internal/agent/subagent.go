@@ -320,6 +320,11 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 		Policy:    childPolicy,
 		Approve:   spec.Approve,
 		Thinking:  spec.Thinking,
+		// The child gets the same bound the parent has: an oversized tool
+		// result goes to a file and the child keeps the head plus the
+		// path. Without it the child's own context is the one place a
+		// flood can still land.
+		Offload: NewFileOffloader(),
 	}
 	if spec.OnRun != nil {
 		spec.OnRun(ag)

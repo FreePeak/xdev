@@ -1922,6 +1922,10 @@ func (a *Agent) runTools(ctx context.Context, calls []ai.ToolCallBlock) []ai.Mes
 			a.streamToolMu.Unlock()
 			if reused {
 				a.Hooks.OnToolStart(calls[i])
+				// The result ran mid-stream, so it never went through
+				// runOneTool — it still goes through the offload, or an
+				// oversized read would sit in the conversation verbatim.
+				res = a.offloadResult(calls[i], res)
 				a.Hooks.OnToolEnd(calls[i], res, 0)
 				out[i] = a.redactToolMessage(toolResultMsg(calls[i], res, 0))
 				return
@@ -2254,15 +2258,10 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		// miss in a long output (T3 #40 had it appended and buried).
 		res.Text = rem + "\n\n" + strings.TrimLeft(res.Text, "\n")
 	}
-	if a.Offload != nil && !res.IsError && len(res.Text) > OffloadThresholdBytes {
-		if stub, ok, oerr := a.Offload.Offload(call.Name, call.ID, res.Text); oerr != nil {
-			// A failed spill must be a named error, never a silent
-			// marker claiming bytes that were not written (#115).
-			logx.Errorf("artifact offload: %v", oerr)
-		} else if ok {
-			res.Text = stub
-		}
-	}
+	// The offload is the last thing the result text goes through: rule notes
+	// and reminders have been added, so what is spilled is what the model
+	// would have read.
+	res = a.offloadResult(call, res)
 	a.Hooks.OnToolEnd(call, res, dur)
 	msg := toolResultMsg(call, res, dur)
 	// Deep-copy content so later repeatNotice decorations don't mutate the
@@ -2276,6 +2275,36 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 	a.toolResultCache[cacheKey] = cached
 	a.toolResultCacheMu.Unlock()
 	return msg
+}
+
+// offloadResult hands an oversized result to the offloader and returns the
+// result carrying the stub the conversation keeps.
+//
+// It is the seam's one implementation, shared by both paths a tool result
+// takes: the call executed in the turn (runOneTool) and the read-only call
+// executed mid-stream and reused afterwards (runTools). A result that fails
+// to spill keeps its bytes verbatim — a marker claiming "full output at
+// <handle>" must be a true claim about storage, not a guess (#115).
+//
+// The size gate is the OFFLOADER's: what "too big" means belongs to the
+// backend, and a rule of its own here would silently drop the backend's
+// other limit (a result of many short rows is small in bytes and huge in
+// rows). The gate is asked before anything is spilled, so the common small
+// result never reaches the disk.
+func (a *Agent) offloadResult(call ai.ToolCallBlock, res tool.Result) tool.Result {
+	if a.Offload == nil || res.IsError || len(res.Text) <= OffloadThresholdBytes {
+		return res
+	}
+	stub, ok, err := a.Offload.Offload(call.Name, call.ID, res.Text)
+	if err != nil {
+		logx.Errorf("artifact offload: %v", err)
+		return res
+	}
+	if !ok {
+		return res
+	}
+	res.Text = stub
+	return res
 }
 
 // toolResultMsg builds the toolResult message for one finished call. Every

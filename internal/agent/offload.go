@@ -8,10 +8,11 @@ package agent
 // notes have finalized the text): the full output goes to durable
 // storage, the conversation keeps a small stub pointing at the handle.
 //
-// #115 owns the backend (blob-store retention + the model-facing
-// re-read, per the handle contract in that issue); until it lands,
-// Agent.Offload stays nil and results are retained verbatim — today's
-// behavior, unchanged.
+// The backend ships: FileOffloader (offload_file.go) writes the output to
+// a file under the xdev data dir and returns opencode's stub — the head of
+// the output plus a marker naming the file, the same shape opencode's
+// tool-output.ts produces. An agent built without one (ag.Offload nil)
+// keeps results verbatim, as before.
 type ArtifactOffloader interface {
 	// Offload persists text out-of-band and returns the replacement the
 	// conversation should carry. ok=false leaves the result untouched
@@ -24,5 +25,7 @@ type ArtifactOffloader interface {
 
 // OffloadThresholdBytes is the seam's size gate: results at or below it
 // are the cheap majority (store-wide median 952 B) and are never handed
-// to the offloader. 16 KiB matches the #115 spill threshold.
-const OffloadThresholdBytes = 16 << 10
+// to the offloader. 50 KiB matches opencode's tool-output.ts MAX_BYTES,
+// and the shipped backend's own limit — one number, one meaning: a result
+// over it is offloaded, a result under it stays in the conversation.
+const OffloadThresholdBytes = 50 << 10
