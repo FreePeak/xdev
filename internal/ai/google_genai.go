@@ -258,7 +258,16 @@ func (p *GoogleGenAIProvider) buildRequest(req StreamRequest) ([]byte, error) {
 			gen.MaxOutputTokens = req.MaxTokens
 		}
 		if req.Thinking != nil && req.Thinking.Tokens > 0 {
-			gen.ThinkingConfig = map[string]any{"thinkingBudget": req.Thinking.Tokens}
+			// The level the model actually takes, when the model takes one:
+			// Gemini names the rung itself (thinkingLevel) and the budget is
+			// its own way of saying the same thing, so a model that takes the
+			// level does not also get the number (omp sends one or the other —
+			// packages__ai__src__providers__google-shared.ts:554-563).
+			if lvl, capable := effortLevel(req.Thinking); capable && lvl != "" {
+				gen.ThinkingConfig = map[string]any{"thinkingLevel": lvl}
+			} else {
+				gen.ThinkingConfig = map[string]any{"thinkingBudget": req.Thinking.Tokens}
+			}
 		}
 		g.GenerationConfig = gen
 	}

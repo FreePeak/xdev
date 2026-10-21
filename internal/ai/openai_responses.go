@@ -160,9 +160,22 @@ func (p *OpenAIResponsesProvider) buildRequest(req StreamRequest) ([]byte, error
 		wr.User = InstallID() // "" when unset: the field is omitted
 	}
 	if req.Thinking != nil {
-		wr.Reasoning = &struct {
-			Effort string `json:"effort"`
-		}{Effort: reasoningEffort(req.Thinking.Tokens)}
+		// The level the model actually takes, when the model takes one: the
+		// request says WHICH rung, not how many tokens. A model that declares
+		// no effort parameter keeps the token-derived tier it always sent, and
+		// a level the model does not accept is dropped rather than folded
+		// onto a different one.
+		if lvl, capable := effortLevel(req.Thinking); capable {
+			if lvl != "" {
+				wr.Reasoning = &struct {
+					Effort string `json:"effort"`
+				}{Effort: lvl}
+			}
+		} else {
+			wr.Reasoning = &struct {
+				Effort string `json:"effort"`
+			}{Effort: reasoningEffort(req.Thinking.Tokens)}
+		}
 	}
 	tools := req.Tools
 	if p.behavior.sanitize {

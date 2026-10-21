@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -170,14 +171,54 @@ func malformedStream(api, stage string, err error) error {
 	return fmt.Errorf("%s: %w: %s: %v", api, ErrMalformedStream, stage, err)
 }
 
+// EffortLevels is the effort vocabulary a provider's own effort parameter
+// speaks: minimal, low, medium, high, xhigh, max. It is omp's whitelist
+// (packages__ai__src__providers__openai-responses.ts:157-170), and the same
+// ladder xdev's own config names (config.EffortLevels).
+//
+// A level outside it is never sent: an endpoint that rejects an unrecognised
+// effort would fail the whole turn over a rung the user asked for.
+var EffortLevels = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// effortLevel resolves the effort level one request carries.
+//
+// capable reports whether the model takes an effort parameter at all. It is
+// false for every model that does not declare the capability (models.yml
+// `effort:`), and false is the answer that keeps the request byte-identical
+// to the one that existed before the level did.
+//
+// The level is DROPPED — never downgraded — when the model does not accept
+// it: silently sending a different rung is a lie about what was asked for.
+func effortLevel(t *ThinkingBudget) (level string, capable bool) {
+	if t == nil || t.Level == "" {
+		return "", false
+	}
+	if len(t.Supported) == 0 {
+		return "", false // the model declares no effort parameter
+	}
+	lvl := strings.ToLower(strings.TrimSpace(t.Level))
+	if !slices.Contains(EffortLevels, lvl) {
+		return "", true // named, but not a level any provider speaks
+	}
+	for _, s := range t.Supported {
+		if strings.EqualFold(strings.TrimSpace(s), lvl) {
+			return lvl, true
+		}
+	}
+	return "", true
+}
+
 // reasoningEffort maps a thinking budget to the OpenAI reasoning-effort
-// tier. The wire's own vocabulary stops at "high" (no OpenAI-compatible
-// endpoint documents xhigh/max), so every rung at or above high's budget
-// folds onto it: the top rungs of xdev's ladder are a wider budget, and the
-// adapters that carry a NUMBER (Anthropic's budget_tokens) are the ones that
-// express that. Folding rather than passing an unknown tier is deliberate —
-// an endpoint that rejects an unrecognised effort would fail the whole turn
-// over a rung the user asked for.
+// tier — the FALLBACK for a model that declares no effort parameter.
+//
+// It is what xdev sent before the effort level existed, and it stays the
+// answer for every model that does not declare one: such a request must be
+// byte-identical to the one it always got. The tiers stop at "high" (the
+// older OpenAI-compatible vocabulary), so every rung at or above high's
+// budget folds onto it: the top rungs of xdev's ladder are a wider budget,
+// and the adapters that carry a NUMBER (Anthropic's budget_tokens) are the
+// ones that express that. A model that DOES declare the effort parameter
+// gets the rung itself instead (see effortLevel).
 func reasoningEffort(tokens int) string {
 	switch {
 	case tokens <= 2048:

@@ -131,3 +131,51 @@ func EffortBudget(effort string) (tokens int, ok bool) {
 	}
 	return n, true
 }
+
+// EffortLevels returns the effort levels this model can actually take: the
+// rungs it advertises (models.yml `efforts:`) narrowed by the levels its
+// provider's effort parameter accepts (models.yml `effort:`).
+//
+// A rung the model advertises but the wire does not accept is not reachable,
+// so the intersection is the honest answer. An empty result means "no
+// opinion" — the model is on record but names no ladder — and a requested
+// rung then rides out unchanged, the same rule ClampEffort applies to an
+// empty advertised list.
+func (m ModelConfig) EffortLevels() []string {
+	if len(m.Efforts) == 0 {
+		return m.Effort
+	}
+	if len(m.Effort) == 0 {
+		return m.Efforts
+	}
+	out := make([]string, 0, len(m.Efforts))
+	for _, a := range m.Efforts {
+		for _, w := range m.Effort {
+			if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(w)) {
+				out = append(out, strings.ToLower(strings.TrimSpace(a)))
+				break
+			}
+		}
+	}
+	return out
+}
+
+// EffortWireLevels returns the effort levels this model accepts on the wire
+// (models.yml `effort:`), in the ladder's own spelling.
+//
+// An empty list is the answer that keeps every request exactly as it was:
+// the model takes no effort parameter, so no effort parameter goes out.
+func (m ModelConfig) EffortWireLevels() []string {
+	if len(m.Effort) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m.Effort))
+	for _, w := range m.Effort {
+		w = strings.ToLower(strings.TrimSpace(w))
+		if w == "" {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}

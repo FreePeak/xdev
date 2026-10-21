@@ -3,27 +3,23 @@ package ai
 import "testing"
 
 // The effort ladder's top two rungs do NOT reach an OpenAI-compatible
-// provider.
+// provider that declares no effort parameter.
 //
 // The ladder's reasoning budget is a NUMBER (config.EffortTokens): high
 // 16,384, xhigh 32,768, max 49,152. The OpenAI-compatible wire carries a
 // LEVEL string instead, and reasoningEffort folds every budget above 8,192
-// onto "high" — because the OpenAI reasoning_effort vocabulary is
+// onto "high" — because the older reasoning_effort vocabulary is
 // low/medium/high and has no rung above high.
 //
-// So on the openai-completions and openai-responses wires, `effort: xhigh`
-// and `effort: max` send byte-identical requests to `effort: high`. The
-// user pays for a rung the provider never hears about.
+// This is the FALLBACK, and it is the answer for every model that does not
+// declare the effort capability (models.yml `effort:`): such a request must
+// be byte-identical to the one it always got. A model that DOES declare the
+// capability gets the rung itself — see effort_level_test.go.
 //
-// This is not a bug in the fold: the wire vocabulary genuinely stops at
-// high. It IS worth pinning, because "I set xhigh and nothing changed" is
-// exactly the kind of silent downgrade that reads as "the agent is
-// overthinking and I asked it not to" — the knob appears to do something and
-// does not.
-//
-// The Anthropic and Google wires carry the NUMBER (anthropic.go's
-// thinking.budget_tokens, google_genai.go's thinkingBudget), so there the
-// top two rungs really do buy a deeper reasoning budget.
+// The Anthropic and Google wires carry the NUMBER for an undeclared model
+// (anthropic.go's thinking.budget_tokens, google_genai.go's
+// thinkingBudget), so there the top two rungs really do buy a deeper
+// reasoning budget.
 //
 // The budgets below are config.EffortTokens' values, spelled out because
 // internal/config imports this package and a test import would be a cycle.

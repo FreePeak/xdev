@@ -96,6 +96,9 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	wireTaskParent(reg, store)
+	// A resumed session runs at the level its own transcript records, and at
+	// the tool surface that level was reached through.
+	tool.ApplySessionEffort(reg, sessionEffortRung(store, lastSettings().SessionEffort()))
 
 	h := &rpcHandler{
 		cwd: cwd, buildSys: buildSys, reg: reg, cfg: cfg,
@@ -111,7 +114,7 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 		Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), lastSettings(), agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())),
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, lastSettings(), provName, modelName),
-		Thinking:   effortBudget(effortRef),
+		Thinking:   effortThinking(sessionThinkingLevel(store, effortRef), provName, modelName, cfg),
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
 	wireAgentMode(h.agent, reg, cfg, lastSettings(), provName, modelName, cwd, false)

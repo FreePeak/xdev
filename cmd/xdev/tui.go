@@ -2374,6 +2374,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			modelMu.Lock()
 			lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
 			modelMu.Unlock()
+			// A resumed session runs at the level its own transcript records:
+			// the machine-wide setting is a different value from what the run
+			// that produced this transcript used. The tool surface follows the
+			// rung that level was reached through, so a resumed session offers
+			// the same tools the original run offered.
+			le = sessionThinkingLevel(turnStore, le)
+			tool.ApplySessionEffort(reg, sessionEffortRung(turnStore, lastSettings().SessionEffort()))
 			// Per-turn hooks pin the store and the focused predicate so a
 			// parked turn keeps persisting and never paints over the live view.
 			turnTS := &tuiSession{store: turnStore, app: app, tabs: tabs, id: sid}
@@ -2391,7 +2398,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Store:      turnStore,
 				Compaction: compactionConfigFor(modelWindow(cfg, lpn, lm), lastSettings(), agent.HandoffOrder(lastSettings().CompactionMethodOrder())),
 				Failovers:  failoverChain(cfg, lastSettings(), lpn, lm),
-				Thinking:   effortBudget(le),
+				Thinking:   effortThinking(le, lpn, lm, cfg),
 				// Intercept set below from exts (only when non-nil).
 				Policy:  agentPolicy(),
 				Handoff: handoffSettings(),

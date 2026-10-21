@@ -30,6 +30,11 @@ type connectModel struct {
 	MaxTokens     int
 	Reasoning     bool
 	Vision        bool
+	// Effort is the effort levels the model accepts on the wire (models.yml
+	// `effort:`). Empty = the model takes no effort parameter, and every
+	// request for it keeps the exact shape it had before the effort level
+	// existed.
+	Effort []string
 }
 
 // connectEntry is one connectable provider.
@@ -181,6 +186,7 @@ func ConnectProviderConfig(name string) (*ProviderConfig, error) {
 		pc.Models = append(pc.Models, ModelConfig{
 			ID: m.ID, Name: m.Name, ContextWindow: m.ContextWindow,
 			MaxTokens: m.MaxTokens, Reasoning: m.Reasoning, Vision: m.Vision,
+			Effort: m.Effort,
 		})
 	}
 	return pc, nil

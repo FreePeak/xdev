@@ -564,7 +564,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
 	hooks := agent.TurnHooks(ph)
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	// A resumed session runs at the level its own transcript records: the
+	// machine-wide setting is a different value from what the run that
+	// produced this transcript used, and the tool surface follows the rung
+	// that level was reached through.
+	effortLevel := sessionThinkingLevel(store, effortRef)
+	tool.ApplySessionEffort(reg, sessionEffortRung(store, settings.SessionEffort()))
+	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -980,13 +986,14 @@ func modelReasoning(cfg *config.Config, provider, model string) (supported, know
 	return false, false
 }
 
-// modelEfforts reports the reasoning rungs a model advertises (models.yml
-// `efforts:`, ordered low→high). known is false when the catalog lists no
-// entry for the id at all — the same "no opinion" modelReasoning reports, and
-// the reason a gateway-served id nobody pinned keeps the rung the user chose.
-// A listed entry that states no `efforts:` is known with an empty list: the
-// model is on record, it just names no ladder, so the non-reasoning fallback
-// applies.
+// modelEfforts reports the reasoning rungs a model can actually take
+// (models.yml `efforts:` narrowed by the levels its provider's effort
+// parameter accepts — models.yml `effort:`). known is false when the catalog
+// lists no entry for the id at all — the same "no opinion" modelReasoning
+// reports, and the reason a gateway-served id nobody pinned keeps the rung
+// the user chose. A listed entry that states no `efforts:` is known with an
+// empty list: the model is on record, it just names no ladder, so the
+// non-reasoning fallback applies.
 func modelEfforts(cfg *config.Config, provider, model string) (advertised []string, known bool) {
 	if cfg == nil {
 		return nil, false
@@ -997,10 +1004,30 @@ func modelEfforts(cfg *config.Config, provider, model string) (advertised []stri
 	}
 	for _, m := range providerModels(provider, pc) {
 		if m.ID == model {
-			return m.Efforts, true
+			return m.EffortLevels(), true
 		}
 	}
 	return nil, false
+}
+
+// modelEffortWire reports the effort levels the model accepts on the wire
+// (models.yml `effort:`). An empty list means the model declares no effort
+// parameter, and that is the answer that keeps its requests byte-identical
+// to the ones xdev sent before the effort level existed.
+func modelEffortWire(cfg *config.Config, provider, model string) []string {
+	if cfg == nil {
+		return nil
+	}
+	pc, ok := cfg.Providers[provider]
+	if !ok {
+		return nil
+	}
+	for _, m := range providerModels(provider, pc) {
+		if m.ID == model {
+			return m.EffortWireLevels()
+		}
+	}
+	return nil
 }
 
 // providerModels merges pinned + discovered models once per provider per
@@ -2242,6 +2269,72 @@ func effortBudget(effort string) *ai.ThinkingBudget {
 		return nil
 	}
 	return &ai.ThinkingBudget{Tokens: tokens}
+}
+
+// effortThinking builds the reasoning request for one rung against one
+// model: the token budget (unchanged), the effort LEVEL the rung names, and
+// the levels the model accepts on the wire.
+//
+// The level is what a provider that takes an effort parameter wants to see;
+// the budget stays what it was for the ones that take a number. A model that
+// declares no effort parameter gets no level, so its request stays exactly
+// the one it always sent.
+func effortThinking(effort, provider, model string, cfg *config.Config) *ai.ThinkingBudget {
+	b := effortBudget(effort)
+	if b == nil {
+		return nil
+	}
+	supported := modelEffortWire(cfg, provider, model)
+	if len(supported) == 0 {
+		// The model declares no effort parameter: the budget stays exactly
+		// the budget it always was, and no level rides along.
+		return b
+	}
+	b.Level = strings.ToLower(strings.TrimSpace(effort))
+	b.Supported = supported
+	return b
+}
+
+// sessionThinkingLevel returns the reasoning level a session runs at: the
+// level its own transcript records, or fallback when the transcript records
+// none.
+//
+// The session's record wins over the machine-wide setting: the setting is a
+// different value from what the run that produced this transcript used, and
+// a resumed session must continue where that run left off. A session that
+// never changed its level records nothing and falls back — the same value a
+// fresh session starts with.
+func sessionThinkingLevel(store *session.Store, fallback string) string {
+	if store == nil {
+		return fallback
+	}
+	level, _ := session.PersistedThinkingLevel(store.Entries(), store.LeafID())
+	if level == "" {
+		return fallback
+	}
+	return level
+}
+
+// sessionEffortRung returns the effort rung a session runs at: the rung its
+// own transcript recorded, or fallback when it recorded none.
+//
+// The record's "configured" field is what tells the two apart. A PINNED
+// level names the rung it was reached through (the /effort command folds the
+// rung onto a level and pins it there), while an INHERITED one ("auto") means
+// the level followed the model role's ":effort" and the tool surface stayed
+// the default one — so the rung is the default, not the level.
+func sessionEffortRung(store *session.Store, fallback string) string {
+	if store == nil {
+		return fallback
+	}
+	level, configured := session.PersistedThinkingLevel(store.Entries(), store.LeafID())
+	if level == "" {
+		return fallback
+	}
+	if configured == session.ConfiguredAuto {
+		return config.SessionEffortDefault
+	}
+	return config.NormalizeSessionEffort(configured)
 }
 
 // settingsPolicy resolves the approval policy from settings (nil or a bad

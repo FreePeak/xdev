@@ -71,7 +71,7 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	overrides := agent.LoadSystemPromptOverrides(cwd)
 	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
 
-	h := newACPHandler(cwd, cfg, prov, provName, modelName, reg, buildSys, effortBudget(effortRef), opts.MaxTokens, opts.MaxTurns)
+	h := newACPHandler(cwd, cfg, prov, provName, modelName, reg, buildSys, effortThinking(effortRef, provName, modelName, cfg), opts.MaxTokens, opts.MaxTurns)
 	// Hooks and extension processes compose into one interceptor chain, the
 	// same shape print mode uses; extensions' actions steer the live run.
 	exts := attachExtensions(context.Background(), reg, h.steer, h.followUp, cfg)
