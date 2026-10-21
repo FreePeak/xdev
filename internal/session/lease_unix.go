@@ -57,14 +57,14 @@ func unlockLeaseFile(f *os.File) error {
 // REFUSE rather than quietly carry on without one.
 func checkLeaseDirPrivate(path string, st os.FileInfo) error {
 	if perm := st.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("%w: %s is readable by other users (mode %04o) — a lease another user could take is not a lease", ErrLeaseUntrusted, path, perm)
+		return fmt.Errorf("%w: %s is readable by other users (mode %04o) — a lease another user could take is not a lease; fix it with: chmod 700 %s", ErrLeaseUntrusted, path, perm, path)
 	}
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil // a filesystem that reports no owner is not claiming one
 	}
 	if int(sys.Uid) != os.Getuid() {
-		return fmt.Errorf("%w: %s is owned by uid %d, not by this user — a lease another user could take is not a lease", ErrLeaseUntrusted, path, sys.Uid)
+		return fmt.Errorf("%w: %s is owned by uid %d, not by this user — a lease another user could take is not a lease; fix it with: chown %d %s (or remove it)", ErrLeaseUntrusted, path, sys.Uid, os.Getuid(), path)
 	}
 	return nil
 }

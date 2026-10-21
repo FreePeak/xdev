@@ -833,3 +833,116 @@ func TestAnImportedSessionHoldsTheLease(t *testing.T) {
 		t.Fatalf("the imported session did not take the lease: %v", err)
 	}
 }
+
+// TestAnUntrustedLeaseRootRefusesToMaterialiseASession: a session written
+// without a lease is a session two processes write into — the exact thing the
+// lease exists to prevent — so an untrusted lease root means the session is
+// NOT materialised, and the file it would have created does not exist.
+//
+// (The OPEN path refuses the same way: TestAnUntrustedLeaseRootIsRefused.)
+func TestAnUntrustedLeaseRootRefusesToMaterialiseASession(t *testing.T) {
+	dir := t.TempDir()
+
+	roots := map[string]string{}
+	// (a) the lease root is a FILE.
+	fileRoot := filepath.Join(dir, "as-a-file")
+	if err := os.WriteFile(fileRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots["file"] = fileRoot
+	// (b) the lease root is readable by other users.
+	openRoot := filepath.Join(dir, "open-to-others")
+	if err := os.Mkdir(openRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(openRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots["group-readable"] = openRoot
+	// (c) the lease root is a SYMLINK.
+	if runtime.GOOS != "windows" {
+		symRoot := filepath.Join(dir, "as-a-symlink")
+		target := filepath.Join(dir, "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, symRoot); err != nil {
+			t.Fatal(err)
+		}
+		roots["symlink"] = symRoot
+	}
+
+	for name, root := range roots {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".jsonl")
+			s := OpenMem(dir, "new")
+			_, err := s.EnsureOnDisk(path, Options{LeaseDir: root})
+			if !errors.Is(err, ErrLeaseUntrusted) {
+				t.Fatalf("err = %v, want ErrLeaseUntrusted (a session nobody can protect is not written)", err)
+			}
+			// And the file the materialisation created is GONE: the rollback
+			// removes it, so a half-created session is never left behind.
+			if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+				t.Fatalf("the session file exists under an untrusted lease root: %v", serr)
+			}
+			_ = s.Close()
+		})
+	}
+}
+
+// TestTheUntrustedRefusalsCarryTheirRemedy: a user who hits a refusal must
+// be able to act without reading the source. The message names the path, the
+// cause, AND the fix.
+func TestTheUntrustedRefusalsCarryTheirRemedy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	writeClean(t, path)
+
+	// The mode refusal names the chmod.
+	openRoot := filepath.Join(dir, "open-to-others")
+	if err := os.Mkdir(openRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(openRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := OpenForWrite(path, Options{LeaseDir: openRoot})
+	if err == nil {
+		t.Fatal("a group-readable lease root was accepted")
+	}
+	if !strings.Contains(err.Error(), "chmod 700 "+openRoot) {
+		t.Fatalf("the refusal does not carry the remedy: %v", err)
+	}
+
+	// The file refusal names the removal.
+	fileRoot := filepath.Join(dir, "as-a-file")
+	if err := os.WriteFile(fileRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = OpenForWrite(path, Options{LeaseDir: fileRoot})
+	if err == nil {
+		t.Fatal("a lease root that is a file was accepted")
+	}
+	if !strings.Contains(err.Error(), "rm "+fileRoot) {
+		t.Fatalf("the refusal does not carry the remedy: %v", err)
+	}
+
+	// The symlink refusal names the removal too.
+	if runtime.GOOS != "windows" {
+		symRoot := filepath.Join(dir, "as-a-symlink")
+		target := filepath.Join(dir, "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, symRoot); err != nil {
+			t.Fatal(err)
+		}
+		_, err = OpenForWrite(path, Options{LeaseDir: symRoot})
+		if err == nil {
+			t.Fatal("a symlinked lease root was accepted")
+		}
+		if !strings.Contains(err.Error(), "rm "+symRoot) {
+			t.Fatalf("the refusal does not carry the remedy: %v", err)
+		}
+	}
+}

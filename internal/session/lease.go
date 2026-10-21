@@ -182,10 +182,10 @@ func ensureLeaseDir(dir string) error {
 		}
 	}
 	if st.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s is a symlink — a lease root that can be redirected is not a lease", ErrLeaseUntrusted, dir)
+		return fmt.Errorf("%w: %s is a symlink — a lease root that can be redirected is not a lease; fix it by removing the symlink (rm %s) or pointing it at a private directory", ErrLeaseUntrusted, dir, dir)
 	}
 	if !st.IsDir() {
-		return fmt.Errorf("%w: %s exists but is not a directory", ErrLeaseUntrusted, dir)
+		return fmt.Errorf("%w: %s exists but is not a directory; fix it by removing it (rm %s)", ErrLeaseUntrusted, dir, dir)
 	}
 	return checkLeaseDirPrivate(dir, st)
 }

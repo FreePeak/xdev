@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/agent"
+	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -304,4 +307,56 @@ func TestTheExportOfAContinuationWithNoHistoryKeepsItsTitle(t *testing.T) {
 	if !strings.HasPrefix(st.Title(), "continued print ") {
 		t.Fatalf("title = %q, want the continuation title", st.Title())
 	}
+}
+
+// assertSessionHoldsTheLease materialises the store the way a real run does
+// — the first assistant message, through the agent's own call — and asserts
+// that the ownership lease is held.
+func assertSessionHoldsTheLease(t *testing.T, st *session.Store) {
+	t.Helper()
+	path := st.AutoPath()
+	if path == "" {
+		t.Fatal("the session has no auto-persist path")
+	}
+	// The agent materialises with the store's own recorded options; this is
+	// that same call.
+	if _, err := st.EnsureOnDisk(path, st.Options()); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(sessionLeaseDir(), st.ID()+".lock")
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("the session did not take the lease: %v", err)
+	}
+}
+
+// TestTheRPCSessionHoldsTheLease: an rpc session is an ORDINARY user session
+// — --continue and --resume pick it up — so it must hold the ownership lease
+// once it materialises, like every other session xdev creates.
+func TestTheRPCSessionHoldsTheLease(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	cwd := t.TempDir()
+	prov := &stubProvider{}
+	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil, false)
+	old := session.OpenMem(cwd, "old")
+	h := &rpcHandler{cwd: cwd, reg: reg, store: old, agent: &agent.Agent{}}
+	if err := h.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	defer h.store.Close()
+	assertSessionHoldsTheLease(t, h.store)
+}
+
+// TestTheACPSessionHoldsTheLease: the same for the ACP front-end.
+func TestTheACPSessionHoldsTheLease(t *testing.T) {
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	cwd := t.TempDir()
+	prov := &stubProvider{}
+	reg := newToolRegistry(cwd, prov, "stub", "m", lastSettings(), nil, nil, false)
+	h := newACPHandler(cwd, &config.Config{}, prov, "stub", "m", reg, func() string { return "system" }, nil, 0, 0)
+	t.Cleanup(h.close)
+	id, err := h.NewSession(context.Background(), cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSessionHoldsTheLease(t, h.sessions[id].store)
 }
