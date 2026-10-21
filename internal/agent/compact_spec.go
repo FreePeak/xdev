@@ -51,10 +51,16 @@ func leadWindow(threshold int64) int64 {
 
 // armEligible reports whether this boundary may arm a speculative
 // compaction: the context is below the threshold and within the lead
-// window of it. It is omp's arm condition — the context is under the
-// threshold and the gap to it is no wider than the lead window (omp
-// packages/coding-agent/src/session/session-maintenance.ts:1170-1172).
+// window of it, and the token budget can trigger a compaction at all.
+//
+// The last part is the trigger's own rule (compact.go's tokenTriggerEnabled):
+// a method order that names neither the threshold member nor a product
+// never compacts on the token budget, so it must not spend a provider call
+// on a speculative summary either.
 func (a *Agent) armEligible(used int64) bool {
+	if !a.tokenTriggerEnabled() {
+		return false
+	}
 	threshold := a.compaction().threshold()
 	if threshold <= 0 || used >= threshold {
 		return false

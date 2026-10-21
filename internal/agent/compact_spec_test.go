@@ -617,3 +617,28 @@ func TestTheNoShrinkRuleIsInclusive(t *testing.T) {
 		})
 	}
 }
+
+// TestTheArmDoesNotStartWhenTheTokenTriggerIsDisabled: a method order that
+// names neither the threshold member nor a product never compacts on the
+// token budget — so it must not spend a provider call on a speculative
+// summary either.
+func TestTheArmDoesNotStartWhenTheTokenTriggerIsDisabled(t *testing.T) {
+	stubPressure(t, 0)
+	p := newLadderProvider()
+	cfg := specConfig("overflow", "promotion")
+	cfg.Async = true
+	a, s := asyncAgent(t, p, cfg)
+	hist := specFixture(t, s, 75000)
+	ctx := context.Background()
+
+	_ = a.maybeCompact(ctx, hist)
+	if a.compactAsync != nil {
+		t.Fatal("the boundary armed although the token trigger is disabled")
+	}
+	if _, summaries, _ := p.counts(); summaries != 0 {
+		t.Fatalf("summarize calls = %d, want none", summaries)
+	}
+	if n := len(compactionEntries(s)); n != 0 {
+		t.Fatalf("the token trigger is disabled: compaction entries = %d", n)
+	}
+}

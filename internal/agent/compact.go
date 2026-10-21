@@ -780,7 +780,7 @@ func (a *Agent) compactionDue(history []ai.Message) bool {
 	// shipped default names exactly those) keeps the historical rule:
 	// whether a boundary compacts on the token budget is the threshold
 	// member's business.
-	if !slices.Contains(a.compaction().methods(), methodThreshold) && !a.hasExplicitProduct() {
+	if !a.tokenTriggerEnabled() {
 		return false
 	}
 	// A zero (or negative) context window has no threshold to cross:
@@ -793,6 +793,17 @@ func (a *Agent) compactionDue(history []ai.Message) bool {
 		return false
 	}
 	return contextTokens(history) > a.compaction().threshold()
+}
+
+// tokenTriggerEnabled reports whether the token budget can trigger a
+// compaction at all: the method order must name the threshold member or a
+// member that produces a retained context.
+//
+// The ARM asks the same question (compact_spec.go's armEligible): a method
+// order that disables the token trigger must not spend a provider call on a
+// speculative summary either.
+func (a *Agent) tokenTriggerEnabled() bool {
+	return slices.Contains(a.compaction().methods(), methodThreshold) || a.hasExplicitProduct()
 }
 
 // idleDue reports — and closes — the idle trigger: the session sat between
