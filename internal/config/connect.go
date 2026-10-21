@@ -167,6 +167,55 @@ func isPlan(name string) bool {
 		strings.Contains(name, "step-plan") || strings.HasSuffix(name, "-pass")
 }
 
+// ConnectEffortLevels returns the effort levels a model accepts on the wire,
+// as the SHIPPED catalog states them: the levels models.dev publishes for
+// that model id, across every provider row that names it.
+//
+// It is the fallback for a models.yml written before the `effort:` key
+// existed — the catalog is what `xdev connect` copies from, so a user who
+// has been connected for a year must not have to re-run it to get the
+// capability.
+//
+// The levels of the rows that claim one are INTERSECTED: a level every
+// carrier of the model claims is a level the model takes, and one that only
+// one row claims is not. A model no row names, or no row that names it
+// claims an effort for, has NO capability: the default is not supported.
+func ConnectEffortLevels(modelID string) []string {
+	if modelID == "" {
+		return nil
+	}
+	var out []string
+	found := false
+	for _, e := range connectCatalog {
+		for _, m := range e.Models {
+			if m.ID != modelID || len(m.Effort) == 0 {
+				continue
+			}
+			if !found {
+				out = append([]string(nil), m.Effort...)
+				found = true
+				continue
+			}
+			out = intersectEffortLevels(out, m.Effort)
+		}
+	}
+	return out
+}
+
+// intersectEffortLevels keeps the levels both lists name.
+func intersectEffortLevels(a, b []string) []string {
+	out := make([]string, 0, len(a))
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				out = append(out, x)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // ConnectProviderConfig builds the models.yml block for one catalog row. The
 // credential is written as a ${VAR} reference, never as the key.
 func ConnectProviderConfig(name string) (*ProviderConfig, error) {

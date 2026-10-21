@@ -566,11 +566,13 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	hooks := agent.TurnHooks(ph)
 	// A resumed session runs at the level its own transcript records: the
 	// machine-wide setting is a different value from what the run that
-	// produced this transcript used, and the tool surface follows the rung
-	// that level was reached through.
-	effortLevel := sessionThinkingLevel(store, effortRef)
-	tool.ApplySessionEffort(reg, sessionEffortRung(store, settings.SessionEffort()))
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
+	// produced this transcript used. The level goes through the same clamp
+	// every other path does, so a persisted level above what the model
+	// accepts resumes clamped, not dropped. The tool surface follows the
+	// rung, in a VIEW of the shared registry: this run's own deferred set.
+	effortLevel := sessionLevelFor(store, effortRef, provName, modelName, cfg)
+	runTools := reg.View(sessionRung(store, settings.SessionEffort()))
+	ag := &agent.Agent{Provider: prov, Tools: runTools, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -598,7 +600,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, reg, cfg, settings, provName, modelName, cwd, false)
+	wireAgentMode(ag, runTools, cfg, settings, provName, modelName, cwd, false)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
@@ -1014,20 +1016,26 @@ func modelEfforts(cfg *config.Config, provider, model string) (advertised []stri
 // (models.yml `effort:`). An empty list means the model declares no effort
 // parameter, and that is the answer that keeps its requests byte-identical
 // to the ones xdev sent before the effort level existed.
+//
+// The SHIPPED catalog is the fallback: it is what `xdev connect` copies
+// from, so a models.yml written before the `effort:` key existed must not
+// leave the model without the capability — a user who has been connected
+// for a year cannot be asked to re-run connect to get it.
 func modelEffortWire(cfg *config.Config, provider, model string) []string {
 	if cfg == nil {
 		return nil
 	}
-	pc, ok := cfg.Providers[provider]
-	if !ok {
-		return nil
-	}
-	for _, m := range providerModels(provider, pc) {
-		if m.ID == model {
-			return m.EffortWireLevels()
+	if pc, ok := cfg.Providers[provider]; ok {
+		for _, m := range providerModels(provider, pc) {
+			if m.ID == model {
+				if levels := m.EffortWireLevels(); len(levels) > 0 {
+					return levels
+				}
+				break
+			}
 		}
 	}
-	return nil
+	return config.ConnectEffortLevels(model)
 }
 
 // providerModels merges pinned + discovered models once per provider per
@@ -2295,46 +2303,65 @@ func effortThinking(effort, provider, model string, cfg *config.Config) *ai.Thin
 	return b
 }
 
-// sessionThinkingLevel returns the reasoning level a session runs at: the
-// level its own transcript records, or fallback when the transcript records
-// none.
+// sessionThinkingState reads the reasoning state a session's own transcript
+// records: the level, the level the user pinned, and the effort rung whose
+// tool surface the following turns ran on.
+func sessionThinkingState(store *session.Store) session.ThinkingState {
+	if store == nil {
+		return session.ThinkingState{}
+	}
+	return session.PersistedThinkingState(store.Entries(), store.LeafID())
+}
+
+// sessionLevel returns the reasoning level a session runs at: the level its
+// own transcript records, or fallback when the transcript records none.
 //
 // The session's record wins over the machine-wide setting: the setting is a
 // different value from what the run that produced this transcript used, and
-// a resumed session must continue where that run left off. A session that
-// never changed its level records nothing and falls back — the same value a
-// fresh session starts with.
-func sessionThinkingLevel(store *session.Store, fallback string) string {
-	if store == nil {
+// a resumed session must continue where that run left off.
+//
+// A record that pins reasoning OFF is a record: the level is "" and the
+// session resumes with no reasoning — not with whatever the setting says.
+func sessionLevel(store *session.Store, fallback string) string {
+	st := sessionThinkingState(store)
+	if !st.Found {
 		return fallback
 	}
-	level, _ := session.PersistedThinkingLevel(store.Entries(), store.LeafID())
-	if level == "" {
-		return fallback
-	}
-	return level
+	return st.Level
 }
 
-// sessionEffortRung returns the effort rung a session runs at: the rung its
-// own transcript recorded, or fallback when it recorded none.
+// sessionLevelFor returns the reasoning level a resumed session runs at:
+// the level its own transcript records, clamped to what the model accepts.
 //
-// The record's "configured" field is what tells the two apart. A PINNED
-// level names the rung it was reached through (the /effort command folds the
-// rung onto a level and pins it there), while an INHERITED one ("auto") means
-// the level followed the model role's ":effort" and the tool surface stayed
-// the default one — so the rung is the default, not the level.
-func sessionEffortRung(store *session.Store, fallback string) string {
-	if store == nil {
+// The clamp is the same fold every other path does (thinkingForModel →
+// ClampEffort): a persisted level above what the model takes resumes
+// CLAMPED, not dropped — the level the transcript names was clamped when it
+// was written, and the model's ceiling may have moved since.
+func sessionLevelFor(store *session.Store, fallback, provider, model string, cfg *config.Config) string {
+	return thinkingForModel(sessionLevel(store, fallback), provider, model, cfg)
+}
+
+// sessionRung returns the effort rung a session runs at: the rung its own
+// transcript recorded, or fallback when it recorded none.
+//
+// The record's RUNG is the fact: it is what the /effort command wrote, and
+// it is the rung whose TOOL SURFACE the following turns ran on. A record
+// written before the field existed falls back to what the level says — a
+// PINNED level names the rung it was reached through, an INHERITED one
+// ("auto", omp's own sentinel) means the surface never moved and the rung is
+// the default.
+func sessionRung(store *session.Store, fallback string) string {
+	st := sessionThinkingState(store)
+	if !st.Found {
 		return fallback
 	}
-	level, configured := session.PersistedThinkingLevel(store.Entries(), store.LeafID())
-	if level == "" {
-		return fallback
+	if st.Rung != "" {
+		return config.NormalizeSessionEffort(st.Rung)
 	}
-	if configured == session.ConfiguredAuto {
+	if st.Configured == session.ConfiguredAuto {
 		return config.SessionEffortDefault
 	}
-	return config.NormalizeSessionEffort(configured)
+	return config.NormalizeSessionEffort(st.Configured)
 }
 
 // settingsPolicy resolves the approval policy from settings (nil or a bad

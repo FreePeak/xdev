@@ -20,23 +20,54 @@ import (
 // reasoning at a level the transcript never saw.
 func TestAResumedSessionKeepsItsOwnEffortRung(t *testing.T) {
 	s := session.OpenMem("test", "t")
-	appendThinkingLevel(s, "high", "high")
+	appendThinkingLevel(s, "high", "high", "high")
 
-	if got := sessionThinkingLevel(s, "low"); got != "high" {
+	if got := sessionLevel(s, "low"); got != "high" {
 		t.Fatalf("level = %q, want high (the session's own record wins over the global setting)", got)
 	}
-	if got := sessionEffortRung(s, "low"); got != "high" {
+	if got := sessionRung(s, "low"); got != "high" {
 		t.Fatalf("rung = %q, want high", got)
 	}
 
 	reg := effortStubRegistry()
-	tool.ApplySessionEffort(reg, sessionEffortRung(s, "low"))
+	tool.ApplySessionEffort(reg, sessionRung(s, "low"))
 	deferred := effortDeferred(reg)
 	if !deferred["computer"] {
 		t.Fatal("the resumed session must keep the high rung's surface: computer stays deferred")
 	}
 	if deferred["ast_grep"] {
 		t.Fatal("the resumed session must not fall back to another rung's surface: ast_grep stays eager")
+	}
+}
+
+// The RUNG and the LEVEL are two different facts, and the transcript records
+// both. A session that pinned /thinking high on the low rung ran with the
+// LOW tool surface and the high level: resuming it must restore the low
+// surface, not the high one the level names.
+//
+// This is the mismatch a level-only record cannot see — and it is the
+// difference between "a resumed session keeps its own effort rung" and a
+// claim that a rung is a level.
+func TestAResumedSessionKeepsTheRungAndNotTheLevel(t *testing.T) {
+	s := session.OpenMem("test", "t")
+	appendThinkingLevel(s, "high", "high", "low")
+
+	if got := sessionLevel(s, "medium"); got != "high" {
+		t.Fatalf("level = %q, want high", got)
+	}
+	if got := sessionRung(s, "medium"); got != "low" {
+		t.Fatalf("rung = %q, want low (the rung the record names, not the level)", got)
+	}
+
+	reg := effortStubRegistry()
+	tool.ApplySessionEffort(reg, sessionRung(s, "medium"))
+	deferred := effortDeferred(reg)
+	if !deferred["ast_grep"] {
+		t.Fatal("the resumed session must keep the low rung's surface: ast_grep stays deferred")
+	}
+	if deferred["computer"] != true {
+		// The low rung defers everything, computer included.
+		t.Fatal("the low rung defers computer too")
 	}
 }
 
@@ -47,24 +78,42 @@ func TestASessionThatRecordsNoLevelFallsBackToTheGlobalRung(t *testing.T) {
 	if err := s.Append(&session.MessageEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := sessionThinkingLevel(s, "high"); got != "high" {
+	if got := sessionLevel(s, "high"); got != "high" {
 		t.Fatalf("level = %q, want the global fallback high", got)
 	}
-	if got := sessionEffortRung(s, "high"); got != "high" {
+	if got := sessionRung(s, "high"); got != "high" {
 		t.Fatalf("rung = %q, want the global fallback high", got)
 	}
 }
 
+// A record that pins reasoning OFF is a record, not an absence: the level
+// it names is "" and the session resumes with no reasoning — not with
+// whatever the machine-wide setting says.
+func TestASessionThatPinnedReasoningOffResumesOff(t *testing.T) {
+	s := session.OpenMem("test", "t")
+	appendThinkingLevel(s, "", "off", "medium")
+
+	if got := sessionLevel(s, "high"); got != "" {
+		t.Fatalf("level = %q, want empty (the session pinned reasoning off)", got)
+	}
+	// The rung is still the record's: /thinking off moves the level, not the
+	// tool surface.
+	if got := sessionRung(s, "low"); got != "medium" {
+		t.Fatalf("rung = %q, want medium (the record's rung)", got)
+	}
+}
+
 // An INHERITED level ("auto") is not a rung: the level followed the model
-// role's ":effort" and the tool surface stayed the default one.
+// role's ":effort" and the tool surface stayed the default one. It is the
+// fallback for a record written before the rung field existed.
 func TestAnInheritedLevelRestoresTheDefaultRung(t *testing.T) {
 	s := session.OpenMem("test", "t")
-	appendThinkingLevel(s, "high", session.ConfiguredAuto)
-	if got := sessionEffortRung(s, "low"); got != config.SessionEffortDefault {
+	appendThinkingLevel(s, "high", session.ConfiguredAuto, "")
+	if got := sessionRung(s, "low"); got != config.SessionEffortDefault {
 		t.Fatalf("rung = %q, want the default rung %q", got, config.SessionEffortDefault)
 	}
 	reg := effortStubRegistry()
-	tool.ApplySessionEffort(reg, sessionEffortRung(s, "low"))
+	tool.ApplySessionEffort(reg, sessionRung(s, "low"))
 	deferred := effortDeferred(reg)
 	if !deferred["ast_grep"] {
 		t.Fatal("the default rung defers ast_grep")
@@ -74,38 +123,85 @@ func TestAnInheritedLevelRestoresTheDefaultRung(t *testing.T) {
 	}
 }
 
-// The wire request carries the level the rung names and the levels the
-// model accepts. A model that declares no capability gets no level at all,
-// so its request stays the one it always sent.
-func TestEffortThinkingCarriesTheLevelAndTheCapability(t *testing.T) {
+// The resumed level goes through the SAME clamp every other path does, so a
+// persisted level above what the model accepts resumes clamped — not
+// dropped, and not sent as a level the model does not take.
+func TestTheResumeClampsThePersistedLevel(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
 		"openai": {BaseURL: "https://api.openai.com/v1", API: "openai-responses", Models: []config.ModelConfig{
-			{ID: "gpt-6", Effort: []string{"low", "medium", "high", "xhigh", "max"}},
-			{ID: "gpt-6-plain"},
+			{ID: "gpt-6", Effort: []string{"low", "medium", "high"}},
 		}},
 	}}
+	s := session.OpenMem("test", "t")
+	appendThinkingLevel(s, "xhigh", "xhigh", "high")
 
-	b := effortThinking("xhigh", "openai", "gpt-6", cfg)
-	if b == nil {
-		t.Fatal("budget = nil, want the xhigh budget")
+	got := sessionLevelFor(s, "low", "openai", "gpt-6", cfg)
+	if got != "high" {
+		t.Fatalf("level = %q, want high (clamped to what the model accepts)", got)
 	}
-	if b.Tokens != 32768 {
-		t.Errorf("tokens = %d, want 32768 (the budget is unchanged)", b.Tokens)
+	// The clamp is the model's, not the session's: a model that takes
+	// everything leaves the level alone.
+	if got := sessionLevelFor(s, "low", "openai", "gpt-6-unknown", cfg); got != "xhigh" {
+		t.Fatalf("level = %q, want xhigh (a model the catalog does not list has no opinion)", got)
 	}
-	if b.Level != "xhigh" {
-		t.Errorf("level = %q, want xhigh", b.Level)
+}
+
+// The capability must not need a re-run of `xdev connect`: the SHIPPED
+// catalog is a trusted source, and it is what connect copies from.
+func TestTheEffortCapabilityFallsBackToTheShippedCatalog(t *testing.T) {
+	// A model the user's models.yml says nothing about.
+	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw": {BaseURL: "http://127.0.0.1:20128/v1", API: "openai-completions", Models: []config.ModelConfig{
+			{ID: "gpt-6-astra"},
+		}},
+	}}
+	levels := modelEffortWire(cfg, "onegw", "gpt-6-astra")
+	if len(levels) == 0 {
+		t.Fatal("the shipped catalog must answer for a model the models.yml does not declare")
 	}
-	if len(b.Supported) != 5 {
-		t.Errorf("supported = %v, want the five declared levels", b.Supported)
+	// A model nobody knows: no capability, and the request keeps its shape.
+	if got := modelEffortWire(cfg, "onegw", "no-such-model"); len(got) != 0 {
+		t.Fatalf("levels = %v, want none for a model the catalog does not name", got)
+	}
+	// The user's own declaration wins over the catalog.
+	// A second provider name: the discovered-model cache is keyed by the
+	// provider, so a reused name would answer from the first config.
+	cfg2 := &config.Config{Providers: map[string]*config.ProviderConfig{
+		"onegw2": {BaseURL: "http://127.0.0.1:20128/v1", API: "openai-completions", Models: []config.ModelConfig{
+			{ID: "gpt-6-astra", Effort: []string{"low"}},
+		}},
+	}}
+	if got := modelEffortWire(cfg2, "onegw2", "gpt-6-astra"); len(got) != 1 || got[0] != "low" {
+		t.Fatalf("levels = %v, want the user's own declaration [low]", got)
+	}
+}
+
+// The tool set follows the SESSION, not the shared registry: a view carries
+// its own deferred set, so two sessions at different rungs do not fight
+// over one catalog.
+func TestTheToolViewLeavesTheSharedRegistryAlone(t *testing.T) {
+	reg := effortStubRegistry()
+	tool.ApplySessionEffort(reg, "medium")
+	shared := effortDeferred(reg)
+	if !shared["ast_grep"] {
+		t.Fatal("the shared registry starts at the medium rung: ast_grep deferred")
 	}
 
-	plain := effortThinking("xhigh", "openai", "gpt-6-plain", cfg)
-	if plain == nil || plain.Tokens != 32768 {
-		t.Fatalf("budget = %v, want the xhigh budget", plain)
+	view := reg.View("high")
+	if view == nil {
+		t.Fatal("View returned nil")
 	}
-	if plain.Level != "" || len(plain.Supported) != 0 {
-		t.Fatalf("level/supported = %q/%v, want none for a model that declares no capability",
-			plain.Level, plain.Supported)
+	viewDeferred := effortDeferred(view)
+	if !viewDeferred["computer"] {
+		t.Fatal("the view carries the high rung's surface: computer deferred")
+	}
+	if viewDeferred["ast_grep"] {
+		t.Fatal("the view carries the high rung's surface: ast_grep eager")
+	}
+	// The shared registry is untouched: the view is a window, not a rebuild.
+	after := effortDeferred(reg)
+	if !after["ast_grep"] || after["computer"] {
+		t.Fatal("the view must not rebuild the shared registry's deferred set")
 	}
 }
 

@@ -21,20 +21,41 @@ type ContextResult struct {
 	// Compaction anchors firstKeptEntryId through it.
 	EntryIDs []string
 	Model    string
-	// ThinkingLevel is the request-side reasoning level in force at the leaf
-	// of the path: the level the session's own transcript records (omp folds
-	// the same record back when it rebuilds the context —
+	// Thinking is the reasoning state the session's own transcript records
+	// at the leaf of the path: the level, the level the user pinned, and
+	// the effort rung whose tool surface the following turns ran on (omp
+	// folds the same record back when it rebuilds the context —
 	// packages__coding-agent__src__session__session-context.ts:137-140, and
-	// hands it back as "thinkingLevel" at :412). Empty when the transcript
-	// records none.
-	ThinkingLevel string
-	// ConfiguredThinkingLevel is the level the user pinned, or
-	// ConfiguredAuto when the level was inherited from the model role's
-	// ":effort" default ("" when the record says nothing about it).
-	ConfiguredThinkingLevel string
+	// hands it back as "thinkingLevel" at :412).
+	Thinking ThinkingState
 	// TokensBefore approximates the consumed context as the sum of usage
 	// totals across the path (MVP approximation).
 	TokensBefore int64
+}
+
+// ThinkingState is what a session's transcript records about the reasoning
+// posture of the turns that follow a point in it.
+//
+// Level and Rung are two different facts: /thinking pins a LEVEL on the rung
+// the session already had, and only the rung says which tools the model was
+// offered. A resumed session needs both, and the record that carries them is
+// the same one omp folds back.
+type ThinkingState struct {
+	// Level is the request-side level in force ("" when the session pinned
+	// reasoning off).
+	Level string
+	// Configured is the level the user pinned, or ConfiguredAuto when the
+	// level was inherited from the model role's ":effort" default ("" when
+	// the record says nothing about it).
+	Configured string
+	// Rung is the session effort rung in force: the rung whose tool surface
+	// the following turns ran on. Empty when the record predates the field.
+	Rung string
+	// Found reports whether the transcript records a thinking level at all.
+	// "No record" and "a record that says off" are different answers, and a
+	// caller must not confuse them: a session that pinned reasoning off
+	// resumes off.
+	Found bool
 }
 
 // buildContext reconstructs the model-visible conversation for the path from
@@ -105,13 +126,13 @@ const UnansweredToolCallNotice = "the previous turn ended before this tool call 
 func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextResult, error) {
 	chain := entryChain(entries, leafID)
 
-	// The reasoning level in force at the leaf: the LAST
+	// The reasoning state in force at the leaf: the LAST
 	// thinking_level_change on the path (omp folds the same record back when
 	// it rebuilds the context — session-context.ts:137-140). It is read
 	// before the boundaries below cut the chain: the level is a state
 	// record, not a message, and the session's own record stands whatever
 	// the messages say.
-	thinkingLevel, configuredLevel := foldThinkingLevel(chain)
+	thinking := foldThinkingLevel(chain)
 
 	// Emission boundary: drop everything before the LATEST reset_boundary.
 	// (reset_boundary itself is not a message.)
@@ -274,13 +295,12 @@ func buildContext(entries []Entry, leafID string, sys SystemPrompt) (*ContextRes
 	}
 
 	return &ContextResult{
-		System:                  sys.Text,
-		Messages:                out,
-		EntryIDs:                entryIDs,
-		Model:                   model,
-		ThinkingLevel:           thinkingLevel,
-		ConfiguredThinkingLevel: configuredLevel,
-		TokensBefore:            tokens,
+		System:       sys.Text,
+		Messages:     out,
+		EntryIDs:     entryIDs,
+		Model:        model,
+		Thinking:     thinking,
+		TokensBefore: tokens,
 	}, nil
 }
 
@@ -322,37 +342,40 @@ func entryChain(entries []Entry, leafID string) []Entry {
 	return chain
 }
 
-// foldThinkingLevel returns the reasoning level the path records: the LAST
-// thinking_level_change on it, with the level it names and the level the
-// user pinned (ConfiguredAuto when the level was inherited from the model
-// role's ":effort" default).
+// foldThinkingLevel returns the reasoning state the path records: the LAST
+// thinking_level_change on it, with the level it names, the level the user
+// pinned (ConfiguredAuto when the level was inherited from the model role's
+// ":effort" default), and the effort rung whose tool surface the following
+// turns ran on.
 //
-// Both are empty when the path records none: a session that never changed
+// Found is false when the path records none: a session that never changed
 // its level says nothing, and the caller falls back to the machine-wide
-// setting.
-func foldThinkingLevel(chain []Entry) (level, configured string) {
+// setting. A record that pins reasoning OFF is a record, not an absence —
+// its level is "" and its answer is "off", not "whatever the setting says".
+func foldThinkingLevel(chain []Entry) ThinkingState {
+	var st ThinkingState
 	for _, e := range chain {
 		if t, ok := e.(*ThinkingLevelChangeEntry); ok {
-			level = t.ThinkingLevel
-			configured = t.Configured
+			st = ThinkingState{
+				Level:      t.ThinkingLevel,
+				Configured: t.Configured,
+				Rung:       t.Effort,
+				Found:      true,
+			}
 		}
 	}
-	return level, configured
+	return st
 }
 
-// PersistedThinkingLevel returns the reasoning level the session's own
+// PersistedThinkingState returns the reasoning state the session's own
 // transcript records at its leaf: the last thinking_level_change on the path
-// to the leaf, with the level it names and the level the user pinned
-// (ConfiguredAuto when the level was inherited from the model role's
-// ":effort" default).
-//
-// Both are empty when the transcript records none — a session that never
-// changed its level says nothing, and the caller falls back to the
-// machine-wide setting.
+// to the leaf.
 //
 // It is the accessor next to BuildContext for the callers that need the
-// level without rebuilding the whole conversation.
-func PersistedThinkingLevel(entries []Entry, leafID string) (level, configured string) {
+// state without rebuilding the whole conversation — a resume needs the level
+// AND the rung, and it needs to tell "no record" from "a record that says
+// off".
+func PersistedThinkingState(entries []Entry, leafID string) ThinkingState {
 	return foldThinkingLevel(entryChain(entries, leafID))
 }
 

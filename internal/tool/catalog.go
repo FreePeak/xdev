@@ -324,7 +324,47 @@ func indentJSON(raw json.RawMessage) string {
 	return string(out)
 }
 
-// --- Registry: the deferred view ---
+// View returns a registry that shares this one's tools but carries the
+// deferred set of ONE effort rung.
+//
+// The tools are the same instances — their state (the todo list, the file
+// freshness records) stays shared — and the deferred VIEW is this one's own.
+// The shared registry is the tool SET; a view is one session's window onto
+// it. That is what lets two sessions at different rungs advertise different
+// surfaces at the same time: neither rebuilds the catalog the other reads.
+//
+// The bridge tools are re-created over the view's own catalog, so a search
+// finds the tools THIS view defers.
+func (r *Registry) View(effort string) *Registry {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	view := &Registry{
+		tools:       make(map[string]Tool, len(r.tools)),
+		snaps:       map[string]*fileSnapshot{},
+		stickyDefer: make(map[string]Entry, len(r.stickyDefer)),
+	}
+	for n, t := range r.tools {
+		if isBridgeTool(n) {
+			continue // re-created below, over the view's own catalog
+		}
+		view.tools[n] = t
+	}
+	for k, v := range r.stickyDefer {
+		view.stickyDefer[k] = v
+	}
+	r.mu.RUnlock()
+	cat := NewCatalog(view)
+	view.catalog = cat
+	view.Register(NewToolSearchTool(cat))
+	view.Register(NewToolDescribeTool(cat))
+	view.Register(NewToolCallTool(cat))
+	ApplySessionEffort(view, effort)
+	return view
+}
+
+// Registry: the deferred view ---
 
 // Catalog returns the registry's deferred-tool catalog, creating it on first
 // use (a nil registry has none).

@@ -97,8 +97,9 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	wireTaskParent(reg, store)
 	// A resumed session runs at the level its own transcript records, and at
-	// the tool surface that level was reached through.
-	tool.ApplySessionEffort(reg, sessionEffortRung(store, lastSettings().SessionEffort()))
+	// the tool surface that level was reached through. The tool set is a
+	// VIEW of the shared registry: this run's own deferred set.
+	runTools := reg.View(sessionRung(store, lastSettings().SessionEffort()))
 
 	h := &rpcHandler{
 		cwd: cwd, buildSys: buildSys, reg: reg, cfg: cfg,
@@ -108,13 +109,13 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 		store:   store,
 	}
 	h.agent = &agent.Agent{
-		Provider: prov, Tools: reg, Store: store, Model: modelName,
+		Provider: prov, Tools: runTools, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
 		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 		Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), lastSettings(), agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())),
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, lastSettings(), provName, modelName),
-		Thinking:   effortThinking(sessionThinkingLevel(store, effortRef), provName, modelName, cfg),
+		Thinking:   effortThinking(sessionLevelFor(store, effortRef, provName, modelName, cfg), provName, modelName, cfg),
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
 	wireAgentMode(h.agent, reg, cfg, lastSettings(), provName, modelName, cwd, false)

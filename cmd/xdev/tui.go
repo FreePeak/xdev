@@ -77,11 +77,16 @@ func tabsModeOn(s *config.Settings) string {
 // The level is the one the next request carries; configured is omp's
 // CONFIGURED LEVEL — the level the user pinned, or "auto" when the level
 // is inherited from the model role's ":effort" default.
-func appendThinkingLevel(store *session.Store, level string, configured string) {
+//
+// rung is the SESSION EFFORT RUNG in force: the rung whose TOOL SURFACE the
+// following turns run on. It is xdev's own addition to omp's record, and it
+// is the fact a resume needs for the tool set — a level is not a rung
+// (/thinking high pins a level on the rung the session already had).
+func appendThinkingLevel(store *session.Store, level string, configured string, rung string) {
 	if store == nil {
 		return
 	}
-	if err := store.Append(&session.ThinkingLevelChangeEntry{ThinkingLevel: level, Configured: configured}); err != nil {
+	if err := store.Append(&session.ThinkingLevelChangeEntry{ThinkingLevel: level, Configured: configured, Effort: rung}); err != nil {
 		logx.Errorf("thinking level entry: %v", err)
 	}
 }
@@ -207,18 +212,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return live.level
 	}
 	// thinkingState reads the reasoning state in force: the request-side
-	// level the next turn carries, and the CONFIGURED level in omp's
+	// level the next turn carries, the CONFIGURED level in omp's
 	// shape — the level the user pinned, or "auto" when the level is
 	// inherited from the model role's ":effort" default. live.level is
 	// the sticky choice: "" or "auto" means nothing was pinned, so the
 	// level follows the model role's ":effort" (omp's own sentinel).
-	thinkingState := func() (level string, configured string) {
+	//
+	// The third value is the SESSION EFFORT RUNG — the rung whose tool
+	// surface the next turn runs on. It is a fact of its own: /thinking
+	// moves the level, /effort moves the rung, and the transcript records
+	// both.
+	thinkingState := func() (level string, configured string, rung string) {
+		rung = lastSettings().SessionEffort()
 		modelMu.Lock()
 		defer modelMu.Unlock()
 		if live.level == "" || live.level == "auto" {
-			return live.effort, session.ConfiguredAuto
+			return live.effort, session.ConfiguredAuto, rung
 		}
-		return live.effort, live.level
+		return live.effort, live.level, rung
 	}
 
 	// Tools + system prompt (shared with print mode).
@@ -735,7 +746,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if _, err := applyThinkingFlag(level, ""); err != nil {
 				return err
 			}
-			beforeLevel, beforeConfigured := thinkingState()
+			beforeLevel, beforeConfigured, _ := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "thinking", level); err != nil {
 				return err
 			}
@@ -756,9 +767,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// The level in force changed: the transcript says so (omp
 			// thinking_level_change), so a resume knows which level produced
 			// which part of it. A re-set of the same level changes nothing
-			// and says nothing.
-			if afterLevel, afterConfigured := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
-				appendThinkingLevel(storeOf(), afterLevel, afterConfigured)
+			// and says nothing. The RUNG rides along: it is the tool surface
+			// the following turns run on, and /thinking does not move it.
+			if afterLevel, afterConfigured, afterRung := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
+				appendThinkingLevel(storeOf(), afterLevel, afterConfigured, afterRung)
 			}
 			return nil
 		},
@@ -1942,7 +1954,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !config.IsSessionEffort(name) {
 				return fmt.Errorf("effort: want %s", strings.Join(config.SessionEffortLevels, "|"))
 			}
-			beforeLevel, beforeConfigured := thinkingState()
+			beforeLevel, beforeConfigured, beforeRung := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "effort", name); err != nil {
 				return err
 			}
@@ -1966,9 +1978,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// The reasoning budget in force moved with the rung: the
 			// transcript says so (omp thinking_level_change). A rung that
 			// leaves the level alone (a pinned /thinking, or the same rung
-			// again) changes nothing and says nothing.
-			if afterLevel, afterConfigured := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
-				appendThinkingLevel(storeOf(), afterLevel, afterConfigured)
+			// again) changes nothing and says nothing — but a rung that
+			// moves the TOOL SURFACE and not the level still has to be
+			// recorded: the rung is what a resume restores, and a stale
+			// record would restore the old one over the user's choice.
+			if afterLevel, afterConfigured, afterRung := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured || afterRung != beforeRung {
+				appendThinkingLevel(storeOf(), afterLevel, afterConfigured, afterRung)
 			}
 			return nil
 		},
@@ -2376,17 +2391,22 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			modelMu.Unlock()
 			// A resumed session runs at the level its own transcript records:
 			// the machine-wide setting is a different value from what the run
-			// that produced this transcript used. The tool surface follows the
-			// rung that level was reached through, so a resumed session offers
-			// the same tools the original run offered.
-			le = sessionThinkingLevel(turnStore, le)
-			tool.ApplySessionEffort(reg, sessionEffortRung(turnStore, lastSettings().SessionEffort()))
+			// that produced this transcript used. The level goes through the
+			// same clamp every other path does, so a persisted level above
+			// what the model accepts resumes clamped, not dropped.
+			le = sessionLevelFor(turnStore, le, lpn, lm, cfg)
+			// The tool surface follows the rung, and the rung is what the
+			// session recorded: a resumed session offers the same tools the
+			// original run offered. It is a VIEW of the shared registry —
+			// this turn's own deferred set — so two tabs at different rungs
+			// do not fight over one catalog.
+			turnTools := toolsForTurn().View(sessionRung(turnStore, lastSettings().SessionEffort()))
 			// Per-turn hooks pin the store and the focused predicate so a
 			// parked turn keeps persisting and never paints over the live view.
 			turnTS := &tuiSession{store: turnStore, app: app, tabs: tabs, id: sid}
 			ag := &agent.Agent{
 				Provider: lp,
-				Tools:    toolsForTurn(),
+				Tools:    turnTools,
 				// feedAdvisor is assigned after the agent exists, so go
 				// through an indirection: a direct field copy would
 				// capture the nil func at literal time.
@@ -2415,7 +2435,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
 			// result here is the case that mattered.
-			if st := wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
+			if st := wireAgentMode(ag, turnTools, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
 				// The TUI has a console: a silent provider swap or a
 				// cooldown revert is otherwise invisible to the user.
 				st.Notify = func(msg string) {

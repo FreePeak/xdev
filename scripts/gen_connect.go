@@ -207,6 +207,7 @@ func main() {
 	}
 
 	var buf strings.Builder
+	var effortRows []effortRow
 	buf.WriteString(header)
 	names := make([]string, 0, len(out))
 	for k := range out {
@@ -239,6 +240,7 @@ func main() {
 			}
 			if len(m.Effort) > 0 {
 				fmt.Fprintf(&buf, ", Effort: []string{%s}", joinQuoted(m.Effort))
+				effortRows = append(effortRows, effortRow{key: k + "/" + m.ID, levels: m.Effort})
 			}
 			buf.WriteString("},\n")
 		}
@@ -246,11 +248,40 @@ func main() {
 	}
 	buf.WriteString("}\n")
 	fatal(os.WriteFile("internal/config/connect_catalog.go", []byte(buf.String()), 0o644))
+	fatal(os.WriteFile(effortFixturePath, []byte(effortFixture(effortRows)), 0o644))
 	count := 0
 	for _, e := range out {
 		count += len(e.Models)
 	}
 	fmt.Printf("wrote internal/config/connect_catalog.go: %d providers, %d models\n", len(names), count)
+}
+
+// effortRow is one model of the pinned effort snapshot.
+type effortRow struct {
+	key    string
+	levels []string
+}
+
+// effortFixturePath is the pinned snapshot of the effort data the catalog
+// carries. It is what makes the generated file verifiable: the test in
+// internal/config reads it and checks the committed catalog against it, so a
+// hand-edit of connect_catalog.go cannot pass unnoticed.
+const effortFixturePath = "internal/config/testdata/connect_effort.json"
+
+// effortFixture renders the pinned snapshot: one line per model that claims
+// an effort, "provider/model" to its levels.
+func effortFixture(rows []effortRow) string {
+	var buf strings.Builder
+	buf.WriteString("{\n")
+	for i, r := range rows {
+		sep := ","
+		if i == len(rows)-1 {
+			sep = ""
+		}
+		fmt.Fprintf(&buf, "  %s: [%s]%s\n", quote(r.key), joinQuoted(r.levels), sep)
+	}
+	buf.WriteString("}\n")
+	return buf.String()
 }
 
 // effortLevels are the effort levels a provider's own effort parameter

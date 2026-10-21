@@ -137,10 +137,15 @@ func EffortBudget(effort string) (tokens int, ok bool) {
 // provider's effort parameter accepts (models.yml `effort:`).
 //
 // A rung the model advertises but the wire does not accept is not reachable,
-// so the intersection is the honest answer. An empty result means "no
-// opinion" — the model is on record but names no ladder — and a requested
-// rung then rides out unchanged, the same rule ClampEffort applies to an
-// empty advertised list.
+// so the intersection is the honest answer. An intersection that is EMPTY
+// (the two lists name nothing in common) falls back to the wire list: a
+// rung the model advertises but cannot take on the wire is not a rung the
+// model has, and reading the pair as "no opinion" would let a request ride
+// out above what the provider accepts.
+//
+// An empty result means "no opinion" — the model is on record but names no
+// ladder — and a requested rung then rides out unchanged, the same rule
+// ClampEffort applies to an empty advertised list.
 func (m ModelConfig) EffortLevels() []string {
 	if len(m.Efforts) == 0 {
 		return m.Effort
@@ -156,6 +161,9 @@ func (m ModelConfig) EffortLevels() []string {
 				break
 			}
 		}
+	}
+	if len(out) == 0 {
+		return m.Effort
 	}
 	return out
 }

@@ -121,6 +121,17 @@ func TestOpenAICompletionsSendsTheEffortLevel(t *testing.T) {
 
 // Anthropic gets output_config.effort AND the beta header that goes with
 // it (omp sends the two together — anthropic.ts:55, :3281-3290).
+//
+// And the budget rides along with it, on purpose. omp's Anthropic body
+// carries `thinking` and `output_config` in the SAME request
+// (anthropic.ts:3312 and :3320), and the thinking block that goes with an
+// effort is the budget one — the `{type:"enabled", budget_tokens}` shape is
+// the model mode omp calls "anthropic-budget-effort" (anthropic.ts:3216-3226:
+// the effort is set right after the budget block, under exactly that mode).
+// The two are therefore not mutually exclusive: a model in that mode takes
+// both, and a model in no mode takes neither. xdev's Anthropic wire has
+// always carried the budget, so xdev's both-params request IS omp's
+// budget-effort shape.
 func TestAnthropicSendsOutputConfigEffortAndBeta(t *testing.T) {
 	srv, got := newEffortServer(t)
 	p := NewAnthropicProvider("anthropic", srv.URL, "sk-test", nil, nil)
@@ -249,56 +260,102 @@ func TestModelWithoutTheEffortCapabilityIsByteIdentical(t *testing.T) {
 // A level the model does not accept is DROPPED, never folded onto a
 // different one: silently sending "high" for a request that said "max" is a
 // lie about what was asked.
+//
+// Each provider is pinned by BOTH halves: the same model, the same request,
+// one level it accepts and one it does not. The accepted level must go out
+// and the rejected one must not — a wire that sent neither (the behaviour
+// before the effort level existed) fails the first half.
 func TestUnsupportedEffortLevelIsDropped(t *testing.T) {
 	srv, got := newEffortServer(t)
 
 	t.Run("openai-responses", func(t *testing.T) {
 		p := NewOpenAIResponsesProvider("openai", srv.URL, "sk-test", nil, nil)
-		req := effortTurn()
-		req.Thinking = &ThinkingBudget{
+		accepted := effortTurn()
+		accepted.Thinking = &ThinkingBudget{
+			Tokens:    32768,
+			Level:     "high",
+			Supported: []string{"low", "medium", "high"},
+		}
+		rejected := effortTurn()
+		rejected.Thinking = &ThinkingBudget{
 			Tokens:    32768,
 			Level:     "xhigh",
 			Supported: []string{"low", "medium", "high"},
 		}
-		body := effortJSON(t, captureEffort(t, p, req, got).body)
-		if _, ok := body["reasoning"]; ok {
-			t.Fatalf("reasoning rode along for an unsupported level: %v", body["reasoning"])
+		a := effortJSON(t, captureEffort(t, p, accepted, got).body)
+		reasoning, _ := a["reasoning"].(map[string]any)
+		if reasoning == nil || reasoning["effort"] != "high" {
+			t.Fatalf("the accepted level must ride along: reasoning = %v", a["reasoning"])
+		}
+		b := effortJSON(t, captureEffort(t, p, rejected, got).body)
+		if _, ok := b["reasoning"]; ok {
+			t.Fatalf("reasoning rode along for an unsupported level: %v", b["reasoning"])
 		}
 	})
 
 	t.Run("anthropic", func(t *testing.T) {
 		p := NewAnthropicProvider("anthropic", srv.URL, "sk-test", nil, nil)
-		req := effortTurn()
-		req.Model = "claude-opus-5"
-		req.Thinking = &ThinkingBudget{
+		accepted := effortTurn()
+		accepted.Model = "claude-opus-5"
+		accepted.Thinking = &ThinkingBudget{
+			Tokens:    16384,
+			Level:     "high",
+			Supported: []string{"low", "medium", "high"},
+		}
+		rejected := effortTurn()
+		rejected.Model = "claude-opus-5"
+		rejected.Thinking = &ThinkingBudget{
 			Tokens:    16384,
 			Level:     "xhigh",
 			Supported: []string{"low", "medium", "high"},
 		}
-		sent := captureEffort(t, p, req, got)
-		body := effortJSON(t, sent.body)
-		if _, ok := body["output_config"]; ok {
-			t.Fatalf("output_config rode along for an unsupported level: %v", body["output_config"])
+		a := captureEffort(t, p, accepted, got)
+		out, _ := effortJSON(t, a.body)["output_config"].(map[string]any)
+		if out == nil || out["effort"] != "high" {
+			t.Fatalf("the accepted level must ride along: output_config = %v", out)
 		}
-		if beta := sent.head.Get("anthropic-beta"); beta != "" {
+		if beta := a.head.Get("anthropic-beta"); beta != anthropicEffortBeta {
+			t.Fatalf("anthropic-beta = %q, want %q", beta, anthropicEffortBeta)
+		}
+		b := captureEffort(t, p, rejected, got)
+		if _, ok := effortJSON(t, b.body)["output_config"]; ok {
+			t.Fatalf("output_config rode along for an unsupported level")
+		}
+		if beta := b.head.Get("anthropic-beta"); beta != "" {
 			t.Fatalf("anthropic-beta = %q, want no header for an unsupported level", beta)
 		}
 	})
 
 	t.Run("google", func(t *testing.T) {
 		p := NewGoogleGenAIProvider("google", srv.URL, "key", nil, nil)
-		req := effortTurn()
-		req.Model = "gemini-3.8-flash"
-		req.Thinking = &ThinkingBudget{
+		accepted := effortTurn()
+		accepted.Model = "gemini-3.8-flash"
+		accepted.Thinking = &ThinkingBudget{
+			Tokens:    8192,
+			Level:     "high",
+			Supported: []string{"low", "medium", "high"},
+		}
+		rejected := effortTurn()
+		rejected.Model = "gemini-3.8-flash"
+		rejected.Thinking = &ThinkingBudget{
 			Tokens:    8192,
 			Level:     "xhigh",
 			Supported: []string{"low", "medium", "high"},
 		}
-		body := effortJSON(t, captureEffort(t, p, req, got).body)
-		gen, _ := body["generationConfig"].(map[string]any)
+		a := effortJSON(t, captureEffort(t, p, accepted, got).body)
+		gen, _ := a["generationConfig"].(map[string]any)
 		thinking, _ := gen["thinkingConfig"].(map[string]any)
+		if thinking == nil || thinking["thinkingLevel"] != "high" {
+			t.Fatalf("the accepted level must ride along: thinkingConfig = %v", gen["thinkingConfig"])
+		}
+		b := effortJSON(t, captureEffort(t, p, rejected, got).body)
+		gen, _ = b["generationConfig"].(map[string]any)
+		thinking, _ = gen["thinkingConfig"].(map[string]any)
 		if thinking == nil || thinking["thinkingBudget"] != float64(8192) {
-			t.Fatalf("thinkingConfig = %v, want the budget back", gen["thinkingConfig"])
+			t.Fatalf("an unsupported level falls back to the budget: thinkingConfig = %v", gen["thinkingConfig"])
+		}
+		if _, ok := thinking["thinkingLevel"]; ok {
+			t.Fatalf("the unsupported level rode along: thinkingConfig = %v", thinking)
 		}
 	})
 }

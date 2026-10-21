@@ -65,12 +65,18 @@ var repoSafeProviderKeys = []string{"api", "models", "discovery", "toolsFormat"}
 // per-model baseUrl/apiKey/headers overrides are absent on purpose: they are
 // the provider-level authority in miniature. `efforts` IS allowed — it is a
 // capability claim about the model, the same kind of data as `reasoning`
-// and `maxTokens` (it can only make xdev clamp a rung down, never spend
-// more), and a project vendoring its own model file needs to declare it.
-// `failover` is allowed because it can only REMOVE a target from the
-// implicit chain — the same narrowing shape as a lowered contextWindow —
-// and a repo that vendors its own model file must be able to keep a
-// pinned alias out of the user's outage path.
+// and `maxTokens`: it can only make xdev clamp a rung DOWN, never spend
+// more, and since the effort level reached the wire it also narrows the
+// literal level on the wire, downward only. `failover` is allowed because it
+// can only REMOVE a target from the implicit chain — the same narrowing
+// shape as a lowered contextWindow — and a repo that vendors its own model
+// file must be able to keep a pinned alias out of the user's outage path.
+//
+// `effort` is NOT allowed: it says the provider's own parameter takes the
+// level, and a project that claims it for a model that does not take it
+// would have every one of that model's requests rejected. The capability
+// comes from the user's own models.yml or from the shipped catalog, both of
+// which xdev trusts.
 var repoSafeModelKeys = []string{"id", "name", "reasoning", "vision", "contextWindow", "maxTokens", "efforts", "failover"}
 
 // readYAMLLayer reads one configuration file; ok=false when it is absent.
