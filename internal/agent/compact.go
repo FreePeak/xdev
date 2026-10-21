@@ -463,12 +463,11 @@ func (a *Agent) compact(ctx context.Context) error {
 // persistCompaction appends a ladder result to the session store and tells the
 // hook bus how big the context was before it (the entry carries that number).
 //
-// The record is filled HERE, at the one point where a compaction enters the
-// store: the surviving context is measured once and the summary gets its
-// one-line rendering, so every path that persists a compaction says the same
-// thing about itself.
+// The record is filled by FillCompactionRecord — the ONE helper every
+// compaction path uses — so the ladder, the handoff, the notes rollover and
+// the CLI all say the same thing about themselves.
 func (a *Agent) persistCompaction(entry *session.CompactionEntry, kept []ai.Message) error {
-	fillCompactionRecord(entry, kept)
+	FillCompactionRecord(entry, kept)
 	if err := a.Store.Append(entry); err != nil {
 		return fmt.Errorf("compaction: persist: %w", err)
 	}
@@ -476,7 +475,7 @@ func (a *Agent) persistCompaction(entry *session.CompactionEntry, kept []ai.Mess
 	return nil
 }
 
-// fillCompactionRecord completes a compaction entry with the omp-parity
+// FillCompactionRecord completes a compaction entry with the omp-parity
 // record (omp rule 27): the token count of the context that SURVIVES the
 // compaction, and a one-line rendering of the summary.
 //
@@ -485,8 +484,22 @@ func (a *Agent) persistCompaction(entry *session.CompactionEntry, kept []ai.Mess
 // the request BEFORE the compaction, so reporting it here would claim the
 // compaction freed nothing. The estimate is the same unit the estimator floor
 // uses everywhere else, and it is the size the NEXT request will carry.
-func fillCompactionRecord(entry *session.CompactionEntry, kept []ai.Message) {
+//
+// kept is the window the compaction kept; the surviving context is the
+// summary plus that window. It is the ONE implementation every persist path
+// uses — the ladder, the handoff, the notes rollover and the CLI — so all of
+// them say the same thing about themselves.
+//
+// The entry's Method is left alone: each path names its own ladder member.
+func FillCompactionRecord(entry *session.CompactionEntry, kept []ai.Message) {
 	entry.ShortSummary = compactionShortSummary(entry.Summary)
+	if entry.Summary.Text() == "" && len(kept) == 0 {
+		// Nothing survived that can be measured: the record claims no
+		// size and the wire omits the field. A compaction is never failed
+		// over a missing measurement.
+		entry.TokensAfter = 0
+		return
+	}
 	post := make([]ai.Message, 0, len(kept)+1)
 	post = append(post, entry.Summary)
 	post = append(post, kept...)
@@ -725,6 +738,15 @@ func (a *Agent) compactionDue(history []ai.Message) bool {
 	// whether a boundary compacts on the token budget is the threshold
 	// member's business.
 	if !slices.Contains(a.compaction().methods(), methodThreshold) && !a.hasExplicitProduct() {
+		return false
+	}
+	// A zero (or negative) context window has no threshold to cross:
+	// threshold() is 0 there, so "used > 0" would fire on any history at
+	// all. omp never compacts without a window (its check requires a
+	// positive threshold), so a session with no window never compacts on
+	// the token budget. The memory-pressure and idle backstops above are
+	// not the token budget and still fire.
+	if a.compaction().ContextWindow <= 0 {
 		return false
 	}
 	return contextTokens(history) > a.compaction().threshold()

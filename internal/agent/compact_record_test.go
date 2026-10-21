@@ -77,7 +77,7 @@ func TestTheCompactionRecordReachesTheWire(t *testing.T) {
 func TestTheShortSummaryIsOneBoundedLine(t *testing.T) {
 	long := strings.Repeat("word ", 200)
 	entry := &session.CompactionEntry{Summary: textSummary(long)}
-	fillCompactionRecord(entry, nil)
+	FillCompactionRecord(entry, nil)
 	if strings.ContainsAny(entry.ShortSummary, "\n\r") {
 		t.Fatalf("the short summary is not one line: %q", entry.ShortSummary)
 	}

@@ -229,6 +229,11 @@ func compressSession(ctx context.Context, path, method string, keepRecent int64,
 		TokensBefore:     plan.TokensBefore,
 		Method:           method,
 	}
+	// The record (omp rule 27) is filled by the same helper every other
+	// compaction path uses, over the SAME kept tail the report measures —
+	// so the number on the wire is the number the CLI printed
+	// ("context 60060 -> 35047 tokens").
+	agent.FillCompactionRecord(entry, plan.Messages[plan.Cut:])
 	if err := store.Append(entry); err != nil {
 		return nil, fmt.Errorf("persist compaction: %w", err)
 	}
