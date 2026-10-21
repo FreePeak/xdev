@@ -521,11 +521,12 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 	// The prompt and the agent's tool set are the SAME set: the agent's
 	// tools are a view of the shared registry, and a prompt built from the
-	// shared registry would describe a different surface.
-	var runTools *tool.Registry
-	buildSys := promptFnForTools(basePrompt(opts, cwd), cwd, func() *tool.Registry { return runTools },
+	// shared registry would describe a different surface. The pair is made
+	// once the session's rung is known; the prompt resolves it at Run time
+	// (late-registered tools must be in the prompt).
+	buildPrompt := promptBuilder(basePrompt(opts, cwd), cwd,
 		tailSystemPrompt(overrides, opts.AppendSystem), mem)
-	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
+	var buildSys func() string
 
 	// --- session ---
 	store, err := openStartupSession(cwd, opts)
@@ -579,7 +580,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// accepts resumes clamped, not dropped. The tool surface follows the
 	// rung, in a VIEW of the shared registry: this run's own deferred set.
 	effortLevel := sessionLevelFor(store, effortRef, provName, modelName, cfg)
-	runTools = reg.View(sessionRung(store, settings.SessionEffort()))
+	runTools, runPrompt := turnToolSet(reg, sessionRung(store, settings.SessionEffort()), buildPrompt)
+	buildSys = runPrompt
 	ag := &agent.Agent{Provider: prov, Tools: runTools, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
@@ -1097,6 +1099,21 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 	return func() string { return build(reg) }
 }
 
+// turnToolSet returns the tool set a turn runs with and the system prompt
+// for that SAME set.
+//
+// The two MUST come from one set: the prompt lists the eager tools and
+// indexes the deferred ones, and the agent is given the tool set. Two sets
+// mean the model is told about tools it cannot call, and the tools it can
+// call are missing from the prompt.
+//
+// It is a function and not two values assembled at a call site, so the tie
+// cannot be broken by editing one of them.
+func turnToolSet(reg *tool.Registry, rung string, build func(*tool.Registry) string) (tools *tool.Registry, prompt func() string) {
+	view := reg.View(rung)
+	return view, func() string { return build(view) }
+}
+
 // promptFnForTools builds the system prompt from a tool set that can
 // CHANGE between calls.
 //
@@ -1110,6 +1127,10 @@ func promptFnForTools(base string, cwd string, tools func() *tool.Registry, appe
 	return func() string {
 		reg := tools()
 		if reg == nil {
+			// Unreachable today: the resolver is bound to the run's tool
+			// set, which is assigned before the first prompt is built. The
+			// empty registry is a safe answer for a prompt that somehow
+			// has no tools: it lists none rather than the wrong ones.
 			reg = tool.NewRegistry()
 		}
 		return build(reg)

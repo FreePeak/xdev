@@ -182,7 +182,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// it is built below, once the registry's hub and task tools are known.
 	var vibeScope *agent.VibeScope
 	// vibeSys is the director's system prompt (built with the scope, below).
-	var vibeSys func() string
+	// vibeBuild renders the director's prompt for a NAMED tool set: the
+	// turn's view of the scope registry, which is the set the director is
+	// given.
+	var vibeBuild func(*tool.Registry) string
 	vibeActive := func() bool { return vibeScope != nil && vibeScope.Active() }
 	// /prewalk live toggle: the holder is what each submit reads; Set
 	// resolves the ref through the same precedence as --prewalk-into.
@@ -1492,7 +1495,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					app.AddSystemBlock("· vibe " + w.ID + " (" + w.Tier + ") " + w.Status + ": " + agent.VibePreview(w.Output))
 				},
 			})
-			vibeSys = promptFnWithMemory(basePrompt(opts, cwd), cwd, vibeScope.Registry(),
+			// The director's prompt is rendered for the tool set the
+			// director is GIVEN — the turn's view of the scope registry —
+			// not for the scope registry itself: a prompt that offers a
+			// tool the agent has deferred is a tool the provider rejects.
+			vibeBuild = promptBuilder(basePrompt(opts, cwd), cwd,
 				tailSystemPrompt(overrides, opts.AppendSystem)+"\n\n"+agent.VibeDirectorPrompt, sessionMemory)
 			// The startup session may itself be a resume: adopt its mode.
 			workers, on := agent.LoadVibe(storeOf().Entries())
@@ -2400,7 +2407,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// original run offered. It is a VIEW of the shared registry —
 			// this turn's own deferred set — so two tabs at different rungs
 			// do not fight over one catalog.
-			turnTools := toolsForTurn().View(sessionRung(turnStore, lastSettings().SessionEffort()))
+			turnTools, turnPrompt := turnToolSet(toolsForTurn(), sessionRung(turnStore, lastSettings().SessionEffort()), buildPrompt)
 			// Per-turn hooks pin the store and the focused predicate so a
 			// parked turn keeps persisting and never paints over the live view.
 			turnTS := &tuiSession{store: turnStore, app: app, tabs: tabs, id: sid}
@@ -2527,9 +2534,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				history = hist.Messages
 			}
 			sessMu.Unlock()
-			sys := buildPrompt(turnTools)
+			sys := turnPrompt() // the prompt for THIS turn's tool set
 			if vibeActive() {
-				sys = vibeSys() // director prompt for the restricted toolset
+				sys = vibeBuild(turnTools) // director prompt for the same set
 			}
 			finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), history)
 			if turnTS.isFocused() {

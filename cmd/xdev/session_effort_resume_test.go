@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/agent"
@@ -10,6 +11,89 @@ import (
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
 )
+
+// The system prompt must describe the SAME surface the agent has — through
+// the PRODUCTION wiring, not a re-implementation of it.
+//
+// The agent's tools are a per-turn VIEW of the shared registry, and the
+// shared registry is laddered at the GLOBAL rung: a session whose rung
+// differs from the global one — the resumed-session case this PR exists for
+// — would be told about tools it cannot call, and the tools it can call
+// would be missing from the prompt.
+//
+// The pair (the tool set and the prompt) is built by ONE production
+// function, turnToolSet, so the two cannot be edited apart.
+func TestTheRenderedPromptIndexesTheViewsDeferredTools(t *testing.T) {
+	reg := effortStubRegistry()
+	tool.ApplySessionEffort(reg, "medium") // the GLOBAL rung
+	build := promptBuilder("BASE", t.TempDir(), "", nil)
+
+	tools, prompt := turnToolSet(reg, "high", build) // the SESSION's rung
+	_, deferred := splitPromptTools(prompt())
+
+	// The index must name the VIEW's deferred tools...
+	for _, want := range []string{"computer", "tts"} {
+		if !strings.Contains(deferred, want) {
+			t.Fatalf("the deferred index must name the view's %q: %s", want, deferred)
+		}
+	}
+	// ...and NOT the shared registry's.
+	for _, unwanted := range []string{"ast_grep", "github"} {
+		if strings.Contains(deferred, unwanted) {
+			t.Fatalf("the deferred index must not name the shared registry's %q: %s", unwanted, deferred)
+		}
+	}
+	// The agent's tool set is the same view.
+	found := false
+	for _, e := range tools.Deferred() {
+		if e.Name == "computer" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the agent's tool set must be the view the prompt describes")
+	}
+}
+
+// The vibe director's prompt must describe the tool set the director is
+// GIVEN — the turn's view of the scope registry, not the scope registry
+// itself.
+//
+// The scope registry is not laddered; the view is. At the low rung the
+// director's two tools are behind the bridge, and a prompt that still
+// offers them as directly callable is a tool the provider rejects.
+func TestTheVibePromptDescribesTheDirectorsOwnToolSurface(t *testing.T) {
+	scope := tool.NewRegistry()
+	scope.Register(effortStub{n: "vibe_spawn"})
+	scope.Register(effortStub{n: "vibe_send"})
+	build := promptBuilder("BASE", t.TempDir(), "", nil)
+
+	tools, prompt := turnToolSet(scope, "low", build)
+	eager, _ := splitPromptTools(prompt())
+	for _, name := range []string{"vibe_spawn", "vibe_send"} {
+		if strings.Contains(eager, name) {
+			t.Fatalf("the prompt must not offer %q as directly callable: the director's set has it deferred", name)
+		}
+	}
+	deferred := false
+	for _, e := range tools.Deferred() {
+		if e.Name == "vibe_spawn" {
+			deferred = true
+		}
+	}
+	if !deferred {
+		t.Fatal("the director's tool set must have vibe_spawn deferred at the low rung")
+	}
+}
+
+// splitPromptTools splits a rendered prompt into the eager tool list and
+// the deferred index.
+func splitPromptTools(sys string) (eager, deferred string) {
+	if i := strings.Index(sys, "# Deferred tools"); i >= 0 {
+		return sys[:i], sys[i:]
+	}
+	return sys, ""
+}
 
 // A resumed session continues at the rung its own transcript records.
 //
