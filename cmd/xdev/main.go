@@ -167,6 +167,42 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
 Flags:
 `
 
+// maxTurnsHelp is the --max-turns help text. It says what the code does:
+// the flag's 0 means "use the configured maxTurns" (200 by default) — NOT
+// "no cap". The agent layer treats a 0 as unbounded, but the CLI never
+// passes one on: it substitutes the configured value first, and the
+// configured value cannot be 0 either (the settings layer refuses it).
+const maxTurnsHelp = "max agent turns per run (0 = the maxTurns setting, 200 by default)"
+
+// effectiveMaxTurnsFlag resolves the --max-turns flag against the
+// configured default. The flag's zero value means "use the configured
+// maxTurns", so the help text has to name the CONFIGURED value — the
+// agent's own 0-means-unbounded is a number the CLI never passes on.
+func effectiveMaxTurnsFlag(flagValue, configured int) int {
+	if flagValue == 0 {
+		return configured
+	}
+	return flagValue
+}
+
+// resumeFlagClash names the flags --resume cannot be combined with: it
+// names ONE session, and "continue the newest", "fork that one" and "save
+// nothing" are three other meanings. The names are the user's own — the
+// error has to say which flag is in the way.
+func resumeFlagClash(cont bool, fork string, noSession bool) []string {
+	var clash []string
+	if cont {
+		clash = append(clash, "--continue")
+	}
+	if fork != "" {
+		clash = append(clash, "--fork")
+	}
+	if noSession {
+		clash = append(clash, "--no-session")
+	}
+	return clash
+}
+
 func main() {
 	// Chrome launches the native host with this flag (wrapper script). Must run
 	// before FlagSet parse so unknown-flag handling never swallows it.
@@ -180,7 +216,7 @@ func main() {
 	fs.Var(&configOverlays, "config", "extra config file layered over the defaults (repeatable)")
 	model := fs.String("model", "", "model to use (provider/model)")
 	continueLast := fs.Bool("continue", false, "continue the most recent session in this directory")
-	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
+	resumePrefix := fs.String("resume", "", "resume a session by id, file-name or id-suffix prefix, in this project or any other (e.g. -resume 01a0)")
 	fromClaude := fs.String("from-claude", "", "import a Claude Code transcript (id prefix or path) and continue it")
 	fromCodex := fs.String("from-codex", "", "import a Codex transcript (id prefix or path) and continue it")
 	exportFile := fs.String("export", "", "write the session as one self-contained HTML file and exit")
@@ -189,7 +225,7 @@ func main() {
 	appendSystemPrompt := fs.String("append-system-prompt", "", "append to the system prompt")
 	personality := fs.String("personality", "", "personality preset: default | friendly | pragmatic | none (default: settings.personality)")
 	themeName := fs.String("theme", "", "TUI theme: groknight | grokday | catppuccin | dracula | gruvbox | nord | one-dark | one-light | rose-pine | tokyo-night, or a name from ~/.xdev/agent/themes (default: auto)")
-	maxTurns := fs.Int("max-turns", 0, "max agent turns per run (0 = default 200)")
+	maxTurns := fs.Int("max-turns", 0, maxTurnsHelp)
 	maxTokens := fs.Int("max-tokens", 0, "assistant output token cap (0 = provider default)")
 	apiKeyValue := fs.String("api-key", "", "credential for this run only (never persisted)")
 	verbose := fs.Bool("verbose", false, "log to stderr")
@@ -238,7 +274,7 @@ func main() {
 	fs.BoolVar(printModeFlag, "p", false, "alias for --print")
 	fs.BoolVar(continueLast, "c", false, "alias for --continue")
 	fs.StringVar(resumePrefix, "r", "", "alias for --resume (session id prefix)")
-	fs.StringVar(resumePrefix, "session", "", "resume a session by id prefix (alias: --session)")
+	fs.StringVar(resumePrefix, "session", "", "alias for --resume (id, file-name or id-suffix prefix)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
 	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
 	retryAllErrors := fs.Bool("retry-all-errors", false, "retry every error class, including empty turns (retry.retryAllErrors for this run)")
@@ -276,6 +312,16 @@ func main() {
 		logx.Enable(logx.LevelDebug)
 	}
 
+	// --resume names ONE session and nothing else can: it cannot also mean
+	// "continue the newest one", "fork that one" or "save nothing". Say so
+	// instead of picking one of the meanings silently (omp's flag rules).
+	if *resumePrefix != "" {
+		if clash := resumeFlagClash(*continueLast, *forkID, *noSession); len(clash) > 0 {
+			fmt.Fprintf(os.Stderr, "xdev: --resume cannot be combined with %s\n", strings.Join(clash, ", "))
+			os.Exit(2)
+		}
+	}
+
 	// --- issue #33 launch flags: fail-fast validation, then the chdir.
 	// --cwd has to land before everything downstream: the dotenv chain,
 	// project settings, session bucketing and the tool roots all resolve
@@ -302,6 +348,61 @@ func main() {
 	if err := config.SetAlias(*aliasName); err != nil {
 		fmt.Fprintln(os.Stderr, "xdev:", err)
 		os.Exit(2)
+	}
+	// issue #33: the launch surface the modes and their helpers read. It is
+	// set here, before the cwd can move: the session lookup below honours
+	// --session-dir, and everything downstream reads the same struct.
+	launch = launchFlags{
+		SessionDir:      *sessionDir,
+		NoSession:       *noSession,
+		NoTitle:         *noTitle,
+		Thinking:        *thinkingFlag,
+		ThinkingDisplay: resolveThinkingDisplay(*hideThinking, *printThoughts),
+		Tools:           parseCSV(*toolsFlag),
+		NoTools:         *noTools,
+		NoLSP:           *noLSP,
+		AutoApprove:     *autoApprove,
+		ApprovalMode:    *approvalModeFlag,
+		MaxTime:         maxTime,
+		NoExtensions:    *noExtensions,
+		Skills:          parseCSV(*skillsFlag),
+		NoSkills:        *noSkills,
+		Advisor:         *advisorFlag,
+		NoPrewalk:       *noPrewalk,
+		Models:          splitPatterns(modelsPatterns),
+		Provider:        *providerFlag,
+		ExtraDirs:       addDirs,
+		AllowHome:       *allowHome,
+		NoPTY:           *noPTY,
+		Extensions:      extensionPaths,
+		PluginDirs:      pluginDirs,
+		LogFile:         *logFile,
+	}
+	// A --bg worker that somehow started without a wall-clock cap still
+	// gets one: unattended runs must not hang forever (issue #131).
+	if isBgWorker() && launch.MaxTime == 0 {
+		launch.MaxTime = bgDefaultMaxAge
+	}
+	// --resume re-derives the working directory from the session's header:
+	// the session belongs to a project, and the run continues THERE, not in
+	// the directory the command was typed in (omp rules 43-47). The project
+	// has to still exist — a session whose directory was deleted keeps the
+	// launch directory and says so. It runs before the dotenv chain and the
+	// settings layer, so the resumed project supplies both, the way the
+	// --cwd flag does.
+	if *resumePrefix != "" {
+		cwd := mustGetwd()
+		path, err := resolveResumeID(cwd, *resumePrefix)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", err)
+			os.Exit(2)
+		}
+		dir, derr := resumeCwd(path, cwd)
+		if derr != nil {
+			fmt.Fprintln(os.Stderr, "xdev:", derr)
+		} else if dir != cwd {
+			fmt.Fprintf(os.Stderr, "xdev: resuming in %s\n", dir)
+		}
 	}
 	// Mint the per-install id on first run (0600, O_EXCL, never rewritten)
 	// so provider metadata — Codex installationId, Claude device_id — sees
@@ -369,38 +470,6 @@ func main() {
 	noRulesFlag = *noRules
 	handoffMode = *handoffFlag
 	appliedLimit = memlimit.ApplyFrom(settings.MemoryLimit)
-	// issue #33: the launch surface the modes and their helpers read.
-	launch = launchFlags{
-		SessionDir:      *sessionDir,
-		NoSession:       *noSession,
-		NoTitle:         *noTitle,
-		Thinking:        *thinkingFlag,
-		ThinkingDisplay: resolveThinkingDisplay(*hideThinking, *printThoughts),
-		Tools:           parseCSV(*toolsFlag),
-		NoTools:         *noTools,
-		NoLSP:           *noLSP,
-		AutoApprove:     *autoApprove,
-		ApprovalMode:    *approvalModeFlag,
-		MaxTime:         maxTime,
-		NoExtensions:    *noExtensions,
-		Skills:          parseCSV(*skillsFlag),
-		NoSkills:        *noSkills,
-		Advisor:         *advisorFlag,
-		NoPrewalk:       *noPrewalk,
-		Models:          splitPatterns(modelsPatterns),
-		Provider:        *providerFlag,
-		ExtraDirs:       addDirs,
-		AllowHome:       *allowHome,
-		NoPTY:           *noPTY,
-		Extensions:      extensionPaths,
-		PluginDirs:      pluginDirs,
-		LogFile:         *logFile,
-	}
-	// A --bg worker that somehow started without a wall-clock cap still
-	// gets one: unattended runs must not hang forever (issue #131).
-	if isBgWorker() && launch.MaxTime == 0 {
-		launch.MaxTime = bgDefaultMaxAge
-	}
 	// --- launch-flag overrides onto the layered settings. Each one is a
 	// documented flag, so each must win over the file: approval mode and
 	// the prewalk off-switch.
@@ -443,7 +512,7 @@ func main() {
 		*model = settings.DefaultModel
 	}
 	if *maxTurns == 0 {
-		*maxTurns = settings.MaxTurns
+		*maxTurns = effectiveMaxTurnsFlag(*maxTurns, settings.MaxTurns)
 	}
 	if *personality == "" {
 		*personality = settings.Personality

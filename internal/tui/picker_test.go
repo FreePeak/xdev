@@ -136,7 +136,7 @@ func TestPickerSearchHookRanksMatches(t *testing.T) {
 func TestPickerStatusIsSearchable(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	items := []SessionPickerItem{
-		{ID: "aaaa1111", Title: "finished work", InCwd: true, Status: "done"},
+		{ID: "aaaa1111", Title: "finished work", InCwd: true, Status: "complete"},
 		{ID: "bbbb2222", Title: "killed work", InCwd: true, Status: "interrupted"},
 		{ID: "cccc3333", Title: "interrupted rerun", InCwd: true, Status: "interrupted"},
 	}
@@ -686,9 +686,9 @@ func TestPickerMouseWheelAndClick(t *testing.T) {
 // session the user killed mid-turn is legible before Enter (#107).
 func TestSessionPickerRowCarriesStatus(t *testing.T) {
 	done := sessionPickerRowText(SessionPickerItem{
-		ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", CWD: "/home/user/proj", Status: "done",
+		ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", CWD: "/home/user/proj", Status: "complete",
 	})
-	if !strings.HasSuffix(done, "done") {
+	if !strings.HasSuffix(done, "complete") {
 		t.Fatalf("row does not end on the status: %q", done)
 	}
 	cut := sessionPickerRowText(SessionPickerItem{
@@ -712,12 +712,12 @@ func TestSessionPickerRowCarriesStatus(t *testing.T) {
 func TestSessionPickerDrawsStatus(t *testing.T) {
 	app, scr := newTestApp(t, 100, 30)
 	app.OpenSessionPicker([]SessionPickerItem{
-		{ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", InCwd: true, Status: "done"},
+		{ID: "aaaa1111", Title: "fix parser bug", Mtime: "Jan 02 15:04", Size: "1 KB", InCwd: true, Status: "complete"},
 		{ID: "bbbb2222", Title: "alpha notes", Mtime: "Jan 02 15:04", Size: "2 KB", InCwd: true, Status: "interrupted"},
 	})
 	app.draw()
-	if !gridContains(scr, "done") {
-		t.Fatal("done badge not drawn")
+	if !gridContains(scr, "complete") {
+		t.Fatal("complete badge not drawn")
 	}
 	if !gridContains(scr, "interrupted") {
 		t.Fatal("interrupted badge not drawn")
@@ -733,7 +733,7 @@ func TestResumeSessionPickerShowsStatus(t *testing.T) {
 		Resume: func(string) error { return nil },
 		Recent: func() []ResumeOption {
 			return []ResumeOption{
-				{ID: "aaaa1111", Title: "finished work", Detail: "aaaa1111 · Jan 02 15:04 · done"},
+				{ID: "aaaa1111", Title: "finished work", Detail: "aaaa1111 · Jan 02 15:04 · complete"},
 				{ID: "bbbb2222", Title: "killed work", Detail: "bbbb2222 · Jan 02 15:04 · interrupted"},
 			}
 		},
@@ -745,7 +745,7 @@ func TestResumeSessionPickerShowsStatus(t *testing.T) {
 		t.Fatal("/resume with no argument must open the picker")
 	}
 	app.draw()
-	for _, want := range []string{"done", "interrupted"} {
+	for _, want := range []string{"complete", "interrupted"} {
 		if !gridContains(scr, want) {
 			t.Fatalf("status %q not drawn on the resume picker", want)
 		}
@@ -807,7 +807,7 @@ func TestPickerNameColumnFollowsTerminalWidth(t *testing.T) {
 			Resume: func(string) error { return nil },
 			Recent: func() []ResumeOption {
 				return []ResumeOption{
-					{ID: "aaaa1111", Title: name, Detail: "aaaa1111 · Jan 02 15:04 · done"},
+					{ID: "aaaa1111", Title: name, Detail: "aaaa1111 · Jan 02 15:04 · complete"},
 					{ID: "bbbb2222", Title: "short", Detail: "bbbb2222 · Jan 02 15:04"},
 				}
 			},
@@ -905,7 +905,7 @@ func TestPickerWrapsLongLabelOntoContinuationRows(t *testing.T) {
 // to run off the right edge, taking the badge with it.
 func TestSessionPickerWrapsLongTitle(t *testing.T) {
 	const title = "port the resume picker so a very long session title still reads whole"
-	it := SessionPickerItem{ID: "aaaa1111", Title: title, Mtime: "Jan 02 15:04", Size: "1 KB", CWD: "/home/u/p", Status: "done"}
+	it := SessionPickerItem{ID: "aaaa1111", Title: title, Mtime: "Jan 02 15:04", Size: "1 KB", CWD: "/home/u/p", Status: "complete"}
 	// A title that fits is the one line it always was, meta included.
 	plain := sessionPickerRowLines(it, "  ", 200)
 	if len(plain.lines) != 1 || plain.lines[0] != "  "+plain.head {
@@ -921,7 +921,7 @@ func TestSessionPickerWrapsLongTitle(t *testing.T) {
 	if !strings.Contains(joined, "port the resume picker") || !strings.Contains(joined, "still reads whole") {
 		t.Fatalf("wrapped title lost its tail: %q", row.lines)
 	}
-	if !strings.HasSuffix(row.lines[len(row.lines)-1], "done") {
+	if !strings.HasSuffix(row.lines[len(row.lines)-1], "complete") {
 		t.Fatalf("the badge did not close the wrapped row: %q", row.lines)
 	}
 	if len(row.lines) > pickerTitleMaxRows+1 {
@@ -944,7 +944,7 @@ func TestSessionPickerDrawWrapsTitle(t *testing.T) {
 	const title = "port the resume picker so a very long session title still reads whole"
 	app, scr := newTestApp(t, 60, 30)
 	app.OpenSessionPicker([]SessionPickerItem{
-		{ID: "aaaa1111", Title: title, Mtime: "Jan 02 15:04", Size: "1 KB", InCwd: true, Status: "done"},
+		{ID: "aaaa1111", Title: title, Mtime: "Jan 02 15:04", Size: "1 KB", InCwd: true, Status: "complete"},
 		{ID: "bbbb2222", Title: "short", Mtime: "Jan 02 15:04", Size: "2 KB", InCwd: true},
 	})
 	app.draw()
@@ -952,7 +952,7 @@ func TestSessionPickerDrawWrapsTitle(t *testing.T) {
 	if !strings.Contains(txt, "port the resume picker") {
 		t.Fatalf("wrapped title missing from the screen:\n%s", txt)
 	}
-	if !strings.Contains(txt, "done") {
+	if !strings.Contains(txt, "complete") {
 		t.Fatalf("the badge did not reach the screen:\n%s", txt)
 	}
 	if !gridContains(scr, "bbbb2222") {
@@ -1008,5 +1008,47 @@ func TestTabsPickerUnwiredIsANotice(t *testing.T) {
 	}
 	if app.PickerOpen() {
 		t.Fatal("an unwired /tabs must not open a picker")
+	}
+}
+
+// TestResumeOpensTheRichSessionPicker: /resume with no argument must open the
+// SESSION picker — the one with the all-projects scope, the pins, the
+// confirmed delete and the prompt-text search. It used to open the plain
+// recent list instead, so the whole rich picker was unreachable: a shipped
+// feature that could never be seen.
+func TestResumeOpensTheRichSessionPicker(t *testing.T) {
+	app, _ := newTestApp(t, 80, 24)
+	asked := ""
+	app.SetSessionOps(&SessionOps{
+		Resume: func(q string) error {
+			asked = q
+			app.OpenSessionPicker([]SessionPickerItem{
+				{ID: "aaaa1111", Title: "a session in this project", InCwd: true},
+				{ID: "bbbb2222", Title: "a session in another project", InCwd: false},
+			})
+			return nil
+		},
+		Recent: func() []ResumeOption {
+			return []ResumeOption{{ID: "aaaa1111", Title: "a session in this project"}}
+		},
+	})
+	if err := app.ResumeSession(""); err != nil {
+		t.Fatal(err)
+	}
+	if asked != "" {
+		t.Fatalf("/resume asked for %q, want the no-argument session picker", asked)
+	}
+	if !app.SessionPickerOpen() {
+		t.Fatal("the rich session picker did not open")
+	}
+	rows := pickerRows(t, app)
+	if len(rows) != 1 || rows[0].ID != "aaaa1111" {
+		t.Fatalf("picker rows = %v, want the cmd-provided row of this project", rows)
+	}
+	// The all-projects scope is the point of the rich picker: the row from
+	// another project is one Tab away.
+	pressKey(app, tcell.KeyTab)
+	if got := pickerRows(t, app); len(got) != 2 {
+		t.Fatalf("all-projects rows = %v, want both projects' rows", got)
 	}
 }

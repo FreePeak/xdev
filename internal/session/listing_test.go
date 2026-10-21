@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 func TestBlobPutGetRoundTrip(t *testing.T) {
@@ -345,5 +347,140 @@ func TestListDistinguishesForkFromSubagent(t *testing.T) {
 	}
 	if got := byPath[childPath].TitleSource; got != TitleSourceSubagent {
 		t.Fatalf("child titleSource = %q, want subagent (must be skipped by resume)", got)
+	}
+}
+
+// --- title / preview fallbacks (omp rules 35, 45) ---
+
+// writePreviewSession lays down a session file with the given title slot and
+// body lines, and returns its path.
+func writePreviewSession(t *testing.T, dir, name, title string, body ...string) string {
+	t.Helper()
+	bucket := filepath.Join(dir, "sessions", "-x")
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.Write(MarshalTitleSlot(title, TitleSourceAuto, slotTS))
+	b.Write(MarshalHeader(SessionHeader{Version: 3, ID: "id-" + name, Timestamp: ts0, CWD: "/x", Title: title, TitleSource: TitleSourceAuto}))
+	for _, l := range body {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	p := filepath.Join(bucket, name)
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestSanitizeTitleFoldsToOneLine: a title is model- and user-written text,
+// so it is folded to one printable line before anything paints it.
+func TestSanitizeTitleFoldsToOneLine(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"fix the parser", "fix the parser"},
+		{"first line\nsecond line", "first line"},
+		{"first line\r\nsecond line", "first line"},
+		{"with\x00control\x07chars", "withcontrolchars"},
+		{"   padded   ", "padded"},
+		{"\n\n", ""},
+		{"", ""},
+		// A legit unicode title is NOT mangled: the sanitiser drops control
+		// characters, not letters. CJK, an emoji and an accented word all
+		// survive whole.
+		{"修复解析器", "修复解析器"},
+		{"ship it 🚀", "ship it 🚀"},
+		{"café au lait", "café au lait"},
+		{"emoji with a control char 🚀\x00", "emoji with a control char 🚀"},
+	} {
+		if got := SanitizeTitle(tc.in); got != tc.want {
+			t.Errorf("SanitizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestListPreviewFallsBackToTheFirstMessage: a session with no title still
+// has to say what it was about — the first prompt is the next best name.
+func TestListPreviewFallsBackToTheFirstMessage(t *testing.T) {
+	dir := t.TempDir()
+	line := string(MarshalMust(t, userMsg("11111111", "", "why does the parser drop the last block?")))
+	writePreviewSession(t, dir, "untitled.jsonl", "", line)
+
+	metas, err := listWithCache(dir, newStatCache())
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("list: %+v %v", metas, err)
+	}
+	if metas[0].Title != "" {
+		t.Fatalf("title = %q, want empty", metas[0].Title)
+	}
+	want := "why does the parser drop the last block?"
+	if metas[0].Preview != want {
+		t.Fatalf("preview = %q, want %q", metas[0].Preview, want)
+	}
+}
+
+// TestListPreviewFallsBackToUntitled: no title and no prompt at all still
+// leaves the row something to say — the session's own creation time, in the
+// LOCAL zone (the same zone the row's mtime column is printed in).
+func TestListPreviewFallsBackToUntitled(t *testing.T) {
+	// A fixed local zone, so the assertion pins the RENDERED clock and the
+	// timezone it is rendered in, not the machine's: a UTC rendering would
+	// print a different hour and fail here.
+	prev := time.Local
+	time.Local = time.FixedZone("test", 2*60*60)
+	t.Cleanup(func() { time.Local = prev })
+
+	dir := t.TempDir()
+	writePreviewSession(t, dir, "bare.jsonl", "")
+
+	metas, err := listWithCache(dir, newStatCache())
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("list: %+v %v", metas, err)
+	}
+	// ts0 is the fixture's header timestamp: 03:20:45 UTC, which is 05:20
+	// in the fixed +02:00 zone.
+	want := "Untitled · " + ts0.In(time.Local).Format("15:04")
+	if ts0.In(time.Local).Format("15:04") == ts0.UTC().Format("15:04") {
+		t.Fatalf("the fixture cannot tell UTC from local: %s", ts0)
+	}
+	if metas[0].Preview != want {
+		t.Fatalf("preview = %q, want %q (the local clock, not UTC)", metas[0].Preview, want)
+	}
+}
+
+// TestListPreviewUsesTheCompactionSummary: a session that was compacted
+// knows what it was about — the compaction record's one-line summary is the
+// preview when there is no title.
+func TestListPreviewUsesTheCompactionSummary(t *testing.T) {
+	dir := t.TempDir()
+	compaction := string(MarshalMust(t, &CompactionEntry{
+		Env:          Envelope{Type: TypeCompaction, ID: "c1", ParentID: "", Timestamp: ts0},
+		Summary:      ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "the whole plan"}}},
+		ShortSummary: "the parser rewrite plan",
+	}))
+	writePreviewSession(t, dir, "compacted.jsonl", "", compaction)
+
+	metas, err := listWithCache(dir, newStatCache())
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("list: %+v %v", metas, err)
+	}
+	if metas[0].Preview != "the parser rewrite plan" {
+		t.Fatalf("preview = %q, want the compaction summary", metas[0].Preview)
+	}
+}
+
+// TestListPreviewPrefersTheTitle: the title still wins — the fallbacks are
+// for a session that has none.
+func TestListPreviewPrefersTheTitle(t *testing.T) {
+	dir := t.TempDir()
+	line := string(MarshalMust(t, userMsg("11111111", "", "the prompt")))
+	writePreviewSession(t, dir, "titled.jsonl", "fix the parser bug", line)
+
+	metas, err := listWithCache(dir, newStatCache())
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("list: %+v %v", metas, err)
+	}
+	if metas[0].Preview != "fix the parser bug" {
+		t.Fatalf("preview = %q, want the title", metas[0].Preview)
 	}
 }

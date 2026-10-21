@@ -89,6 +89,13 @@ func TestGuardRestoresThenDiesOnSignal(t *testing.T) {
 				t.Fatalf("child died by %v, want %v", st, tc.sig)
 			}
 			child.expectRestore(t, mark, !tc.never)
+			// The signal path writes the session's exit marker before it
+			// re-raises: a death by signal runs no deferred function, so a
+			// marker written there would never be written. (A RELEASED guard
+			// catches nothing, so it writes nothing.)
+			if tc.mode != "stopped" {
+				child.expectFile(t, mark+".signalled")
+			}
 		})
 	}
 }
@@ -104,6 +111,12 @@ func TestGuardChildProcess(t *testing.T) {
 	stop := watchTerminalRoutes(func() {
 		if err := os.WriteFile(mark, []byte("restored"), 0o600); err != nil {
 			os.Exit(3)
+		}
+	}, func(sig os.Signal, code int) {
+		// The signal path's own contract: the exit marker is written BEFORE
+		// the re-raise, because a death by signal runs no deferred function.
+		if err := os.WriteFile(mark+".signalled", []byte(sig.String()), 0o600); err != nil {
+			os.Exit(7)
 		}
 	})
 	if stop == nil {
@@ -212,6 +225,19 @@ func (c *guardChild) expectRestore(t *testing.T, mark string, want bool) {
 	if want {
 		t.Fatal("the terminal was never restored")
 	}
+}
+
+// expectFile asserts a file exists within a bounded wait.
+func (c *guardChild) expectFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the signal path wrote no %s", filepath.Base(path))
 }
 
 func waitForFile(t *testing.T, path string, d time.Duration, what string) {

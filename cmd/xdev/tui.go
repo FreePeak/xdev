@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -364,7 +365,19 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 	}()
-	defer func() {
+	// The exit marker and the crash flag are ONE defer. A panic on the main
+	// goroutine unwinds THROUGH it, so the marker is written for a CRASHED
+	// session — and it must not say "normal". Two defers cannot do this: the
+	// flag is set by the recovering defer and READ by the marker defer, and
+	// defers run last-in-first-out, so a reader registered first runs FIRST
+	// and sees the flag while it is still false (that was the bug: a crashed
+	// TUI recorded a normal exit).
+	//
+	// withCrashGuard recovers the panic, records the crash BEFORE the writer
+	// runs, and re-raises the panic afterwards — the process must still die
+	// loudly. The original stack is printed, because the re-raise's own stack
+	// starts at the re-raise.
+	defer withCrashGuard(func(crashed bool) {
 		// Cancel every in-flight turn before the stores close under them.
 		tabs.abortAll()
 		modelMu.Lock()
@@ -372,11 +385,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		modelMu.Unlock()
 		if s := storeOf(); s != nil {
 			_ = s.Append(&session.ModelChangeEntry{Model: lm})
-			_ = s.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
+			kind, code, detail := crashExitKind(crashed, exitCode)
+			_ = s.Append(&session.CustomEntry{CustomType: "session_exit",
+				Data: exitMarker("tui", code, kind, exitReason("tui", kind, detail), pendingToolCalls(s))})
 			exitStore = s // the exit line's store, read before closeAll drops it
 		}
 		tabs.closeAll()
-	}()
+	})
 
 	// Screen.
 	th := theme.LoadNamed(themeName, theme.CustomDir())
@@ -424,8 +439,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// A stop, a hangup or a SIGTERM must not leave the shell in a raw-mode
 	// alt screen: the two defers above only run when runTUI returns. The
 	// guard restores first, then dies on the signal it was sent
-	// (tui_signal.go).
-	if stopSignals := watchTerminalRoutes(scr.Fini); stopSignals != nil {
+	// (tui_signal.go). The exit marker is written by the guard, BEFORE the
+	// re-raise: a death by signal runs no deferred function, so the marker
+	// the defer above would write never happens.
+	onSignal := func(sig os.Signal, code int) {
+		writeSignalExitMarker(storeOf(), sig, code)
+	}
+	if stopSignals := watchTerminalRoutes(scr.Fini, onSignal); stopSignals != nil {
 		defer stopSignals()
 	}
 
@@ -1169,6 +1189,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("resume: " + err.Error())
 			return
 		}
+		// The session may belong to ANOTHER project. The pane's tools and
+		// system prompt are bound to the launch directory, so the project is
+		// REPORTED, not moved: a half-move (the process cwd in one project,
+		// the tool roots in another) is worse than no move. The headless
+		// path re-derives the working directory from the header BEFORE the
+		// run starts, where the whole tool set is built around it.
+		if dir := sessionFileCwd(path); dir != "" && dir != cwd {
+			app.AddSystemBlock("· session " + shortSessionID(resumed.ID()) + " belongs to " + dir +
+				" — this pane's tools stay in " + cwd)
+		}
 		if err := swapStoreTo(resumed); err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
 		}
@@ -1184,18 +1214,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	app.SetPickerDelete(func(id string) error {
 		return deleteSessionByShortID(id, storeOf().Path())
-	})
-	app.SetResumeList(func(cwd string) error {
-		// The rows here are the session picker's; the closure used to also
-		// build a []tui.ResumeOption that nothing read, at the price of a
-		// second full session.List on every call.
-		items := resumePickerItems(cwd)
-		if len(items) == 0 {
-			app.AddSystemBlock("no other sessions in this directory")
-			return nil
-		}
-		app.OpenSessionPicker(items)
-		return nil
 	})
 	// branchReplay rebuilds the transcript from the live leaf — the
 	// TUI-side twin of the re-render omp performs after every tree
@@ -1554,60 +1572,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		Resume: func(query string) error {
 			// /resume parks the current session and focuses another. A turn
 			// in the parked session keeps running.
-			if query == "" {
-				// Interactive picker (omp/Claude Code /resume): rows
-				// span all projects (Tab toggles scope; the picker
-				// defaults to this folder and shows the Tab hint when
-				// the folder has no sessions), newest first;
-				// Up/Down + Enter resumes, Esc closes. No candidates
-				// at all → text listing.
-				items := resumePickerItems(cwd)
-				if len(items) == 0 {
-					return app.ListSessions(cwd)
-				}
-				app.OpenSessionPicker(items)
-				return nil
-			}
-			// Foreign-session import (issue #28): /resume @claude|@codex
-			// lists foreign transcripts; with an id/path prefix it imports
-			// one (read-only source) and switches to the new session.
-			if kind, ref, ok := splitForeignQuery(query); ok {
-				if ref == "" {
-					list, err := listForeignTranscripts(kind, cwd)
-					if err != nil {
-						return err
-					}
-					if len(list) == 0 {
-						app.AddSystemBlock("no " + kind + " transcripts found for " + cwd)
-						return nil
-					}
-					lines := make([]string, 0, len(list))
-					for i, ft := range list {
-						if i == 12 {
-							break
-						}
-						lines = append(lines, fmt.Sprintf("%-8s  %s  (last %s)",
-							shortSessionID(ft.ID), ft.Path, ft.ModTime.Format("Jan 02 15:04")))
-					}
-					app.AddSystemBlock(kind + " transcripts (import with /resume @" + kind + " <id-prefix>):\n" +
-						strings.Join(lines, "\n"))
-					return nil
-				}
-				imported, err := importForeignSession(kind, ref, cwd)
-				if err != nil {
-					return err
-				}
-				return swapStoreTo(imported)
-			}
-			path, err := resolveResumeID(cwd, query)
-			if err != nil {
-				return err
-			}
-			resumed, err := session.Open(path)
-			if err != nil {
-				return err
-			}
-			return swapStoreTo(resumed)
+			return resumeSessionCommand(app, cwd, query, swapStoreTo)
 		},
 		NavigateTree: func(entryID string, summarize bool) (string, error) {
 			sid, ok := tabs.claimCurrent()
@@ -3958,9 +3923,131 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 		if m.Status != "" {
 			detail += " · " + string(m.Status)
 		}
-		out = append(out, tui.ResumeOption{ID: m.ID, Title: m.Title, Detail: detail})
+		out = append(out, tui.ResumeOption{ID: m.ID, Title: m.Preview, Detail: detail})
 	}
 	return out
+}
+
+// withCrashGuard runs write. If the caller panicked on the way, the crash
+// is recorded BEFORE write runs, and the panic is re-raised afterwards — the
+// process must still die loudly, and the original stack is printed because
+// the re-raise's own stack starts at the re-raise.
+//
+// ONE defer, not two: the crash flag is READ by the writer, and two defers
+// with the reader registered first would run the reader FIRST (defers are
+// last-in-first-out) — the flag would still be false when the exit marker is
+// written, and a crashed session would record a NORMAL exit. That was the
+// bug, and it is why the flag and the writer live here together.
+func withCrashGuard(write func(crashed bool)) {
+	crashed := false
+	if r := recover(); r != nil {
+		crashed = true
+		fmt.Fprintf(os.Stderr, "xdev: the TUI panicked:\n%s\n", debug.Stack())
+		// Re-raised when this function returns — AFTER write has run, so the
+		// marker records the crash.
+		defer panic(r)
+	}
+	write(crashed)
+}
+
+// crashExitKind is the exit marker's verdict for a session whose process is
+// dying: a crash is "fatal" with the conventional crash exit code, and a
+// clean exit is "normal" with the code the run returned.
+func crashExitKind(crashed bool, code int) (kind string, exitCode int, detail string) {
+	if crashed {
+		return "fatal", 2, "the TUI panicked"
+	}
+	return "normal", code, ""
+}
+
+// sessionPickerOpener is the seam the session picker opens through: the
+// TUI's App.OpenSessionPicker.
+type sessionPickerOpener interface {
+	OpenSessionPicker(items []tui.SessionPickerItem)
+}
+
+// resumeSurface is what the /resume command needs from the TUI: the rich
+// session picker, and a way to say something in the transcript.
+type resumeSurface interface {
+	sessionPickerOpener
+	AddSystemBlock(text string)
+}
+
+// resumeSessionCommand is the /resume command: the rich session picker for an empty
+// query, the foreign-transcript import for an @claude|@codex query, and the
+// resolver for a named one. It is a named function so the cmd-side wiring is
+// testable end to end — the TUI's session ops call exactly this.
+//
+// swap takes over the session the command resolved.
+func resumeSessionCommand(surface resumeSurface, cwd, query string, swap func(*session.Store) error) error {
+	// Interactive picker (omp/Claude Code /resume): rows span all projects
+	// (Tab toggles scope; the picker defaults to this folder and shows the
+	// Tab hint when the folder has no sessions), newest first; Up/Down +
+	// Enter resumes, Esc closes. No candidates at all → the TUI's own "no
+	// other sessions" notice.
+	if query == "" {
+		return openResumePicker(surface, cwd)
+	}
+	// Foreign-session import (issue #28): /resume @claude|@codex lists
+	// foreign transcripts; with an id/path prefix it imports one (read-only
+	// source) and switches to the new session.
+	if kind, ref, ok := splitForeignQuery(query); ok {
+		if ref == "" {
+			list, err := listForeignTranscripts(kind, cwd)
+			if err != nil {
+				return err
+			}
+			if len(list) == 0 {
+				surface.AddSystemBlock("no " + kind + " transcripts found for " + cwd)
+				return nil
+			}
+			lines := make([]string, 0, len(list))
+			for i, ft := range list {
+				if i == 12 {
+					break
+				}
+				lines = append(lines, fmt.Sprintf("%-8s  %s  (last %s)",
+					shortSessionID(ft.ID), ft.Path, ft.ModTime.Format("Jan 02 15:04")))
+			}
+			surface.AddSystemBlock(kind + " transcripts (import with /resume @" + kind + " <id-prefix>):\n" +
+				strings.Join(lines, "\n"))
+			return nil
+		}
+		imported, err := importForeignSession(kind, ref, cwd)
+		if err != nil {
+			return err
+		}
+		return swap(imported)
+	}
+	path, err := resolveResumeID(cwd, query)
+	if err != nil {
+		return err
+	}
+	resumed, err := session.Open(path)
+	if err != nil {
+		return err
+	}
+	// The session may belong to ANOTHER project: the pane's tools and system
+	// prompt are bound to the launch directory, so the project is REPORTED,
+	// not moved (see the picker path).
+	if dir := sessionFileCwd(path); dir != "" && dir != cwd {
+		surface.AddSystemBlock("· session " + shortSessionID(resumed.ID()) + " belongs to " + dir +
+			" — this pane's tools stay in " + cwd)
+	}
+	return swap(resumed)
+}
+
+// openResumePicker opens the RICH session picker over every resumable
+// session: all projects (Tab toggles the scope), the pins (Ctrl+P), the
+// confirmed delete (Backspace twice) and the prompt-text search. It is the
+// /resume surface, and it is what the TUI's session ops call.
+func openResumePicker(opener sessionPickerOpener, cwd string) error {
+	items := resumePickerItems(cwd)
+	if len(items) == 0 {
+		return nil
+	}
+	opener.OpenSessionPicker(items)
+	return nil
 }
 
 // resumePickerItems lists resumable sessions as picker rows across ALL
@@ -3969,9 +4056,6 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 // text listing); session.List is newest-first. Rows carry InCwd so the TUI
 // can window the current-folder scope without a second scan, and Pinned from
 // the session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
-// browsing while the picker windows to 8 visible rows.
-// current-folder scope without a second scan, and Pinned from the
-// session-pins.json sidecar. Capped at 50 — enough for Tab-all-projects
 // browsing while the picker windows to 8 visible rows.
 func resumePickerItems(cwd string) []tui.SessionPickerItem {
 	metas, err := session.List(sessionDataDir())
@@ -3989,7 +4073,7 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 		}
 		out = append(out, tui.SessionPickerItem{
 			ID:     m.ID[:8],
-			Title:  m.Title,
+			Title:  m.Preview,
 			Mtime:  m.ModTime.Format("Jan 02 15:04"),
 			Size:   humanSize(m.SizeBytes),
 			Pinned: pins[m.ID[:8]],

@@ -79,8 +79,9 @@ func readBreadcrumb() string {
 // reopens the session just used. It asks resolveResumeID the same question the
 // pasted line will ask it — does `--resume <id>` land on THIS file, from this
 // directory? — so a store with nothing to resume (--no-session, a chat that got
-// no assistant reply, the file /drop deleted, a --continue'd session owned by
-// another directory) prints nothing instead of a command that errors.
+// no assistant reply, the file /drop deleted) prints nothing instead of a
+// command that errors. A session owned by another directory still gets the
+// line: --resume finds it across projects.
 func resumeHint(store *session.Store, cwd string) string {
 	if store == nil {
 		return ""
@@ -109,8 +110,17 @@ func resumeProg(argv0 string) string {
 	return prog
 }
 
-// resolveResumeID finds a session by case-insensitive id prefix (mtime
-// desc, omp parity). "" query returns the most recent in cwd.
+// resolveResumeID finds a session by a case-insensitive id prefix, filename
+// prefix or id suffix (mtime desc, omp parity). "" query returns the most
+// recent in cwd.
+//
+// The match precedence is omp's (rules 38, 43-47): for every session, in
+// turn, the id prefix, then the file-name prefix, then the id after the last
+// "_" in the file name. A query that matches nothing in this directory
+// falls back across directories — a session belongs to a project, and the
+// user who names its id means that session, not "a session in this
+// directory". The "" (newest) form stays in cwd: --continue must not jump
+// projects.
 //
 // A session whose file holds no message at all is not a resume target
 // (session.StatusEmpty): resuming one opens a TUI with a blank transcript
@@ -125,27 +135,208 @@ func resolveResumeID(cwd, query string) (string, error) {
 	}
 	// session.List already returns newest-first with a header-timestamp
 	// tiebreak; the scan is ordered, so no second sort here.
-	q := strings.ToLower(query)
-	for _, m := range metas {
-		if m.CWD != cwd {
-			continue
-		}
-		// The "" (newest) form must resolve a user session, never a
-		// subagent child; an explicit prefix may still address one.
-		if q == "" && m.TitleSource == session.TitleSourceSubagent {
-			continue
-		}
-		if m.Status == session.StatusEmpty {
-			if q != "" && strings.HasPrefix(strings.ToLower(m.ID), q) {
-				return "", fmt.Errorf("session %s has no messages — there is nothing to resume", m.ID[:8])
+	q := strings.ToLower(strings.TrimSpace(query))
+	// Two passes: this directory first, then every directory. A query that
+	// names nothing here may still name a session elsewhere.
+	passes := []bool{true, false}
+	if q == "" {
+		passes = passes[:1] // the newest-in-cwd form never leaves the directory
+	}
+	for _, local := range passes {
+		for _, m := range metas {
+			if local != (m.CWD == cwd) {
+				continue
 			}
-			continue
-		}
-		if q == "" || strings.HasPrefix(strings.ToLower(m.ID), q) {
-			return m.Path, nil
+			// The "" (newest) form must resolve a user session, never a
+			// subagent child; an explicit prefix may still address one.
+			if q == "" && m.TitleSource == session.TitleSourceSubagent {
+				continue
+			}
+			if m.Status == session.StatusEmpty {
+				if q != "" && resumeMatches(m, q) {
+					return "", fmt.Errorf("session %s has no messages — there is nothing to resume", m.ID[:8])
+				}
+				continue
+			}
+			if q == "" || resumeMatches(m, q) {
+				return m.Path, nil
+			}
 		}
 	}
-	return "", fmt.Errorf("no session in %s matching %q", cwd, query)
+	if q == "" {
+		return "", fmt.Errorf("no session in %s matching %q", cwd, query)
+	}
+	return "", fmt.Errorf("no session matching %q in %s or any project", query, cwd)
+}
+
+// resumeMatches reports whether a session answers a resume query, in omp's
+// precedence (rules 38, 43): the session id, then the file name, then the id
+// after the last "_" in the file name. The file name is
+// <timestamp>_<id>.jsonl, so a query that names either half finds the
+// session.
+func resumeMatches(m session.SessionMeta, q string) bool {
+	if q == "" {
+		return false
+	}
+	q = strings.ToLower(q)
+	if strings.HasPrefix(strings.ToLower(m.ID), q) {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSuffix(filepath.Base(m.Path), ".jsonl"))
+	if strings.HasPrefix(name, q) {
+		return true
+	}
+	if i := strings.LastIndex(name, "_"); i >= 0 && strings.HasPrefix(name[i+1:], q) {
+		return true
+	}
+	return false
+}
+
+// resumeCwd re-derives the working directory of a resumed session from its
+// header: the session records the project it belongs to, and a resume must
+// continue THERE, not in the launch directory (omp rules 43-47). The
+// directory has to still exist — a session whose project was deleted keeps
+// the launch cwd and says so. It returns the cwd the run must use.
+//
+// The header is read from the file, not from an opened store: opening the
+// store twice would fight over the writer lock.
+func resumeCwd(path, launchCwd string) (string, error) {
+	dir := sessionFileCwd(path)
+	if dir == "" || dir == launchCwd {
+		return launchCwd, nil
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return launchCwd, fmt.Errorf("the session's directory %s is gone — staying in %s", dir, launchCwd)
+	}
+	if err := os.Chdir(dir); err != nil {
+		return launchCwd, err
+	}
+	return dir, nil
+}
+
+// sessionFileCwd reads the working directory a session file records in its
+// header, without opening the store.
+func sessionFileCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 4096)
+	n, _ := f.Read(buf)
+	for _, line := range strings.Split(strings.TrimRight(string(buf[:n]), "\n"), "\n") {
+		if h, ok := session.ParseHeader([]byte(line)); ok {
+			return h.CWD
+		}
+	}
+	return ""
+}
+
+// exitMarker builds the payload of the session_exit entry — the record a
+// resumed process reads to learn how the previous one ended.
+//
+// It carries the fields omp's exit diagnostics reader requires (rule 21):
+// reason, kind (normal | signal | fatal | process_exit), recordedAt and the
+// optional pendingToolCalls. It also keeps the keys xdev's own readers have
+// always seen (mode, code), so nothing that reads the marker breaks.
+//
+// kind is the exit class; "" derives it from the code (0 ended normally,
+// 128+N is the conventional code for a death by signal N, anything else is a
+// fatal end). pending is the number of tool calls the session left
+// unanswered, or nil when that is genuinely unknown (no session to read).
+func exitMarker(mode string, code int, kind, reason string, pending *int) map[string]any {
+	if kind == "" {
+		kind = exitKind(code)
+	}
+	data := map[string]any{
+		"reason":     reason,
+		"kind":       kind,
+		"recordedAt": time.Now().UTC().Format(time.RFC3339Nano),
+		"mode":       mode,
+		"code":       code,
+	}
+	if pending != nil {
+		data["pendingToolCalls"] = *pending
+	}
+	return data
+}
+
+// exitKind is the default classification of an exit code: 0 ended
+// normally, 128+N is the conventional code for a death by signal N, and
+// anything else is a fatal end.
+func exitKind(code int) string {
+	switch {
+	case code == 0:
+		return "normal"
+	case code > 128 && code < 192:
+		return "signal"
+	default:
+		return "fatal"
+	}
+}
+
+// exitReason names why the run ended, in the words a reader shows. detail
+// is the signal name, the crash, or the failure — whatever the kind needs.
+func exitReason(mode, kind, detail string) string {
+	switch kind {
+	case "signal":
+		return fmt.Sprintf("the %s run was stopped by %s", mode, detail)
+	case "fatal":
+		if detail != "" {
+			return fmt.Sprintf("the %s run ended fatally: %s", mode, detail)
+		}
+		return fmt.Sprintf("the %s run ended fatally", mode)
+	default:
+		return fmt.Sprintf("the %s run ended normally", mode)
+	}
+}
+
+// writeSignalExitMarker records the end of a session whose process died on a
+// signal. The death runs no deferred function, so the marker is written
+// HERE — before the re-raise — or it is never written at all.
+func writeSignalExitMarker(s *session.Store, sig os.Signal, code int) {
+	if s == nil {
+		return
+	}
+	_ = s.Append(&session.CustomEntry{CustomType: "session_exit",
+		Data: exitMarker("tui", code, "signal", exitReason("tui", "signal", sig.String()), pendingToolCalls(s))})
+}
+
+// pendingToolCalls counts the tool calls the session left unanswered: the
+// toolCall blocks of its last assistant turn that no tool result answered.
+// A new assistant turn clears the set, so this is the count of the calls the
+// process was in the middle of when it died. nil when the count is genuinely
+// unknown (there is no session to read).
+func pendingToolCalls(s *session.Store) *int {
+	if s == nil {
+		return nil
+	}
+	entries := s.Entries()
+	last := -1
+	for i, e := range entries {
+		if me, ok := e.(*session.MessageEntry); ok && me.Message.Role == ai.RoleAssistant {
+			last = i
+		}
+	}
+	if last < 0 {
+		n := 0
+		return &n // no assistant turn: nothing can be pending
+	}
+	answered := map[string]bool{}
+	for _, e := range entries[last+1:] {
+		me, ok := e.(*session.MessageEntry)
+		if !ok || me.Message.Role != ai.RoleToolResult {
+			continue
+		}
+		answered[me.Message.ToolCallID] = true
+	}
+	n := 0
+	for _, b := range entries[last].(*session.MessageEntry).Message.Content {
+		if tc, ok := b.(ai.ToolCallBlock); ok && !answered[tc.ID] {
+			n++
+		}
+	}
+	return &n
 }
 
 // dumpSession renders the transcript at leaf as markdown, writes it to

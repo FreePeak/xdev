@@ -34,11 +34,17 @@ import (
 // SIGWINCH is deliberately absent: tcell installs its own handler for it
 // (tty_unix.go) and a second Notify would starve the screen of resize
 // events.
-func watchTerminalRoutes(fini func()) (stop func()) {
+//
+// watchTerminalRoutes restores the terminal when a signal arrives and then
+// re-raises it, so the process still dies on the signal it was sent. onSignal
+// is called with the signal and its conventional exit code (128+N) BEFORE the
+// re-raise: a death by signal runs no deferred function, so the session's
+// exit marker has to be written here or it is never written at all.
+func watchTerminalRoutes(fini func(), onSignal func(sig os.Signal, code int)) (stop func()) {
 	sigs := make(chan os.Signal, 4)
 	// On a platform without these (Windows has no SIGTSTP/SIGHUP) Notify
 	// accepts them silently and simply never fires, so the guard degrades to
-	// inert rather than fake: the terminal stays as-is, as it did before.
+	// inert rather than fake: the terminal stays as it is, as it did before.
 	signal.Notify(sigs, syscall.SIGTSTP, syscall.SIGHUP, syscall.SIGTERM,
 		syscall.SIGTTOU, syscall.SIGTTIN)
 	done := make(chan struct{})
@@ -59,6 +65,14 @@ func watchTerminalRoutes(fini func()) (stop func()) {
 				// captured before tcell took it.
 				restoreTerminalBounded(fini, "signal "+sig.String())
 				if s, ok := sig.(syscall.Signal); ok {
+					// The record goes BEFORE the re-raise: the process dies
+					// on the signal, and a death by signal runs no deferred
+					// function, so a marker written there would never be
+					// written. 128+N is the conventional exit code for a
+					// death by signal N.
+					if onSignal != nil {
+						onSignal(sig, 128+int(s))
+					}
 					// Re-raise after un-notifying, so the process still ends on
 					// the signal it was sent (a stopped/hung-up job) — with a
 					// terminal behind it that works.

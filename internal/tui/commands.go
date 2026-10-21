@@ -77,9 +77,10 @@ type SessionOps struct {
 	// Rename stamps a custom title on the live session (/rename). The title
 	// slot is rewritten in place, so the listing and the picker see it.
 	Rename func(title string) error
-	// Recent lists the sessions /resume offers when called with no
-	// argument; the TUI renders them as a picker and hands the chosen id
-	// back to Resume. nil degrades /resume to Resume("").
+	// Recent lists the sessions /resume offers when it falls back to the
+	// plain list (the rich picker could not open one — no sessions at all);
+	// the TUI renders them as a picker and hands the chosen id back to
+	// Resume. nil degrades /resume to a notice.
 	Recent func() []ResumeOption
 }
 
