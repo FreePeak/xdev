@@ -57,6 +57,14 @@ func TestNoDestructiveGitSpellingIsEverClassifiedAsARead(t *testing.T) {
 		// to CREATE — so the helper would call a read destructive and the
 		// assertion would be wrong about the classifier.
 		fields := strings.Fields(cutAtRedirect(seg))
+		if len(fields) == 0 {
+			return false
+		}
+		// A shell keyword is scaffolding, not a command — but the BODY of
+		// a loop is one, and a destructive verb inside it is still
+		// destructive: "do git branch -d x" must be caught here, or the
+		// guard would stop looking at the calls it most needs to see.
+		fields, _ = stripShellKeyword(fields)
 		if len(fields) == 0 || fields[0] != "git" {
 			return false
 		}

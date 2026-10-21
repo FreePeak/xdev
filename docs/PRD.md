@@ -4416,3 +4416,31 @@ The keep-going gate asks "did this run change anything?" and a "yes" pushes the 
 
 **Tests.** `internal/tool/readonly_redirect_test.go` — `TestSplitCompoundKeepsARedirectIntact` (the four redirect forms stay with their command; a background `&` and `&&` still split; a quoted `&` is data) and `TestARedirectAfterAnFdShuffleStillWrites` (a write after an fd shuffle is a write; `git branch --contains sha 2>&1` is a query, while `git branch sha` still CREATES). `internal/tool/classifier_corpus_test.go` — the destructive-git detector learned the same rule, so the store-wide guard still holds: 1,912 segments running a destructive git verb, none of them a read.
 *Last updated: 2026-10-21 (fix/keep-going-gate-redirect-split — the `&` in `2>&1` is a redirect and not a command: 6,195 of the store's 132,019 bash calls change verdict, a redirection is not an argument to the command, and a write behind an fd shuffle is still a write)*
+
+## A loop's scaffolding is not a command (2026-10-21)
+
+The last measured hole in the keep-going gate's classifier: the shell's own words.
+
+`for x in a b`, `do`, `done`, `then`, `else`, `elif` and `fi` name no program, so a segment that is one of them cannot change anything — but the classifier read them as unknown commands, and an unknown command is a mutation. A research turn that enumerated a list with a `for` loop was therefore a mutating turn, and the keep-going gate armed on it. The two PRs before this one measured the size of the gap: **1,999** of the store's 132,019 bash calls were a mutation ONLY because of loop scaffolding.
+
+**THE BODY IS STILL A COMMAND.** "do rm -rf /" writes, and it must keep writing. The scaffolding is transparent; the body is judged as one. The header of a `for` loop cannot write either: the shell expands its word list, and a command substitution inside it is a segment of its own (the splitter cuts at `(`), so the command inside it is still judged.
+
+**A CONDITION IS A COMMAND.** `while COND` and `until COND` can name a command in the condition position, so they are judged like one rather than treated as scaffolding.
+
+**THE STORE-WIDE GUARD GOT STRONGER, NOT WEAKER.** The destructive-git detector in the corpus test learned the same rule, so it now sees inside a loop body: the segments running a destructive git verb went from 1,912 to **1,926**, and none of them is ever classified as a read. A guard that stopped looking at the calls it most needs to see would be a weaker guard, not a faster one.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (132,175 bash calls): classified read-only **66,916 (50.6%)**, up from 65,609 (49.7%) and from origin/main's 59,472 (45.0%).
+
+**THE FIELD REPORT, END TO END.** The 26 tool calls of session 4c4addab, replayed through the three classifiers:
+
+| | calls that arm the keep-going gate |
+|---|---|
+| origin/main | 16 |
+| after the `gh` read forms (#719) | 15 |
+| after the `2>&1` split (#720) | 5 |
+| after the loop scaffolding | **1** |
+
+The one that still arms writes `/tmp/open_prs.txt`. It is correct.
+
+**Tests.** `internal/tool/readonly_loop_test.go` — `TestShellLoopScaffoldingIsTransparent` (a read-only loop is a read; the body still writes when it writes, redirects when it redirects, commits when it commits, merges when it merges, and deletes a branch when it deletes one; a while or until condition is judged as a command). `internal/tool/classifier_corpus_test.go` — the destructive-git detector strips the same keyword, so the store-wide guard covers the calls inside a loop body.
+*Last updated: 2026-10-22 (fix/keep-going-gate-loop-scaffolding — a loop's scaffolding names no program: the body is still judged as a command, a condition is still judged as a command, and the store-wide destructive guard now sees inside a loop body: 1,926 destructive segments, none of them a read)*
