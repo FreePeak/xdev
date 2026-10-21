@@ -97,6 +97,21 @@ type anthropicWireThinking struct {
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
+// anthropicWireOutputConfig carries Anthropic's output_config block. The
+// effort block is the only one xdev sends: the model answers at the rung the
+// user asked for instead of at a tier derived from a token count.
+//
+// The block rides on the effort-2025-11-24 beta (omp sends the two
+// together — packages__ai__src__providers__anthropic.ts:55, :3281-3290), and
+// both are absent for a model that does not accept the parameter.
+type anthropicWireOutputConfig struct {
+	Effort string `json:"effort"`
+}
+
+// anthropicEffortBeta is the beta header Anthropic's output_config.effort
+// rides on (omp: packages__ai__src__providers__anthropic.ts:55).
+const anthropicEffortBeta = "effort-2025-11-24"
+
 type anthropicWireRequest struct {
 	Model     string `json:"model"`
 	MaxTokens int    `json:"max_tokens"`
@@ -108,6 +123,10 @@ type anthropicWireRequest struct {
 	Stream   bool                   `json:"stream"`
 	Tools    []anthropicWireTool    `json:"tools,omitempty"`
 	Thinking *anthropicWireThinking `json:"thinking,omitempty"`
+	// OutputConfig carries the effort the model should answer at. It is
+	// present only for a model that accepts the parameter: for every other
+	// model the key is absent entirely, not present-and-empty.
+	OutputConfig *anthropicWireOutputConfig `json:"output_config,omitempty"`
 	// Metadata carries the stable installation identity the OAuth account is
 	// keyed by (omp sends {device_id, session_id, account_uuid}); it rides the
 	// documented `metadata.user_id` string field. #102: install-id minted a
@@ -162,6 +181,13 @@ func (p *AnthropicProvider) buildRequest(req StreamRequest) ([]byte, error) {
 		if wr.MaxTokens <= req.Thinking.Tokens {
 			wr.MaxTokens = req.Thinking.Tokens + 1024
 		}
+	}
+	// The effort the model answers at (omp's output_config.effort). Only a
+	// model that accepts the parameter gets the block, and the beta header
+	// that goes with it — a model that does not see the key at all, not an
+	// empty one.
+	if lvl, capable := effortLevel(req.Thinking); capable && lvl != "" {
+		wr.OutputConfig = &anthropicWireOutputConfig{Effort: lvl}
 	}
 	for _, t := range req.Tools {
 		wr.Tools = append(wr.Tools, anthropicWireTool{
@@ -277,7 +303,7 @@ func lastToolResultMessage(msgs []anthropicWireMessage) int {
 	return -1
 }
 
-func (p *AnthropicProvider) headers() map[string]string {
+func (p *AnthropicProvider) headers(req StreamRequest) map[string]string {
 	h := map[string]string{
 		"anthropic-version": "2023-06-01",
 	}
@@ -286,6 +312,16 @@ func (p *AnthropicProvider) headers() map[string]string {
 	}
 	for k, v := range p.extraHeaders {
 		h[k] = v
+	}
+	// The effort beta rides with output_config.effort and with nothing else:
+	// a model that does not accept the parameter must not see the header,
+	// because a beta the model does not implement is a rejected request.
+	if lvl, capable := effortLevel(req.Thinking); capable && lvl != "" {
+		if prev := h["anthropic-beta"]; prev != "" {
+			h["anthropic-beta"] = prev + "," + anthropicEffortBeta
+		} else {
+			h["anthropic-beta"] = anthropicEffortBeta
+		}
 	}
 	return h
 }
@@ -307,7 +343,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 	if model == "" {
 		model = p.model
 	}
-	resp, err := wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
+	resp, err := wirePost(sctx, p.httpClient, p.endpoint(), p.headers(req), body, APIAnthropicMessages)
 	if err != nil && req.Cache.cacheWanted() && cacheRejected(err) {
 		// The endpoint does not understand markers — a gateway, an older proxy.
 		// Rebuild without them and retry once on the same context: one lost turn
@@ -319,7 +355,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req StreamRequest) (<-ch
 			cancel(nil)
 			return nil, err
 		}
-		resp, err = wirePost(sctx, p.httpClient, p.endpoint(), p.headers(), body, APIAnthropicMessages)
+		resp, err = wirePost(sctx, p.httpClient, p.endpoint(), p.headers(req), body, APIAnthropicMessages)
 	}
 	if err != nil {
 		cancel(nil) // no goroutine will own it on this path

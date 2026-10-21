@@ -100,6 +100,12 @@ type modelDoc struct {
 	Modalities  *struct {
 		Output []string `json:"output"`
 	} `json:"modalities"`
+	// ReasoningOptions names what a reasoning model can be told: an "effort"
+	// option carries the levels the model accepts on the wire.
+	ReasoningOptions []struct {
+		Type   string   `json:"type"`
+		Values []string `json:"values"`
+	} `json:"reasoning_options"`
 	Limit struct {
 		Context int `json:"context"`
 		Output  int `json:"output"`
@@ -119,6 +125,9 @@ type model struct {
 	ContextWindow, MaxTokens int
 	Reasoning, Vision        bool
 	Release                  string
+	// Effort is the effort levels the model accepts on the wire (models.yml
+	// `effort:`). Empty = the model takes no effort parameter.
+	Effort []string
 }
 
 // Pinning limits: enough rows that /model offers the current generation of a
@@ -171,7 +180,7 @@ func main() {
 			}
 			rows = append(rows, model{ID: id, Name: name, ContextWindow: m.Limit.Context,
 				MaxTokens: m.Limit.Output, Reasoning: m.Reasoning, Release: m.ReleaseDate,
-				Vision: m.Attachment != nil && *m.Attachment})
+				Vision: m.Attachment != nil && *m.Attachment, Effort: effortLevels(m)})
 		}
 		if len(rows) == 0 {
 			continue
@@ -198,6 +207,7 @@ func main() {
 	}
 
 	var buf strings.Builder
+	var effortRows []effortRow
 	buf.WriteString(header)
 	names := make([]string, 0, len(out))
 	for k := range out {
@@ -228,17 +238,80 @@ func main() {
 			if m.Vision {
 				buf.WriteString(", Vision: true")
 			}
+			if len(m.Effort) > 0 {
+				fmt.Fprintf(&buf, ", Effort: []string{%s}", joinQuoted(m.Effort))
+				effortRows = append(effortRows, effortRow{key: k + "/" + m.ID, levels: m.Effort})
+			}
 			buf.WriteString("},\n")
 		}
 		buf.WriteString("\t\t},\n\t},\n")
 	}
 	buf.WriteString("}\n")
 	fatal(os.WriteFile("internal/config/connect_catalog.go", []byte(buf.String()), 0o644))
+	fatal(os.WriteFile(effortFixturePath, []byte(effortFixture(effortRows)), 0o644))
 	count := 0
 	for _, e := range out {
 		count += len(e.Models)
 	}
 	fmt.Printf("wrote internal/config/connect_catalog.go: %d providers, %d models\n", len(names), count)
+}
+
+// effortRow is one model of the pinned effort snapshot.
+type effortRow struct {
+	key    string
+	levels []string
+}
+
+// effortFixturePath is the pinned snapshot of the effort data the catalog
+// carries. It is what makes the generated file verifiable: the test in
+// internal/config reads it and checks the committed catalog against it, so a
+// hand-edit of connect_catalog.go cannot pass unnoticed.
+const effortFixturePath = "internal/config/testdata/connect_effort.json"
+
+// effortFixture renders the pinned snapshot: one line per model that claims
+// an effort, "provider/model" to its levels.
+func effortFixture(rows []effortRow) string {
+	var buf strings.Builder
+	buf.WriteString("{\n")
+	for i, r := range rows {
+		sep := ","
+		if i == len(rows)-1 {
+			sep = ""
+		}
+		fmt.Fprintf(&buf, "  %s: [%s]%s\n", quote(r.key), joinQuoted(r.levels), sep)
+	}
+	buf.WriteString("}\n")
+	return buf.String()
+}
+
+// effortLevels are the effort levels a provider's own effort parameter
+// speaks — the vocabulary xdev's config names (config.EffortLevels).
+// A level outside it is never sent: an endpoint that rejects an unrecognised
+// effort would fail the whole turn.
+var effortWhitelist = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// effortLevels reads the levels a model accepts on the wire out of
+// models.dev's reasoning options: the "effort" option names them.
+//
+// A model that publishes no effort option gets no list, and no list is the
+// answer that keeps every request for it exactly as it was — xdev sends no
+// effort parameter to a model that did not say it takes one.
+func effortLevels(m modelDoc) []string {
+	var out []string
+	for _, o := range m.ReasoningOptions {
+		if o.Type != "effort" {
+			continue
+		}
+		for _, v := range o.Values {
+			for _, w := range effortWhitelist {
+				if v == w {
+					out = append(out, v)
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 // textOutput reports whether a model emits text: image/audio-only entries

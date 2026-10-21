@@ -62,6 +62,12 @@ type Registry struct {
 	// lsp package; nil keeps the cheap parser-only behavior. Written once
 	// before any turn runs and read from the write path, never concurrently.
 	diagProvider DiagnosticsProvider
+	// parent is the registry a VIEW takes its tools from, and viewBridge the
+	// tools the view owns (the three bridge tools over the view's own
+	// catalog). A view has no other tools of its own: the tool set is the
+	// parent's, read LIVE.
+	parent     *Registry
+	viewBridge map[string]Tool
 }
 
 // NewRegistry returns an empty registry.
@@ -73,6 +79,15 @@ func NewRegistry() *Registry {
 // that implement setRegistry (the freshness-record participants) get the
 // owning registry injected here.
 func (r *Registry) Register(t Tool) {
+	if r == nil {
+		return
+	}
+	if r.parent != nil {
+		// A view adds to the SHARED set: the tool must be visible to every
+		// view of it, and to the registry itself, at once.
+		r.parent.Register(t)
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.tools[t.Name()]; dup {
@@ -86,14 +101,33 @@ func (r *Registry) Register(t Tool) {
 
 // Names returns every registered tool name (eager and deferred), sorted.
 func (r *Registry) Names() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]string, 0, len(r.tools))
-	for n := range r.tools {
+	if r == nil {
+		return nil
+	}
+	src := r.toolSource()
+	src.mu.RLock()
+	out := make([]string, 0, len(src.tools)+len(r.viewBridge))
+	for n := range src.tools {
+		if r.parent != nil && isBridgeTool(n) {
+			continue // the view's own bridge replaces the parent's
+		}
+		out = append(out, n)
+	}
+	src.mu.RUnlock()
+	for n := range r.viewBridge {
 		out = append(out, n)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// toolSource returns the registry whose tools this one serves: the parent
+// for a view, the registry itself otherwise.
+func (r *Registry) toolSource() *Registry {
+	if r != nil && r.parent != nil {
+		return r.parent
+	}
+	return r
 }
 
 // Remove unregisters the named tools (the launch --tools/--no-tools filter).
@@ -104,6 +138,9 @@ func (r *Registry) Names() []string {
 func (r *Registry) Remove(names ...string) []string {
 	if r == nil {
 		return nil
+	}
+	if r.parent != nil {
+		return r.parent.Remove(names...)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -170,9 +207,16 @@ func (r *Registry) forgetSnapshot(path string) {
 
 // Get returns the tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	t, ok := r.tools[name]
+	if r == nil {
+		return nil, false
+	}
+	if t, ok := r.viewBridge[name]; ok {
+		return t, true
+	}
+	src := r.toolSource()
+	src.mu.RLock()
+	defer src.mu.RUnlock()
+	t, ok := src.tools[name]
 	return t, ok
 }
 
@@ -181,10 +225,23 @@ func (r *Registry) Get(name string) (Tool, bool) {
 // reach the model through tool_search/tool_describe instead, and the prompt
 // indexes them with one line each (Registry.Deferred).
 func (r *Registry) Defs() []NamedDef {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.tools))
-	for n := range r.tools {
+	if r == nil {
+		return nil
+	}
+	src := r.toolSource()
+	src.mu.RLock()
+	names := make([]string, 0, len(src.tools)+len(r.viewBridge))
+	for n := range src.tools {
+		if r.parent != nil && isBridgeTool(n) {
+			continue // the view's own bridge replaces the parent's
+		}
+		if r.deferred(n) {
+			continue
+		}
+		names = append(names, n)
+	}
+	src.mu.RUnlock()
+	for n := range r.viewBridge {
 		if r.deferred(n) {
 			continue
 		}
@@ -193,7 +250,10 @@ func (r *Registry) Defs() []NamedDef {
 	sort.Strings(names)
 	out := make([]NamedDef, 0, len(names))
 	for _, n := range names {
-		t := r.tools[n]
+		t, ok := r.Get(n)
+		if !ok {
+			continue
+		}
 		out = append(out, NamedDef{
 			Name:        t.Name(),
 			Description: t.Description(),

@@ -157,3 +157,68 @@ func TestApplySessionEffortReapplyIsIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// A view is a WINDOW onto the tool set, not a copy of it: a tool registered
+// after the view was made — an MCP server that connects late, an extension
+// attached later — is visible in the view at once.
+//
+// A copy would hide it, and the model would never be offered the tool: the
+// view is built once per turn, and the extension tools land after it.
+func TestTheViewSeesAToolRegisteredAfterItWasMade(t *testing.T) {
+	r := NewRegistry()
+	r.Register(namedStub{n: "read"})
+	view := r.View("medium")
+	if !viewHas(view, "read") {
+		t.Fatal("the view must carry the tools the registry had")
+	}
+	r.Register(namedStub{n: "late_extension_tool"})
+	if !viewHas(view, "late_extension_tool") {
+		t.Fatal("a tool registered after the view was made must be visible in it")
+	}
+	// The shared registry keeps its own set: the view's rung never deferred
+	// anything on it.
+	if r.deferred("read") {
+		t.Fatal("the view must not defer anything on the shared registry")
+	}
+	// The view's own bridge is over the view's own catalog.
+	if view.Catalog() == r.Catalog() {
+		t.Fatal("the view must carry its own deferred set")
+	}
+}
+
+// viewHas reports whether the view advertises the named tool.
+func viewHas(r *Registry, name string) bool {
+	for _, d := range r.Defs() {
+		if d.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// A removed tool leaves no entry behind: a VIEW owns its own catalog, and
+// the removal reaches the shared registry's catalog only.
+//
+// An entry whose tool is gone is not a tool: tool_search must not offer it,
+// and tool_call on it would fail.
+func TestTheViewDropsARemovedTool(t *testing.T) {
+	r := NewRegistry()
+	r.Register(namedStub{n: "read"})
+	r.Register(namedStub{n: "gone"})
+	view := r.View("low") // the low rung defers everything but the pi core
+	if len(view.Deferred()) != 1 {
+		t.Fatalf("deferred = %v, want the one entry", view.Deferred())
+	}
+	r.Remove("gone")
+	if len(view.Deferred()) != 0 {
+		t.Fatalf("the view's catalog still lists the removed tool: %v", view.Deferred())
+	}
+	if _, ok := view.Catalog().Lookup("gone"); ok {
+		t.Fatal("the view's catalog still resolves the removed tool")
+	}
+	for _, e := range view.Catalog().Search("gone", 10) {
+		if e.Name == "gone" {
+			t.Fatal("tool_search still offers the removed tool")
+		}
+	}
+}

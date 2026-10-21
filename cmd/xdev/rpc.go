@@ -84,7 +84,11 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	// Recomputed per prompt: async MCP/extension tools must reach the
 	// model that is being told they exist.
 	overrides := agent.LoadSystemPromptOverrides(cwd)
-	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
+	// The prompt and the agent's tool set are the SAME set: the agent's
+	// tools are a view of the shared registry (the rung's surface), and a
+	// prompt built from the shared registry would describe a different one.
+	buildPrompt := promptBuilder(basePrompt(opts, cwd), cwd, tailSystemPrompt(overrides, opts.AppendSystem), nil)
+	var buildSys func() string
 
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {
@@ -96,6 +100,11 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	wireTaskParent(reg, store)
+	// A resumed session runs at the level its own transcript records, and at
+	// the tool surface that level was reached through. The tool set is a
+	// VIEW of the shared registry: this run's own deferred set.
+	runTools, runPrompt := turnToolSet(reg, sessionRung(store, lastSettings().SessionEffort()), buildPrompt, false)
+	buildSys = runPrompt
 
 	h := &rpcHandler{
 		cwd: cwd, buildSys: buildSys, reg: reg, cfg: cfg,
@@ -105,16 +114,18 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 		store:   store,
 	}
 	h.agent = &agent.Agent{
-		Provider: prov, Tools: reg, Store: store, Model: modelName,
+		Provider: prov, Tools: runTools, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
 		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
 		Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), lastSettings(), agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())),
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, lastSettings(), provName, modelName),
-		Thinking:   effortBudget(effortRef),
+		Thinking:   effortThinking(sessionLevelFor(store, effortRef, provName, modelName, cfg), provName, modelName, cfg),
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
-	wireAgentMode(h.agent, reg, cfg, lastSettings(), provName, modelName, cwd, false)
+	// The agent's tool set is the VIEW, so the catalog it is wired to must
+	// be the VIEW's: the bridge runs the tools the agent sees.
+	wireAgentMode(h.agent, cfg, lastSettings(), provName, modelName, cwd, false)
 	// #90: mailbox arrivals become follow-ups in this session's agent (one
 	// long-lived agent per RPC process, so no indirection is needed).
 	setInboxSink(func(m agent.Message) bool {

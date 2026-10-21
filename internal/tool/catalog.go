@@ -58,6 +58,18 @@ func NewCatalog(reg *Registry) *Catalog {
 	return &Catalog{reg: reg, entries: map[string]Entry{}}
 }
 
+// HasRunner reports whether a call path is installed: the bridge can run a
+// deferred tool only when it has one. A catalog without a runner refuses
+// every call, which is the safe answer for a catalog nobody wired.
+func (c *Catalog) HasRunner() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.runner != nil
+}
+
 // SetRunner installs the harness call path for tool_call (nil = refuse).
 func (c *Catalog) SetRunner(r Runner) {
 	if c == nil {
@@ -113,10 +125,27 @@ func (c *Catalog) Entries() []Entry {
 	defer c.mu.RUnlock()
 	out := make([]Entry, 0, len(c.entries))
 	for _, e := range c.entries {
+		if !c.live(e.Name) {
+			continue // the tool is gone; the entry is not a tool any more
+		}
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// live reports whether the catalogued tool is STILL registered.
+//
+// A tool removed from the registry leaves its catalog entry behind: a view
+// owns its own catalog, and the removal reaches the shared registry's
+// catalog only. An entry whose tool is gone is not a tool — tool_search must
+// not offer it, and tool_call on it would fail.
+func (c *Catalog) live(name string) bool {
+	if c == nil || c.reg == nil {
+		return true
+	}
+	_, ok := c.reg.Get(name)
+	return ok
 }
 
 // Lookup returns one deferred tool.
@@ -125,9 +154,12 @@ func (c *Catalog) Lookup(name string) (Entry, bool) {
 		return Entry{}, false
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	e, ok := c.entries[name]
-	return e, ok
+	c.mu.RUnlock()
+	if !ok || !c.live(name) {
+		return Entry{}, false
+	}
+	return e, true
 }
 
 // Search ranks the deferred tools against a free-text query: exact name >
@@ -324,7 +356,41 @@ func indentJSON(raw json.RawMessage) string {
 	return string(out)
 }
 
-// --- Registry: the deferred view ---
+// View returns a LIVE view of the registry: the same tools, this view's own
+// deferred set.
+//
+// The tools are the PARENT's, read live: a tool registered after the view
+// was made — an MCP server that connects late, an extension attached later
+// — is visible in the view at once. A copy would hide it, and the model
+// would never be offered the tool.
+//
+// The view owns only what must differ: the deferred set (its own catalog)
+// and the bridge over it (its own three tools, so a search finds THIS
+// view's deferred tools and not the parent's).
+//
+// The freshness records, the diagnostics provider and the MCP block stay
+// the parent's: they are the registry's, and the tools themselves hold the
+// parent — a view is a window onto the tool set, not a second one.
+func (r *Registry) View(effort string) *Registry {
+	if r == nil {
+		return nil
+	}
+	v := &Registry{
+		parent:     r,
+		tools:      map[string]Tool{},
+		snaps:      map[string]*fileSnapshot{},
+		viewBridge: map[string]Tool{},
+	}
+	cat := NewCatalog(v)
+	v.catalog = cat
+	v.viewBridge[ToolSearchName] = NewToolSearchTool(cat)
+	v.viewBridge[ToolDescribeName] = NewToolDescribeTool(cat)
+	v.viewBridge[ToolCallName] = NewToolCallTool(cat)
+	ApplySessionEffort(v, effort)
+	return v
+}
+
+// Registry: the deferred view ---
 
 // Catalog returns the registry's deferred-tool catalog, creating it on first
 // use (a nil registry has none).
@@ -363,6 +429,17 @@ func (r *Registry) Defer(name, index string, tags ...string) {
 // everything it does not list — a sticky entry is a floor, never a ceiling.
 func (r *Registry) DeferSticky(name, index string, tags ...string) {
 	r.Defer(name, index, tags...)
+	if r.parent != nil {
+		// The sticky set is the PARENT's: the wide remote surfaces are the
+		// registry's, and every view of it must keep them behind the bridge.
+		r.parent.recordSticky(name, index, tags...)
+		return
+	}
+	r.recordSticky(name, index, tags...)
+}
+
+// recordSticky records a sticky deferral on the registry itself.
+func (r *Registry) recordSticky(name, index string, tags ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stickyDefer == nil {
@@ -375,6 +452,9 @@ func (r *Registry) DeferSticky(name, index string, tags ...string) {
 func (r *Registry) isSticky(name string) bool {
 	if r == nil {
 		return false
+	}
+	if r.parent != nil {
+		return r.parent.isSticky(name)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -407,12 +487,13 @@ func (r *Registry) ResetDeferred() {
 	if r == nil {
 		return
 	}
-	r.mu.RLock()
-	sticky := make(map[string]Entry, len(r.stickyDefer))
-	for k, v := range r.stickyDefer {
+	src := r.toolSource()
+	src.mu.RLock()
+	sticky := make(map[string]Entry, len(src.stickyDefer))
+	for k, v := range src.stickyDefer {
 		sticky[k] = v
 	}
-	r.mu.RUnlock()
+	src.mu.RUnlock()
 	c := r.Catalog()
 	c.mu.Lock()
 	defer c.mu.Unlock()

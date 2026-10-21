@@ -331,4 +331,20 @@ type ToolDef struct {
 // ThinkingBudget requests reasoning from the model when non-nil.
 type ThinkingBudget struct {
 	Tokens int
+	// Level is the request-side effort LEVEL — the rung's name rather than
+	// its token count ("minimal" … "max"). It rides with the budget because
+	// it IS the budget: the same rung, spelled the way the providers' own
+	// effort parameters spell it.
+	//
+	// Empty means "no level": every adapter keeps deriving its own tier from
+	// Tokens, so a request that does not set it is byte-identical to the one
+	// that existed before the field.
+	Level string
+	// Supported lists the effort levels the MODEL accepts on the wire — the
+	// capability the model registry declares (models.yml `effort:`).
+	//
+	// It is empty for every model that does not declare one, and an empty
+	// list is the answer that keeps the request exactly as it was: no effort
+	// parameter goes out at all.
+	Supported []string
 }

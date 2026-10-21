@@ -70,6 +70,22 @@ type ModelConfig struct {
 	// highest-at-or-below clamp real for a model that advertises fewer rungs
 	// than the built-in ladder (config.ClampEffort).
 	Efforts []string `yaml:"efforts,omitempty"`
+	// Effort lists the reasoning-effort levels this model accepts ON THE
+	// WIRE (config.EffortLevels names: minimal, low, medium, high, xhigh,
+	// max) — the capability the adapters gate their effort parameter on.
+	//
+	// EMPTY = the model takes no effort parameter at all. That is the
+	// default, and it is the safe one: every request for such a model keeps
+	// the exact shape it had before the effort level existed, byte for byte.
+	// A wrong "supported" claim makes a provider reject the request, which
+	// is worse than not sending the parameter at all.
+	//
+	// This is the WIRE capability, not the ladder: `efforts:` says which
+	// rungs the model advertises (and clamps a request to), `effort:` says
+	// which of them the provider's own parameter takes. A model that
+	// advertises a rung it does not accept on the wire is a broken
+	// declaration, not a default.
+	Effort []string `yaml:"effort,omitempty"`
 	// Pricing is the model's per-million-token rates in USD, used to estimate
 	// the cost of a request the provider reported no cost for. Absent = the
 	// model is priced by whatever the provider says, and nothing else.

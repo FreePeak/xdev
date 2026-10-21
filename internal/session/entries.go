@@ -96,6 +96,17 @@ type ThinkingLevelChangeEntry struct {
 	Env           Envelope
 	ThinkingLevel string
 	Configured    string
+	// Effort is the SESSION EFFORT RUNG in force at this point of the
+	// transcript: the rung whose TOOL SURFACE the following turns ran on
+	// (config.SessionEffortLevels — low, medium, high, xhigh, max).
+	//
+	// It is xdev's own addition to omp's record, and it is OPTIONAL: a
+	// file written before the field existed carries no rung, and a reader
+	// falls back to what the level says. A rung and a level are two
+	// different facts — /thinking high pins a level on the rung the
+	// session already had — and only the rung says which tools the model
+	// was offered.
+	Effort string
 }
 
 // ConfiguredAuto is the value a thinking_level_change's "configured" field
@@ -421,22 +432,27 @@ type entryWire struct {
 	ParentID  *string  `json:"parentId"`
 	Timestamp wireTime `json:"timestamp"`
 
-	Message          json.RawMessage       `json:"message,omitempty"`
-	Model            *string               `json:"model,omitempty"`
-	ResolvedFallback *bool                 `json:"resolvedModelIsFallback,omitempty"`
-	Summary          json.RawMessage       `json:"summary,omitempty"`
-	FirstKeptEntryID *string               `json:"firstKeptEntryId,omitempty"`
-	TokensBefore     *int64                `json:"tokensBefore,omitempty"`
-	TokensAfter      *int64                `json:"tokensAfter,omitempty"`
-	ShortSummary     *string               `json:"shortSummary,omitempty"`
-	Method           *string               `json:"method,omitempty"`
-	ThinkingLevel    *string               `json:"thinkingLevel,omitempty"`
-	Configured       *configuredLevel      `json:"configured,omitempty"`
-	CustomType       string                `json:"customType,omitempty"`
-	Data             map[string]any        `json:"data,omitempty"`
-	Goal             *GoalPayload          `json:"goal,omitempty"`
-	Checkpoint       *CheckpointPayload    `json:"checkpoint,omitempty"`
-	Schedule         *ScheduleChangedEntry `json:"schedule,omitempty"`
+	Message          json.RawMessage  `json:"message,omitempty"`
+	Model            *string          `json:"model,omitempty"`
+	ResolvedFallback *bool            `json:"resolvedModelIsFallback,omitempty"`
+	Summary          json.RawMessage  `json:"summary,omitempty"`
+	FirstKeptEntryID *string          `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     *int64           `json:"tokensBefore,omitempty"`
+	TokensAfter      *int64           `json:"tokensAfter,omitempty"`
+	ShortSummary     *string          `json:"shortSummary,omitempty"`
+	Method           *string          `json:"method,omitempty"`
+	ThinkingLevel    *string          `json:"thinkingLevel,omitempty"`
+	Configured       *configuredLevel `json:"configured,omitempty"`
+	// SessionEffort is the SESSION EFFORT RUNG in force at this point of
+	// the transcript: the rung whose TOOL SURFACE the following turns ran
+	// on. It is optional — a file written before the field existed carries
+	// no rung, and a reader falls back to what the level says.
+	SessionEffort *string               `json:"effort,omitempty"`
+	CustomType    string                `json:"customType,omitempty"`
+	Data          map[string]any        `json:"data,omitempty"`
+	Goal          *GoalPayload          `json:"goal,omitempty"`
+	Checkpoint    *CheckpointPayload    `json:"checkpoint,omitempty"`
+	Schedule      *ScheduleChangedEntry `json:"schedule,omitempty"`
 }
 
 func (w entryWire) envelope() Envelope {
@@ -481,6 +497,10 @@ func MarshalEntry(e Entry) ([]byte, error) {
 		level := t.ThinkingLevel
 		w.ThinkingLevel = &level
 		w.Configured = &configuredLevel{level: t.Configured}
+		if t.Effort != "" {
+			rung := t.Effort
+			w.SessionEffort = &rung
+		}
 	case *BranchSummaryEntry:
 		w.Type = TypeBranchSummary
 		w.Summary = mustMarshal(t.Summary)
@@ -566,6 +586,9 @@ func ParseEntry(line []byte) (Entry, error) {
 				return nil, fmt.Errorf("%w: thinking_level_change configured", ErrMalformedEntry)
 			}
 			e.Configured = w.Configured.level
+		}
+		if w.SessionEffort != nil {
+			e.Effort = *w.SessionEffort
 		}
 		return e, nil
 	case TypeBranchSummary:

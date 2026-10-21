@@ -30,6 +30,11 @@ type connectModel struct {
 	MaxTokens     int
 	Reasoning     bool
 	Vision        bool
+	// Effort is the effort levels the model accepts on the wire (models.yml
+	// `effort:`). Empty = the model takes no effort parameter, and every
+	// request for it keeps the exact shape it had before the effort level
+	// existed.
+	Effort []string
 }
 
 // connectEntry is one connectable provider.
@@ -162,6 +167,40 @@ func isPlan(name string) bool {
 		strings.Contains(name, "step-plan") || strings.HasSuffix(name, "-pass")
 }
 
+// ConnectEffortLevels returns the effort levels a model accepts on the wire,
+// as the SHIPPED catalog states them: the levels of the catalog row for the
+// provider and the model.
+//
+// The row is keyed the way the catalog is keyed — provider, then model id —
+// so the answer is the DECLARATION OF THAT ROW, not a consensus over every
+// provider that serves the same model id. An alias carrier that never
+// promised a level must not strip it from the row that did: the vendor row
+// says the model takes it, and the vendor row is the one the user
+// configured.
+//
+// It is the fallback for a models.yml written before the `effort:` key
+// existed — the catalog is what `xdev connect` copies from, so a user who
+// has been connected for a year must not have to re-run it to get the
+// capability.
+//
+// A provider or model the catalog does not name has NO capability: the
+// default is not supported.
+func ConnectEffortLevels(provider, model string) []string {
+	if provider == "" || model == "" {
+		return nil
+	}
+	e, ok := lookupConnect(provider)
+	if !ok {
+		return nil
+	}
+	for _, m := range e.Models {
+		if m.ID == model {
+			return m.Effort
+		}
+	}
+	return nil
+}
+
 // ConnectProviderConfig builds the models.yml block for one catalog row. The
 // credential is written as a ${VAR} reference, never as the key.
 func ConnectProviderConfig(name string) (*ProviderConfig, error) {
@@ -181,6 +220,7 @@ func ConnectProviderConfig(name string) (*ProviderConfig, error) {
 		pc.Models = append(pc.Models, ModelConfig{
 			ID: m.ID, Name: m.Name, ContextWindow: m.ContextWindow,
 			MaxTokens: m.MaxTokens, Reasoning: m.Reasoning, Vision: m.Vision,
+			Effort: m.Effort,
 		})
 	}
 	return pc, nil

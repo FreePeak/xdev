@@ -188,7 +188,18 @@ func (p *OpenAICompletionsProvider) buildRequest(req StreamRequest) ([]byte, err
 		wr.Messages = append(wr.Messages, openaiWireMessage{Role: "system", Content: req.System})
 	}
 	if req.Thinking != nil {
-		wr.ReasoningEffort = reasoningEffort(req.Thinking.Tokens)
+		// The level the model actually takes, when the model takes one: the
+		// request says WHICH rung, not how many tokens. A model that declares
+		// no effort parameter keeps the token-derived tier it always sent, and
+		// a level the model does not accept is dropped rather than folded
+		// onto a different one.
+		if lvl, capable := effortLevel(req.Thinking); capable {
+			if lvl != "" {
+				wr.ReasoningEffort = lvl
+			}
+		} else {
+			wr.ReasoningEffort = reasoningEffort(req.Thinking.Tokens)
+		}
 	}
 	for _, t := range NormalizeToolsForAPI(p.API(), req.Tools) {
 		wr.Tools = append(wr.Tools, openaiWireTool{

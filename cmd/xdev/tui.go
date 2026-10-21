@@ -78,11 +78,16 @@ func tabsModeOn(s *config.Settings) string {
 // The level is the one the next request carries; configured is omp's
 // CONFIGURED LEVEL — the level the user pinned, or "auto" when the level
 // is inherited from the model role's ":effort" default.
-func appendThinkingLevel(store *session.Store, level string, configured string) {
+//
+// rung is the SESSION EFFORT RUNG in force: the rung whose TOOL SURFACE the
+// following turns run on. It is xdev's own addition to omp's record, and it
+// is the fact a resume needs for the tool set — a level is not a rung
+// (/thinking high pins a level on the rung the session already had).
+func appendThinkingLevel(store *session.Store, level string, configured string, rung string) {
 	if store == nil {
 		return
 	}
-	if err := store.Append(&session.ThinkingLevelChangeEntry{ThinkingLevel: level, Configured: configured}); err != nil {
+	if err := store.Append(&session.ThinkingLevelChangeEntry{ThinkingLevel: level, Configured: configured, Effort: rung}); err != nil {
 		logx.Errorf("thinking level entry: %v", err)
 	}
 }
@@ -178,7 +183,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// it is built below, once the registry's hub and task tools are known.
 	var vibeScope *agent.VibeScope
 	// vibeSys is the director's system prompt (built with the scope, below).
-	var vibeSys func() string
 	vibeActive := func() bool { return vibeScope != nil && vibeScope.Active() }
 	// /prewalk live toggle: the holder is what each submit reads; Set
 	// resolves the ref through the same precedence as --prewalk-into.
@@ -208,18 +212,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return live.level
 	}
 	// thinkingState reads the reasoning state in force: the request-side
-	// level the next turn carries, and the CONFIGURED level in omp's
+	// level the next turn carries, the CONFIGURED level in omp's
 	// shape — the level the user pinned, or "auto" when the level is
 	// inherited from the model role's ":effort" default. live.level is
 	// the sticky choice: "" or "auto" means nothing was pinned, so the
 	// level follows the model role's ":effort" (omp's own sentinel).
-	thinkingState := func() (level string, configured string) {
+	//
+	// The third value is the SESSION EFFORT RUNG — the rung whose tool
+	// surface the next turn runs on. It is a fact of its own: /thinking
+	// moves the level, /effort moves the rung, and the transcript records
+	// both.
+	thinkingState := func() effortState {
+		rung := lastSettings().SessionEffort()
 		modelMu.Lock()
 		defer modelMu.Unlock()
 		if live.level == "" || live.level == "auto" {
-			return live.effort, session.ConfiguredAuto
+			return effortState{level: live.effort, configured: session.ConfiguredAuto, rung: rung}
 		}
-		return live.effort, live.level
+		return effortState{level: live.effort, configured: live.level, rung: rung}
 	}
 
 	// Tools + system prompt (shared with print mode).
@@ -333,8 +343,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// (#86): the prompt path, the turn boundary and the tool registry share
 	// this one instance.
 	sessionMemory := buildMemory(lastSettings())
-	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
+	// The prompt is rendered for a NAMED tool set: the agent's tools are a
+	// per-turn view of the shared registry, and a prompt built from the
+	// shared registry would describe a different surface than the agent has.
+	buildPrompt := promptBuilder(basePrompt(opts, cwd), cwd,
 		tailSystemPrompt(overrides, opts.AppendSystem), sessionMemory)
+	buildSys := func() string { return buildPrompt(reg) }
 	// The breadcrumb keys --continue for this pane. A fresh session is
 	// memory-only until its first assistant message, so record the
 	// AUTO-PERSIST path: --continue already guards with os.Stat, and a
@@ -755,7 +769,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if _, err := applyThinkingFlag(level, ""); err != nil {
 				return err
 			}
-			beforeLevel, beforeConfigured := thinkingState()
+			before := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "thinking", level); err != nil {
 				return err
 			}
@@ -776,10 +790,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// The level in force changed: the transcript says so (omp
 			// thinking_level_change), so a resume knows which level produced
 			// which part of it. A re-set of the same level changes nothing
-			// and says nothing.
-			if afterLevel, afterConfigured := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
-				appendThinkingLevel(storeOf(), afterLevel, afterConfigured)
-			}
+			// and says nothing. The RUNG rides along: it is the tool surface
+			// the following turns run on, and /thinking does not move it.
+			recordEffortChange(storeOf(), before, thinkingState())
 			return nil
 		},
 	})
@@ -876,7 +889,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Handoff:    handoffSettings(),
 		}
 		ag.SetContextWindow(lastSettings().CompactionContextWindow())
-		wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true)
+		wireAgentMode(ag, cfg, lastSettings(), lpn, lm, cwd, true)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
 	// #272: the alt screen swallows stderr, which is where discovery
@@ -1496,8 +1509,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					app.AddSystemBlock("· vibe " + w.ID + " (" + w.Tier + ") " + w.Status + ": " + agent.VibePreview(w.Output))
 				},
 			})
-			vibeSys = promptFnWithMemory(basePrompt(opts, cwd), cwd, vibeScope.Registry(),
-				tailSystemPrompt(overrides, opts.AppendSystem)+"\n\n"+agent.VibeDirectorPrompt, sessionMemory)
 			// The startup session may itself be a resume: adopt its mode.
 			workers, on := agent.LoadVibe(storeOf().Entries())
 			vibeScope.Restore(workers, on)
@@ -1907,7 +1918,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !config.IsSessionEffort(name) {
 				return fmt.Errorf("effort: want %s", strings.Join(config.SessionEffortLevels, "|"))
 			}
-			beforeLevel, beforeConfigured := thinkingState()
+			before := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "effort", name); err != nil {
 				return err
 			}
@@ -1931,10 +1942,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// The reasoning budget in force moved with the rung: the
 			// transcript says so (omp thinking_level_change). A rung that
 			// leaves the level alone (a pinned /thinking, or the same rung
-			// again) changes nothing and says nothing.
-			if afterLevel, afterConfigured := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
-				appendThinkingLevel(storeOf(), afterLevel, afterConfigured)
-			}
+			// again) changes nothing and says nothing — but a rung that
+			// moves the TOOL SURFACE and not the level still has to be
+			// recorded: the rung is what a resume restores, and a stale
+			// record would restore the old one over the user's choice.
+			recordEffortChange(storeOf(), before, thinkingState())
 			return nil
 		},
 	})
@@ -2339,12 +2351,28 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			modelMu.Lock()
 			lp, lm, lpn, le := live.prov, live.model, live.provName, live.effort
 			modelMu.Unlock()
+			// A resumed session runs at the level its own transcript records:
+			// the machine-wide setting is a different value from what the run
+			// that produced this transcript used. The level goes through the
+			// same clamp every other path does, so a persisted level above
+			// what the model accepts resumes clamped, not dropped.
+			le = sessionLevelFor(turnStore, le, lpn, lm, cfg)
+			// The tool surface follows the rung, and the rung is what the
+			// session recorded: a resumed session offers the same tools the
+			// original run offered. It is a VIEW of the shared registry —
+			// this turn's own deferred set — so two tabs at different rungs
+			// do not fight over one catalog.
+			// The tool set and the prompt are ONE pair — and the director's
+			// prompt is the one rendered when the director mode is on, over
+			// that same set. There is no second binding where the two could
+			// be edited apart.
+			turnTools, turnPrompt := turnToolSet(toolsForTurn(), sessionRung(turnStore, lastSettings().SessionEffort()), buildPrompt, vibeActive())
 			// Per-turn hooks pin the store and the focused predicate so a
 			// parked turn keeps persisting and never paints over the live view.
 			turnTS := &tuiSession{store: turnStore, app: app, tabs: tabs, id: sid}
 			ag := &agent.Agent{
 				Provider: lp,
-				Tools:    toolsForTurn(),
+				Tools:    turnTools,
 				// feedAdvisor is assigned after the agent exists, so go
 				// through an indirection: a direct field copy would
 				// capture the nil func at literal time.
@@ -2356,7 +2384,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				Store:      turnStore,
 				Compaction: compactionConfigFor(modelWindow(cfg, lpn, lm), lastSettings(), agent.HandoffOrder(lastSettings().CompactionMethodOrder())),
 				Failovers:  failoverChain(cfg, lastSettings(), lpn, lm),
-				Thinking:   effortBudget(le),
+				Thinking:   effortThinking(le, lpn, lm, cfg),
 				// Intercept set below from exts (only when non-nil).
 				Policy:  agentPolicy(),
 				Handoff: handoffSettings(),
@@ -2373,7 +2401,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
 			// result here is the case that mattered.
-			if st := wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
+			if st := wireAgentMode(ag, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
 				// The TUI has a console: a silent provider swap or a
 				// cooldown revert is otherwise invisible to the user.
 				st.Notify = func(msg string) {
@@ -2465,10 +2493,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				history = hist.Messages
 			}
 			sessMu.Unlock()
-			sys := buildSys()
-			if vibeActive() {
-				sys = vibeSys() // director prompt for the restricted toolset
-			}
+			sys := turnPrompt() // the prompt for THIS turn's tool set
 			finalMsg, err := ag.Run(ctx, hookBus.Context(ctx, sys), history)
 			if turnTS.isFocused() {
 				app.EndAssistant()

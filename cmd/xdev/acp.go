@@ -71,7 +71,7 @@ func runACP(opts printOptions) (exitCode int, err error) {
 	overrides := agent.LoadSystemPromptOverrides(cwd)
 	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
 
-	h := newACPHandler(cwd, cfg, prov, provName, modelName, reg, buildSys, effortBudget(effortRef), opts.MaxTokens, opts.MaxTurns)
+	h := newACPHandler(cwd, cfg, prov, provName, modelName, reg, buildSys, effortThinking(effortRef, provName, modelName, cfg), opts.MaxTokens, opts.MaxTurns)
 	// Hooks and extension processes compose into one interceptor chain, the
 	// same shape print mode uses; extensions' actions steer the live run.
 	exts := attachExtensions(context.Background(), reg, h.steer, h.followUp, cfg)
@@ -253,7 +253,7 @@ func (h *acpHandler) newAgent(s *acpSession) *agent.Agent {
 		Approve:    s.approve,
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
-	wireAgentMode(ag, h.reg, h.cfg, lastSettings(), h.provName, h.modelName, h.cwd, false)
+	wireAgentMode(ag, h.cfg, lastSettings(), h.provName, h.modelName, h.cwd, false)
 	// NOTE (#90): ACP deliberately installs no mailbox sink. An ACP host can
 	// hold several sessions in one process, and there is one mailbox owner per
 	// process — routing every arrival to whichever agent was built last would

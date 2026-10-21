@@ -247,15 +247,19 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // of (the TUI). Only there may an active goal auto-continue between turns
 // (omp's goal.continuationModes defaults to interactive); a print/RPC/ACP run
 // must not spend turns of its own after its prompt is answered.
-func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, provider, model, cwd string, interactive bool) *agent.FallbackState {
+func wireAgentMode(ag *agent.Agent, cfg *config.Config, settings *config.Settings, provider, model, cwd string, interactive bool) *agent.FallbackState {
 	if ag == nil {
 		return nil
 	}
 	ag.GoalContinuation = interactive
 	ag.PromptContinuation = interactive
-	if reg != nil {
-		ag.WireCatalog(reg.Catalog())
-		ag.WireEvalKernel(reg)
+	// The catalog bridge is wired to the agent's OWN tool set. It used to
+	// take a registry as an argument, and a mode that passed a different one
+	// wired the bridge to a catalog whose deferred tools the agent never
+	// advertised — every deferred tool unreachable through tool_call.
+	if ag.Tools != nil {
+		ag.WireCatalog(ag.Tools.Catalog())
+		ag.WireEvalKernel(ag.Tools)
 	}
 	ag.Redactor = redactorFor(cwd)
 	// #115 left the artifact-offload backend to land with the seam. It
@@ -517,9 +521,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if h, ok := mem.(interface{ SetWarnSink(func(string)) }); ok {
 		h.SetWarnSink(func(msg string) { fmt.Fprintln(os.Stderr, "xdev: "+msg) })
 	}
-	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
+	// The prompt and the agent's tool set are the SAME set: the agent's
+	// tools are a view of the shared registry, and a prompt built from the
+	// shared registry would describe a different surface. The pair is made
+	// once the session's rung is known; the prompt resolves it at Run time
+	// (late-registered tools must be in the prompt).
+	buildPrompt := promptBuilder(basePrompt(opts, cwd), cwd,
 		tailSystemPrompt(overrides, opts.AppendSystem), mem)
-	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
+	var buildSys func() string
 
 	// --- session ---
 	store, err := openStartupSession(cwd, opts)
@@ -566,7 +575,16 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// --- agent ---
 	ph := &printHooks{store: store, showThinking: showThinkingOn(settings)}
 	hooks := agent.TurnHooks(ph)
-	ag := &agent.Agent{Provider: prov, Tools: reg, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortBudget(effortRef), PlanMode: planMode}
+	// A resumed session runs at the level its own transcript records: the
+	// machine-wide setting is a different value from what the run that
+	// produced this transcript used. The level goes through the same clamp
+	// every other path does, so a persisted level above what the model
+	// accepts resumes clamped, not dropped. The tool surface follows the
+	// rung, in a VIEW of the shared registry: this run's own deferred set.
+	effortLevel := sessionLevelFor(store, effortRef, provName, modelName, cfg)
+	runTools, runPrompt := turnToolSet(reg, sessionRung(store, settings.SessionEffort()), buildPrompt, false)
+	buildSys = runPrompt
+	ag := &agent.Agent{Provider: prov, Tools: runTools, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
 	}
@@ -594,7 +612,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, reg, cfg, settings, provName, modelName, cwd, false)
+	wireAgentMode(ag, cfg, settings, provName, modelName, cwd, false)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
@@ -997,13 +1015,14 @@ func modelReasoning(cfg *config.Config, provider, model string) (supported, know
 	return false, false
 }
 
-// modelEfforts reports the reasoning rungs a model advertises (models.yml
-// `efforts:`, ordered low→high). known is false when the catalog lists no
-// entry for the id at all — the same "no opinion" modelReasoning reports, and
-// the reason a gateway-served id nobody pinned keeps the rung the user chose.
-// A listed entry that states no `efforts:` is known with an empty list: the
-// model is on record, it just names no ladder, so the non-reasoning fallback
-// applies.
+// modelEfforts reports the reasoning rungs a model can actually take
+// (models.yml `efforts:` narrowed by the levels its provider's effort
+// parameter accepts — models.yml `effort:`). known is false when the catalog
+// lists no entry for the id at all — the same "no opinion" modelReasoning
+// reports, and the reason a gateway-served id nobody pinned keeps the rung
+// the user chose. A listed entry that states no `efforts:` is known with an
+// empty list: the model is on record, it just names no ladder, so the
+// non-reasoning fallback applies.
 func modelEfforts(cfg *config.Config, provider, model string) (advertised []string, known bool) {
 	if cfg == nil {
 		return nil, false
@@ -1014,10 +1033,36 @@ func modelEfforts(cfg *config.Config, provider, model string) (advertised []stri
 	}
 	for _, m := range providerModels(provider, pc) {
 		if m.ID == model {
-			return m.Efforts, true
+			return m.EffortLevels(), true
 		}
 	}
 	return nil, false
+}
+
+// modelEffortWire reports the effort levels the model accepts on the wire
+// (models.yml `effort:`). An empty list means the model declares no effort
+// parameter, and that is the answer that keeps its requests byte-identical
+// to the ones xdev sent before the effort level existed.
+//
+// The SHIPPED catalog is the fallback: it is what `xdev connect` copies
+// from, so a models.yml written before the `effort:` key existed must not
+// leave the model without the capability — a user who has been connected
+// for a year cannot be asked to re-run connect to get it.
+func modelEffortWire(cfg *config.Config, provider, model string) []string {
+	if cfg == nil {
+		return nil
+	}
+	if pc, ok := cfg.Providers[provider]; ok {
+		for _, m := range providerModels(provider, pc) {
+			if m.ID == model {
+				if levels := m.EffortWireLevels(); len(levels) > 0 {
+					return levels
+				}
+				break
+			}
+		}
+	}
+	return config.ConnectEffortLevels(provider, model)
 }
 
 // providerModels merges pinned + discovered models once per provider per
@@ -1067,6 +1112,69 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 }
 
 func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem memory.Store) func() string {
+	build := promptBuilder(base, cwd, appendSystem, mem)
+	return func() string { return build(reg) }
+}
+
+// turnToolSet returns the tool set a turn runs with and the system prompt
+// for that SAME set.
+//
+// The two MUST come from one set: the prompt lists the eager tools and
+// indexes the deferred ones, and the agent is given the tool set. Two sets
+// mean the model is told about tools it cannot call, and the tools it can
+// call are missing from the prompt.
+//
+// It is a function and not two values assembled at a call site, so the tie
+// cannot be broken by editing one of them.
+func turnToolSet(reg *tool.Registry, rung string, build func(*tool.Registry) string, director bool) (tools *tool.Registry, prompt func() string) {
+	view := reg.View(rung)
+	pick := build
+	if director {
+		pick = directorPrompt(build)
+	}
+	return view, func() string { return pick(view) }
+}
+
+// directorPrompt renders the ordinary system prompt with the director's
+// appendix: the SAME builder, so the director's prompt cannot drift from
+// the ordinary one, and it is rendered for the same tool set.
+func directorPrompt(build func(*tool.Registry) string) func(*tool.Registry) string {
+	return func(reg *tool.Registry) string {
+		return build(reg) + "\n\n" + agent.VibeDirectorPrompt
+	}
+}
+
+// promptFnForTools builds the system prompt from a tool set that can
+// CHANGE between calls.
+//
+// The agent's tools are a per-turn VIEW of the shared registry (the rung's
+// surface), and a prompt built from the shared registry would describe a
+// DIFFERENT surface than the agent has: the model would be told about tools
+// it cannot call, and the tools it can call would be missing from the
+// prompt. The two must come from the same set.
+func promptFnForTools(base string, cwd string, tools func() *tool.Registry, appendSystem string, mem memory.Store) func() string {
+	build := promptBuilder(base, cwd, appendSystem, mem)
+	return func() string {
+		reg := tools()
+		if reg == nil {
+			// Unreachable today: the resolver is bound to the run's tool
+			// set, which is assigned before the first prompt is built. The
+			// empty registry is a safe answer for a prompt that somehow
+			// has no tools: it lists none rather than the wrong ones.
+			reg = tool.NewRegistry()
+		}
+		return build(reg)
+	}
+}
+
+// promptBuilder prepares what the system prompt needs that does not depend
+// on the tool set (the context files, the rules) and returns the renderer
+// for ONE tool set: the eager tools of that set and the deferred index of
+// that set.
+//
+// The tool set is an ARGUMENT, not a capture, so the caller can hand the
+// renderer the very set the agent was given.
+func promptBuilder(base string, cwd string, appendSystem string, mem memory.Store) func(reg *tool.Registry) string {
 	// --add-dir roots contribute their own AGENTS.md hierarchy; the launch
 	// cwd stays first so its files keep precedence.
 	ctxFiles := agent.LoadContextFiles(cwd)
@@ -1085,7 +1193,7 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 		ruleSet = rules.Discover(cwd, lastSettings().EnabledProviders)
 		rules.Set(ruleSet)
 	}
-	return func() string {
+	return func(reg *tool.Registry) string {
 		defs := reg.Defs()
 		named := make([]agent.NamedToolDef, 0, len(defs))
 		for _, d := range defs {
@@ -2259,6 +2367,121 @@ func effortBudget(effort string) *ai.ThinkingBudget {
 		return nil
 	}
 	return &ai.ThinkingBudget{Tokens: tokens}
+}
+
+// effortThinking builds the reasoning request for one rung against one
+// model: the token budget (unchanged), the effort LEVEL the rung names, and
+// the levels the model accepts on the wire.
+//
+// The level is what a provider that takes an effort parameter wants to see;
+// the budget stays what it was for the ones that take a number. A model that
+// declares no effort parameter gets no level, so its request stays exactly
+// the one it always sent.
+func effortThinking(effort, provider, model string, cfg *config.Config) *ai.ThinkingBudget {
+	b := effortBudget(effort)
+	if b == nil {
+		return nil
+	}
+	supported := modelEffortWire(cfg, provider, model)
+	if len(supported) == 0 {
+		// The model declares no effort parameter: the budget stays exactly
+		// the budget it always was, and no level rides along.
+		return b
+	}
+	b.Level = strings.ToLower(strings.TrimSpace(effort))
+	b.Supported = supported
+	return b
+}
+
+// effortState is the triple a reasoning change is judged by: the level the
+// next request carries, the CONFIGURED level (omp's shape), and the SESSION
+// EFFORT RUNG — the rung whose tool surface the following turns run on.
+//
+// The rung is part of the answer: a /effort change with /thinking pinned
+// moves the tool surface and not the level, and the transcript has to say
+// so — the resume reads the rung, and a stale record would restore the old
+// one over the user's fresh choice.
+type effortState struct {
+	level      string
+	configured string
+	rung       string
+}
+
+// moved reports whether the state changed enough to be recorded in the
+// session.
+func (s effortState) moved(other effortState) bool {
+	return s.level != other.level || s.configured != other.configured || s.rung != other.rung
+}
+
+// recordEffortChange appends the session record when the reasoning state
+// moved. It is the ONE place that decides, so the /thinking and /effort
+// commands cannot disagree about what a change is.
+func recordEffortChange(store *session.Store, before, after effortState) {
+	if !before.moved(after) {
+		return
+	}
+	appendThinkingLevel(store, after.level, after.configured, after.rung)
+}
+
+// sessionThinkingState reads the reasoning state a session's own transcript
+// records: the level, the level the user pinned, and the effort rung whose
+// tool surface the following turns ran on.
+func sessionThinkingState(store *session.Store) session.ThinkingState {
+	if store == nil {
+		return session.ThinkingState{}
+	}
+	return session.PersistedThinkingState(store.Entries(), store.LeafID())
+}
+
+// sessionLevel returns the reasoning level a session runs at: the level its
+// own transcript records, or fallback when the transcript records none.
+//
+// The session's record wins over the machine-wide setting: the setting is a
+// different value from what the run that produced this transcript used, and
+// a resumed session must continue where that run left off.
+//
+// A record that pins reasoning OFF is a record: the level is "" and the
+// session resumes with no reasoning — not with whatever the setting says.
+func sessionLevel(store *session.Store, fallback string) string {
+	st := sessionThinkingState(store)
+	if !st.Found {
+		return fallback
+	}
+	return st.Level
+}
+
+// sessionLevelFor returns the reasoning level a resumed session runs at:
+// the level its own transcript records, clamped to what the model accepts.
+//
+// The clamp is the same fold every other path does (thinkingForModel →
+// ClampEffort): a persisted level above what the model takes resumes
+// CLAMPED, not dropped — the level the transcript names was clamped when it
+// was written, and the model's ceiling may have moved since.
+func sessionLevelFor(store *session.Store, fallback, provider, model string, cfg *config.Config) string {
+	return thinkingForModel(sessionLevel(store, fallback), provider, model, cfg)
+}
+
+// sessionRung returns the effort rung a session runs at: the rung its own
+// transcript recorded, or fallback when it recorded none.
+//
+// The record's RUNG is the fact: it is what the /effort command wrote, and
+// it is the rung whose TOOL SURFACE the following turns ran on. A record
+// written before the field existed falls back to what the level says — a
+// PINNED level names the rung it was reached through, an INHERITED one
+// ("auto", omp's own sentinel) means the surface never moved and the rung is
+// the default.
+func sessionRung(store *session.Store, fallback string) string {
+	st := sessionThinkingState(store)
+	if !st.Found {
+		return fallback
+	}
+	if st.Rung != "" {
+		return config.NormalizeSessionEffort(st.Rung)
+	}
+	if st.Configured == session.ConfiguredAuto {
+		return config.SessionEffortDefault
+	}
+	return config.NormalizeSessionEffort(st.Configured)
 }
 
 // settingsPolicy resolves the approval policy from settings (nil or a bad
