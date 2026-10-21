@@ -65,6 +65,17 @@ type Store struct {
 	tornTail  int64
 	repaired  int64
 
+	// lease is the cross-process ownership lease this store holds for its
+	// session id (nil when the session was opened read-only, or when the
+	// lease is disabled). It is released by Close, after the last append has
+	// been flushed.
+	lease *lease
+	// forkedFrom is the path of the session this store was forked from, and
+	// forkedFromID its session id — set only when another live process owned
+	// the session and this one had to branch away from it.
+	forkedFrom   string
+	forkedFromID string
+
 	autoPath string // when set, the first assistant message persists here
 	autoOpts Options
 
@@ -97,6 +108,14 @@ type Options struct {
 	// (subagent children; empty for roots). Resume paths use it to keep
 	// child sessions out of the user's --continue/--resume candidates.
 	ParentSession string
+	// LeaseDir is the directory holding the cross-process session ownership
+	// leases — one 0-byte <sessionId>.lock per session. It is INJECTED
+	// because internal/session cannot import internal/config (that would be
+	// an import cycle in internal/config's own test binary).
+	//
+	// Empty disables the lease: the session is opened without one and no
+	// fork-on-owned can happen. Read-only tools leave it empty.
+	LeaseDir string
 }
 
 // OpenMem creates a brand-new memory-only session. Nothing touches the file
@@ -1035,10 +1054,25 @@ func (s *Store) ensureOnDiskLocked(path string, opts Options) (string, error) {
 		_ = f.Close()
 		_ = os.Remove(path)
 		s.file, s.f, s.w = "", nil, nil
+		// The lease goes with the file it was taken for: a lease on a session
+		// that no longer exists would block nobody, but it would still be a
+		// held descriptor.
+		s.releaseLeaseLocked()
 	}()
 	s.file = path
 	s.f = f
 	s.strictFsync = opts.StrictFsync
+	// The session is ON DISK from here: any other xdev can find it with
+	// --continue or --resume, so the creator takes the ownership lease NOW.
+	// A session that was never leased is a session two processes write into.
+	//
+	// A lease root that cannot host a TRUSTWORTHY lease is refused here: the
+	// session is not materialised, because a session nobody can protect is
+	// one two processes write into.
+	if err := s.takeLeaseLocked(opts.LeaseDir); err != nil {
+		s.latchErr = err
+		return "", err
+	}
 
 	w := bufio.NewWriter(f)
 	write := func(b []byte) error {
@@ -1110,6 +1144,12 @@ func (s *Store) titleSourceFor() string {
 }
 
 // Close flushes and releases the underlying file. A latched error rethrows.
+//
+// The ownership lease is released LAST — after the last append has been
+// flushed and the session file closed — so the lease never disappears while
+// bytes are still unwritten. The lease FILE stays on disk: unlinking a
+// flock'd file races (see lease.go), and an inert 0-byte file is cheaper
+// than two owners of one session.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1118,19 +1158,21 @@ func (s *Store) Close() error {
 		return s.latchErr
 	}
 	s.closed = true
-	if s.f == nil {
-		return s.latchErr
-	}
-	if s.w != nil {
-		if err := s.w.Flush(); err != nil && s.latchErr == nil {
-			s.latchErr = fmt.Errorf("session: final flush: %w", err)
+	if s.f != nil {
+		if s.w != nil {
+			if err := s.w.Flush(); err != nil && s.latchErr == nil {
+				s.latchErr = fmt.Errorf("session: final flush: %w", err)
+			}
 		}
+		if err := s.f.Close(); err != nil && s.latchErr == nil {
+			s.latchErr = fmt.Errorf("session: close file: %w", err)
+		}
+		s.w = nil
+		s.f = nil
 	}
-	if err := s.f.Close(); err != nil && s.latchErr == nil {
-		s.latchErr = fmt.Errorf("session: close file: %w", err)
+	if s.lease != nil {
+		s.releaseLeaseLocked()
 	}
-	s.w = nil
-	s.f = nil
 	return s.latchErr
 }
 

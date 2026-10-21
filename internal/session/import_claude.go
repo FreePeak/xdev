@@ -50,8 +50,11 @@ type claudeBlock struct {
 }
 
 // ImportClaude imports a Claude Code JSONL transcript as a NEW xdev session.
-func ImportClaude(path, dataDir, cwd string) (*ImportResult, error) {
-	return importForeign("claude", path, dataDir, cwd, scanClaude)
+//
+// opts carries the ownership lease the imported session takes when it
+// materialises (empty disables it).
+func ImportClaude(path, dataDir, cwd string, opts Options) (*ImportResult, error) {
+	return importForeign("claude", path, dataDir, cwd, opts, scanClaude)
 }
 
 func scanClaude(r io.Reader) (importScan, error) {

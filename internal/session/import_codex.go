@@ -56,8 +56,11 @@ type codexMeta struct {
 }
 
 // ImportCodex imports a Codex rollout JSONL transcript as a NEW xdev session.
-func ImportCodex(path, dataDir, cwd string) (*ImportResult, error) {
-	return importForeign("codex", path, dataDir, cwd, scanCodex)
+//
+// opts carries the ownership lease the imported session takes when it
+// materialises (empty disables it).
+func ImportCodex(path, dataDir, cwd string, opts Options) (*ImportResult, error) {
+	return importForeign("codex", path, dataDir, cwd, opts, scanCodex)
 }
 
 func scanCodex(r io.Reader) (importScan, error) {

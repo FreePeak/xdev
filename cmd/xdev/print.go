@@ -2897,9 +2897,16 @@ func runExitDetail(err error) string {
 // one, and reports whatever #122 had to discard to make that file appendable.
 // A record lost to an interrupted write is invisible damage unless the user
 // hears about it; the TUI shows the same notice in its transcript.
+//
+// It also reports a FORK: when another live xdev process owns the session,
+// the resume writes to a new file instead, and the user has to be told
+// where their entries are going.
 func openSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
 	s, err := resolveSession(cwd, cont, resumePrefix)
 	if n := sessionRepairNotice(s); n != "" {
+		fmt.Fprintln(os.Stderr, "xdev: "+n)
+	}
+	if n := sessionForkNotice(s); n != "" {
 		fmt.Fprintln(os.Stderr, "xdev: "+n)
 	}
 	return s, err
@@ -2930,14 +2937,45 @@ func sessionHasMessages(s *session.Store) bool {
 	return false
 }
 
-// openMostRecentWithHistory is the --continue fallback: the newest session in
-// cwd that actually holds a conversation (session.StatusEmpty files are
-// skipped — they are the blank-transcript trap). nil means this directory has
-// none, and the caller starts a fresh session.
-func openMostRecentWithHistory(cwd string) *session.Store {
-	metas, err := session.List(sessionDataDir())
+// openBreadcrumbSession opens the --continue breadcrumb READ-ONLY: the
+// session this terminal last wrote to, when it still holds a conversation.
+// nil means there is no such session.
+//
+// The write path resolves the breadcrumb differently (it takes the lease and
+// forks when another live xdev owns the session); this one is for the
+// read-only callers, which must neither take a lease nor be refused.
+func openBreadcrumbSession() *session.Store {
+	crumb := readBreadcrumb()
+	if crumb == "" {
+		return nil
+	}
+	if _, err := os.Stat(crumb); err != nil {
+		return nil
+	}
+	st, err := session.Open(crumb)
 	if err != nil {
 		return nil
+	}
+	if !sessionHasMessages(st) {
+		_ = st.Close()
+		return nil
+	}
+	return st
+}
+
+// openMostRecentWithHistory is the --continue fallback: the newest session in
+// cwd that actually holds a conversation (session.StatusEmpty files are
+// skipped — they are the blank-transcript trap). Empty means this directory
+// has none, and the caller starts a fresh session.
+//
+// It is a READ-ONLY probe: each candidate is opened to look for messages and
+// closed again, and the winner's PATH is returned. The caller re-opens it
+// FOR WRITE (taking the ownership lease), so the probe never blocks another
+// xdev and never leaves a lease behind.
+func openMostRecentWithHistory(cwd string) string {
+	metas, err := session.List(sessionDataDir())
+	if err != nil {
+		return ""
 	}
 	for _, m := range metas {
 		if m.CWD != cwd || m.TitleSource == session.TitleSourceSubagent {
@@ -2950,13 +2988,28 @@ func openMostRecentWithHistory(cwd string) *session.Store {
 		if err != nil {
 			continue
 		}
-		if !sessionHasMessages(s) {
-			_ = s.Close()
+		has := sessionHasMessages(s)
+		_ = s.Close()
+		if !has {
 			continue
 		}
-		return s
+		return m.Path
 	}
-	return nil
+	return ""
+}
+
+// sessionTitle is the mechanical title a session starts with: a timestamped
+// stamp, marked as a continuation when the run continues one.
+//
+// The export fast path uses it too: an export of a --continue with no
+// session to continue starts the SAME empty session the run would have
+// started, under the same title.
+func sessionTitle(cont bool) string {
+	title := "print " + time.Now().Format("2006-01-02 15:04")
+	if cont {
+		return "continued " + title
+	}
+	return title
 }
 
 // resolveSession is the layering itself: explicit --resume prefix, then
@@ -2970,7 +3023,7 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 		if err != nil {
 			return nil, err
 		}
-		return session.Open(path)
+		return session.OpenForWrite(path, session.Options{LeaseDir: sessionLeaseDir()})
 	}
 	if cont {
 		// Breadcrumb-first resume (omp parity): the pane's last session wins.
@@ -2980,7 +3033,7 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 		// the directory (session.StatusEmpty).
 		if crumb := readBreadcrumb(); crumb != "" {
 			if _, err := os.Stat(crumb); err == nil {
-				st, serr := session.Open(crumb)
+				st, serr := session.OpenForWrite(crumb, session.Options{LeaseDir: sessionLeaseDir()})
 				if serr == nil && sessionHasMessages(st) {
 					return st, nil
 				}
@@ -2990,8 +3043,8 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 			}
 		}
 
-		if s := openMostRecentWithHistory(cwd); s != nil {
-			return s, nil
+		if p := openMostRecentWithHistory(cwd); p != "" {
+			return session.OpenForWrite(p, session.Options{LeaseDir: sessionLeaseDir()})
 		}
 	}
 	// Titles are mechanical (M10 #32): no ai-title call exists yet, so
@@ -2999,10 +3052,7 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 	// .TitleSystemPrompt() is where a model-generated title would read its
 	// prompt override. --no-title skips the stamp, so the listing carries no
 	// generated title.
-	title := "print " + time.Now().Format("2006-01-02 15:04")
-	if cont {
-		title = "continued " + title
-	}
+	title := sessionTitle(cont)
 	if launch.NoTitle {
 		title = ""
 	}
@@ -3015,7 +3065,7 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 	now := time.Now().UTC()
 	s.EnableAutoPersist(
 		session.SessionFilePath(sessionDataDir(), cwd, now, s.ID()),
-		session.Options{},
+		session.Options{LeaseDir: sessionLeaseDir()},
 	)
 	return s, nil
 }
