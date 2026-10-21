@@ -38,6 +38,13 @@ type asyncCompactState struct {
 	// pending is the finished result, waiting for the boundary where the
 	// compaction is due. nil while the summarize is still running.
 	pending *asyncCompactResult
+	// owed marks a DEFERRAL: a compaction was DUE and was handed to this
+	// background job, so its result must land at the next boundary whether
+	// or not the trigger that handed it over still fires. The idle trigger
+	// is consumed by the attempt that takes it, so without the debt the
+	// deferred compaction would never be applied — and the provider call
+	// it spent would buy nothing.
+	owed bool
 }
 
 // asyncCompactResult is one job's outcome.
@@ -51,7 +58,11 @@ type asyncCompactResult struct {
 // droppable span); the caller then stays synchronous, which reports the same
 // reason loudly instead of quietly skipping the compaction. A job already in
 // flight is the maybeCompact guard's business, not this one.
-func (a *Agent) kickAsyncCompaction(ctx context.Context) bool {
+//
+// owed says what the job is: a DEFERRAL (a compaction was due and is now
+// owed to this job — its result lands at the next boundary) or a speculative
+// ARM (the compaction is not due yet; the result lands when it becomes due).
+func (a *Agent) kickAsyncCompaction(ctx context.Context, owed bool) bool {
 	if a.compactAsync != nil {
 		return false
 	}
@@ -67,6 +78,7 @@ func (a *Agent) kickAsyncCompaction(ctx context.Context) bool {
 		tokens:               span.tokens,
 		snapshotLeaf:         a.Store.LeafID(),
 		contextTokensAtStart: span.tokens,
+		owed:                 owed,
 	}
 	// Snapshot provider and model: a failover can move the live fields while
 	// the job runs, and the goroutine must not read them.

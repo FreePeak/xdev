@@ -35,7 +35,7 @@ const (
 	// armedPendingTokens is the size of the messages that are queued but
 	// not yet in the context — omp's pendingContextTokens (omp
 	// packages/coding-agent/src/session/session-maintenance.ts:1509).
-	// xdev's compaction boundary is pre-request (loop.go:737): everything
+	// xdev's compaction boundary is pre-request (loop.go:733): everything
 	// the next request will carry is already in the history, so nothing is
 	// pending at the boundary.
 	armedPendingTokens int64 = 0
@@ -96,7 +96,9 @@ func (a *Agent) maybeArm(ctx context.Context, history []ai.Message) {
 	if !a.armEligible(used) {
 		return
 	}
-	a.kickAsyncCompaction(ctx)
+	// An ARM is not a deferral: the compaction is not due yet, so nothing
+	// is owed — the result lands when the compaction becomes due.
+	a.kickAsyncCompaction(ctx, false)
 }
 
 // armedWindow resolves an armed result against the current context: the
@@ -154,7 +156,13 @@ func (a *Agent) armedWindow(job *asyncCompactState, res *asyncCompactResult) ([]
 		logx.Infof("compaction: armed result dropped — its anchor left the active path")
 		return nil, false
 	}
-	kept := fres.Messages[i:]
+	// The kept window: the anchor's message and everything after it. The
+	// slice is guarded, so an anchor that does not resolve can never cut
+	// the context out of range.
+	kept := fres.Messages
+	if i >= 0 {
+		kept = fres.Messages[i:]
+	}
 	after := armedEntry(job, res, kept).TokensAfter
 	// The compacted context (plus whatever is pending) must fit the
 	// head-room the threshold leaves — omp's 0.8 rule, strictly greater.

@@ -687,8 +687,9 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 		return history
 	}
 	// A background summarize that finished since the last boundary waits
-	// here: it is applied at the boundary where the compaction is due, not
-	// at the next boundary whatever the trigger state.
+	// here: an ARM is applied at the boundary where the compaction is due,
+	// a DEFERRAL at the next boundary (the trigger that handed it over may
+	// be gone by then — the idle trigger is consumed by the attempt).
 	a.harvestAsyncResult()
 	// Pre-request tier (microcompact): clear stale tool results before paying
 	// for a summary. Cheap, deterministic, no provider call.
@@ -696,6 +697,21 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 		history = cleared
 	}
 	if !a.compactionDue(history) {
+		// Not due by trigger — but a compaction that WAS due may have been
+		// handed to the background, and it is still owed. The idle trigger
+		// fires once and is gone; without this the deferred compaction
+		// would never be applied and the provider call it spent would buy
+		// nothing.
+		if job := a.compactAsync; job != nil && job.owed && job.pending != nil {
+			if rebuilt, ok := a.applyAsyncCompaction(history); ok {
+				a.forgetAsyncCompaction()
+				return rebuilt
+			}
+			// The result cannot be applied: the owed compaction still
+			// happens, synchronously.
+			a.forgetAsyncCompaction()
+			return a.compactNow(ctx, history)
+		}
 		// Not due: this is where a speculative compaction is armed, so its
 		// summary is ready when the threshold is crossed.
 		a.maybeArm(ctx, history)
@@ -721,9 +737,12 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 		if a.compactAsync != nil {
 			// One job at a time: it lands at a later boundary, and blocking
 			// here on a second summarize would defeat the whole trigger.
+			// The compaction is DUE and this job will carry it: the job
+			// owes the result, so it lands even if the trigger is gone.
+			a.compactAsync.owed = true
 			return history
 		}
-		if a.kickAsyncCompaction(ctx) {
+		if a.kickAsyncCompaction(ctx, true) {
 			return history
 		}
 	}
