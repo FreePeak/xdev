@@ -210,8 +210,11 @@ type CompactionEntry struct {
 	// reading the whole summary. "" when there is none.
 	ShortSummary string
 	// Method names the compaction ladder member that produced Summary
-	// (M5 #24): handoff|snapcompact|shake|soft. "" for entries written
-	// before the ladder recorded it.
+	// (M5 #24): the member's own name — remote|snapcompact|handoff|shake|
+	// soft — following omp's record contract, where the record names the
+	// member that produced it. "" for an entry written before the ladder
+	// recorded it, and for a member outside omp's five (xdev's microcompact
+	// extension).
 	Method string
 }
 

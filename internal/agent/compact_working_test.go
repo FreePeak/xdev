@@ -167,8 +167,12 @@ func TestWorkingStateIsNotInjectedIntoShake(t *testing.T) {
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
 	entries := compactionEntries(s)
-	if len(entries) != 1 || entries[0].Method != methodShake {
-		t.Fatalf("entries = %d, method = %q", len(entries), entries[0].Method)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	// The record names the member that produced it (omp's contract).
+	if entries[0].Method != methodShake {
+		t.Fatalf("method = %q, want %q", entries[0].Method, methodShake)
 	}
 	text := entries[0].Summary.Text()
 	if strings.Contains(text, "Working state") {

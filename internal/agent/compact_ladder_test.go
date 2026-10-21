@@ -200,8 +200,13 @@ func TestLadderShakeElidesBodiesKeepsSkeleton(t *testing.T) {
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
 	entries := compactionEntries(s)
-	if len(entries) != 1 || entries[0].Method != methodShake {
-		t.Fatalf("entries = %d, method = %q", len(entries), entries[0].Method)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	// The record names the member that produced it (omp's contract): the
+	// elision kept the span locally, and the entry says which rung did it.
+	if entries[0].Method != methodShake {
+		t.Fatalf("method = %q, want %q", entries[0].Method, methodShake)
 	}
 	text := entries[0].Summary.Text()
 	if !strings.Contains(text, "[tool read(offset,path)]") {
@@ -534,15 +539,16 @@ func TestParseMethodOrderAcceptsLadderMembers(t *testing.T) {
 }
 
 // TestLadderProducts pins the trigger/product split: an order of triggers
-// alone means the builtin handoff summarize (the pre-ladder behavior), while a
-// named product is used in order.
+// alone means omp's ladder (remote, snapcompact, handoff, shake, soft — the
+// first applicable member wins), while a named product is used in order.
 func TestLadderProducts(t *testing.T) {
+	ompLadder := []string{"remote", "snapcompact", "handoff", "shake", "soft"}
 	for _, tc := range []struct {
 		methods []string
 		want    []string
 	}{
-		{nil, []string{"handoff"}},
-		{[]string{"threshold", "overflow", "promotion"}, []string{"handoff"}},
+		{nil, ompLadder},
+		{[]string{"threshold", "overflow", "promotion"}, ompLadder},
 		{[]string{"threshold", "soft"}, []string{"soft"}},
 		{[]string{"remote", "snapcompact", "handoff"}, []string{"remote", "snapcompact", "handoff"}},
 	} {
@@ -556,5 +562,135 @@ func TestLadderProducts(t *testing.T) {
 				t.Fatalf("products(%v)[%d] = %q, want %q", tc.methods, i, got[i], tc.want[i])
 			}
 		}
+	}
+}
+
+// ---- omp ladder parity: default order, applicability, recorded method -----
+
+// TestLadderDefaultOrderRunsHandoff is the common case: the active model is
+// text-only, so neither remote nor snapcompact applies and the first
+// applicable member of omp's ladder is the provider summarize — and the
+// record names it.
+func TestLadderDefaultOrderRunsHandoff(t *testing.T) {
+	stubPressure(t, 0)
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
+	a, s, _ := storeAgent(t, p, ladderConfig())
+	ladderFixture(t, s)
+	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
+
+	entries := compactionEntries(s)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	if entries[0].Method != MethodHandoff {
+		t.Fatalf("method = %q, want %q", entries[0].Method, MethodHandoff)
+	}
+	if len(p.gotReqs) != 1 {
+		t.Fatalf("provider calls = %d, want one summarize", len(p.gotReqs))
+	}
+}
+
+// TestLadderRemoteNeverApplies pins omp's remote applicability: the rung
+// applies with a configured remote endpoint OR a provider that supports
+// native compaction (omp `hde`,
+// packages/coding-agent/src/session/compaction-methods.ts:70-72). xdev has
+// neither — no endpoint setting, no native-compaction transport — so the rung
+// never applies and the ladder falls through to the next member instead of
+// faking a remote summary.
+func TestLadderRemoteNeverApplies(t *testing.T) {
+	stubPressure(t, 0)
+	logs := captureLogs(t)
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
+	a, s, _ := storeAgent(t, p, ladderConfig())
+	ladderFixture(t, s)
+	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
+
+	entries := compactionEntries(s)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	if entries[0].Method != MethodHandoff {
+		t.Fatalf("remote must not have produced the context: method = %q, want %q", entries[0].Method, MethodHandoff)
+	}
+	if !strings.Contains(logs.String(), "remote (provider-native streaming) not supported") {
+		t.Errorf("remote must say why it fell through, logs:\n%s", logs.String())
+	}
+}
+
+// TestLadderSnapcompactAppliesForAVisionModel pins omp's snapcompact
+// applicability: the rung needs the ACTIVE MODEL to declare image input
+// (omp `u?.input?.includes("image") === true`,
+// packages/coding-agent/src/session/compaction-methods.ts:77), not an image
+// in the conversation — so a vision model takes the rung even when the
+// discarded span holds no image, and the record names the rung that produced
+// it (omp writes `method: "snapcompact"`,
+// packages/coding-agent/src/session/session-maintenance.ts:2383).
+func TestLadderSnapcompactAppliesForAVisionModel(t *testing.T) {
+	stubPressure(t, 0)
+	p := &fakeProvider{}
+	a, s, _ := storeAgent(t, p, ladderConfig())
+	a.Vision = func() bool { return true } // the model declares image input
+	ladderFixture(t, s)
+	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
+
+	entries := compactionEntries(s)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	if entries[0].Method != methodSnapcompact {
+		t.Fatalf("method = %q, want %q", entries[0].Method, methodSnapcompact)
+	}
+	if len(p.gotReqs) != 0 {
+		t.Fatalf("snapcompact must not call the provider, got %d calls", len(p.gotReqs))
+	}
+	imageBlockOf(t, entries[0].Summary)
+}
+
+// TestLadderSnapcompactSkippedForATextOnlyModel pins the other side: a model
+// that does not declare image input cannot read the bitmap the rung produces,
+// so the rung does not apply and the ladder falls through to the summarize —
+// with the reason in the log (omp refuses the same rung outright:
+// "snapcompact cannot run locally: <id> is text-only.",
+// packages/coding-agent/src/session/session-maintenance.ts:619-621).
+func TestLadderSnapcompactSkippedForATextOnlyModel(t *testing.T) {
+	stubPressure(t, 0)
+	logs := captureLogs(t)
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
+	a, s, _ := storeAgent(t, p, ladderConfig())
+	ladderFixture(t, s)
+	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
+
+	entries := compactionEntries(s)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	if entries[0].Method != MethodHandoff {
+		t.Fatalf("method = %q, want %q", entries[0].Method, MethodHandoff)
+	}
+	if !strings.Contains(logs.String(), "text-only") {
+		t.Errorf("the skipped rung must say why, logs:\n%s", logs.String())
+	}
+}
+
+// TestLadderConfiguredOrderSkipsInapplicableMembers pins that a configured
+// order is honoured verbatim, but a member that does not apply is skipped
+// rather than run — here snapcompact, because the active model is text-only.
+func TestLadderConfiguredOrderSkipsInapplicableMembers(t *testing.T) {
+	stubPressure(t, 0)
+	logs := captureLogs(t)
+	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
+	a, s, _ := storeAgent(t, p, ladderConfig("snapcompact", "handoff"))
+	ladderFixture(t, s)
+	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
+
+	entries := compactionEntries(s)
+	if len(entries) != 1 {
+		t.Fatalf("compaction entries = %d, want 1", len(entries))
+	}
+	if entries[0].Method != MethodHandoff {
+		t.Fatalf("method = %q, want %q", entries[0].Method, MethodHandoff)
+	}
+	if !strings.Contains(logs.String(), "snapcompact") || !strings.Contains(logs.String(), "text-only") {
+		t.Errorf("the skipped rung must say why, logs:\n%s", logs.String())
 	}
 }

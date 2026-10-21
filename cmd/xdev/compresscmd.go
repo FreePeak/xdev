@@ -227,7 +227,10 @@ func compressSession(ctx context.Context, path, method string, keepRecent int64,
 		Summary:          summary,
 		FirstKeptEntryID: &anchor,
 		TokensBefore:     plan.TokensBefore,
-		Method:           method,
+		// The same record contract the ladder uses: a member that never
+		// calls a provider names nothing, so the record cannot claim a
+		// round trip that never happened.
+		Method: agent.RecordedMethod(method),
 	}
 	// The record (omp rule 27) is filled by the same helper every other
 	// compaction path uses, over the SAME kept tail the report measures —

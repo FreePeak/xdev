@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/logx"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -39,8 +40,15 @@ func methodSnapcompactRun(a *Agent, _ context.Context, span *compactionSpan) (*s
 	text := renderTranscript(span.msgs[:span.cut()], snapResultChars, snapTotalChars)
 	// A text-only model cannot read a bitmap, so the dropped span is kept as
 	// a text excerpt instead of being encoded into bytes nobody can consume
-	// (#83; omp gates the same rung on model capability).
+	// (#83). The ladder never picks this rung for such a model — omp gates
+	// the rung on the model's declared image input and refuses it outright
+	// for a text-only one (omp
+	// packages/coding-agent/src/session/session-maintenance.ts:619-621) —
+	// so this path is the FORCED one (`xdev compress --method snapcompact`,
+	// which runs a member without the applicability check). It says so
+	// instead of quietly producing something else.
 	if !modelAcceptsImages(a) {
+		logx.Warnf("compaction: snapcompact needs a vision-capable model (%s is text-only) — keeping the dropped span as text instead of a bitmap", modelLabel(a))
 		return snapcompactText(a, span, text)
 	}
 	img, rows, err := renderTextPNG(text)

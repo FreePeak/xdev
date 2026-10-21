@@ -105,6 +105,8 @@ func TestCompressSessionCompactsDeterministically(t *testing.T) {
 	if compaction == nil {
 		t.Fatal("no compaction entry in the session file")
 	}
+	// The persisted record names the member that produced it (omp's
+	// contract): the CLI ran shake, and the entry says so.
 	if compaction.Method != "shake" {
 		t.Fatalf("compaction method = %q, want shake", compaction.Method)
 	}

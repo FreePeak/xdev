@@ -62,45 +62,48 @@ func TestHeaderTimeoutEndsTheTurnInsteadOfReplayingIt(t *testing.T) {
 // A compaction that replaces a hundred tool results with a summary is the
 // move the overflow path already makes; here the provider proved by staying
 // silent that the request did not fit the way it was.
+//
+// The window is deliberately unreachable: the token trigger stays out of the
+// way so the ONLY compaction is the one the repair forces, and the request
+// the provider stays silent about is the whole history — the body the
+// compaction has to shrink.
 func TestHeaderTimeoutRepairsTheRequestWhenCompactionShrinksIt(t *testing.T) {
 	p := &fakeProvider{calls: []fakeScript{
-		{err: headerTimeoutErr()},
-		{events: []ai.Event{textEvent("ok"), doneEvent("ok")}},
+		{err: headerTimeoutErr()},                              // the request the provider never answered
+		{events: []ai.Event{textEvent("ok"), doneEvent("ok")}}, // the summarize the repair forces
+		{events: []ai.Event{textEvent("ok"), doneEvent("ok")}}, // the repaired request
 	}}
-	// A small window: the threshold method compacts, so the forced
-	// compaction the repair calls has something to do.
-	a, s, p := storeAgent(t, p, CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5})
+	a, s, p := storeAgent(t, p, CompactionConfig{ContextWindow: 1 << 20, KeepRecentTokens: 5})
 	a.Retry = RetryPolicy{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, Infinite: true}
 	// A history big enough to be worth compacting — the shape the live
 	// failure had: a long run of tool results, then the user's question.
 	big := strings.Repeat("x", 4000)
-	for _, m := range []ai.Message{
+	history := []ai.Message{
 		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "first question"}}},
 		{Role: ai.RoleAssistant, Content: []ai.Block{ai.ToolCallBlock{ID: "call_1", Name: "read", Arguments: []byte(`{"path":"a.go"}`)}}},
 		{Role: ai.RoleToolResult, ToolCallID: "call_1", ToolName: "read", Content: []ai.Block{ai.TextBlock{Text: big}}},
 		{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "answer"}}},
-	} {
+		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "what now?"}}},
+	}
+	for _, m := range history {
 		if err := s.Append(&session.MessageEntry{Message: m}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	submitHistory(t, s, big)
 
-	final, err := a.Run(context.Background(), "sys", []ai.Message{
-		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: big}}},
-	})
+	final, err := a.Run(context.Background(), "sys", history)
 	if err != nil {
 		t.Fatalf("Run: the repaired request must be tried, got %v", err)
 	}
 	if final == nil || final.Text() != "ok" {
 		t.Fatalf("final = %#v", final)
 	}
-	if len(p.gotReqs) != 2 {
-		t.Fatalf("stream calls = %d, want 2 (the silent one, then the repaired one)", len(p.gotReqs))
+	if len(p.gotReqs) != 3 {
+		t.Fatalf("stream calls = %d, want 3 (the silent one, the repair's summarize, the repaired one)", len(p.gotReqs))
 	}
-	// The repair must have SHRUNK the request: the second attempt carries
-	// fewer bytes than the first.
-	first, second := requestBytes(p.gotReqs[0].Messages), requestBytes(p.gotReqs[1].Messages)
+	// The repair must have SHRUNK the request: the repaired attempt carries
+	// fewer bytes than the request it replaces.
+	first, second := requestBytes(p.gotReqs[0].Messages), requestBytes(p.gotReqs[2].Messages)
 	if second >= first {
 		t.Fatalf("the repaired request is not smaller: %d bytes then %d", first, second)
 	}
