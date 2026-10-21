@@ -84,7 +84,12 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	// Recomputed per prompt: async MCP/extension tools must reach the
 	// model that is being told they exist.
 	overrides := agent.LoadSystemPromptOverrides(cwd)
-	buildSys := promptFn(basePrompt(opts, cwd), cwd, reg, tailSystemPrompt(overrides, opts.AppendSystem))
+	// The prompt and the agent's tool set are the SAME set: the agent's
+	// tools are a view of the shared registry (the rung's surface), and a
+	// prompt built from the shared registry would describe a different one.
+	var runTools *tool.Registry
+	buildSys := promptFnForTools(basePrompt(opts, cwd), cwd, func() *tool.Registry { return runTools },
+		tailSystemPrompt(overrides, opts.AppendSystem), nil)
 
 	store, err := openSession(cwd, opts.ContinueLast, opts.ResumePrefix)
 	if err != nil {
@@ -99,7 +104,7 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	// A resumed session runs at the level its own transcript records, and at
 	// the tool surface that level was reached through. The tool set is a
 	// VIEW of the shared registry: this run's own deferred set.
-	runTools := reg.View(sessionRung(store, lastSettings().SessionEffort()))
+	runTools = reg.View(sessionRung(store, lastSettings().SessionEffort()))
 
 	h := &rpcHandler{
 		cwd: cwd, buildSys: buildSys, reg: reg, cfg: cfg,

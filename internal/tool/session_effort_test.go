@@ -195,3 +195,30 @@ func viewHas(r *Registry, name string) bool {
 	}
 	return false
 }
+
+// A removed tool leaves no entry behind: a VIEW owns its own catalog, and
+// the removal reaches the shared registry's catalog only.
+//
+// An entry whose tool is gone is not a tool: tool_search must not offer it,
+// and tool_call on it would fail.
+func TestTheViewDropsARemovedTool(t *testing.T) {
+	r := NewRegistry()
+	r.Register(namedStub{n: "read"})
+	r.Register(namedStub{n: "gone"})
+	view := r.View("low") // the low rung defers everything but the pi core
+	if len(view.Deferred()) != 1 {
+		t.Fatalf("deferred = %v, want the one entry", view.Deferred())
+	}
+	r.Remove("gone")
+	if len(view.Deferred()) != 0 {
+		t.Fatalf("the view's catalog still lists the removed tool: %v", view.Deferred())
+	}
+	if _, ok := view.Catalog().Lookup("gone"); ok {
+		t.Fatal("the view's catalog still resolves the removed tool")
+	}
+	for _, e := range view.Catalog().Search("gone", 10) {
+		if e.Name == "gone" {
+			t.Fatal("tool_search still offers the removed tool")
+		}
+	}
+}

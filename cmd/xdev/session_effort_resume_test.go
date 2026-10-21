@@ -330,3 +330,23 @@ func TestTheDeferredToolsAreReachableThroughTheBridge(t *testing.T) {
 		t.Fatalf("bridge = %q, want %q", bridge.Name(), tool.ToolCallName)
 	}
 }
+
+// The system prompt must describe the SAME surface the agent has.
+//
+// The agent's tools are a per-turn VIEW of the shared registry, and the
+// shared registry is laddered at the GLOBAL rung: a session whose rung
+// differs from the global one — the resumed-session case this PR exists for
+// — would be told about tools it cannot call, and the tools it can call
+// would be missing from the prompt.
+func TestThePromptDescribesTheAgentsOwnToolSurface(t *testing.T) {
+	reg := effortStubRegistry()
+	tool.ApplySessionEffort(reg, "medium") // the GLOBAL rung
+	store := session.OpenMem("test", "t")
+	appendThinkingLevel(store, "high", "high", "high")
+	view := reg.View(sessionRung(store, "medium")) // the SESSION's rung
+
+	build := promptBuilder("BASE", t.TempDir(), "", nil)
+	if build(view) == build(reg) {
+		t.Fatal("the prompt must be built from the agent's own tool set: the view and the shared registry describe different surfaces")
+	}
+}

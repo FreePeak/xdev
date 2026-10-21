@@ -519,7 +519,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	if h, ok := mem.(interface{ SetWarnSink(func(string)) }); ok {
 		h.SetWarnSink(func(msg string) { fmt.Fprintln(os.Stderr, "xdev: "+msg) })
 	}
-	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
+	// The prompt and the agent's tool set are the SAME set: the agent's
+	// tools are a view of the shared registry, and a prompt built from the
+	// shared registry would describe a different surface.
+	var runTools *tool.Registry
+	buildSys := promptFnForTools(basePrompt(opts, cwd), cwd, func() *tool.Registry { return runTools },
 		tailSystemPrompt(overrides, opts.AppendSystem), mem)
 	_ = buildSys // resolved at Run time: late-registered tools must be in the prompt
 
@@ -575,7 +579,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// accepts resumes clamped, not dropped. The tool surface follows the
 	// rung, in a VIEW of the shared registry: this run's own deferred set.
 	effortLevel := sessionLevelFor(store, effortRef, provName, modelName, cfg)
-	runTools := reg.View(sessionRung(store, settings.SessionEffort()))
+	runTools = reg.View(sessionRung(store, settings.SessionEffort()))
 	ag := &agent.Agent{Provider: prov, Tools: runTools, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
 		ag.Prewalk = &agent.Prewalk{Target: *t}
@@ -1089,6 +1093,37 @@ func promptFn(base string, cwd string, reg *tool.Registry, appendSystem string) 
 }
 
 func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSystem string, mem memory.Store) func() string {
+	build := promptBuilder(base, cwd, appendSystem, mem)
+	return func() string { return build(reg) }
+}
+
+// promptFnForTools builds the system prompt from a tool set that can
+// CHANGE between calls.
+//
+// The agent's tools are a per-turn VIEW of the shared registry (the rung's
+// surface), and a prompt built from the shared registry would describe a
+// DIFFERENT surface than the agent has: the model would be told about tools
+// it cannot call, and the tools it can call would be missing from the
+// prompt. The two must come from the same set.
+func promptFnForTools(base string, cwd string, tools func() *tool.Registry, appendSystem string, mem memory.Store) func() string {
+	build := promptBuilder(base, cwd, appendSystem, mem)
+	return func() string {
+		reg := tools()
+		if reg == nil {
+			reg = tool.NewRegistry()
+		}
+		return build(reg)
+	}
+}
+
+// promptBuilder prepares what the system prompt needs that does not depend
+// on the tool set (the context files, the rules) and returns the renderer
+// for ONE tool set: the eager tools of that set and the deferred index of
+// that set.
+//
+// The tool set is an ARGUMENT, not a capture, so the caller can hand the
+// renderer the very set the agent was given.
+func promptBuilder(base string, cwd string, appendSystem string, mem memory.Store) func(reg *tool.Registry) string {
 	// --add-dir roots contribute their own AGENTS.md hierarchy; the launch
 	// cwd stays first so its files keep precedence.
 	ctxFiles := agent.LoadContextFiles(cwd)
@@ -1107,7 +1142,7 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 		ruleSet = rules.Discover(cwd, lastSettings().EnabledProviders)
 		rules.Set(ruleSet)
 	}
-	return func() string {
+	return func(reg *tool.Registry) string {
 		defs := reg.Defs()
 		named := make([]agent.NamedToolDef, 0, len(defs))
 		for _, d := range defs {

@@ -125,10 +125,27 @@ func (c *Catalog) Entries() []Entry {
 	defer c.mu.RUnlock()
 	out := make([]Entry, 0, len(c.entries))
 	for _, e := range c.entries {
+		if !c.live(e.Name) {
+			continue // the tool is gone; the entry is not a tool any more
+		}
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// live reports whether the catalogued tool is STILL registered.
+//
+// A tool removed from the registry leaves its catalog entry behind: a view
+// owns its own catalog, and the removal reaches the shared registry's
+// catalog only. An entry whose tool is gone is not a tool — tool_search must
+// not offer it, and tool_call on it would fail.
+func (c *Catalog) live(name string) bool {
+	if c == nil || c.reg == nil {
+		return true
+	}
+	_, ok := c.reg.Get(name)
+	return ok
 }
 
 // Lookup returns one deferred tool.
@@ -137,9 +154,12 @@ func (c *Catalog) Lookup(name string) (Entry, bool) {
 		return Entry{}, false
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	e, ok := c.entries[name]
-	return e, ok
+	c.mu.RUnlock()
+	if !ok || !c.live(name) {
+		return Entry{}, false
+	}
+	return e, true
 }
 
 // Search ranks the deferred tools against a free-text query: exact name >

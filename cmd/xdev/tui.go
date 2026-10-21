@@ -343,8 +343,12 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// (#86): the prompt path, the turn boundary and the tool registry share
 	// this one instance.
 	sessionMemory := buildMemory(lastSettings())
-	buildSys := promptFnWithMemory(basePrompt(opts, cwd), cwd, reg,
+	// The prompt is rendered for a NAMED tool set: the agent's tools are a
+	// per-turn view of the shared registry, and a prompt built from the
+	// shared registry would describe a different surface than the agent has.
+	buildPrompt := promptBuilder(basePrompt(opts, cwd), cwd,
 		tailSystemPrompt(overrides, opts.AppendSystem), sessionMemory)
+	buildSys := func() string { return buildPrompt(reg) }
 	// The breadcrumb keys --continue for this pane. A fresh session is
 	// memory-only until its first assistant message, so record the
 	// AUTO-PERSIST path: --continue already guards with os.Stat, and a
@@ -2523,7 +2527,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				history = hist.Messages
 			}
 			sessMu.Unlock()
-			sys := buildSys()
+			sys := buildPrompt(turnTools)
 			if vibeActive() {
 				sys = vibeSys() // director prompt for the restricted toolset
 			}
