@@ -28,7 +28,7 @@ func TestTheRenderedPromptIndexesTheViewsDeferredTools(t *testing.T) {
 	tool.ApplySessionEffort(reg, "medium") // the GLOBAL rung
 	build := promptBuilder("BASE", t.TempDir(), "", nil)
 
-	tools, prompt := turnToolSet(reg, "high", build) // the SESSION's rung
+	tools, prompt := turnToolSet(reg, "high", build, false) // the SESSION's rung
 	_, deferred := splitPromptTools(prompt())
 
 	// The index must name the VIEW's deferred tools...
@@ -68,8 +68,14 @@ func TestTheVibePromptDescribesTheDirectorsOwnToolSurface(t *testing.T) {
 	scope.Register(effortStub{n: "vibe_send"})
 	build := promptBuilder("BASE", t.TempDir(), "", nil)
 
-	tools, prompt := turnToolSet(scope, "low", build)
-	eager, _ := splitPromptTools(prompt())
+	// The DIRECTOR mode: the seam renders the director's prompt over the
+	// turn's view of the scope registry.
+	tools, prompt := turnToolSet(scope, "low", build, true)
+	sys := prompt()
+	if !strings.Contains(sys, agent.VibeDirectorPrompt) {
+		t.Fatal("the director's prompt must be the one rendered")
+	}
+	eager, _ := splitPromptTools(sys)
 	for _, name := range []string{"vibe_spawn", "vibe_send"} {
 		if strings.Contains(eager, name) {
 			t.Fatalf("the prompt must not offer %q as directly callable: the director's set has it deferred", name)

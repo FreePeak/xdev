@@ -103,7 +103,7 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 	// A resumed session runs at the level its own transcript records, and at
 	// the tool surface that level was reached through. The tool set is a
 	// VIEW of the shared registry: this run's own deferred set.
-	runTools, runPrompt := turnToolSet(reg, sessionRung(store, lastSettings().SessionEffort()), buildPrompt)
+	runTools, runPrompt := turnToolSet(reg, sessionRung(store, lastSettings().SessionEffort()), buildPrompt, false)
 	buildSys = runPrompt
 
 	h := &rpcHandler{

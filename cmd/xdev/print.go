@@ -580,7 +580,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	// accepts resumes clamped, not dropped. The tool surface follows the
 	// rung, in a VIEW of the shared registry: this run's own deferred set.
 	effortLevel := sessionLevelFor(store, effortRef, provName, modelName, cfg)
-	runTools, runPrompt := turnToolSet(reg, sessionRung(store, settings.SessionEffort()), buildPrompt)
+	runTools, runPrompt := turnToolSet(reg, sessionRung(store, settings.SessionEffort()), buildPrompt, false)
 	buildSys = runPrompt
 	ag := &agent.Agent{Provider: prov, Tools: runTools, Hooks: hooks, MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Model: modelName, Store: store, Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), settings, agent.HandoffOrder(settings.CompactionMethodOrder())), Failovers: failoverChain(cfg, settings, provName, modelName), Thinking: effortThinking(effortLevel, provName, modelName, cfg), PlanMode: planMode}
 	if t := resolvePrewalk(opts, cfg, settings); t != nil {
@@ -1109,9 +1109,22 @@ func promptFnWithMemory(base string, cwd string, reg *tool.Registry, appendSyste
 //
 // It is a function and not two values assembled at a call site, so the tie
 // cannot be broken by editing one of them.
-func turnToolSet(reg *tool.Registry, rung string, build func(*tool.Registry) string) (tools *tool.Registry, prompt func() string) {
+func turnToolSet(reg *tool.Registry, rung string, build func(*tool.Registry) string, director bool) (tools *tool.Registry, prompt func() string) {
 	view := reg.View(rung)
-	return view, func() string { return build(view) }
+	pick := build
+	if director {
+		pick = directorPrompt(build)
+	}
+	return view, func() string { return pick(view) }
+}
+
+// directorPrompt renders the ordinary system prompt with the director's
+// appendix: the SAME builder, so the director's prompt cannot drift from
+// the ordinary one, and it is rendered for the same tool set.
+func directorPrompt(build func(*tool.Registry) string) func(*tool.Registry) string {
+	return func(reg *tool.Registry) string {
+		return build(reg) + "\n\n" + agent.VibeDirectorPrompt
+	}
 }
 
 // promptFnForTools builds the system prompt from a tool set that can
