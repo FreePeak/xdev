@@ -792,6 +792,15 @@ func (a *Agent) compactionDue(history []ai.Message) bool {
 	if a.compaction().ContextWindow <= 0 {
 		return false
 	}
+	// A zero (or negative) context window has no threshold to cross:
+	// threshold() is 0 there, so "used > 0" would fire on any history at
+	// all. omp never compacts without a window (its check requires a
+	// positive threshold), so a session with no window never compacts on
+	// the token budget. The memory-pressure and idle backstops above are
+	// not the token budget and still fire.
+	if a.compaction().ContextWindow <= 0 {
+		return false
+	}
 	return contextTokens(history) > a.compaction().threshold()
 }
 
