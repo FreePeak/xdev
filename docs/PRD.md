@@ -4388,3 +4388,31 @@ The one nudge the fixed run still received was CORRECT: that turn ran `git fetch
 
 **Tests.** `internal/tool/readonly_gh_test.go` — `TestReadOnlyCommandClassifiesGh` (the read forms and the writing forms, both directions, including the three `gh api` method spellings). `internal/tool/caps_op_test.go` — `TestCallIsReadOnlyJudgesAMultiOpToolByItsOp` (the per-op verdict; an unparseable call, a call with no op and an undeclared tool are all not reads) and `TestTheGithubToolDeclaresItsReadOnlyOps` (the real tool's op set, so a typo cannot pass). `internal/agent/keep_going_read_tools_test.go` — `TestKeepGoingStaysOffAfterAGhReadOnlyTurn` and `TestKeepGoingStaysOffAfterAReadOnlyToolOp` (the field report: a research turn that only reads gets NO nudge), against `TestKeepGoingStillFiresForAGhWrite` and `TestKeepGoingStillFiresForAWriteToolOp` (the other direction: a merge and a PR creation still arm the gate). `internal/tool/classifier_gh_corpus_test.go` — `TestNoDestructiveGhSpellingIsEverClassifiedAsARead` replays the whole local store and asserts the one property that must never break.
 *Last updated: 2026-10-21 (fix/keep-going-gate-read-tools — a plain question is answered once: the read form of `gh` is a read, a tool that mixes reads and writes is judged per op, and the gate's conservative default for an undeclared tool is unchanged)*
+
+## The `&` in `2>&1` is a redirect, not a command (2026-10-21)
+
+The keep-going gate asks "did this run change anything?" and a "yes" pushes the model past the answer it has already given. The verdict comes from `tool.ReadOnlyCommand`, which splits a shell line into segments and asks whether EVERY segment is a read. The splitter cut the line at every unquoted `&` — including the `&` that belongs to a REDIRECT.
+
+`cmd 2>&1` therefore became two segments: `"cmd 2>"` and `"1"`. The second one is not a command, so it could not be classified, and the WHOLE line stopped being a read. `2>&1` is how a session captures stderr, so it appears in a large share of the calls a research turn makes.
+
+**THE FIELD REPORT, COUNTED.** Session 4c4addab (2026-10-21): the model answered "list me all pr urls openningin xdev" and the harness pushed it past its own answer in the same millisecond. Replaying that turn's 26 calls through the old and the new classifier: **16 armed the gate, 5 do**. The five that still do are correct — one writes `/tmp/open_prs.txt`, and three are shell loops the classifier does not model.
+
+**THE FIX IS IN THE SPLITTER, NOT IN THE CLASSIFIER.** `>&2`, `2>&1`, `&>f` and `&>>f` are redirect operators. The `&` in them starts no new command, so the splitter keeps it with the command it belongs to (`internal/tool/policy.go` — `isRedirectAmp`). A control `&` (backgrounding, or the first half of `&&`) still splits, and a quoted `&` is still data.
+
+**A REDIRECT IS NOT AN ARGUMENT TO THE COMMAND.** With the redirect intact in one segment, `git branch --contains 01671eb 2>&1` handed the classifier a third argument — and a bare argument after `git branch` is a branch name to CREATE, so a query read as a write. The classifier now cuts the segment at the redirect before it judges the arguments (`internal/tool/readonly.go` — `cutAtRedirect`), taking the file-descriptor number with it: the operator is `[n]>`, so "2>&1" is one redirect, not an argument "2" followed by a redirect. The write check is separate and runs on the WHOLE segment, so nothing is lost by cutting.
+
+**THE WRITE CHECK NO LONGER STOPS AT THE FIRST `>`.** `hasWriteRedirect` returned on the first `>`, and the first `>` of `cmd 2>&1 > out` is the one in the fd shuffle — so the line reported itself as a read while writing `out`. A write reported as a read is the one direction that must be impossible, so the scan now CONTINUES past an fd shuffle and finds the later redirect.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (132,019 bash calls, origin/main's classifier against this one):
+
+| | origin/main | this branch |
+|---|---|---|
+| classified read-only | 59,472 (45.0%) | 65,609 (**49.7%**) |
+| verdict flipped to read | — | **6,195** |
+
+6,195 is six times the `gh` table's own 1,035. The `2>&1` split was the larger hole.
+
+**STILL OPEN, MEASURED.** 1,999 calls are still a mutation ONLY because of shell-loop scaffolding — the segments `for x in ...`, `do ...` and `done` are not commands, so the classifier cannot classify them. Making them transparent is a shell parser, and the conservative default (an unrecognised construct is a mutation) is the safe direction; it is the next thing to close, and the number is known.
+
+**Tests.** `internal/tool/readonly_redirect_test.go` — `TestSplitCompoundKeepsARedirectIntact` (the four redirect forms stay with their command; a background `&` and `&&` still split; a quoted `&` is data) and `TestARedirectAfterAnFdShuffleStillWrites` (a write after an fd shuffle is a write; `git branch --contains sha 2>&1` is a query, while `git branch sha` still CREATES). `internal/tool/classifier_corpus_test.go` — the destructive-git detector learned the same rule, so the store-wide guard still holds: 1,912 segments running a destructive git verb, none of them a read.
+*Last updated: 2026-10-21 (fix/keep-going-gate-redirect-split — the `&` in `2>&1` is a redirect and not a command: 6,195 of the store's 132,019 bash calls change verdict, a redirection is not an argument to the command, and a write behind an fd shuffle is still a write)*

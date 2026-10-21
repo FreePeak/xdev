@@ -369,9 +369,46 @@ func ghApiIsRead(args []string) bool {
 	return false
 }
 
+// cutAtRedirect returns the segment up to the first unquoted '<' or '>'.
+//
+// A redirection is not an argument to the command. `git branch --contains
+// 01671eb 2>&1` passes --contains and 01671eb to git and 2>&1 to the shell,
+// but the classifier saw "2>&1" as a third argument — and a bare argument
+// after `git branch` is a branch name to CREATE, so the query became a
+// write. Cutting at the redirect leaves the command's own arguments, which
+// is what the caller wants.
+//
+// The cut takes the file-descriptor number with it: the operator is `[n]>`,
+// so "2>&1" is one redirect, not an argument "2" followed by a redirect.
+//
+// The write check is separate and runs on the WHOLE segment
+// (hasWriteRedirect), so nothing is lost by cutting here: a segment that
+// redirects is still a write.
+func cutAtRedirect(seg string) string {
+	var quote byte
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '>' || c == '<':
+			j := i
+			for j > 0 && seg[j-1] >= '0' && seg[j-1] <= '9' {
+				j-- // the file-descriptor number belongs to the operator
+			}
+			return seg[:j]
+		}
+	}
+	return seg
+}
+
 // readOnlySegment judges one already-split segment.
 func readOnlySegment(seg string) bool {
-	fields := strings.Fields(seg)
+	fields := strings.Fields(cutAtRedirect(seg))
 	// Leading VAR=value assignments do not change the command: `FOO=1 ls` is
 	// an ls. A segment that is ONLY assignments is a write (it exports state),
 	// so it falls through to the false below.
@@ -509,7 +546,14 @@ func hasWriteRedirect(seg string) bool {
 			}
 			if j < len(seg) && seg[j] == '&' {
 				// `>&1`, `2>&1`, `&>` — fd shuffle / merge, not a file write.
-				return false
+				//
+				// The scan CONTINUES: this operator is not the only one in
+				// the segment, and the line may still write a file later —
+				// "cmd 2>&1 > out" writes out. Returning here would report
+				// that line as a read, which is the one direction that must
+				// be impossible: a write read as a read costs a turn that
+				// ends when it should not have.
+				continue
 			}
 			for j < len(seg) && (seg[j] == ' ' || seg[j] == '\t') {
 				j++
