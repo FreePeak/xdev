@@ -9,6 +9,10 @@
 # local tool scratch: the edit/write/bash self-tests run in here
 .selftest/
 
+# git worktrees for feature branches (the repo's own convention: every
+# change happens in .worktrees/<slug>, never in the shared checkout)
+.worktrees/
+
 # go test + coverage output
 *.test
 coverage.out
