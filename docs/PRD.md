@@ -3446,6 +3446,18 @@ Verified on the built binary in a forked pty with `pyte` (the same drive that sh
 
 ---
 
+*Last updated: 2026-10-21 (`fix/status-bar-no-tab-count` — user report: "remove the tab count in the status bar bottom too"):* **the status row counted the open sessions; the count was a number nobody could act on.**
+
+**What it was.** The `sessions` HUD segment — the first segment of the shipped status row — printed `"6 tabs"`: `len(a.tabs)`, the size of the open-session set, with `·1` for a running session and `✦1` for unread output.
+
+**Why it went.** The set is behind the chords (`Alt+]`, `Alt+[`, `C-1..9`) and the `/tabs` list; the COUNT told the user nothing they could act on, and it read as a wrong count — a directory whose persisted set had grown showed "6 tabs" for the one session in view (the report that opened at #713). It was also the only figure on the row that grew without the user doing anything.
+
+**What it is now.** The segment carries the open-session STATE, not the count: `1 running`, `1 unread`, `1 running · 1 unread`, and nothing at all when every session is idle. The tab count is gone from the status row; the tab STRIP (opt-in, `tui.tabs.mode on`) is the other surface that names the open sessions, and `/tabs` lists them.
+
+Tests: `internal/tui/statusrowcount_test.go` — `TestStatusRowDoesNotCountOpenSessions` (three idle sessions render nothing; a running and an unread session render the marks, and the word "tab" is nowhere in the text).
+
+---
+
 *Last updated: 2026-10-05 (`test/ask-isolation` — the two red tests in `internal/config`, closed):* **`TestAskTimeoutLayersAndDecodes` and `TestAskAutoAnswerDefaultsOffAndLayersOn` had been failing on this machine and green in CI, and the cause was neither the code nor the box.** Both call `LoadSettings(cwd, nil)`, and the global layer that call folds in is `~/.xdev/agent/config.yml` — the developer's REAL one, not a fixture. So a test whose whole subject is the *shipped default* (`ask.timeout` = 60s, `ask.autoAnswer` off) was really asserting "the shipped default, as overridden by whatever this developer has configured". This box carries `ask: {autoAnswer: true, timeout: 300}` — exactly what those two keys exist for — so both failed; a clean machine passed them. `asktimeout_test.go` was the **only** file in `internal/config` that called `LoadSettings` without isolating the global layer (`t.Setenv("XDEV_AGENT_DIR", …)` or `t.Setenv("HOME", …)`); the other twenty do. Both tests now isolate it, with the reason in the file so the next test copied from a neighbour does not undo it.
 
 The general rule this earns, and the reason it is worth recording next to the tests rather than in a comment nobody reads: **a test that pins a DEFAULT must not read the machine's config through the loader it is testing.** `LoadSettings(cwd, nil)` reads as "no overlays" and is anything but. Verified by running the package three ways — with the real `ask:` config in a temp agent dir, with an empty one, and with the two new lines removed (which reproduces both failures under the same config).
