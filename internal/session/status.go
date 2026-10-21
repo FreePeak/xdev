@@ -10,16 +10,33 @@ import (
 // SessionStatus is the lifecycle badge of a session, derived from the tail of
 // its file (#107): a session the user killed mid-turn must not look like one
 // that ran to the end.
+//
+// The vocabulary is omp's six verdicts (rules 36, 37) — error, aborted,
+// interrupted, complete, pending, unknown — plus xdev's own "empty". "empty"
+// is not one of omp's six because it answers a question omp never asks: not
+// "how did the last turn end" but "is there a conversation here at all". An
+// empty session is skipped by every resume path (see resolveResumeID), so it
+// must not be a flavour of "interrupted" — the two mean opposite things.
 type SessionStatus string
 
 const (
-	// StatusDone — the last assistant turn ended normally.
-	StatusDone SessionStatus = "done"
-	// StatusInterrupted — the session stopped mid-turn: the user aborted it,
-	// the provider errored or hit the output limit, a tool call never came
-	// back, or the transcript still ends on the user prompt that was being
-	// answered when it died.
+	// StatusError — the last assistant turn ended with a provider error.
+	StatusError SessionStatus = "error"
+	// StatusAborted — the last assistant turn was aborted: the user
+	// stopped it, or a watchdog cancelled it.
+	StatusAborted SessionStatus = "aborted"
+	// StatusInterrupted — the session stopped mid-turn: the provider hit
+	// the output limit, a tool call never came back, or the transcript
+	// still ends on the user prompt that was being answered when it died.
 	StatusInterrupted SessionStatus = "interrupted"
+	// StatusComplete — the last assistant turn ended normally.
+	StatusComplete SessionStatus = "complete"
+	// StatusPending — the transcript ends on a user prompt that nothing
+	// has answered yet: the turn is in flight, not finished.
+	StatusPending SessionStatus = "pending"
+	// StatusUnknown — the tail holds a message whose role this build does
+	// not know. One unreadable line must not cost the session its badge.
+	StatusUnknown SessionStatus = "unknown"
 )
 
 // statusTailMax bounds the tail read that finds the terminal entry. The store
@@ -34,7 +51,7 @@ const (
 // offset as a custom entry the way session_exit is recorded.
 const statusTailMax = 32 * 1024
 
-// statusMessageWire is the minimal decode of a persisted message. It is
+// statusMessageWire is the minimal decode of a persisted line. It is
 // deliberately not ai.Message: ai.Message's block union is strict, so a line
 // carrying a block type this build does not know would fail the whole decode
 // and cost the status of the file. Only the fields the verdict needs are read.
@@ -47,6 +64,10 @@ type statusMessageWire struct {
 			Type string `json:"type"`
 		} `json:"content"`
 	} `json:"message"`
+	// ShortSummary is the one-line rendering a compaction record carries
+	// (omp rule 27). It is the preview fallback for a session that has no
+	// title (rule 45).
+	ShortSummary string `json:"shortSummary"`
 }
 
 // StatusEmpty marks a session whose file carries no message at all: a title
@@ -63,6 +84,10 @@ const StatusEmpty SessionStatus = "empty"
 // line (a goal entry, a model change, a session_exit) means the transcript
 // sits behind the window — that is interrupted, not empty. Only a file with
 // nothing but its slot and header is StatusEmpty.
+//
+// The scan runs BACKWARDS and stops at the first message it finds: the
+// listing calls this for every session file, on the picker's per-keystroke
+// path, so the window is not parsed to its end.
 func ClassifyStatus(tail []byte) SessionStatus {
 	lines := strings.Split(string(tail), "\n")
 	bookkeeping := false
@@ -76,7 +101,7 @@ func ClassifyStatus(tail []byte) SessionStatus {
 			continue
 		}
 		if w.Type != TypeMessage || w.Message == nil {
-			if !isHeaderLine(line) {
+			if !isHeaderLine(w.Type) {
 				bookkeeping = true
 			}
 			continue
@@ -94,27 +119,60 @@ func ClassifyStatus(tail []byte) SessionStatus {
 // not entries, so a file holding only them has no conversation and is empty;
 // every other non-message line is bookkeeping and implies the transcript is
 // behind this window.
-func isHeaderLine(line string) bool {
-	var w struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal([]byte(line), &w) != nil {
-		return false
-	}
-	return w.Type == "title" || w.Type == "session"
+func isHeaderLine(entryType string) bool {
+	return entryType == "title" || entryType == "session"
 }
 
-// classifyTerminal maps the last message onto the row's two words. Anything
-// short of a cleanly finished assistant turn counts as interrupted — an
-// aborted turn persists nothing past the prompt it was answering, so a
-// user-last transcript IS the signature of a user interruption.
+// TailCompactionSummary returns the one-line summary of the LAST compaction
+// record in the window — the preview fallback for a session that carries no
+// title (omp rule 45).
+//
+// ponytail: the summary is only found when the compaction record falls inside
+// the 32 KiB window, so a session compacted long ago and busy since falls
+// back to its first message instead. Upgrade path if that ever shows up:
+// record the summary in the session header when the compaction lands.
+func TailCompactionSummary(tail []byte) string {
+	lines := strings.Split(string(tail), "\n")
+	summary := ""
+	for _, line := range lines {
+		// Cheap prefilter: only a compaction record can carry the summary,
+		// and the listing reads this window for every file.
+		if !strings.Contains(line, TypeCompaction) {
+			continue
+		}
+		var w struct {
+			Type         string `json:"type"`
+			ShortSummary string `json:"shortSummary"`
+		}
+		if err := json.Unmarshal([]byte(line), &w); err != nil {
+			continue
+		}
+		if w.Type == TypeCompaction && w.ShortSummary != "" {
+			summary = w.ShortSummary
+		}
+	}
+	return summary
+}
+
+// classifyTerminal maps the last message onto one of omp's six verdicts
+// (rules 36, 37). The role decides the family and the stop reason decides
+// the failure: an errored turn is "error", an aborted one is "aborted", and
+// everything short of a clean finish inside an assistant turn is
+// "interrupted" (the output limit, a tool call that never came back). A
+// transcript that ends on the user prompt is "pending" — the turn is in
+// flight, not finished — and a tool result nobody consumed is
+// "interrupted": the call it answers is still open.
 func classifyTerminal(role ai.Role, stop ai.StopReason, content []struct {
 	Type string `json:"type"`
 }) SessionStatus {
 	switch role {
 	case ai.RoleAssistant:
 		switch stop {
-		case ai.StopReasonError, ai.StopReasonAborted, ai.StopReasonLength:
+		case ai.StopReasonError:
+			return StatusError
+		case ai.StopReasonAborted:
+			return StatusAborted
+		case ai.StopReasonLength:
 			return StatusInterrupted
 		}
 		for _, b := range content {
@@ -122,8 +180,12 @@ func classifyTerminal(role ai.Role, stop ai.StopReason, content []struct {
 				return StatusInterrupted // the call never came back
 			}
 		}
-		return StatusDone
-	default: // user (nothing answered it) or toolResult (call left open)
-		return StatusInterrupted
+		return StatusComplete
+	case ai.RoleUser:
+		return StatusPending // nothing has answered this prompt yet
+	case ai.RoleToolResult:
+		return StatusInterrupted // the call it answers is still open
+	default:
+		return StatusUnknown // a role this build does not know
 	}
 }

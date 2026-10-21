@@ -372,7 +372,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		modelMu.Unlock()
 		if s := storeOf(); s != nil {
 			_ = s.Append(&session.ModelChangeEntry{Model: lm})
-			_ = s.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"mode": "tui", "code": exitCode}})
+			_ = s.Append(&session.CustomEntry{CustomType: "session_exit",
+				Data: exitMarker("tui", exitCode, exitReason("tui", exitCode), pendingToolCalls(s))})
 			exitStore = s // the exit line's store, read before closeAll drops it
 		}
 		tabs.closeAll()
@@ -1169,6 +1170,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("resume: " + err.Error())
 			return
 		}
+		// The session belongs to the project its header names: continue
+		// there, not in the directory the picker was opened from.
+		if dir, derr := resumeCwd(path, cwd); derr != nil {
+			app.AddSystemBlock("resume: " + derr.Error())
+		} else if dir != cwd {
+			cwd = dir
+			app.SetPathCompletion(cwd, listDir) // the @-mention root follows
+			app.AddSystemBlock("· resumed in " + dir)
+		}
 		if err := swapStoreTo(resumed); err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
 		}
@@ -1184,18 +1194,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	})
 	app.SetPickerDelete(func(id string) error {
 		return deleteSessionByShortID(id, storeOf().Path())
-	})
-	app.SetResumeList(func(cwd string) error {
-		// The rows here are the session picker's; the closure used to also
-		// build a []tui.ResumeOption that nothing read, at the price of a
-		// second full session.List on every call.
-		items := resumePickerItems(cwd)
-		if len(items) == 0 {
-			app.AddSystemBlock("no other sessions in this directory")
-			return nil
-		}
-		app.OpenSessionPicker(items)
-		return nil
 	})
 	// branchReplay rebuilds the transcript from the live leaf — the
 	// TUI-side twin of the re-render omp performs after every tree
@@ -1560,10 +1558,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				// defaults to this folder and shows the Tab hint when
 				// the folder has no sessions), newest first;
 				// Up/Down + Enter resumes, Esc closes. No candidates
-				// at all → text listing.
+				// at all → the TUI's own "no other sessions" notice.
 				items := resumePickerItems(cwd)
 				if len(items) == 0 {
-					return app.ListSessions(cwd)
+					return nil
 				}
 				app.OpenSessionPicker(items)
 				return nil
@@ -1606,6 +1604,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			resumed, err := session.Open(path)
 			if err != nil {
 				return err
+			}
+			// The session belongs to the project its header names: continue
+			// there, not in the directory the command was typed in.
+			if dir, derr := resumeCwd(path, cwd); derr != nil {
+				app.AddSystemBlock("resume: " + derr.Error())
+			} else if dir != cwd {
+				cwd = dir
+				app.SetPathCompletion(cwd, listDir) // the @-mention root follows
+				app.AddSystemBlock("· resumed in " + dir)
 			}
 			return swapStoreTo(resumed)
 		},
@@ -3958,7 +3965,7 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 		if m.Status != "" {
 			detail += " · " + string(m.Status)
 		}
-		out = append(out, tui.ResumeOption{ID: m.ID, Title: m.Title, Detail: detail})
+		out = append(out, tui.ResumeOption{ID: m.ID, Title: m.Preview, Detail: detail})
 	}
 	return out
 }
@@ -3989,7 +3996,7 @@ func resumePickerItems(cwd string) []tui.SessionPickerItem {
 		}
 		out = append(out, tui.SessionPickerItem{
 			ID:     m.ID[:8],
-			Title:  m.Title,
+			Title:  m.Preview,
 			Mtime:  m.ModTime.Format("Jan 02 15:04"),
 			Size:   humanSize(m.SizeBytes),
 			Pinned: pins[m.ID[:8]],

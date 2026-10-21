@@ -302,7 +302,6 @@ type App struct {
 	extRun             ExtensionCommand
 	renderers          map[string]RenderSpec   // tool name -> declarative render spec
 	sessionBranch      func(args string) error // /branch to an entry id
-	resumeList         func(cwd string) error  // /resume session listing
 	onSend             func(text string)
 	// onSendImages is the multimodal send: the draft with every attached
 	// image's chip stripped, plus the payloads in prompt order. It returns
@@ -804,12 +803,6 @@ func (a *App) SetPickerPinToggle(fn func(id string)) { a.onPickerPinToggle = fn 
 // cmd removes the session JSONL + artifacts (nil → delete disabled).
 func (a *App) SetPickerDelete(fn func(id string) error) { a.onPickerDelete = fn }
 
-func (a *App) SetResumeList(fn func(cwd string) error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.resumeList = fn
-}
-
 func (a *App) SetSessionBranch(fn func(args string) error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -822,14 +815,6 @@ func (a *App) BranchSession(args string) error {
 		return fmt.Errorf("session branch not wired")
 	}
 	return a.sessionBranch(args)
-}
-
-// ListSessions implements CommandAPI /resume listing.
-func (a *App) ListSessions(cwd string) error {
-	if a.resumeList != nil {
-		return a.resumeList(cwd)
-	}
-	return fmt.Errorf("no session listing available")
 }
 
 func (a *App) AddSystemBlock(text string) {
@@ -2285,8 +2270,10 @@ func tabLabel(t TabInfo) string {
 }
 
 // ResumeSession implements CommandAPI /resume. With no argument it opens the
-// session picker (the recent sessions for this directory); with a query it
-// resolves immediately, so `/resume <id-prefix>` still works headlessly.
+// session picker — the RICH one: cmd builds the rows (all projects, pins,
+// prompt-text search, delete) and the TUI opens it (scope toggle on Tab,
+// Ctrl+P pin, Backspace delete). With a query it resolves immediately, so
+// `/resume <id-prefix>` still works headlessly.
 func (a *App) ResumeSession(query string) error {
 	if a.ops == nil || a.ops.Resume == nil {
 		return fmt.Errorf("session resume not wired")
@@ -2294,8 +2281,17 @@ func (a *App) ResumeSession(query string) error {
 	if q := strings.TrimSpace(query); q != "" {
 		return a.ops.Resume(q)
 	}
+	// No argument: the rich picker. cmd opens it and the TUI knows it is
+	// open; a build that cannot (no sessions at all) falls back to the
+	// plain recent list.
+	if err := a.ops.Resume(""); err != nil {
+		return err
+	}
+	if a.SessionPickerOpen() {
+		return nil
+	}
 	if a.ops.Recent == nil {
-		return a.ops.Resume("")
+		return nil
 	}
 	opts := a.ops.Recent()
 	if len(opts) == 0 {

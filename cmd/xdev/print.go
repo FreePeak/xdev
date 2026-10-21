@@ -718,7 +718,8 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			append(append([]ai.Message(nil), history...), *final))
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
-	_ = store.Append(&session.CustomEntry{CustomType: "session_exit", Data: map[string]any{"code": exitCode}})
+	_ = store.Append(&session.CustomEntry{CustomType: "session_exit",
+		Data: exitMarker("print", exitCode, exitReason("print", exitCode), pendingToolCalls(store))})
 	// M12 #43: the session boundary — the remote backend queues any unfired
 	// cadence turns as one final retain and drains its queue (bounded by the
 	// retain timeout; a dead server leaves the queue behind).

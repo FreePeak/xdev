@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,15 +9,24 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/FreePeak/xdev/internal/ai"
 )
 
 // SessionMeta is one listed session (metadata only — never a full parse).
 type SessionMeta struct {
-	Path      string
-	ID        string
-	Title     string
-	CWD       string
-	Timestamp time.Time // session header timestamp
+	Path  string
+	ID    string
+	Title string
+	// Preview is what a picker row shows: the title when the session has
+	// one, and otherwise the fallback chain — the last compaction's one-line
+	// summary, then the first user message, then "Untitled · HH:MM". It is
+	// never empty: a session with no title still has to say WHICH session it
+	// is (omp's title/preview fallbacks, rules 35 and 45).
+	Preview string
+	CWD     string
+	// Timestamp is the session header timestamp.
+	Timestamp time.Time
 	SizeBytes int64
 	ModTime   time.Time
 	// ParentSession is non-empty for forks and subagent children (lineage).
@@ -25,9 +35,10 @@ type SessionMeta struct {
 	// Resume paths skip "subagent" — a child is never a user continuation.
 	TitleSource string
 	// Status is the lifecycle badge derived from the tail of the file
-	// (#107): "done" when the last turn finished, "interrupted" otherwise.
-	// A session the user killed mid-turn must not look like one that
-	// finished.
+	// (#107): omp's six verdicts — "complete" when the last turn finished,
+	// "error", "aborted", "interrupted", "pending" and "unknown" otherwise,
+	// plus xdev's "empty" for a file with no message at all. A session the
+	// user killed mid-turn must not look like one that finished.
 	Status SessionStatus
 }
 
@@ -160,6 +171,82 @@ func scanPaths(paths []string, cache *statCache) []SessionMeta {
 	return kept
 }
 
+// SanitizeTitle folds a title to the single line a row can paint: the first
+// line only, control characters stripped, trimmed. A title that holds
+// nothing after that is "" — the caller falls back (omp's title sanitiser,
+// rule 35). A title is model- and user-written text, so it is never painted
+// as it came off disk.
+func SanitizeTitle(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(s)
+}
+
+// DisplayTitle is the listing's fallback chain (omp rules 35, 45): the
+// sanitised title, then the last compaction's one-line summary, then the
+// first user message, and finally "Untitled · HH:MM" — the session's own
+// creation time, so two untitled sessions are told apart.
+func DisplayTitle(title, shortSummary, firstMessage string, created time.Time) string {
+	for _, s := range []string{title, shortSummary, firstMessage} {
+		if t := SanitizeTitle(s); t != "" {
+			return t
+		}
+	}
+	return "Untitled · " + created.Format("15:04")
+}
+
+// listingMessageWire is the minimal decode of a persisted message for the
+// listing: the role and the text blocks. It is deliberately not ai.Message —
+// the strict block union would fail on a block type this build does not know
+// and cost the whole line, and the listing only needs the words.
+type listingMessageWire struct {
+	Type    string `json:"type"`
+	Message *struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
+// firstUserMessage returns the text of the first user prompt in the window:
+// the fallback a session with no title shows, so the row says what the
+// session was about (omp rule 45). "" when the window holds no readable user
+// message — the first prompt can be longer than the prefix the listing
+// reads, and a truncated line is not a message.
+func firstUserMessage(lines []string) string {
+	for _, line := range lines {
+		if line == "" || line[0] != '{' {
+			continue
+		}
+		var w listingMessageWire
+		if err := json.Unmarshal([]byte(line), &w); err != nil {
+			continue
+		}
+		if w.Type != TypeMessage || w.Message == nil || w.Message.Role != string(ai.RoleUser) {
+			continue
+		}
+		var b strings.Builder
+		for _, c := range w.Message.Content {
+			if c.Type == "text" {
+				b.WriteString(c.Text)
+			}
+		}
+		if t := strings.TrimSpace(b.String()); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 // statPath stats one file and parses its 4 KiB prefix plus its status tail
 // (cache-first).
 func statPath(path string, cache *statCache) (SessionMeta, bool) {
@@ -194,10 +281,11 @@ func statPath(path string, cache *statCache) (SessionMeta, bool) {
 	f.Close()
 	lines := strings.Split(strings.TrimRight(string(prefix[:n]), "\n"), "\n")
 
-	meta := SessionMeta{Path: path, SizeBytes: fi.Size(), ModTime: fi.ModTime(), Status: ClassifyStatus(tail)}
+	status := ClassifyStatus(tail)
+	meta := SessionMeta{Path: path, SizeBytes: fi.Size(), ModTime: fi.ModTime(), Status: status}
 	if len(lines) > 0 {
 		if title, src, ok := ParseTitleSlotSource([]byte(lines[0])); ok {
-			meta.Title = title
+			meta.Title = SanitizeTitle(title)
 			meta.TitleSource = src
 		}
 	}
@@ -212,13 +300,27 @@ func statPath(path string, cache *statCache) (SessionMeta, bool) {
 			meta.Timestamp = h.Timestamp
 			meta.ParentSession = h.ParentSession
 			if meta.Title == "" {
-				meta.Title = h.Title
+				meta.Title = SanitizeTitle(h.Title)
 			}
 			break
 		}
 	}
 	if meta.ID == "" {
 		return SessionMeta{}, false // not a session file
+	}
+	// The display fallback chain (omp rules 35, 45): title, then the last
+	// compaction's one-line summary, then the first user message, then
+	// "Untitled · HH:MM". A row always has something to say. The fallbacks
+	// are only computed for a session with no title — the common case
+	// already has its answer.
+	created := meta.Timestamp
+	if created.IsZero() {
+		created = meta.ModTime
+	}
+	if meta.Title != "" {
+		meta.Preview = meta.Title
+	} else {
+		meta.Preview = DisplayTitle("", TailCompactionSummary(tail), firstUserMessage(lines), created)
 	}
 	cache.put(key, meta)
 	return meta, true

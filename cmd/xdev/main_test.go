@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -100,5 +101,18 @@ func TestMainIsolationIsActuallyInPlace(t *testing.T) {
 	// rather than a restatement of the comparison above.
 	if _, err := os.Stat(filepath.Join(home, ".xdev", "agent", "skills")); err == nil {
 		t.Errorf("a user skill root exists inside the isolated HOME: discovery is not isolated")
+	}
+}
+
+// TestMaxTurnsHelpMatchesTheCode: the --max-turns help text must say what
+// the flag does. 0 is UNBOUNDED — effectiveMaxTurns returns MaxTurns
+// verbatim — and the old text claimed a default of 200, which the code has
+// not done since the turn cap was removed.
+func TestMaxTurnsHelpMatchesTheCode(t *testing.T) {
+	if !strings.Contains(maxTurnsHelp, "unbounded") {
+		t.Fatalf("--max-turns help %q must say that 0 is unbounded", maxTurnsHelp)
+	}
+	if strings.Contains(maxTurnsHelp, "200") {
+		t.Fatalf("--max-turns help %q must not claim a default of 200", maxTurnsHelp)
 	}
 }

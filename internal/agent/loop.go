@@ -148,10 +148,6 @@ func WithCompactionEvent(h TurnHooks, i Interceptor) TurnHooks {
 	return compactionNotifier{TurnHooks: h, intercept: i}
 }
 
-// DefaultMaxTurns is retained for the -max-turns flag and historical reference.
-// effectiveMaxTurns returns MaxTurns directly; MaxTurns=0 means unbounded.
-const DefaultMaxTurns = 200
-
 // EmptyTurnNudgePrompt is the synthetic user message injected when a turn
 // ends with no text and no tool call. The model never said it was done, so
 // the alternative to asking again is a session that looks like it stopped on
