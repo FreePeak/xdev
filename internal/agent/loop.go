@@ -243,6 +243,15 @@ func (a *Agent) runBudget() time.Duration {
 // anything. It is the single definition of "mid-task" the keep-going gate
 // uses, so the gate and the reasoning in the loop cannot drift apart.
 //
+// The verdict for a tool that mixes reads and writes is PER OP. The github
+// tool searches and creates under one name, and the hub lists and cancels
+// under one name, so neither can carry a whole-tool "read-only" cap. Live
+// 2026-10-21 (sessions 4c4addab and 9db850ca): the model answered "list me
+// all pr urls openningin xdev" and "where are we now" using exactly those
+// read paths, both calls counted as mutations because neither tool had a caps
+// entry, the gate armed, and the harness pushed the model past the answer it
+// had just delivered.
+//
 // A tool with no Caps declaration counts as mutating: the same conservative
 // default Decide makes for an unmodeled tool (policy.go:119), because an
 // ext_*/mcp_* call may write anything and the safe reading of "unknown" is
@@ -263,15 +272,8 @@ func (a *Agent) runBudget() time.Duration {
 // matters: an unrecognised command is mutating, so the worst case is one
 // lost nudge on a run that really was mid-task, never a mutation read as a
 // read.
-func callMutated(c ai.ToolCallBlock) bool {
-	caps, declared := tool.CapsByName(c.Name)
-	if !declared {
-		return true
-	}
-	if c.Name == "bash" {
-		return !tool.BashCallIsReadOnly(c.Arguments)
-	}
-	return !caps.ReadOnly
+func callMutated(reg *tool.Registry, c ai.ToolCallBlock) bool {
+	return !tool.CallIsReadOnly(reg, c.Name, c.Arguments)
 }
 
 // taskFloor is the index of the last REAL user turn in history — the boundary
@@ -948,7 +950,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 						continue
 					}
 					for _, c := range h.ToolCalls() {
-						if callMutated(c) {
+						if callMutated(a.Tools, c) {
 							mutated = true
 						}
 					}
