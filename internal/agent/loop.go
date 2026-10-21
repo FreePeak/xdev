@@ -198,6 +198,47 @@ const PromptContinuationPrompt = "continue the unfinished work: take the next co
 // final sentence.
 const maxPromptContinuations = 2
 
+// DefaultRunBudget bounds ONE run's wall clock — how long a single user ask
+// may keep the harness working before it is told to report what it has.
+//
+// It is the backstop under every other guard. A turn budget counts turns and
+// a provider that answers in two seconds makes 200 turns ten minutes of
+// waiting; a tool-call budget counts calls and says nothing about how long
+// the calls take. The thing the person actually experiences is the clock.
+//
+// Live 2026-10-21 (session 8efefc9e): one "tell me where we are" question
+// ran 17 minutes and 20 seconds — 113 provider round trips, 182 tool calls,
+// 11.6 minutes of it pure model time — and produced NO answer at all. The
+// session ended in a provider failure, not a report. Every guard the loop
+// had (turn cap 200, repeat guard, compaction ladder) was satisfied: the
+// run was legal the whole way through. Only a clock says "this has taken too
+// long, say what you have".
+const DefaultRunBudget = 6 * time.Minute
+
+// RunBudgetPrompt is the wrap-up the budget sends. It asks for the report
+// the user asked for, in prose, and tells the model to stop calling tools —
+// the same shape as the turn-limit wrap-up, because a budget is a budget: it
+// ends the run, it does not merely advise it.
+const RunBudgetPrompt = "this run has reached its time budget — answer now, in prose, with what you have found so far, and do not call any more tools"
+
+// RunBudgetAttribution tags the budget wrap-up as harness text: the user
+// never typed it.
+const RunBudgetAttribution = "run-budget"
+
+// runBudget resolves the run's wall-clock bound: the configured value, or
+// DefaultRunBudget when unset. A negative value is an explicit opt-out
+// (unbounded), because a host that knows what it is doing should be able to
+// say so.
+func (a *Agent) runBudget() time.Duration {
+	if a.RunBudget < 0 {
+		return 0
+	}
+	if a.RunBudget == 0 {
+		return DefaultRunBudget
+	}
+	return a.RunBudget
+}
+
 // callMutated reports whether one already-issued tool call changed
 // anything. It is the single definition of "mid-task" the keep-going gate
 // uses, so the gate and the reasoning in the loop cannot drift apart.
@@ -415,6 +456,11 @@ type Agent struct {
 	compactAsync *asyncCompactState
 	// MaxTurns caps one Run's turns; 0 means unbounded (no cap).
 	MaxTurns int
+	// RunBudget caps one Run's wall clock; 0 means DefaultRunBudget, a
+	// negative value means unbounded. The clock is the only bound that
+	// speaks the person's language: turns and tool calls both hide how long
+	// a run actually takes.
+	RunBudget time.Duration
 	// CancelGrace bounds how long a cancelled turn waits for a tool that is
 	// already running (#126); 0 means DefaultCancelGrace.
 	CancelGrace time.Duration
@@ -682,6 +728,17 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	// nudge budget is spent. Used for escalating backoff and the
 	// "still waiting" notice so the run never looks frozen.
 	emptyRetries := 0
+	// runStarted is the run's clock. The budget is a wall clock, not a turn
+	// count: a provider that answers in two seconds turns 200 turns into
+	// ten minutes of waiting, and the person waiting is the one the budget
+	// protects.
+	runStarted := time.Now()
+	budget := a.runBudget()
+	// budgetSpent records that the wrap-up already went out. The run gets
+	// ONE turn to answer it; a model that answers the wrap-up with another
+	// tool call ends the run there, because a budget that can be spent
+	// again is not a budget.
+	budgetSpent := false
 	for turn := 0; limit == 0 || turn < limit; turn++ {
 		select {
 		case <-ctx.Done():
@@ -692,6 +749,27 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 			a.CancelAsyncCompaction()
 			return lastAssistant, ctx.Err()
 		default:
+		}
+
+		// The wall-clock budget. Checked at the step boundary, where the
+		// turn count is checked too: a turn in flight is finished, not
+		// killed, so the wrap-up never lands mid-tool-call.
+		if budget > 0 && time.Since(runStarted) >= budget {
+			if budgetSpent {
+				// The wrap-up went out and the model still wants tools. The
+				// run ends with what it has: the person gets an answer, not
+				// another wait.
+				emit("turn_end", map[string]any{"turn": turn})
+				return lastAssistant, nil
+			}
+			budgetSpent = true
+			wrap := ai.Message{
+				Role:        ai.RoleUser,
+				Content:     []ai.Block{ai.TextBlock{Text: RunBudgetPrompt}},
+				Attribution: RunBudgetAttribution,
+			}
+			history = append(history, wrap)
+			a.persist(wrap)
 		}
 
 		turnsUsed = turn + 1
