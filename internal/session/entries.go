@@ -75,13 +75,99 @@ const (
 	// CustomType is "branch" with data {"to":entryID}); it is how Open
 	// reconstructs the leaf pointer across restarts.
 	TypeBranch = "branch"
+
+	// TypeThinkingLevelChange records the reasoning level in force from
+	// this point of the transcript on (omp thinking_level_change): a state
+	// record, not a message. A resumed session can therefore tell which
+	// thinking level produced which part of the transcript.
+	TypeThinkingLevelChange = "thinking_level_change"
 )
+
+// ThinkingLevelChangeEntry records the reasoning level in force at a point
+// in the transcript (omp thinking_level_change).
+// Wire: {"type":"thinking_level_change",...,"thinkingLevel":"high","configured":"auto"}.
+//
+// ThinkingLevel is the request-side level the next turn carries ("" when the
+// request pins none). Configured is the CONFIGURED LEVEL in omp's shape: the
+// level the user pinned, or "auto" when the level follows the model role's
+// ":effort" default ("" when the record says nothing about it). xdev wrote a
+// boolean here before this shape existed; a reader accepts both.
+type ThinkingLevelChangeEntry struct {
+	Env           Envelope
+	ThinkingLevel string
+	Configured    string
+}
+
+// ConfiguredAuto is the value a thinking_level_change's "configured" field
+// carries when the thinking level is INHERITED from the model role's
+// ":effort" default instead of being pinned. It is omp's own sentinel
+// (model-controls.ts: configuredThinkingLevel() returns "auto" or the
+// configured level name), and a reader that sees it knows the level was
+// not chosen by the user.
+const ConfiguredAuto = "auto"
+
+func (e *ThinkingLevelChangeEntry) Envelope() Envelope { return e.Env }
+
+// configuredLevel is the wire shape of the thinking_level_change
+// "configured" field: omp writes a LEVEL STRING there — "auto" when the
+// level is inherited from the model role's ":effort" default, the pinned
+// level name ("high") otherwise.
+//
+// A reader must also accept what xdev's own first cut of this record
+// wrote: a BOOLEAN. A bool carries no level name, so it reads as "not
+// recorded" (the empty string) rather than as a level — the record still
+// parses, and the level in force is in "thinkingLevel" beside it.
+//
+// A value that is neither a string, a bool, nor null (a number, an
+// object, an array) names no level at all: the entry cannot be decoded,
+// and the store keeps the line verbatim as an UnknownEntry instead of
+// refusing the whole file.
+type configuredLevel struct {
+	level string
+	bad   bool
+}
+
+// MarshalJSON writes the level as a plain JSON string ("null" when the
+// record carries no level), which is omp's shape.
+func (c configuredLevel) MarshalJSON() ([]byte, error) {
+	if c.level == "" {
+		return []byte("null"), nil
+	}
+	return json.Marshal(c.level)
+}
+
+// UnmarshalJSON accepts a level string, a bool (xdev's older shape) and
+// null. Anything else marks the field bad instead of failing the decode:
+// the entry parser turns that into the malformed-entry marker, and the
+// store keeps the line as an UnknownEntry.
+func (c *configuredLevel) UnmarshalJSON(b []byte) error {
+	var level string
+	if err := json.Unmarshal(b, &level); err == nil {
+		c.level = level
+		return nil
+	}
+	var flag bool
+	if err := json.Unmarshal(b, &flag); err == nil {
+		// A bool says whether a level was configured but names none.
+		c.level = ""
+		return nil
+	}
+	c.bad = true
+	return nil
+}
 
 // ErrUnknownEntryType marks a structurally valid entry whose "type" is not
 // part of the model. ParseEntry returns (nil, ErrUnknownEntryType) for it;
 // the store materializes the line as an UnknownEntry so the parent chain
 // stays intact, and the line is never rewritten or removed from disk.
 var ErrUnknownEntryType = errors.New("session: unknown entry type")
+
+// ErrMalformedEntry marks an entry of a KNOWN type whose payload this build
+// cannot decode (e.g. a thinking_level_change whose "configured" is neither
+// a string nor a boolean). The store keeps such a line verbatim as an
+// UnknownEntry, exactly like an unknown type: one unreadable field never
+// refuses a whole session file.
+var ErrMalformedEntry = errors.New("session: malformed entry")
 
 // MessageEntry carries one ai.Message (user/assistant/toolResult).
 // Wire: {"type":"message",...,"message":{...}}.
@@ -104,12 +190,25 @@ func (e *ModelChangeEntry) Envelope() Envelope { return e.Env }
 
 // CompactionEntry replaces pre-compaction history with a summary message.
 // Wire: {"type":"compaction",...,"summary":{...},"firstKeptEntryId":...,
-// "tokensBefore":N,"method":"handoff"}.
+// "tokensBefore":N,"tokensAfter":N,"shortSummary":"...","method":"handoff"}.
+//
+// tokensAfter and shortSummary are optional on the wire: an entry written
+// before them existed (or by a writer that has no kept window to measure)
+// simply omits them, and a reader takes the zero value.
 type CompactionEntry struct {
 	Env              Envelope
 	Summary          ai.Message
 	FirstKeptEntryID *string // nil → only the summary survives
 	TokensBefore     int64
+	// TokensAfter is the size of the context that SURVIVES the compaction
+	// (omp rule 27): the summary plus the window the compaction kept. It
+	// is what the next request carries, so a reader can see what the
+	// compaction freed. 0 when the entry carries no measurement.
+	TokensAfter int64
+	// ShortSummary is a one-line rendering of Summary, so a reader (the
+	// TUI, a resume, omp) can see what the compaction was about without
+	// reading the whole summary. "" when there is none.
+	ShortSummary string
 	// Method names the compaction ladder member that produced Summary
 	// (M5 #24): handoff|snapcompact|shake|soft. "" for entries written
 	// before the ladder recorded it.
@@ -254,10 +353,9 @@ func (e *CheckpointEntry) Envelope() Envelope { return e.Env }
 
 // UnknownEntry preserves an entry type outside xdev's parsed set while
 // keeping the parent chain intact — real omp files carry title_change /
-// thinking_level_change / service_tier_change entries mid-chain, and
-// dropping them from the tree would sever the leaf→root walk. The raw line
-// is kept verbatim so a full rewrite round-trips byte-exactly; context
-// conversion ignores these nodes.
+// service_tier_change entries mid-chain, and dropping them from the tree
+// would sever the leaf→root walk. The raw line is kept verbatim so a full
+// rewrite round-trips byte-exactly; context conversion ignores these nodes.
 type UnknownEntry struct {
 	Env       Envelope
 	EntryType string
@@ -326,7 +424,11 @@ type entryWire struct {
 	Summary          json.RawMessage       `json:"summary,omitempty"`
 	FirstKeptEntryID *string               `json:"firstKeptEntryId,omitempty"`
 	TokensBefore     *int64                `json:"tokensBefore,omitempty"`
+	TokensAfter      *int64                `json:"tokensAfter,omitempty"`
+	ShortSummary     *string               `json:"shortSummary,omitempty"`
 	Method           *string               `json:"method,omitempty"`
+	ThinkingLevel    *string               `json:"thinkingLevel,omitempty"`
+	Configured       *configuredLevel      `json:"configured,omitempty"`
 	CustomType       string                `json:"customType,omitempty"`
 	Data             map[string]any        `json:"data,omitempty"`
 	Goal             *GoalPayload          `json:"goal,omitempty"`
@@ -359,10 +461,23 @@ func MarshalEntry(e Entry) ([]byte, error) {
 		w.FirstKeptEntryID = t.FirstKeptEntryID
 		tokens := t.TokensBefore
 		w.TokensBefore = &tokens
+		if t.TokensAfter > 0 {
+			after := t.TokensAfter
+			w.TokensAfter = &after
+		}
+		if t.ShortSummary != "" {
+			short := t.ShortSummary
+			w.ShortSummary = &short
+		}
 		if t.Method != "" {
 			method := t.Method
 			w.Method = &method
 		}
+	case *ThinkingLevelChangeEntry:
+		w.Type = TypeThinkingLevelChange
+		level := t.ThinkingLevel
+		w.ThinkingLevel = &level
+		w.Configured = &configuredLevel{level: t.Configured}
 	case *BranchSummaryEntry:
 		w.Type = TypeBranchSummary
 		w.Summary = mustMarshal(t.Summary)
@@ -424,8 +539,30 @@ func ParseEntry(line []byte) (Entry, error) {
 		if w.TokensBefore != nil {
 			e.TokensBefore = *w.TokensBefore
 		}
+		if w.TokensAfter != nil {
+			e.TokensAfter = *w.TokensAfter
+		}
+		if w.ShortSummary != nil {
+			e.ShortSummary = *w.ShortSummary
+		}
 		if w.Method != nil {
 			e.Method = *w.Method
+		}
+		return e, nil
+	case TypeThinkingLevelChange:
+		e := &ThinkingLevelChangeEntry{Env: env}
+		if w.ThinkingLevel != nil {
+			e.ThinkingLevel = *w.ThinkingLevel
+		}
+		if w.Configured != nil {
+			if w.Configured.bad {
+				// The field names no level: the entry cannot be read.
+				// The store keeps the line verbatim as an UnknownEntry
+				// (like an unknown type), so one unreadable field never
+				// refuses a whole session file.
+				return nil, fmt.Errorf("%w: thinking_level_change configured", ErrMalformedEntry)
+			}
+			e.Configured = w.Configured.level
 		}
 		return e, nil
 	case TypeBranchSummary:

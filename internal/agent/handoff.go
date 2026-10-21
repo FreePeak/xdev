@@ -181,6 +181,10 @@ func (a *Agent) handoff(ctx context.Context, system, instruction string, planRes
 		TokensBefore:     tokensBefore,
 		Method:           MethodHandoff,
 	}
+	// The record (omp rule 27) is filled by the same helper every other
+	// compaction path uses: the surviving context is the document plus the
+	// kept tail, and the summary gets its one-line rendering.
+	FillCompactionRecord(entry, kept)
 	if err := a.Store.Append(entry); err != nil {
 		return "", fmt.Errorf("handoff: persist: %w", err)
 	}

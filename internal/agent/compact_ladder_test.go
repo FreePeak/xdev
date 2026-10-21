@@ -70,11 +70,13 @@ func ladderHistory(t *testing.T, s *session.Store) []ai.Message {
 	return res.Messages
 }
 
-// ladderConfig compacts on every boundary: ContextWindow 1000 sits far below
-// the reserve, so the token trigger always fires; KeepRecentTokens 5 keeps one
-// message — the tail question — out of the discarded span.
+// ladderConfig compacts on every boundary: the threshold is pinned to one
+// token, so the token trigger always fires (the omp reserve rule keeps the
+// reserve inside the window, so a small window no longer fires by itself);
+// KeepRecentTokens 5 keeps one message — the tail question — out of the
+// discarded span.
 func ladderConfig(methods ...string) CompactionConfig {
-	return CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5, Methods: methods}
+	return CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5, ThresholdTokens: 1, Methods: methods}
 }
 
 func compactionEntries(s *session.Store) []*session.CompactionEntry {

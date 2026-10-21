@@ -257,7 +257,7 @@ func TestOpenSkipsUnknownTypesButKeepsFileIntact(t *testing.T) {
 	slot := MarshalTitleSlot("t", TitleSourceAuto, slotTS)
 	hdr := MarshalHeader(SessionHeader{Version: 3, ID: "uuid-1", Timestamp: ts0, CWD: "/tmp/x", Title: "t", TitleSource: TitleSourceAuto})
 	m1 := MarshalMust(t, userMsg("11111111", "", "known"))
-	unknown := `{"type":"thinking_level_change","id":"22222222","parentId":"11111111","timestamp":"2026-09-07T03:20:45.220Z","level":"high"}`
+	unknown := `{"type":"title_change","id":"22222222","parentId":"11111111","timestamp":"2026-09-07T03:20:45.220Z","title":"renamed"}`
 	m2 := MarshalMust(t, asstMsg("33333333", "22222222", "after unknown"))
 	if err := os.WriteFile(path, concat(slot, hdr, append(m1, '\n'), []byte(unknown+"\n"), append(m2, '\n')), 0o644); err != nil {
 		t.Fatal(err)
@@ -278,7 +278,7 @@ func TestOpenSkipsUnknownTypesButKeepsFileIntact(t *testing.T) {
 	}
 	// Unknown line must stay on disk untouched.
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "thinking_level_change") {
+	if !strings.Contains(string(data), "title_change") {
 		t.Fatal("unknown line was dropped from disk")
 	}
 	// Chain across the opaque node still works: buildContext walks through

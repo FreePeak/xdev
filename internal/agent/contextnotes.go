@@ -193,6 +193,10 @@ func (n *NotesState) CommitRollover() (committed bool, err error) {
 		FirstKeptEntryID: &anchor,
 		TokensBefore:     contextTokens(res.Messages),
 	}
+	// The record (omp rule 27) is filled by the same helper every other
+	// compaction path uses: the surviving context is the boundary marker
+	// plus the tail the rollover kept.
+	FillCompactionRecord(entry, res.Messages[cut:])
 	if err := store.Append(entry); err != nil {
 		return false, fmt.Errorf("new_context: persist boundary: %w", err)
 	}

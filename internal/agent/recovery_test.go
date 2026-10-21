@@ -225,10 +225,26 @@ func TestThresholdCompactionBetweenTurns(t *testing.T) {
 	a, s, _ := storeAgent(t, p, cfg)
 	a.Retry = RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond}
 
-	if _, err := a.Run(context.Background(), "sys", submitHistory(t, s, seed)); err != nil {
+	// The TUI hands Run the context rebuilt from the store, so the trigger
+	// measures the whole conversation and not just the new turn.
+	history := func() []ai.Message {
+		t.Helper()
+		res, err := session.BuildContext(s.Entries(), s.LeafID(), session.SystemPrompt{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Messages
+	}
+	submit := func(text string) []ai.Message {
+		t.Helper()
+		submitHistory(t, s, text)
+		return history()
+	}
+
+	if _, err := a.Run(context.Background(), "sys", submit(seed)); err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
-	if _, err := a.Run(context.Background(), "sys", submitHistory(t, s, "second user")); err != nil {
+	if _, err := a.Run(context.Background(), "sys", submit("second user")); err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
 	if len(p.gotReqs) != 3 {

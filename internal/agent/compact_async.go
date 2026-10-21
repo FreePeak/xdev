@@ -126,7 +126,14 @@ func (a *Agent) applyAsyncCompaction(history []ai.Message) ([]ai.Message, bool) 
 		TokensBefore:     job.tokens,
 		Method:           MethodHandoff,
 	}
-	if err := a.persistCompaction(entry); err != nil {
+	// The window the compaction keeps: the anchor's message and everything
+	// after it, out of the rebuilt context (the anchor is the first kept
+	// entry).
+	kept := []ai.Message{}
+	if i := slices.Index(fres.EntryIDs, job.anchor); i >= 0 {
+		kept = fres.Messages[i:]
+	}
+	if err := a.persistCompaction(entry, kept); err != nil {
 		logx.Errorf("compaction: %v", err)
 		return history, false
 	}

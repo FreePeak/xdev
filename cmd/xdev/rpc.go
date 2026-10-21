@@ -108,7 +108,7 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 		Provider: prov, Tools: reg, Store: store, Model: modelName,
 		MaxTokens: opts.MaxTokens, MaxTurns: opts.MaxTurns, Hooks: h,
 		TTSR:       agent.NewTTSR(ttsrConfig(lastSettings())),
-		Compaction: agent.CompactionConfig{ContextWindow: pinnedWindow(cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())},
+		Compaction: compactionConfigFor(pinnedWindow(cfg, provName, modelName), lastSettings(), agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())),
 		Policy:     agentPolicy(),
 		Failovers:  failoverChain(cfg, lastSettings(), provName, modelName),
 		Thinking:   effortBudget(effortRef),
@@ -347,7 +347,7 @@ func (h *rpcHandler) SetModel(ref string) error {
 	h.provName, h.modelName = provName, modelName
 	h.agent.Provider = prov
 	h.agent.Model = modelName
-	h.agent.Compaction = agent.CompactionConfig{ContextWindow: pinnedWindow(h.cfg, provName, modelName), Methods: agent.ParseMethodOrder(lastSettings().CompactionMethodOrder())}
+	h.agent.Compaction = compactionConfigFor(pinnedWindow(h.cfg, provName, modelName), lastSettings(), agent.ParseMethodOrder(lastSettings().CompactionMethodOrder()))
 	h.agent.Failovers = failoverChain(h.cfg, lastSettings(), provName, modelName)
 	// Children must spawn on the current model, not the one captured at
 	// startup.
