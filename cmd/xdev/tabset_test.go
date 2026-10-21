@@ -393,7 +393,7 @@ func TestTabSetSurvivesARestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	saveTabSet(cwd, ts.persistIDs())
+	saveTabSet(cwd, ts.persistTabs())
 	saveTabSet(other, nil) // another directory's set is untouched by cwd's
 
 	got := savedTabSessions(cwd)
@@ -467,11 +467,11 @@ func TestReplaceCurrentSwapsTheSlot(t *testing.T) {
 	if _, err := os.Stat(aPath); err != nil {
 		t.Fatalf("the displaced session's file is gone: %v", err)
 	}
-	// The persisted set — what the next launch reopens — names the resumed
-	// session and not the displaced one.
-	ids := ts.persistIDs()
-	if len(ids) != 1 || ids[0] != b.Path() {
-		t.Fatalf("persisted set = %v, want just the resumed session", ids)
+	// The persisted set — what the next launch reopens — is empty: the
+	// resumed session is the one the user is in (a launch does not carry the
+	// session you are in over) and the displaced one is not open any more.
+	if ids := ts.persistTabs(); len(ids) != 0 {
+		t.Fatalf("persisted set = %v, want empty (the current session is not carried)", ids)
 	}
 
 	// A resume of a session that is ALREADY open only focuses it.
@@ -505,5 +505,59 @@ func TestReplaceCurrentParksARunningSession(t *testing.T) {
 	}
 	if !ts.isRunning(a.ID()) {
 		t.Fatal("the running session lost its turn")
+	}
+}
+
+// Consecutive launches must not grow the open set. A launch opens ONE
+// session of its own, and that session was persisted like any other tab — so
+// every launch left its live session in the set, the next launch restored it
+// as a tab ON TOP of its own new one, and the set grew by one per launch.
+// Measured on the shipped binary: launch 1 showed no count, launch 2 showed
+// "2 tabs", launch 3 showed "3 tabs".
+//
+// The set carries the tabs the user kept open BESIDE the one they are in;
+// the session in the view is not carried into the next run (it is on disk —
+// `--continue` resumes it, `/resume` lists it).
+func TestLaunchesDoNotGrowTheOpenSet(t *testing.T) {
+	sandbox(t)
+	cwd := t.TempDir()
+
+	live := func(title string) *session.Store {
+		st := session.OpenMem(cwd, title)
+		if _, err := st.EnsureOnDisk(session.SessionFilePath(sessionDataDir(), cwd, time.Now(), st.ID()), session.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Append(userMessage(t, "hello "+title)); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	// Three launches in a row, each with a session of its own: the set the
+	// next launch reopens must be the SAME size every time.
+	counts := []int{}
+	for range 3 {
+		store := live("run")
+		// The launch: a session of its own, plus the tabs the previous run
+		// left open beside the one it was in.
+		ts := newTabset(store)
+		for _, st := range savedTabSessions(cwd) {
+			if _, err := ts.open(st); err != nil {
+				t.Fatal(err)
+			}
+		}
+		saveTabSet(cwd, ts.persistTabs())
+		open, _, _ := ts.summary()
+		counts = append(counts, open)
+		ts.closeAll()
+	}
+	// Launch 1 has one tab (its own). Every later launch has that one plus
+	// what the previous run left open — and the previous run's own session is
+	// NOT among them, so the count does not climb.
+	if counts[0] != 1 {
+		t.Fatalf("first launch opened %d tabs, want 1", counts[0])
+	}
+	if counts[1] != counts[0] || counts[2] != counts[0] {
+		t.Fatalf("the open set grew across launches: %v", counts)
 	}
 }

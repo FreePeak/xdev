@@ -564,15 +564,30 @@ func (ts *tabset) setTitle(id, title string) {
 	}
 }
 
-// persistIDs returns the open session ids in tab order — the set a later
-// launch in the same directory should reopen. The path, not the id: a
-// session's file is what survives a restart, and a store that never
-// materialized has nothing to reopen.
-func (ts *tabset) persistIDs() []string {
+// persistTabs returns the paths of the open tabs EXCEPT the one the user is
+// in — the set a later launch in the same directory should reopen.
+//
+// The excluded tab is the whole point. A launch opens ONE session of its own,
+// and that session was persisted too: so every launch left its live session
+// in the set, the next launch restored it as a tab ON TOP of its own new
+// one, and the set grew by one per launch. Measured on the shipped binary:
+// launch 1 showed no count, launch 2 showed "2 tabs", launch 3 showed "3
+// tabs" — a directory where one conversation was being worked on ended up
+// with six tabs, five of them dead.
+//
+// The session the user is in is not lost by leaving the set: it is on disk,
+// `--continue` (the breadcrumb) resumes it and `/resume` lists it. What the
+// set carries is what the user kept OPEN BESIDE it — a session parked by
+// /new, a fork, an import, a reopen — which is the working set the set
+// exists for.
+func (ts *tabset) persistTabs() []string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	out := make([]string, 0, len(ts.tabs))
-	for _, t := range ts.tabs {
+	for i, t := range ts.tabs {
+		if i == ts.cur {
+			continue
+		}
 		if t.store != nil && t.store.Path() != "" {
 			out = append(out, t.store.Path())
 		}
