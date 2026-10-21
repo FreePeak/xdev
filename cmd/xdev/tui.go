@@ -222,14 +222,14 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// surface the next turn runs on. It is a fact of its own: /thinking
 	// moves the level, /effort moves the rung, and the transcript records
 	// both.
-	thinkingState := func() (level string, configured string, rung string) {
-		rung = lastSettings().SessionEffort()
+	thinkingState := func() effortState {
+		rung := lastSettings().SessionEffort()
 		modelMu.Lock()
 		defer modelMu.Unlock()
 		if live.level == "" || live.level == "auto" {
-			return live.effort, session.ConfiguredAuto, rung
+			return effortState{level: live.effort, configured: session.ConfiguredAuto, rung: rung}
 		}
-		return live.effort, live.level, rung
+		return effortState{level: live.effort, configured: live.level, rung: rung}
 	}
 
 	// Tools + system prompt (shared with print mode).
@@ -746,7 +746,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if _, err := applyThinkingFlag(level, ""); err != nil {
 				return err
 			}
-			beforeLevel, beforeConfigured, _ := thinkingState()
+			before := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "thinking", level); err != nil {
 				return err
 			}
@@ -769,9 +769,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// which part of it. A re-set of the same level changes nothing
 			// and says nothing. The RUNG rides along: it is the tool surface
 			// the following turns run on, and /thinking does not move it.
-			if afterLevel, afterConfigured, afterRung := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured {
-				appendThinkingLevel(storeOf(), afterLevel, afterConfigured, afterRung)
-			}
+			recordEffortChange(storeOf(), before, thinkingState())
 			return nil
 		},
 	})
@@ -868,7 +866,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Handoff:    handoffSettings(),
 		}
 		ag.SetContextWindow(lastSettings().CompactionContextWindow())
-		wireAgentMode(ag, reg, cfg, lastSettings(), lpn, lm, cwd, true)
+		wireAgentMode(ag, cfg, lastSettings(), lpn, lm, cwd, true)
 		return ag.HandoffDoc(baseCtx, buildSys(), instruction)
 	}
 	// #272: the alt screen swallows stderr, which is where discovery
@@ -1954,7 +1952,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			if !config.IsSessionEffort(name) {
 				return fmt.Errorf("effort: want %s", strings.Join(config.SessionEffortLevels, "|"))
 			}
-			beforeLevel, beforeConfigured, beforeRung := thinkingState()
+			before := thinkingState()
 			if err := config.Set(config.GlobalSettingsPath(), "effort", name); err != nil {
 				return err
 			}
@@ -1982,9 +1980,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// moves the TOOL SURFACE and not the level still has to be
 			// recorded: the rung is what a resume restores, and a stale
 			// record would restore the old one over the user's choice.
-			if afterLevel, afterConfigured, afterRung := thinkingState(); afterLevel != beforeLevel || afterConfigured != beforeConfigured || afterRung != beforeRung {
-				appendThinkingLevel(storeOf(), afterLevel, afterConfigured, afterRung)
-			}
+			recordEffortChange(storeOf(), before, thinkingState())
 			return nil
 		},
 	})
@@ -2435,7 +2431,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// Shared per-mode seams: catalog bridge + secrets redactor
 			// (#79/#80). The TUI is the daily driver; an unredacted tool
 			// result here is the case that mattered.
-			if st := wireAgentMode(ag, turnTools, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
+			if st := wireAgentMode(ag, cfg, lastSettings(), lpn, lm, cwd, true); st != nil {
 				// The TUI has a console: a silent provider swap or a
 				// cooldown revert is otherwise invisible to the user.
 				st.Notify = func(msg string) {

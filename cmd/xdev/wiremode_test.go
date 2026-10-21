@@ -34,7 +34,7 @@ func TestWireAgentModeInstallsBothSeams(t *testing.T) {
 
 	reg := tool.NewRegistry()
 	ag := &agent.Agent{Tools: reg, Model: "m"}
-	wireAgentMode(ag, reg, &config.Config{}, &config.Settings{}, "p", "m", cwd, false)
+	wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", cwd, false)
 
 	// 1. Redactor: the secret leaves context as a placeholder and comes back
 	// on the way in (the reversible round trip is the whole contract).
@@ -62,7 +62,7 @@ func TestWireAgentModeWiresEvalKernel(t *testing.T) {
 	et := eval.NewTool(t.TempDir())
 	reg.Register(et)
 	ag := &agent.Agent{Tools: reg, Model: "m"}
-	wireAgentMode(ag, reg, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -80,11 +80,11 @@ func TestWireAgentModeWiresEvalKernel(t *testing.T) {
 func TestWireAgentModeToleratesNilRegistry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	if ag.Redactor == nil {
 		t.Fatal("redactor must still be installed with no registry")
 	}
-	wireAgentMode(nil, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false) // must not panic
+	wireAgentMode(nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false) // must not panic
 }
 
 // The config the redactor reads is the project one, so a secret declared in
@@ -103,7 +103,7 @@ func TestWireAgentModeUsesGlobalSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	if got := ag.Redactor.Apply("token " + secret); strings.Contains(got, secret) {
 		t.Fatalf("global secret not masked: %q", got)
 	}
@@ -199,7 +199,7 @@ func TestWireAgentModeGatesGoalContinuationByMode(t *testing.T) {
 		{"print", false, false},
 	} {
 		ag := &agent.Agent{Model: "m"}
-		wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), tc.interactive)
+		wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), tc.interactive)
 		if ag.GoalContinuation != tc.want {
 			t.Fatalf("%s: GoalContinuation = %v, want %v", tc.name, ag.GoalContinuation, tc.want)
 		}
@@ -213,7 +213,7 @@ func TestWireAgentModeGatesGoalContinuationByMode(t *testing.T) {
 func TestWireAgentModeArmsFallbackState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	st := wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+	st := wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	if st == nil {
 		t.Fatal("fallback state not armed — retry.fallbackChains/reserve/revert stay unreachable")
 	}
@@ -231,7 +231,7 @@ func TestWireAgentModeAppliesCompactionSettings(t *testing.T) {
 	s.Compaction.IdleAfter = "90s"
 	s.Compaction.Async = &on
 	ag := &agent.Agent{Model: "m", Compaction: agent.CompactionConfig{ContextWindow: 1000}}
-	wireAgentMode(ag, nil, &config.Config{}, s, "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, &config.Config{}, s, "p", "m", t.TempDir(), false)
 	if ag.Compaction.IdleAfter != 90*time.Second {
 		t.Fatalf("IdleAfter = %v, want 90s from settings", ag.Compaction.IdleAfter)
 	}
@@ -267,7 +267,7 @@ func TestAbortCancelsAsyncCompaction(t *testing.T) {
 func TestWireAgentModeCarriesMemoryContext(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ag := &agent.Agent{Model: "m"}
-	wireAgentMode(ag, nil, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+	wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
 	// Backend off: no seam, and nothing panics.
 	if ag.MemoryContext != nil {
 		t.Fatal("MemoryContext set with no remote backend configured")

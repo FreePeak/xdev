@@ -168,52 +168,37 @@ func isPlan(name string) bool {
 }
 
 // ConnectEffortLevels returns the effort levels a model accepts on the wire,
-// as the SHIPPED catalog states them: the levels models.dev publishes for
-// that model id, across every provider row that names it.
+// as the SHIPPED catalog states them: the levels of the catalog row for the
+// provider and the model.
+//
+// The row is keyed the way the catalog is keyed — provider, then model id —
+// so the answer is the DECLARATION OF THAT ROW, not a consensus over every
+// provider that serves the same model id. An alias carrier that never
+// promised a level must not strip it from the row that did: the vendor row
+// says the model takes it, and the vendor row is the one the user
+// configured.
 //
 // It is the fallback for a models.yml written before the `effort:` key
 // existed — the catalog is what `xdev connect` copies from, so a user who
 // has been connected for a year must not have to re-run it to get the
 // capability.
 //
-// The levels of the rows that claim one are INTERSECTED: a level every
-// carrier of the model claims is a level the model takes, and one that only
-// one row claims is not. A model no row names, or no row that names it
-// claims an effort for, has NO capability: the default is not supported.
-func ConnectEffortLevels(modelID string) []string {
-	if modelID == "" {
+// A provider or model the catalog does not name has NO capability: the
+// default is not supported.
+func ConnectEffortLevels(provider, model string) []string {
+	if provider == "" || model == "" {
 		return nil
 	}
-	var out []string
-	found := false
-	for _, e := range connectCatalog {
-		for _, m := range e.Models {
-			if m.ID != modelID || len(m.Effort) == 0 {
-				continue
-			}
-			if !found {
-				out = append([]string(nil), m.Effort...)
-				found = true
-				continue
-			}
-			out = intersectEffortLevels(out, m.Effort)
+	e, ok := lookupConnect(provider)
+	if !ok {
+		return nil
+	}
+	for _, m := range e.Models {
+		if m.ID == model {
+			return m.Effort
 		}
 	}
-	return out
-}
-
-// intersectEffortLevels keeps the levels both lists name.
-func intersectEffortLevels(a, b []string) []string {
-	out := make([]string, 0, len(a))
-	for _, x := range a {
-		for _, y := range b {
-			if x == y {
-				out = append(out, x)
-				break
-			}
-		}
-	}
-	return out
+	return nil
 }
 
 // ConnectProviderConfig builds the models.yml block for one catalog row. The

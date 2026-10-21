@@ -245,15 +245,19 @@ func buildChildAdvisorFactory(settings *config.Settings) func() *agent.Advisor {
 // of (the TUI). Only there may an active goal auto-continue between turns
 // (omp's goal.continuationModes defaults to interactive); a print/RPC/ACP run
 // must not spend turns of its own after its prompt is answered.
-func wireAgentMode(ag *agent.Agent, reg *tool.Registry, cfg *config.Config, settings *config.Settings, provider, model, cwd string, interactive bool) *agent.FallbackState {
+func wireAgentMode(ag *agent.Agent, cfg *config.Config, settings *config.Settings, provider, model, cwd string, interactive bool) *agent.FallbackState {
 	if ag == nil {
 		return nil
 	}
 	ag.GoalContinuation = interactive
 	ag.PromptContinuation = interactive
-	if reg != nil {
-		ag.WireCatalog(reg.Catalog())
-		ag.WireEvalKernel(reg)
+	// The catalog bridge is wired to the agent's OWN tool set. It used to
+	// take a registry as an argument, and a mode that passed a different one
+	// wired the bridge to a catalog whose deferred tools the agent never
+	// advertised — every deferred tool unreachable through tool_call.
+	if ag.Tools != nil {
+		ag.WireCatalog(ag.Tools.Catalog())
+		ag.WireEvalKernel(ag.Tools)
 	}
 	ag.Redactor = redactorFor(cwd)
 	// #115 left the artifact-offload backend to land with the seam. It
@@ -600,7 +604,7 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		}
 	}()
 	applyPolicy(ag, settings)
-	wireAgentMode(ag, runTools, cfg, settings, provName, modelName, cwd, false)
+	wireAgentMode(ag, cfg, settings, provName, modelName, cwd, false)
 	// Stream rules (M11 #35): settings-declared rules watch the deltas.
 	// Sessions re-read settings at start, so a change needs a new session
 	// (fired state is in-session only, never persisted).
@@ -1035,7 +1039,7 @@ func modelEffortWire(cfg *config.Config, provider, model string) []string {
 			}
 		}
 	}
-	return config.ConnectEffortLevels(model)
+	return config.ConnectEffortLevels(provider, model)
 }
 
 // providerModels merges pinned + discovered models once per provider per
@@ -2301,6 +2305,36 @@ func effortThinking(effort, provider, model string, cfg *config.Config) *ai.Thin
 	b.Level = strings.ToLower(strings.TrimSpace(effort))
 	b.Supported = supported
 	return b
+}
+
+// effortState is the triple a reasoning change is judged by: the level the
+// next request carries, the CONFIGURED level (omp's shape), and the SESSION
+// EFFORT RUNG — the rung whose tool surface the following turns run on.
+//
+// The rung is part of the answer: a /effort change with /thinking pinned
+// moves the tool surface and not the level, and the transcript has to say
+// so — the resume reads the rung, and a stale record would restore the old
+// one over the user's fresh choice.
+type effortState struct {
+	level      string
+	configured string
+	rung       string
+}
+
+// moved reports whether the state changed enough to be recorded in the
+// session.
+func (s effortState) moved(other effortState) bool {
+	return s.level != other.level || s.configured != other.configured || s.rung != other.rung
+}
+
+// recordEffortChange appends the session record when the reasoning state
+// moved. It is the ONE place that decides, so the /thinking and /effort
+// commands cannot disagree about what a change is.
+func recordEffortChange(store *session.Store, before, after effortState) {
+	if !before.moved(after) {
+		return
+	}
+	appendThinkingLevel(store, after.level, after.configured, after.rung)
 }
 
 // sessionThinkingState reads the reasoning state a session's own transcript

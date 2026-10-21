@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/config"
 	"github.com/FreePeak/xdev/internal/session"
 	"github.com/FreePeak/xdev/internal/tool"
@@ -146,32 +147,53 @@ func TestTheResumeClampsThePersistedLevel(t *testing.T) {
 	}
 }
 
-// The capability must not need a re-run of `xdev connect`: the SHIPPED
-// catalog is a trusted source, and it is what connect copies from.
+// The capability must not need a re-run of `xdev connect`: the shipped
+// catalog is a TRUSTED source, and it is what connect copies from.
+//
+// The answer comes from the catalog ROW for the provider the user
+// configured — not from a consensus over every provider that serves the
+// same model id: an alias carrier that never promised a level must not
+// strip it from the row that did.
 func TestTheEffortCapabilityFallsBackToTheShippedCatalog(t *testing.T) {
-	// A model the user's models.yml says nothing about.
+	// A model the user's models.yml says nothing about, under a provider the
+	// catalog names.
 	cfg := &config.Config{Providers: map[string]*config.ProviderConfig{
-		"onegw": {BaseURL: "http://127.0.0.1:20128/v1", API: "openai-completions", Models: []config.ModelConfig{
+		"openai": {BaseURL: "https://api.openai.com/v1", API: "openai-completions", Models: []config.ModelConfig{
 			{ID: "gpt-6-astra"},
 		}},
 	}}
-	levels := modelEffortWire(cfg, "onegw", "gpt-6-astra")
+	levels := modelEffortWire(cfg, "openai", "gpt-6-astra")
 	if len(levels) == 0 {
 		t.Fatal("the shipped catalog must answer for a model the models.yml does not declare")
 	}
-	// A model nobody knows: no capability, and the request keeps its shape.
-	if got := modelEffortWire(cfg, "onegw", "no-such-model"); len(got) != 0 {
+	// The VENDOR row declares xhigh: an intersection over the alias
+	// carriers would have dropped it, and the model would never be asked
+	// for a level it takes.
+	found := false
+	for _, l := range levels {
+		if l == "xhigh" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("levels = %v, want the catalog row's own levels (xhigh included)", levels)
+	}
+	// A provider the catalog does not name: no capability, and the request
+	// keeps its shape.
+	if got := modelEffortWire(cfg, "no-such-provider", "gpt-6-astra"); len(got) != 0 {
+		t.Fatalf("levels = %v, want none for a provider the catalog does not name", got)
+	}
+	// A model nobody knows: no capability either.
+	if got := modelEffortWire(cfg, "openai", "no-such-model"); len(got) != 0 {
 		t.Fatalf("levels = %v, want none for a model the catalog does not name", got)
 	}
 	// The user's own declaration wins over the catalog.
-	// A second provider name: the discovered-model cache is keyed by the
-	// provider, so a reused name would answer from the first config.
 	cfg2 := &config.Config{Providers: map[string]*config.ProviderConfig{
-		"onegw2": {BaseURL: "http://127.0.0.1:20128/v1", API: "openai-completions", Models: []config.ModelConfig{
+		"openai2": {BaseURL: "https://api.openai.com/v1", API: "openai-completions", Models: []config.ModelConfig{
 			{ID: "gpt-6-astra", Effort: []string{"low"}},
 		}},
 	}}
-	if got := modelEffortWire(cfg2, "onegw2", "gpt-6-astra"); len(got) != 1 || got[0] != "low" {
+	if got := modelEffortWire(cfg2, "openai2", "gpt-6-astra"); len(got) != 1 || got[0] != "low" {
 		t.Fatalf("levels = %v, want the user's own declaration [low]", got)
 	}
 }
@@ -239,4 +261,72 @@ func effortDeferred(r *tool.Registry) map[string]bool {
 		out[e.Name] = true
 	}
 	return out
+}
+
+// A /effort change that moves the RUNG but not the level must be recorded.
+//
+// With /thinking pinned, the /effort command moves the tool surface and
+// leaves the level alone — so a record that only watched the level would
+// stay stale, and the resume would restore the OLD rung over the user's
+// fresh choice.
+func TestAnEffortChangeThatMovesOnlyTheRungIsRecorded(t *testing.T) {
+	s := session.OpenMem("test", "t")
+	before := effortState{level: "high", configured: "high", rung: "medium"}
+	after := effortState{level: "high", configured: "high", rung: "high"}
+	recordEffortChange(s, before, after)
+	entries := s.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (a change that moves only the rung must be recorded)", len(entries))
+	}
+	tc, ok := entries[0].(*session.ThinkingLevelChangeEntry)
+	if !ok {
+		t.Fatalf("entry = %T, want *session.ThinkingLevelChangeEntry", entries[0])
+	}
+	if tc.Effort != "high" {
+		t.Errorf("effort = %q, want high (the rung the user chose)", tc.Effort)
+	}
+	if tc.ThinkingLevel != "high" {
+		t.Errorf("thinkingLevel = %q, want high (the level did not move)", tc.ThinkingLevel)
+	}
+	// An unchanged state records nothing.
+	recordEffortChange(s, after, after)
+	if len(s.Entries()) != 1 {
+		t.Fatalf("entries = %d, want 1 (an unchanged state must not be recorded)", len(s.Entries()))
+	}
+}
+
+// The agent's catalog bridge must be wired to the agent's OWN tool set: a
+// deferred tool is reachable through tool_call only when the bridge and the
+// tools share a catalog.
+//
+// The wiring used to take a registry as an argument, and a mode that passed
+// a different one wired the bridge to a catalog whose deferred tools the
+// agent never advertised — every deferred tool unreachable.
+func TestTheDeferredToolsAreReachableThroughTheBridge(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(effortStub{n: "read"})
+	reg.Register(effortStub{n: "custom_tool"})
+	view := reg.View("low") // the low rung defers everything but the pi core
+	ag := &agent.Agent{Tools: view}
+	wireAgentMode(ag, &config.Config{}, &config.Settings{}, "p", "m", t.TempDir(), false)
+	if !ag.Tools.Catalog().HasRunner() {
+		t.Fatal("the agent's own catalog must carry the call path: a deferred tool is unreachable through the bridge without it")
+	}
+	found := false
+	for _, e := range ag.Tools.Catalog().Entries() {
+		if e.Name == "custom_tool" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the agent's catalog must carry the deferred set the agent advertises")
+	}
+	// The bridge the agent sees is the one over that catalog.
+	bridge, ok := ag.Tools.Get(tool.ToolCallName)
+	if !ok {
+		t.Fatal("the agent must see the tool_call bridge")
+	}
+	if bridge.Name() != tool.ToolCallName {
+		t.Fatalf("bridge = %q, want %q", bridge.Name(), tool.ToolCallName)
+	}
 }

@@ -58,6 +58,18 @@ func NewCatalog(reg *Registry) *Catalog {
 	return &Catalog{reg: reg, entries: map[string]Entry{}}
 }
 
+// HasRunner reports whether a call path is installed: the bridge can run a
+// deferred tool only when it has one. A catalog without a runner refuses
+// every call, which is the safe answer for a catalog nobody wired.
+func (c *Catalog) HasRunner() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.runner != nil
+}
+
 // SetRunner installs the harness call path for tool_call (nil = refuse).
 func (c *Catalog) SetRunner(r Runner) {
 	if c == nil {
@@ -324,44 +336,38 @@ func indentJSON(raw json.RawMessage) string {
 	return string(out)
 }
 
-// View returns a registry that shares this one's tools but carries the
-// deferred set of ONE effort rung.
+// View returns a LIVE view of the registry: the same tools, this view's own
+// deferred set.
 //
-// The tools are the same instances — their state (the todo list, the file
-// freshness records) stays shared — and the deferred VIEW is this one's own.
-// The shared registry is the tool SET; a view is one session's window onto
-// it. That is what lets two sessions at different rungs advertise different
-// surfaces at the same time: neither rebuilds the catalog the other reads.
+// The tools are the PARENT's, read live: a tool registered after the view
+// was made — an MCP server that connects late, an extension attached later
+// — is visible in the view at once. A copy would hide it, and the model
+// would never be offered the tool.
 //
-// The bridge tools are re-created over the view's own catalog, so a search
-// finds the tools THIS view defers.
+// The view owns only what must differ: the deferred set (its own catalog)
+// and the bridge over it (its own three tools, so a search finds THIS
+// view's deferred tools and not the parent's).
+//
+// The freshness records, the diagnostics provider and the MCP block stay
+// the parent's: they are the registry's, and the tools themselves hold the
+// parent — a view is a window onto the tool set, not a second one.
 func (r *Registry) View(effort string) *Registry {
 	if r == nil {
 		return nil
 	}
-	r.mu.RLock()
-	view := &Registry{
-		tools:       make(map[string]Tool, len(r.tools)),
-		snaps:       map[string]*fileSnapshot{},
-		stickyDefer: make(map[string]Entry, len(r.stickyDefer)),
+	v := &Registry{
+		parent:     r,
+		tools:      map[string]Tool{},
+		snaps:      map[string]*fileSnapshot{},
+		viewBridge: map[string]Tool{},
 	}
-	for n, t := range r.tools {
-		if isBridgeTool(n) {
-			continue // re-created below, over the view's own catalog
-		}
-		view.tools[n] = t
-	}
-	for k, v := range r.stickyDefer {
-		view.stickyDefer[k] = v
-	}
-	r.mu.RUnlock()
-	cat := NewCatalog(view)
-	view.catalog = cat
-	view.Register(NewToolSearchTool(cat))
-	view.Register(NewToolDescribeTool(cat))
-	view.Register(NewToolCallTool(cat))
-	ApplySessionEffort(view, effort)
-	return view
+	cat := NewCatalog(v)
+	v.catalog = cat
+	v.viewBridge[ToolSearchName] = NewToolSearchTool(cat)
+	v.viewBridge[ToolDescribeName] = NewToolDescribeTool(cat)
+	v.viewBridge[ToolCallName] = NewToolCallTool(cat)
+	ApplySessionEffort(v, effort)
+	return v
 }
 
 // Registry: the deferred view ---
@@ -403,6 +409,17 @@ func (r *Registry) Defer(name, index string, tags ...string) {
 // everything it does not list — a sticky entry is a floor, never a ceiling.
 func (r *Registry) DeferSticky(name, index string, tags ...string) {
 	r.Defer(name, index, tags...)
+	if r.parent != nil {
+		// The sticky set is the PARENT's: the wide remote surfaces are the
+		// registry's, and every view of it must keep them behind the bridge.
+		r.parent.recordSticky(name, index, tags...)
+		return
+	}
+	r.recordSticky(name, index, tags...)
+}
+
+// recordSticky records a sticky deferral on the registry itself.
+func (r *Registry) recordSticky(name, index string, tags ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stickyDefer == nil {
@@ -415,6 +432,9 @@ func (r *Registry) DeferSticky(name, index string, tags ...string) {
 func (r *Registry) isSticky(name string) bool {
 	if r == nil {
 		return false
+	}
+	if r.parent != nil {
+		return r.parent.isSticky(name)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -447,12 +467,13 @@ func (r *Registry) ResetDeferred() {
 	if r == nil {
 		return
 	}
-	r.mu.RLock()
-	sticky := make(map[string]Entry, len(r.stickyDefer))
-	for k, v := range r.stickyDefer {
+	src := r.toolSource()
+	src.mu.RLock()
+	sticky := make(map[string]Entry, len(src.stickyDefer))
+	for k, v := range src.stickyDefer {
 		sticky[k] = v
 	}
-	r.mu.RUnlock()
+	src.mu.RUnlock()
 	c := r.Catalog()
 	c.mu.Lock()
 	defer c.mu.Unlock()

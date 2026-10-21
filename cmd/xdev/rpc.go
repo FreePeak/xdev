@@ -118,7 +118,9 @@ func newSessionCore(opts printOptions) (*rpcHandler, func(), error) {
 		Thinking:   effortThinking(sessionLevelFor(store, effortRef, provName, modelName, cfg), provName, modelName, cfg),
 	}
 	// Shared per-mode seams: catalog bridge + secrets redactor (#79/#80).
-	wireAgentMode(h.agent, reg, cfg, lastSettings(), provName, modelName, cwd, false)
+	// The agent's tool set is the VIEW, so the catalog it is wired to must
+	// be the VIEW's: the bridge runs the tools the agent sees.
+	wireAgentMode(h.agent, cfg, lastSettings(), provName, modelName, cwd, false)
 	// #90: mailbox arrivals become follow-ups in this session's agent (one
 	// long-lived agent per RPC process, so no indirection is needed).
 	setInboxSink(func(m agent.Message) bool {
