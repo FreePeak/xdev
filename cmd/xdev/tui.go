@@ -309,7 +309,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			restoreNotices = append(restoreNotices, n)
 		}
 	}
-	saveTabSet(cwd, tabs.persistIDs())
+	saveTabSet(cwd, tabs.persistTabs())
 	storeOf := func() *session.Store { return tabs.store() }
 	// The live agent is per SESSION, not per process (#157). It was one
 	// pointer every turn overwrote, so with two sessions working whichever turn
@@ -990,7 +990,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// The open set is what the next launch reopens, so every switch
 		// rewrites it. Cheap enough (a few paths) to sit on the one
 		// seam that already owns the tabset snapshot.
-		saveTabSet(cwd, tabs.persistIDs())
+		saveTabSet(cwd, tabs.persistTabs())
 		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
 			replaySession(app, res.Messages)
 		}
@@ -1155,7 +1155,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// launch reopens the tab the user just closed. A closure, not a
 		// deferred call: defer evaluates its arguments NOW, which would
 		// record the set while the tab is still open.
-		defer func() { saveTabSet(cwd, tabs.persistIDs()) }()
+		defer func() { saveTabSet(cwd, tabs.persistTabs()) }()
 		cur := tabs.current()
 		if cur == nil || cur.id != id {
 			if tabs.close(id) == nil && len(tabs.snapshot()) == 0 {
@@ -2548,7 +2548,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					app.SetRunning(false)
 				}
 				app.SetTabs(tabInfos(tabs))
-				saveTabSet(cwd, tabs.persistIDs())
+				saveTabSet(cwd, tabs.persistTabs())
 			}()
 			sessMu.Lock()
 			hist, errH := session.BuildContext(turnStore.Entries(), turnStore.LeafID(), session.SystemPrompt{})

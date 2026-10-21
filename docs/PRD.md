@@ -3432,6 +3432,20 @@ Verified on the built binary in a forked pty with `pyte` (the throwaway drive: a
 
 ---
 
+*Last updated: 2026-10-21 (`fix/tab-set-no-growth-per-launch` — the follow-up to #713, on the same user report: "why we have so many tabs while I just open 1 ?"):* **every launch left its own session in the tab set, so the set grew by one per launch.**
+
+**The measurement** (the shipped binary, three launches in a row in one directory, each in a session of its own): launch 1 showed no count, launch 2 showed **"2 tabs"**, launch 3 showed **"3 tabs"** — and the persisted set (`~/.xdev/agent/session-tabs.json`, per working directory) grew with it.
+
+**The cause.** A launch opens ONE session of its own, and that session was persisted like any other tab (`tabset.persistIDs` returned every open tab's path). So every run left its live session in the set, the next run restored it as a tab ON TOP of its own new one, and nothing ever dropped it. A directory where one conversation was being worked on ended up with six tabs — five of them dead conversations from earlier days. #713 closed the other growth path (a resume APPENDED a tab); this is the launch path, and it was the one that actually made the count.
+
+**The fix.** The set a later launch reopens is now the tabs the user kept open BESIDE the one they are in: `tabset.persistTabs` skips the current tab. The session in the view is not carried into the next run — it is on disk, `--continue` (the breadcrumb) resumes it and `/resume` lists it — and what the set carries is the working set: a session parked by `/new`, a fork, an import, a reopen. The count is then the number of conversations actually in play, and it does not climb one per launch.
+
+Tests: `cmd/xdev/tabset_test.go` — `TestLaunchesDoNotGrowTheOpenSet` (three launches in a row: the open set is the same size every time) and the updated `TestReplaceCurrentSwapsTheSlot` (the persisted set names neither the session in the view nor the displaced one).
+
+Verified on the built binary in a forked pty with `pyte` (the same drive that showed 1 → 2 → 3 tabs on the pre-fix build): three consecutive launches now show the SAME count every time — no count at all, because one open session hides the segment — while the three session files are all still on disk. The conversations are not lost by leaving the set; only the tab COUNT is honest now.
+
+---
+
 *Last updated: 2026-10-05 (`test/ask-isolation` — the two red tests in `internal/config`, closed):* **`TestAskTimeoutLayersAndDecodes` and `TestAskAutoAnswerDefaultsOffAndLayersOn` had been failing on this machine and green in CI, and the cause was neither the code nor the box.** Both call `LoadSettings(cwd, nil)`, and the global layer that call folds in is `~/.xdev/agent/config.yml` — the developer's REAL one, not a fixture. So a test whose whole subject is the *shipped default* (`ask.timeout` = 60s, `ask.autoAnswer` off) was really asserting "the shipped default, as overridden by whatever this developer has configured". This box carries `ask: {autoAnswer: true, timeout: 300}` — exactly what those two keys exist for — so both failed; a clean machine passed them. `asktimeout_test.go` was the **only** file in `internal/config` that called `LoadSettings` without isolating the global layer (`t.Setenv("XDEV_AGENT_DIR", …)` or `t.Setenv("HOME", …)`); the other twenty do. Both tests now isolate it, with the reason in the file so the next test copied from a neighbour does not undo it.
 
 The general rule this earns, and the reason it is worth recording next to the tests rather than in a comment nobody reads: **a test that pins a DEFAULT must not read the machine's config through the loader it is testing.** `LoadSettings(cwd, nil)` reads as "no overlays" and is anything but. Verified by running the package three ways — with the real `ask:` config in a temp agent dir, with an empty one, and with the two new lines removed (which reproduces both failures under the same config).
