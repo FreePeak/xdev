@@ -79,6 +79,12 @@ type TaskTool struct {
 	// was spawned FOR (spawn-policy check: can this agent spawn its
 	// declared children?).
 	AgentName string
+	// ParentLabel names the child that owns THIS task tool ("" = the
+	// top-level session owns it). A nested task tool is handed to a child,
+	// so it knows the child's label — which is the parent link the child's
+	// OWN children need. Without it a grandchild arrives with no parent
+	// and the display can only draw a flat list.
+	ParentLabel string
 	// Hub enables background task dispatch (hub tool, research §2). nil
 	// makes background:true fall back to a synchronous spawn.
 	Hub *Hub
@@ -578,6 +584,10 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 				MaxDepth:     maxDepth,
 				Depth:        t.Depth + 1,
 				AgentName:    agentArg,
+				// The child's own label is the parent link for everything
+				// IT spawns: the grandchild's events arrive here, and
+				// without a name to point at they read as roots.
+				ParentLabel:  a.Name,
 				Hub:          t.Hub,
 				ChildAdvisor: t.ChildAdvisor,
 				// The grandchild's progress has to reach the same display
@@ -635,6 +645,10 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		Policy:          t.Policy,
 		Approve:         t.Approve,
 		Thinking:        agentThinking,
+		// Who spawned this child. The top-level session owns its children
+		// (""), a child owns the ones it spawns — and that is the edge the
+		// display draws the tree along.
+		Parent: t.ParentLabel,
 	}
 
 	// A foreground spawn is the one a user is watching: the TUI learns what

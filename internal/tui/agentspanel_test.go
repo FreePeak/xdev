@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func panelScreen(t *testing.T) (*App, tcell.SimulationScreen) {
 // row of its own.
 func TestAgentPanelShowsARunningChild(t *testing.T) {
 	app, scr := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "free", "fg-7")
+	app.AgentPanelStart("scout", "scout", "free", "", "fg-7")
 	app.AgentPanelUpdate("scout", "read", `{"path":"internal/tui/app.go"}`)
 	app.draw()
 
@@ -47,19 +48,134 @@ func TestAgentPanelShowsARunningChild(t *testing.T) {
 }
 
 // A grandchild is exactly the case the transcript cannot render: it arrives
-// with a label and no call row of its own. The strip is flat, so it shows it.
+// with a label and no call row of its own. The strip shows it — and, now that
+// the child names the parent that spawned it, shows it as the CHILD it is.
 func TestAgentPanelShowsAChainFlat(t *testing.T) {
 	app, scr := panelScreen(t)
-	app.AgentPanelStart("task", "task", "", "")
-	app.AgentPanelStart("scout", "scout", "", "")
-	app.AgentPanelStart("leaf", "sonic", "", "")
+	app.AgentPanelStart("task", "task", "", "", "")
+	app.AgentPanelStart("scout", "scout", "", "", "")
+	app.AgentPanelStart("leaf", "sonic", "", "", "")
 	app.draw()
 
 	out := screenText(scr)
 	for _, want := range []string{"task", "scout", "leaf"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("level %q is missing from the flat strip:\n%s", want, out)
+			t.Fatalf("level %q is missing from the strip:\n%s", want, out)
 		}
+	}
+}
+
+// The tree is the point: a child that names its parent is drawn UNDER it,
+// with the connectors that say so. A flat list of the same names cannot
+// tell a user which child spawned which, and a chain is exactly the case
+// that reads wrong.
+func TestAgentPanelDrawsAChainAsATree(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "", "fg-7")
+	app.AgentPanelStart("leaf", "sonic", "", "scout", "fg-8")
+	app.AgentPanelUpdate("leaf", "grep", `{"pattern":"TODO"}`)
+	app.draw()
+
+	out := screenText(scr)
+	lines := strings.Split(out, "\n")
+	scoutAt, leafAt := -1, -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "scout") && scoutAt < 0 {
+			scoutAt = i
+		}
+		if strings.Contains(ln, "leaf") && leafAt < 0 {
+			leafAt = i
+		}
+	}
+	if scoutAt < 0 || leafAt < 0 {
+		t.Fatalf("the tree lost a level:\n%s", out)
+	}
+	if leafAt <= scoutAt {
+		t.Fatalf("the child must sit under its parent:\n%s", out)
+	}
+	// The parent's branch and the child's own connector.
+	if !strings.Contains(lines[scoutAt], "├─") && !strings.Contains(lines[scoutAt], "╰─") {
+		t.Fatalf("the parent row has no branch:\n%s", out)
+	}
+	if !strings.Contains(lines[leafAt], "╰─") {
+		t.Fatalf("the child row has no closing branch:\n%s", out)
+	}
+	// The child is INDENTED: its text starts further right than the
+	// parent's, which is what makes the nesting readable.
+	if strings.Index(lines[leafAt], "leaf") <= strings.Index(lines[scoutAt], "scout") {
+		t.Fatalf("the child is not indented under its parent:\n%s", out)
+	}
+}
+
+// A child whose parent the strip never saw is an orphan, not a lost row: it
+// draws as a root rather than vanishing.
+func TestAgentPanelAnOrphanChildDrawsAsARoot(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("leaf", "sonic", "", "ghost", "")
+	app.draw()
+
+	out := screenText(scr)
+	if !strings.Contains(out, "leaf") {
+		t.Fatalf("an orphan child must still be shown:\n%s", out)
+	}
+}
+
+// A cycle in the parent links cannot come from a real spawn, but a hang is
+// the worst failure a strip can have: the rows must still paint.
+func TestAgentPanelSurvivesACyclicParentLink(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("a", "worker", "", "b", "")
+	app.AgentPanelStart("b", "worker", "", "a", "")
+	app.draw()
+
+	out := screenText(scr)
+	if !strings.Contains(out, "a") || !strings.Contains(out, "b") {
+		t.Fatalf("a cyclic parent link must not empty the strip:\n%s", out)
+	}
+}
+
+// The strip shows the chain WHOLE: a kept child drags its ancestors in, so
+// the newest link of a chain is never cut off by the paint budget. The price
+// is a row or two more than the budget — the chain's depth is bounded, and a
+// branch with nothing above it is worse than a taller strip.
+func TestAgentPanelShowsTheNewestChainWhole(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "", "")
+	app.AgentPanelStart("leaf", "sonic", "", "scout", "")
+	app.AgentPanelStart("deep", "worker", "", "leaf", "")
+	app.AgentPanelStart("reviewer", "reviewer", "", "", "")
+	app.draw()
+
+	out := screenText(scr)
+	for _, want := range []string{"scout", "leaf", "deep", "reviewer"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("%q is missing from the strip:\n%s", want, out)
+		}
+	}
+}
+
+// The keyboard's focus lands on a row the user can SEE. A focus on a row the
+// paint budget cut would open a transcript that is not on screen.
+func TestAgentPanelFocusLandsOnAVisibleRow(t *testing.T) {
+	app, _ := panelScreen(t)
+	for i := 0; i < 6; i++ {
+		app.AgentPanelStart(fmt.Sprintf("child-%d", i), "worker", "", "", fmt.Sprintf("fg-%d", i))
+	}
+	app.draw()
+
+	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
+	app.mu.Lock()
+	focus := app.agents.focused()
+	visible := map[string]bool{}
+	for _, r := range app.agents.visibleTreeLocked() {
+		visible[r.Label] = true
+	}
+	app.mu.Unlock()
+	if focus == "" {
+		t.Fatal("Alt+F left the strip with no focus")
+	}
+	if !visible[focus] {
+		t.Fatalf("the focus %q is not a painted row", focus)
 	}
 }
 
@@ -67,7 +183,7 @@ func TestAgentPanelShowsAChainFlat(t *testing.T) {
 // child's row is the transcript's business.
 func TestAgentPanelDropsASettledChild(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "")
+	app.AgentPanelStart("scout", "scout", "", "", "")
 	if _, n := app.AgentPanelState(); n != 1 {
 		t.Fatalf("running = %d, want 1", n)
 	}
@@ -81,7 +197,7 @@ func TestAgentPanelDropsASettledChild(t *testing.T) {
 // the same surface /hub's Enter uses, so Esc means one thing.
 func TestAgentPanelRowClickOpensTheChildTranscript(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "fg-7")
+	app.AgentPanelStart("scout", "scout", "", "", "fg-7")
 	app.draw()
 
 	app.mu.Lock()
@@ -110,7 +226,7 @@ func TestAgentPanelRowClickOpensTheChildTranscript(t *testing.T) {
 // row that offers nothing.
 func TestAgentPanelRowWithoutTranscriptIsNotClickable(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "")
+	app.AgentPanelStart("scout", "scout", "", "", "")
 	app.draw()
 	app.mu.Lock()
 	hits := len(app.agentHits)
@@ -128,7 +244,7 @@ func TestAgentPanelToggle(t *testing.T) {
 		OpenChild: func(string, string) bool { return true },
 		Set:       func(bool) error { return nil },
 	})
-	app.AgentPanelStart("scout", "scout", "", "")
+	app.AgentPanelStart("scout", "scout", "", "", "")
 	app.draw()
 
 	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModAlt))
@@ -158,7 +274,7 @@ func TestAgentPanelToggleUnwiredSaysSo(t *testing.T) {
 // and children running, the strip is pushed up and stays a chrome band.
 func TestAgentPanelSitsAboveTheQueue(t *testing.T) {
 	app, scr := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "")
+	app.AgentPanelStart("scout", "scout", "", "", "")
 	app.mu.Lock()
 	app.queue = append(app.queue, queuedEntry{text: "a pending prompt", kind: queueKindText, session: app.st.SessionID})
 	app.mu.Unlock()
@@ -183,7 +299,7 @@ func TestAgentPanelSitsAboveTheQueue(t *testing.T) {
 // RUNNING children drops to zero while the row itself remains.
 func TestAgentPanelKeepsASettledChild(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "")
+	app.AgentPanelStart("scout", "scout", "", "", "")
 	if _, n := app.AgentPanelState(); n != 1 {
 		t.Fatalf("running = %d, want 1", n)
 	}
@@ -209,8 +325,8 @@ func TestAgentPanelKeepsASettledChild(t *testing.T) {
 // frame.
 func TestAgentPanelAltFFocusesTheNewestRow(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "fg-7")
-	app.AgentPanelStart("leaf", "sonic", "", "fg-8")
+	app.AgentPanelStart("scout", "scout", "", "", "fg-7")
+	app.AgentPanelStart("leaf", "sonic", "", "", "fg-8")
 	app.draw()
 
 	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
@@ -243,9 +359,9 @@ func TestAgentPanelAltFWithNothingToFocusIsSilence(t *testing.T) {
 // the keyboard and the mouse cannot drift into opening different children.
 func TestAgentPanelArrowsWalkAndEnterOpens(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("task", "task", "", "fg-7")
-	app.AgentPanelStart("scout", "scout", "", "fg-8")
-	app.AgentPanelStart("leaf", "sonic", "", "fg-9")
+	app.AgentPanelStart("task", "task", "", "", "fg-7")
+	app.AgentPanelStart("scout", "scout", "", "", "fg-8")
+	app.AgentPanelStart("leaf", "sonic", "", "", "fg-9")
 	app.draw()
 
 	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
@@ -304,7 +420,7 @@ func TestAgentPanelArrowsWalkAndEnterOpens(t *testing.T) {
 // the strip", not "close the whole app".
 func TestAgentPanelEscLeavesTheStrip(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "fg-7")
+	app.AgentPanelStart("scout", "scout", "", "", "fg-7")
 	app.draw()
 
 	app.handleKey(tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModAlt))
@@ -329,7 +445,7 @@ func TestAgentPanelEscLeavesTheStrip(t *testing.T) {
 // falls through to the editor as before.
 func TestAgentPanelDownFromComposerEntersTheStrip(t *testing.T) {
 	app, _ := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "", "fg-7")
+	app.AgentPanelStart("scout", "scout", "", "", "fg-7")
 	app.draw()
 
 	app.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
@@ -345,22 +461,95 @@ func TestAgentPanelDownFromComposerEntersTheStrip(t *testing.T) {
 }
 
 // D1: a tracked child — one the host has a transcript for — wears the ⎿ tick
-// next to its model column, so the row reads as openable before the mouse
-// moves. An untracked child wears nothing, because offering an open it cannot
-// perform is worse than offering nothing.
+// NEXT TO ITS LABEL, so the row reads as openable before the mouse moves and
+// the glyph is read as part of the name rather than as a stray mark at the
+// far end of the row. An untracked child wears nothing, because offering an
+// open it cannot perform is worse than offering nothing.
 func TestAgentPanelOpenableRowWearsATick(t *testing.T) {
 	app, scr := panelScreen(t)
-	app.AgentPanelStart("scout", "scout", "free", "fg-7")
+	app.AgentPanelStart("scout", "scout", "free", "", "fg-7")
 	app.draw()
 
-	if !strings.Contains(screenText(scr), "⎿") {
-		t.Fatalf("an openable strip row must wear the ⎿ tick:\n%s", screenText(scr))
+	out := screenText(scr)
+	if !strings.Contains(out, "⎿") {
+		t.Fatalf("an openable strip row must wear the ⎿ tick:\n%s", out)
+	}
+	// The tick sits with the name, not at the far end of the row.
+	for _, ln := range strings.Split(out, "\n") {
+		if !strings.Contains(ln, "scout") {
+			continue
+		}
+		tick := strings.Index(ln, "⎿")
+		name := strings.Index(ln, "scout")
+		if tick < 0 || name < 0 || tick > name {
+			t.Fatalf("the ⎿ tick must sit next to the label:\n%s", out)
+		}
 	}
 
 	app2, scr2 := panelScreen(t)
-	app2.AgentPanelStart("scout", "scout", "", "")
+	app2.AgentPanelStart("scout", "scout", "", "", "")
 	app2.draw()
 	if strings.Contains(screenText(scr2), "⎿") {
 		t.Fatalf("an untracked row must not wear the ⎿ tick:\n%s", screenText(scr2))
 	}
+}
+
+// The label and the activity are separated: "reviewer · grep · TODO". Without
+// the separator they ran together into one word, and the row said nothing
+// about which child was working.
+func TestAgentPanelRowSeparatesLabelFromActivity(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("reviewer", "reviewer", "", "", "")
+	app.AgentPanelUpdate("reviewer", "grep", `{"pattern":"TODO"}`)
+	app.draw()
+
+	out := screenText(scr)
+	if !strings.Contains(out, "reviewer · grep · TODO") {
+		t.Fatalf("the row must separate the label from the activity:\n%s", out)
+	}
+}
+
+// The row carries its OWN elapsed clock. The clock was computed and reserved
+// in the row's budget but never painted, so a row said what the child was
+// doing and never said for how long.
+func TestAgentPanelRowShowsItsOwnClock(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "", "")
+	app.draw()
+
+	out := screenText(scr)
+	found := false
+	for _, ln := range strings.Split(out, "\n") {
+		if !strings.Contains(ln, "scout") {
+			continue
+		}
+		for _, clock := range []string{"0s", "1s", "2s"} {
+			if strings.Contains(ln, clock) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the row must show its elapsed clock:\n%s", out)
+	}
+}
+
+// A settled child wears a static tick, not the spinner: a finished row that
+// kept spinning said "still working" about work that is done.
+func TestAgentPanelSettledRowStopsSpinning(t *testing.T) {
+	app, scr := panelScreen(t)
+	app.AgentPanelStart("scout", "scout", "", "", "")
+	app.AgentPanelSettle("scout")
+	app.draw()
+
+	out := screenText(scr)
+	for _, ln := range strings.Split(out, "\n") {
+		if !strings.Contains(ln, "scout") {
+			continue
+		}
+		if strings.Contains(ln, "✓") {
+			return
+		}
+	}
+	t.Fatalf("a settled row must wear a static tick:\n%s", out)
 }

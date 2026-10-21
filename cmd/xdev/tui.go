@@ -3297,7 +3297,7 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 		}
 		s.mu.Unlock()
 		s.app.AddTaskChild(callID, ev.Label, ev.Agent, ev.Model)
-		s.app.AgentPanelStart(ev.Label, ev.Agent, ev.Model, ev.TranscriptID)
+		s.app.AgentPanelStart(ev.Label, ev.Agent, ev.Model, ev.Parent, ev.TranscriptID)
 	case agent.SubagentTool:
 		s.app.UpdateTaskChild(callID, ev.Label, ev.Tool, string(ev.Args), ev.Status)
 		s.app.AgentPanelUpdate(ev.Label, ev.Tool, string(ev.Args))
