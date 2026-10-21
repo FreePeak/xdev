@@ -45,7 +45,11 @@ type importTurn struct {
 // file is opened read-only and never mutated. dataDir places the new file;
 // cwd is the session's working directory (the importer's cwd, not the
 // foreign one — the import continues in the current project).
-func importForeign(kind, path, dataDir, cwd string, scan func(io.Reader) (importScan, error)) (*ImportResult, error) {
+//
+// opts carries the ownership lease: the imported session is a NEW file that
+// any other xdev can find, so the importer holds its lease from the moment
+// it materialises — before it writes the first imported record.
+func importForeign(kind, path, dataDir, cwd string, opts Options, scan func(io.Reader) (importScan, error)) (*ImportResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -67,7 +71,7 @@ func importForeign(kind, path, dataDir, cwd string, scan func(io.Reader) (import
 
 	now := time.Now().UTC()
 	s := OpenMem(cwd, title)
-	if _, err := s.EnsureOnDisk(SessionFilePath(dataDir, cwd, now, s.ID()), Options{}); err != nil {
+	if _, err := s.EnsureOnDisk(SessionFilePath(dataDir, cwd, now, s.ID()), opts); err != nil {
 		return nil, err
 	}
 	toolCalls := 0

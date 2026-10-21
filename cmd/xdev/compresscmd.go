@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -186,6 +187,12 @@ func compressProvider(explicit string) (ai.Provider, string, error) {
 // compressSession is the engine both the CLI and its tests exercise: plan the
 // compaction, run the ladder member, and (unless dryRun) append the
 // CompactionEntry the live boundary would have written.
+//
+// It modifies an EXISTING session file out of band, so it takes the
+// session's ownership lease. When another live xdev owns the session it
+// REFUSES — it does not fork: a compaction written to a file nobody is
+// looking at is invisible damage, and the refusal names the conflict
+// instead. Nothing is changed.
 func compressSession(ctx context.Context, path, method string, keepRecent int64, dryRun bool, provider ai.Provider, model string) (*compressStats, error) {
 	store, err := session.Open(path)
 	if err != nil {
@@ -196,6 +203,15 @@ func compressSession(ctx context.Context, path, method string, keepRecent int64,
 			fmt.Fprintf(os.Stderr, "xdev compress: session close: %v\n", cerr)
 		}
 	}()
+	// A dry run only READS, so it takes no lease and is never refused.
+	if !dryRun {
+		if err := store.AttachLease(sessionLeaseDir()); err != nil {
+			if errors.Is(err, session.ErrSessionOwned) {
+				return nil, fmt.Errorf("refusing to compress %s: another xdev is writing this session — exit it first; nothing was changed", path)
+			}
+			return nil, err
+		}
+	}
 	ctxRes, err := session.BuildContext(store.Entries(), store.LeafID(), session.SystemPrompt{})
 	if err != nil {
 		return nil, fmt.Errorf("rebuild context: %w", err)

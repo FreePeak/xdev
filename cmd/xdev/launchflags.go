@@ -221,6 +221,18 @@ func sessionDataDir() string {
 	return config.DataDir()
 }
 
+// sessionLeaseDir is the directory holding the cross-process session
+// ownership leases — one 0-byte <sessionId>.lock per session, under the
+// state root (the counterpart of omp's run/session-owners subtree).
+//
+// It is resolved here, in cmd/xdev, and INJECTED into internal/session:
+// that package cannot import internal/config (internal/config's own test
+// binary imports internal/session, so the reverse edge would be an import
+// cycle).
+func sessionLeaseDir() string {
+	return filepath.Join(config.StateDir(), "session-owners")
+}
+
 // parseCSV splits a comma-separated flag value, dropping blanks.
 func parseCSV(v string) []string {
 	var out []string

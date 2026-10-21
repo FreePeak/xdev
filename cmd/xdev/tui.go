@@ -286,8 +286,16 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// or no longer a session is already filtered out; the live startup
 	// session is first so it is the one on screen.
 	restored := savedTabSessions(cwd)
+	// A restored tab whose session another live xdev owns comes back as a
+	// FORK. The transcript surface does not exist yet (the app is built
+	// below), so the notice is collected and printed once it does.
+	var restoreNotices []string
 	for _, st := range restored {
 		if st.ID() == store.ID() {
+			// The live startup session is already open: this copy holds a
+			// second reference to the same lease, so it is closed here
+			// rather than leaked.
+			_ = st.Close()
 			continue
 		}
 		// The same fix as the startup session: a restored tab still
@@ -295,6 +303,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		adoptMechanicalTitle(st)
 		if _, err := tabs.open(st); err != nil {
 			_ = st.Close()
+			continue
+		}
+		if n := sessionForkNotice(st); n != "" {
+			restoreNotices = append(restoreNotices, n)
 		}
 	}
 	saveTabSet(cwd, tabs.persistIDs())
@@ -473,6 +485,9 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	defer func() { terminalRestore = prevRestore }()
 
 	app := tui.New(scr, th, modelRef, store.ID())
+	for _, n := range restoreNotices {
+		app.AddSystemBlock(n)
+	}
 	app.SetFrameDropped(dropped)
 	// --log: write a TUI screen transcript to <path> after each
 	// paint frame (off by default). Relative paths resolve under
@@ -1037,6 +1052,11 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if n := sessionRepairNotice(ns); n != "" {
 			app.AddSystemBlock(n)
 		}
+		// A session another live xdev owns is resumed as a FORK: the entries
+		// go to a new file, and the user has to be told which one.
+		if n := sessionForkNotice(ns); n != "" {
+			app.AddSystemBlock(n)
+		}
 		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
 		i, err := tabs.open(ns)
@@ -1137,7 +1157,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if path == "" {
 			return fmt.Errorf("no closed session to reopen")
 		}
-		ns, err := session.Open(path)
+		ns, err := session.OpenForWrite(path, session.Options{LeaseDir: sessionLeaseDir()})
 		if err != nil {
 			return fmt.Errorf("reopen %s: %w", shortSessionID(sessionIDOfPath(path)), err)
 		}
@@ -1197,7 +1217,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("resume: " + err.Error())
 			return
 		}
-		resumed, err := session.Open(path)
+		resumed, err := session.OpenForWrite(path, session.Options{LeaseDir: sessionLeaseDir()})
 		if err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
 			return
@@ -1554,13 +1574,20 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			if storeOf().Path() == "" {
 				if _, err := storeOf().EnsureOnDisk(
-					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()), session.Options{}); err != nil {
+					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()),
+					session.Options{LeaseDir: sessionLeaseDir()}); err != nil {
 					return err
 				}
 			}
 			fork, err := session.ForkSession(storeOf().Path(),
 				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), session.NewSessionID()), "")
 			if err != nil {
+				return err
+			}
+			// The fork is a write path: it gets its own lease, for its own
+			// (fresh) session id.
+			if err := fork.AttachLease(sessionLeaseDir()); err != nil {
+				_ = fork.Close()
 				return err
 			}
 			return swapStoreTo(fork)
@@ -2807,7 +2834,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if s.Path() == "" {
 			if _, err := s.EnsureOnDisk(
 				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), s.ID()),
-				session.Options{},
+				session.Options{LeaseDir: sessionLeaseDir()},
 			); err != nil {
 				app.AddSystemBlock("· detach failed — session not on disk: " + err.Error())
 				return false
@@ -4048,7 +4075,7 @@ func resumeSessionCommand(surface resumeSurface, cwd, query string, swap func(*s
 	if err != nil {
 		return err
 	}
-	resumed, err := session.Open(path)
+	resumed, err := session.OpenForWrite(path, session.Options{LeaseDir: sessionLeaseDir()})
 	if err != nil {
 		return err
 	}

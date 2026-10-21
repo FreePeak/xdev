@@ -296,7 +296,10 @@ func (h *rpcHandler) NewSession() error {
 	s := session.OpenMem(h.cwd, "rpc "+now.Format("2006-01-02 15:04"))
 	s.EnableAutoPersist(
 		session.SessionFilePath(config.DataDir(), h.cwd, now, s.ID()),
-		session.Options{},
+		// An rpc session is an ORDINARY user session: --continue and
+		// --resume pick it up, so it holds the ownership lease like any other
+		// session xdev creates.
+		session.Options{LeaseDir: sessionLeaseDir()},
 	)
 	old := h.store
 	h.store = s

@@ -134,7 +134,11 @@ func (h *acpHandler) NewSession(_ context.Context, cwd string) (string, error) {
 		logx.Debugf("acp: session cwd %q differs from the agent's working directory %q — tools stay rooted there", cwd, h.cwd)
 	}
 	store := session.OpenMem(cwd, "acp "+now.Format("2006-01-02 15:04"))
-	store.EnableAutoPersist(session.SessionFilePath(config.DataDir(), cwd, now, store.ID()), session.Options{})
+	// An acp session is an ORDINARY user session: --continue and --resume
+	// pick it up, so it holds the ownership lease like any other session
+	// xdev creates.
+	store.EnableAutoPersist(session.SessionFilePath(config.DataDir(), cwd, now, store.ID()),
+		session.Options{LeaseDir: sessionLeaseDir()})
 	schedules := agent.NewScheduleState(store)
 	// The registry is shared by all ACP sessions. Do not rebind its
 	// single-session schedule state here; the per-session context seam owns it.
