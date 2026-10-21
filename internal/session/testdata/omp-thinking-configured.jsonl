@@ -1,0 +1,6 @@
+{"type":"title","v":1,"title":"Thinking level record","source":"auto","updatedAt":"2026-09-07T03:20:57.319Z","pad":"                                                                                                                                         "}
+{"type":"session","version":3,"id":"01a079e1-efa4-70f4-936b-a39a83bd5771","timestamp":"2026-09-07T03:20:45.220Z","cwd":"/home/dev/.config/herdr","title":"Thinking level record","titleSource":"auto"}
+{"type":"model_change","id":"0ae209fb","parentId":null,"timestamp":"2026-09-07T03:20:45.252Z","model":"router/free","resolvedModelIsFallback":false}
+{"type":"message","id":"e6fe4637","parentId":"0ae209fb","timestamp":"2026-09-07T03:20:54.204Z","message":{"role":"user","content":[{"type":"text","text":"raise the thinking level"}],"attribution":"user","timestamp":1788751254141}}
+{"type":"thinking_level_change","id":"aaaaaaaa","parentId":"e6fe4637","timestamp":"2026-09-07T03:21:00.570Z","thinkingLevel":"high","configured":"auto"}
+{"type":"message","id":"7106ed9e","parentId":"aaaaaaaa","timestamp":"2026-09-07T03:21:00.590Z","message":{"role":"assistant","content":[{"type":"text","text":"raised"}],"attribution":"assistant","timestamp":1788751260590}}
