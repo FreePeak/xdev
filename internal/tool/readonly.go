@@ -406,6 +406,49 @@ func cutAtRedirect(seg string) string {
 	return seg
 }
 
+// shellKeywordScaffolding are the shell keywords that NAME no program, so a
+// segment that starts with one cannot change anything on its own.
+//
+//	"for x in a b"   the loop header: a variable and a word list
+//	"do"            the body's introducer
+//	"done"          the loop's end
+//	"then" "else"   the conditional's branches
+//	"elif" "fi"     the conditional's branches
+//
+// A loop's BODY is a command and is judged on its own — "do rm -rf /" is
+// still a write. The header of a for loop cannot write: the shell expands
+// its word list, and a command substitution inside it is a segment of its
+// own (the splitter cuts at `(`), so the command is still judged.
+var shellKeywordScaffolding = map[string]bool{
+	"for": true, "do": true, "done": true,
+	"then": true, "else": true, "elif": true, "fi": true,
+}
+
+// shellKeywordCommand are the shell keywords whose segment CONTINUES with a
+// command or an expression, so the rest of the segment is what has to be
+// judged.
+//
+//	"do rm -rf /"   the body
+//	"while COND"   the condition, which can name a command
+//	"until COND"   the condition
+//	"if COND"      the condition
+var shellKeywordCommand = map[string]bool{
+	"do": true, "while": true, "until": true, "if": true,
+}
+
+// stripShellKeyword removes a leading shell keyword from a segment's fields
+// and reports whether there was one. The keyword itself is not a command.
+func stripShellKeyword(fields []string) ([]string, string) {
+	if len(fields) == 0 {
+		return fields, ""
+	}
+	k := fields[0]
+	if shellKeywordScaffolding[k] || shellKeywordCommand[k] {
+		return fields[1:], k
+	}
+	return fields, ""
+}
+
 // readOnlySegment judges one already-split segment.
 func readOnlySegment(seg string) bool {
 	fields := strings.Fields(cutAtRedirect(seg))
@@ -417,6 +460,17 @@ func readOnlySegment(seg string) bool {
 	}
 	if len(fields) == 0 {
 		return false
+	}
+	// A shell keyword is scaffolding, not a command. The body of a loop and
+	// the condition of a while are commands, so they are judged as one.
+	if rest, kw := stripShellKeyword(fields); kw != "" {
+		if len(rest) == 0 {
+			return true // the keyword alone names no program
+		}
+		if shellKeywordCommand[kw] {
+			return readOnlySegment(strings.Join(rest, " "))
+		}
+		return true
 	}
 	switch head := fields[0]; head {
 	case "git":
