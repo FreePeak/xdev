@@ -282,6 +282,10 @@ func splitOnOperators(command string) []string {
 		case c == '\'' || c == '"':
 			quote = c
 			cur.WriteByte(c)
+		case c == '&' && isRedirectAmp(command, i):
+			// An '&' inside a redirect is not a control operator. See
+			// isRedirectAmp for why cutting here was expensive.
+			cur.WriteByte(c)
 		case isCompoundOperator(c):
 			segs = append(segs, cur.String())
 			cur.Reset()
@@ -293,6 +297,31 @@ func splitOnOperators(command string) []string {
 		}
 	}
 	return append(segs, cur.String())
+}
+
+// isRedirectAmp reports whether the '&' at position i belongs to a REDIRECT
+// operator rather than to a control operator.
+//
+//	>&2    fd duplication: stderr onto stdout
+//	2>&1   fd duplication: stdout onto stderr
+//	&>f    both streams onto a file
+//	&>>f   both streams appended to a file
+//
+// A control '&' (backgrounding, or the first half of &&) is a different
+// operator, and cutting there splits `cmd 2>&1` into "cmd 2>" and "1". The
+// second piece is not a command, so readOnlySegment cannot classify it and
+// the WHOLE line stops being a read — and `2>&1` is how a session captures
+// stderr, so it appears in a large share of the calls a research turn makes.
+//
+// Live 2026-10-21 (session 4c4addab): the answer to "list me all pr urls
+// openningin xdev" was delivered, and the keep-going gate then pushed the
+// model past it. Twelve of that turn's calls ended in `2>&1`, and every one
+// of them read as a mutation for this reason.
+func isRedirectAmp(command string, i int) bool {
+	if i > 0 && command[i-1] == '>' {
+		return true // >&2, 2>&1, >&-
+	}
+	return i+1 < len(command) && command[i+1] == '>' // &>f, &>>f
 }
 
 // isCompoundOperator reports whether c starts a new command.

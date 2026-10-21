@@ -50,7 +50,13 @@ func TestNoDestructiveGitSpellingIsEverClassifiedAsARead(t *testing.T) {
 	// (a subcommand that never reaches its handler, a flag cluster that is
 	// not scanned letter by letter).
 	destructiveGitSegment := func(seg string) bool {
-		fields := strings.Fields(seg)
+		// A redirection is not an argument to the command, so the tail
+		// after it is not a branch name. `git branch --contains sha 2>&1`
+		// is a QUERY: without this the "2" after `--contains` would read
+		// as a bare name, and a bare name after `git branch` is a branch
+		// to CREATE — so the helper would call a read destructive and the
+		// assertion would be wrong about the classifier.
+		fields := strings.Fields(cutAtRedirect(seg))
 		if len(fields) == 0 || fields[0] != "git" {
 			return false
 		}
