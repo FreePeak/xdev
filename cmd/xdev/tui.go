@@ -365,21 +365,19 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 		}
 	}()
-	// A panic on the main goroutine unwinds THROUGH this defer, so the exit
-	// marker is written for a CRASHED session — and it must not say
-	// "normal". The flag is set by the defer below, which runs FIRST
-	// (defers run last-in-first-out) and re-raises the panic: the process
-	// must still die loudly. The original stack is printed here, because the
-	// re-raise's own stack starts at the re-raise.
-	panicked := false
-	defer func() {
-		if r := recover(); r != nil {
-			panicked = true
-			fmt.Fprintf(os.Stderr, "xdev: the TUI panicked:\n%s\n", debug.Stack())
-			panic(r)
-		}
-	}()
-	defer func() {
+	// The exit marker and the crash flag are ONE defer. A panic on the main
+	// goroutine unwinds THROUGH it, so the marker is written for a CRASHED
+	// session — and it must not say "normal". Two defers cannot do this: the
+	// flag is set by the recovering defer and READ by the marker defer, and
+	// defers run last-in-first-out, so a reader registered first runs FIRST
+	// and sees the flag while it is still false (that was the bug: a crashed
+	// TUI recorded a normal exit).
+	//
+	// withCrashGuard recovers the panic, records the crash BEFORE the writer
+	// runs, and re-raises the panic afterwards — the process must still die
+	// loudly. The original stack is printed, because the re-raise's own stack
+	// starts at the re-raise.
+	defer withCrashGuard(func(crashed bool) {
 		// Cancel every in-flight turn before the stores close under them.
 		tabs.abortAll()
 		modelMu.Lock()
@@ -387,18 +385,13 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		modelMu.Unlock()
 		if s := storeOf(); s != nil {
 			_ = s.Append(&session.ModelChangeEntry{Model: lm})
-			kind, detail, code := "normal", "", exitCode
-			if panicked {
-				// A crash is not a normal exit: the runtime exits 2 on a
-				// panic, and the marker says the session died that way.
-				kind, detail, code = "fatal", "the TUI panicked", 2
-			}
+			kind, code, detail := crashExitKind(crashed, exitCode)
 			_ = s.Append(&session.CustomEntry{CustomType: "session_exit",
 				Data: exitMarker("tui", code, kind, exitReason("tui", kind, detail), pendingToolCalls(s))})
 			exitStore = s // the exit line's store, read before closeAll drops it
 		}
 		tabs.closeAll()
-	}()
+	})
 
 	// Screen.
 	th := theme.LoadNamed(themeName, theme.CustomDir())
@@ -3933,6 +3926,38 @@ func recentResumeOptions(cwd, currentID string) []tui.ResumeOption {
 		out = append(out, tui.ResumeOption{ID: m.ID, Title: m.Preview, Detail: detail})
 	}
 	return out
+}
+
+// withCrashGuard runs write. If the caller panicked on the way, the crash
+// is recorded BEFORE write runs, and the panic is re-raised afterwards — the
+// process must still die loudly, and the original stack is printed because
+// the re-raise's own stack starts at the re-raise.
+//
+// ONE defer, not two: the crash flag is READ by the writer, and two defers
+// with the reader registered first would run the reader FIRST (defers are
+// last-in-first-out) — the flag would still be false when the exit marker is
+// written, and a crashed session would record a NORMAL exit. That was the
+// bug, and it is why the flag and the writer live here together.
+func withCrashGuard(write func(crashed bool)) {
+	crashed := false
+	if r := recover(); r != nil {
+		crashed = true
+		fmt.Fprintf(os.Stderr, "xdev: the TUI panicked:\n%s\n", debug.Stack())
+		// Re-raised when this function returns — AFTER write has run, so the
+		// marker records the crash.
+		defer panic(r)
+	}
+	write(crashed)
+}
+
+// crashExitKind is the exit marker's verdict for a session whose process is
+// dying: a crash is "fatal" with the conventional crash exit code, and a
+// clean exit is "normal" with the code the run returned.
+func crashExitKind(crashed bool, code int) (kind string, exitCode int, detail string) {
+	if crashed {
+		return "fatal", 2, "the TUI panicked"
+	}
+	return "normal", code, ""
 }
 
 // sessionPickerOpener is the seam the session picker opens through: the

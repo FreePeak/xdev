@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/FreePeak/xdev/internal/agent"
@@ -646,8 +648,15 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 		defer exts.Close()
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
+	// The signals a headless run must survive: an interrupt (SIGINT) and a
+	// termination (SIGTERM, SIGHUP). A termination SIGNAL used to kill the
+	// process outright, and a death by signal runs no deferred function — so
+	// the session got NO exit marker at all, and a reader could not tell a
+	// terminated run from a session that was never closed. The signals are
+	// trapped here instead: the run is cancelled, the exit marker is written
+	// on the way out, and the process exits with the conventional 128+N.
+	ctx, stopSignals, caught := printSignalTrap(context.Background())
+	defer stopSignals()
 	// --max-time bounds the whole run (signal handling still cancels too).
 	ctx, cancelTimeout := withMaxTime(ctx, launch.MaxTime)
 	defer cancelTimeout()
@@ -687,11 +696,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			}
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
-				exitCode = runExitCode(ctx, err)
+				exitCode = runExitCode(ctx, err, caughtSignal(*caught))
 			}
 		} else {
 			fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
-			exitCode = runExitCode(ctx, err)
+			exitCode = runExitCode(ctx, err, caughtSignal(*caught))
 		}
 	}
 	// Advisor exit drain (T3 #20): a headless run cannot steer a finished
@@ -719,8 +728,14 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
 	kind := exitKind(exitCode)
+	detail := runExitDetail(err)
+	if sig := caughtSignal(*caught); sig != nil && kind == "signal" {
+		// A signal names itself: "the print run was stopped by terminated"
+		// says more than the cancellation error does.
+		detail = sig.String()
+	}
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit",
-		Data: exitMarker("print", exitCode, kind, exitReason("print", kind, runExitDetail(err)), pendingToolCalls(store))})
+		Data: exitMarker("print", exitCode, kind, exitReason("print", kind, detail), pendingToolCalls(store))})
 	// M12 #43: the session boundary — the remote backend queues any unfired
 	// cadence turns as one final retain and drains its queue (bounded by the
 	// retain timeout; a dead server leaves the queue behind).
@@ -2585,11 +2600,42 @@ func defaultFailoverTargets(cfg *config.Config, primaryProv, primaryModel string
 	return out
 }
 
-// runExitCode is the process exit code for a run that did not finish. An
-// interrupt is the conventional 130 (128 + SIGINT) — the run was stopped,
-// not broken — and a wall-clock deadline is 124. Everything else is 1.
-func runExitCode(ctx context.Context, err error) int {
+// printSignalTrap catches the signals a headless run must survive — an
+// interrupt (SIGINT) and a termination (SIGTERM, SIGHUP) — and cancels the
+// run's context when one arrives.
+//
+// A termination signal used to kill the process outright, and a death by
+// signal runs no deferred function: the session got NO exit marker at all,
+// and a reader could not tell a terminated run from a session that was never
+// closed. Trapping it means the run unwinds normally, the marker is written
+// on the way out, and the process exits with the conventional 128+N.
+//
+// The caught signal is returned so the caller can name it in the marker and
+// in the exit code.
+func printSignalTrap(ctx context.Context) (context.Context, func(), *atomic.Value) {
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, cancel := context.WithCancel(ctx)
+	var caught atomic.Value // os.Signal, once one arrives
+	go func() {
+		select {
+		case sig := <-sigCh:
+			caught.Store(sig)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { signal.Stop(sigCh); cancel() }, &caught
+}
+
+// runExitCode is the process exit code for a run that did not finish. A
+// caught signal is the conventional 128+N (the shell reports a death by
+// signal that way), an interrupt without a named signal is 130, a wall-clock
+// deadline is 124, and everything else is 1.
+func runExitCode(ctx context.Context, err error, sig os.Signal) int {
 	switch {
+	case sig != nil:
+		return signalExitCode(sig)
 	case errors.Is(err, context.Canceled) && ctx.Err() == context.Canceled:
 		return 130
 	case ctx.Err() == context.DeadlineExceeded:
@@ -2597,6 +2643,23 @@ func runExitCode(ctx context.Context, err error) int {
 	default:
 		return 1
 	}
+}
+
+// signalExitCode is the conventional exit code for a death by signal N
+// (128 + N). SIGINT is 130, SIGTERM is 143.
+func signalExitCode(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 130
+}
+
+// caughtSignal returns the signal that ended the run, or nil when none did.
+func caughtSignal(v atomic.Value) os.Signal {
+	if s, ok := v.Load().(os.Signal); ok {
+		return s
+	}
+	return nil
 }
 
 // runExitDetail names the failure a run ended on, for the exit marker.

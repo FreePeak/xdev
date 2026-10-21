@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/FreePeak/xdev/internal/config"
 )
 
@@ -147,5 +149,41 @@ func TestSetupRejectsArguments(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "usage: xdev setup") {
 		t.Errorf("stderr:\n%s", errw.String())
+	}
+}
+
+// TestStarterConfigDoesNotPromiseACapItCannotDeliver: the starter file is
+// written into EVERY user's config, so a comment that promises "0 =
+// unbounded" is a lie in everyone's home directory — the settings layer
+// treats a 0 as unset, so the run gets the default 200 turns.
+//
+// The file must also carry the value the settings layer will actually
+// honour: a 0 in the file is silently discarded, so a file that says 0
+// says nothing.
+func TestStarterConfigDoesNotPromiseACapItCannotDeliver(t *testing.T) {
+	if strings.Contains(setupStarterConfig, "unbounded") {
+		t.Fatalf("the starter config promises a cap the settings layer refuses to give:\n%s", setupStarterConfig)
+	}
+	var s config.Settings
+	dec := yaml.NewDecoder(strings.NewReader(setupStarterConfig))
+	dec.KnownFields(true)
+	if err := dec.Decode(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.MaxTurns == 0 {
+		t.Fatalf("the starter config writes maxTurns: 0, which the settings layer discards:\n%s", setupStarterConfig)
+	}
+	// And the resolved value is the shipped default, not something the file
+	// silently changed.
+	_ = setupDataDir(t)
+	if code, _, errw := runSetup(t); code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, errw)
+	}
+	resolved, err := config.LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.MaxTurns != 200 {
+		t.Fatalf("the starter config resolves to %d turns, want the default 200", resolved.MaxTurns)
 	}
 }

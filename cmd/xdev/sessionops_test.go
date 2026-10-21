@@ -1234,18 +1234,26 @@ func TestExitKindNamesTheDeath(t *testing.T) {
 func TestRunExitCodeNamesAnInterrupt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := runExitCode(ctx, context.Canceled); got != 130 {
+	if got := runExitCode(ctx, context.Canceled, nil); got != 130 {
 		t.Fatalf("runExitCode(cancelled) = %d, want 130", got)
 	}
-	if got := runExitCode(context.Background(), errors.New("provider died")); got != 1 {
+	if got := runExitCode(context.Background(), errors.New("provider died"), nil); got != 1 {
 		t.Fatalf("runExitCode(failure) = %d, want 1", got)
 	}
 	// A wall-clock deadline is its own code.
 	dctx, dcancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer dcancel()
 	<-dctx.Done()
-	if got := runExitCode(dctx, context.DeadlineExceeded); got != 124 {
+	if got := runExitCode(dctx, context.DeadlineExceeded, nil); got != 124 {
 		t.Fatalf("runExitCode(deadline) = %d, want 124", got)
+	}
+	// A caught signal names itself: the conventional 128+N, so a terminated
+	// run is 143 and an interrupted one is 130.
+	if got := runExitCode(context.Background(), context.Canceled, syscall.SIGTERM); got != 143 {
+		t.Fatalf("runExitCode(SIGTERM) = %d, want 143", got)
+	}
+	if got := runExitCode(context.Background(), context.Canceled, syscall.SIGINT); got != 130 {
+		t.Fatalf("runExitCode(SIGINT) = %d, want 130", got)
 	}
 }
 
@@ -1488,5 +1496,36 @@ func TestResumeOpensThePickerEndToEnd(t *testing.T) {
 	}
 	if !strings.HasPrefix(it.ID, "E2E1111") {
 		t.Fatalf("the highlighted row = %q, want the E2E1111 session", it.ID)
+	}
+}
+
+// TestPrintSignalTrapCatchesATermination: a SIGTERM must not kill a
+// headless run outright. A death by signal runs no deferred function, so an
+// untrapped termination left the session with NO exit marker at all — and a
+// reader could not tell a terminated run from a session that was never
+// closed. The trap cancels the run instead, so the marker is written on the
+// way out.
+func TestPrintSignalTrapCatchesATermination(t *testing.T) {
+	ctx, stop, caught := printSignalTrap(context.Background())
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the SIGTERM did not cancel the run")
+	}
+	sig := caughtSignal(*caught)
+	if sig == nil {
+		t.Fatal("the signal was not recorded")
+	}
+	if got := signalExitCode(sig); got != 143 {
+		t.Fatalf("signalExitCode(%v) = %d, want 143 (128 + SIGTERM)", sig, got)
+	}
+	// And the marker it produces says "signal", not "fatal".
+	kind := exitKind(signalExitCode(sig))
+	if kind != "signal" {
+		t.Fatalf("kind = %q, want signal", kind)
 	}
 }
