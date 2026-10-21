@@ -168,9 +168,22 @@ Flags:
 `
 
 // maxTurnsHelp is the --max-turns help text. It says what the code does:
-// 0 is UNBOUNDED (effectiveMaxTurns returns MaxTurns verbatim), not a
-// default of 200 — the old text lied about the flag's own zero value.
-const maxTurnsHelp = "max agent turns per run (0 = unbounded)"
+// the flag's 0 means "use the configured maxTurns" (200 by default) — NOT
+// "no cap". The agent layer treats a 0 as unbounded, but the CLI never
+// passes one on: it substitutes the configured value first, and the
+// configured value cannot be 0 either (the settings layer refuses it).
+const maxTurnsHelp = "max agent turns per run (0 = the maxTurns setting, 200 by default)"
+
+// effectiveMaxTurnsFlag resolves the --max-turns flag against the
+// configured default. The flag's zero value means "use the configured
+// maxTurns", so the help text has to name the CONFIGURED value — the
+// agent's own 0-means-unbounded is a number the CLI never passes on.
+func effectiveMaxTurnsFlag(flagValue, configured int) int {
+	if flagValue == 0 {
+		return configured
+	}
+	return flagValue
+}
 
 // resumeFlagClash names the flags --resume cannot be combined with: it
 // names ONE session, and "continue the newest", "fork that one" and "save
@@ -203,7 +216,7 @@ func main() {
 	fs.Var(&configOverlays, "config", "extra config file layered over the defaults (repeatable)")
 	model := fs.String("model", "", "model to use (provider/model)")
 	continueLast := fs.Bool("continue", false, "continue the most recent session in this directory")
-	resumePrefix := fs.String("resume", "", "resume a session by id prefix (e.g. -resume 01a0)")
+	resumePrefix := fs.String("resume", "", "resume a session by id, file-name or id-suffix prefix, in this project or any other (e.g. -resume 01a0)")
 	fromClaude := fs.String("from-claude", "", "import a Claude Code transcript (id prefix or path) and continue it")
 	fromCodex := fs.String("from-codex", "", "import a Codex transcript (id prefix or path) and continue it")
 	exportFile := fs.String("export", "", "write the session as one self-contained HTML file and exit")
@@ -261,7 +274,7 @@ func main() {
 	fs.BoolVar(printModeFlag, "p", false, "alias for --print")
 	fs.BoolVar(continueLast, "c", false, "alias for --continue")
 	fs.StringVar(resumePrefix, "r", "", "alias for --resume (session id prefix)")
-	fs.StringVar(resumePrefix, "session", "", "resume a session by id prefix (alias: --session)")
+	fs.StringVar(resumePrefix, "session", "", "alias for --resume (id, file-name or id-suffix prefix)")
 	noPrewalk := fs.Bool("no-prewalk", false, "force the prewalk handoff off even when the prewalk.enabled setting turns it on")
 	retryForever := fs.Bool("retry-forever", false, "keep the retry ladder running forever once every failover target is down (retry.infinite for this run)")
 	retryAllErrors := fs.Bool("retry-all-errors", false, "retry every error class, including empty turns (retry.retryAllErrors for this run)")
@@ -499,7 +512,7 @@ func main() {
 		*model = settings.DefaultModel
 	}
 	if *maxTurns == 0 {
-		*maxTurns = settings.MaxTurns
+		*maxTurns = effectiveMaxTurnsFlag(*maxTurns, settings.MaxTurns)
 	}
 	if *personality == "" {
 		*personality = settings.Personality

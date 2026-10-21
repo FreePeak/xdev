@@ -739,6 +739,13 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		var hist []ai.Message
 		msg, hist, err := a.oneTurnWithRecovery(ctx, a.goalSystem(system), history)
 		if err != nil {
+			// A cancellation is not recorded twice: the aborted turn itself
+			// is the record (it carries the "aborted" stop reason). Every
+			// OTHER failure gets one, so the session can say "error" instead
+			// of leaving the transcript on the user prompt.
+			if !errors.Is(err, context.Canceled) {
+				a.persistTurnFailure(err)
+			}
 			return lastAssistant, err
 		}
 		history = hist
@@ -881,6 +888,20 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 					contAttr = PromptContinuationAttribution
 					promptConts++
 				}
+			}
+			// An ABORTED turn is not an empty turn. The user stopped it (or
+			// the caller cancelled), so asking the model to answer again
+			// would be asking the question the user just cancelled — and the
+			// nudge would be the LAST thing in the transcript, which reads as
+			// "pending" and hides the abort. The run ends here, with the
+			// cancellation as the reason; the aborted turn itself is the
+			// record (it carries the "aborted" stop reason).
+			if msg.StopReason == ai.StopReasonAborted {
+				emit("turn_end", map[string]any{"turn": turn})
+				if cerr := ctx.Err(); cerr != nil {
+					return msg, cerr
+				}
+				return msg, errors.New("agent: the turn was aborted")
 			}
 			// Empty completion (#331): the model ended its turn with no text
 			// and no tool call — only reasoning, or nothing at all. That is
@@ -1777,6 +1798,42 @@ func (a *Agent) persist(m ai.Message) {
 	}
 }
 
+// persistTurnFailure records WHY a turn ended without an answer, so the
+// session says "error" or "aborted" instead of leaving the transcript on the
+// user prompt — which reads as "pending", a turn still in flight. A provider
+// error and a user abort are different failures, and the badge has to be able
+// to tell them apart (omp rules 36, 37).
+//
+// The record is an assistant message with the stop reason and a one-line
+// reason, the same shape omp writes when it synthesizes the interrupted turn
+// on resume. It never claims an answer: the text says the turn produced
+// none.
+func (a *Agent) persistTurnFailure(err error) {
+	if a == nil || a.Store == nil || err == nil {
+		return
+	}
+	stop, text := ai.StopReasonError, "the turn failed before it produced an answer"
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		stop, text = ai.StopReasonAborted, "the turn was stopped before it produced an answer"
+	}
+	a.persist(ai.Message{
+		Role:       ai.RoleAssistant,
+		StopReason: stop,
+		Content:    []ai.Block{ai.TextBlock{Text: text + ": " + trimForRecord(err.Error())}},
+	})
+}
+
+// trimForRecord keeps a failure reason short enough to be a line in the
+// transcript: the full error is in the run's log, the record is a note.
+func trimForRecord(s string) string {
+	const limit = 240
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "…"
+}
+
 func (a *Agent) popFollowUp() string {
 	a.steerMu.Lock()
 	defer a.steerMu.Unlock()
@@ -2040,6 +2097,14 @@ func (a *Agent) oneTurn(ctx context.Context, system string, history []ai.Message
 		}
 	}
 	msg.StopReason = stop
+	// A stream that ends WITHOUT a Done event on a cancelled context is an
+	// ABORTED turn: the user stopped it (or the caller cancelled). The stop
+	// reason says so, so the session's badge can tell an abort from a
+	// failure and from a turn that finished (omp rules 36, 37) — and the
+	// model reads a turn that was cut short, not one that completed.
+	if msg.StopReason == "" && ctx.Err() != nil {
+		msg.StopReason = ai.StopReasonAborted
+	}
 	msg.Usage = usage
 	// The provider already stamped both clocks on the Done message, and it
 	// stamps them fetch-origin — from before wirePost — so ttft covers

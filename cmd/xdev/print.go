@@ -687,11 +687,11 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			}
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
-				exitCode = 1
+				exitCode = runExitCode(ctx, err)
 			}
 		} else {
 			fmt.Fprintln(os.Stderr, "\nxdev: run aborted:", err)
-			exitCode = 1
+			exitCode = runExitCode(ctx, err)
 		}
 	}
 	// Advisor exit drain (T3 #20): a headless run cannot steer a finished
@@ -718,8 +718,9 @@ func runPrint(prompt string, opts printOptions) (exitCode int, err error) {
 			append(append([]ai.Message(nil), history...), *final))
 	}
 	_ = store.Append(&session.ModelChangeEntry{Model: modelRef})
+	kind := exitKind(exitCode)
 	_ = store.Append(&session.CustomEntry{CustomType: "session_exit",
-		Data: exitMarker("print", exitCode, exitReason("print", exitCode), pendingToolCalls(store))})
+		Data: exitMarker("print", exitCode, kind, exitReason("print", kind, runExitDetail(err)), pendingToolCalls(store))})
 	// M12 #43: the session boundary — the remote backend queues any unfired
 	// cadence turns as one final retain and drains its queue (bounded by the
 	// retain timeout; a dead server leaves the queue behind).
@@ -2582,6 +2583,28 @@ func defaultFailoverTargets(cfg *config.Config, primaryProv, primaryModel string
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ContextWindow > out[j].ContextWindow })
 	return out
+}
+
+// runExitCode is the process exit code for a run that did not finish. An
+// interrupt is the conventional 130 (128 + SIGINT) — the run was stopped,
+// not broken — and a wall-clock deadline is 124. Everything else is 1.
+func runExitCode(ctx context.Context, err error) int {
+	switch {
+	case errors.Is(err, context.Canceled) && ctx.Err() == context.Canceled:
+		return 130
+	case ctx.Err() == context.DeadlineExceeded:
+		return 124
+	default:
+		return 1
+	}
+}
+
+// runExitDetail names the failure a run ended on, for the exit marker.
+func runExitDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // openSession resumes the latest session in cwd (--continue) or starts a new

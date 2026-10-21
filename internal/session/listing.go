@@ -193,13 +193,17 @@ func SanitizeTitle(s string) string {
 // sanitised title, then the last compaction's one-line summary, then the
 // first user message, and finally "Untitled · HH:MM" — the session's own
 // creation time, so two untitled sessions are told apart.
+//
+// The stamp is LOCAL, like the mtime column printed beside it in the same
+// row: one row must never carry two timezones. The session header records
+// its timestamp in UTC, so the conversion happens here.
 func DisplayTitle(title, shortSummary, firstMessage string, created time.Time) string {
 	for _, s := range []string{title, shortSummary, firstMessage} {
 		if t := SanitizeTitle(s); t != "" {
 			return t
 		}
 	}
-	return "Untitled · " + created.Format("15:04")
+	return "Untitled · " + created.In(time.Local).Format("15:04")
 }
 
 // listingMessageWire is the minimal decode of a persisted message for the

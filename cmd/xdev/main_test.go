@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/FreePeak/xdev/internal/config"
 )
 
 // TestMain isolates the user-level roots cmd/xdev reads at construction time.
@@ -105,14 +108,24 @@ func TestMainIsolationIsActuallyInPlace(t *testing.T) {
 }
 
 // TestMaxTurnsHelpMatchesTheCode: the --max-turns help text must say what
-// the flag does. 0 is UNBOUNDED — effectiveMaxTurns returns MaxTurns
-// verbatim — and the old text claimed a default of 200, which the code has
-// not done since the turn cap was removed.
+// the flag does. The CLI substitutes the CONFIGURED maxTurns when the flag
+// is 0, so the text has to name that value — "unbounded" is what the agent
+// layer does with a 0 the CLI never passes on.
 func TestMaxTurnsHelpMatchesTheCode(t *testing.T) {
-	if !strings.Contains(maxTurnsHelp, "unbounded") {
-		t.Fatalf("--max-turns help %q must say that 0 is unbounded", maxTurnsHelp)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
+	settings, err := config.LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(maxTurnsHelp, "200") {
-		t.Fatalf("--max-turns help %q must not claim a default of 200", maxTurnsHelp)
+	// The substitution the CLI does, read from the same place it reads it.
+	if got := effectiveMaxTurnsFlag(0, settings.MaxTurns); got != settings.MaxTurns {
+		t.Fatalf("--max-turns 0 resolved to %d, want the configured %d", got, settings.MaxTurns)
+	}
+	if !strings.Contains(maxTurnsHelp, strconv.Itoa(settings.MaxTurns)) {
+		t.Fatalf("--max-turns help %q must name the value the CLI substitutes (%d)", maxTurnsHelp, settings.MaxTurns)
+	}
+	if strings.Contains(maxTurnsHelp, "unbounded") {
+		t.Fatalf("--max-turns help %q must not claim 0 is unbounded: the CLI substitutes %d", maxTurnsHelp, settings.MaxTurns)
 	}
 }

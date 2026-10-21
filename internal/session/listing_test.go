@@ -385,6 +385,13 @@ func TestSanitizeTitleFoldsToOneLine(t *testing.T) {
 		{"   padded   ", "padded"},
 		{"\n\n", ""},
 		{"", ""},
+		// A legit unicode title is NOT mangled: the sanitiser drops control
+		// characters, not letters. CJK, an emoji and an accented word all
+		// survive whole.
+		{"修复解析器", "修复解析器"},
+		{"ship it 🚀", "ship it 🚀"},
+		{"café au lait", "café au lait"},
+		{"emoji with a control char 🚀\x00", "emoji with a control char 🚀"},
 	} {
 		if got := SanitizeTitle(tc.in); got != tc.want {
 			t.Errorf("SanitizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
@@ -413,8 +420,16 @@ func TestListPreviewFallsBackToTheFirstMessage(t *testing.T) {
 }
 
 // TestListPreviewFallsBackToUntitled: no title and no prompt at all still
-// leaves the row something to say — the session's own creation time.
+// leaves the row something to say — the session's own creation time, in the
+// LOCAL zone (the same zone the row's mtime column is printed in).
 func TestListPreviewFallsBackToUntitled(t *testing.T) {
+	// A fixed local zone, so the assertion pins the RENDERED clock and the
+	// timezone it is rendered in, not the machine's: a UTC rendering would
+	// print a different hour and fail here.
+	prev := time.Local
+	time.Local = time.FixedZone("test", 2*60*60)
+	t.Cleanup(func() { time.Local = prev })
+
 	dir := t.TempDir()
 	writePreviewSession(t, dir, "bare.jsonl", "")
 
@@ -422,11 +437,14 @@ func TestListPreviewFallsBackToUntitled(t *testing.T) {
 	if err != nil || len(metas) != 1 {
 		t.Fatalf("list: %+v %v", metas, err)
 	}
-	if !strings.HasPrefix(metas[0].Preview, "Untitled · ") {
-		t.Fatalf("preview = %q, want the Untitled fallback", metas[0].Preview)
+	// ts0 is the fixture's header timestamp: 03:20:45 UTC, which is 05:20
+	// in the fixed +02:00 zone.
+	want := "Untitled · " + ts0.In(time.Local).Format("15:04")
+	if ts0.In(time.Local).Format("15:04") == ts0.UTC().Format("15:04") {
+		t.Fatalf("the fixture cannot tell UTC from local: %s", ts0)
 	}
-	if len(metas[0].Preview) != len("Untitled · 15:04") {
-		t.Fatalf("preview = %q, want an Untitled · HH:MM stamp", metas[0].Preview)
+	if metas[0].Preview != want {
+		t.Fatalf("preview = %q, want %q (the local clock, not UTC)", metas[0].Preview, want)
 	}
 }
 

@@ -20,14 +20,16 @@ import (
 type SessionStatus string
 
 const (
-	// StatusError — the last assistant turn ended with a provider error.
+	// StatusError — the last assistant turn died on a provider failure:
+	// the request was refused, the stream broke, the ladder gave up.
 	StatusError SessionStatus = "error"
-	// StatusAborted — the last assistant turn was aborted: the user
-	// stopped it, or a watchdog cancelled it.
+	// StatusAborted — the turn was cut short before it produced an answer:
+	// the user stopped it (or the caller cancelled), or the provider
+	// refused the content on policy grounds.
 	StatusAborted SessionStatus = "aborted"
 	// StatusInterrupted — the session stopped mid-turn: the provider hit
 	// the output limit, a tool call never came back, or the transcript
-	// still ends on the user prompt that was being answered when it died.
+	// still ends on a tool result whose turn never finished.
 	StatusInterrupted SessionStatus = "interrupted"
 	// StatusComplete — the last assistant turn ended normally.
 	StatusComplete SessionStatus = "complete"

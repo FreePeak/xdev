@@ -240,12 +240,13 @@ func sessionFileCwd(path string) string {
 // optional pendingToolCalls. It also keeps the keys xdev's own readers have
 // always seen (mode, code), so nothing that reads the marker breaks.
 //
-// pending is the number of tool calls the session left unanswered, or nil
-// when that is genuinely unknown (no session to read).
-func exitMarker(mode string, code int, reason string, pending *int) map[string]any {
-	kind := "normal"
-	if code != 0 {
-		kind = "fatal"
+// kind is the exit class; "" derives it from the code (0 ended normally,
+// 128+N is the conventional code for a death by signal N, anything else is a
+// fatal end). pending is the number of tool calls the session left
+// unanswered, or nil when that is genuinely unknown (no session to read).
+func exitMarker(mode string, code int, kind, reason string, pending *int) map[string]any {
+	if kind == "" {
+		kind = exitKind(code)
 	}
 	data := map[string]any{
 		"reason":     reason,
@@ -260,12 +261,45 @@ func exitMarker(mode string, code int, reason string, pending *int) map[string]a
 	return data
 }
 
-// exitReason names why the run ended, in the words a reader shows.
-func exitReason(mode string, code int) string {
-	if code != 0 {
-		return fmt.Sprintf("the %s run ended with exit code %d", mode, code)
+// exitKind is the default classification of an exit code: 0 ended
+// normally, 128+N is the conventional code for a death by signal N, and
+// anything else is a fatal end.
+func exitKind(code int) string {
+	switch {
+	case code == 0:
+		return "normal"
+	case code > 128 && code < 192:
+		return "signal"
+	default:
+		return "fatal"
 	}
-	return fmt.Sprintf("the %s run ended normally", mode)
+}
+
+// exitReason names why the run ended, in the words a reader shows. detail
+// is the signal name, the crash, or the failure — whatever the kind needs.
+func exitReason(mode, kind, detail string) string {
+	switch kind {
+	case "signal":
+		return fmt.Sprintf("the %s run was stopped by %s", mode, detail)
+	case "fatal":
+		if detail != "" {
+			return fmt.Sprintf("the %s run ended fatally: %s", mode, detail)
+		}
+		return fmt.Sprintf("the %s run ended fatally", mode)
+	default:
+		return fmt.Sprintf("the %s run ended normally", mode)
+	}
+}
+
+// writeSignalExitMarker records the end of a session whose process died on a
+// signal. The death runs no deferred function, so the marker is written
+// HERE — before the re-raise — or it is never written at all.
+func writeSignalExitMarker(s *session.Store, sig os.Signal, code int) {
+	if s == nil {
+		return
+	}
+	_ = s.Append(&session.CustomEntry{CustomType: "session_exit",
+		Data: exitMarker("tui", code, "signal", exitReason("tui", "signal", sig.String()), pendingToolCalls(s))})
 }
 
 // pendingToolCalls counts the tool calls the session left unanswered: the

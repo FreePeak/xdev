@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1163,7 +1166,7 @@ func TestExitMarkerCarriesTheReaderContract(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	data := exitMarker("print", 0, exitReason("print", 0), pendingToolCalls(st))
+	data := exitMarker("print", 0, "", exitReason("print", "normal", ""), pendingToolCalls(st))
 	if data["reason"] == "" {
 		t.Errorf("marker has no reason: %v", data)
 	}
@@ -1187,12 +1190,62 @@ func TestExitMarkerCarriesTheReaderContract(t *testing.T) {
 		t.Errorf("pendingToolCalls = %v, want the one unanswered call", data["pendingToolCalls"])
 	}
 	// A failed run is a fatal exit, and it says so.
-	fatal := exitMarker("tui", 1, exitReason("tui", 1), nil)
+	fatal := exitMarker("tui", 1, "", exitReason("tui", "fatal", "the provider died"), nil)
 	if fatal["kind"] != "fatal" {
 		t.Errorf("kind = %v, want fatal", fatal["kind"])
 	}
 	if _, ok := fatal["pendingToolCalls"]; ok {
 		t.Errorf("an unknown pending count must be omitted, not faked: %v", fatal)
+	}
+}
+
+// TestExitKindNamesTheDeath: the marker's kind has to name HOW the process
+// ended — a normal exit, a death by signal, or a fatal end. A signal death
+// writes NO marker at all (a death by signal runs no deferred function), so
+// the kind the signal path writes is the only record of it.
+func TestExitKindNamesTheDeath(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want string
+	}{
+		{0, "normal"},
+		{1, "fatal"},
+		{2, "fatal"},   // a panic
+		{124, "fatal"}, // a wall-clock deadline
+		{130, "signal"},
+		{143, "signal"}, // 128 + SIGTERM
+	} {
+		if got := exitKind(tc.code); got != tc.want {
+			t.Errorf("exitKind(%d) = %q, want %q", tc.code, got, tc.want)
+		}
+	}
+	// The reason names the death, not just the code.
+	sig := exitMarker("tui", 143, "signal", exitReason("tui", "signal", "terminated"), nil)
+	if sig["kind"] != "signal" {
+		t.Errorf("kind = %v, want signal", sig["kind"])
+	}
+	if reason, _ := sig["reason"].(string); !strings.Contains(reason, "terminated") {
+		t.Errorf("reason = %q, want it to name the signal", reason)
+	}
+}
+
+// TestRunExitCodeNamesAnInterrupt: a Ctrl-C is a stop, not a failure — the
+// conventional 130, and the marker says "signal" rather than "fatal".
+func TestRunExitCodeNamesAnInterrupt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := runExitCode(ctx, context.Canceled); got != 130 {
+		t.Fatalf("runExitCode(cancelled) = %d, want 130", got)
+	}
+	if got := runExitCode(context.Background(), errors.New("provider died")); got != 1 {
+		t.Fatalf("runExitCode(failure) = %d, want 1", got)
+	}
+	// A wall-clock deadline is its own code.
+	dctx, dcancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer dcancel()
+	<-dctx.Done()
+	if got := runExitCode(dctx, context.DeadlineExceeded); got != 124 {
+		t.Fatalf("runExitCode(deadline) = %d, want 124", got)
 	}
 }
 
@@ -1255,5 +1308,185 @@ func TestResumeFlagClash(t *testing.T) {
 	got := resumeFlagClash(true, "abc", true)
 	if len(got) != 3 {
 		t.Fatalf("clash = %v, want all three names", got)
+	}
+}
+
+// TestSignalDeathWritesItsMarker: a death by signal runs no deferred
+// function, so the exit marker has to be written by the signal path itself.
+// Without it a signalled session has NO exit record at all, and a reader
+// cannot tell it from a session that was never closed.
+func TestSignalDeathWritesItsMarker(t *testing.T) {
+	sandbox(t)
+	st := session.OpenMem(t.TempDir(), "t")
+	defer st.Close()
+	writeSignalExitMarker(st, syscall.SIGTERM, 143)
+
+	entries := st.Entries()
+	if len(entries) == 0 {
+		t.Fatal("the signal wrote no entry")
+	}
+	ce, ok := entries[len(entries)-1].(*session.CustomEntry)
+	if !ok || ce.CustomType != "session_exit" {
+		t.Fatalf("the last entry is not the exit marker: %+v", entries[len(entries)-1])
+	}
+	if ce.Data["kind"] != "signal" {
+		t.Errorf("kind = %v, want signal", ce.Data["kind"])
+	}
+	if ce.Data["code"] != 143 {
+		t.Errorf("code = %v, want 143 (128 + SIGTERM)", ce.Data["code"])
+	}
+	if reason, _ := ce.Data["reason"].(string); !strings.Contains(reason, "terminated") {
+		t.Errorf("reason = %q, want it to name the signal", reason)
+	}
+	// A nil store is not a crash: there is simply nothing to record.
+	writeSignalExitMarker(nil, syscall.SIGTERM, 143)
+}
+
+// TestResolveResumeIDPrecedenceIsPerSessionNewestFirst: the rules are
+// applied PER SESSION, newest first — the same shape omp's resolver has
+// (omp's session-listing.ts: the first session, newest first, that matches
+// ANY of the three rules wins). So a NEWER session that matches by
+// file-name prefix beats an OLDER one that matches by id prefix, and the
+// rules are not tried one after the other across the whole list.
+//
+// This is the resolver-level counterpart of TestResumeMatchesPrecedence,
+// which only exercises the per-session helper.
+func TestResolveResumeIDPrecedenceIsPerSessionNewestFirst(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/precedence"
+	now := time.Now()
+	// The NEWER session matches by FILE NAME (its name starts with the
+	// query); the OLDER one matches by ID (its id starts with the same
+	// digit). The newer wins.
+	newer := writeSessionIn(t, dir, cwd, "OLD1111-0000-0000-0000-000000000000", "newer", now)
+	older := writeSessionIn(t, dir, cwd, "2OLD2222-0000-0000-0000-000000000000", "older", now.Add(-time.Hour))
+	// The listing sorts by file mtime first, so the fixture's mtimes are
+	// set explicitly: the newer session must really be the newer one.
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(newer, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(older, past, past); err != nil {
+		t.Fatal(err)
+	}
+	// The query is the first character of the file-name timestamp, which is
+	// also the first character of the older session's id.
+	const query = "2"
+	if !strings.Contains(filepath.Base(older), "_2OLD2222") {
+		t.Fatalf("the fixture does not exercise the precedence: %q", older)
+	}
+	if !strings.HasPrefix(strings.ToLower(filepath.Base(newer)), query) {
+		t.Fatalf("the fixture does not exercise the precedence: %q", newer)
+	}
+	got, err := resolveResumeID(cwd, query)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != newer {
+		t.Fatalf("resolved %q, want the newer session %q (the rules are per session, newest first)", got, newer)
+	}
+}
+
+// fakePickerOpener records the rows the picker was opened with, and the
+// blocks the command printed.
+type fakePickerOpener struct {
+	open   func(items []tui.SessionPickerItem)
+	blocks []string
+}
+
+func (f *fakePickerOpener) OpenSessionPicker(items []tui.SessionPickerItem) { f.open(items) }
+func (f *fakePickerOpener) AddSystemBlock(text string)                      { f.blocks = append(f.blocks, text) }
+
+// TestResumeOpensTheRealSessionPicker: the cmd-side /resume wiring must open
+// the session picker with the rows cmd builds. The TUI-side test installs a
+// fake that opens the picker ITSELF, so the cmd-side wiring was untested —
+// this one drives the real closure.
+func TestResumeOpensTheRealSessionPicker(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/cmd-resume-picker"
+	writeSessionIn(t, dir, cwd, "PICK1111-0000-0000-0000-000000000000", "a session", time.Now())
+
+	var got []tui.SessionPickerItem
+	opener := &fakePickerOpener{open: func(items []tui.SessionPickerItem) { got = items }}
+	// The REAL command — the one the TUI's session ops call.
+	if err := resumeSessionCommand(opener, cwd, "", func(*session.Store) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the picker was opened with %d rows, want 1", len(got))
+	}
+	if got[0].ID != "PICK1111" {
+		t.Fatalf("row = %+v, want the PICK1111 session", got[0])
+	}
+	if got[0].Title == "" {
+		t.Fatalf("the row carries no title: %+v", got[0])
+	}
+	// The scope is ALL projects: the same session is a row for another
+	// directory too, marked as not-in-cwd (the picker scopes it).
+	if err := resumeSessionCommand(opener, "/tmp/nowhere", "", func(*session.Store) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].InCwd {
+		t.Fatalf("rows = %+v, want the other project's row, not in cwd", got)
+	}
+	// A data dir with no sessions at all → no picker (the TUI owns the
+	// notice).
+	sandbox(t) // a fresh data dir
+	var none []tui.SessionPickerItem
+	if err := resumeSessionCommand(&fakePickerOpener{open: func(items []tui.SessionPickerItem) { none = items }},
+		cwd, "", func(*session.Store) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if none != nil {
+		t.Fatalf("the picker opened with %d rows, want none", len(none))
+	}
+}
+
+// TestResumeOpensThePickerEndToEnd: the TUI's /resume and cmd's own /resume
+// command, wired together the way the TUI wires them. A no-argument
+// /resume must open the RICH session picker with the rows cmd builds — the
+// TUI-side test installs a fake that opens the picker itself, so without
+// this one the cmd-side wiring was untested.
+func TestResumeOpensThePickerEndToEnd(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/e2e-resume-picker"
+	writeSessionIn(t, dir, cwd, "E2E1111-0000-0000-0000-000000000000", "a session", time.Now())
+
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(100, 30)
+	app := tui.New(scr, theme.Load("groknight"), "test/free", "sess1234")
+	// The TUI's session ops, wired the way runTUI wires them: the command
+	// below IS cmd's /resume.
+	app.SetSessionOps(&tui.SessionOps{
+		Resume: func(q string) error {
+			return resumeSessionCommand(app, cwd, q, func(*session.Store) error { return nil })
+		},
+		// The shipped build wires Recent too: the TUI's /resume falls back
+		// to the plain list when the picker cannot open one, so a test that
+		// omits it would not exercise the path the user takes.
+		Recent: func() []tui.ResumeOption {
+			return []tui.ResumeOption{{ID: "E2E1111", Title: "a session"}}
+		},
+	})
+	if err := app.ResumeSession(""); err != nil {
+		t.Fatal(err)
+	}
+	if !app.SessionPickerOpen() {
+		t.Fatal("the rich session picker did not open")
+	}
+	it, ok := app.SessionPickerSelection()
+	if !ok {
+		t.Fatal("the picker has no selected row")
+	}
+	if !strings.HasPrefix(it.ID, "E2E1111") {
+		t.Fatalf("the highlighted row = %q, want the E2E1111 session", it.ID)
 	}
 }
