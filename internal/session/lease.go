@@ -36,6 +36,18 @@ import (
 // this session id.
 var ErrSessionOwned = errors.New("session: owned by another process")
 
+// ErrLeaseUntrusted means the lease root cannot host a TRUSTWORTHY lease:
+// it is not a private directory, it belongs to another user, it is a
+// symlink, or it is not a directory at all.
+//
+// This is NOT the same failure as "the lease is held" (ErrSessionOwned) and
+// NOT the same as "the environment cannot host a lease here" (a read-only
+// state root, a directory that cannot be created). A lease taken in an
+// untrusted root could be taken by someone else, so a write path REFUSES on
+// it: running without the prevention layer is exactly what an adversary
+// wants, and a silent downgrade hands it to them.
+var ErrLeaseUntrusted = errors.New("session: lease root is not a trustworthy lease host")
+
 // lease is one held ownership lease: an open descriptor on
 // <dir>/<sessionId>.lock plus the number of in-process holders sharing it.
 //
@@ -134,23 +146,74 @@ func leaseFileName(id string) string {
 }
 
 // ensureLeaseDir creates the lease directory (0700) and verifies it is a
-// private directory this user owns. A lease another user could read or
-// steal is not a lease, so a directory with group/other bits is refused
-// rather than repaired: silently chmod'ing it would hide a misconfigured
-// install behind a working lock.
+// private directory this user owns.
+//
+// The taxonomy matters, because the two failures are handled differently:
+//
+//   - The lease root is there but is NOT A TRUSTWORTHY LEASE HOST (not
+//     private, another user's, a symlink, not a directory) → ErrLeaseUntrusted
+//     → the write path REFUSES. A lease taken there could be taken by
+//     someone else, and running without the prevention layer is exactly what
+//     an adversary wants.
+//   - The lease root simply CANNOT EXIST HERE (the parent cannot be created,
+//     the state root is read-only) → a plain error → the write path DEGRADES
+//     to no lease. That is a misconfiguration, not an attack, and a write
+//     path that used to work must keep working.
+//
+// A symlinked lease root is refused outright rather than resolved: a symlink
+// to a private directory PASSES the privacy check, so resolving it would let
+// a swapped root redirect the lease onto another inode — two owners of one
+// session id, reached through the directory instead of the file.
 func ensureLeaseDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("session: create lease dir %s: %w", dir, err)
-	}
-	st, err := os.Stat(dir)
+	st, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("session: stat lease dir %s: %w", dir, err)
+		if !os.IsNotExist(err) {
+			// The path could not even be examined (the parent is not a
+			// directory, a permission error): the environment cannot host a
+			// lease here.
+			return err
+		}
+		// The lease root does not exist yet: create it, private.
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		if st, err = os.Lstat(dir); err != nil {
+			return err
+		}
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s is a symlink — a lease root that can be redirected is not a lease", ErrLeaseUntrusted, dir)
 	}
 	if !st.IsDir() {
-		return fmt.Errorf("session: lease dir %s is not a directory", dir)
+		return fmt.Errorf("%w: %s exists but is not a directory", ErrLeaseUntrusted, dir)
 	}
 	return checkLeaseDirPrivate(dir, st)
 }
+
+// leaseDegraded says out loud that the lease could not be taken because the
+// environment cannot host one, and that the write path is carrying on
+// without it.
+//
+// It is LOUD on purpose. The lease is the prevention layer, and a user whose
+// lease root is unusable is running without it — silently, forever, unless
+// somebody says so. One line per lease root per process: a broken root is
+// one fact, not one fact per session.
+func leaseDegraded(dir string, err error) {
+	leaseWarnMu.Lock()
+	defer leaseWarnMu.Unlock()
+	if leaseWarned[dir] {
+		return
+	}
+	leaseWarned[dir] = true
+	fmt.Fprintf(os.Stderr, "xdev: session lease unavailable (%v) — continuing without it; two xdev processes can write the same session\n", err)
+}
+
+// leaseWarned remembers the lease roots this process has already complained
+// about.
+var (
+	leaseWarnMu sync.Mutex
+	leaseWarned = map[string]bool{}
+)
 
 // OpenForWrite opens path for appending and takes the cross-process
 // ownership lease for the session id in the file's header.
@@ -186,15 +249,25 @@ func OpenForWrite(path string, opts Options) (*Store, error) {
 	}
 	l, err := acquireLease(opts.LeaseDir, s.ID())
 	if err != nil {
-		if !errors.Is(err, ErrSessionOwned) {
-			// The lease could not be TAKEN (an unusable lease directory, a
-			// filesystem that cannot lock). The lease is ADVISORY: a lease
-			// that cannot be taken must not fail a write path that used to
-			// work. The committed-byte boundary still protects the file.
-			return s, nil
+		if errors.Is(err, ErrSessionOwned) {
+			_ = s.Close()
+			return forkOwnedSession(path, opts, s.ID())
 		}
-		_ = s.Close()
-		return forkOwnedSession(path, opts, s.ID())
+		if errors.Is(err, ErrLeaseUntrusted) {
+			// The lease root cannot host a trustworthy lease: a lease taken
+			// there could be taken by someone else. REFUSE — running without
+			// the prevention layer is what an adversary wants, and a silent
+			// downgrade hands it to them.
+			_ = s.Close()
+			return nil, err
+		}
+		// The environment cannot host a lease here. The lease is ADVISORY: a
+		// lease that cannot be taken must not fail a write path that used to
+		// work. The committed-byte boundary still protects the file — and the
+		// user is told, because running without the prevention layer must not
+		// be silent.
+		leaseDegraded(opts.LeaseDir, err)
+		return s, nil
 	}
 	s.lease = l
 	return s, nil
@@ -283,20 +356,27 @@ func rememberFork(srcID, forkPath string) {
 // takeLeaseLocked takes the ownership lease for this store's session id, if
 // one is configured and none is held yet.
 //
-// A lease that CANNOT be taken is not an error: the lease is advisory, and a
-// write path that used to work must not start failing because the lease
-// directory is unusable. The committed-byte boundary still protects the file.
-// A lease held by ANOTHER process is a different thing — the caller that
-// needs to know (OpenForWrite) checks for it itself.
-func (s *Store) takeLeaseLocked(dir string) {
+// A lease that CANNOT be taken because the ENVIRONMENT cannot host one is
+// not an error: the lease is advisory, and a write path that used to work
+// must not start failing because the lease directory is unusable. The
+// committed-byte boundary still protects the file — and the user is told.
+//
+// A lease root that cannot host a TRUSTWORTHY lease IS an error: the caller
+// refuses rather than materialise a session nobody can protect.
+func (s *Store) takeLeaseLocked(dir string) error {
 	if dir == "" || s.id == "" || s.lease != nil {
-		return
+		return nil
 	}
 	l, err := acquireLease(dir, s.id)
-	if err != nil || l == nil {
-		return
+	if err != nil {
+		if errors.Is(err, ErrLeaseUntrusted) {
+			return err
+		}
+		leaseDegraded(dir, err)
+		return nil
 	}
 	s.lease = l
+	return nil
 }
 
 // releaseLeaseLocked drops the ownership lease this store holds, if any.
@@ -316,10 +396,15 @@ func (s *Store) releaseLeaseLocked() {
 // of band (xdev compress) needs: forking there would silently write to a
 // file nobody is looking at.
 //
-// A lease that cannot be TAKEN at all (an unusable lease directory) is not
-// an error: the lease is advisory, and a write path that used to work must
-// not start failing because the lease directory is unusable. The
-// committed-byte boundary still protects the file.
+// A lease that cannot be TAKEN at all because the ENVIRONMENT cannot host
+// one (an unusable lease directory) is not an error: the lease is advisory,
+// and a write path that used to work must not start failing because the
+// lease directory is unusable. The committed-byte boundary still protects
+// the file.
+//
+// A lease root that cannot host a TRUSTWORTHY lease (ErrLeaseUntrusted) IS
+// an error: a lease taken there could be taken by someone else, and the
+// write path refuses rather than run without the prevention layer.
 func (s *Store) AttachLease(dir string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,9 +419,10 @@ func (s *Store) AttachLease(dir string) error {
 	}
 	l, err := acquireLease(dir, s.id)
 	if err != nil {
-		if errors.Is(err, ErrSessionOwned) {
+		if errors.Is(err, ErrSessionOwned) || errors.Is(err, ErrLeaseUntrusted) {
 			return err
 		}
+		leaseDegraded(dir, err)
 		return nil // the lease is unavailable — carry on without one
 	}
 	s.lease = l

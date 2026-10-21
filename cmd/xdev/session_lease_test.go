@@ -177,25 +177,78 @@ func TestTheStartupForksAnOwnedSessionOnlyOnce(t *testing.T) {
 }
 
 // TestCompressSucceedsWithoutAUsableLeaseDirectory: the lease is ADVISORY, so
-// a lease directory that cannot be created must not take the write path down.
-// The base branch compacted this session; the branch must compact it too.
+// a lease root that the ENVIRONMENT cannot host — the state root cannot be
+// written to, so the lease directory can never be created — must not take the
+// write path down. The base branch compacted this session; the branch must
+// compact it too, and SAY that the lease is off.
 func TestCompressSucceedsWithoutAUsableLeaseDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so the lease root would be creatable")
+	}
 	dataDir := t.TempDir()
 	t.Setenv("XDEV_AGENT_DIR", dataDir)
 	cwd := t.TempDir()
 	path := compressTestSession(t, dataDir, cwd)
-	// A FILE where the lease directory belongs: it can never be created.
+	// The state root cannot be written to: the lease directory can never be
+	// created under it.
+	if err := os.Chmod(dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+
+	var out, errOut bytes.Buffer
+	var code int
+	stderr := captureStderr(t, func() {
+		code = compressCmd([]string{"--session", path, "--keep-recent", "30", "--force"}, cwd, nil, &out, &errOut)
+	})
+	if code != 0 {
+		t.Fatalf("compress exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !compressTestHasCompaction(t, path) {
+		t.Fatal("the compaction was not written")
+	}
+	// The degradation is LOUD: running without the prevention layer must not
+	// be silent.
+	if !strings.Contains(stderr, "session lease unavailable") {
+		t.Fatalf("the degradation was silent: stderr = %q", stderr)
+	}
+}
+
+// TestCompressRefusesAnUntrustedLeaseRoot: a lease root that is THERE but
+// cannot host a TRUSTWORTHY lease is REFUSED, not degraded. `xdev compress`
+// must say so and change nothing — a lease another user could take is not a
+// lease, and running without it is what an adversary wants.
+func TestCompressRefusesAnUntrustedLeaseRoot(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+	path := compressTestSession(t, dataDir, cwd)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A FILE where the lease directory belongs: it can never be a lease host.
 	if err := os.WriteFile(filepath.Join(dataDir, "session-owners"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	var out, errOut bytes.Buffer
 	code := compressCmd([]string{"--session", path, "--keep-recent", "30", "--force"}, cwd, nil, &out, &errOut)
-	if code != 0 {
-		t.Fatalf("compress exit = %d (stderr: %s)", code, errOut.String())
+	if code != 1 {
+		t.Fatalf("compress exit = %d, want 1 (stderr: %s)", code, errOut.String())
 	}
-	if !compressTestHasCompaction(t, path) {
-		t.Fatal("the compaction was not written")
+	if !strings.Contains(errOut.String(), "not a trustworthy lease host") {
+		t.Fatalf("the refusal does not name the cause:\n%s", errOut.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("the session was modified by a refused compaction")
+	}
+	if compressTestHasCompaction(t, path) {
+		t.Fatal("the refusal still wrote a compaction entry")
 	}
 }
 

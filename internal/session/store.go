@@ -1065,7 +1065,14 @@ func (s *Store) ensureOnDiskLocked(path string, opts Options) (string, error) {
 	// The session is ON DISK from here: any other xdev can find it with
 	// --continue or --resume, so the creator takes the ownership lease NOW.
 	// A session that was never leased is a session two processes write into.
-	s.takeLeaseLocked(opts.LeaseDir)
+	//
+	// A lease root that cannot host a TRUSTWORTHY lease is refused here: the
+	// session is not materialised, because a session nobody can protect is
+	// one two processes write into.
+	if err := s.takeLeaseLocked(opts.LeaseDir); err != nil {
+		s.latchErr = err
+		return "", err
+	}
 
 	w := bufio.NewWriter(f)
 	write := func(b []byte) error {

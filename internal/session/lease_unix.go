@@ -51,16 +51,20 @@ func unlockLeaseFile(f *os.File) error {
 
 // checkLeaseDirPrivate refuses a lease directory another user could reach:
 // it must carry no group/other bits and must belong to this user.
+//
+// The refusal is ErrLeaseUntrusted, not a plain error: a lease taken in a
+// directory another user can reach is not a lease, and the write path must
+// REFUSE rather than quietly carry on without one.
 func checkLeaseDirPrivate(path string, st os.FileInfo) error {
 	if perm := st.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("session: lease dir %s is readable by other users (mode %04o) — a lease another user could take is not a lease", path, perm)
+		return fmt.Errorf("%w: %s is readable by other users (mode %04o) — a lease another user could take is not a lease", ErrLeaseUntrusted, path, perm)
 	}
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil // a filesystem that reports no owner is not claiming one
 	}
 	if int(sys.Uid) != os.Getuid() {
-		return fmt.Errorf("session: lease dir %s is owned by uid %d, not by this user — a lease another user could take is not a lease", path, sys.Uid)
+		return fmt.Errorf("%w: %s is owned by uid %d, not by this user — a lease another user could take is not a lease", ErrLeaseUntrusted, path, sys.Uid)
 	}
 	return nil
 }

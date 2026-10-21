@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,8 +64,8 @@ func TestLeaseHolderProcess(t *testing.T) {
 		path := os.Getenv(leaseEnvPath)
 		st, err := OpenForWrite(path, Options{LeaseDir: dir})
 		if err != nil {
-			fmt.Println("error:", err)
-			os.Exit(2)
+			fmt.Println("refused:", err)
+			return
 		}
 		defer st.Close()
 		fmt.Println("path:", st.Path())
@@ -498,13 +499,22 @@ func TestForkedStoreKeepsTheAnchorResolvable(t *testing.T) {
 	}
 }
 
+// leaseWriterResult is what the writing child reported.
+type leaseWriterResult struct {
+	path     string // the file the child wrote to
+	forked   bool   // it was diverted to a fork
+	appended bool   // its append succeeded
+	refused  string // the refusal, when the child was refused
+	out      string // the child's whole output
+}
+
 // runLeaseWriter asks a child process to open the session for writing and to
 // append an entry to whatever it gets. It reports the path the child wrote
-// to, whether it was a fork, and whether the append succeeded.
+// to, whether it was a fork, whether the append succeeded, and any refusal.
 //
 // The child is a REAL process: this is the two-writer case the lease exists
 // for, and a goroutine in this process cannot reproduce it.
-func runLeaseWriter(t *testing.T, dir, path string) (childPath string, forked bool, appended bool, out string) {
+func runLeaseWriter(t *testing.T, dir, path string) leaseWriterResult {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLeaseHolderProcess$", "-test.v")
 	cmd.Env = append(os.Environ(),
@@ -513,22 +523,47 @@ func runLeaseWriter(t *testing.T, dir, path string) (childPath string, forked bo
 		leaseEnvMode+"=write",
 		leaseEnvPath+"="+path)
 	raw, err := cmd.CombinedOutput()
-	out = string(raw)
+	res := leaseWriterResult{out: string(raw)}
 	if err != nil {
-		t.Fatalf("the writing child failed: %v\n%s", err, out)
+		t.Fatalf("the writing child failed: %v\n%s", err, res.out)
 	}
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(res.out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "path: "):
-			childPath = strings.TrimPrefix(line, "path: ")
+			res.path = strings.TrimPrefix(line, "path: ")
+		case strings.HasPrefix(line, "refused: "):
+			res.refused = strings.TrimPrefix(line, "refused: ")
 		case line == "forked: true":
-			forked = true
+			res.forked = true
 		case line == "appended: ok":
-			appended = true
+			res.appended = true
 		}
 	}
-	return childPath, forked, appended, out
+	return res
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what
+// was written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	fn()
+	os.Stderr = old
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
 }
 
 // TestACreatedSessionHoldsTheLease: a session xdev CREATES is materialised on
@@ -556,15 +591,15 @@ func TestACreatedSessionHoldsTheLease(t *testing.T) {
 	defer s.Close()
 
 	// A second, REAL process opens the same session for writing.
-	childPath, forked, appended, out := runLeaseWriter(t, leaseDir, path)
-	if !forked {
-		t.Fatalf("the second process was not diverted to a fork: %s", out)
+	got := runLeaseWriter(t, leaseDir, path)
+	if !got.forked {
+		t.Fatalf("the second process was not diverted to a fork: %s", got.out)
 	}
-	if !appended {
-		t.Fatalf("the second process could not write to its fork: %s", out)
+	if !got.appended {
+		t.Fatalf("the second process could not write to its fork: %s", got.out)
 	}
-	if childPath == path {
-		t.Fatalf("the second process wrote to the live session: %s", out)
+	if got.path == path {
+		t.Fatalf("the second process wrote to the live session: %s", got.out)
 	}
 
 	// The creator's NEXT append must succeed: the other process wrote to its
@@ -584,23 +619,34 @@ func TestACreatedSessionHoldsTheLease(t *testing.T) {
 }
 
 // TestAnUnusableLeaseDirectoryDoesNotFailAWrite: the lease is ADVISORY. A
-// lease directory that cannot be created must not turn a write path that
-// used to work into a failure — the committed-byte boundary still protects
-// the file. (The refusal of a lease directory that is not PRIVATE stays hard:
-// that is a different failure, and it is tested in TestLeaseDirIsPrivate.)
+// lease root that the ENVIRONMENT cannot host — the parent cannot be
+// written to, so the lease directory can never be created — must not turn a
+// write path that used to work into a failure. The committed-byte boundary
+// still protects the file.
+//
+// (A lease root that is THERE but cannot host a TRUSTWORTHY lease is a
+// different failure, and it REFUSES: see TestAnUntrustedLeaseRootIsRefused.)
 func TestAnUnusableLeaseDirectoryDoesNotFailAWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so the lease root would be creatable")
+	}
 	dir := t.TempDir()
-	// A FILE where the lease directory should be: the lease directory can
-	// never be created under it, whatever the uid.
-	blocker := filepath.Join(dir, "blocked")
-	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+	// A parent that cannot be written to: the lease directory can never be
+	// created under it.
+	parent := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(parent, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	leaseDir := filepath.Join(blocker, "session-owners")
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	leaseDir := filepath.Join(parent, "session-owners")
 	path := filepath.Join(dir, "s.jsonl")
 	writeClean(t, path)
 
-	st, err := OpenForWrite(path, Options{LeaseDir: leaseDir})
+	var st *Store
+	var err error
+	out := captureStderr(t, func() {
+		st, err = OpenForWrite(path, Options{LeaseDir: leaseDir})
+	})
 	if err != nil {
 		t.Fatalf("an unusable lease directory failed the write path: %v", err)
 	}
@@ -612,6 +658,11 @@ func TestAnUnusableLeaseDirectoryDoesNotFailAWrite(t *testing.T) {
 	if err := st.Append(userMsg("", "", "mine")); err != nil {
 		t.Fatalf("the write failed without a lease: %v", err)
 	}
+	// And the degradation is LOUD: a user whose lease root is unusable is
+	// running without the prevention layer, and that must not be silent.
+	if !strings.Contains(out, "session lease unavailable") {
+		t.Fatalf("the degradation was silent: stderr = %q", out)
+	}
 	// And attaching a lease to an existing store degrades the same way.
 	plain, err := Open(path)
 	if err != nil {
@@ -620,6 +671,106 @@ func TestAnUnusableLeaseDirectoryDoesNotFailAWrite(t *testing.T) {
 	defer plain.Close()
 	if err := plain.AttachLease(leaseDir); err != nil {
 		t.Fatalf("AttachLease failed on an unusable lease directory: %v", err)
+	}
+}
+
+// TestAnUntrustedLeaseRootIsRefused: a lease root that is THERE but cannot
+// host a TRUSTWORTHY lease is REFUSED, not degraded. A lease taken in such a
+// root could be taken by someone else, and running without the prevention
+// layer is exactly what an adversary wants.
+//
+// Three shapes, all refused: the root is a FILE, the root is a SYMLINK (a
+// symlink to a private directory PASSES the privacy check, so resolving it
+// would let a swapped root redirect the lease onto another inode), and the
+// root is readable by other users.
+func TestAnUntrustedLeaseRootIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	writeClean(t, path)
+
+	// (a) the lease root is a FILE.
+	fileRoot := filepath.Join(dir, "as-a-file")
+	if err := os.WriteFile(fileRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenForWrite(path, Options{LeaseDir: fileRoot}); !errors.Is(err, ErrLeaseUntrusted) {
+		t.Fatalf("err = %v, want ErrLeaseUntrusted (a lease root that is a file is not a lease host)", err)
+	}
+
+	// (b) the lease root is readable by other users.
+	openRoot := filepath.Join(dir, "open-to-others")
+	if err := os.Mkdir(openRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(openRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenForWrite(path, Options{LeaseDir: openRoot}); !errors.Is(err, ErrLeaseUntrusted) {
+		t.Fatalf("err = %v, want ErrLeaseUntrusted (a lease another user could take is not a lease)", err)
+	}
+
+	// (c) the lease root is a SYMLINK.
+	if runtime.GOOS != "windows" {
+		symRoot := filepath.Join(dir, "as-a-symlink")
+		target := filepath.Join(dir, "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, symRoot); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenForWrite(path, Options{LeaseDir: symRoot}); !errors.Is(err, ErrLeaseUntrusted) {
+			t.Fatalf("err = %v, want ErrLeaseUntrusted (a symlinked lease root can redirect the lease)", err)
+		}
+	}
+}
+
+// TestTheHolderKeepsItsLeaseWhenTheLeaseRootIsReplaced: the adversary's
+// case. A REAL process holds the lease on a session; the lease root is then
+// replaced (here by a file); a second REAL process opens the same session
+// for writing.
+//
+// The second process must be REFUSED. It must not be let into the live file
+// (that is the failure the lease exists to prevent), and the holder must
+// keep its lease and its file untouched.
+func TestTheHolderKeepsItsLeaseWhenTheLeaseRootIsReplaced(t *testing.T) {
+	dir := t.TempDir()
+	leaseDir := filepath.Join(dir, "session-owners")
+	path := filepath.Join(dir, "s.jsonl")
+	before := writeClean(t, path)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.ID()
+	_ = s.Close()
+
+	// A REAL process holds the lease.
+	stop := startLeaseHolder(t, leaseDir, id, "hold")
+	defer stop()
+
+	// The adversary replaces the lease root with a file.
+	if err := os.RemoveAll(leaseDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leaseDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second REAL process opens the same session for writing: REFUSED.
+	got := runLeaseWriter(t, leaseDir, path)
+	if got.refused == "" {
+		t.Fatalf("the second process was not refused: %s", got.out)
+	}
+	if !strings.Contains(got.refused, "not a trustworthy lease host") {
+		t.Fatalf("the refusal does not name the cause: %q", got.refused)
+	}
+	if got.forked || got.appended {
+		t.Fatalf("the second process got in anyway: %s", got.out)
+	}
+	// The holder's file is untouched.
+	if after := mustRead(t, path); !bytes.Equal(after, before) {
+		t.Fatal("the held session's file was modified")
 	}
 }
 
