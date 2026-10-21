@@ -574,7 +574,7 @@ func TestLadderProducts(t *testing.T) {
 func TestLadderDefaultOrderRunsHandoff(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
-	a, s, _ := storeAgent(t, p, CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5})
+	a, s, _ := storeAgent(t, p, ladderConfig())
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
@@ -601,7 +601,7 @@ func TestLadderRemoteNeverApplies(t *testing.T) {
 	stubPressure(t, 0)
 	logs := captureLogs(t)
 	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
-	a, s, _ := storeAgent(t, p, CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5})
+	a, s, _ := storeAgent(t, p, ladderConfig())
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
@@ -628,7 +628,7 @@ func TestLadderRemoteNeverApplies(t *testing.T) {
 func TestLadderSnapcompactAppliesForAVisionModel(t *testing.T) {
 	stubPressure(t, 0)
 	p := &fakeProvider{}
-	a, s, _ := storeAgent(t, p, CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5})
+	a, s, _ := storeAgent(t, p, ladderConfig())
 	a.Vision = func() bool { return true } // the model declares image input
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
@@ -656,7 +656,7 @@ func TestLadderSnapcompactSkippedForATextOnlyModel(t *testing.T) {
 	stubPressure(t, 0)
 	logs := captureLogs(t)
 	p := &fakeProvider{calls: []fakeScript{{events: []ai.Event{doneEvent("SUMMARY")}}}}
-	a, s, _ := storeAgent(t, p, CompactionConfig{ContextWindow: 1000, KeepRecentTokens: 5})
+	a, s, _ := storeAgent(t, p, ladderConfig())
 	ladderFixture(t, s)
 	_ = a.maybeCompact(context.Background(), ladderHistory(t, s))
 
