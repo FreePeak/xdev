@@ -20,6 +20,21 @@ import (
 	"github.com/FreePeak/xdev/internal/share"
 )
 
+// sessionForkNotice reports that this session had to be forked because
+// another live xdev process owns it.
+//
+// The wording is omp's: the user has to know that their entries are going
+// somewhere else. A resumed session that silently diverges from the file
+// they are looking at is unexplainable, and "another process is writing
+// this" is the one fact that explains it.
+func sessionForkNotice(s *session.Store) string {
+	if s == nil || s.ForkedFrom() == "" {
+		return ""
+	}
+	return fmt.Sprintf("Session %s is open for writing in another xdev process, so this session now saves to %s instead of mixing its entries into that file.",
+		shortSessionID(s.ForkedFromID()), s.Path())
+}
+
 // terminalKey identifies the terminal/pane + directory for the
 // --continue breadcrumb: pane env vars first, then the TTY device,
 // always suffixed with the cwd bucket so a terminal can never adopt
@@ -427,6 +442,12 @@ func runExport(outPath string, opts printOptions) error {
 
 // exportSourceSession resolves the session an --export run reads. --fork
 // resolves to its SOURCE: an export must not leave a fork behind.
+//
+// The export only READS, so it takes no lease and is never refused — not
+// even when another live xdev owns the session. Refusing to read because
+// someone else writes would be a usability regression with no safety
+// benefit: the committed-byte boundary already guarantees a reader never
+// sees a torn record.
 func exportSourceSession(cwd string, opts printOptions) (*session.Store, error) {
 	if opts.ForkID != "" {
 		if st, err := os.Stat(opts.ForkID); err == nil && !st.IsDir() {
@@ -438,8 +459,33 @@ func exportSourceSession(cwd string, opts printOptions) (*session.Store, error) 
 		}
 		return session.Open(path)
 	}
-	if opts.ResumePrefix != "" || opts.ContinueLast || opts.FromClaude != "" || opts.FromCodex != "" {
-		return openStartupSession(cwd, opts)
+	if opts.ResumePrefix != "" {
+		path, err := resolveResumeID(cwd, opts.ResumePrefix)
+		if err != nil {
+			return nil, err
+		}
+		return session.Open(path)
+	}
+	if opts.ContinueLast {
+		// The same order --continue uses (breadcrumb first), resolved
+		// READ-ONLY.
+		if st := openBreadcrumbSession(); st != nil {
+			return st, nil
+		}
+		if p := openMostRecentWithHistory(cwd); p != "" {
+			return session.Open(p)
+		}
+		// Nothing to export: the empty session --continue would have
+		// started.
+		return session.OpenMem(cwd, ""), nil
+	}
+	if opts.FromClaude != "" {
+		// A foreign import materializes a NEW session file under a fresh
+		// id: there is nothing to contend for, and the export reads it.
+		return importForeignSession("claude", opts.FromClaude, cwd)
+	}
+	if opts.FromCodex != "" {
+		return importForeignSession("codex", opts.FromCodex, cwd)
 	}
 	path, err := resolveResumeID(cwd, "")
 	if err != nil {
@@ -550,6 +596,10 @@ func importForeignSession(kind, ref, cwd string) (*session.Store, error) {
 
 // forkSessionByID implements --fork <id|path>: open the resolved session
 // and fork it — new file, parentSession header (session.ForkSession).
+//
+// The fork lands on a FRESH id, so it cannot collide with another
+// process's session — but it IS a write path (the user continues in it),
+// so it takes the lease for its new id like any other.
 func forkSessionByID(cwd, query string) (*session.Store, error) {
 	src := query
 	if st, err := os.Stat(query); err != nil || st.IsDir() {
@@ -559,8 +609,16 @@ func forkSessionByID(cwd, query string) (*session.Store, error) {
 		}
 		src = p
 	}
-	return session.ForkSession(src,
+	fork, err := session.ForkSession(src,
 		session.SessionFilePath(sessionDataDir(), cwd, time.Now(), session.NewSessionID()), "")
+	if err != nil {
+		return nil, err
+	}
+	if err := fork.AttachLease(sessionLeaseDir()); err != nil {
+		_ = fork.Close()
+		return nil, fmt.Errorf("fork: %w", err)
+	}
+	return fork, nil
 }
 
 // openStartupSession resolves the startup session for print/TUI runs:
@@ -664,13 +722,18 @@ func loadTabSets() map[string][]string {
 
 // savedTabSessions is what a launch in cwd should reopen as tabs: the recorded
 // paths in order, skipping any file that is gone or no longer a session.
+//
+// A restored tab is a WRITE path — the TUI appends to the tab it has on
+// screen — so it takes the session's ownership lease like any other write
+// path. A tab whose session another live xdev owns comes back as a fork
+// (the notice is printed by the TUI, which owns the transcript surface).
 func savedTabSessions(cwd string) []*session.Store {
 	var out []*session.Store
 	for _, p := range loadTabSets()[session.EncodeCWDBucket(cwd)] {
 		if _, err := os.Stat(p); err != nil {
 			continue // deleted or moved since: not a tab to reopen
 		}
-		st, err := session.Open(p)
+		st, err := session.OpenForWrite(p, session.Options{LeaseDir: sessionLeaseDir()})
 		if err != nil {
 			continue
 		}
