@@ -65,12 +65,17 @@ type OpReadOnly interface {
 //
 //   - bash is judged by its command line (ReadOnlyCommand).
 //   - a tool that declares its read-only ops is judged by its op.
+//   - a tool that declares its Caps is judged by them (Capser).
 //   - everything else is judged by the caps manifest, and an UNDECLARED tool
 //     counts as a mutation: the conservative default Decide already uses, so
 //     an MCP tool this build has never heard of keeps its keep-going.
 //
-// reg may be nil, which leaves the op path unavailable — the caps manifest
-// then decides, and an undeclared name still fails closed.
+// The registry is what makes the Capser path reachable — the name table
+// cannot know what a tool in another package declares about itself, and the
+// name table alone would read every such tool as a mutation.
+//
+// reg may be nil, which leaves the declared paths unavailable — the caps
+// manifest then decides, and an undeclared name still fails closed.
 func CallIsReadOnly(reg *Registry, name string, args json.RawMessage) bool {
 	if name == "bash" {
 		return BashCallIsReadOnly(args)
@@ -79,6 +84,9 @@ func CallIsReadOnly(reg *Registry, name string, args json.RawMessage) bool {
 		if t, ok := reg.Get(name); ok {
 			if o, ok := t.(OpReadOnly); ok {
 				return opIsReadOnly(o.ReadOnlyOps(), args)
+			}
+			if c, ok := CapsOf(t); ok {
+				return c.ReadOnly
 			}
 		}
 	}

@@ -4444,3 +4444,16 @@ The one that still arms writes `/tmp/open_prs.txt`. It is correct.
 
 **Tests.** `internal/tool/readonly_loop_test.go` — `TestShellLoopScaffoldingIsTransparent` (a read-only loop is a read; the body still writes when it writes, redirects when it redirects, commits when it commits, merges when it merges, and deletes a branch when it deletes one; a while or until condition is judged as a command). `internal/tool/classifier_corpus_test.go` — the destructive-git detector strips the same keyword, so the store-wide guard covers the calls inside a loop body.
 *Last updated: 2026-10-22 (fix/keep-going-gate-loop-scaffolding — a loop's scaffolding names no program: the body is still judged as a command, a condition is still judged as a command, and the store-wide destructive guard now sees inside a loop body: 1,926 destructive segments, none of them a read)*
+
+## A tool declares what it does, and the gate reads that (2026-10-21)
+
+The keep-going gate judged a tool call by NAME, through a table in `internal/tool/caps.go` — and the table cannot know what a tool in another package says about itself. So every tool that was not in the table counted as a MUTATION, and the model recalls on almost every run: it is how it finds out what it already knows. A turn that asked the memory bank a question and then answered it was a mutating turn, and the gate pushed the model past its own answer.
+
+**THE DECLARATION LIVES ON THE TOOL.** `tool.Capser` already existed — "the optional interface a Tool implements to declare Caps without going through the name table. Preferred for new tools" — but `callMutated` read the name table alone, so a tool that declared itself was read as undeclared. `tool.CallIsReadOnly` now resolves the tool from the registry and asks it (`CapsOf`), so the Capser path is reachable.
+
+**THE MEMORY TOOLS DECLARE THEMSELVES.** `recall` reads the bank and returns what it found; `reflect` asks the bank to answer a question from what it has stored. Neither writes anything — the same shape as the `todo` tool (session scratch) and `web_search` (network) — so both are `ReadOnly` with `SideEffect: ScopeNetwork`. `retain` STORES, and says so explicitly rather than leaning on the undeclared default.
+
+**THE CONSERVATIVE DEFAULT IS STILL THERE.** A tool this build has never heard of — an `ext_*` or `mcp_*` name — is still undeclared, still a mutation, still keeps its keep-going.
+
+**Tests.** `internal/memory/hindsight_caps_test.go` — `TestTheMemoryToolsDeclareWhatTheyDo` (recall and reflect are reads, retain is not, and the verdict the gate reads matches). `internal/tool/caps_op_test.go` — the per-op path is unchanged; the Capser path is a new third way to answer, and it is only consulted for a tool that is IN the registry.
+*Last updated: 2026-10-22 (fix/keep-going-gate-tool-caps — a tool declares what it does and the gate reads that: recall and reflect are reads, retain is not, and the conservative default for a tool this build has never heard of is unchanged)*
