@@ -74,9 +74,10 @@ func tabsModeOn(s *config.Settings) string {
 // thinking level produced which part of it, so a resumed session can tell
 // instead of guessing.
 //
-// The level is the one the next request carries; configured says the user
-// asked for that level, rather than it following the model role's ":effort".
-func appendThinkingLevel(store *session.Store, level string, configured bool) {
+// The level is the one the next request carries; configured is omp's
+// CONFIGURED LEVEL — the level the user pinned, or "auto" when the level
+// is inherited from the model role's ":effort" default.
+func appendThinkingLevel(store *session.Store, level string, configured string) {
 	if store == nil {
 		return
 	}
@@ -206,13 +207,18 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		return live.level
 	}
 	// thinkingState reads the reasoning state in force: the request-side
-	// level the next turn carries, and whether the user pinned it. A level
-	// that merely follows the model role's ":effort" (or the effort rung's
-	// default) is not configured.
-	thinkingState := func() (level string, configured bool) {
+	// level the next turn carries, and the CONFIGURED level in omp's
+	// shape — the level the user pinned, or "auto" when the level is
+	// inherited from the model role's ":effort" default. live.level is
+	// the sticky choice: "" or "auto" means nothing was pinned, so the
+	// level follows the model role's ":effort" (omp's own sentinel).
+	thinkingState := func() (level string, configured string) {
 		modelMu.Lock()
 		defer modelMu.Unlock()
-		return live.effort, live.level != "" && live.level != "auto"
+		if live.level == "" || live.level == "auto" {
+			return live.effort, session.ConfiguredAuto
+		}
+		return live.effort, live.level
 	}
 
 	// Tools + system prompt (shared with print mode).

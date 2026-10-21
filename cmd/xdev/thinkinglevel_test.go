@@ -11,7 +11,7 @@ import (
 // of the conversation.
 func TestAppendThinkingLevelRecordsTheLevel(t *testing.T) {
 	s := session.OpenMem("test", "t")
-	appendThinkingLevel(s, "high", true)
+	appendThinkingLevel(s, "high", "high")
 	entries := s.Entries()
 	if len(entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(entries))
@@ -23,15 +23,16 @@ func TestAppendThinkingLevelRecordsTheLevel(t *testing.T) {
 	if tc.ThinkingLevel != "high" {
 		t.Errorf("thinkingLevel = %q, want high", tc.ThinkingLevel)
 	}
-	if !tc.Configured {
-		t.Errorf("configured = false, want true")
+	if tc.Configured != "high" {
+		t.Errorf("configured = %q, want high (the level the user pinned)", tc.Configured)
 	}
 }
 
-// A level that only follows the model (not chosen by the user) says so.
+// A level that only follows the model (not chosen by the user) says so:
+// omp's own sentinel is "auto".
 func TestAppendThinkingLevelRecordsAnUnconfiguredLevel(t *testing.T) {
 	s := session.OpenMem("test", "t")
-	appendThinkingLevel(s, "medium", false)
+	appendThinkingLevel(s, "medium", session.ConfiguredAuto)
 	entries := s.Entries()
 	if len(entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(entries))
@@ -40,13 +41,13 @@ func TestAppendThinkingLevelRecordsAnUnconfiguredLevel(t *testing.T) {
 	if !ok {
 		t.Fatalf("entry = %T, want *session.ThinkingLevelChangeEntry", entries[0])
 	}
-	if tc.Configured {
-		t.Errorf("configured = true, want false")
+	if tc.Configured != session.ConfiguredAuto {
+		t.Errorf("configured = %q, want %q", tc.Configured, session.ConfiguredAuto)
 	}
 }
 
 // A mode with no session (a one-shot print run) must not crash on the
 // record.
 func TestAppendThinkingLevelWithoutAStoreIsANoOp(t *testing.T) {
-	appendThinkingLevel(nil, "high", true)
+	appendThinkingLevel(nil, "high", "high")
 }

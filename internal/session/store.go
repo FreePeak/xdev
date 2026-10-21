@@ -203,10 +203,13 @@ func (s *Store) loadLine(line []byte, no int) error {
 	}
 
 	e, err := ParseEntry(line)
-	if errors.Is(err, ErrUnknownEntryType) {
+	if errors.Is(err, ErrUnknownEntryType) || errors.Is(err, ErrMalformedEntry) {
 		// Keep the line as an opaque chain node (it stays on disk
 		// untouched). An unparseable envelope cannot anchor anything, so
-		// such a line is skipped entirely.
+		// such a line is skipped entirely. A KNOWN type this build cannot
+		// decode (a thinking_level_change whose "configured" names no
+		// level) lands here too: one unreadable field never refuses a
+		// whole session file.
 		env, envErr := ParseEnvelope(line)
 		if envErr != nil || env.ID == "" {
 			return nil

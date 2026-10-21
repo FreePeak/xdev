@@ -9,10 +9,12 @@ import (
 )
 
 // The thinking level record (omp thinking_level_change) round-trips on the
-// wire: the level and whether it was configured are the two facts a resumed
-// session needs to know how the earlier turns were reasoned.
+// wire: the level in force and the CONFIGURED LEVEL — the level the user
+// pinned, or "auto" when the level is inherited from the model role's
+// ":effort" default — are the two facts a resumed session needs to know how
+// the earlier turns were reasoned.
 func TestThinkingLevelChangeEntryRoundTrips(t *testing.T) {
-	line := `{"type":"thinking_level_change","id":"a1b2c3d4","parentId":null,"timestamp":"2026-09-07T03:21:00.570Z","thinkingLevel":"high","configured":true}`
+	line := `{"type":"thinking_level_change","id":"a1b2c3d4","parentId":null,"timestamp":"2026-09-07T03:21:00.570Z","thinkingLevel":"high","configured":"high"}`
 	e, err := ParseEntry([]byte(line))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -24,8 +26,8 @@ func TestThinkingLevelChangeEntryRoundTrips(t *testing.T) {
 	if tc.ThinkingLevel != "high" {
 		t.Errorf("thinkingLevel = %q, want high", tc.ThinkingLevel)
 	}
-	if !tc.Configured {
-		t.Errorf("configured = false, want true")
+	if tc.Configured != "high" {
+		t.Errorf("configured = %q, want high", tc.Configured)
 	}
 	out, err := MarshalEntry(tc)
 	if err != nil {
@@ -41,8 +43,8 @@ func TestThinkingLevelChangeEntryRoundTrips(t *testing.T) {
 	if wire["thinkingLevel"] != "high" {
 		t.Errorf("wire thinkingLevel = %v, want high", wire["thinkingLevel"])
 	}
-	if wire["configured"] != true {
-		t.Errorf("wire configured = %v, want true", wire["configured"])
+	if wire["configured"] != "high" {
+		t.Errorf("wire configured = %v, want high", wire["configured"])
 	}
 }
 
@@ -61,8 +63,8 @@ func TestThinkingLevelChangeEntryToleratesMissingFields(t *testing.T) {
 	if tc.ThinkingLevel != "" {
 		t.Errorf("thinkingLevel = %q, want the empty level", tc.ThinkingLevel)
 	}
-	if tc.Configured {
-		t.Errorf("configured = true, want false")
+	if tc.Configured != "" {
+		t.Errorf("configured = %q, want the empty level", tc.Configured)
 	}
 }
 
@@ -73,7 +75,7 @@ func TestTheContextBuilderIgnoresTheThinkingLevelEntry(t *testing.T) {
 	if err := s.Append(&MessageEntry{Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "hello"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Append(&ThinkingLevelChangeEntry{ThinkingLevel: "high", Configured: true}); err != nil {
+	if err := s.Append(&ThinkingLevelChangeEntry{ThinkingLevel: "high", Configured: "high"}); err != nil {
 		t.Fatal(err)
 	}
 	res, err := BuildContext(s.Entries(), s.LeafID(), SystemPrompt{})
@@ -92,7 +94,7 @@ func TestTheContextBuilderIgnoresTheThinkingLevelEntry(t *testing.T) {
 // changed.
 func TestTheStoreKeepsTheThinkingLevelRecord(t *testing.T) {
 	s := OpenMem("test", "t")
-	if err := s.Append(&ThinkingLevelChangeEntry{ThinkingLevel: "medium", Configured: false}); err != nil {
+	if err := s.Append(&ThinkingLevelChangeEntry{ThinkingLevel: "medium", Configured: ConfiguredAuto}); err != nil {
 		t.Fatal(err)
 	}
 	found := false
@@ -115,7 +117,7 @@ func TestTheThinkingLevelWireTypeIsOMPs(t *testing.T) {
 	if TypeThinkingLevelChange != "thinking_level_change" {
 		t.Fatalf("wire type = %q, want thinking_level_change", TypeThinkingLevelChange)
 	}
-	out, err := MarshalEntry(&ThinkingLevelChangeEntry{ThinkingLevel: "low", Configured: true})
+	out, err := MarshalEntry(&ThinkingLevelChangeEntry{ThinkingLevel: "low", Configured: "low"})
 	if err != nil {
 		t.Fatal(err)
 	}
