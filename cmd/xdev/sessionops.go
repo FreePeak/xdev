@@ -443,11 +443,16 @@ func runExport(outPath string, opts printOptions) error {
 // exportSourceSession resolves the session an --export run reads. --fork
 // resolves to its SOURCE: an export must not leave a fork behind.
 //
-// The export only READS, so it takes no lease and is never refused — not
-// even when another live xdev owns the session. Refusing to read because
-// someone else writes would be a usability regression with no safety
-// benefit: the committed-byte boundary already guarantees a reader never
-// sees a torn record.
+// The export never TAKES a lease on the session it reads and is never
+// refused — not even when another live xdev owns the session. Refusing to
+// read because someone else writes would be a usability regression with no
+// safety benefit: the committed-byte boundary already guarantees a reader
+// never sees a torn record.
+//
+// The resolution order is the base's: --fork first (its SOURCE), then the
+// foreign import, then --resume, then --continue. The --from-* selectors
+// MATERIALISE a new session file (a fresh id) — exactly as they did before
+// this branch — and that file is not leased by the import itself.
 func exportSourceSession(cwd string, opts printOptions) (*session.Store, error) {
 	if opts.ForkID != "" {
 		if st, err := os.Stat(opts.ForkID); err == nil && !st.IsDir() {
@@ -458,6 +463,15 @@ func exportSourceSession(cwd string, opts printOptions) (*session.Store, error) 
 			return nil, err
 		}
 		return session.Open(path)
+	}
+	if opts.FromClaude != "" && opts.FromCodex != "" {
+		return nil, fmt.Errorf("--from-claude and --from-codex are mutually exclusive")
+	}
+	if opts.FromClaude != "" {
+		return importForeignSession("claude", opts.FromClaude, cwd)
+	}
+	if opts.FromCodex != "" {
+		return importForeignSession("codex", opts.FromCodex, cwd)
 	}
 	if opts.ResumePrefix != "" {
 		path, err := resolveResumeID(cwd, opts.ResumePrefix)
@@ -475,17 +489,9 @@ func exportSourceSession(cwd string, opts printOptions) (*session.Store, error) 
 		if p := openMostRecentWithHistory(cwd); p != "" {
 			return session.Open(p)
 		}
-		// Nothing to export: the empty session --continue would have
-		// started.
-		return session.OpenMem(cwd, ""), nil
-	}
-	if opts.FromClaude != "" {
-		// A foreign import materializes a NEW session file under a fresh
-		// id: there is nothing to contend for, and the export reads it.
-		return importForeignSession("claude", opts.FromClaude, cwd)
-	}
-	if opts.FromCodex != "" {
-		return importForeignSession("codex", opts.FromCodex, cwd)
+		// Nothing to export: the same empty session --continue would have
+		// started, under the same title.
+		return session.OpenMem(cwd, sessionTitle(true)), nil
 	}
 	path, err := resolveResumeID(cwd, "")
 	if err != nil {
@@ -580,14 +586,22 @@ func importForeignSession(kind, ref, cwd string) (*session.Store, error) {
 	var res *session.ImportResult
 	switch kind {
 	case "claude":
-		res, err = session.ImportClaude(path, sessionDataDir(), cwd)
+		res, err = session.ImportClaude(path, sessionDataDir(), cwd, session.Options{LeaseDir: sessionLeaseDir()})
 	case "codex":
-		res, err = session.ImportCodex(path, sessionDataDir(), cwd)
+		res, err = session.ImportCodex(path, sessionDataDir(), cwd, session.Options{LeaseDir: sessionLeaseDir()})
 	default:
 		err = fmt.Errorf("import: unknown foreign source %q", kind)
 	}
 	if err != nil {
 		return nil, err
+	}
+	// The import MATERIALISED a new session file and took its ownership
+	// lease as it did (the import is a write path like any other). The
+	// AttachLease below is the belt to that braces: it takes the lease if
+	// the import could not.
+	if err := res.Store.AttachLease(sessionLeaseDir()); err != nil {
+		_ = res.Store.Close()
+		return nil, fmt.Errorf("import %s: %w", kind, err)
 	}
 	logx.Debugf("import %s: %s → %s (%d turns, %d dropped)",
 		kind, path, res.Store.Path(), res.Turns, res.Dropped)

@@ -186,10 +186,14 @@ func OpenForWrite(path string, opts Options) (*Store, error) {
 	}
 	l, err := acquireLease(opts.LeaseDir, s.ID())
 	if err != nil {
-		_ = s.Close()
 		if !errors.Is(err, ErrSessionOwned) {
-			return nil, err
+			// The lease could not be TAKEN (an unusable lease directory, a
+			// filesystem that cannot lock). The lease is ADVISORY: a lease
+			// that cannot be taken must not fail a write path that used to
+			// work. The committed-byte boundary still protects the file.
+			return s, nil
 		}
+		_ = s.Close()
 		return forkOwnedSession(path, opts, s.ID())
 	}
 	s.lease = l
@@ -198,7 +202,30 @@ func OpenForWrite(path string, opts Options) (*Store, error) {
 
 // forkOwnedSession copies an owned session into a new file beside it and
 // takes the lease for the NEW id. The source file is only ever read.
+//
+// ONE fork per owned session, not one per call: the fork is memoised by the
+// SOURCE session id, so a second open-for-write of the same owned session in
+// this process reuses the fork instead of littering the session directory with
+// a second copy of the same conversation (and the caller with a second tab
+// showing it).
 func forkOwnedSession(path string, opts Options, srcID string) (*Store, error) {
+	if forkPath, ok := memoFork(srcID); ok {
+		// The fork this process already made for this session: reuse the FILE
+		// (a second handle on it — the in-process refcount shares the lease,
+		// exactly as two stores on one session do).
+		fork, err := Open(forkPath)
+		if err == nil {
+			fork.strictFsync = opts.StrictFsync
+			if l, lerr := acquireLease(opts.LeaseDir, fork.ID()); lerr == nil && l != nil {
+				fork.lease = l
+			}
+			fork.forkedFrom = path
+			fork.forkedFromID = srcID
+			return fork, nil
+		}
+		// The memoised fork is gone (deleted under us): fall through and
+		// make a new one.
+	}
 	newID := NewSessionID()
 	now := time.Now().UTC()
 	// The canonical session file name (listing.go), placed in the SOURCE's
@@ -218,7 +245,67 @@ func forkOwnedSession(path string, opts Options, srcID string) (*Store, error) {
 	fork.lease = l
 	fork.forkedFrom = path
 	fork.forkedFromID = srcID
+	rememberFork(srcID, forkPath)
 	return fork, nil
+}
+
+// forks memoises the fork made for an owned session, keyed by the SOURCE
+// session id. It is what makes "one fork per owned session" true inside one
+// process.
+var (
+	forkMu sync.Mutex
+	forks  = map[string]string{}
+)
+
+// memoFork returns the fork this process already made for the source session
+// id, if the fork file is still there.
+func memoFork(srcID string) (string, bool) {
+	forkMu.Lock()
+	defer forkMu.Unlock()
+	p, ok := forks[srcID]
+	if !ok {
+		return "", false
+	}
+	if _, err := os.Stat(p); err != nil {
+		delete(forks, srcID)
+		return "", false
+	}
+	return p, true
+}
+
+// rememberFork records the fork made for a source session id.
+func rememberFork(srcID, forkPath string) {
+	forkMu.Lock()
+	defer forkMu.Unlock()
+	forks[srcID] = forkPath
+}
+
+// takeLeaseLocked takes the ownership lease for this store's session id, if
+// one is configured and none is held yet.
+//
+// A lease that CANNOT be taken is not an error: the lease is advisory, and a
+// write path that used to work must not start failing because the lease
+// directory is unusable. The committed-byte boundary still protects the file.
+// A lease held by ANOTHER process is a different thing — the caller that
+// needs to know (OpenForWrite) checks for it itself.
+func (s *Store) takeLeaseLocked(dir string) {
+	if dir == "" || s.id == "" || s.lease != nil {
+		return
+	}
+	l, err := acquireLease(dir, s.id)
+	if err != nil || l == nil {
+		return
+	}
+	s.lease = l
+}
+
+// releaseLeaseLocked drops the ownership lease this store holds, if any.
+func (s *Store) releaseLeaseLocked() {
+	if s.lease == nil {
+		return
+	}
+	s.lease.release()
+	s.lease = nil
 }
 
 // AttachLease takes the cross-process ownership lease for this store's
@@ -228,6 +315,11 @@ func forkOwnedSession(path string, opts Options, srcID string) (*Store, error) {
 // session — the refusal a tool that modifies an existing session file out
 // of band (xdev compress) needs: forking there would silently write to a
 // file nobody is looking at.
+//
+// A lease that cannot be TAKEN at all (an unusable lease directory) is not
+// an error: the lease is advisory, and a write path that used to work must
+// not start failing because the lease directory is unusable. The
+// committed-byte boundary still protects the file.
 func (s *Store) AttachLease(dir string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -242,7 +334,10 @@ func (s *Store) AttachLease(dir string) error {
 	}
 	l, err := acquireLease(dir, s.id)
 	if err != nil {
-		return err
+		if errors.Is(err, ErrSessionOwned) {
+			return err
+		}
+		return nil // the lease is unavailable — carry on without one
 	}
 	s.lease = l
 	return nil

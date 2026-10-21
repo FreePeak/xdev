@@ -1574,7 +1574,8 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			}
 			if storeOf().Path() == "" {
 				if _, err := storeOf().EnsureOnDisk(
-					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()), session.Options{}); err != nil {
+					session.SessionFilePath(sessionDataDir(), cwd, time.Now(), storeOf().ID()),
+					session.Options{LeaseDir: sessionLeaseDir()}); err != nil {
 					return err
 				}
 			}
@@ -2833,7 +2834,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if s.Path() == "" {
 			if _, err := s.EnsureOnDisk(
 				session.SessionFilePath(sessionDataDir(), cwd, time.Now(), s.ID()),
-				session.Options{},
+				session.Options{LeaseDir: sessionLeaseDir()},
 			); err != nil {
 				app.AddSystemBlock("· detach failed — session not on disk: " + err.Error())
 				return false

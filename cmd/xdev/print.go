@@ -2998,6 +2998,20 @@ func openMostRecentWithHistory(cwd string) string {
 	return ""
 }
 
+// sessionTitle is the mechanical title a session starts with: a timestamped
+// stamp, marked as a continuation when the run continues one.
+//
+// The export fast path uses it too: an export of a --continue with no
+// session to continue starts the SAME empty session the run would have
+// started, under the same title.
+func sessionTitle(cont bool) string {
+	title := "print " + time.Now().Format("2006-01-02 15:04")
+	if cont {
+		return "continued " + title
+	}
+	return title
+}
+
 // resolveSession is the layering itself: explicit --resume prefix, then
 // breadcrumb-first --continue, then a fresh auto-persisting session.
 func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store, error) {
@@ -3038,10 +3052,7 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 	// .TitleSystemPrompt() is where a model-generated title would read its
 	// prompt override. --no-title skips the stamp, so the listing carries no
 	// generated title.
-	title := "print " + time.Now().Format("2006-01-02 15:04")
-	if cont {
-		title = "continued " + title
-	}
+	title := sessionTitle(cont)
 	if launch.NoTitle {
 		title = ""
 	}
@@ -3054,7 +3065,7 @@ func resolveSession(cwd string, cont bool, resumePrefix string) (*session.Store,
 	now := time.Now().UTC()
 	s.EnableAutoPersist(
 		session.SessionFilePath(sessionDataDir(), cwd, now, s.ID()),
-		session.Options{},
+		session.Options{LeaseDir: sessionLeaseDir()},
 	)
 	return s, nil
 }

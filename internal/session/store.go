@@ -1054,10 +1054,18 @@ func (s *Store) ensureOnDiskLocked(path string, opts Options) (string, error) {
 		_ = f.Close()
 		_ = os.Remove(path)
 		s.file, s.f, s.w = "", nil, nil
+		// The lease goes with the file it was taken for: a lease on a session
+		// that no longer exists would block nobody, but it would still be a
+		// held descriptor.
+		s.releaseLeaseLocked()
 	}()
 	s.file = path
 	s.f = f
 	s.strictFsync = opts.StrictFsync
+	// The session is ON DISK from here: any other xdev can find it with
+	// --continue or --resume, so the creator takes the ownership lease NOW.
+	// A session that was never leased is a session two processes write into.
+	s.takeLeaseLocked(opts.LeaseDir)
 
 	w := bufio.NewWriter(f)
 	write := func(b []byte) error {
@@ -1156,8 +1164,7 @@ func (s *Store) Close() error {
 		s.f = nil
 	}
 	if s.lease != nil {
-		s.lease.release()
-		s.lease = nil
+		s.releaseLeaseLocked()
 	}
 	return s.latchErr
 }

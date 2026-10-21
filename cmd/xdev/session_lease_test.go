@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -115,5 +116,139 @@ func TestExportTakesNoLease(t *testing.T) {
 	entries, err := os.ReadDir(sessionLeaseDir())
 	if err == nil && len(entries) != 0 {
 		t.Fatalf("the read-only export took a lease: %v", entries)
+	}
+}
+
+// TestTheStartupForksAnOwnedSessionOnlyOnce: the TUI opens the live session
+// and then the restored tab set, and the tab set usually names the SAME
+// session. When another live xdev owns it, ONE fork must be made — two forks
+// are two orphan files and two tabs showing one conversation.
+func TestTheStartupForksAnOwnedSessionOnlyOnce(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+	path := compressTestSession(t, dataDir, cwd)
+
+	// Another live process owns the session.
+	stop := startLeaseHolder(t, path, sessionLeaseDir())
+	defer stop()
+
+	// The tab set names the same session (the TUI reopens it).
+	saveTabSet(cwd, []string{path})
+
+	// The TUI startup: the live session, then the restored tabs.
+	live, err := openStartupSession(cwd, printOptions{ResumePrefix: compressTestShortID(path)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	restored := savedTabSessions(cwd)
+	defer func() {
+		for _, st := range restored {
+			_ = st.Close()
+		}
+	}()
+
+	// Exactly ONE fork: the original and one fork in the bucket.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonl := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			jsonl++
+		}
+	}
+	if jsonl != 2 {
+		t.Fatalf("the session bucket holds %d files, want the original and ONE fork", jsonl)
+	}
+	// And ONE tab: the restored store carries the live session's id, so the
+	// TUI's dedupe check drops it instead of opening a second tab.
+	if len(restored) != 1 {
+		t.Fatalf("restored tabs = %d, want 1", len(restored))
+	}
+	if restored[0].ID() != live.ID() {
+		t.Fatalf("the restored tab is a different session: %q vs %q", restored[0].ID(), live.ID())
+	}
+	if restored[0].Path() != live.Path() {
+		t.Fatalf("the restored tab is a different file: %q vs %q", restored[0].Path(), live.Path())
+	}
+}
+
+// TestCompressSucceedsWithoutAUsableLeaseDirectory: the lease is ADVISORY, so
+// a lease directory that cannot be created must not take the write path down.
+// The base branch compacted this session; the branch must compact it too.
+func TestCompressSucceedsWithoutAUsableLeaseDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+	path := compressTestSession(t, dataDir, cwd)
+	// A FILE where the lease directory belongs: it can never be created.
+	if err := os.WriteFile(filepath.Join(dataDir, "session-owners"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := compressCmd([]string{"--session", path, "--keep-recent", "30", "--force"}, cwd, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("compress exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !compressTestHasCompaction(t, path) {
+		t.Fatal("the compaction was not written")
+	}
+}
+
+// TestTheExportRefusesTwoForeignSelectors: the base branch refused
+// --from-claude and --from-codex together, and the export path must keep
+// refusing them.
+func TestTheExportRefusesTwoForeignSelectors(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+
+	if _, err := exportSourceSession(cwd, printOptions{FromClaude: "a", FromCodex: "b"}); err == nil {
+		t.Fatal("the export accepted two foreign selectors")
+	} else if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("err = %v, want the mutual-exclusion refusal", err)
+	}
+}
+
+// TestTheExportResolvesTheForeignImportBeforeResume: the base branch
+// resolved the FOREIGN import when both --resume and --from-* were given.
+// The export path must keep that precedence.
+func TestTheExportResolvesTheForeignImportBeforeResume(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+	path := compressTestSession(t, dataDir, cwd)
+
+	_, err := exportSourceSession(cwd, printOptions{
+		ResumePrefix: compressTestShortID(path),
+		FromClaude:   "no-such-transcript",
+	})
+	if err == nil {
+		t.Fatal("the foreign import should have been resolved (and failed)")
+	}
+	if !strings.Contains(err.Error(), "claude") {
+		t.Fatalf("err = %v, want the foreign import to be resolved BEFORE --resume", err)
+	}
+}
+
+// TestTheExportOfAContinuationWithNoHistoryKeepsItsTitle: the base branch
+// exported the empty session a --continue would have started, under the
+// continuation title. The exported document must keep that title.
+func TestTheExportOfAContinuationWithNoHistoryKeepsItsTitle(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDEV_AGENT_DIR", dataDir)
+	cwd := t.TempDir()
+
+	st, err := exportSourceSession(cwd, printOptions{ContinueLast: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if !strings.HasPrefix(st.Title(), "continued print ") {
+		t.Fatalf("title = %q, want the continuation title", st.Title())
 	}
 }

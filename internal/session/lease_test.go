@@ -21,11 +21,13 @@ import (
 // refcount deliberately makes two stores on one session SHARE the lease. So
 // the other writer is this test binary, re-executed as a child process.
 
-// leaseEnvDir / leaseEnvID / leaseEnvMode carry the child's instructions.
+// leaseEnvDir / leaseEnvID / leaseEnvMode / leaseEnvPath carry the child's
+// instructions.
 const (
 	leaseEnvDir  = "XDEV_LEASE_TEST_DIR"
 	leaseEnvID   = "XDEV_LEASE_TEST_ID"
 	leaseEnvMode = "XDEV_LEASE_TEST_MODE"
+	leaseEnvPath = "XDEV_LEASE_TEST_PATH"
 )
 
 // TestLeaseHolderProcess is the CHILD half of the cross-process lease tests.
@@ -35,6 +37,8 @@ const (
 //	mode "hold"  — take the lease and keep it until the parent kills us
 //	mode "crash" — take the lease and exit at once WITHOUT releasing it
 //	mode "probe" — try to take the lease and report whether it was free
+//	mode "write" — open the session for writing, report the path it got and
+//	               whether it was a fork, and append an entry to it
 func TestLeaseHolderProcess(t *testing.T) {
 	dir := os.Getenv(leaseEnvDir)
 	id := os.Getenv(leaseEnvID)
@@ -53,6 +57,27 @@ func TestLeaseHolderProcess(t *testing.T) {
 			fmt.Println("error:", err)
 			os.Exit(2)
 		}
+	case "write":
+		// Open the session for writing and WRITE to it: the parent must not
+		// see those bytes in its own file.
+		path := os.Getenv(leaseEnvPath)
+		st, err := OpenForWrite(path, Options{LeaseDir: dir})
+		if err != nil {
+			fmt.Println("error:", err)
+			os.Exit(2)
+		}
+		defer st.Close()
+		fmt.Println("path:", st.Path())
+		if st.ForkedFrom() != "" {
+			fmt.Println("forked: true")
+		} else {
+			fmt.Println("forked: false")
+		}
+		if err := st.Append(userMsg("", "", "written by the other process")); err != nil {
+			fmt.Println("append error:", err)
+			os.Exit(3)
+		}
+		fmt.Println("appended: ok")
 	case "crash":
 		if _, err := acquireLease(dir, id); err != nil {
 			fmt.Println("error:", err)
@@ -470,5 +495,190 @@ func TestForkedStoreKeepsTheAnchorResolvable(t *testing.T) {
 	}
 	if res.Messages[0].Text() != "summary text" {
 		t.Fatalf("the compaction anchor did not survive the fork: %q", res.Messages[0].Text())
+	}
+}
+
+// runLeaseWriter asks a child process to open the session for writing and to
+// append an entry to whatever it gets. It reports the path the child wrote
+// to, whether it was a fork, and whether the append succeeded.
+//
+// The child is a REAL process: this is the two-writer case the lease exists
+// for, and a goroutine in this process cannot reproduce it.
+func runLeaseWriter(t *testing.T, dir, path string) (childPath string, forked bool, appended bool, out string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLeaseHolderProcess$", "-test.v")
+	cmd.Env = append(os.Environ(),
+		leaseEnvDir+"="+dir,
+		leaseEnvID+"=writer",
+		leaseEnvMode+"=write",
+		leaseEnvPath+"="+path)
+	raw, err := cmd.CombinedOutput()
+	out = string(raw)
+	if err != nil {
+		t.Fatalf("the writing child failed: %v\n%s", err, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "path: "):
+			childPath = strings.TrimPrefix(line, "path: ")
+		case line == "forked: true":
+			forked = true
+		case line == "appended: ok":
+			appended = true
+		}
+	}
+	return childPath, forked, appended, out
+}
+
+// TestACreatedSessionHoldsTheLease: a session xdev CREATES is materialised on
+// its first assistant message, and from that moment it is an ordinary file on
+// disk that any second xdev can find with --continue or --resume. So the
+// CREATOR takes the ownership lease when it materialises — otherwise the
+// prevention layer is absent for exactly the case it was built for.
+//
+// Two REAL processes: this one creates the session and writes to it, a child
+// opens the same session for writing. The child must be diverted to a FORK,
+// and this process's next append must still succeed.
+func TestACreatedSessionHoldsTheLease(t *testing.T) {
+	dir := t.TempDir()
+	leaseDir := filepath.Join(dir, "session-owners")
+	path := filepath.Join(dir, "s.jsonl")
+
+	// The creator: a brand-new session, materialised on its first message.
+	s := OpenMem(dir, "created")
+	if _, err := s.EnsureOnDisk(path, Options{LeaseDir: leaseDir}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(userMsg("", "", "mine")); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A second, REAL process opens the same session for writing.
+	childPath, forked, appended, out := runLeaseWriter(t, leaseDir, path)
+	if !forked {
+		t.Fatalf("the second process was not diverted to a fork: %s", out)
+	}
+	if !appended {
+		t.Fatalf("the second process could not write to its fork: %s", out)
+	}
+	if childPath == path {
+		t.Fatalf("the second process wrote to the live session: %s", out)
+	}
+
+	// The creator's NEXT append must succeed: the other process wrote to its
+	// own fork, not to this file.
+	if err := s.Append(userMsg("", "", "mine again")); err != nil {
+		t.Fatalf("the creator's append was killed by the other process: %v", err)
+	}
+	// And this file still holds only this process's records.
+	raw := mustRead(t, path)
+	if bytes.Contains(raw, []byte("written by the other process")) {
+		t.Fatal("the other process's record landed in the live session")
+	}
+	// The lease file exists: the creator holds it.
+	if _, err := os.Stat(filepath.Join(leaseDir, s.ID()+".lock")); err != nil {
+		t.Fatalf("the creator did not take the lease: %v", err)
+	}
+}
+
+// TestAnUnusableLeaseDirectoryDoesNotFailAWrite: the lease is ADVISORY. A
+// lease directory that cannot be created must not turn a write path that
+// used to work into a failure — the committed-byte boundary still protects
+// the file. (The refusal of a lease directory that is not PRIVATE stays hard:
+// that is a different failure, and it is tested in TestLeaseDirIsPrivate.)
+func TestAnUnusableLeaseDirectoryDoesNotFailAWrite(t *testing.T) {
+	dir := t.TempDir()
+	// A FILE where the lease directory should be: the lease directory can
+	// never be created under it, whatever the uid.
+	blocker := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leaseDir := filepath.Join(blocker, "session-owners")
+	path := filepath.Join(dir, "s.jsonl")
+	writeClean(t, path)
+
+	st, err := OpenForWrite(path, Options{LeaseDir: leaseDir})
+	if err != nil {
+		t.Fatalf("an unusable lease directory failed the write path: %v", err)
+	}
+	defer st.Close()
+	if st.Path() != path {
+		t.Fatalf("path = %q, want the session itself", st.Path())
+	}
+	// The session still works: the boundary is the real guard.
+	if err := st.Append(userMsg("", "", "mine")); err != nil {
+		t.Fatalf("the write failed without a lease: %v", err)
+	}
+	// And attaching a lease to an existing store degrades the same way.
+	plain, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if err := plain.AttachLease(leaseDir); err != nil {
+		t.Fatalf("AttachLease failed on an unusable lease directory: %v", err)
+	}
+}
+
+// TestOneOwnedSessionIsForkedOnce: ONE fork per owned session, not one per
+// open-for-write call. The TUI opens the live session and then the restored
+// tab set, and the tab set usually names the SAME session: two calls, two
+// forks, two orphan files and two tabs showing one conversation.
+func TestOneOwnedSessionIsForkedOnce(t *testing.T) {
+	path, leaseDir, id, _ := leaseFixture(t)
+	stop := startLeaseHolder(t, leaseDir, id, "hold")
+	defer stop()
+
+	first, err := OpenForWrite(path, Options{LeaseDir: leaseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenForWrite(path, Options{LeaseDir: leaseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	if first.Path() != second.Path() {
+		t.Fatalf("the owned session was forked twice: %q and %q", first.Path(), second.Path())
+	}
+	if first.ID() != second.ID() {
+		t.Fatalf("the two forks carry different ids: %q and %q", first.ID(), second.ID())
+	}
+	// Exactly ONE file was added to the directory: the original and one fork.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonl := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			jsonl++
+		}
+	}
+	if jsonl != 2 {
+		t.Fatalf("the directory holds %d session files, want the original and ONE fork", jsonl)
+	}
+}
+
+// TestAnImportedSessionHoldsTheLease: the import MATERIALISES a new session
+// file and writes the imported records into it, so it is a write path like
+// any other — the importer holds the lease from the moment the file exists,
+// not after the import has finished.
+func TestAnImportedSessionHoldsTheLease(t *testing.T) {
+	dir := t.TempDir()
+	leaseDir := filepath.Join(dir, "session-owners")
+	res, err := ImportClaude(testdataPath(t, "claude", "11111111-2222-3333-4444-555555555555.jsonl"),
+		dir, "/tmp/work", Options{LeaseDir: leaseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Store.Close()
+	if _, err := os.Stat(filepath.Join(leaseDir, res.Store.ID()+".lock")); err != nil {
+		t.Fatalf("the imported session did not take the lease: %v", err)
 	}
 }

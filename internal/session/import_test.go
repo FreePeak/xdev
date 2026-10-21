@@ -29,7 +29,7 @@ func importEntries(t *testing.T, s *Store) []Entry {
 // becomes the title, and the header entry records the source.
 func TestImportClaudeFixture(t *testing.T) {
 	src := testdataPath(t, "claude", "11111111-2222-3333-4444-555555555555.jsonl")
-	res, err := ImportClaude(src, t.TempDir(), "/tmp/work")
+	res, err := ImportClaude(src, t.TempDir(), "/tmp/work", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestImportClaudeFixture(t *testing.T) {
 // TestImportClaudeTimestampsPreserved: foreign stamps carry into entries.
 func TestImportClaudeTimestampsPreserved(t *testing.T) {
 	res, err := ImportClaude(testdataPath(t, "claude", "11111111-2222-3333-4444-555555555555.jsonl"),
-		t.TempDir(), "/tmp/work")
+		t.TempDir(), "/tmp/work", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestImportClaudeTimestampsPreserved(t *testing.T) {
 // dropped, reasoning maps to thinking, function_call/output pair up.
 func TestImportCodexFixture(t *testing.T) {
 	src := testdataPath(t, "codex", "rollout-2026-04-28T12-33-27-019dd293-fc90-7023-a178-f09154ca651e.jsonl")
-	res, err := ImportCodex(src, t.TempDir(), "/here")
+	res, err := ImportCodex(src, t.TempDir(), "/here", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestImportForeignNoTurns(t *testing.T) {
 	if err := os.WriteFile(src, []byte("{\"type\":\"mode\",\"mode\":\"normal\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ImportClaude(src, dir, "/tmp"); err == nil {
+	if _, err := ImportClaude(src, dir, "/tmp", Options{}); err == nil {
 		t.Fatal("expected error for a transcript with no turns")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sessions")); err == nil {
