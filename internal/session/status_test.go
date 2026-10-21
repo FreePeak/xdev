@@ -31,23 +31,28 @@ func TestClassifyStatus(t *testing.T) {
 		tail string
 		want SessionStatus
 	}{
-		{"assistant stopped", asstStop, StatusDone},
-		{"stopped, then model change and exit", asstStop + "\n" + modelChange + "\n" + exit, StatusDone},
-		{"stopped, then a branch marker", asstStop + "\n" + exit + "\n" + branch, StatusDone},
+		{"assistant stopped", asstStop, StatusComplete},
+		{"stopped, then model change and exit", asstStop + "\n" + modelChange + "\n" + exit, StatusComplete},
+		{"stopped, then a branch marker", asstStop + "\n" + exit + "\n" + branch, StatusComplete},
 		// A stop reason this build does not know (a wider vocabulary on disk)
 		// must still classify: one file never breaks the listing.
-		{"unknown stop reason", withStop("cancelled"), StatusDone},
-		{"unknown block type", `{"type":"message","id":"e5","parentId":"e1","message":{"role":"assistant","stopReason":"stop","content":[{"type":"future-block","whatever":1}]}}`, StatusDone},
-		{"assistant aborted", withStop(ai.StopReasonAborted), StatusInterrupted},
-		{"assistant errored", withStop(ai.StopReasonError), StatusInterrupted},
+		{"unknown stop reason", withStop("cancelled"), StatusComplete},
+		{"unknown block type", `{"type":"message","id":"e5","parentId":"e1","message":{"role":"assistant","stopReason":"stop","content":[{"type":"future-block","whatever":1}]}}`, StatusComplete},
+		// omp's six verdicts (rules 36, 37): the failure KIND is named, not
+		// collapsed into one "interrupted".
+		{"assistant aborted", withStop(ai.StopReasonAborted), StatusAborted},
+		{"assistant errored", withStop(ai.StopReasonError), StatusError},
 		{"assistant hit the output limit", withStop(ai.StopReasonLength), StatusInterrupted},
 		{"open tool call", asstCalls, StatusInterrupted},
 		{"dangling tool result", toolResult + "\n" + exit, StatusInterrupted},
 		{"bookkeeping after a dangling result", toolResult + "\n" + modelChange + "\n" + exit + "\n" + branch, StatusInterrupted},
-		// An aborted turn persists nothing past the prompt it was answering,
-		// so a user-last transcript IS the signature of the interruption.
-		{"unanswered user prompt", user, StatusInterrupted},
-		{"user prompt after a finished turn", asstStop + "\n" + user, StatusInterrupted},
+		// A transcript that ends on the user prompt is PENDING: the turn is
+		// in flight, not finished. It used to read "interrupted", which
+		// claimed a turn had been cut short.
+		{"unanswered user prompt", user, StatusPending},
+		{"user prompt after a finished turn", asstStop + "\n" + user, StatusPending},
+		// A role this build does not know is "unknown", never a guess.
+		{"role this build does not know", `{"type":"message","id":"e6","parentId":"e1","message":{"role":"developer","content":[]}}`, StatusUnknown},
 		// A file holding nothing but its slot and header has no conversation to
 		// continue, so it reads "empty" and a resume path skips it instead of
 		// restoring a blank transcript. Bookkeeping lines mean the transcript
@@ -56,8 +61,8 @@ func TestClassifyStatus(t *testing.T) {
 		{"header only (no message yet)", `{"type":"session","id":"e0"}`, StatusEmpty},
 		{"title slot and header only", `{"type":"title","v":1}` + "\n" + `{"type":"session","id":"e0"}`, StatusEmpty},
 		{"bookkeeping only means the window missed the transcript", exit, StatusInterrupted},
-		{"truncated first line is skipped", "...truncated\n" + asstStop, StatusDone},
-		{"garbage lines are skipped", "not json\n" + asstStop + "\n{oops", StatusDone},
+		{"truncated first line is skipped", "...truncated\n" + asstStop, StatusComplete},
+		{"garbage lines are skipped", "not json\n" + asstStop + "\n{oops", StatusComplete},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ClassifyStatus([]byte(tc.tail)); got != tc.want {
@@ -68,7 +73,7 @@ func TestClassifyStatus(t *testing.T) {
 }
 
 // TestListSetsStatus: the listing carries the badge, and the stat-keyed cache
-// refreshes it when the session grows (a finished turn flips to done).
+// refreshes it when the session grows (a finished turn flips to complete).
 func TestListSetsStatus(t *testing.T) {
 	dir := t.TempDir()
 	p := writeSession(t, dir, "-x", "s.jsonl", "sess", "/x")
@@ -77,8 +82,10 @@ func TestListSetsStatus(t *testing.T) {
 	if err != nil || len(metas) != 1 {
 		t.Fatalf("list: %+v %v", metas, err)
 	}
-	if metas[0].Status != StatusInterrupted {
-		t.Fatalf("fresh session status = %q, want %q", metas[0].Status, StatusInterrupted)
+	// A fresh session's transcript ends on the user prompt that is being
+	// answered: the turn is in flight, so the badge is "pending".
+	if metas[0].Status != StatusPending {
+		t.Fatalf("fresh session status = %q, want %q", metas[0].Status, StatusPending)
 	}
 
 	// The assistant answers and the process exits cleanly: the tail — not the
@@ -100,8 +107,8 @@ func TestListSetsStatus(t *testing.T) {
 	if err != nil || len(metas) != 1 {
 		t.Fatalf("list after append: %+v %v", metas, err)
 	}
-	if metas[0].Status != StatusDone {
-		t.Fatalf("status after a finished turn = %q, want %q", metas[0].Status, StatusDone)
+	if metas[0].Status != StatusComplete {
+		t.Fatalf("status after a finished turn = %q, want %q", metas[0].Status, StatusComplete)
 	}
 }
 

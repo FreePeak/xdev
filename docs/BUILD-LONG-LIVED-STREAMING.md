@@ -127,10 +127,15 @@ has a different answer in the TUI than in `xdev --print`.
 `effectiveMaxTurns()` returning `a.MaxTurns` verbatim
 (`loop.go:492-494`). Nothing else is in that condition.
 
-- `--max-turns 0` (the flag default, `cmd/xdev/main.go:162`) means
-  **unbounded** — not 200, despite the flag's help text saying "0 =
-  default 200". `DefaultMaxTurns = 200` is retained only for historical
-  reference (`loop.go:150-152`).
+- `--max-turns 0` (the flag default) means **"use the configured
+  `maxTurns`"** — 200 by default — NOT unbounded: the CLI substitutes
+  `settings.MaxTurns` before the agent ever sees the number, and the
+  settings layer refuses a configured 0, so 0 can never reach the agent
+  from the command line. The agent layer itself treats a 0 as unbounded
+  (`effectiveMaxTurns()` returns `a.MaxTurns` verbatim), and the constant
+  `DefaultMaxTurns = 200` that used to name that default is **deleted** —
+  the value lives in the settings layer now
+  (`internal/config/settings.go`, `MaxTurns: 200`).
 - When the cap bites, the run does NOT error: it injects one wrap-up turn
   ("turn limit reached — wrap up the current step and report status",
   attributed `turn-limit`, `loop.go:909`) and returns normally.

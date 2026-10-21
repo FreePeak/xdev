@@ -396,14 +396,15 @@ const (
 type SessionPickerItem struct {
 	CWD    string // session's working directory — shown in /resume rows
 	ID     string // short id (8 hex)
-	Title  string
+	Title  string // display title — the session's title, or its preview fallback
 	Mtime  string // formatted, e.g. "Jan 02 15:04"
 	Size   string // e.g. "128 KB"
 	Pinned bool   // session-pins.json sidecar, managed by cmd
 	InCwd  bool   // session's folder == the launcher's cwd
 	// Status is the lifecycle badge, read from the session's tail by cmd
-	// (#107): "done" when the last turn finished, "interrupted" otherwise.
-	// Empty hides it (a caller that did not classify).
+	// (#107): omp's six verdicts — "complete", "error", "aborted",
+	// "interrupted", "pending", "unknown" — plus xdev's "empty". Empty hides
+	// it (a caller that did not classify).
 	Status string
 }
 

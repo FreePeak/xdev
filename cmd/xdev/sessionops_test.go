@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -693,9 +696,11 @@ func TestResumeHint(t *testing.T) {
 	if got, want := resumeHint(st, cwd), resumeCommand(id); got != want {
 		t.Fatalf("hint = %q, want %q", got, want)
 	}
-	// Another directory: --resume <id> would error there, so no line.
-	if got := resumeHint(st, "/tmp/hint-elsewhere"); got != "" {
-		t.Fatalf("hint for another cwd = %q, want empty", got)
+	// Another directory: --resume <id> finds the session across projects
+	// (the cross-directory fallback), so the pasted line still lands on this
+	// file — the hint is honest there too.
+	if got, want := resumeHint(st, "/tmp/hint-elsewhere"), resumeCommand(id); got != want {
+		t.Fatalf("hint for another cwd = %q, want %q", got, want)
 	}
 	// /drop took the file with it.
 	if err := os.Remove(path); err != nil {
@@ -736,7 +741,7 @@ func TestResumePickerItemsCarryStatus(t *testing.T) {
 	dir := config.DataDir()
 	cwd := "/tmp/status-picker"
 	now := time.Now()
-	for i, tail := range []string{"done", "interrupted"} {
+	for i, tail := range []string{"complete", "interrupted"} {
 		id := "STATUS" + string(rune('A'+i)) + "-0000-0000-0000-000000000000"
 		p := session.SessionFilePath(dir, cwd, now.Add(time.Duration(-i)*time.Minute), id)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -748,13 +753,13 @@ func TestResumePickerItemsCarryStatus(t *testing.T) {
 			Version: 3, ID: id, Timestamp: now, CWD: cwd, Title: "sess " + tail, TitleSource: session.TitleSourceAuto,
 		}))
 		b.WriteString("\n")
-		role := ai.RoleAssistant
-		msg := ai.Message{Role: role, Content: []ai.Block{ai.TextBlock{Text: "answer"}}}
-		if tail == "done" {
-			msg.StopReason = ai.StopReasonStop
-		} else {
-			// An aborted turn persists the prompt and nothing past it.
-			msg = ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "unfinished"}}}
+		msg := ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop, Content: []ai.Block{ai.TextBlock{Text: "answer"}}}
+		if tail == "interrupted" {
+			// A tool call that never came back: the turn was cut short.
+			msg = ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{
+				ai.TextBlock{Text: "unfinished"},
+				ai.ToolCallBlock{ID: "call_1", Name: "bash"},
+			}}
 		}
 		line, err := session.MarshalEntry(&session.MessageEntry{Message: msg})
 		if err != nil {
@@ -775,14 +780,14 @@ func TestResumePickerItemsCarryStatus(t *testing.T) {
 	for _, it := range items {
 		byID[it.ID[:7]] = it.Status
 	}
-	if byID["STATUSA"] != "done" || byID["STATUSB"] != "interrupted" {
-		t.Fatalf("row statuses = %v, want STATUSA done, STATUSB interrupted", byID)
+	if byID["STATUSA"] != "complete" || byID["STATUSB"] != "interrupted" {
+		t.Fatalf("row statuses = %v, want STATUSA complete, STATUSB interrupted", byID)
 	}
 }
 
 // writeStatusSession lays down one session whose tail classifies as want
-// ("done" or "interrupted"), so search tests exercise the real classifier
-// instead of hand-set struct fields.
+// ("complete", "interrupted" or "pending"), so search tests exercise the real
+// classifier instead of hand-set struct fields.
 func writeStatusSession(t *testing.T, cwd, id, title, want string, age time.Duration) {
 	t.Helper()
 	now := time.Now().UTC().Add(-age)
@@ -797,8 +802,15 @@ func writeStatusSession(t *testing.T, cwd, id, title, want string, age time.Dura
 	}))
 	b.WriteString("\n")
 	msg := ai.Message{Role: ai.RoleAssistant, StopReason: ai.StopReasonStop, Content: []ai.Block{ai.TextBlock{Text: "answer"}}}
-	if want == "interrupted" {
-		// An aborted turn persists the prompt and nothing past it.
+	switch want {
+	case "interrupted":
+		// A tool call that never came back: the turn was cut short.
+		msg = ai.Message{Role: ai.RoleAssistant, Content: []ai.Block{
+			ai.TextBlock{Text: "unfinished"},
+			ai.ToolCallBlock{ID: "call_1", Name: "bash"},
+		}}
+	case "pending":
+		// The transcript ends on the prompt that is being answered.
 		msg = ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "unfinished"}}}
 	}
 	line, err := session.MarshalEntry(&session.MessageEntry{Message: msg})
@@ -818,7 +830,7 @@ func writeStatusSession(t *testing.T, cwd, id, title, want string, age time.Dura
 func TestSearchPickerItemsMatchesStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cwd := "/tmp/picker-status"
-	writeStatusSession(t, cwd, "AAAA1111-0000-0000-0000-000000000000", "finished work", "done", time.Minute)
+	writeStatusSession(t, cwd, "AAAA1111-0000-0000-0000-000000000000", "finished work", "complete", time.Minute)
 	writeStatusSession(t, cwd, "BBBB2222-0000-0000-0000-000000000000", "killed work", "interrupted", 2*time.Minute)
 	writeStatusSession(t, cwd, "CCCC3333-0000-0000-0000-000000000000", "killed rerun", "interrupted", 3*time.Minute)
 
@@ -844,9 +856,9 @@ func TestSearchPickerItemsMatchesStatus(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("status+body query matches = %v, want both interrupted rows (body carries 'unfinished')", got)
 	}
-	got = searchPickerItems(cwd, "done")
+	got = searchPickerItems(cwd, "complete")
 	if len(got) != 1 || got[0].ID != "AAAA1111" {
-		t.Fatalf("query 'done' matches = %v, want only AAAA1111", got)
+		t.Fatalf("query 'complete' matches = %v, want only AAAA1111", got)
 	}
 }
 
@@ -858,14 +870,14 @@ func TestRecentResumeOptionsUncapped(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cwd := "/tmp/recent-uncapped"
 	live := "LIVE0000-0000-0000-0000-000000000000"
-	writeStatusSession(t, cwd, live, "the live one", "done", 0)
+	writeStatusSession(t, cwd, live, "the live one", "complete", 0)
 	for i := range 20 {
 		writeStatusSession(t, cwd,
 			fmt.Sprintf("RECENT%02d-0000-0000-0000-000000000000", i),
-			fmt.Sprintf("older session %02d", i), "done", time.Duration(i+1)*time.Minute)
+			fmt.Sprintf("older session %02d", i), "complete", time.Duration(i+1)*time.Minute)
 	}
 	// A session from another folder must not leak into the picker.
-	writeStatusSession(t, "/tmp/recent-elsewhere", "OTHER000-0000-0000-0000-000000000000", "elsewhere", "done", time.Minute)
+	writeStatusSession(t, "/tmp/recent-elsewhere", "OTHER000-0000-0000-0000-000000000000", "elsewhere", "complete", time.Minute)
 
 	got := recentResumeOptions(cwd, live)
 	if len(got) != 20 {
@@ -878,7 +890,7 @@ func TestRecentResumeOptionsUncapped(t *testing.T) {
 		if !strings.HasPrefix(o.ID, "RECENT") {
 			t.Fatalf("foreign row %q in the current-folder picker", o.ID)
 		}
-		if !strings.Contains(o.Detail, "done") {
+		if !strings.Contains(o.Detail, "complete") {
 			t.Fatalf("row %q lost its lifecycle status: %q", o.ID, o.Detail)
 		}
 	}
@@ -972,5 +984,548 @@ func TestSessionHasMessagesIsTheForkGuard(t *testing.T) {
 	}
 	if !sessionHasMessages(s) {
 		t.Fatal("a session with a prompt must read as forkable")
+	}
+}
+
+// --- resume matching (omp rules 38, 43-47) ---
+
+// writeSessionIn lays down one session file with a real message, in the
+// bucket of its own cwd, and returns its path.
+func writeSessionIn(t *testing.T, dir, cwd, id, title string, ts time.Time) string {
+	t.Helper()
+	p := session.SessionFilePath(dir, cwd, ts, id)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.Write(session.MarshalTitleSlot(title, session.TitleSourceAuto, ts))
+	b.Write(session.MarshalHeader(session.SessionHeader{
+		Version: 3, ID: id, Timestamp: ts, CWD: cwd, Title: title, TitleSource: session.TitleSourceAuto,
+	}))
+	line, err := session.MarshalEntry(&session.MessageEntry{
+		Message: ai.Message{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "the prompt"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Write(line)
+	b.WriteString("\n")
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestResolveResumeIDMatchesTheFileName: a query that names the FILE — its
+// timestamp prefix — finds the session, the way omp's resolver does.
+func TestResolveResumeIDMatchesTheFileName(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/name-match"
+	now := time.Now()
+	writeSessionIn(t, dir, cwd, "NAME1111-0000-0000-0000-000000000000", "sess", now)
+
+	// The file name is <timestamp>_<id>.jsonl: the timestamp prefix is the
+	// query that finds it.
+	name := filepath.Base(session.SessionFilePath(dir, cwd, now, "NAME1111-0000-0000-0000-000000000000"))
+	stamp := strings.TrimSuffix(name, ".jsonl")
+	stamp = stamp[:strings.Index(stamp, "_")]
+	got, err := resolveResumeID(cwd, strings.ToLower(stamp))
+	if err != nil {
+		t.Fatalf("resolve by file name %q: %v", stamp, err)
+	}
+	if !strings.HasSuffix(got, "NAME1111-0000-0000-0000-000000000000.jsonl") {
+		t.Fatalf("resolved %q, want the NAME1111 session", got)
+	}
+}
+
+// TestResolveResumeIDFallsBackAcrossProjects: a query that names nothing in
+// this directory still names a session somewhere else. The user who names an
+// id means THAT session.
+func TestResolveResumeIDFallsBackAcrossProjects(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	here, there := "/tmp/here", "/tmp/there"
+	now := time.Now()
+	writeSessionIn(t, dir, there, "OTHER2222-0000-0000-0000-000000000000", "sess", now)
+
+	got, err := resolveResumeID(here, "other2222")
+	if err != nil {
+		t.Fatalf("resolve across projects: %v", err)
+	}
+	if !strings.HasSuffix(got, "OTHER2222-0000-0000-0000-000000000000.jsonl") {
+		t.Fatalf("resolved %q, want the OTHER2222 session", got)
+	}
+	// The newest-in-cwd form never leaves the directory: --continue must
+	// not jump projects.
+	if _, err := resolveResumeID(here, ""); err == nil {
+		t.Fatal("the empty query must not resolve a session from another project")
+	}
+}
+
+// TestResumeMatchesPrecedence: the three ways a query can name a session.
+func TestResumeMatchesPrecedence(t *testing.T) {
+	m := session.SessionMeta{ID: "ABCD1234-0000-0000-0000-000000000000", Path: "/d/2026-01-02T03-04-05.000Z_ABCD1234-0000-0000-0000-000000000000.jsonl"}
+	for _, tc := range []struct {
+		q    string
+		want bool
+	}{
+		{"abcd", true},    // id prefix
+		{"ABCD", true},    // case-insensitive
+		{"2026-01", true}, // file name prefix
+		{"zzzz", false},   // neither half of the name
+	} {
+		if got := resumeMatches(m, tc.q); got != tc.want {
+			t.Errorf("resumeMatches(%q) = %v, want %v", tc.q, got, tc.want)
+		}
+	}
+	// The id after the last "_" in the file name is a name of its own: a
+	// file whose id part differs from the header still answers to it.
+	other := session.SessionMeta{ID: "ABCD1234-0000-0000-0000-000000000000", Path: "/d/2026-01-02T03-04-05.000Z_ZZZZ9999.jsonl"}
+	if !resumeMatches(other, "zzzz") {
+		t.Error("the id after the last _ in the file name must match")
+	}
+}
+
+// TestResumeCwdFollowsTheSessionHeader: the resumed session's project is
+// where the run continues, not the directory the command was typed in.
+func TestResumeCwdFollowsTheSessionHeader(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	project := t.TempDir()
+	now := time.Now()
+	p := writeSessionIn(t, dir, project, "CWD11111-0000-0000-0000-000000000000", "sess", now)
+
+	before, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(before) })
+
+	got, err := resumeCwd(p, before)
+	if err != nil {
+		t.Fatalf("resumeCwd: %v", err)
+	}
+	if got != project {
+		t.Fatalf("cwd = %q, want the session's project %q", got, project)
+	}
+	now2, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The temp dir is a symlink on macOS; compare the resolved paths.
+	want, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCwd, err := filepath.EvalSymlinks(now2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCwd != want {
+		t.Fatalf("process cwd = %q, want %q", gotCwd, want)
+	}
+}
+
+// TestResumeCwdKeepsTheLaunchDirWhenTheProjectIsGone: a session whose
+// project was deleted must not strand the run in a directory that is not
+// there.
+func TestResumeCwdKeepsTheLaunchDirWhenTheProjectIsGone(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	gone := filepath.Join(t.TempDir(), "deleted")
+	now := time.Now()
+	p := writeSessionIn(t, dir, gone, "GONE1111-0000-0000-0000-000000000000", "sess", now)
+
+	before, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := resumeCwd(p, before)
+	if err == nil {
+		t.Fatal("a vanished project must be reported")
+	}
+	if got != before {
+		t.Fatalf("cwd = %q, want the launch dir %q", got, before)
+	}
+}
+
+// --- the exit marker (omp rule 21) ---
+
+// TestExitMarkerCarriesTheReaderContract: omp's exit diagnostics reader
+// needs reason, kind and recordedAt; xdev's own readers still read mode and
+// code. The pending tool calls are the REAL count of the calls the session
+// left unanswered — not a placeholder.
+func TestExitMarkerCarriesTheReaderContract(t *testing.T) {
+	sandbox(t)
+	st := session.OpenMem(t.TempDir(), "t")
+	defer st.Close()
+	if err := st.Append(&session.MessageEntry{Message: ai.Message{
+		Role:    ai.RoleAssistant,
+		Content: []ai.Block{ai.TextBlock{Text: "working"}, ai.ToolCallBlock{ID: "call_1", Name: "bash"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	data := exitMarker("print", 0, "", exitReason("print", "normal", ""), pendingToolCalls(st))
+	if data["reason"] == "" {
+		t.Errorf("marker has no reason: %v", data)
+	}
+	if data["kind"] != "normal" {
+		t.Errorf("kind = %v, want normal", data["kind"])
+	}
+	if data["mode"] != "print" {
+		t.Errorf("mode = %v, want print (the key xdev's readers already had)", data["mode"])
+	}
+	if data["code"] != 0 {
+		t.Errorf("code = %v, want 0", data["code"])
+	}
+	rec, _ := data["recordedAt"].(string)
+	if rec == "" {
+		t.Errorf("marker has no recordedAt: %v", data)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, rec); err != nil {
+		t.Errorf("recordedAt %q is not an ISO-8601 timestamp: %v", rec, err)
+	}
+	if data["pendingToolCalls"] != 1 {
+		t.Errorf("pendingToolCalls = %v, want the one unanswered call", data["pendingToolCalls"])
+	}
+	// A failed run is a fatal exit, and it says so.
+	fatal := exitMarker("tui", 1, "", exitReason("tui", "fatal", "the provider died"), nil)
+	if fatal["kind"] != "fatal" {
+		t.Errorf("kind = %v, want fatal", fatal["kind"])
+	}
+	if _, ok := fatal["pendingToolCalls"]; ok {
+		t.Errorf("an unknown pending count must be omitted, not faked: %v", fatal)
+	}
+}
+
+// TestExitKindNamesTheDeath: the marker's kind has to name HOW the process
+// ended — a normal exit, a death by signal, or a fatal end. A signal death
+// writes NO marker at all (a death by signal runs no deferred function), so
+// the kind the signal path writes is the only record of it.
+func TestExitKindNamesTheDeath(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want string
+	}{
+		{0, "normal"},
+		{1, "fatal"},
+		{2, "fatal"},   // a panic
+		{124, "fatal"}, // a wall-clock deadline
+		{130, "signal"},
+		{143, "signal"}, // 128 + SIGTERM
+	} {
+		if got := exitKind(tc.code); got != tc.want {
+			t.Errorf("exitKind(%d) = %q, want %q", tc.code, got, tc.want)
+		}
+	}
+	// The reason names the death, not just the code.
+	sig := exitMarker("tui", 143, "signal", exitReason("tui", "signal", "terminated"), nil)
+	if sig["kind"] != "signal" {
+		t.Errorf("kind = %v, want signal", sig["kind"])
+	}
+	if reason, _ := sig["reason"].(string); !strings.Contains(reason, "terminated") {
+		t.Errorf("reason = %q, want it to name the signal", reason)
+	}
+}
+
+// TestRunExitCodeNamesAnInterrupt: a Ctrl-C is a stop, not a failure — the
+// conventional 130, and the marker says "signal" rather than "fatal".
+func TestRunExitCodeNamesAnInterrupt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := runExitCode(ctx, context.Canceled, nil); got != 130 {
+		t.Fatalf("runExitCode(cancelled) = %d, want 130", got)
+	}
+	if got := runExitCode(context.Background(), errors.New("provider died"), nil); got != 1 {
+		t.Fatalf("runExitCode(failure) = %d, want 1", got)
+	}
+	// A wall-clock deadline is its own code.
+	dctx, dcancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer dcancel()
+	<-dctx.Done()
+	if got := runExitCode(dctx, context.DeadlineExceeded, nil); got != 124 {
+		t.Fatalf("runExitCode(deadline) = %d, want 124", got)
+	}
+	// A caught signal names itself: the conventional 128+N, so a terminated
+	// run is 143 and an interrupted one is 130.
+	if got := runExitCode(context.Background(), context.Canceled, syscall.SIGTERM); got != 143 {
+		t.Fatalf("runExitCode(SIGTERM) = %d, want 143", got)
+	}
+	if got := runExitCode(context.Background(), context.Canceled, syscall.SIGINT); got != 130 {
+		t.Fatalf("runExitCode(SIGINT) = %d, want 130", got)
+	}
+}
+
+// TestPendingToolCallCountIsTheRealCount: only the calls that never came
+// back count — an answered call is not pending, and a new assistant turn
+// clears the previous one's set.
+func TestPendingToolCallCountIsTheRealCount(t *testing.T) {
+	sandbox(t)
+	st := session.OpenMem(t.TempDir(), "t")
+	defer st.Close()
+	msg := func(role ai.Role, blocks ...ai.Block) *session.MessageEntry {
+		return &session.MessageEntry{Message: ai.Message{Role: role, Content: blocks}}
+	}
+	answer := func(id string) *session.MessageEntry {
+		return &session.MessageEntry{Message: ai.Message{Role: ai.RoleToolResult, ToolCallID: id, Content: []ai.Block{ai.TextBlock{Text: "the file"}}}}
+	}
+	// An answered call: the tool result came back.
+	if err := st.Append(msg(ai.RoleAssistant, ai.ToolCallBlock{ID: "call_1", Name: "read"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Append(answer("call_1")); err != nil {
+		t.Fatal(err)
+	}
+	if n := pendingToolCalls(st); n == nil || *n != 0 {
+		t.Fatalf("pending = %v, want 0 (the call was answered)", n)
+	}
+	// A second turn with two calls, one of them never answered.
+	if err := st.Append(msg(ai.RoleAssistant,
+		ai.ToolCallBlock{ID: "call_2", Name: "read"},
+		ai.ToolCallBlock{ID: "call_3", Name: "bash"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Append(answer("call_2")); err != nil {
+		t.Fatal(err)
+	}
+	if n := pendingToolCalls(st); n == nil || *n != 1 {
+		t.Fatalf("pending = %v, want 1 (call_3 never came back)", n)
+	}
+	// No session at all: the count is genuinely unknown, so it is omitted.
+	if n := pendingToolCalls(nil); n != nil {
+		t.Fatalf("pending = %v, want nil for a missing session", n)
+	}
+}
+
+// TestResumeFlagClash: --resume names one session, so the flags that name a
+// different one cannot ride along with it.
+func TestResumeFlagClash(t *testing.T) {
+	if got := resumeFlagClash(false, "", false); len(got) != 0 {
+		t.Fatalf("clash = %v, want none", got)
+	}
+	if got := resumeFlagClash(true, "", false); len(got) != 1 || got[0] != "--continue" {
+		t.Fatalf("clash = %v, want --continue", got)
+	}
+	if got := resumeFlagClash(false, "abc", false); len(got) != 1 || got[0] != "--fork" {
+		t.Fatalf("clash = %v, want --fork", got)
+	}
+	if got := resumeFlagClash(false, "", true); len(got) != 1 || got[0] != "--no-session" {
+		t.Fatalf("clash = %v, want --no-session", got)
+	}
+	got := resumeFlagClash(true, "abc", true)
+	if len(got) != 3 {
+		t.Fatalf("clash = %v, want all three names", got)
+	}
+}
+
+// TestSignalDeathWritesItsMarker: a death by signal runs no deferred
+// function, so the exit marker has to be written by the signal path itself.
+// Without it a signalled session has NO exit record at all, and a reader
+// cannot tell it from a session that was never closed.
+func TestSignalDeathWritesItsMarker(t *testing.T) {
+	sandbox(t)
+	st := session.OpenMem(t.TempDir(), "t")
+	defer st.Close()
+	writeSignalExitMarker(st, syscall.SIGTERM, 143)
+
+	entries := st.Entries()
+	if len(entries) == 0 {
+		t.Fatal("the signal wrote no entry")
+	}
+	ce, ok := entries[len(entries)-1].(*session.CustomEntry)
+	if !ok || ce.CustomType != "session_exit" {
+		t.Fatalf("the last entry is not the exit marker: %+v", entries[len(entries)-1])
+	}
+	if ce.Data["kind"] != "signal" {
+		t.Errorf("kind = %v, want signal", ce.Data["kind"])
+	}
+	if ce.Data["code"] != 143 {
+		t.Errorf("code = %v, want 143 (128 + SIGTERM)", ce.Data["code"])
+	}
+	if reason, _ := ce.Data["reason"].(string); !strings.Contains(reason, "terminated") {
+		t.Errorf("reason = %q, want it to name the signal", reason)
+	}
+	// A nil store is not a crash: there is simply nothing to record.
+	writeSignalExitMarker(nil, syscall.SIGTERM, 143)
+}
+
+// TestResolveResumeIDPrecedenceIsPerSessionNewestFirst: the rules are
+// applied PER SESSION, newest first — the same shape omp's resolver has
+// (omp's session-listing.ts: the first session, newest first, that matches
+// ANY of the three rules wins). So a NEWER session that matches by
+// file-name prefix beats an OLDER one that matches by id prefix, and the
+// rules are not tried one after the other across the whole list.
+//
+// This is the resolver-level counterpart of TestResumeMatchesPrecedence,
+// which only exercises the per-session helper.
+func TestResolveResumeIDPrecedenceIsPerSessionNewestFirst(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/precedence"
+	now := time.Now()
+	// The NEWER session matches by FILE NAME (its name starts with the
+	// query); the OLDER one matches by ID (its id starts with the same
+	// digit). The newer wins.
+	newer := writeSessionIn(t, dir, cwd, "OLD1111-0000-0000-0000-000000000000", "newer", now)
+	older := writeSessionIn(t, dir, cwd, "2OLD2222-0000-0000-0000-000000000000", "older", now.Add(-time.Hour))
+	// The listing sorts by file mtime first, so the fixture's mtimes are
+	// set explicitly: the newer session must really be the newer one.
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(newer, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(older, past, past); err != nil {
+		t.Fatal(err)
+	}
+	// The query is the first character of the file-name timestamp, which is
+	// also the first character of the older session's id.
+	const query = "2"
+	if !strings.Contains(filepath.Base(older), "_2OLD2222") {
+		t.Fatalf("the fixture does not exercise the precedence: %q", older)
+	}
+	if !strings.HasPrefix(strings.ToLower(filepath.Base(newer)), query) {
+		t.Fatalf("the fixture does not exercise the precedence: %q", newer)
+	}
+	got, err := resolveResumeID(cwd, query)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != newer {
+		t.Fatalf("resolved %q, want the newer session %q (the rules are per session, newest first)", got, newer)
+	}
+}
+
+// fakePickerOpener records the rows the picker was opened with, and the
+// blocks the command printed.
+type fakePickerOpener struct {
+	open   func(items []tui.SessionPickerItem)
+	blocks []string
+}
+
+func (f *fakePickerOpener) OpenSessionPicker(items []tui.SessionPickerItem) { f.open(items) }
+func (f *fakePickerOpener) AddSystemBlock(text string)                      { f.blocks = append(f.blocks, text) }
+
+// TestResumeOpensTheRealSessionPicker: the cmd-side /resume wiring must open
+// the session picker with the rows cmd builds. The TUI-side test installs a
+// fake that opens the picker ITSELF, so the cmd-side wiring was untested —
+// this one drives the real closure.
+func TestResumeOpensTheRealSessionPicker(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/cmd-resume-picker"
+	writeSessionIn(t, dir, cwd, "PICK1111-0000-0000-0000-000000000000", "a session", time.Now())
+
+	var got []tui.SessionPickerItem
+	opener := &fakePickerOpener{open: func(items []tui.SessionPickerItem) { got = items }}
+	// The REAL command — the one the TUI's session ops call.
+	if err := resumeSessionCommand(opener, cwd, "", func(*session.Store) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the picker was opened with %d rows, want 1", len(got))
+	}
+	if got[0].ID != "PICK1111" {
+		t.Fatalf("row = %+v, want the PICK1111 session", got[0])
+	}
+	if got[0].Title == "" {
+		t.Fatalf("the row carries no title: %+v", got[0])
+	}
+	// The scope is ALL projects: the same session is a row for another
+	// directory too, marked as not-in-cwd (the picker scopes it).
+	if err := resumeSessionCommand(opener, "/tmp/nowhere", "", func(*session.Store) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].InCwd {
+		t.Fatalf("rows = %+v, want the other project's row, not in cwd", got)
+	}
+	// A data dir with no sessions at all → no picker (the TUI owns the
+	// notice).
+	sandbox(t) // a fresh data dir
+	var none []tui.SessionPickerItem
+	if err := resumeSessionCommand(&fakePickerOpener{open: func(items []tui.SessionPickerItem) { none = items }},
+		cwd, "", func(*session.Store) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if none != nil {
+		t.Fatalf("the picker opened with %d rows, want none", len(none))
+	}
+}
+
+// TestResumeOpensThePickerEndToEnd: the TUI's /resume and cmd's own /resume
+// command, wired together the way the TUI wires them. A no-argument
+// /resume must open the RICH session picker with the rows cmd builds — the
+// TUI-side test installs a fake that opens the picker itself, so without
+// this one the cmd-side wiring was untested.
+func TestResumeOpensThePickerEndToEnd(t *testing.T) {
+	sandbox(t)
+	dir := config.DataDir()
+	cwd := "/tmp/e2e-resume-picker"
+	writeSessionIn(t, dir, cwd, "E2E1111-0000-0000-0000-000000000000", "a session", time.Now())
+
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(100, 30)
+	app := tui.New(scr, theme.Load("groknight"), "test/free", "sess1234")
+	// The TUI's session ops, wired the way runTUI wires them: the command
+	// below IS cmd's /resume.
+	app.SetSessionOps(&tui.SessionOps{
+		Resume: func(q string) error {
+			return resumeSessionCommand(app, cwd, q, func(*session.Store) error { return nil })
+		},
+		// The shipped build wires Recent too: the TUI's /resume falls back
+		// to the plain list when the picker cannot open one, so a test that
+		// omits it would not exercise the path the user takes.
+		Recent: func() []tui.ResumeOption {
+			return []tui.ResumeOption{{ID: "E2E1111", Title: "a session"}}
+		},
+	})
+	if err := app.ResumeSession(""); err != nil {
+		t.Fatal(err)
+	}
+	if !app.SessionPickerOpen() {
+		t.Fatal("the rich session picker did not open")
+	}
+	it, ok := app.SessionPickerSelection()
+	if !ok {
+		t.Fatal("the picker has no selected row")
+	}
+	if !strings.HasPrefix(it.ID, "E2E1111") {
+		t.Fatalf("the highlighted row = %q, want the E2E1111 session", it.ID)
+	}
+}
+
+// TestPrintSignalTrapCatchesATermination: a SIGTERM must not kill a
+// headless run outright. A death by signal runs no deferred function, so an
+// untrapped termination left the session with NO exit marker at all — and a
+// reader could not tell a terminated run from a session that was never
+// closed. The trap cancels the run instead, so the marker is written on the
+// way out.
+func TestPrintSignalTrapCatchesATermination(t *testing.T) {
+	ctx, stop, caught := printSignalTrap(context.Background())
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the SIGTERM did not cancel the run")
+	}
+	sig := caughtSignal(*caught)
+	if sig == nil {
+		t.Fatal("the signal was not recorded")
+	}
+	if got := signalExitCode(sig); got != 143 {
+		t.Fatalf("signalExitCode(%v) = %d, want 143 (128 + SIGTERM)", sig, got)
+	}
+	// And the marker it produces says "signal", not "fatal".
+	kind := exitKind(signalExitCode(sig))
+	if kind != "signal" {
+		t.Fatalf("kind = %q, want signal", kind)
 	}
 }
