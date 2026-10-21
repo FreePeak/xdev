@@ -54,6 +54,22 @@ var githubOps = []string{
 	"search_repos", "run_watch",
 }
 
+// ReadOnlyOps lists the github ops that only READ.
+//
+// The other ops write — a PR, a worktree, a branch — so a whole-tool
+// "read-only" cap would be a lie in one direction or the other. The
+// keep-going gate asks per op: live 2026-10-21 (session 4c4addab), the model
+// called search_prs while answering "list me all pr urls openningin xdev",
+// the gate had no caps entry for the name, and the call counted as a
+// mutation — so the harness pushed the model past the answer it had just
+// delivered.
+func (t *GithubTool) ReadOnlyOps() []string {
+	return []string{
+		"repo_view", "file_read",
+		"search_issues", "search_prs", "search_code", "search_commits", "search_repos",
+	}
+}
+
 // GithubTool dispatches GitHub operations over the `gh` CLI. One instance
 // serves a session: the checkout registry and the pr:///issue:// cache are
 // per-instance, so build it once (newToolRegistry) and share it.

@@ -263,6 +263,112 @@ func readOnlyGitWorktree(args []string) bool {
 	return readOnlyGitWorktreeSubs[args[0]]
 }
 
+// ghReadSubs are the `gh` subcommands that only READ, per noun.
+//
+// `gh` is the same shape as `git`: a small set of nouns, each with read forms
+// and write forms that share the first two words. `gh pr list` and `gh pr
+// merge` differ by one word, so the noun alone cannot decide — the subcommand
+// does.
+//
+// A noun that is not in this table is not a read. gh grows nouns, and a noun
+// this table has never heard of is more likely to be a write (`pr`, `issue`
+// and `repo` are the write-heavy ones), so the unknown direction is the
+// mutating one — the same conservative default an unrecognised command gets.
+var ghReadSubs = map[string]map[string]bool{
+	"pr":        {"list": true, "view": true, "status": true, "diff": true, "checks": true},
+	"issue":     {"list": true, "view": true, "status": true},
+	"repo":      {"list": true, "view": true},
+	"search":    {"prs": true, "issues": true, "code": true, "commits": true, "repos": true},
+	"run":       {"list": true, "view": true},
+	"release":   {"list": true, "view": true, "download": true},
+	"label":     {"list": true},
+	"secret":    {"list": true},
+	"gist":      {"list": true, "view": true},
+	"workflow":  {"list": true, "view": true},
+	"cache":     {"list": true},
+	"alias":     {"list": true},
+	"extension": {"list": true},
+	"auth":      {"status": true},
+	"config":    {"get": true},
+}
+
+// ghBareReadNouns are the `gh` nouns that read with no subcommand at all.
+var ghBareReadNouns = map[string]bool{"status": true, "browse": true}
+
+// readOnlyGh reports whether a `gh` invocation is a pure read.
+//
+// Live 2026-10-21 (session 4c4addab): the user asked "list me all pr urls
+// openningin xdev" and the model answered it — the open PR list, with the
+// URLs — and in the same millisecond the harness pushed it past its own
+// answer, because `gh` was not in the read-only table at all and every
+// `gh pr list` was therefore read as a mutation. The model then spent three
+// minutes reading the diffs of two unrelated worktrees.
+//
+// `gh api` is the one noun whose verb is a flag, not a word: it defaults to
+// GET and a method flag is the only thing that makes it write.
+func readOnlyGh(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	// gh's global flags come before the noun and take no value.
+	i := 0
+	for ; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") {
+			break
+		}
+	}
+	if i >= len(args) {
+		return false
+	}
+	noun := args[i]
+	rest := args[i+1:]
+	if noun == "api" {
+		return ghApiIsRead(rest)
+	}
+	if ghBareReadNouns[noun] {
+		return true
+	}
+	subs, ok := ghReadSubs[noun]
+	if !ok {
+		return false
+	}
+	// The subcommand is the first non-flag word after the noun.
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return subs[a]
+	}
+	return false
+}
+
+// ghApiIsRead reports whether a `gh api` call is a read.
+//
+// `gh api` sends a GET unless a method flag says otherwise, and the flag has
+// three spellings: `-X POST`, `--method POST` and `--method=POST`.
+func ghApiIsRead(args []string) bool {
+	method := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-X" || a == "--method":
+			if i+1 < len(args) {
+				method = strings.ToUpper(args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "--method="):
+			method = strings.ToUpper(strings.TrimPrefix(a, "--method="))
+		case strings.HasPrefix(a, "-X") && len(a) > 2:
+			method = strings.ToUpper(a[2:])
+		}
+	}
+	switch method {
+	case "", "GET", "HEAD", "OPTIONS":
+		return true
+	}
+	return false
+}
+
 // readOnlySegment judges one already-split segment.
 func readOnlySegment(seg string) bool {
 	fields := strings.Fields(seg)
@@ -278,6 +384,8 @@ func readOnlySegment(seg string) bool {
 	switch head := fields[0]; head {
 	case "git":
 		return readOnlyGit(fields[1:])
+	case "gh":
+		return readOnlyGh(fields[1:])
 	case "sed":
 		return !hasFlagContaining(fields[1:], 'i')
 	case "sort":
