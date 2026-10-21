@@ -384,6 +384,11 @@ type ladderProvider struct {
 	started    chan struct{}
 	released   chan struct{}
 	cancelSeen chan struct{}
+	// summary is what a summarize answers; empty means the default text.
+	summary string
+	// failFirst makes the FIRST summarize fail — the arm that never
+	// produced a summary.
+	failFirst bool
 }
 
 func newLadderProvider() *ladderProvider {
@@ -404,9 +409,17 @@ func (p *ladderProvider) Stream(ctx context.Context, req ai.StreamRequest) (<-ch
 	p.mu.Lock()
 	p.summaries++
 	first := p.summaries == 1
+	text := p.summary
+	if text == "" {
+		text = "SUMMARY-FROM-ASYNC"
+	}
+	fail := p.failFirst && first
 	p.mu.Unlock()
 	if first {
 		close(p.started)
+	}
+	if fail {
+		return nil, errors.New("ladder: the summarize failed")
 	}
 	select {
 	case <-p.released:
@@ -420,7 +433,7 @@ func (p *ladderProvider) Stream(ctx context.Context, req ai.StreamRequest) (<-ch
 		}
 		return nil, ctx.Err()
 	}
-	return eventChan(doneEvent("SUMMARY-FROM-ASYNC")), nil
+	return eventChan(doneEvent(text)), nil
 }
 
 func (p *ladderProvider) Name() string { return "ladder" }
@@ -442,17 +455,19 @@ func eventChan(events ...ai.Event) <-chan ai.Event {
 	return ch
 }
 
-// TestAsyncCompactionAppliesAtTheNextBoundary pins the async trigger: the
-// boundary that is due hands the summarize to a goroutine and returns without
-// compacting, and the result lands — recorded as handoff — at a later boundary.
-func TestAsyncCompactionAppliesAtTheNextBoundary(t *testing.T) {
+// TestAsyncCompactionAppliesWhenDue pins the async trigger: the boundary
+// that is due hands the summarize to a goroutine and returns without
+// compacting, and the result lands — recorded as handoff — at a later
+// boundary, where the compaction is still due. The summarize is spent once:
+// the boundary that applies the result spends no provider round-trip.
+func TestAsyncCompactionAppliesWhenDue(t *testing.T) {
 	stubPressure(t, 0)
 	p := newLadderProvider()
-	cfg := ladderConfig("handoff")
+	cfg := specConfig("handoff")
 	cfg.Async = true
 	a, s := asyncAgent(t, p, cfg)
-	ladderFixture(t, s)
-	hist := ladderHistory(t, s)
+	// The context is over the threshold: the boundary is due.
+	hist := specFixture(t, s, 85000)
 	ctx := context.Background()
 
 	_ = a.maybeCompact(ctx, hist)

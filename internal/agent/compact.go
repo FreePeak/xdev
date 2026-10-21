@@ -677,23 +677,42 @@ func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs
 // that summarize off in the background instead of blocking; a later boundary
 // applies it. Silent on failure (logged, never fatal): a failed compaction
 // degrades to the pre-compaction behavior, and the overflow path re-tries it.
+//
+// The background summarize is ARMED before the threshold is due — inside the
+// lead window (compact_spec.go) — and its result is consumed at the boundary
+// where the compaction becomes DUE, so that boundary costs no provider
+// round-trip.
 func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Message {
 	if a.Store == nil || a.compaction().ContextWindow <= 0 {
 		return history
 	}
-	// A background summarize that finished since the last boundary applies
-	// here, whatever the trigger state; an applied result is this boundary's
-	// whole job (M5 #24 async).
-	if rebuilt, ok := a.applyAsyncCompaction(history); ok {
-		return rebuilt
-	}
+	// A background summarize that finished since the last boundary waits
+	// here: it is applied at the boundary where the compaction is due, not
+	// at the next boundary whatever the trigger state.
+	a.harvestAsyncResult()
 	// Pre-request tier (microcompact): clear stale tool results before paying
 	// for a summary. Cheap, deterministic, no provider call.
 	if cleared, changed := microcompactToolResults(history, defaultMicrocompactKeepRecent); changed {
 		history = cleared
 	}
 	if !a.compactionDue(history) {
+		// Not due: this is where a speculative compaction is armed, so its
+		// summary is ready when the threshold is crossed.
+		a.maybeArm(ctx, history)
 		return history
+	}
+	// Due. An armed result applies HERE: its summary was produced before the
+	// threshold was crossed, so this boundary costs no provider round-trip.
+	if job := a.compactAsync; job != nil && job.pending != nil {
+		if rebuilt, ok := a.applyAsyncCompaction(history); ok {
+			// The result is consumed: the next boundary may arm a fresh one.
+			a.forgetAsyncCompaction()
+			return rebuilt
+		}
+		// The arm is unusable: drop it and compact synchronously. A
+		// discarded arm costs latency, never correctness.
+		a.forgetAsyncCompaction()
+		return a.compactNow(ctx, history)
 	}
 	// Async hands the provider round-trip to a goroutine; the deterministic
 	// members are already cheap, so they stay on this goroutine. Memory
@@ -708,11 +727,16 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 			return history
 		}
 	}
+	return a.compactNow(ctx, history)
+}
+
+// compactNow runs the compaction ladder on this goroutine and rebuilds the
+// context from the store: summary + kept tail + everything after.
+func (a *Agent) compactNow(ctx context.Context, history []ai.Message) []ai.Message {
 	if err := a.compact(ctx); err != nil {
 		logx.Errorf("compaction: %v", err)
 		return history
 	}
-	// Rebuild from the store: summary + kept tail + everything after.
 	if res, err := session.BuildContext(a.Store.Entries(), a.Store.LeafID(), session.SystemPrompt{}); err == nil {
 		return res.Messages
 	}
