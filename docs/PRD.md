@@ -159,7 +159,7 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | Collab depth (link formats + view-only tokens, guest select/editor answering, bus/agents frames, web-relay equivalent) | collab.md | NICE (NEW) | M14 |
 | Vibe mode detail (5 worker tools, fast\|good tiers, worker persistence/rehydration, plan/goal mutual exclusion) | vibe-mode.md | NICE (NEW) | M14 |
 | Advisor tails (`syncBacklog` off\|1\|3\|5, `immuneTurns`, `task.agentAdvisor` per-subagent) | advisor-watchdog.md, settings.md | NICE (NEW) | M11 |
-| Distribution polish (macos signing/notarization — **landed 2026-09-14 as `.github/workflows/release.yml`**: patch semver auto-bump on `main`, six-platform artifacts, Developer ID sign + notarize when the `APPLE_*` secrets exist, one GitHub Release with a merged `SHA256SUMS`; plus `scripts/install.sh`, the `curl \| sh` Linux/macOS installer that resolves the newest release every run, so re-running it is the upgrade; `xdev update` canary/stable, shell completions, `gc`, `bench` dashboard) | cli-reference.md, macos-signing-notarization.md | NICE (NEW) | M14 |
+| Distribution polish (macos signing/notarization — **landed 2026-09-14 as `.github/workflows/release.yml`**: semver auto-bump on `main` — a feature commit moves the minor (Y), anything else the patch (Z), the major (X) is the maintainer's —, six-platform artifacts, Developer ID sign + notarize when the `APPLE_*` secrets exist, one GitHub Release with a merged `SHA256SUMS`; plus `scripts/install.sh`, the `curl \| sh` Linux/macOS installer that resolves the newest release every run, so re-running it is the upgrade; `xdev update` canary/stable, shell completions, `gc`, `bench` dashboard) | cli-reference.md, macos-signing-notarization.md | NICE (NEW) | M14 |
 | `computer` desktop control (native screenshots/input) | computer-use.md | DEFERRED | M15 (parity requested 2026-09-11) |
 | Full DAP debug driver (adapter-based, `debug` tool) | debug.md | DEFERRED | M15 (parity requested) |
 | `security_scan` (OMP-native + Codex cloud) | security-scan.md | DEFERRED | M15 (parity requested) |
@@ -931,6 +931,7 @@ JSONL tree, and the subprocess trust boundary. Each phase ends with focused test
 same PR. A feature is not marked complete merely because a package or type exists: it needs a
 real consumer and evidence from a running xdev interaction.
 
+*Last updated: 2026-10-22 (ci(release) — the version says what the commits say):* `release.yml`'s `plan` job no longer bumps the patch on every merge — that made every version a lie (v0.4.368 said "one more fix" when the range held a feature). `scripts/release-version.sh` reads the commits that landed since the last release tag and moves the MINOR (Y) for a feature commit (`feat`, `feature`, `enhance`, `refactor`, `perf`, …) and the PATCH (Z) for everything else, a bug fix included; the range decides by its highest impact, so one feature among ten fixes is a minor release. The MAJOR (X) stays the maintainer's: a breaking change in the range (`feat(api)!:` or a `BREAKING CHANGE:` footer) is reported as a `::warning::` naming the commit, and the major release is cut by hand (push a `vX.0.0` tag, or dispatch the workflow with an explicit version). The rule lives in a script, `scripts/release-version_test.sh` proves it against fixture repositories, and the release job runs that test before it plans — the rule that ships a release is the rule that was tested. The dispatch input also stopped being spliced into the shell: it comes through the environment, so an input is a string, not code, and a malformed version fails the plan instead of publishing a tag nobody can resolve.
 *Last updated: 2026-10-19 (fix/open-subagent-session — F1–F5 + D1: same-process TaskTool subagent panel transcript):*
 *Last updated: 2026-10-13 (fix/failover-combo-alias — a gateway's own route names are never implicit failover legs):*
 #641/#642 landed the per-model `failover: false`, which fixes the symptom only when the operator
@@ -4619,4 +4620,28 @@ The cause is the merge. `Settings.merge` is hand-written per field — every key
 **Evidence.** Two renders of the same TUI session, driven through a mock provider against a scratch repository: `/tmp/tui1/before.png` (the base branch) and `/tmp/tui1/after.png` (this branch). The tool rows read `●`/`✗`/`⠋` before and `✔`/`✘`/`⣽` after, the accent is magenta before and tan after, and the status row gains `● bash` — the indicator that used to reserve its space and paint nothing.
 
 *Last updated: 2026-10-22 (feat/tui-parity-phase1 rebased onto main: the TUI speaks omp's INK and omp's ALPHABET — the launch dark theme is omp's groknight token for token, the accent is omp's iris, and the spinner is omp's circle-braille; merged with main's read-commands section.)
+
+## The budget stops exploring, not acting (2026-10-22)
+
+The run budget's wrap-up said: *"answer now, in prose, with what you have found so far, and do not call any more tools."* That is right for a run that owes NOTHING — a question ends at the report — and wrong for a run that still owes a change: the clock turned a slow run into a run that **reported and changed nothing**.
+
+**MEASURED, ON A LADDER OF EIGHT ASKS**, from *"what does this project do?"* to *"the tests do not pass, find the cause and fix it"*:
+
+| step | wall | turns | calls | budget | the tree after |
+|---|---|---|---|---|---|
+| a question you could answer from memory | 29 s | 6 | 12 | 0 | clean |
+| one lookup | 14 s | 3 | 2 | 0 | clean |
+| a lookup and a comparison | 12 s | 2 | 1 | 0 | clean |
+| find the code that decides something | 50 s | 7 | 11 | 0 | clean |
+| **a small edit, one file** | 207 s | 16 | 19 | **1** | **clean — the edit did not happen** |
+| **an edit and a test run** | 202 s | 8 | 12 | **1** | **clean — the edit did not happen** |
+| diagnose a failure | 219 s | 8 | 13 | 1 | clean (right: a diagnosis changes nothing) |
+| **diagnose and fix** | 217 s | 14 | 13 | **1** | **clean — the fix did not happen** |
+
+Every step that had to CHANGE something ended with an untouched tree, and every one of them hit the budget. Every step that owed nothing was lean and finished in 12-29 seconds.
+
+**THE WRAP-UP NOW SAYS THE TWO THINGS THAT ARE TRUE AT ONCE**: *"Do not explore further. If your task was to make a change and you have not made it, make it now; then report in prose what you did or found."* The search ends; the work does not.
+
+**Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
+*Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 
