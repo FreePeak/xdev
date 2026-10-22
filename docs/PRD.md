@@ -4529,6 +4529,7 @@ was a mutation on a turn that had only read. The loop's own scaffolding is trans
 **MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,418 bash calls): classified read-only **73,053 (54.8%)**, up from 68,996 (51.8%) and from origin/main's 59,472 (45.0%).
 
 **Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
+
 *Last updated: 2026-10-22 (fix/keep-going-gate-assignment-fragment — a bare assignment changes nothing because the call's shell dies with it, the fragment the splitter leaves behind no longer reads as an unknown command, and the command inside a substitution is still judged: 54.8% of the store's calls are reads, against 45.0% before this series)*
 
 ## The run stops when the answer is in hand (2026-10-22)
