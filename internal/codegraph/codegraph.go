@@ -301,6 +301,10 @@ func sameDir(a, b string) bool {
 }
 
 func resolveDir(s string) string {
+	s = filepath.Clean(s)
+	if abs, err := filepath.Abs(s); err == nil {
+		s = abs
+	}
 	s = trimDir(s)
 	if real, err := filepath.EvalSymlinks(s); err == nil {
 		return trimDir(real)

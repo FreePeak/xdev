@@ -197,6 +197,12 @@ func startServer(ctx context.Context, name string, spec ServerSpec, root string)
 // marker; the file's own directory is the fallback. Markers are file or
 // directory names (go.mod, .git).
 func detectRoot(dir, stop string, markers []string) string {
+	// Canonicalise both sides so a symlinked or differently-spelled cwd
+	// (e.g. /tmp vs /private/tmp on macOS) still acts as the stop marker.
+	// Without this, dir and stop never compare equal and the walk runs all
+	// the way to the filesystem root, detecting the wrong project root.
+	dir = canonicalPath(dir)
+	stop = canonicalPath(stop)
 	d := dir
 	for {
 		for _, m := range markers {
