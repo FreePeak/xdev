@@ -239,6 +239,52 @@ func (a *Agent) runBudget() time.Duration {
 	return a.RunBudget
 }
 
+// keepGoingNudge is the keep-going gate's verdict: should this run be pushed
+// past the answer it already has?
+//
+// Two questions, two scopes, and BOTH matter:
+//
+//   - "Has this conversation changed anything?" — mutated. It is read over
+//     the current TASK (taskFloor), not the whole session: work done inside
+//     the current ask still arms the gate, and an EARLIER ask's edit does
+//     not make a NEW question look mid-task.
+//
+//   - "Did this run already stop?" — the last synthetic user turn. The gate
+//     knows about its OWN nudge (PromptContinuationAttribution), so a run
+//     that already nudged once does not nudge again. It must know about the
+//     run-budget wrap-up too: the budget says "answer now, in prose, and do
+//     not call any more tools", and it is the run's STOP.
+//
+//     It did not. Live 2026-10-22, a TUI run of "list me all pr urls
+//     opening xdev": the budget fired at 6 minutes and the model answered in
+//     prose — and the gate then fired on the turn's earlier `git fetch`, so
+//     the run continued for one more turn AFTER the clock had already ended
+//     it. A stop that something else can override is not a stop.
+//
+// A user interjection ends both: work that was asked for again is
+// compliance, not a loop.
+func keepGoingNudge(history []ai.Message, resumeFloor int, mutated bool) bool {
+	if !mutated {
+		return false
+	}
+	lastWasPromptCont := false
+	lastWasRunBudget := false
+	for _, h := range history[min(len(history), resumeFloor):] {
+		switch {
+		case h.Role == ai.RoleUser && h.Attribution == PromptContinuationAttribution:
+			lastWasPromptCont = true
+			lastWasRunBudget = false
+		case h.Role == ai.RoleUser && h.Attribution == RunBudgetAttribution:
+			lastWasPromptCont = false
+			lastWasRunBudget = true
+		case h.Role == ai.RoleUser:
+			lastWasPromptCont = false
+			lastWasRunBudget = false
+		}
+	}
+	return !lastWasPromptCont && !lastWasRunBudget
+}
+
 // callMutated reports whether one already-issued tool call changed
 // anything. It is the single definition of "mid-task" the keep-going gate
 // uses, so the gate and the reasoning in the loop cannot drift apart.
@@ -585,6 +631,14 @@ type Agent struct {
 	repeats     repeatChain
 	repeatBreak bool // set when the repeat guard vetoes further continuation
 
+	// coarseRepeats counts each call's WORK over the run, not just the
+	// identical calls in a row. It is the one that sees a RE-DERIVATION: a
+	// model that asks the same question in ten spellings never repeats an
+	// exact call, so the chain above never sees it. The count is for the
+	// NOTICE only — the hard break stays on the exact chain, where a break
+	// is unambiguous.
+	coarseRepeats coarseChain
+
 	// toolResultCache dedups identical tool calls within one run: a repeat
 	// with the same name+args returns the cached result instead of
 	// re-executing. Keyed by name + canonical args.
@@ -721,6 +775,9 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 	promptConts := 0
 	a.toolResultCache = map[string]ai.Message{}
 	a.repeatBreak = false
+	// The coarse count is per run, like the chain above: a re-derivation is
+	// a property of THIS run's work, and a resumed run starts its own.
+	a.coarseRepeats = coarseChain{}
 	// resumeFloor is where this run's own history begins: everything before it
 	// was rebuilt from the store by a resume or a compaction. The prompt
 	// continuation guard below needs the boundary because the two questions it
@@ -784,6 +841,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 		steering := a.drainSteering()
 		if len(steering) > 0 {
 			a.repeats = repeatChain{}
+			a.coarseRepeats.reset()
 			a.repeatBreak = false
 			a.toolResultCache = map[string]ai.Message{}
 		}
@@ -955,15 +1013,7 @@ func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (f
 						}
 					}
 				}
-				lastWasPromptCont := false
-				for _, h := range history[min(len(history), resumeFloor):] {
-					if h.Role == ai.RoleUser && h.Attribution == PromptContinuationAttribution {
-						lastWasPromptCont = true
-					} else if h.Role == ai.RoleUser {
-						lastWasPromptCont = false
-					}
-				}
-				if !lastWasPromptCont && mutated {
+				if keepGoingNudge(history, resumeFloor, mutated) {
 					cont = PromptContinuationPrompt
 					contAttr = PromptContinuationAttribution
 					promptConts++

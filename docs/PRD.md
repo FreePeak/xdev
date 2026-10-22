@@ -4527,7 +4527,48 @@ was a mutation on a turn that had only read. The loop's own scaffolding is trans
 **MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,418 bash calls): classified read-only **73,053 (54.8%)**, up from 68,996 (51.8%) and from origin/main's 59,472 (45.0%).
 
 **Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
+*Last updated: 2026-10-22 (fix/keep-going-gate-assignment-fragment — a bare assignment changes nothing because the call's shell dies with it, the fragment the splitter leaves behind no longer reads as an unknown command, and the command inside a substitution is still judged: 54.8% of the store's calls are reads, against 45.0% before this series)*
 
+## The run stops when the answer is in hand (2026-10-22)
+
+**A question is not a project.** Live 2026-10-22, session `adf5029b`: *"list me all pr urls opening xdev"* took **22 assistant turns and 28 tool calls over 6 minutes 19 seconds**, and the answer arrived only when the run-budget wrap-up forced it. The model had the answer at turn 5 and said so in its own reasoning — *"the answer is clear. There are ZERO open PRs in FreePeak/xdev"* — and then spent 15 more turns corroborating it, because it decided the answer was "too thin" and went looking for adjacent material to offer instead. Zero keep-going nudges: the gate was not the cause.
+
+**THE PROMPT NOW SAYS TO STOP.** `SystemPromptBase` already said *"a question gets an answer … do the reading, give the report and stop"*. That is about not OVER-delivering by starting to implement. It said nothing about the other half: **the answer was IN HAND and the model kept going.** The rule now says *"don't start implementing, and don't keep gathering once you have it"*. It is paid for by cutting prose, never by appending: the example *"Find the root cause and fix asks for a change; why is this slow? asks a question"* is now covered by the effort ladder and the question rule, and the base prompt sits at 1,846 of 2,000 runes with the assembled prompt at 981 of 1,000 tokens.
+
+**THE BUDGET'S STOP IS AUTHORITATIVE.** The wrap-up says *"answer now, in prose, and do not call any more tools"*. The model obeyed — and then the keep-going gate fired, because the gate's guard knew about the gate's OWN nudge and about nothing else, and the turn's earlier `git fetch` had armed it. The run continued for one more turn AFTER the clock had ended it. A stop that something else can override is not a stop. The gate's decision is now one function (`keepGoingNudge`), and it recognises the budget the same way it recognises its own nudge.
+
+**THE BUDGET IS CONFIGURABLE.** `runBudget` (seconds) rides the settings like every other knob: 0 is the shipped default (6 minutes), a negative value is unbounded. The default is measured, not guessed — the RCA's patched run of a "tell me where we are" question took 4 min 53 s, so a shorter default would truncate legitimate work — but the same question asked as "list me all pr urls" has a right answer in 30 seconds, and the clock is the only thing that ends a model that has decided to keep gathering.
+
+**A CANONICAL "SAME WORK" KEY, FOR THE NOTICE ONLY.** The repeat guard keys on the tool name plus `canonicalArgs`, which normalizes nothing but JSON key order — so a model that changes `--limit 100` to `--limit 2000`, or swaps `--jq 'length'` for `--jq '.[] | .url'`, or pipes into `head -40` instead of `head -50`, pays for the same work again. The canonical form (`internal/tool/canonical.go`) is the program's path plus its sorted targets, with a projection's value dropped and a pure-number magnitude normalized. It deliberately does NOT normalize a flag value that names the TARGET (`--repo A` vs `--repo B`), a range (`sed -n '1,50p'` vs `sed -n '200,250p'`), or the program path (`gh pr` vs `gh api`).
+
+| | within-run calls in a group of more than one |
+|---|---|
+| the exact key (today) | 4,634 |
+| the canonical key | **6,515** (+41%) |
+
+The key is used for the NOTICE only. The tool-result cache keeps the exact key, because a coarse key that merged `--repo A` with `--repo B` would hand the model the answer to a different question. The hard break at eight identical calls stays on the exact chain for the same reason: a coarse count of eight can be a model reading a file in chunks.
+
+**TWO DETECTORS WERE BUILT, MEASURED AND THROWN AWAY.** A tool-only streak guard looks perfect for the live shape (21 consecutive tool calls with no text) and is not: **54%** of this repo's 7,941 tool-only streaks are ≥ 6 long and 22% are ≥ 20, so the signal does not discriminate. A program-level counter ("you have run `gh` 12 times") is not either: **70%** of 791 runs call one program ≥ 6 times and half call one ≥ 20. Both would nag on legitimate work. The numbers are in `docs/research/2026-10-22-rederivation-loop-rca.md`, because the rejected detectors are the useful result: they say what the harness cannot see.
+
+**Tests.** `internal/tool/canonical_test.go` — `TestCanonicalCommandGroupsTheSameWork` (the same work at two depths, with two projections, with two pipe targets, in two flag orders, groups alike; a different target, a different state, a different program and a different file range do NOT). `internal/agent/repeat_coarse_test.go` — `TestRepeatedWorkNoticeFiresOnARederivation` (five spellings of one question, interleaved with other work, and the fifth carries the notice), `TestRepeatedWorkNoticeStaysOffForDifferentWork`, `TestTheHardBreakStaysOnTheExactChain`. `internal/agent/run_budget_stop_test.go` — `TestTheRunBudgetsStopIsAuthoritative` (RED without the fix), `TestTheKeepGoingGateStillFiresForUnfinishedWork`, `TestTheKeepGoingGateDoesNotNudgeTwice`, `TestARealUserTurnEndsTheBudgetsAuthority`. `internal/config/runbudget_test.go` — `TestRunBudgetSetting`. `internal/agent/prompt_stop_test.go` — `TestBasePromptCarriesTheStopOnceYouHaveTheAnswer`.
+*Last updated: 2026-10-22 (fix/rederivation-loop — a question stops at the report: the prompt says to stop gathering once the answer is in hand, the run budget's stop is authoritative, the budget is configurable, and a canonical "same work" key finds 41% more within-run repeats for the notice — two detectors were measured and rejected)*
+
+## The shell's own words are not commands (2026-10-22)
+
+A live A/B of the previous batch found three more read-only shell patterns that the keep-going gate read as MUTATIONS, and each one armed the gate on a turn that had changed nothing.
+
+**A SHELL TEST IS A READ.** `[ "$n" != "0" ]` looks at values and returns a status. It changes no file, and a session that guards a loop with one is still only READING. Live 2026-10-22: *"do n=$(gh api …); if [ "$n" != "0" ]; then … fi"* was read as a mutation, armed the gate, and pushed the model past the answer it had.
+
+**THE SHELL'S CONTROL WORDS NAME NO PROGRAM.** `continue`, `break`, `read`, `exit` and `shift` are the shell's own words: a loop's jump, a line of stdin, the end of the shell. None of them is a program, so none of them can write.
+
+**`git branch --list <pattern>` IS A QUERY.** The list form takes a PATTERN, not a branch name to create — so the pattern was read as a create, and `git branch -r --list 'origin/*'` armed the gate. The list form is now modelled the way the six git verbs already were: judged by its arguments.
+
+**AND A BRANCH IS A COMMAND, NOT SCAFFOLDING.** The fix above exposed a bug in the batch before it: `if COND; then git worktree remove "$p"; else …; fi` was treated as scaffolding, and the `git worktree remove` inside the branch was never judged. The store-wide destructive-git guard caught it — 1,854 destructive segments, and one of them had gone dark. `then`, `else` and `elif` now carry their branch into the judgement, the way `do` carries a loop's body.
+
+Measured over this repo's own session store (134,296 bash calls): classified read-only **73,949 (55.1%)**, up from 73,053 (54.4%) and from origin/main's 59,472 (45.0%).
+
+**Tests.** `internal/tool/readonly_patterns_test.go` — `TestReadOnlyPatternsAreReads` (a test, a control word, and a branch listing are reads; a branch NAME still creates; a branch that removes a worktree is a write).
+*Last updated: 2026-10-22 (fix/keep-going-gate-read-patterns — a shell test, a control word and a branch listing are reads, and a branch is a command: 55.1% of the store's calls are reads)*
 
 ## The TUI speaks omp's INK and omp's ALPHABET (2026-10-21)
 
