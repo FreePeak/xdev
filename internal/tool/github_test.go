@@ -529,6 +529,9 @@ func TestGithubPrCheckoutCrossRepositoryFetchTarget(t *testing.T) {
 }
 
 func TestGithubSearchArgs(t *testing.T) {
+	// The search runs against the CURRENT checkout: the tool resolves the
+	// repository first (`gh repo view`), then pins the search to it. The
+	// repo view is the first gh call, so the search is the second.
 	cases := []struct {
 		name string
 		args string
@@ -540,14 +543,14 @@ func TestGithubSearchArgs(t *testing.T) {
 			want: []string{"search", "issues", "flaky test updated:>=3d updated:<=2026-09-12 is:issue", "--limit", "3", "--json", ghSearchIssueFields, "--repo", "FreePeak/xdev"},
 		},
 		{
-			name: "prs",
+			name: "prs are scoped to the current repository",
 			args: `{"op":"search_prs","query":"widget"}`,
-			want: []string{"search", "prs", "widget is:pr", "--limit", "10", "--json", ghSearchPRFields},
+			want: []string{"search", "prs", "widget is:pr", "--limit", "10", "--json", ghSearchPRFields, "--repo", "FreePeak/xdev"},
 		},
 		{
 			name: "code",
 			args: `{"op":"search_code","query":"func main"}`,
-			want: []string{"search", "code", "func main", "--limit", "10", "--json", ghSearchCodeFields},
+			want: []string{"search", "code", "func main", "--limit", "10", "--json", ghSearchCodeFields, "--repo", "FreePeak/xdev"},
 		},
 		{
 			name: "commits use committer-date",
@@ -562,24 +565,27 @@ func TestGithubSearchArgs(t *testing.T) {
 		{
 			name: "a qualifier-only search needs no query",
 			args: `{"op":"search_issues"}`,
-			want: []string{"search", "issues", "is:issue", "--limit", "10", "--json", ghSearchIssueFields},
+			want: []string{"search", "issues", "is:issue", "--limit", "10", "--json", ghSearchIssueFields, "--repo", "FreePeak/xdev"},
 		},
 		{
 			name: "limit clamps to 50",
 			args: `{"op":"search_issues","limit":999}`,
-			want: []string{"search", "issues", "is:issue", "--limit", "50", "--json", ghSearchIssueFields},
+			want: []string{"search", "issues", "is:issue", "--limit", "50", "--json", ghSearchIssueFields, "--repo", "FreePeak/xdev"},
 		},
 		{
 			name: "limit below one falls back to the default",
 			args: `{"op":"search_issues","limit":-4}`,
-			want: []string{"search", "issues", "is:issue", "--limit", "10", "--json", ghSearchIssueFields},
+			want: []string{"search", "issues", "is:issue", "--limit", "10", "--json", ghSearchIssueFields, "--repo", "FreePeak/xdev"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := newGithubStub(t)
-			stub.respond("[]")
-			res := runGithub(t, NewGithubTool(stub.repo), tc.args)
+			stub.respondSeq("FreePeak/xdev\n", "[]")
+			tool := NewGithubTool(stub.repo)
+			// search_repos is a global search by nature, so it asks first.
+			tool.Ask = &AskTool{Sink: &scopeSink{answer: ghScopeWiden}}
+			res := runGithub(t, tool, tc.args)
 			if res.IsError {
 				t.Fatalf("search errored: %s", res.Text)
 			}
@@ -587,10 +593,10 @@ func TestGithubSearchArgs(t *testing.T) {
 				t.Fatalf("empty search text = %q", res.Text)
 			}
 			calls := stub.calls()
-			if len(calls) != 1 {
+			if len(calls) != 2 {
 				t.Fatalf("calls = %v", calls)
 			}
-			assertArgs(t, calls[0], "gh", stub.repo, tc.want...)
+			assertArgs(t, calls[1], "gh", stub.repo, tc.want...)
 		})
 	}
 }
@@ -613,7 +619,7 @@ func TestGithubSearchValidation(t *testing.T) {
 
 func TestGithubSearchRendersResults(t *testing.T) {
 	stub := newGithubStub(t)
-	stub.respond(`[{"number":49,"title":"github tool","state":"OPEN","url":"https://github.com/FreePeak/xdev/issues/49","repository":{"nameWithOwner":"FreePeak/xdev"}}]`)
+	stub.respondSeq("FreePeak/xdev\n", `[{"number":49,"title":"github tool","state":"OPEN","url":"https://github.com/FreePeak/xdev/issues/49","repository":{"nameWithOwner":"FreePeak/xdev"}}]`)
 	res := runGithub(t, NewGithubTool(stub.repo), `{"op":"search_issues","query":"github"}`)
 	if res.IsError {
 		t.Fatalf("search errored: %s", res.Text)

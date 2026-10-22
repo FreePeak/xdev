@@ -1963,6 +1963,11 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 	if !userPresent {
 		ask.Sink = tool.NewUnanswerableAskSink(ask.Timeout, ask.AutoAnswer)
 	}
+	// The github tool asks the SAME ask tool before a search leaves the
+	// current repository (github_scope.go). It holds the tool, not the sink,
+	// so the TUI's later card swap is picked up: the scope question is a
+	// question like any other, asked through the one channel to the user.
+	ghTool.Ask = ask
 	for _, t := range []tool.Tool{
 		tool.NewReadTool(),
 		tool.NewWriteTool(),
