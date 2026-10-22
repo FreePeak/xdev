@@ -61,6 +61,9 @@ var readOnlyHeads = map[string]bool{
 	"tree": true, "diff": true, "cmp": true, "md5": true, "shasum": true,
 	"sha256sum": true, "hexdump": true, "xxd": true, "strings": true,
 	"seq": true, "test": true, "hostname": true, "lsof": true, "sw_vers": true,
+	// sleep does nothing, and expr evaluates an expression and prints it.
+	// Neither can change anything.
+	"sleep": true, "expr": true,
 	// cd changes only the shell's own working directory, and the bash tool
 	// gives every call a fresh process (a caller sets one with the workdir
 	// argument), so it persists nothing across calls. It is also the single
@@ -449,6 +452,59 @@ func stripShellKeyword(fields []string) ([]string, string) {
 	return fields, ""
 }
 
+// readOnlyTimeout judges a `timeout` invocation.
+//
+//	timeout 5 gh pr list    the wrapped command is what runs
+//	timeout 5               no command: a no-op
+//
+// The wrapped command is judged on its own, so `timeout 5 rm -rf x` is still
+// a write. The wrapper is worth modelling: a research turn bounds a slow
+// call with it constantly, and an unmodelled `timeout` made every bounded
+// read look like a mutation.
+func readOnlyTimeout(args []string) bool {
+	rest := args
+	// Flags first; -k/--kill-after and -s/--signal take a value.
+	for len(rest) > 0 {
+		a := rest[0]
+		if !strings.HasPrefix(a, "-") {
+			break // the duration
+		}
+		rest = rest[1:]
+		switch a {
+		case "-k", "--kill-after", "-s", "--signal":
+			if len(rest) > 0 {
+				rest = rest[1:]
+			}
+		}
+	}
+	if len(rest) == 0 {
+		return true // `timeout` with no duration and no command
+	}
+	rest = rest[1:] // the duration
+	if len(rest) == 0 {
+		return true // `timeout 5` with no command does nothing
+	}
+	return readOnlySegment(strings.Join(rest, " "))
+}
+
+// readOnlyGofmt reports whether a `gofmt` invocation only prints.
+//
+//	gofmt file.go      print the formatted source
+//	gofmt -l ./...     list the files that need formatting
+//	gofmt -d file.go   print a diff
+//	gofmt -w file.go   REWRITE the file
+//
+// -w is the whole of the write surface, so it is a denylist of one — the
+// same shape as `sed -i`.
+func readOnlyGofmt(args []string) bool {
+	for _, a := range args {
+		if a == "-w" || a == "--write" {
+			return false
+		}
+	}
+	return true
+}
+
 // readOnlySegment judges one already-split segment.
 func readOnlySegment(seg string) bool {
 	fields := strings.Fields(cutAtRedirect(seg))
@@ -477,6 +533,10 @@ func readOnlySegment(seg string) bool {
 		return readOnlyGit(fields[1:])
 	case "gh":
 		return readOnlyGh(fields[1:])
+	case "timeout":
+		return readOnlyTimeout(fields[1:])
+	case "gofmt":
+		return readOnlyGofmt(fields[1:])
 	case "sed":
 		return !hasFlagContaining(fields[1:], 'i')
 	case "sort":
