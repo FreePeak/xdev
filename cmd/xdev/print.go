@@ -268,6 +268,12 @@ func wireAgentMode(ag *agent.Agent, cfg *config.Config, settings *config.Setting
 	// tool result goes to a file and the model keeps the head plus the
 	// path to the rest.
 	ag.Offload = agent.NewFileOffloader()
+	// The tool-usage learning rides here for the same reason: every
+	// build site (print/tui/rpc/acp) goes through this function, so one
+	// line gives every session the failure -> recipe loop. A failed tool
+	// call is recorded, and the agent's own recovery from it becomes a
+	// recipe that later sessions read.
+	ag.ToolLessons = toolUseLessons(settings, cwd)
 	// #83: snapcompact's bitmap only helps a model that can read images.
 	ag.Vision = func() bool { return modelVision(cfg, provider, model) }
 	// M5 #25 depth (#84): arm the fallback state so the reserve policy,
@@ -1219,6 +1225,13 @@ func promptBuilder(base string, cwd string, appendSystem string, mem memory.Stor
 				sys += "\n\n" + gb
 			}
 		}
+		// The tool-usage recipes ride every prompt: they are operating
+		// knowledge about THIS machine's tools, so they do not wait for a
+		// memory backend to be configured. The block names the tools it
+		// talks about, so it only carries the ones this session has.
+		if tb := toolUseBlock(reg); tb != "" {
+			sys += "\n\n" + tb
+		}
 		// The block names a tool, so it may only ride a prompt that HAS
 		// it: the vibe director's scope (internal/agent/vibe.go) is built
 		// from this same closure but carries vibe_spawn/vibe_send and no
@@ -1650,6 +1663,50 @@ func registerURISchemes() {
 // satisfy it, so those four seams never branch on the backend.
 type memoryBackend = memory.Store
 
+// toolUseDir is where the tool-usage recipes live: beside MEMORY.md and
+// learned.md, under the agent data dir. It does not depend on the memory
+// backend — a recipe is operating knowledge about this machine's tools,
+// and it has to be readable by the session that comes next whichever
+// backend is configured.
+func toolUseDir() string { return filepath.Join(config.DataDir(), "memory") }
+
+// toolUseTracker is the tool-usage learner: it records the failures and
+// the recipes over the shared store. The session's agent and its
+// subagents each get one — they learn into the same store and read the
+// same recipes, and their pending failures are their own.
+func toolUseTracker(cwd string) *memory.ToolUseTracker {
+	return memory.NewToolUseTracker(memory.SharedToolUse(toolUseDir()), func(s string) string {
+		return redactorFor(cwd).Apply(s)
+	})
+}
+
+// toolUseLessons is the learner a session gets, or nil when the setting
+// turns the learning off. One place decides, so the agent and its
+// subagents cannot drift apart on the switch.
+func toolUseLessons(settings *config.Settings, cwd string) agent.ToolLessonObserver {
+	if !settings.ToolLessonsOn() {
+		return nil
+	}
+	return toolUseTracker(cwd)
+}
+
+// toolUseBlock renders the remembered tool-usage recipes for the tools
+// this session actually has. Empty when there are none (the common case:
+// a session that has not tripped over anything pays nothing).
+func toolUseBlock(reg *tool.Registry) string {
+	store := memory.SharedToolUse(toolUseDir())
+	if store == nil {
+		return ""
+	}
+	return store.Block(func(name string) bool {
+		if reg == nil {
+			return false
+		}
+		_, ok := reg.Get(name)
+		return ok
+	})
+}
+
 // buildMemory returns the configured memory backend (nil = off). The Store
 // seam keeps every consumer — prompt injection, the memory:// read seam, the
 // learn tool, /memory — backend-agnostic. Two backends ship: the local
@@ -1956,6 +2013,10 @@ func newToolRegistry(cwd string, prov ai.Provider, provName, modelName string, s
 		Policy:       pol,
 		Thinking:     thinking,
 		Provider:     prov,
+		// The children inherit the tool-usage learner: a child does most
+		// of the session's tool work, and a mistake only a child made is
+		// a mistake the next session makes again.
+		ToolLessons: toolUseLessons(settings, cwd),
 		// Children share the parent's model: there is no separate task
 		// model, and a cross-provider child would need its own client.
 		Model: modelName,

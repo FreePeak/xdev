@@ -15,8 +15,19 @@ name: release
 # main was already the branch every merge lands on, and a second branch
 # meant every release needed a manual cherry-pick push to remember.)
 #
+# The version is computed by `scripts/release-version.sh` from the commits
+# that landed since the last release tag:
+#
+#   a feature commit (feat, feature, enhance, refactor, perf, ...)  -> Y+1, Z=0
+#   anything else, a bug fix included                               -> Z+1
+#
+# The MAJOR version (X) is the maintainer's: the script never moves it, and
+# a breaking change in the range is reported as a warning so the major
+# release can be cut by hand (push a vX.0.0 tag, or dispatch this workflow
+# with an explicit version).
+#
 # Triggers:
-#   push to main          auto-bump the patch version, build, publish
+#   push to main          auto-bump the version, build, publish
 #   push: tags: ["v*"]    tag already chosen (manual minor/major release)
 #   workflow_dispatch     optional "version" input, else like a main push
 on:
@@ -51,64 +62,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The rule that ships a release is the rule that was tested: the plan
+      # below reads the same script these cases pin.
+      - name: Prove the version rule
+        run: bash scripts/release-version_test.sh
+
       - name: Plan the release
         id: plan
+        env:
+          # The dispatch input comes through the environment, never spliced
+          # into the script: an input is a string, not code.
+          PINNED_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
 
-          # Is this run for a tag that already exists (a manual
-          # minor/major release), or for a commit that needs the next
-          # patch version computed?
-          case "${GITHUB_REF}" in
-            refs/tags/v*)
-              VERSION="${GITHUB_REF_NAME}"
-              TARGET="${GITHUB_SHA}" ;;
-            *)
-              # A dispatch can pin the version explicitly.
-              VERSION="${{ github.event.inputs.version }}"
-              if [ -n "$VERSION" ]; then
-                TARGET="${GITHUB_SHA}"
-              # Skip when HEAD itself carries a version tag (a re-run
-              # or the push that created the tag). `git describe` is
-              # NOT usable here: it matches the nearest *reachable*
-              # tag, so once the first release exists every later
-              # push would "see" it and skip forever.
-              elif CURRENT_TAG="$(git tag --points-at HEAD --list 'v*' | head -n 1)" \
-                   && [ -n "$CURRENT_TAG" ]; then
-                VERSION="$CURRENT_TAG"
-                TARGET="${GITHUB_SHA}"
-                echo "::notice::HEAD already released as ${CURRENT_TAG} — re-publishing it"
-              else
-                # Newest tag wins the ordering (numeric, so v0.10.0
-                # beats v0.9.0); the patch component bumps. A repo
-                # with no tags at all opens at v0.1.0, matching the
-                # 0.1.0-dev the binary reports before the first stamp.
-                LATEST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1 || true)"
-                if [ -z "$LATEST_TAG" ]; then
-                  VERSION="v0.1.0"
-                else
-                  CORE="${LATEST_TAG#v}"; CORE="${CORE%%-*}"
-                  MAJOR="$(echo "$CORE" | awk -F. '{print $1+0}')"
-                  MINOR="$(echo "$CORE" | awk -F. '{print $2+0}')"
-                  PATCH="$(echo "$CORE" | awk -F. '{print $3+0}')"
-                  PATCH=$((PATCH + 1))
-                  VERSION="v${MAJOR}.${MINOR}.${PATCH}"
-                fi
-                TARGET="${GITHUB_SHA}"
-              fi ;;
-          esac
-
-          # A `-suffix` tag is a pre-release, which is exactly what
-          # `xdev update --channel canary` resolves and stable skips.
-          PRERELEASE=false
-          case "$VERSION" in *-*) PRERELEASE=true ;; esac
-
-          {
-            echo "version=$VERSION"
-            echo "target=$TARGET"
-            echo "prerelease=$PRERELEASE"
-          } >> "$GITHUB_OUTPUT"
-          echo "planned: ${VERSION} (pre-release: ${PRERELEASE}) at ${TARGET}"
+          # A tag push names its own version (that is how a major release is
+          # cut by hand), a dispatch can pin one, and anything else is
+          # computed from the commits since the last release.
+          args=(--repo . --ref "$GITHUB_REF" --ref-name "$GITHUB_REF_NAME")
+          if [ -n "$PINNED_VERSION" ]; then
+            args+=(--tag "$PINNED_VERSION")
+          fi
+          plan="$(mktemp)"
+          bash scripts/release-version.sh "${args[@]}" > "$plan"
+          cat "$plan" >> "$GITHUB_OUTPUT"
+          version="$(sed -n 's/^version=//p' "$plan")"
+          bump="$(sed -n 's/^bump=//p' "$plan")"
+          echo "planned: ${version} (${bump}) at ${GITHUB_SHA}"
+          echo "target=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
   release-artifacts:
     needs: plan

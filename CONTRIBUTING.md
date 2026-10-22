@@ -46,7 +46,17 @@ go vet ./...
 go test -count=1 ./...
 go test -race -count=1 ./...
 CGO_ENABLED=0 go build -o /dev/null ./cmd/xdev
+bash scripts/release-version_test.sh   # the release version rule
 ```
+
+The last one is the rule the release pipeline ships with: a feature commit
+(`feat`, `feature`, `enhance`, `refactor`, `perf`, …) moves the minor version
+(Y) and resets the patch (Z), anything else — a bug fix included — moves the
+patch (Z). The major version (X) is the maintainer's: a breaking change in
+the unreleased range is reported as a warning, and the major release is cut by
+hand (push a `vX.0.0` tag, or dispatch the release workflow with an explicit
+version). Your commit subject is what the rule reads, so the type prefix is
+load-bearing: a subject without one is not read as a feature.
 
 Plus the six-platform cross matrix (the Goal-1 promise):
 

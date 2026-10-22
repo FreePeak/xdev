@@ -606,6 +606,12 @@ type Settings struct {
 	// (omp's autolearn.enabled). Default true: the shipped behavior stays
 	// unless a user opts out explicitly.
 	AutolearnEnabled *bool `yaml:"autolearnEnabled"`
+	// ToolLessons gates the tool-usage learning: a failed tool call is
+	// recorded, and the agent's own recovery from it becomes a durable
+	// recipe that later sessions read, so the same mistake is not paid
+	// for twice. Default true, like the memory backend: a recipe that is
+	// learned but never read is a write-only store.
+	ToolLessons *bool `yaml:"toolLessons"`
 	// LessonCap bounds how many recent lessons the prompt sees; 0 = the
 	// shipped default (omp's cap is a setting, xdev's was a constant).
 	LessonCap int `yaml:"lessonCap"`
@@ -1355,6 +1361,12 @@ func (s *Settings) AutolearnOn() bool {
 	return s == nil || s.AutolearnEnabled == nil || *s.AutolearnEnabled
 }
 
+// ToolLessonsOn reports whether the tool-usage learning may run
+// (nil-safe: unset means on, so an existing config keeps its behavior).
+func (s *Settings) ToolLessonsOn() bool {
+	return s == nil || s.ToolLessons == nil || *s.ToolLessons
+}
+
 // LessonCapOrDefault resolves the lesson cap (0 = memory.DefaultLessonCap).
 func (s *Settings) LessonCapOrDefault() int {
 	if s == nil || s.LessonCap <= 0 {
@@ -1937,6 +1949,9 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.AutolearnEnabled != nil {
 		s.AutolearnEnabled = layer.AutolearnEnabled
+	}
+	if layer.ToolLessons != nil {
+		s.ToolLessons = layer.ToolLessons
 	}
 	if layer.LessonCap > 0 {
 		s.LessonCap = layer.LessonCap
@@ -2656,6 +2671,7 @@ func List(s *Settings, globalPath string) []string {
 		"notifications.subagents " + fmt.Sprint(s.NotificationsSubagentsOn()),
 		"notifications.sound " + fmt.Sprint(s.NotificationsSoundOn()),
 		"autolearn.enabled " + fmt.Sprint(s.AutolearnOn()),
+		"toolLessons " + fmt.Sprint(s.ToolLessonsOn()),
 		"ttsr.scanThinking " + fmt.Sprint(s.TTSR.ScanThinkingOn()),
 		"ttsr.disabledRules " + strings.Join(ttsrDisabledList(s.TTSR), ","),
 		"lessonCap " + fmt.Sprint(s.LessonCapOrDefault()),
