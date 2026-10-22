@@ -196,6 +196,7 @@ type App struct {
 	// onTabReopen reopens the most recently closed session (opencode
 	// session_tab_reopen). nil degrades the chord to a notice.
 	onTabReopen func() error
+	loadSubagentItemsOp func() []SessionPickerItem
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
 	// BeginMessage (one EventStart) discards one a dead turn left open, so

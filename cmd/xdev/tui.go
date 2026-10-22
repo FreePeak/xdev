@@ -513,6 +513,17 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// iteration stalls, xdev now writes the goroutine stacks where `xdev gc`
 	// already collects them.
 	app.SetStallDumpDir(filepath.Join(config.DataDir(), "dumps"))
+	app.SetLoadSubagentItems(func() []tui.SessionPickerItem {
+		metas, err := session.List(filepath.Join(config.DataDir(), "subagents"))
+		if err != nil {
+			return nil
+		}
+		var out []tui.SessionPickerItem
+		for _, m := range metas {
+			out = append(out, tui.SessionPickerItem{ID: m.ID[:8], Title: m.Preview, Path: m.Path, Kind: "subagent"})
+		}
+		return out
+	})
 	// The last resort for a UI loop that never comes back: restore the
 	// terminal and end the session, because nothing inside the process can
 	// (the quit chord is applied by the loop, which is what is stuck). Ninety

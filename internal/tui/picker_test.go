@@ -68,7 +68,8 @@ func TestPickerScopeToggleKeepsItems(t *testing.T) {
 	if got[2].ID != "cccc3333" {
 		t.Fatalf("all-projects lost a row: %v", got)
 	}
-	pressKey(app, tcell.KeyTab)
+	pressKey(app, tcell.KeyTab) // subagents scope
+	pressKey(app, tcell.KeyTab) // back to current folder
 	if got := pickerRows(t, app); len(got) != 2 {
 		t.Fatalf("back to current folder = %d rows, want 2", len(got))
 	}
