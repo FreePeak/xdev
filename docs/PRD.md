@@ -4584,3 +4584,14 @@ The noise is now dropped from the key: `echo`, `printf`, `true`, `false`, `:`, `
 
 **Tests.** `internal/tool/canonical_test.go` — `TestCanonicalCommandGroupsTheSameWork` (a call with a heading and a pipe groups with the bare call; a call in a different directory does not).
 *Last updated: 2026-10-22 (fix/keep-going-gate-canonical-noise — the model's own labels and the shaping of its output are not the work: 9,967 within-run repeats, against 4,634 for the exact key)*
+
+## A setting that is parsed is not a setting that is wired (2026-10-22)
+
+`runBudget` landed in the previous batch as a plain `int` on `Settings`, and it was **inert**: the file parsed, `xdev config get runBudget` printed the value, `xdev config list` showed the key — and the agent never saw it. A live run with `runBudget: 180` in the config took **4 min 11 s** against a 180-second budget, and the TUI never fired the wrap-up at all.
+
+The cause is the merge. `Settings.merge` is hand-written per field — every key a layer contributes has a line for it — and the budget had no line, so the value was decoded and then dropped on the floor. It is the same shape as the repo's own #82: *"the two compaction triggers were parsed, validated and listed in `config list`, but no build site copied them into CompactionConfig, so neither the idle boundary nor the async summarize could ever fire."* A setting is either wired or merely parsed, and the wiring is a per-field line that has to be written.
+
+**THE VALUE IS A POINTER, SO A CLOSER LAYER CAN RESET IT.** `runBudget *int`: unset means the shipped default applies, and a layer that SETS the key contributes it even when it sets it to 0. With a plain `int`, 0 is "unset" and a closer layer could never take a global budget back to the default.
+
+**Tests.** `internal/config/runbudget_test.go` — `TestRunBudgetSetting` (the key walks a real struct path; unset means the agent's default; a value is a wall clock in seconds; a negative value is unbounded), `TestRunBudgetReachesTheMergedSettings` (the merge carries it — RED without the merge line) and `TestRunBudgetCanBeResetByACloserLayer`.
+*Last updated: 2026-10-22 (fix/run-budget-merge — the run budget is wired: the merge carries it, the value is a pointer so a closer layer can reset it, and the live run that took 4 min 11 s against a 180-second budget is the one that found it)*
