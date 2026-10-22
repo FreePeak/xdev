@@ -1420,6 +1420,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				rows := append(sessionHub.Roster(), sessionHub.Foreground()...)
 				out := make([]tui.HubAgent, len(rows))
 				for i, r := range rows {
+					// hub.AgentRecords() carries Tokens/Level/Requests/Tools/Elapsed/ParentID/Kind/Outcome — see internal/agent/hub.go:170
 					out[i] = tui.HubAgent{
 						ID: r.ID, Name: r.Name, Status: r.Status, Model: r.Model,
 						Activity: r.Activity, Cost: hubCostLabel(r),

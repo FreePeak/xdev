@@ -4623,6 +4623,8 @@ The cause is the merge. `Settings.merge` is hand-written per field — every key
 
 *Last updated: 2026-10-22 (feat/tui-parity-phase1 rebased onto main: the TUI speaks omp's INK and omp's ALPHABET — the launch dark theme is omp's groknight token for token, the accent is omp's iris, and the spinner is omp's circle-braille; merged with main's read-commands section.)
 
+
+*Last updated: 2026-10-22 (feat/agent-hub-ui — the agent hub is omp's agent hub: roster, metrics, and the detail pane)*
 ## The budget stops exploring, not acting (2026-10-22)
 
 The run budget's wrap-up said: *"answer now, in prose, with what you have found so far, and do not call any more tools."* That is right for a run that owes NOTHING — a question ends at the report — and wrong for a run that still owes a change: the clock turned a slow run into a run that **reported and changed nothing**.

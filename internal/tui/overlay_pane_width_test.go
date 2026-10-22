@@ -252,7 +252,7 @@ func TestHubRosterStopsAtTheSidebar(t *testing.T) {
 	app.draw()
 
 	painted := screenText(scr)
-	if !strings.Contains(painted, "AGENT HUB") || !strings.Contains(painted, "agent-1") {
+	if !strings.Contains(painted, "Agent Hub") || !strings.Contains(painted, "agent-1") {
 		t.Fatalf("the roster painted nothing:\n%s", painted)
 	}
 	for y := range app.height {
