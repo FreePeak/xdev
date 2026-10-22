@@ -14,11 +14,17 @@ package tui
 //     that spawned it, so it is not a job, and the roster is a modal overlay
 //     the user opens; nothing is on screen while it works.
 //
-// So this panel is the flat, always-on view: every running child at every
-// depth, in one list, with the child's own transcript one click away. It is
-// chrome over the transcript's tail, the same discipline the mid-turn queue
-// uses (queue.go): the rows paint above the composer and the viewport
-// arithmetic does not move.
+// So this panel is the always-on view: every running child at every depth,
+// as a TREE — a parent, then the children it spawned under it, joined by
+// Crush's connectors ("├─" / "╰─" / "│") — with the child's own transcript
+// one click away. It is chrome over the transcript's tail, the same
+// discipline the mid-turn queue uses (queue.go): the rows paint above the
+// composer and the viewport arithmetic does not move.
+//
+// The tree is what a chain needs. The transcript's rows are per-CALL, so a
+// grandchild has no row of its own to hang under; the panel is the only
+// surface that can show the whole chain — and a flat list of child names
+// says nothing about which child spawned which.
 //
 // Deliberate: background hub jobs are NOT listed. /hub (Alt+A) and the dock's
 // agents section already cover them, and one panel mixing a blocking child
@@ -26,6 +32,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,16 +42,20 @@ import (
 	"github.com/FreePeak/xdev/internal/theme"
 )
 
-// agentPanelRowMax caps the painted rows. Three running children plus a
+// agentPanelRowMax is the paint budget: three running children plus a
 // "+N more" line is the same budget the transcript's child rows use
 // (subRowsMax): a strip that grows with the fan-out eats the transcript it is
 // supposed to annotate, and a batch of eight is the normal case.
+//
+// It is a budget on the FAN-OUT, not on the tree: a kept row drags its
+// ancestors in (see agentTreeCut), so a chain can paint a row or two more.
+// The chain's depth is bounded (taskMaxDepth), so the strip stays bounded.
 const agentPanelRowMax = 3
 
-// agentPanelRow is one running child, flattened across every depth. It is
-// keyed by the child's LABEL, which a batch and a chain both make unique
-// (childLabel), and it carries no call id on purpose: the panel's job is to
-// show the tree flat, and the transcript rows are where call attribution lives.
+// agentPanelRow is one running child, one level of the tree. It is keyed by
+// the child's LABEL, which a batch and a chain both make unique (childLabel),
+// and it carries no call id on purpose: the panel's job is to show the tree,
+// and the transcript rows are where call attribution lives.
 type agentPanelRow struct {
 	Label string
 	Agent string
@@ -52,6 +63,11 @@ type agentPanelRow struct {
 	Tool  string
 	Args  string
 	Start time.Time
+	// Parent names the child that spawned THIS one ("" = the top-level
+	// session spawned it). It is the tree's edge: a chain is the only way
+	// a child has a parent, and without the edge the strip can only draw a
+	// flat list of names.
+	Parent string
 	// TranscriptID is the id this child's transcript is readable under
 	// (Hub.TrackForeground's "fg-N"). Empty when nothing tracked it, which is
 	// exactly when the row must not offer to open one.
@@ -65,6 +81,23 @@ type agentPanelRow struct {
 	// seq is the arrival order, so two children that started in the same
 	// millisecond still have a stable order to sort by.
 	seq int
+}
+
+// agentTreeRow is one row of the strip's tree: the row's own data plus the
+// connector the tree draws to its left.
+//
+// The shape is Crush's: a parent, then its children under it, joined by
+// "├─" / "╰─" and the "│" bar that continues a branch down the rows below.
+// The prefix GROWS one level per depth, so a grandchild sits under its
+// parent and the eye can tell which is which — the one thing a flat list of
+// child names cannot say.
+type agentTreeRow struct {
+	agentPanelRow
+	// prefix is the tree's own column: the ancestor bars, then this row's
+	// branch.
+	prefix string
+	// depth is how many levels down the row sits (0 = a root).
+	depth int
 }
 
 // agentPanelHit is one painted row's click target: the row body opens the
@@ -116,7 +149,7 @@ func (p *agentPanel) setEnabled(on bool) {
 }
 
 // start records a child that just began.
-func (p *agentPanel) start(label, agent, model, transcriptID string) {
+func (p *agentPanel) start(label, agent, model, parent, transcriptID string) {
 	if p == nil || label == "" {
 		return
 	}
@@ -127,6 +160,9 @@ func (p *agentPanel) start(label, agent, model, transcriptID string) {
 		// (a batch item adopted by an update before its start event, or a
 		// revive). Refresh it rather than appending a duplicate row.
 		r.Agent, r.Model = agent, model
+		if parent != "" {
+			r.Parent = parent
+		}
 		if transcriptID != "" {
 			r.TranscriptID = transcriptID
 		}
@@ -134,7 +170,7 @@ func (p *agentPanel) start(label, agent, model, transcriptID string) {
 	}
 	p.next++
 	p.rows = append(p.rows, agentPanelRow{
-		Label: label, Agent: agent, Model: model,
+		Label: label, Agent: agent, Model: model, Parent: parent,
 		Start: time.Now(), TranscriptID: transcriptID, seq: p.next,
 	})
 }
@@ -200,21 +236,179 @@ func (p *agentPanel) findLocked(label string) *agentPanelRow {
 	return nil
 }
 
-// snapshot copies the rows, newest first, for the painter. Newest first
-// because the panel is a strip at the bottom of the screen: the child that
-// just started is the one the eye is looking for, and the one that has been
-// running for two minutes is already known.
-func (p *agentPanel) snapshot() []agentPanelRow {
+// treeLocked returns the strip's rows in PAINTED order: a parent, then its
+// children, so a chain reads as a chain instead of a flat list of names.
+//
+// Roots are ordered by the NEWEST row under them, not by their own start:
+// a chain's newest link is the one the eye wants, and ordering the roots by
+// their own start would push that link below the cap. A flat batch is
+// unaffected — every root's newest row is its own.
+//
+// A child whose parent the strip never saw (a background job, a parent whose
+// start event was dropped) draws as a root: an orphan is still a child the
+// user is watching, and hiding it would lose the work.
+//
+// Caller holds p.mu.
+func (p *agentPanel) treeLocked() []agentTreeRow {
+	if len(p.rows) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(p.rows))
+	for i := range p.rows {
+		known[p.rows[i].Label] = true
+	}
+	// kids maps a parent's label to its children, in start order.
+	kids := make(map[string][]int, len(p.rows))
+	var roots []int
+	for i := range p.rows {
+		parent := p.rows[i].Parent
+		if parent == "" || parent == p.rows[i].Label || !known[parent] {
+			roots = append(roots, i)
+			continue
+		}
+		kids[parent] = append(kids[parent], i)
+	}
+	if len(roots) == 0 {
+		// A cycle — impossible from a real spawn, but a hang is the worst
+		// failure a strip can have. Every row becomes a root, so the strip
+		// still shows something.
+		for i := range p.rows {
+			roots = append(roots, i)
+		}
+	}
+	// newest[i] is the latest start under row i, so a root can be ordered
+	// by the newest thing it is running. -1 marks a branch in progress, so
+	// a cycle cannot recurse forever.
+	newest := make([]int, len(p.rows))
+	const inProgress = -1
+	var newestUnder func(idx int) int
+	newestUnder = func(idx int) int {
+		if newest[idx] != 0 {
+			if newest[idx] == inProgress {
+				return 0 // a cycle: this branch contributes nothing
+			}
+			return newest[idx]
+		}
+		newest[idx] = inProgress
+		best := p.rows[idx].seq
+		for _, ci := range kids[p.rows[idx].Label] {
+			if v := newestUnder(ci); v > best {
+				best = v
+			}
+		}
+		newest[idx] = best
+		return best
+	}
+	for _, r := range roots {
+		newestUnder(r)
+	}
+	sort.SliceStable(roots, func(i, j int) bool {
+		return newest[roots[i]] > newest[roots[j]]
+	})
+	out := make([]agentTreeRow, 0, len(p.rows))
+	// seen breaks a cycle: a row already painted is not painted again, so a
+	// malformed parent link cannot hang the paint.
+	seen := make(map[int]bool, len(p.rows))
+	var walk func(idx int, prefix string, depth int, last bool)
+	walk = func(idx int, prefix string, depth int, last bool) {
+		if seen[idx] {
+			return
+		}
+		seen[idx] = true
+		r := p.rows[idx]
+		branch := "├─"
+		if last {
+			branch = "╰─"
+		}
+		out = append(out, agentTreeRow{agentPanelRow: r, prefix: prefix + branch, depth: depth})
+		// The bar under this row continues while this row has a sibling
+		// below it, and stops where this row closes its branch.
+		bar := "│ "
+		if last {
+			bar = "  "
+		}
+		ch := kids[r.Label]
+		for c, ci := range ch {
+			walk(ci, prefix+bar, depth+1, c == len(ch)-1)
+		}
+	}
+	for k, r := range roots {
+		walk(r, "", 0, k == len(roots)-1)
+	}
+	return out
+}
+
+// visibleTreeLocked is the tree as the strip PAINTS it: the rows the paint
+// budget allows, in painted order. The keyboard walks this list, not the
+// whole tree, so the focus is always on a row the user can see.
+//
+// Caller holds p.mu.
+func (p *agentPanel) visibleTreeLocked() []agentTreeRow {
+	kept, _ := agentTreeCut(p.treeLocked(), agentPanelRowMax)
+	return kept
+}
+
+// agentTreeCut selects the rows the strip paints.
+//
+// The NEWEST rows win: a strip that shows old work while a new child runs
+// answers the wrong question. A kept row drags its ANCESTORS in with it —
+// a child without its parent on screen is a branch with nothing above it —
+// so a chain can paint a row or two more than the budget. That is the
+// price of showing a chain whole, and the chain's depth is bounded
+// (taskMaxDepth).
+func agentTreeCut(tree []agentTreeRow, max int) (kept []agentTreeRow, hidden int) {
+	if len(tree) == 0 {
+		return nil, 0
+	}
+	parent := make(map[string]string, len(tree))
+	for _, r := range tree {
+		if r.depth > 0 {
+			parent[r.Label] = r.Parent
+		}
+	}
+	order := make([]agentTreeRow, len(tree))
+	copy(order, tree)
+	sort.SliceStable(order, func(i, j int) bool { return order[i].seq > order[j].seq })
+	keep := make(map[string]bool, max)
+	picked := 0
+	for _, r := range order {
+		if picked >= max {
+			break
+		}
+		if keep[r.Label] {
+			continue
+		}
+		picked++
+		keep[r.Label] = true
+		if r.depth == 0 {
+			continue // a root has no ancestor to pull in
+		}
+		for p := r.Parent; p != ""; {
+			if keep[p] {
+				break
+			}
+			keep[p] = true
+			p = parent[p]
+		}
+	}
+	kept = make([]agentTreeRow, 0, len(keep))
+	for _, r := range tree {
+		if keep[r.Label] {
+			kept = append(kept, r)
+		}
+	}
+	return kept, len(tree) - len(kept)
+}
+
+// snapshot copies the tree, for the painter and the keyboard. It is the
+// painted order (see treeLocked), so both walk one list.
+func (p *agentPanel) snapshot() []agentTreeRow {
 	if p == nil {
 		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := append([]agentPanelRow(nil), p.rows...)
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
+	return p.treeLocked()
 }
 
 // hasRows reports whether anything is running, so the painter and the layout
@@ -248,20 +442,33 @@ func (p *agentPanel) focused() string {
 	return p.focus
 }
 
-// focusNewest moves the keyboard onto the newest row: the strip paints newest
-// first, so that is index 0. It is the chord's activation — the same row a
-// person watching would open — and idempotent when the strip is empty.
+// focusNewest moves the keyboard onto the newest row: the child that
+// started most recently among the rows the strip PAINTS. The tree paints a
+// parent BEFORE its children, so "newest" is not "the first row painted" —
+// it is the row with the latest start. It is the chord's activation — the
+// same row a person watching would open — and idempotent when the strip is
+// empty.
+//
+// It picks a VISIBLE row on purpose: a focus on a row the paint budget cut
+// would open a transcript the user cannot see on screen.
 func (p *agentPanel) focusNewest() {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.rows) == 0 {
+	rows := p.visibleTreeLocked()
+	if len(rows) == 0 {
 		p.focus = ""
 		return
 	}
-	p.focus = p.rows[len(p.rows)-1].Label
+	best := rows[0]
+	for _, r := range rows[1:] {
+		if r.seq > best.seq {
+			best = r
+		}
+	}
+	p.focus = best.Label
 }
 
 // blur leaves the strip: the next arrow falls through to the editor, which
@@ -275,51 +482,51 @@ func (p *agentPanel) blur() {
 	p.mu.Unlock()
 }
 
-// focusMove steps the focus by delta rows (-1 up, +1 down), wrapping at the
-// ends of the strip. The strip paints newest first, so "up" (toward the
-// newest) is toward index 0 and "down" is toward the oldest. A delta that
-// lands off the end wraps to the other end, the way a list does.
+// focusMove steps the focus by delta rows (-1 up, +1 down), clamping at the
+// ends of the strip. The delta is a SCREEN delta: down is one row lower,
+// which is one row later in the painted tree. The strip is a short band at
+// the bottom of the screen, and an arrow that runs off the end stays on the
+// last row instead of teleporting the selection to the other end, which
+// would read as a bug.
+//
+// It walks the VISIBLE rows, so the focus never lands on a row the paint
+// budget cut.
 func (p *agentPanel) focusMove(delta int) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.rows) == 0 {
+	rows := p.visibleTreeLocked()
+	if len(rows) == 0 {
 		p.focus = ""
 		return
 	}
-	if p.focus == "" {
-		p.focus = p.rows[len(p.rows)-1].Label
-	}
-	// rows is stored oldest-first; the strip paints newest-first, so the
-	// painted order is the reverse of the stored order.
 	idx := -1
-	for i := len(p.rows) - 1; i >= 0; i-- {
-		if p.rows[i].Label == p.focus {
+	for i, r := range rows {
+		if r.Label == p.focus {
 			idx = i
 			break
 		}
 	}
 	if idx < 0 {
-		p.focus = p.rows[len(p.rows)-1].Label
-		return
+		// No focus yet (or a row that is gone): start from the newest row,
+		// the same one the chord's activation picks.
+		best := 0
+		for i, r := range rows {
+			if r.seq > rows[best].seq {
+				best = i
+			}
+		}
+		idx = best
 	}
-	n := len(p.rows)
-	// Painted position: 0 = newest = stored index n-1. Moving "up" (toward
-	// the newest, delta -1) decreases the painted position, which increases
-	// the stored index. Both ends clamp rather than wrap: the strip is a
-	// short band at the bottom of the screen, and an arrow that runs off
-	// the end stays on the last row instead of teleporting the selection to
-	// the other end, which would read as a bug.
-	painted := (n - 1) - idx
-	painted += delta
-	if painted < 0 {
-		painted = 0
-	} else if painted > n-1 {
-		painted = n - 1
+	idx += delta
+	if idx < 0 {
+		idx = 0
+	} else if idx > len(rows)-1 {
+		idx = len(rows) - 1
 	}
-	p.focus = p.rows[n-1-painted].Label
+	p.focus = rows[idx].Label
 }
 
 // --- wiring ---------------------------------------------------------------
@@ -342,11 +549,14 @@ type AgentPanelOps struct {
 // taskChildSink calls from the agent's OnEvent — the callback runs on the
 // CHILD's goroutine, so this must stay cheap: one short lock on the panel's
 // own mutex (never a.mu, which is held across a frame) and a poke.
-func (a *App) AgentPanelStart(label, agent, model, transcriptID string) {
+//
+// parent names the child that spawned this one ("" = the top-level session
+// did): it is the tree's edge, and the strip draws the chain along it.
+func (a *App) AgentPanelStart(label, agent, model, parent, transcriptID string) {
 	if a == nil || a.agents == nil {
 		return
 	}
-	a.agents.start(label, agent, model, transcriptID)
+	a.agents.start(label, agent, model, parent, transcriptID)
 	a.poke()
 }
 
@@ -412,9 +622,10 @@ func (a *App) agentPanelRows() int {
 	if a.agents == nil || !a.agents.enabled() || !a.agents.hasRows() {
 		return 0
 	}
-	n := len(a.agents.snapshot())
-	if n > agentPanelRowMax {
-		n = agentPanelRowMax + 1 // the rows plus the "+N more" line
+	kept, hidden := agentTreeCut(a.agents.snapshot(), agentPanelRowMax)
+	n := len(kept)
+	if hidden > 0 {
+		n++ // the "+N more" line
 	}
 	return n
 }
@@ -430,12 +641,21 @@ func (a *App) agentPanelTop(queueTop int) int {
 	return y
 }
 
-// drawAgentPanel paints the running-children strip and publishes the hit table
-// the mouse reads. Each row is a spinner, the child's label, its agent type,
-// what it is doing right now, and its own elapsed clock; the model rides at
-// the right end, dim, only when the child runs on a different model than the
-// session — a column of identical model names is noise, and a child that was
-// sent to another model is exactly the thing worth seeing.
+// drawAgentPanel paints the running-children TREE and publishes the hit
+// table the mouse reads.
+//
+// The shape is Crush's: a parent, then the children it spawned under it,
+// joined by "├─" / "╰─" and the "│" bar that carries a branch down the rows
+// under it. A flat list of child names cannot say which child spawned which,
+// and a chain is exactly the case that reads wrong.
+//
+// A row is: the tree's column, a status glyph (the shared spinner while the
+// child works, a static tick once it settled), the openable tick for a child
+// a host tracked, the child's label and agent type, what it is doing right
+// now, its own elapsed clock, and — at the right end — the model, dim, only
+// when the child runs on a different model than the session. A column of
+// identical model names is noise, and a child that was sent to another model
+// is exactly the thing worth seeing.
 //
 // Caller holds a.mu (draw does) — this must not re-lock a.mu.
 func (a *App) drawAgentPanel(queueTop int) {
@@ -443,8 +663,8 @@ func (a *App) drawAgentPanel(queueTop int) {
 	if a.agents == nil || !a.agents.enabled() {
 		return
 	}
-	rows := a.agents.snapshot()
-	if len(rows) == 0 {
+	tree := a.agents.snapshot()
+	if len(tree) == 0 {
 		return
 	}
 	s := a.scr
@@ -455,42 +675,76 @@ func (a *App) drawAgentPanel(queueTop int) {
 	}
 	dim := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray))).Bold(true)
+	focusSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))).Bold(true)
 	runSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning)))
 	textSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
-	hidden := 0
-	if len(rows) > agentPanelRowMax {
-		hidden = len(rows) - agentPanelRowMax
-		rows = rows[:agentPanelRowMax]
-	}
+	focus := a.agents.focused()
 	now := time.Now()
+	rows, hidden := agentTreeCut(tree, agentPanelRowMax)
 	for i, r := range rows {
 		y := y0 + i
 		if y >= queueTop {
 			break // the strip never paints over the queue or the composer
 		}
-		// The left gutter: the shared spinner, so this row moves in step with
-		// the composer divider and the call row (spinFrame's whole point).
-		drawText(s, 1, y, a.spinFrame(), runSt)
-		x := 3
-		name := r.Label
-		if r.Agent != "" && r.Agent != r.Label {
-			name += " · " + r.Agent
+		x := 1
+		// The tree's own column: the ancestor bars, then this row's branch.
+		drawText(s, x, y, r.prefix, dim)
+		x += width(r.prefix) + 1
+		// The status glyph: the shared spinner while the child works, so
+		// this row moves in step with the composer divider and the call
+		// row (spinFrame's whole point). A settled child wears a static
+		// tick instead — a finished row that kept spinning would say
+		// "still working" about work that is done.
+		mark, markSt := "✓", dim
+		if !r.Done {
+			mark, markSt = a.spinFrame(), runSt
 		}
-		drawText(s, x, y, name, nameSt)
-		x += width(name) + 1
-		// The model rides at the right end, but only when it is news.
+		drawText(s, x, y, mark, markSt)
+		x += 2
+		// A row the host tracked has a transcript to open, and says so
+		// NEXT TO ITS LABEL — the same glyph the transcript's own child
+		// rows wear, so "openable" reads the same in both places. It sat
+		// at the far right before, where it read as a stray glyph next to
+		// the model column.
+		if r.TranscriptID != "" {
+			drawText(s, x, y, "⎿", dim)
+			x += 2
+		}
+		label := r.Label
+		if r.Agent != "" && r.Agent != r.Label {
+			label += " · " + r.Agent
+		}
+		// The right end first, so the text knows how much room is left:
+		// the model (only when it is news), then the child's own clock.
 		right := ""
 		if r.Model != "" && r.Model != a.st.Model {
 			right = r.Model
 		}
 		elapsed := humanDur(now.Sub(r.Start))
-		rightW := 0
-		if right != "" {
-			rightW = width(right) + 1
+		if r.Done && !r.End.IsZero() {
+			// A settled child's clock is its OWN time, not the time since
+			// it started: a row that kept counting would say the child is
+			// still running.
+			elapsed = humanDur(r.End.Sub(r.Start))
 		}
-		budget := w - 2 - rightW - width(elapsed) - 2
-		if budget < 8 {
-			budget = 8
+		rightX := w - 1
+		if right != "" {
+			rightX = w - 1 - width(right)
+			drawText(s, rightX, y, right, dim)
+			rightX--
+		}
+		clockX := rightX - width(elapsed)
+		drawText(s, clockX, y, elapsed, dim)
+		// What is left between the tree column and the clock. The label
+		// comes first — it is the child's name, and a row that says
+		// "read · internal/tui/app.go" without the name says nothing
+		// about WHO is working.
+		avail := clockX - 1 - x
+		if avail < 12 {
+			avail = 12
+		}
+		if width(label) > avail-8 {
+			label = truncateCells(label, max(1, avail-8), "…")
 		}
 		phrase := r.Tool
 		if d := toolDetail(r.Args); d != "" {
@@ -504,29 +758,22 @@ func (a *App) drawAgentPanel(queueTop int) {
 			phrase = "starting"
 		}
 		phrase = collapseLines(utf8Only(phrase))
-		if x-1 < budget {
-			phrase = truncateCells(phrase, budget-(x-1), "…")
-			drawText(s, x, y, phrase, textSt)
+		phrase = truncateCells(phrase, max(1, avail-width(label)-3), "…")
+		labelSt := nameSt
+		if r.Label == focus {
+			labelSt = focusSt
 		}
-		if right != "" {
-			drawText(s, w-1-width(right), y, right, dim)
-		}
+		drawText(s, x, y, label, labelSt)
+		x += width(label)
+		// The separator between the name and what the child is doing. It
+		// was missing before, so "reviewer grep · TODO" read as one word.
+		drawText(s, x+1, y, "·", dim)
+		drawText(s, x+3, y, phrase, textSt)
+		x += 3 + width(phrase)
 		// Blank the row's tail so a longer phrase from an earlier frame cannot
 		// show through this one.
-		for bx := x + width(phrase); bx < w-1-rightW; bx++ {
+		for bx := x; bx < clockX-1; bx++ {
 			s.SetContent(bx, y, ' ', nil, textSt)
-		}
-		// A row the host tracked has a transcript to open. Paint the ⎿
-		// tick at the right edge of this row's text area — the same glyph
-		// the transcript's own child rows wear, so "openable" reads the
-		// same in both places. It sits on the row line (the clock is a
-		// separate bottom line), so it is visible before the mouse moves
-		// and cannot collide with the model column.
-		if r.TranscriptID != "" {
-			tickX := w - 2 - rightW
-			if tickX > x+width(phrase) {
-				drawText(s, tickX, y, "⎿", dim)
-			}
 		}
 		// Only a child a host tracked has a transcript to open; a row with
 		// nothing to show is never clickable.
@@ -540,7 +787,9 @@ func (a *App) drawAgentPanel(queueTop int) {
 	if hidden > 0 {
 		y := y0 + len(rows)
 		if y < queueTop {
-			drawText(s, 3, y, fmt.Sprintf("+%d more running", hidden), dim)
+			// Not "more running": the strip keeps settled rows, so the
+			// hidden ones are not all working.
+			drawText(s, 1, y, fmt.Sprintf("+%d more", hidden), dim)
 		}
 	}
 }
@@ -632,6 +881,22 @@ func (a *App) AgentPanelState() (on bool, running int) {
 		}
 	}
 	return a.agents.enabled(), running
+}
+
+// AgentPanelParent reports the parent the strip's tree gives a child: the
+// label of the child that spawned it, or "" when the top-level session did.
+// It is how a host reads back the tree's edge — the link the child's start
+// event carried.
+func (a *App) AgentPanelParent(label string) string {
+	if a.agents == nil {
+		return ""
+	}
+	for _, r := range a.agents.snapshot() {
+		if r.Label == label {
+			return r.Parent
+		}
+	}
+	return ""
 }
 
 // agentPanelSummary is the one-line state a notice prints.
