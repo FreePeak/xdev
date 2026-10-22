@@ -519,6 +519,11 @@ type Agent struct {
 	// Offload is the artifact-offload seam for oversized tool results
 	// (#283 RCA §4, backend owned by #115); nil keeps results verbatim.
 	Offload ArtifactOffloader
+	// ToolLessons learns from the run's own tool failures: a failed call
+	// is recorded, and the agent's recovery (a later call that works)
+	// becomes a durable recipe that later sessions read. nil disables the
+	// learning and keeps the run's behavior exactly as it was.
+	ToolLessons ToolLessonObserver
 	// Intercept routes tool calls/results through the extension bus
 	// (nil disables interception).
 	Intercept Interceptor
@@ -2563,6 +2568,11 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 		// unknownname.go.
 		res := tool.Result{Text: unknownToolText(a.Tools, call.Name), IsError: true}
 		a.Hooks.OnToolEnd(call, res, time.Since(started))
+		// A garbled tool name is the agent getting the call wrong, so it
+		// is the one failure the tool-usage learner gets to see: the
+		// message names the closest registered tool, and a later call to
+		// that tool is the recovery the recipe is built from.
+		a.observeTool(call, res)
 		return toolResultMsg(call, res, time.Since(started))
 	}
 	var args json.RawMessage
@@ -2711,6 +2721,11 @@ func (a *Agent) runOneTool(ctx context.Context, call ai.ToolCallBlock) ai.Messag
 			}
 		}
 	}
+	// The tool-usage learning sees the call's own outcome: the extension
+	// interceptors have finalized the text, and the rulebook note below is
+	// guidance for the model rather than the tool's error, so it must not
+	// end up in the symptom that gets remembered.
+	a.observeTool(call, res)
 	if note := a.rulebookNote(call, res); note != "" {
 		// A glob-scoped rule (globs: *.go) is guidance tied to the file the
 		// model just changed: it rides the tool result, where the model will
