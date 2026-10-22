@@ -643,10 +643,10 @@ func (a *App) SetVersion(v string) {
 	a.DockBump()
 }
 
-// BeginActiveCommand notes that a tool call started, so the status row's left
-// side ("● name") shows the work. Nested calls are counted, not replaced: two
-// concurrent calls to the same tool must not clear the indicator when the
-// first one finishes.
+// BeginActiveCommand notes that a tool call started, so the status row's
+// "command" segment ("● name") shows the work. Nested calls are counted, not
+// replaced: two concurrent calls to the same tool must not clear the
+// indicator when the first one finishes.
 func (a *App) BeginActiveCommand(name string) {
 	a.cmdMu.Lock()
 	a.cmd, a.cmdActive = name, true
@@ -670,10 +670,9 @@ func (a *App) EndActiveCommand() {
 	a.poke()
 }
 
-// hudCommand renders the left side of the status row while a
-// tool is running: "● name". Empty when nothing is running so
-// callers skip it; safe for narrow terminals because the
-// segment block absorbs the squeeze.
+// hudCommand renders the running tool call's name for the status row:
+// "● name". Empty when nothing is running so callers skip it; safe for
+// narrow terminals because the segment block absorbs the squeeze.
 func (a *App) hudCommand() string {
 	a.cmdMu.Lock()
 	name := a.cmd
@@ -682,7 +681,7 @@ func (a *App) hudCommand() string {
 	if !active || name == "" {
 		return ""
 	}
-	return "● " + name
+	return a.th.StatusGlyph(theme.StatusGlyphEnabled) + " " + name
 }
 
 // SetStatusModel updates the status-line model name (wired by cmd on
@@ -1342,6 +1341,17 @@ func (a *App) spinFrame() string {
 	return frames[a.st.spinnerIdx%len(frames)]
 }
 
+// statusSpinFrame is the STATUS indicator's current glyph: the same shared
+// index, but omp's circle-braille set instead of the activity set. A status
+// says "this is still running" (a tool call in flight, an agent working) and
+// an activity says "this is still moving" (the composer's run dot, the
+// reasoning header) — two different sets in omp, two different sets here.
+// Caller holds a.mu.
+func (a *App) statusSpinFrame() string {
+	frames := a.th.StatusSpinnerFrames()
+	return frames[a.st.spinnerIdx%len(frames)]
+}
+
 // subLines renders a `task` call's children as continuation rows under the
 // call row. A child still working takes the parent's spinning frame in place
 // of the `⎿` tick; a settled one keeps that tick, dim: the row is narration
@@ -1377,7 +1387,7 @@ func (a *App) subLines(b *Block, w, base int, hits *[]subHit) []line {
 	emit := func(text string, running bool) line {
 		mark, st := "⎿", dim
 		if running {
-			mark, st = a.spinFrame(), runSt
+			mark, st = a.statusSpinFrame(), runSt
 		}
 		ln := textline("  ", dim)
 		ln.runs = append(ln.runs, cell{text: mark, style: st}, cell{text: " ", style: dim}, cell{text: text, style: nameSt})
@@ -4219,14 +4229,25 @@ func (a *App) blockLines(i int, b *Block, w int) []line {
 		// megabytes of arguments is the model's bug, and it should be
 		// readable rather than quietly shortened.
 		name, detail := toolSummary(b)
-		bullet, fg := "◈", theme.AccentTool
+		// The status glyph is omp's set (theme/symbols.go): a reader scans
+		// the left column for SHAPE, so ✔/✘/⏳/●/○ are the information and
+		// the ink only says which state it is. The idle diamond (◈) and the
+		// old ✗/● are gone: ✗ is not a glyph omp draws, and a filled circle
+		// next to a name reads as "enabled" rather than "done".
+		var bullet, fg string
 		switch b.Status {
 		case "running":
-			bullet, fg = a.spinFrame(), theme.AccentRunning
+			bullet, fg = a.statusSpinFrame(), theme.AccentRunning
 		case "error":
-			bullet, fg = "✗", theme.AccentError
+			bullet, fg = a.th.StatusGlyph(theme.StatusGlyphError), theme.AccentError
 		case "ok":
-			bullet, fg = "●", theme.AccentSuccess
+			bullet, fg = a.th.StatusGlyph(theme.StatusGlyphSuccess), theme.AccentSuccess
+		case "":
+			// A call row with no status is a call that has not started: the
+			// hourglass says "queued" in one cell.
+			bullet, fg = a.th.StatusGlyph(theme.StatusGlyphPending), theme.GrayDim
+		default:
+			bullet, fg = a.th.StatusGlyph(theme.StatusGlyphShadowed), theme.AccentTool
 		}
 		bulletSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(fg)))
 		nameSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
@@ -5860,15 +5881,10 @@ func (a *App) drawJumpChip(s tcell.Screen, edge, top, vp, down int) {
 func (a *App) drawStatusRow(y int) {
 	parts := a.hudParts()
 	w := a.rightEdge()
-	// The running tool call leads the row on the left ("● <name>", with the
-	// room it needs reserved), then the location; the configured segments
-	// stay right-aligned.
-	cmdLabel := a.hudCommand()
-	if cmdLabel != "" {
-		end := a.drawStatusLocation(y, w-2-width(cmdLabel)-2-hudEssentialWidth(parts)-1)
-		a.drawHUD(y, w, end, parts)
-		return
-	}
+	// The running tool call is a HUD segment of its own ("command"), so the
+	// row paints it with the rest of the metrics. It used to be reserved
+	// here — the row shortened the location to make room for a label that
+	// nothing ever drew — so the path gave up its cells to an empty gap.
 	// The work timer and the decode rate are what the row is for during a
 	// run, so they claim the space first: the location is what shrinks.
 	end := a.drawStatusLocation(y, w-2-hudEssentialWidth(parts)-1)
@@ -6240,6 +6256,14 @@ func (a *App) hudSegment(name string) (text, token string) {
 		return fmt.Sprintf("subagent · %d", n), theme.StatusLineSep
 	case "debugmouse":
 		return a.debugMouseLine, theme.StatusLineSep
+	case "command":
+		// The running tool call: "● bash". It is the one segment that says
+		// what the session is DOING right now, and it used to be dead code —
+		// the row reserved the space for it and nothing ever painted it, so
+		// a long tool call was invisible in the status row. Empty when
+		// nothing is running, which hides the segment rather than blanking
+		// a cell.
+		return a.hudCommand(), theme.StatusLineSep
 	}
 	return "", ""
 }
@@ -6494,8 +6518,12 @@ func hudEssentialWidth(parts []hudPart) int {
 // context meter, the token split) gives way before the two headlines it
 // refines.
 var statusKeepRank = map[string]int{
-	"theme":     0,
-	"model":     1,
+	"theme": 0,
+	"model": 1,
+	// The running tool call: a live state, not a metric, so it outranks the
+	// theme name on a narrow row (which is a fact about the session that
+	// never changes) and gives way before the pills.
+	"command":   1,
 	"cost":      2,
 	"toolcalls": 3,
 	"cache":     4,

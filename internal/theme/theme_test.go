@@ -14,24 +14,176 @@ func TestHexParse(t *testing.T) {
 	}
 }
 
-func TestGrokNightIdentity(t *testing.T) {
+// ompGroknightTokens is omp's groknight palette, resolved: the file omp ships
+// at ~/.omp/agent/themes/groknight.json with its `vars` expanded, token for
+// token. The values are PINNED LITERALS, never read back out of the theme — a
+// test that asks the theme what colour it should have painted passes against
+// the palette it replaced.
+//
+// The 256-index tokens are written as the RGB they resolve to: omp's file
+// spells them 250/180/246, and xterm-256's own ramp is what a terminal puts
+// on the screen for them.
+var ompGroknightTokens = map[string]string{
+	Accent:       "#e0af68",
+	Border:       "#505058",
+	BorderAccent: "#6c6c6c",
+	BorderMuted:  "#333333",
+	Success:      "#9ece6a",
+	Error:        "#e15759",
+	Warning:      "#e0af68",
+	Muted:        "#6c6c6c",
+	Dim:          "#585858",
+	Text:         "#e1e1e1",
+	ThinkingText: "#6c6c6c",
+
+	SelectedBg:      "#242424",
+	UserMessageBg:   "#191919",
+	CustomMessageBg: "#1b1b1b",
+	ToolPendingBg:   "#1b1b1b",
+	ToolSuccessBg:   "#171717",
+	ToolErrorBg:     "#212121",
+
+	UserMessageText:    "#e1e1e1",
+	CustomMessageText:  "#e1e1e1",
+	CustomMessageLabel: "#6c6c6c",
+	ToolTitle:          "#e1e1e1",
+	ToolOutput:         "#c8c8c8",
+
+	MdHeading:         "#e1e1e1",
+	MdLink:            "#e1e1e1",
+	MdLinkUrl:         "#6c6c6c",
+	MdCode:            "#e0af68",
+	MdCodeBlock:       "#e1e1e1",
+	MdCodeBlockBorder: "#505058",
+	MdQuote:           "#6c6c6c",
+	MdQuoteBorder:     "#505058",
+	MdHr:              "#505058",
+	MdListBullet:      "#6c6c6c",
+
+	ToolDiffAdded:   "#9ece6a",
+	ToolDiffRemoved: "#e15759",
+	ToolDiffContext: "#6c6c6c",
+
+	SyntaxComment:     "#6c6c6c",
+	SyntaxKeyword:     "#e0af68",
+	SyntaxFunction:    "#e1e1e1",
+	SyntaxVariable:    "#c8c8c8",
+	SyntaxString:      "#73daca",
+	SyntaxNumber:      "#ff9e64",
+	SyntaxType:        "#e1e1e1",
+	SyntaxOperator:    "#6c6c6c",
+	SyntaxPunctuation: "#6c6c6c",
+
+	ThinkingOff:     "#333333",
+	ThinkingMinimal: "#6c6c6c",
+	ThinkingLow:     "#6c6c6c",
+	ThinkingMedium:  "#c8c8c8",
+	ThinkingHigh:    "#c8c8c8",
+	ThinkingXhigh:   "#e0af68",
+	ThinkingMax:     "#e0af68",
+	BashMode:        "#e0af68",
+	PythonMode:      "#e0af68",
+
+	StatusLineSep:       "#505058",
+	StatusLineModel:     "#6c6c6c",
+	StatusLinePath:      "#6c6c6c",
+	StatusLineGitClean:  "#9ece6a",
+	StatusLineGitDirty:  "#e0af68",
+	StatusLineContext:   "#585858",
+	StatusLineSpend:     "#6c6c6c",
+	StatusLineStaged:    "#bcbcbc", // omp's 250
+	StatusLineDirty:     "#d7af87", // omp's 180
+	StatusLineUntracked: "#949494", // omp's 246
+	StatusLineOutput:    "#bcbcbc", // omp's 250
+	StatusLineCost:      "#bcbcbc", // omp's 250
+	StatusLineSubagents: "#6c6c6c",
+}
+
+// TestGroknightIsOmpGroknight pins the launch dark theme to omp's groknight
+// palette, token for token: the built-in theme answers every token omp's
+// file answers, with omp's value.
+//
+// The one token it does NOT carry is status_line_bg, and that is deliberate:
+// omp fills the status band (#242424), xdev's launch themes keep the row
+// transparent, and filling it is a shape change rather than a palette one.
+func TestGroknightIsOmpGroknight(t *testing.T) {
 	th := Load("groknight")
 	if !th.Dark {
 		t.Fatal("groknight must be dark")
 	}
-	// Identity per groknight.rs: neutral user (FG_DARK), gray tool (DARK5),
-	// BG_STORM canvas. Magenta accents live on assistant/thinking/running.
-	if u := th.Get(AccentUser); u != Hex("#c8c8c8") {
-		t.Fatalf("accent_user = %v", u)
+	for slot, hex := range ompGroknightTokens {
+		got, ok := th.Slot(slot)
+		if !ok {
+			t.Errorf("%s is left to the terminal default; the launch theme must pin it", slot)
+			continue
+		}
+		if want := Hex(hex); got != want {
+			t.Errorf("%s = %+v, want omp's groknight %s", slot, got, hex)
+		}
 	}
-	if tool := th.Get(AccentTool); tool != Hex("#787878") {
-		t.Fatalf("accent_tool = %v", tool)
+	// The band stays transparent on purpose (see the comment above).
+	if _, ok := th.Slot(StatusLineBg); ok {
+		t.Errorf("%s must stay unset: the launch status row is transparent", StatusLineBg)
 	}
-	if bg := th.Get(BgBase); bg != Hex("#141414") {
-		t.Fatalf("bg_base = %v", bg)
+	// The contract's own token list, so a token added to the palette and not
+	// to the table above is caught here rather than in a screenshot.
+	for _, slot := range RequiredSlots() {
+		if slot == StatusLineBg {
+			continue
+		}
+		if _, ok := ompGroknightTokens[slot]; !ok {
+			t.Errorf("the pinned table does not cover %s", slot)
+		}
 	}
-	if asst := th.Get(AccentAssistant); asst != Hex("#bb9af7") {
-		t.Fatalf("accent_assistant = %v", asst)
+}
+
+// TestGroknightLegacySlots pins the slots xdev reads under its OWN names.
+// They are the ones a launch theme has and omp's contract does not, or the
+// ones whose ink is not the token's — so each deviation is named here rather
+// than inherited by accident.
+func TestGroknightLegacySlots(t *testing.T) {
+	th := Load("groknight")
+	want := map[string]string{
+		// The legacy names that ARE a token under another name.
+		AccentAssistant:    "#e0af68",
+		AccentThinking:     "#e0af68",
+		AccentRunning:      "#e0af68",
+		AccentError:        "#e15759",
+		AccentSuccess:      "#9ece6a",
+		TextPrimary:        "#e1e1e1",
+		GrayDim:            "#585858",
+		Gray:               "#6c6c6c",
+		MdHeading1:         "#e1e1e1",
+		MdHeading2:         "#e1e1e1",
+		MdHeading3:         "#e1e1e1",
+		MdMuted:            "#6c6c6c",
+		LinkFg:             "#e1e1e1",
+		StatusLineMode:     "#e0af68",
+		PromptBorderActive: "#505058",
+		PromptBorder:       "#333333",
+		// The ones that are xdev's own, with the reason they differ.
+		BgBase:                "#141414",
+		BgHighlight:           "#242424",
+		BgTerminal:            "#0a0a0a",
+		AccentUser:            "#c8c8c8",
+		AccentTool:            "#787878",
+		TextSecondary:         "#c8c8c8",
+		GrayBright:            "#787878",
+		MdCodeBg:              "#191919",
+		ToolDiffAddedBg:       "#022800",
+		ToolDiffRemovedBg:     "#3d0100",
+		ToolDiffAddedWordBg:   "#044700",
+		ToolDiffRemovedWordBg: "#5c0200",
+	}
+	for slot, hex := range want {
+		got, ok := th.Slot(slot)
+		if !ok {
+			t.Errorf("%s is left to the terminal default; the launch theme must pin it", slot)
+			continue
+		}
+		if w := Hex(hex); got != w {
+			t.Errorf("%s = %+v, want %s", slot, got, hex)
+		}
 	}
 }
 

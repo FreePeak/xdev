@@ -3,11 +3,15 @@
 // quantization to the terminal's color capability, and the two launch
 // themes (GrokNight, GrokDay).
 //
-// Hex provenance: GrokNight values are PROVISIONAL (binary string
-// extraction, no slot attribution — PRD §3.5 "indicative, not verified").
-// They render a coherent Grok-like identity today; issue #5's
-// render-verification prerequisite may replace them via a single edit to
-// groknightSlots/grokdaySlots.
+// Hex provenance: the launch DARK theme is omp's own groknight palette — the
+// file omp ships at ~/.omp/agent/themes/groknight.json, vars expanded (see
+// groknightSlots). The launch LIGHT theme is Rosé Pine Dawn's own groups
+// (grokdaySlots), because omp ships no light twin of groknight; the two are
+// no longer a pair, and grokdaySlots says so.
+//
+// The slot vocabulary is omp's 66-token contract (see RequiredSlots): the
+// canonical names are omp's own, and xdev's legacy names are the aliases the
+// TUI reads. A theme file may spell any slot either way.
 package theme
 
 import (
@@ -270,147 +274,181 @@ func (t *Theme) Slot(slot string) (Color, bool) {
 	return c, ok
 }
 
-// groknightSlots — exact GrokNight palette from grok-build
-// (crates/codegen/xai-grok-pager-render/src/theme/groknight.rs, 2026-09-09 sync).
-// xAI neutral-gray base + TokyoNight Night accents.
+// groknightSlots — omp's groknight palette, resolved.
+//
+// Provenance: the theme omp actually runs — the file it ships at
+// ~/.omp/agent/themes/groknight.json, with its `vars` expanded. It is NOT the
+// grok-build palette this table used to carry: that one had a magenta accent
+// (#bb9af7) over xAI's neutral greys, and omp's groknight has a tan accent
+// (#e0af68) over the same canvas. The name is the same; the palette is omp's.
+// (The pre-2026-10-21 palette survives as the shipped `rose-pine` palette,
+// which carries the same syntax and diff inks it did.)
+//
+// The canonical tokens come FIRST and are omp's own names: the file a user
+// drops into ~/.xdev/agent/themes/ carries exactly these keys, so the built-in
+// theme and an imported one answer the same slot the same way. xdev's legacy
+// slot names — the vocabulary the TUI reads — are derived from them below.
+//
+// One token is deliberately absent: status_line_bg. omp's groknight fills the
+// status band (#242424); xdev's launch themes keep the row transparent, and
+// filling it is a shape change, not a palette one.
 func groknightSlots() map[string]Color {
-	return map[string]Color{
-		BgBase:             Hex("#141414"), // BG_STORM, main canvas
-		BgHighlight:        Hex("#242424"), // BG_HIGHLIGHT (user prompt band)
-		BgTerminal:         Hex("#0a0a0a"), // BG, terminal bg
-		AccentUser:         Hex("#c8c8c8"), // accent_user = FG_DARK (neutral, not colored)
-		AccentAssistant:    Hex("#bb9af7"), // MAGENTA
-		AccentThinking:     Hex("#bb9af7"), // MAGENTA
-		AccentTool:         Hex("#787878"), // DARK5
-		AccentError:        Hex("#f7768e"), // RED
-		AccentSuccess:      Hex("#9ece6a"), // GREEN
-		AccentRunning:      Hex("#bb9af7"), // MAGENTA
-		TextPrimary:        Hex("#e1e1e1"), // FG
-		TextSecondary:      Hex("#c8c8c8"), // FG_DARK
-		GrayDim:            Hex("#585858"), // gray_dim
-		Gray:               Hex("#6c6c6c"), // COMMENT
-		GrayBright:         Hex("#787878"), // DARK5
-		PromptBorder:       Hex("#323237"), // prompt_border
-		PromptBorderActive: Hex("#505058"), // prompt_border_active
-		MdHeading1:         Hex("#1abc9c"), // TEAL
-		MdHeading2:         Hex("#7aa2f7"), // BLUE
-		MdHeading3:         Hex("#9d7cd8"), // PURPLE
-		MdCode:             Hex("#3A95AB"), // BLUE1
-		MdCodeBg:           Hex("#1c1c1c"), // rgb(28,28,28)
-		MdMuted:            Hex("#6c6c6c"), // COMMENT
-		LinkFg:             Hex("#7aa6da"),
-		// Status-line hues: StatusLineBg stays unset so the launch themes
-		// keep today's transparent status row.
-		//
-		// The model wears the ACCENT, not gray_dim (the comment above this
-		// block used to say otherwise): omp paints the model name through
-		// accentFg, and 43 of the 98 themes it ships resolve statusLineModel
-		// to `accent` — the name is the session's identity, and identity is
-		// what the accent is for. Gray_dim is right for the separators, which
-		// only have to divide the row's parts.
-		StatusLineSep:       Hex("#585858"),
-		StatusLineModel:     Hex("#bb9af7"), // MAGENTA, accent_assistant
+	slots := map[string]Color{
+		// --- omp's tokens, verbatim (vars expanded) ---
+		Accent:       Hex("#e0af68"), // the identity ink: rails, model, spinner
+		Border:       Hex("#505058"),
+		BorderAccent: Hex("#6c6c6c"),
+		BorderMuted:  Hex("#333333"),
+		Success:      Hex("#9ece6a"),
+		Error:        Hex("#e15759"),
+		Warning:      Hex("#e0af68"),
+		Muted:        Hex("#6c6c6c"),
+		Dim:          Hex("#585858"),
+		Text:         Hex("#e1e1e1"),
+		ThinkingText: Hex("#6c6c6c"),
+
+		SelectedBg:      Hex("#242424"),
+		UserMessageBg:   Hex("#191919"),
+		CustomMessageBg: Hex("#1b1b1b"),
+		ToolPendingBg:   Hex("#1b1b1b"),
+		ToolSuccessBg:   Hex("#171717"),
+		ToolErrorBg:     Hex("#212121"),
+		// StatusLineBg stays unset: the launch status row is transparent.
+
+		UserMessageText:    Hex("#e1e1e1"),
+		CustomMessageText:  Hex("#e1e1e1"),
+		CustomMessageLabel: Hex("#6c6c6c"),
+		ToolTitle:          Hex("#e1e1e1"),
+		ToolOutput:         Hex("#c8c8c8"),
+
+		MdHeading:         Hex("#e1e1e1"),
+		MdLink:            Hex("#e1e1e1"),
+		MdLinkUrl:         Hex("#6c6c6c"),
+		MdCode:            Hex("#e0af68"),
+		MdCodeBlock:       Hex("#e1e1e1"),
+		MdCodeBlockBorder: Hex("#505058"),
+		MdQuote:           Hex("#6c6c6c"),
+		MdQuoteBorder:     Hex("#505058"),
+		MdHr:              Hex("#505058"),
+		MdListBullet:      Hex("#6c6c6c"),
+
+		ToolDiffAdded:   Hex("#9ece6a"),
+		ToolDiffRemoved: Hex("#e15759"),
+		ToolDiffContext: Hex("#6c6c6c"),
+
+		SyntaxComment:     Hex("#6c6c6c"),
+		SyntaxKeyword:     Hex("#e0af68"),
+		SyntaxFunction:    Hex("#e1e1e1"),
+		SyntaxVariable:    Hex("#c8c8c8"),
+		SyntaxString:      Hex("#73daca"),
+		SyntaxNumber:      Hex("#ff9e64"),
+		SyntaxType:        Hex("#e1e1e1"),
+		SyntaxOperator:    Hex("#6c6c6c"),
+		SyntaxPunctuation: Hex("#6c6c6c"),
+
+		ThinkingOff:     Hex("#333333"),
+		ThinkingMinimal: Hex("#6c6c6c"),
+		ThinkingLow:     Hex("#6c6c6c"),
+		ThinkingMedium:  Hex("#c8c8c8"),
+		ThinkingHigh:    Hex("#c8c8c8"),
+		ThinkingXhigh:   Hex("#e0af68"),
+		ThinkingMax:     Hex("#e0af68"),
+		BashMode:        Hex("#e0af68"),
+		PythonMode:      Hex("#e0af68"),
+
+		StatusLineSep:       Hex("#505058"),
+		StatusLineModel:     Hex("#6c6c6c"),
 		StatusLinePath:      Hex("#6c6c6c"),
 		StatusLineGitClean:  Hex("#9ece6a"),
-		StatusLineGitDirty:  Hex("#f7768e"),
-		StatusLineContext:   Hex("#6c6c6c"),
+		StatusLineGitDirty:  Hex("#e0af68"),
+		StatusLineContext:   Hex("#585858"),
 		StatusLineSpend:     Hex("#6c6c6c"),
-		StatusLineStaged:    Hex("#9ece6a"),
-		StatusLineDirty:     Hex("#f7768e"),
-		StatusLineUntracked: Hex("#6c6c6c"),
-		StatusLineOutput:    Hex("#6c6c6c"),
-		StatusLineCost:      Hex("#6c6c6c"),
-		// The reasoning rails (thinking_off..thinking_max). The launcher
-		// themes never named them — the contract requires them of an
-		// imported omp theme, not of a built-in — so they were unset and
-		// Get fell back to the body colour, which is why the reasoning level
-		// on the composer divider read as part of the model name. The ramp
-		// is one step per rung from the muted grey (off) to the accent
-		// (max): the effort is legible as an amount.
-		ThinkingOff:         Hex("#6c6c6c"),
-		ThinkingMinimal:     Hex("#7d7da8"),
-		ThinkingLow:         Hex("#8f8fb9"),
-		ThinkingMedium:      Hex("#a1a1ca"),
-		ThinkingHigh:        Hex("#b3b3db"),
-		ThinkingXhigh:       Hex("#c6a6e8"),
-		ThinkingMax:         Hex("#bb9af7"),
-		StatusLineSubagents: Hex("#bb9af7"),
-		// Session effort (standard rung) and the Vibe chip.
-		StatusLineMode: Hex("#bb9af7"),
-		// Diff rows. Claude Code's model (v2.1.287, the diff renderer) keeps
-		// the SHAPE — the +/- marker is the only coloured text on a changed
-		// row, and the change itself is read from a flat band — while the INKS
-		// are Rosé Pine's own git groups, the two upstream hands its diff
-		// signs (nvim lua/rose-pine/config.lua: git_add = "foam",
-		// git_delete = "love"). Foam rather than pine for the added marker:
-		// pine reads 4.0:1 on this canvas and 3.1:1 on the added band, so a
-		// pine "+" is a marker the reader has to squint at, which defeats the
-		// claim the band is making. Love reads 5.5:1 on the removed band.
-		ToolDiffAdded:   Hex("#9ccfd8"), // foam, upstream git_add
-		ToolDiffRemoved: Hex("#eb6f92"), // love, upstream git_delete
-		ToolDiffContext: Hex("#908caa"), // subtle, the unchanged rows
-		// The bands stay Claude Code's own near-black tints (addLine
-		// rgb(2,40,0), addWord rgb(4,71,0) and the two red equivalents). They
-		// are a near-black STRIPE, not a palette identity: the only ink that
-		// ever sits on one is the row's own body text, so re-tinting them to a
-		// palette hue would repaint the whole diff panel — the transcript box
-		// AND the sidebar's popup, which share these four slots — to buy no
-		// legibility. (The shipped rose-pine.json palette does use its own
-		// pine/foam tints here; a launch theme deliberately does not.)
-		ToolDiffAddedBg:       Hex("#022800"), // CC addLine
-		ToolDiffRemovedBg:     Hex("#3d0100"), // CC deleteLine
-		ToolDiffAddedWordBg:   Hex("#044700"), // CC addWord
-		ToolDiffRemovedWordBg: Hex("#5c0200"), // CC deleteWord
-		// Tool output and fenced-code tokens (#501, #582) wear Rosé Pine's own
-		// syntax groups, mapped role-for-role onto its token table (vscode
-		// themes/rose-pine-color-theme.json). A `read` preview, an `edit`
-		// result and a bash command then read as ONE palette with the diff
-		// above them, instead of a Grok-coloured frame around a One-Dark
-		// block.
-		//
-		// Two of the nine are NOT upstream's own assignment, both forced by
-		// slots xdev has that Rosé Pine has no counterpart for:
-		//
-		//   Comment is `muted`, not nvim's `subtle`. xdev paints a tool body's
-		//   flat rows in TextSecondary (#c8c8c8 here), and a comment in the
-		//   same ink as the body is a comment that vanished — that is exactly
-		//   the regression TestFencedBlockInToolOutputIsNotColoured caught.
-		//   `muted` is one step quieter than `subtle`, still a Rosé Pine token,
-		//   and reads 3.3:1 on the code band against the old comment's 3.5:1.
-		//
-		//   Number is `rose`, not nvim's `gold`: upstream paints String and
-		//   Number the same ink, and two classes a reader tells apart wearing
-		//   one ink is the ambiguity these nine slots exist to remove
-		//   (TestFencedGoBlockColorsItsTokens). VS Code's own rose-pine gives
-		//   constant.numeric #ebbcba — rose — which stays in the palette.
-		SyntaxComment:     Hex("#6e6a86"), // muted, one step below subtle
-		SyntaxKeyword:     Hex("#31748f"), // Keyword
-		SyntaxString:      Hex("#f6c177"), // String
-		SyntaxNumber:      Hex("#ebbcba"), // constant.numeric, not nvim's gold
-		SyntaxType:        Hex("#9ccfd8"), // Type
-		SyntaxVariable:    Hex("#e0def4"), // Identifier (the brightest token)
-		SyntaxFunction:    Hex("#ebbcba"), // Function
-		SyntaxOperator:    Hex("#908caa"), // Operator
-		SyntaxPunctuation: Hex("#908caa"), // @punctuation
+		StatusLineStaged:    Hex("#bcbcbc"), // omp's 256-index 250
+		StatusLineDirty:     Hex("#d7af87"), // omp's 256-index 180
+		StatusLineUntracked: Hex("#949494"), // omp's 256-index 246
+		StatusLineOutput:    Hex("#bcbcbc"), // omp's 256-index 250
+		StatusLineCost:      Hex("#bcbcbc"), // omp's 256-index 250
+		StatusLineSubagents: Hex("#6c6c6c"),
 	}
+	// xdev's legacy slot names, derived from the tokens above.
+	//
+	// Most of them ARE the token under another name — the assistant rail, the
+	// reasoning rail, the running spinner and the session mode all wear the
+	// accent, because in omp they are the accent. The ones that are NOT are
+	// named outright below, each with the reason it differs: xdev's chrome
+	// has slots omp's contract has no room for, and a slot that silently
+	// inherited a token's ink would be a palette that lies about what it is.
+	slots[AccentAssistant] = slots[Accent]
+	slots[AccentThinking] = slots[Accent]
+	slots[AccentRunning] = slots[Accent]
+	slots[AccentError] = slots[Error]
+	slots[AccentSuccess] = slots[Success]
+	slots[TextPrimary] = slots[Text]
+	slots[GrayDim] = slots[Dim]
+	slots[Gray] = slots[Muted]
+	slots[MdHeading1] = slots[MdHeading]
+	slots[MdHeading2] = slots[MdHeading]
+	slots[MdHeading3] = slots[MdHeading]
+	slots[MdMuted] = slots[MdListBullet]
+	slots[LinkFg] = slots[MdLink]
+	slots[StatusLineMode] = slots[Accent]
+	slots[PromptBorderActive] = slots[Border]
+	slots[PromptBorder] = slots[BorderMuted]
+	// The body ink. omp paints a tool body's rows in toolOutput (#c8c8c8) and
+	// a message's prose in text (#e1e1e1); xdev's text_secondary is the BODY
+	// of both, so it takes the toolOutput ink — muted (#6c6c6c) would put the
+	// transcript's prose a full step below the dim chrome around it.
+	slots[TextSecondary] = Hex("#c8c8c8")
+	// The canvas and the raised surface: omp's export.pageBg and its
+	// selectedBg, which is the ink xdev's highlight surfaces (the user band,
+	// the selected rows) wear.
+	slots[BgBase] = Hex("#141414")
+	slots[BgHighlight] = slots[SelectedBg]
+	// xdev's own: the terminal's own background, the gutter's neutral, the
+	// tool card's frame (omp paints a card's BORDER in dim, and its title in
+	// toolTitle — the title is a different slot), and the second grey.
+	slots[BgTerminal] = Hex("#0a0a0a")
+	slots[AccentUser] = Hex("#c8c8c8")
+	slots[AccentTool] = Hex("#787878")
+	slots[GrayBright] = Hex("#787878")
+	// The inline-code band: omp's export.cardBg, one step above the canvas.
+	slots[MdCodeBg] = Hex("#191919")
+	// The diff bands are xdev's own slots (omp's contract has no room for
+	// them) and keep Claude Code's near-black tints (addLine rgb(2,40,0),
+	// addWord rgb(4,71,0) and the two red equivalents): the only ink that
+	// ever sits on one is the row's own body text, so re-tinting them to a
+	// palette hue would repaint the whole diff panel — the transcript box AND
+	// the sidebar's popup, which share these four slots — to buy no
+	// legibility.
+	slots[ToolDiffAddedBg] = Hex("#022800")
+	slots[ToolDiffRemovedBg] = Hex("#3d0100")
+	slots[ToolDiffAddedWordBg] = Hex("#044700")
+	slots[ToolDiffRemovedWordBg] = Hex("#5c0200")
+	return slots
 }
 
 // grokdaySlots — the launch LIGHT theme: Rosé Pine Dawn's own groups (MIT,
-// github.com/rose-pine/rose-pine-theme) over GrokDay's neutral structure, the
-// exact twin of groknightSlots. The same split, the same reasoning: the canvas,
-// the borders and the muted greys stay GrokDay's because the terminal's own
-// background already supplies the canvas, and every INK a reader reads text
-// with is the palette's.
+// github.com/rose-pine/rose-pine-theme) over GrokDay's neutral structure. The
+// same split as the dark theme: the canvas, the borders and the muted greys
+// stay GrokDay's because the terminal's own background already supplies the
+// canvas, and every INK a reader reads text with is the palette's.
 //
-// Why the light twin matters less and is still here: `theme: auto` only picks
-// it for an explicit `light`/`day`, XDEV_THEME, or a terminal that answers the
-// OSC 11 / COLORFGBG light-background probe — so most sessions never see it. It
-// is also the twin a reader on a light terminal gets by DEFAULT, and "the dark
-// theme is Rosé Pine but the light one is One Light" is exactly the split a
-// palette migration is supposed to remove. The cost is one table; the mapping
-// is Dawn's, slot for slot.
+// It is NOT the dark theme's twin any more. The dark theme became omp's
+// groknight (groknightSlots), and omp ships no light counterpart of it — its
+// own light theme is a different palette under a different name — so there is
+// nothing to mirror. What is left here is the light theme xdev has always
+// shipped, and the honest reason it is still here: `theme: auto` only picks it
+// for an explicit `light`/`day`, XDEV_THEME, or a terminal that answers the
+// OSC 11 / COLORFGBG light-background probe, and a reader on a light terminal
+// gets it by DEFAULT. The cost is one table; the mapping is Dawn's, slot for
+// slot.
 func grokdaySlots() map[string]Color {
 	return map[string]Color{
+		// The canonical name of the accent, the token omp's contract spells
+		// `accent`: the surfaces that read omp's token (the dock's section
+		// headings) find it here, and the legacy names below are the same
+		// ink under xdev's own vocabulary.
+		Accent:             Hex("#7D4BC6"),
 		BgBase:             Hex("#eeeeee"),
 		BgHighlight:        Hex("#dedede"),
 		BgTerminal:         Hex("#f5f5f5"),
@@ -521,11 +559,12 @@ func grokdaySlots() map[string]Color {
 // line's clean/dirty tree, and the band is a tint of its own rather than of
 // that ink. A theme that still leaves a slot "" keeps the terminal's answer.
 //
-// The two launch themes stay hand-written tables: each value was read out of
-// a Grok source file and the comment above it names where, which is worth
-// that verbosity. The ported palettes are data (palettes.go) — 37 upstream
-// tokens each, all MIT/Apache, validated by the same ParseTheme as a
-// ~/.xdev/agent/themes/*.json.
+// The two launch themes stay hand-written tables: the dark one is omp's
+// groknight palette, token for token (groknightSlots), and the light one is
+// Rosé Pine Dawn's groups (grokdaySlots) — each value's comment names where
+// it came from, which is worth that verbosity. The ported palettes are data
+// (palettes.go) — 37 upstream tokens each, all MIT/Apache, validated by the
+// same ParseTheme as a ~/.xdev/agent/themes/*.json.
 func Builtins() map[string]*Theme {
 	out := map[string]*Theme{
 		"groknight": {Name: "groknight", Dark: true, Slots: groknightSlots(), Defaults: map[string]bool{}},

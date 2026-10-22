@@ -881,13 +881,13 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 	dim := body.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 	// The panel's own inks, from the palette the rest of the TUI paints with.
 	// Each answers "what IS this row?" rather than "which section is it in":
-	// a section heading is a label, a file path is a path (the ink a grep result
-	// already gives one, toolhl.go), and a note the panel wrote about itself is
-	// a comment. Slot, not Get: a theme that leaves the syntax_* slots to the
-	// terminal default degrades to the ink and the dim the panel painted before,
-	// which is the contract codeStyleFor and diffStyle already keep. NO_COLOR is
-	// read here for the same reason it is read there — the renderer must not
-	// choose inks it is forbidden to emit.
+	// a section heading is a label (the accent), a file path is a path (the
+	// status line's path ink) and a note the panel wrote about itself is a
+	// comment. Slot, not Get: a theme that leaves those slots to the
+	// terminal default degrades to the ink and the dim the panel painted
+	// before, which is the contract codeStyleFor and diffStyle already keep.
+	// NO_COLOR is read here for the same reason it is read there — the
+	// renderer must not choose inks it is forbidden to emit.
 	noColor := os.Getenv("NO_COLOR") != ""
 	inkOf := func(slot string, fallback tcell.Style) tcell.Style {
 		if noColor {
@@ -898,9 +898,15 @@ func (a *App) drawDock(s tcell.Screen, x, top, h int) {
 		}
 		return fallback
 	}
-	label := inkOf(theme.SyntaxType, ink).Bold(true)
+	// A section heading is a LABEL, not a syntax token: it wears the
+	// accent, the same ink omp's sections wear (components/section.ts), so
+	// the panel's chrome stops borrowing the code block's palette. The file
+	// rows are paths, and a path is omp's statusLinePath — not the ink a
+	// function name wears, which after the palette change is the brightest
+	// white in the theme and would make the sidebar shout.
+	label := inkOf(theme.Accent, ink).Bold(true)
 	comment := inkOf(theme.SyntaxComment, dim)
-	pathInk := inkOf(theme.SyntaxFunction, ink)
+	pathInk := inkOf(theme.StatusLinePath, ink)
 	// The change counts wear the diff's own inks, on the panel's background: a
 	// file's "+N" is the green its diff block already paints with — the MARKER
 	// ink, since the panel has no band behind a two-character count. Built from
