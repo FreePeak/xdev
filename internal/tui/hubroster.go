@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -21,6 +22,10 @@ import (
 // HubAgent is one roster row, preformatted by cmd from hub.Roster().
 type HubAgent struct {
 	ID, Name, Status, Model, Activity, Cost string
+	ParentID, Level, Kind, Outcome          string
+	Tokens                                  int64
+	Requests, Tools                         int
+	Elapsed                                 time.Duration
 }
 
 // HubTranscriptLine is one row of a child's transcript.
@@ -428,6 +433,14 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	hubRegMu.Unlock()
 	s := a.scr
 	w := a.rightEdge()
+	leftW := int(float64(w) * 0.58)
+	if leftW < 48 {
+		leftW = 48
+	}
+	if w < 96 {
+		leftW = w
+	}
+	_ = leftW
 	if len(ui.rows) == 0 {
 		// Empty roster: one panel line says so, with the chords that work.
 		h := 3
@@ -445,8 +458,8 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	selSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
-	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 
 	if ui.viewID != "" {
 		lines := ui.view
@@ -457,6 +470,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		panelW := min(w-2, hubPanelWidth(w, visible)+3)
 		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
 		hubRosterBox(s, y, h, hubPanelWidth(w, visible), a.th.Box(), brdSt)
+		drawText(s, 3, y+2, rosterSnippet("status · outcome · model · level · activity · elapsed · tokens · cost · requests · tools · parent", printW(panelW, 3)), dimSt)
 		drawText(s, 3, y+1, rosterSnippet("transcript · "+ui.viewTitle()+ui.viewID, printW(panelW, 3)), dimSt)
 		for i, ln := range visible {
 			drawText(s, 3, y+2+i, rosterLine(ln.Role, ln.Text, panelW), fgSt)
@@ -489,8 +503,14 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	// must not bleed through the overlay (same discipline as the picker).
 	panelW := min(w-2, wid+3)
 	fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
+	// Draw the split divider in dim ink when two panes are shown.
+	if w >= 96 {
+		for yy := y + 1; yy <= y+h; yy++ {
+			drawText(s, leftW, yy, "│", dimSt)
+		}
+	}
 	hubRosterBox(s, y, h, wid, a.th.Box(), brdSt)
-	drawText(s, 3, y+1, rosterSnippet("AGENT HUB — ↑↓ select · Enter transcript · k kill · p park · r revive · Esc close", printW(panelW, 3)), dimSt)
+	drawText(s, 3, y+1, rosterSnippet("Agent Hub · running 0 · idle 0 · parked 0 · aborted 0", printW(panelW, 3)), dimSt)
 	for i, text := range texts {
 		rowStyle := rowSt
 		if i == sel {
@@ -556,10 +576,8 @@ func hubPanelWidth(w int, lines []HubTranscriptLine) int {
 	return min(wid, w-8)
 }
 
-// hubAgentRow renders one roster row: id status model cost name — activity.
 func hubAgentRow(mark string, r HubAgent) string {
-	return fmt.Sprintf("%s%-8s %-8s %-14s %8s  %s — %s",
-		mark, r.ID, r.Status, r.Model, r.Cost, r.Name, r.Activity)
+	return fmt.Sprintf("%s├── %s %s  %s", mark, theme.StatusGlyph(r.Status), r.ID, r.Model)
 }
 
 // rosterLine renders one transcript row: "role  text".
