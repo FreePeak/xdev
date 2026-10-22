@@ -509,13 +509,25 @@ func readOnlyGofmt(args []string) bool {
 func readOnlySegment(seg string) bool {
 	fields := strings.Fields(cutAtRedirect(seg))
 	// Leading VAR=value assignments do not change the command: `FOO=1 ls` is
-	// an ls. A segment that is ONLY assignments is a write (it exports state),
-	// so it falls through to the false below.
+	// an ls.
+	//
+	// A segment that is ONLY assignments changes nothing either. The bash
+	// tool gives every call a fresh process, so a variable set by a call
+	// dies with that call — the same argument that puts `cd` in the read
+	// set. A command substitution inside an assignment is a segment of its
+	// own (the splitter cuts at `(`), so the command inside it is still
+	// judged.
+	//
+	// It used to be a WRITE, on the reasoning that an assignment exports
+	// state. But the splitter cuts `d=$(cmd)` in half, and the half it
+	// leaves — "d=$" — is not a command at all: it read as an unknown one,
+	// so the loop `for b in $(git for-each-ref …); do d=$(git rev-list …);
+	// done` was a mutation on a turn that had only read.
 	for len(fields) > 0 && isAssignment(fields[0]) {
 		fields = fields[1:]
 	}
 	if len(fields) == 0 {
-		return false
+		return true
 	}
 	// A shell keyword is scaffolding, not a command. The body of a loop and
 	// the condition of a while are commands, so they are judged as one.
