@@ -51,8 +51,8 @@ import (
 // during the drag.
 
 // selRow is one selectable row: the rendered text and the column where it starts
-// (3 = rail+pad for transcript rows, 0 for rows read back from the grid, whose
-// leading cells are part of the layout).
+// (2 = the pane's pad column for transcript rows, 0 for rows read back from the
+// grid, whose leading cells are part of the layout).
 type selRow struct {
 	text string
 	x0   int
@@ -885,10 +885,10 @@ func (a *App) selectionText() string {
 }
 
 // selRowAt returns the selectable content of screen row y. Rows the transcript
-// painter recorded come from that capture, which leaves out the accent rail, its
-// padding and every run the frame builders marked chrome, so a copied line is
-// the text and not the decoration; the capture is viewport-relative, so the
-// session strip's row is subtracted. Every other row — the session strip,
+// painter recorded come from that capture, which leaves out the pane's padding
+// and every run the frame builders marked chrome, so a copied line is the text
+// and not the decoration; the capture is viewport-relative, so the session
+// strip's row is subtracted. Every other row — the session strip,
 // welcome, the
 // composer, status row, an open overlay, or blank space under a short
 // transcript — is read back from the painted grid, trimmed of the trailing

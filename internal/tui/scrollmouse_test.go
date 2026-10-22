@@ -49,9 +49,9 @@ func dragAtEnd(t *testing.T, app *App, scr tcell.SimulationScreen) (hdr, vp, las
 
 	hdr = app.transcriptTop()
 	app.mu.Lock()
-	press(app, 3, hdr)
+	press(app, transcriptContentX, hdr)
 	app.mu.Unlock()
-	lastX, lastY = 3+len("L000")-1, hdr+vp-1
+	lastX, lastY = transcriptContentX+len("L000")-1, hdr+vp-1
 	return hdr, vp, lastX, lastY
 }
 
@@ -139,8 +139,8 @@ func TestSweepAcrossAnEdgeRowDoesNotPageTurn(t *testing.T) {
 
 	hdr := app.transcriptTop()
 	app.mu.Lock()
-	press(app, 3, hdr+2)
-	dragTo(app, 3, hdr+vp-1) // crossed the edge row: one event, one step
+	press(app, transcriptContentX, hdr+2)
+	dragTo(app, transcriptContentX, hdr+vp-1) // crossed the edge row: one event, one step
 	if off := app.sm.offset; off != 11 {
 		t.Fatalf("offset = %d after one crossing event, want 11 (one row)", off)
 	}
@@ -370,11 +370,11 @@ func TestWheelDuringAHeldDragDoesNotRestartIt(t *testing.T) {
 	app.mu.Unlock()
 
 	// The real event path, so the edge the caller computes is the one under test.
-	app.handleKey(tcell.NewEventMouse(3, y, tcell.Button1, tcell.ModNone))      // press
-	app.handleKey(tcell.NewEventMouse(3, y+1, tcell.Button1, tcell.ModNone))    // drag
-	app.handleKey(tcell.NewEventMouse(3, y+1, tcell.WheelDown, tcell.ModNone))  // wheel
-	app.handleKey(tcell.NewEventMouse(3, y+2, tcell.Button1, tcell.ModNone))    // drag on
-	app.handleKey(tcell.NewEventMouse(3, y+2, tcell.ButtonNone, tcell.ModNone)) // release
+	app.handleKey(tcell.NewEventMouse(transcriptContentX, y, tcell.Button1, tcell.ModNone))      // press
+	app.handleKey(tcell.NewEventMouse(transcriptContentX, y+1, tcell.Button1, tcell.ModNone))    // drag
+	app.handleKey(tcell.NewEventMouse(transcriptContentX, y+1, tcell.WheelDown, tcell.ModNone))  // wheel
+	app.handleKey(tcell.NewEventMouse(transcriptContentX, y+2, tcell.Button1, tcell.ModNone))    // drag on
+	app.handleKey(tcell.NewEventMouse(transcriptContentX, y+2, tcell.ButtonNone, tcell.ModNone)) // release
 
 	got := strings.Split(string(scr.GetClipboardData()), "\n")
 	if got[0] != "L050" {

@@ -40,7 +40,7 @@ func TestReasoningFrameIsRosePineOnEveryTheme(t *testing.T) {
 			if y < 0 {
 				t.Fatalf("no reasoning box painted under %s", name)
 			}
-			got, _, _ := cellStyle(scr, 3, y).Decompose() // x=3: the box's corner
+			got, _, _ := cellStyle(scr, transcriptContentX, y).Decompose() // the box's corner
 			want := app.cellColor(theme.ThinkFrame(app.th))
 			if got != want {
 				t.Errorf("%s: frame painted %v, want the Rosé Pine %+v", name, got, theme.ThinkFrame(app.th))

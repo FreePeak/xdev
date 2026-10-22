@@ -355,9 +355,9 @@ func TestStickyHeaderDragSelectsHeaderAndTranscript(t *testing.T) {
 	// and release — the gesture a person makes to copy across the boundary.
 	far := hdr + app.viewportLinesLocked() - 1
 	app.mu.Lock()
-	press(app, 3, hdr+stickyMarginTop)
-	dragTo(app, 3, far)
-	release(app, 3, far)
+	press(app, transcriptContentX, hdr+stickyMarginTop)
+	dragTo(app, transcriptContentX, far)
+	release(app, transcriptContentX, far)
 	app.mu.Unlock()
 
 	got := string(scr.GetClipboardData())
@@ -526,9 +526,9 @@ func TestStickyDragAcrossBoundaryCopiesEachRowOnce(t *testing.T) {
 	// last: the header rows, then everything under it.
 	far := hdr + vp - 1
 	app.mu.Lock()
-	press(app, 3, hdr+stickyMarginTop)
-	dragTo(app, 3, far)
-	release(app, 3, far)
+	press(app, transcriptContentX, hdr+stickyMarginTop)
+	dragTo(app, transcriptContentX, far)
+	release(app, transcriptContentX, far)
 	app.mu.Unlock()
 
 	got := string(scr.GetClipboardData())

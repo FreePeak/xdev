@@ -274,10 +274,11 @@ func TestWheelOnlyScrollsAFocusedThinkBox(t *testing.T) {
 	}
 	// The rule, not the label set into it: the label is bold whether the box is
 	// focused or not (boxTop), so only the rule cells carry the focus mark. The
-	// box starts at x=3 (rail + pad), which is its top-left corner.
+	// box starts at the transcript's content column, which is its top-left
+	// corner.
 	y := boxY()
-	if _, _, attr := cellStyle(scr, 3, y).Decompose(); attr&tcell.AttrBold == 0 {
-		t.Fatalf("focused box's top-left corner at (3,%d) is not bold", y)
+	if _, _, attr := cellStyle(scr, transcriptContentX, y).Decompose(); attr&tcell.AttrBold == 0 {
+		t.Fatalf("focused box's top-left corner at (%d,%d) is not bold", transcriptContentX, y)
 	}
 	// The rule runs the box's full width, so a cell inside it proves the whole
 	// border took the mark, not just the corner glyph.
@@ -374,10 +375,11 @@ func TestBlockAtFindsTheOwningBlock(t *testing.T) {
 }
 
 // TestDrawnThinkingBoxDrawsOneEdge pins the painted frame: the reasoning box
-// draws its own border through draw()'s row path and its rows carry no accent
-// rail, so a painted body row has exactly the frame's two vertical edges. A
-// re-added rail would put a third line down the box's left side — a doubling a
-// rendered-lines assertion cannot see, because the rail is chrome, not a run.
+// draws its own border through draw()'s row path and its rows carry no
+// gutter, so a painted body row has exactly the frame's two vertical edges. A
+// re-added rule beside the box would put a third line down its left side — a
+// doubling a rendered-lines assertion cannot see, because the gutter is
+// chrome, not a run.
 func TestDrawnThinkingBoxDrawsOneEdge(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
 	app.BeginThinking()
