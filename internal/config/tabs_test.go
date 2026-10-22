@@ -2,21 +2,21 @@ package config
 
 import "testing"
 
-// The tab strip is opt-in: unset (the shipped default "auto") and "off" both
-// hide it, and only an explicit "on" paints the row. A typo must not conjure
-// the strip — nor hide one the user asked for.
+// The tab strip paints unless it is explicitly off: unset (the shipped default
+// "auto"), "on", and an unknown value all show it, and only "off" hides it.
+// A typo must not hide a strip the user did not ask to hide.
 func TestTabsModeOnIsOptIn(t *testing.T) {
 	cases := []struct {
 		mode string
 		want bool
 	}{
-		{"", false},
-		{"auto", false},
+		{"", true},
+		{"auto", true},
 		{"off", false},
 		{"OFF", false},
 		{"on", true},
 		{"ON", true},
-		{"onnn", false},
+		{"onnn", true},
 	}
 	for _, c := range cases {
 		s := &Settings{}
@@ -25,12 +25,12 @@ func TestTabsModeOnIsOptIn(t *testing.T) {
 			t.Errorf("mode %q -> %v, want %v", c.mode, got, c.want)
 		}
 	}
-	if (&Settings{}).TabsModeOn() {
-		t.Error("a nil-ish default settings must not paint the strip")
+	if !(&Settings{}).TabsModeOn() {
+		t.Error("a nil-ish default settings must paint the strip")
 	}
 	var nilSettings *Settings
-	if nilSettings.TabsModeOn() {
-		t.Error("nil settings must not paint the strip")
+	if !nilSettings.TabsModeOn() {
+		t.Error("nil settings must paint the strip")
 	}
 }
 

@@ -18,11 +18,20 @@ func TestTabStripPolicyHidesAndNumbers(t *testing.T) {
 		{ID: "bbbb2222", Title: "second"},
 	})
 	app.draw()
+	if !strings.Contains(screenText(scr), "second") {
+		t.Fatalf("the default must paint the strip:\n%s", screenText(scr))
+	}
+	if !app.tabStripVisible() {
+		t.Fatal("the default must claim the transcript's first row")
+	}
+
+	app.SetTabPolicy(false, false)
+	app.draw()
 	if strings.Contains(screenText(scr), "second") {
-		t.Fatalf("the opt-in default must not paint the strip:\n%s", screenText(scr))
+		t.Fatalf("mode=off must not paint the strip:\n%s", screenText(scr))
 	}
 	if app.tabStripVisible() {
-		t.Fatal("the opt-in default must not claim the transcript's first row")
+		t.Fatal("mode=off must not claim the transcript's first row")
 	}
 
 	app.SetTabPolicy(true, false)
