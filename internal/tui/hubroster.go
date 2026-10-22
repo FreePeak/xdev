@@ -577,8 +577,7 @@ func hubPanelWidth(w int, lines []HubTranscriptLine) int {
 
 // hubAgentRow renders one roster row: id status model cost name — activity.
 func hubAgentRow(mark string, r HubAgent) string {
-	return fmt.Sprintf("%s%-8s %-8s %-14s %8s  %s — %s",
-		mark, r.ID, r.Status, r.Model, r.Cost, r.Name, r.Activity)
+	return fmt.Sprintf("%s%s %s  %s", mark, theme.StatusGlyph(r.Status), r.ID, r.Model)
 }
 
 // rosterLine renders one transcript row: "role  text".
