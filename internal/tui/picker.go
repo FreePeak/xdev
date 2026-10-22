@@ -1006,13 +1006,23 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 	drawText(s, 2, y, box.BottomLeft+strings.Repeat(box.Horizontal, inner)+box.BottomRight, borderSt)
 }
 
+func (a *App) SetLoadSubagentItems(fn func() []SessionPickerItem) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.loadSubagentItemsOp = fn
+}
+
 func (a *App) loadSubagentItems() {
+	var items []SessionPickerItem
+	if a.loadSubagentItemsOp != nil {
+		items = a.loadSubagentItemsOp()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.spick == nil {
 		return
 	}
-	a.spick.subItems = []SessionPickerItem{}
+	a.spick.subItems = items
 	a.spick.subsLoaded = true
 }
 
