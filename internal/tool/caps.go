@@ -1,5 +1,7 @@
 package tool
 
+import "encoding/json"
+
 // Tool capability manifests (#420 / ZCode §4.1): one declaration read by
 // plan mode, approvals, parallel scheduling, and (later) stream-time
 // execution. Call sites must not guess by tool name.
@@ -36,6 +38,84 @@ type Caps struct {
 // going through the name table. Preferred for new tools.
 type Capser interface {
 	Caps() Caps
+}
+
+// OpReadOnly is the optional interface a Tool implements when its OPS split
+// into reads and writes.
+//
+// A whole-tool cap cannot describe such a tool honestly: the github tool
+// searches (search_prs, repo_view) and creates (pr_create, pr_push) under one
+// name, so a cap that says "read" is a lie for one op and a cap that says
+// "write" is a lie for the other. The verdict is per op.
+//
+// Live 2026-10-21 (session 4c4addab): the model called the github tool's
+// search_prs op while answering "list me all pr urls openningin xdev". The
+// keep-going gate had no caps entry for the name, so the call counted as a
+// mutation, the gate armed, and the harness pushed the model past the answer
+// it had just delivered.
+type OpReadOnly interface {
+	// ReadOnlyOps lists the ops that only READ.
+	ReadOnlyOps() []string
+}
+
+// CallIsReadOnly reports whether one tool call only READ.
+//
+// It is the one definition of "this call changed nothing", so the keep-going
+// gate and the reasoning about it cannot drift apart.
+//
+//   - bash is judged by its command line (ReadOnlyCommand).
+//   - a tool that declares its read-only ops is judged by its op.
+//   - a tool that declares its Caps is judged by them (Capser).
+//   - everything else is judged by the caps manifest, and an UNDECLARED tool
+//     counts as a mutation: the conservative default Decide already uses, so
+//     an MCP tool this build has never heard of keeps its keep-going.
+//
+// The registry is what makes the Capser path reachable — the name table
+// cannot know what a tool in another package declares about itself, and the
+// name table alone would read every such tool as a mutation.
+//
+// reg may be nil, which leaves the declared paths unavailable — the caps
+// manifest then decides, and an undeclared name still fails closed.
+func CallIsReadOnly(reg *Registry, name string, args json.RawMessage) bool {
+	if name == "bash" {
+		return BashCallIsReadOnly(args)
+	}
+	if reg != nil {
+		if t, ok := reg.Get(name); ok {
+			if o, ok := t.(OpReadOnly); ok {
+				return opIsReadOnly(o.ReadOnlyOps(), args)
+			}
+			if c, ok := CapsOf(t); ok {
+				return c.ReadOnly
+			}
+		}
+	}
+	caps, declared := CapsByName(name)
+	if !declared {
+		return false
+	}
+	return caps.ReadOnly
+}
+
+// opIsReadOnly reports whether the op named in the call's arguments is one of
+// the tool's read-only ops. An unparseable call, or a call with no op, is
+// not a read: the tool's write ops are the dangerous direction.
+func opIsReadOnly(ops []string, args json.RawMessage) bool {
+	var a struct {
+		Op string `json:"op"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return false
+	}
+	if a.Op == "" {
+		return false
+	}
+	for _, o := range ops {
+		if o == a.Op {
+			return true
+		}
+	}
+	return false
 }
 
 // builtinCaps is the side table for tools that predate Capser. It encodes

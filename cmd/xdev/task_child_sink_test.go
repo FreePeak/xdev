@@ -71,6 +71,27 @@ func TestTaskChildSinkDropsLateEvents(t *testing.T) {
 	}
 }
 
+// The sink carries the tree's edge: a grandchild's event names the child
+// that spawned it, and the strip draws the chain along that link. Without
+// the pass-through the strip can only draw a flat list, which is exactly
+// what a chain must not look like.
+func TestTaskChildSinkCarriesTheParentLink(t *testing.T) {
+	app := newSinkApp(t)
+	sink := &taskChildSink{app: app}
+
+	sink.onEvent(agent.SubagentEvent{Kind: agent.SubagentStart, Label: "scout", Model: "m"})
+	sink.onEvent(agent.SubagentEvent{Kind: agent.SubagentStart, Label: "leaf", Model: "m", Parent: "scout"})
+
+	if got := app.AgentPanelParent("leaf"); got != "scout" {
+		t.Fatalf("the grandchild's parent = %q, want \"scout\"", got)
+	}
+	// A child of the top-level session has no parent: the link is empty, so
+	// the strip draws it as a root.
+	if got := app.AgentPanelParent("scout"); got != "" {
+		t.Fatalf("a root child's parent = %q, want nothing", got)
+	}
+}
+
 func newSinkApp(t *testing.T) *tui.App {
 	t.Helper()
 	scr := tcell.NewSimulationScreen("UTF-8")

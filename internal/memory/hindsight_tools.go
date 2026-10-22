@@ -29,6 +29,19 @@ const (
 
 func (t *RecallTool) Name() string { return RecallToolName }
 
+// Caps declares what `recall` does to the workspace: nothing.
+//
+// It reads the memory bank and returns what it found. Without this the tool
+// was UNDECLARED as far as the keep-going gate was concerned, so the call
+// counted as a mutation and the gate armed on a turn that had only looked
+// something up — the model recalls on almost every run, so that was every
+// run. The side effect is on the memory bank, not on the workspace, which is
+// the same shape as the `todo` tool (session scratch) and `web_search`
+// (network).
+func (t *RecallTool) Caps() tool.Caps {
+	return tool.Caps{ReadOnly: true, ConcurrentSafe: true, SideEffect: tool.ScopeNetwork, Tier: tool.TierReadOnly}
+}
+
 func (t *RecallTool) Description() string {
 	return "search long-term memory (Hindsight) for relevant facts, decisions, and prior work; use before assuming history is unknown"
 }
@@ -84,6 +97,13 @@ type RetainTool struct{ Backend HindsightStore }
 
 func (t *RetainTool) Name() string { return RetainToolName }
 
+// Caps declares what `retain` does: it STORES. It changes the memory bank,
+// so it is not a read — declared explicitly rather than left to the
+// undeclared default, so the intent is on the tool.
+func (t *RetainTool) Caps() tool.Caps {
+	return tool.Caps{SideEffect: tool.ScopeNetwork, Tier: tool.TierWrite}
+}
+
 func (t *RetainTool) Description() string {
 	return "store a durable fact, decision, or preference in long-term memory (Hindsight); use for anything a future session should know"
 }
@@ -126,6 +146,17 @@ func (t *RetainTool) Execute(_ context.Context, args json.RawMessage) (tool.Resu
 type ReflectTool struct{ Backend HindsightStore }
 
 func (t *ReflectTool) Name() string { return ReflectToolName }
+
+// Caps declares what `reflect` does to the workspace: nothing.
+//
+// It asks the memory bank to answer a question from what it has stored and
+// returns the answer. It writes nothing — the same shape as the `todo` tool
+// (session scratch) and `web_search` (network) — and it is the one memory
+// call that used to arm the keep-going gate on a turn that had only asked a
+// question.
+func (t *ReflectTool) Caps() tool.Caps {
+	return tool.Caps{ReadOnly: true, ConcurrentSafe: true, SideEffect: tool.ScopeNetwork, Tier: tool.TierReadOnly}
+}
 
 func (t *ReflectTool) Description() string {
 	return "ask long-term memory (Hindsight) to answer a question from what it has stored; slower than recall, use when recall results need synthesis"

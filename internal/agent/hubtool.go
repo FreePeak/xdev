@@ -22,6 +22,18 @@ const HubToolName = "hub"
 
 func (t *HubTool) Name() string { return HubToolName }
 
+// ReadOnlyOps lists the hub ops that only READ.
+//
+// The hub is half reads and half writes — send, cancel, park, start, stop and
+// restart all change a job's state — so the verdict has to be per op. The
+// keep-going gate uses it: live 2026-10-21 (session 9db850ca), the model
+// asked the hub for its jobs while answering "where are we now", the call
+// counted as a mutation because the hub had no caps entry, and the gate
+// armed on a question that was never answered.
+func (t *HubTool) ReadOnlyOps() []string {
+	return []string{"jobs", "list", "inbox", "ps", "logs", "describe", "result", "wait"}
+}
+
 func (t *HubTool) Description() string {
 	return "coordinate background agents and processes: list/steer/park jobs (list/jobs/send/wait/cancel/park/result) and supervise named processes (start/ps/logs/stop/restart/describe)"
 }

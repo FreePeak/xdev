@@ -574,7 +574,7 @@ func TestCallMutatedReadsTheCapsManifest(t *testing.T) {
 		if tc.args != "" {
 			c.Arguments = json.RawMessage(tc.args)
 		}
-		if got := callMutated(c); got != tc.want {
+		if got := callMutated(nil, c); got != tc.want {
 			t.Errorf("callMutated(%s %s) = %v, want %v — %s", tc.tool, tc.args, got, tc.want, tc.why)
 		}
 	}

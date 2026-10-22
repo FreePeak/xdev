@@ -247,7 +247,7 @@ const compactionPrompt = `Summarize the conversation so far for seamless continu
 Use this EXACT format (omit sections that do not apply):
 
 ## Goal
-- [what the user is trying to accomplish, one line per goal]
+- [what the user is trying to accomplish, one line per goal — take it ONLY from the conversation transcript]
 
 ## Constraints & Preferences
 - [constraints, preferences, requirements the user stated, or "(none)"]
@@ -266,12 +266,21 @@ Use this EXACT format (omit sections that do not apply):
 ## Next Steps
 1. [ordered next actions]
 
+## Recalled Context
+- [background recalled from EARLIER, UNRELATED sessions — never the goal of this conversation]
+
 ## Critical Context
 - [facts the next turn cannot continue without, or "(none)"]
 
 Preserve exact file paths, function names, error messages, commands and their
 outcomes. Keep each section to terse single-line bullets. Carry forward only
-user requests that remain unanswered. Do not mention that a summary exists.`
+user requests that remain unanswered. Do not mention that a summary exists.
+
+The recalled memories that ride ahead of the transcript are BACKGROUND FACTS
+from other sessions. They are never what the user asked for here. A request
+the user made in another session is not this conversation's request: it goes
+under "## Recalled Context", and if the transcript shows no request at all,
+write that instead of inventing one.`
 
 // compactionTurnPrefixPrompt is the split-turn arm's system prompt: the span
 // is the PREFIX of one turn whose suffix stays retained below the summary, so
@@ -282,15 +291,24 @@ const compactionTurnPrefixPrompt = `This is the PREFIX of a turn that was too la
 Summarize the prefix to provide context for the retained suffix:
 
 ## Original Request
-[what the user asked for in this turn]
+[what the user asked for in THIS turn — take it ONLY from the conversation transcript]
 
 ## Early Progress
 - [key decisions and work done in the prefix]
 
+## Recalled Context
+- [background recalled from EARLIER, UNRELATED sessions — never the request of this turn]
+
 ## Context for Suffix
 - [information needed to understand the retained recent work]
 
-Be concise. Focus on what is needed to understand the kept suffix.`
+Be concise. Focus on what is needed to understand the kept suffix.
+
+The recalled memories that ride ahead of the transcript are BACKGROUND FACTS
+from other sessions. They are never what the user asked for here. A request
+the user made in another session is not this turn's request: it goes under
+"## Recalled Context", and if the transcript shows no request at all,
+write that instead of inventing one.`
 
 // findCutPoint returns the history index where pre-compaction history ends:
 // walking backwards, accumulate estimated tokens until the kept tail reaches
@@ -609,7 +627,21 @@ func summarizeWith(ctx context.Context, provider ai.Provider, model string, msgs
 		// #86: a compaction summary that forgets the recalled memories loses
 		// them for the rest of the session. The backend's context rides
 		// ahead of the transcript so the summarizer keeps what it must.
-		b.WriteString("Recalled memories to preserve:\n\n" + memoryContext + "\n\n")
+		//
+		// The label is load-bearing, not decoration. The memories are
+		// recalled from OTHER sessions — the backend's scope decides how
+		// wide, and a global scope reaches every session the bank has ever
+		// seen. Live 2026-10-21 (session 8efefc9e): a global-scoped recall
+		// surfaced five requests the user had made in OTHER sessions, and
+		// the summarizer — told to write "## Original Request — what the
+		// user asked for in this turn" — wrote THOSE as the original
+		// request. The model then planned PR merges, session monitoring, a
+		// blog post and a testnet dive, and left the working directory to
+		// look for a sibling repo. Naming the block for what it is keeps a
+		// background fact from becoming the instruction.
+		b.WriteString("Recalled memories — background facts from EARLIER, UNRELATED sessions. " +
+			"They are NOT the request of this conversation and must not be summarized as one.\n\n" +
+			memoryContext + "\n\n")
 	}
 	b.WriteString("Conversation transcript:\n\n")
 	for i := range msgs {
@@ -691,12 +723,30 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 	// a DEFERRAL at the next boundary (the trigger that handed it over may
 	// be gone by then — the idle trigger is consumed by the attempt).
 	a.harvestAsyncResult()
-	// Pre-request tier (microcompact): clear stale tool results before paying
-	// for a summary. Cheap, deterministic, no provider call.
-	if cleared, changed := microcompactToolResults(history, defaultMicrocompactKeepRecent); changed {
-		history = cleared
+	// The trigger is read on the history AS IT IS. It used to be read after
+	// the pre-request tier had already cleared the stale tool results, so a
+	// run whose real content was far past the threshold saw a small history
+	// and the ladder never ran — the tier silently suppressed the very
+	// compaction it exists to prepare for.
+	due := a.compactionDue(history)
+	// Pre-request tier (microcompact): shed stale tool-result bodies before
+	// the request grows. Cheap, deterministic, no provider call.
+	//
+	// It runs under PRESSURE, not on every boundary. Clearing unconditionally
+	// capped the visible context at the newest handful of results however
+	// much room the window had, so a survey of twenty files could never hold
+	// its own findings; the model, watching its earlier answers turn into a
+	// placeholder, re-ran the same commands to get them back — 182 calls and
+	// 17 minutes on one "tell me where we are" question (session 8efefc9e,
+	// 2026-10-21). The tier is a preparation for the ladder, so it is gated
+	// the way the ladder is.
+	if a.microcompactDue(history) {
+		if cleared, changed := microcompactToolResults(history, a.compaction().keepRecent()); changed {
+			history = cleared
+		}
 	}
-	if !a.compactionDue(history) {
+	if !due {
+
 		// Not due by trigger — but a compaction that WAS due may have been
 		// handed to the background, and it is still owed. The idle trigger
 		// fires once and is gone; without this the deferred compaction
@@ -760,6 +810,28 @@ func (a *Agent) compactNow(ctx context.Context, history []ai.Message) []ai.Messa
 		return res.Messages
 	}
 	return history
+}
+
+// microcompactDue reports whether the request has grown large enough that
+// shedding stale tool-result bodies pays for itself.
+//
+// The bar is HALF the compaction threshold. The tier is the cheap move made
+// before the ladder's expensive one, so it has to fire before the ladder
+// does — and it must not fire when the window has room. It used to fire on
+// every step boundary, which is a different policy entirely: it held the
+// visible context at the newest handful of results no matter how much room
+// there was, and the model answered by re-running the commands whose
+// findings it had just lost.
+//
+// It is deliberately NOT the ladder's trigger. Sharing it would make the
+// tier redundant: the ladder replaces the whole prefix with a summary, so a
+// pass that only blanks bodies in the same breath would be thrown away.
+func (a *Agent) microcompactDue(history []ai.Message) bool {
+	threshold := a.compaction().threshold()
+	if threshold <= 0 {
+		return false
+	}
+	return contextTokens(history) > threshold/2
 }
 
 // compactionDue reports whether this step boundary should compact.

@@ -309,7 +309,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			restoreNotices = append(restoreNotices, n)
 		}
 	}
-	saveTabSet(cwd, tabs.persistIDs())
+	saveTabSet(cwd, tabs.persistTabs())
 	storeOf := func() *session.Store { return tabs.store() }
 	// The live agent is per SESSION, not per process (#157). It was one
 	// pointer every turn overwrote, so with two sessions working whichever turn
@@ -940,7 +940,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 
 	ts := &tuiSession{store: store, app: app, tabs: tabs, id: store.ID(), focused: true}
 
-	var swapStoreTo func(*session.Store) error
+	var swapStoreTo func(*session.Store, bool) error
 
 	// focusTab rebuilds the App view around a tab that is already open.
 	// The previous session is PARKED, not closed: its turn keeps running
@@ -990,7 +990,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// The open set is what the next launch reopens, so every switch
 		// rewrites it. Cheap enough (a few paths) to sit on the one
 		// seam that already owns the tabset snapshot.
-		saveTabSet(cwd, tabs.persistIDs())
+		saveTabSet(cwd, tabs.persistTabs())
 		if res, err := session.BuildContext(t.store.Entries(), t.store.LeafID(), session.SystemPrompt{}); err == nil {
 			replaySession(app, res.Messages)
 		}
@@ -1040,7 +1040,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// swapStoreTo adopts an already-open store (fork/resume): parks the
 	// previous session and makes this one current. The previous turn keeps
 	// running; only the view moves.
-	swapStoreTo = func(ns *session.Store) error {
+	//
+	// replace=true is the RESUME shape: the session being left does not stay
+	// open, so the open set does not grow on every resume. The displaced
+	// session's file survives — it is still on disk and still in /resume —
+	// but it is no longer open, and the next launch does not reopen it.
+	// A resume of a session that is ALREADY open only focuses it, and a
+	// resume while the current tab is mid-turn parks the running session
+	// instead of killing its turn (the one case where the set grows).
+	swapStoreTo = func(ns *session.Store, replace bool) error {
 		sessMu.Lock()
 		defer sessMu.Unlock()
 		if vibeActive() {
@@ -1059,13 +1067,36 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 		bus := buildHookBus(cwd, opts, app.AddSystemBlock) // resolved per switch: /settings edits land
 		emitSwitchEvents(bus, true, shortSessionID(ns.ID()), ns.Title())
-		i, err := tabs.open(ns)
+		openBefore, _, _ := tabs.summary()
+		alreadyOpen := tabs.isOpen(ns.ID())
+		var i int
+		var err error
+		if replace {
+			i, err = tabs.replaceCurrent(ns)
+		} else {
+			i, err = tabs.open(ns)
+		}
 		if err != nil {
 			return err
 		}
 		t := tabs.activate(i)
 		focusTab(t)
-		app.AddSystemBlock("· session " + shortSessionID(ns.ID()) + " — " + ns.Title())
+		msg := "· session " + shortSessionID(ns.ID()) + " — " + ns.Title()
+		if replace {
+			// The count is the whole point of the replace, so say what it did:
+			// the session the user left either left the set with it, or it
+			// stayed open because a turn is still running in it.
+			openAfter, _, _ := tabs.summary()
+			switch {
+			case alreadyOpen:
+				msg += " — it was already open"
+			case openAfter > openBefore:
+				msg += " — a turn is running there, so that session stays open"
+			case openAfter == openBefore:
+				msg += " — it replaced the open session"
+			}
+		}
+		app.AddSystemBlock(msg)
 		emitSwitchEvents(bus, false, shortSessionID(ns.ID()), ns.Title())
 		return nil
 	}
@@ -1124,7 +1155,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		// launch reopens the tab the user just closed. A closure, not a
 		// deferred call: defer evaluates its arguments NOW, which would
 		// record the set while the tab is still open.
-		defer func() { saveTabSet(cwd, tabs.persistIDs()) }()
+		defer func() { saveTabSet(cwd, tabs.persistTabs()) }()
 		cur := tabs.current()
 		if cur == nil || cur.id != id {
 			if tabs.close(id) == nil && len(tabs.snapshot()) == 0 {
@@ -1161,7 +1192,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if err != nil {
 			return fmt.Errorf("reopen %s: %w", shortSessionID(sessionIDOfPath(path)), err)
 		}
-		if err := swapStoreTo(ns); err != nil {
+		if err := swapStoreTo(ns, false); err != nil {
 			_ = ns.Close()
 			return err
 		}
@@ -1232,7 +1263,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			app.AddSystemBlock("· session " + shortSessionID(resumed.ID()) + " belongs to " + dir +
 				" — this pane's tools stay in " + cwd)
 		}
-		if err := swapStoreTo(resumed); err != nil {
+		if err := swapStoreTo(resumed, true); err != nil {
 			app.AddSystemBlock("resume: " + err.Error())
 		}
 	})
@@ -1590,7 +1621,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 				_ = fork.Close()
 				return err
 			}
-			return swapStoreTo(fork)
+			return swapStoreTo(fork, false)
 		},
 		Dump: func() (string, error) {
 			return dumpSession(storeOf())
@@ -1608,9 +1639,15 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			return shareLive(storeOf(), buildSys(), modelNow())
 		},
 		Resume: func(query string) error {
-			// /resume parks the current session and focuses another. A turn
-			// in the parked session keeps running.
-			return resumeSessionCommand(app, cwd, query, swapStoreTo)
+			// /resume SWAPS the current session for the resumed one: the
+			// session being left leaves the open set (its file survives, so
+			// it is still in /resume), so the set never grows on a resume.
+			// A turn running in the session being left is never killed by a
+			// resume — that session stays open and the resumed one is parked
+			// beside it.
+			return resumeSessionCommand(app, cwd, query, func(ns *session.Store) error {
+				return swapStoreTo(ns, true)
+			})
 		},
 		NavigateTree: func(entryID string, summarize bool) (string, error) {
 			sid, ok := tabs.claimCurrent()
@@ -1639,7 +1676,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// drop today.
 			// ponytail: when provider-session or prompt-cache state lands
 			// (openSession / swapStoreTo), clear it here.
-			return swapStoreTo(storeOf())
+			return swapStoreTo(storeOf(), false)
 		},
 		Clear: func() error {
 			sid, ok := tabs.claimCurrent()
@@ -2511,7 +2548,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 					app.SetRunning(false)
 				}
 				app.SetTabs(tabInfos(tabs))
-				saveTabSet(cwd, tabs.persistIDs())
+				saveTabSet(cwd, tabs.persistTabs())
 			}()
 			sessMu.Lock()
 			hist, errH := session.BuildContext(turnStore.Entries(), turnStore.LeafID(), session.SystemPrompt{})
@@ -3260,7 +3297,7 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 		}
 		s.mu.Unlock()
 		s.app.AddTaskChild(callID, ev.Label, ev.Agent, ev.Model)
-		s.app.AgentPanelStart(ev.Label, ev.Agent, ev.Model, ev.TranscriptID)
+		s.app.AgentPanelStart(ev.Label, ev.Agent, ev.Model, ev.Parent, ev.TranscriptID)
 	case agent.SubagentTool:
 		s.app.UpdateTaskChild(callID, ev.Label, ev.Tool, string(ev.Args), ev.Status)
 		s.app.AgentPanelUpdate(ev.Label, ev.Tool, string(ev.Args))

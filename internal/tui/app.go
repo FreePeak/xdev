@@ -6035,8 +6035,11 @@ var statusSegments = map[string]bool{
 	// when enabled: the segment never hides, so the log is visible
 	// the moment it is opted in.
 	"debugMouse": true,
-	// sessions is the open-tab count with busy/unread marks — the whole
-	// signal the multi-session TUI needs without a painted tab strip.
+	// sessions is the open-session STATE — "1 running", "1 unread" — the
+	// signal the multi-session TUI needs without a painted tab strip. The
+	// COUNT of open sessions is deliberately not here: it was a number
+	// nobody could act on, and it read as a wrong count whenever the
+	// persisted set had grown.
 	"sessions": true,
 	// subagent is the running-foreground-child chip: "subagent · N" while N
 	// TaskTool children are live on the hub, "subagent · Alt+B" when the count
@@ -6194,13 +6197,13 @@ func (a *App) hudSegment(name string) (text, token string) {
 	case "theme":
 		return a.th.Name, theme.StatusLineSep
 	case "sessions":
-		// Open-session summary: "2 tabs" idle, "2 tabs ·1" with one busy,
-		// "2 tabs ·1 ✦1" with unread. Hidden on a single idle session so a
-		// normal one-chat TUI keeps a clean row.
-		n := len(a.tabs)
-		if n == 0 {
-			return "", ""
-		}
+		// The open-session STATE, not the open-session COUNT. "6 tabs" on
+		// the status row was a number nobody could act on — the set is
+		// behind the chords and the /tabs list — and it read as a wrong
+		// count: a directory whose persisted set had grown showed six tabs
+		// for the one session in view. What is worth a glance is a session
+		// that is RUNNING, or one that produced output the user has not
+		// seen; those say "something is happening, look over there".
 		busy, unread := 0, 0
 		for _, t := range a.tabs {
 			if t.Running {
@@ -6210,19 +6213,18 @@ func (a *App) hudSegment(name string) (text, token string) {
 				unread++
 			}
 		}
-		if n == 1 && busy == 0 && unread == 0 {
+		if busy == 0 && unread == 0 {
 			return "", ""
 		}
-		label := "tabs"
-		if n == 1 {
-			label = "tab"
-		}
-		text := fmt.Sprintf("%d %s", n, label)
+		text := ""
 		if busy > 0 {
-			text += fmt.Sprintf(" ·%d", busy)
+			text = fmt.Sprintf("%d running", busy)
 		}
 		if unread > 0 {
-			text += fmt.Sprintf(" ✦%d", unread)
+			if text != "" {
+				text += " · "
+			}
+			text += fmt.Sprintf("%d unread", unread)
 		}
 		return text, theme.StatusLineSep
 	case "subagent":

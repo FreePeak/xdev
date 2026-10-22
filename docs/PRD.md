@@ -3418,6 +3418,46 @@ Verified on the built binary in a forked pty with `pyte` (a full-screen TUI repa
 
 ---
 
+*Last updated: 2026-10-21 (`fix/resume-replaces-tab` — user report: "why my xdev session TUI display 6 tab while I only open 1 session only?"):* **a resume grew the open set, and the open set is what the next launch reopens.**
+
+**The symptom.** The status row's first segment prints the size of the open-session set (`internal/tui/app.go:6200` — `"6 tabs"`), and that set is persisted per working directory (`~/.xdev/agent/session-tabs.json`, `cmd/xdev/sessionops.go:435`) and re-admitted at every launch (`cmd/xdev/tui.go:232`). A directory whose sidecar named five session files therefore showed six tabs — the live session plus five restored ones — to someone working in one conversation. The strip itself was OFF in that install (`tui.tabs.mode` unset reads as off), so the count was the only visible trace of five sessions nobody had asked to keep open.
+
+**The cause.** `/resume` APPENDED a tab (`swapStoreTo` → `tabs.open`) and the persisted set was rewritten with the whole set on every switch, so the set grew by one per resume and nothing pruned it: a directory where five old sessions had been resumed over a week carried five stale tabs forever, up to the `tabSlots = 6` ceiling.
+
+**The fix.** A resume now REPLACES the current tab: the session being left leaves the open set (its file survives — it is still on disk and still in `/resume`), and the resumed session takes its place. `tabset.replaceCurrent` (`cmd/xdev/tabset.go`) is the new seam; `swapStoreTo` takes the flag, and the two resume entry points (`/resume <id>` and the resume picker) pass it, while `/new`, `/fork`, `/import` and `C-Shift-T` keep appending — those OPEN a session, a resume SWITCHES to one. Two cases are deliberately not a replacement: a resume of a session that is ALREADY open only focuses it, and a resume while the current tab is mid-turn parks the running session instead of killing its turn (the one case where a resume still grows the set, and the tab set doing its job). The displaced session is not pushed onto the closed stack: the user did not close it, and `C-Shift-T` means "reopen what I closed".
+
+Tests: `cmd/xdev/tabset_test.go` — `TestReplaceCurrentSwapsTheSlot` (the set does not grow, the displaced session leaves it, its file survives, the persisted set names only the resumed session) and `TestReplaceCurrentParksARunningSession` (a live turn is never killed by a resume).
+
+Verified on the built binary in a forked pty with `pyte` (the throwaway drive: an isolated agent dir, a seeded sidecar naming ONE session, so the launch restores it and the set is (live + restored) = 2 tabs; then `/resume <a second session on disk>`): the fixed build kept the set at **2 tabs** and printed `· session 2e11e29b — beta — it replaced the open session`, while the same drive against the pre-fix binary grew it to **3 tabs** and printed the bare `· session 29159f24 — beta`.
+
+---
+
+*Last updated: 2026-10-21 (`fix/tab-set-no-growth-per-launch` — the follow-up to #713, on the same user report: "why we have so many tabs while I just open 1 ?"):* **every launch left its own session in the tab set, so the set grew by one per launch.**
+
+**The measurement** (the shipped binary, three launches in a row in one directory, each in a session of its own): launch 1 showed no count, launch 2 showed **"2 tabs"**, launch 3 showed **"3 tabs"** — and the persisted set (`~/.xdev/agent/session-tabs.json`, per working directory) grew with it.
+
+**The cause.** A launch opens ONE session of its own, and that session was persisted like any other tab (`tabset.persistIDs` returned every open tab's path). So every run left its live session in the set, the next run restored it as a tab ON TOP of its own new one, and nothing ever dropped it. A directory where one conversation was being worked on ended up with six tabs — five of them dead conversations from earlier days. #713 closed the other growth path (a resume APPENDED a tab); this is the launch path, and it was the one that actually made the count.
+
+**The fix.** The set a later launch reopens is now the tabs the user kept open BESIDE the one they are in: `tabset.persistTabs` skips the current tab. The session in the view is not carried into the next run — it is on disk, `--continue` (the breadcrumb) resumes it and `/resume` lists it — and what the set carries is the working set: a session parked by `/new`, a fork, an import, a reopen. The count is then the number of conversations actually in play, and it does not climb one per launch.
+
+Tests: `cmd/xdev/tabset_test.go` — `TestLaunchesDoNotGrowTheOpenSet` (three launches in a row: the open set is the same size every time) and the updated `TestReplaceCurrentSwapsTheSlot` (the persisted set names neither the session in the view nor the displaced one).
+
+Verified on the built binary in a forked pty with `pyte` (the same drive that showed 1 → 2 → 3 tabs on the pre-fix build): three consecutive launches now show the SAME count every time — no count at all, because one open session hides the segment — while the three session files are all still on disk. The conversations are not lost by leaving the set; only the tab COUNT is honest now.
+
+---
+
+*Last updated: 2026-10-21 (`fix/status-bar-no-tab-count` — user report: "remove the tab count in the status bar bottom too"):* **the status row counted the open sessions; the count was a number nobody could act on.**
+
+**What it was.** The `sessions` HUD segment — the first segment of the shipped status row — printed `"6 tabs"`: `len(a.tabs)`, the size of the open-session set, with `·1` for a running session and `✦1` for unread output.
+
+**Why it went.** The set is behind the chords (`Alt+]`, `Alt+[`, `C-1..9`) and the `/tabs` list; the COUNT told the user nothing they could act on, and it read as a wrong count — a directory whose persisted set had grown showed "6 tabs" for the one session in view (the report that opened at #713). It was also the only figure on the row that grew without the user doing anything.
+
+**What it is now.** The segment carries the open-session STATE, not the count: `1 running`, `1 unread`, `1 running · 1 unread`, and nothing at all when every session is idle. The tab count is gone from the status row; the tab STRIP (opt-in, `tui.tabs.mode on`) is the other surface that names the open sessions, and `/tabs` lists them.
+
+Tests: `internal/tui/statusrowcount_test.go` — `TestStatusRowDoesNotCountOpenSessions` (three idle sessions render nothing; a running and an unread session render the marks, and the word "tab" is nowhere in the text).
+
+---
+
 *Last updated: 2026-10-05 (`test/ask-isolation` — the two red tests in `internal/config`, closed):* **`TestAskTimeoutLayersAndDecodes` and `TestAskAutoAnswerDefaultsOffAndLayersOn` had been failing on this machine and green in CI, and the cause was neither the code nor the box.** Both call `LoadSettings(cwd, nil)`, and the global layer that call folds in is `~/.xdev/agent/config.yml` — the developer's REAL one, not a fixture. So a test whose whole subject is the *shipped default* (`ask.timeout` = 60s, `ask.autoAnswer` off) was really asserting "the shipped default, as overridden by whatever this developer has configured". This box carries `ask: {autoAnswer: true, timeout: 300}` — exactly what those two keys exist for — so both failed; a clean machine passed them. `asktimeout_test.go` was the **only** file in `internal/config` that called `LoadSettings` without isolating the global layer (`t.Setenv("XDEV_AGENT_DIR", …)` or `t.Setenv("HOME", …)`); the other twenty do. Both tests now isolate it, with the reason in the file so the next test copied from a neighbour does not undo it.
 
 The general rule this earns, and the reason it is worth recording next to the tests rather than in a comment nobody reads: **a test that pins a DEFAULT must not read the machine's config through the loader it is testing.** `LoadSettings(cwd, nil)` reads as "no overlays" and is anything but. Verified by running the package three ways — with the real `ask:` config in a temp agent dir, with an empty one, and with the two new lines removed (which reproduces both failures under the same config).
@@ -3959,6 +3999,61 @@ prompt stays last, that the style is present and names the two renderable shapes
 
 **Tests:** `internal/tui/agentspanel_test.go` — `TestAgentPanelKeepsASettledChild` (the row persists, marked done, with an end time), `TestAgentPanelAltFFocusesTheNewestRow`, `TestAgentPanelAltFWithNothingToFocusIsSilence`, `TestAgentPanelArrowsWalkAndEnterOpens` (focus on the newest, Down clamps at the oldest, Up clamps at the newest, Enter opens the focused child's transcript in the panel surface), `TestAgentPanelEscLeavesTheStrip`, `TestAgentPanelDownFromComposerEntersTheStrip`. `go build ./...` clean; `go test ./internal/tui/` green (the three failures that appear in the full suite — `TestWatchdogWithoutAnExitBudgetNeverEndsTheSession`, `TestUsageDocumentsEverySubcommand`, `TestDockTodoMarkersWearTheirOwnInks` — fail identically on `origin/main` before this change, so they are not regressions).
 
+*Last updated: 2026-10-21 (`fix/slow-session-intent-drift` — user report: "a simple prompt like this running so slow more than 9mins but still now done … my flow logic life cycle of the session handling is too much over engineer for the simple thing", and "that session even trying to go outside my dir and doing the wrong intensions, doing the works that not my goal"):*
+
+**The run.** Session `8efefc9e` (`2026-10-21T13-01-14.489Z_8efefc9e-*.jsonl`), one question — *"Check my current codebase and documents tell me where are we from this xdev repos features, issues"* — ran **16 min 55 s**, made 193 tool calls over 120 turns, and **delivered no answer**: it ended in `recovery_silent_provider` → `recovery_header_timeout` → `recovery_all_targets_down` → `session_exit`. 12.8 of those 16 minutes were provider round-trip time; tool execution was ~2 s in total. Every guard the loop had was satisfied the whole way (turn cap 200, repeat guard, compaction ladder) — the run was legal from start to finish and still cost the user 17 minutes and nothing.
+
+**Four causes, all measured on that session's own file.**
+
+1. **The pre-request micro-compaction tier destroyed the evidence, on every boundary.** `maybeCompact` ran `microcompactToolResults(history, 5)` at **every** step boundary and **before** the trigger was evaluated, so every tool result older than the newest five became the literal `[Old tool result content cleared]`. The window here is 1,000,000 tokens (`onegw.contextWindow`), the threshold 850,000 (omp's 15% reserve rule), and the session's real content was **286,290 tokens** — the tier was shaving a survey down to five results inside a window with room for all 193, and the peak tool output the model could see was **99 KB** of 1.1 MB (~97 % destroyed). Worse, the trigger was read on the *shaved* history, so the tier **masked the compaction it exists to prepare for**: the ladder saw a small history and never summarized. The tier is now gated at half the threshold (it fires at 425,000 here — so it never fires on this run) and the trigger is read on the history as it is.
+2. **The model re-derived what the tier had just deleted.** Its own words, at turn 190: *"I need to re-derive since outputs got cleared."* Simulating the tier's rule over the real call sequence: **183 of 183 tool calls** were issued at a point where an earlier result from the same tool had already been cleared. The repeat guard could not see it (`repeat.go:61` keys on byte-identical arguments; **0 of 193** calls were) and the result cache missed for the same reason, so all 25 `gh issue list` calls were 25 real executions. The kept window is now a **token budget** (`CompactionConfig.KeepRecentTokens`), and the placeholder names the tool and says the call can be repeated — a cleared result must not read as an empty one.
+3. **A globally-scoped memory recall was promoted into the session's request.** `wireAgentMode` hands every mode the backend's recall (`cmd/xdev/print.go:286`), the recall rides ahead of the transcript in the summarize request, and `hindsight.readTags()` sends **no tags** under `scoping: global` — so the recall reaches every session the bank has ever seen. The live service returns, for the user's own prompt, five requests the user made in **other** sessions (PR merges, the `agentloop`/Claude-Code ask, branch inventory, a blog, a testnet PnL dive). The compaction prompt asked for `## Original Request — what the user asked for in this turn`; the summarizer had the memories first and a nearly empty transcript (1,003 input tokens against a 286,290-token span) and wrote **the memories** as the original request. The model read it as its instructions, built a six-phase todo list from it, and `cd`'d into `../agentloop` — **outside the working directory**. The memories are now labelled as background facts from other sessions, both compaction prompts bind the request slot to the transcript, and the memories get their own `## Recalled Context` section.
+4. **No guard measured the clock.** A turn budget counts turns; a provider that answers in two seconds turns 200 turns into ten minutes of waiting. A run now has a **wall-clock budget** (`Agent.RunBudget`, default 6 min): one wrap-up asking for the report in prose, then the run ends.
+
+**Measured, same prompt, same model, same gateway** (the patched binary, `xdev print`):
+
+| | original | patched |
+|---|---|---|
+| wall clock | 16 min 55 s | **4 min 53 s** |
+| assistant turns | 120 | **30** |
+| tool calls | 193 | **49** |
+| "outputs got cleared" in the model's reasoning | 14 | **0** |
+| answer delivered | **none** (provider failure) | **yes** — a full status report |
+
+The patched run answered in 30 turns with the same findings the original session spent 120 turns re-deriving. Still open, and out of scope here: `onegw` elides the middle of long tool results (`… [12 ctx lines]`, four occurrences in the patched run — the model worked around each by writing to a file and reading it back), and `bash` has no filesystem boundary under `approvalMode: yolo`.
+
+**Tests:** `internal/agent/compaction_pressure_test.go` — the tier does not run when the window has room, it runs under pressure, and the trigger is read before the tier clears; `internal/agent/compact_micro_test.go` — the token-budgeted window, what fits, the token reduction, and the placeholder naming the tool and offering the re-run; `internal/agent/compaction_memory_test.go` — the summarize request labels the memories and rules them out as the request, and both prompts bind the request slot to the transcript; `internal/agent/run_budget_test.go` — the wrap-up reaches the provider, it is spent once, and a negative budget is unbounded. **RCA:** [research/2026-10-21-slow-session-intent-drift-rca.md](research/2026-10-21-slow-session-intent-drift-rca.md).
+*Last updated: 2026-10-21 (`feat/subagent-tree-panel` — the subagent strip is a TREE now, Crush's shape, and its row stopped lying about three things):*
+
+**What the user asked for:** "update the TUI subagents display like crush bubbletea in my tcell". Crush's subagent display is one thing and it is a tree: the `Agent` tool call renders its nested tool calls as `tree.Root(header).Child(...)` with rounded connectors (`internal/ui/chat/agent.go`, `roundedEnumerator` in `internal/ui/chat/tools.go` — `├`/`╰` + `─`, with `│` continuing a branch down a wrapped child). There is no bottom panel in Crush; the tree in the transcript IS the subagent view.
+
+**xdev has two subagent surfaces and only one can be a tree.** The transcript's rows under a `task` call (`subLines`) hang under the call that spawned the child, and a grandchild has no call row of its own — its parent's call lives inside the child's own session — so that surface can only ever show ONE level. The always-on strip above the composer (`internal/tui/agentspanel.go`) shows every child at every depth, so it is the one that becomes the tree. It was flat, and flat is exactly what a chain reads wrong: a list of names that cannot say which child spawned which.
+
+**The tree needed an edge that did not exist.** `SubagentEvent` carried the child's label, agent, model, tool and duration — and no parent, so a grandchild arrived indistinguishable from a top-level child. The link was missing at the only place that knows it: the spawn. A child is spawned by a `task` call; a grandchild is spawned by a `task` call that lives inside a child, and the nested task tool is built where the child's own label is in hand (`task.go`). Three fields carry it out — `TaskTool.ParentLabel`, `SubagentSpec.Parent`, `SubagentEvent.Parent` — and `SpawnChild` stamps the parent on the start, tool and end events. A root has no parent (the session's own children), and a child whose parent the strip never saw is an **orphan**: it draws as a root rather than vanishing, because it is still work the user is watching.
+
+**The strip now paints** the tree column (`├─`/`╰─`/`│`, one level of indent per depth), the shared spinner while the child works and a static `✓` once it settled, the openable `⎿` next to the label, the label and agent type, the activity (the same `toolDetail` precedence the transcript's rows use), the child's OWN elapsed clock, and the model dim at the far right only when it differs from the session's.
+
+**Three defects the rewrite fixed, all visible in one row of the real-terminal capture:**
+
+1. **The label and the activity ran together.** The painter advanced one space (`x += width(name) + 1`), so the row read `reviewer grep · TODO`, one word. The `·` separator existed only between the label and the agent type.
+2. **The elapsed clock was never painted.** `elapsed` was computed and *reserved* in the row's budget (`budget := w - 2 - rightW - width(elapsed) - 2`) and no `drawText` ever drew it: every row said what the child was doing and never for how long.
+3. **The openable tick was a stray glyph**, parked at `w - 2 - rightW` — the far right, immediately left of the model column. It now sits next to the label, where it means what it says.
+
+A fourth, found while rewriting: the spinner was painted for every row INCLUDING settled ones, so a finished child kept spinning — the opposite of what the row's own comment promised.
+
+```
+before   ⠙ scout read · internal/tui/agentspanel.go                                       ⎿ mock-1
+after    ╰─ ✓ ⎿ scout · read · internal/tui/agentspanel.go                    0s mock-1
+```
+
+**Two decisions that are not obvious.** The paint budget counts the NEWEST rows and a kept row drags its ancestors in — a child without its parent on screen is a branch with nothing above it — so a chain can paint a row or two more than the 3-row budget; the chain's depth is bounded (`taskMaxDepth`, default 3), and the alternative (cutting the tree at the budget) put the newest link of a chain below the cut, which is the one row the user was looking for. And the keyboard focus lands on a VISIBLE row: `focusNewest` picks the newest among the painted rows and `focusMove` walks that same list, because a focus on a cut row would open a transcript the user cannot see. Roots are ordered by the newest row UNDER them, not by their own start, so a chain's newest link is not pushed below the budget; a flat batch is unaffected.
+
+**Deliberate:** the transcript's `⎿` rows were NOT changed (they show one level; there is nothing to nest), the strip keeps its chord (`Alt+F`), its toggle (`Alt+P`) and its click path, and the overflow line says `+N more` rather than `+N more running` — the strip keeps settled rows, so the hidden ones are not all working.
+
+**Tests.** `internal/agent/subagent_parent_test.go` — the parent link on a child's events, the empty link on a session's own child, and a chain driven END TO END (a real `task` spawn whose child calls `task` again, asserting the grandchild's event names the child that spawned it). `internal/tui/agentspanel_test.go` — the tree shape (the child sits under its parent, indented, with a branch), the orphan, the whole chain, the focus on a visible row, the separator, the clock, the settled tick, the openable tick next to the label. `cmd/xdev/task_child_sink_test.go` — the host's pass-through. `go build ./...` clean; `go test ./internal/tui/ ./internal/agent/ ./cmd/xdev/` green; the full suite's one failure (`internal/ai`'s `TestIsNetworkOutage`, which dials an unroutable IPv6 address and expects a "no route" error this machine does not produce) fails identically on a clean `HEAD` worktree, so it is not a regression. The click path is unchanged: clicking the strip row opens that child's transcript in the same panel surface as `/hub`'s Enter, on both binaries.
+
+**Design note:** `docs/decisions/subagent-tree-panel.md`.
+
 *Last updated: 2026-10-18 (`feat/session-failure-notify` — user request: "make xdev notify me when a session fails, and stop it from blocking the whole TUI").* **`internal/notify`** — a bounded, buffered event feed that drains a session's tool/toolResult events and classifies each one as **ok**, **failure**, or **unclassified**, with a settle window so a burst of failures collapses into one notification. The feed is a pure function over `session.Event` (no I/O, no TUI coupling, no goroutine), so it is testable in isolation and drops into any sink.
 
 **The contract is three lines.** `Feed.Settle()` returns `(kind, msg string)` and only emits after `SettleGrace` consecutive non-failure events since the last failure — so a single failed command is reported, and a retry that succeeds two turns later is not. `Feed.Push(e)` is the only input; `Feed.Drain()` is the only output, and both are idempotent under repeated calls. The feed never blocks: it has a hard cap (`MaxFeedEvents`, 256) and drops the oldest events with a `+N dropped` marker rather than growing unboundedly, which is what a runaway session would otherwise do.
@@ -4293,3 +4388,102 @@ xdev's background summarizer existed, but it was armed at the wrong moment: the 
 
 **Tests.** `internal/agent/compact_spec_test.go` — `TestLeadWindowMatchesTheOmpFormula` (the formula, table-driven), `TestTheArmStartsInsideTheLeadWindow` / `TestTheArmDoesNotStartOutsideTheLeadWindow` (the arm's timing, both sides), `TestTheArmDoesNotStartWhenTheTokenTriggerIsDisabled` (a method order that disables the token trigger arms nothing: the arm asks the trigger's OWN question — `tokenTriggerEnabled` — so a session that never compacts on the token budget never spends a provider call on a speculative summary either), `TestTheArmedResultAppliesWhenTheCompactionBecomesDue` (the due boundary spends no provider round-trip), `TestTheArmedResultIsNotAppliedBelowTheThreshold` (the armed result WAITS), `TestTheArmedResultIsDroppedWhenTheSessionBranchesAway`, `...WhenTheContextIsRebuiltAfterTheArm`, `...WhenItsAnchorLeavesTheActivePath`, `...WhenTheCompactedContextWouldNotFit`, `...WhenItWouldNotShrinkTheContext` (one test per invalidation rule), `TestAFailedArmFallsBackToTheSynchronousCompaction`, `TestTheDefaultInstallNeverArms` (the shipped default spends nothing in the background), `TestAnIdleDueBoundaryStillCompactsUnderAsync` (a compaction deferred under the idle trigger still lands: the trigger is consumed by the attempt, the debt is not), `TestTheHeadRoomRuleIsStrict` / `TestTheNoShrinkRuleIsInclusive` (the boundary values: the compacted context exactly ON `floor(threshold*0.8)` is KEPT — the rule is strictly greater — and exactly ON the context size is DROPPED — that rule is inclusive — with the comparison taken against the CURRENT context, not the stored span cost). `internal/agent/compact_ladder_test.go` — `TestAsyncCompactionAppliesWhenDue` (the rewritten async trigger test).
 *Last updated: 2026-10-21 (feat/session-ownership-lease + feat/speculative-compaction — stacked on feat/omp-session-parity-batchD: the session ownership lease — a cross-process flock on `<state root>/session-owners/<sessionId>.lock`, taken when a session is opened for writing AND when it materialises (every session xdev creates — the run, the import, the rpc and acp servers — is leased too, or the prevention layer is absent for the common case); a write path that finds it held FORKS the session once (new id, `parentSession`, the original left byte-identical) and says so, `xdev compress` REFUSES instead; a lease root that is THERE but cannot host a TRUSTWORTHY lease (not private, another user's, a symlink, not a directory) REFUSES the write — and says what to do — while one the ENVIRONMENT cannot host degrades to no lease, loudly; read-only opens stay lease-free and are never refused; and the committed-byte boundary remains the authoritative layer, because the lease is advisory and a pathname lock; the compaction is armed BEFORE it is due, inside omp's lead window min(32000, max(8192, floor(threshold*0.125))), and the armed summary is consumed at the boundary where the compaction becomes DUE - so that boundary costs no provider round-trip; the arm rides the existing compaction.async setting (off by default), an arm that no longer applies is dropped and the boundary compacts synchronously, and a compaction DEFERRED to the background is owed to the next boundary so the idle trigger cannot swallow it)*
+## A read is a read: the keep-going gate learns `gh` (2026-10-21)
+
+The keep-going gate asks one question — "did this run change anything?" — and a "yes" pushes the model past the answer it has already given, with the text "continue the unfinished work: take the next concrete step with tools". The gate's own history says the question is what matters: commit 89e06aa replaced the older "did any tool run" with "did anything change", because "a research session reads twenty files, so every one of them earned a nudge whose own text reads 'take the next concrete step now with tools': precisely what the request did not ask for".
+
+The verdict is produced by a classifier, and the classifier was incomplete. `gh` was not in the read-only command table at all, and the github and hub tools had no capability entry, so every `gh pr list`, every `github` search and every `hub jobs` call was reported as a MUTATION. A read reported as a mutation is the direction that costs the user the most: it arms the gate on a research turn.
+
+**THE FIELD REPORT, WITH THE TIMESTAMP.** Session 4c4addab, 2026-10-21: the user asked *"list me all pr urls openningin xdev"*. The model ran `gh pr list` twelve times and the github tool once, and at 22:44:46.566 it DELIVERED the answer — the open PR list, with the URLs. In the SAME millisecond the harness injected the keep-going nudge, because the turn's calls had all read as mutations. The model obeyed the nudge and spent the next three minutes reading the diffs of two unrelated worktrees (`fix/network-outage-hermetic-test`, `fix/slow-session-intent-drift`). The fork of that session, 6221a574, went on to 277 tool calls and ended at the turn limit.
+
+**`gh` IS JUDGED BY ITS NOUN AND SUBCOMMAND.** The read forms are a closed table (`internal/tool/readonly.go` — `ghReadSubs`): `pr list|view|status|diff|checks`, `issue list|view|status`, `repo list|view`, `search prs|issues|code|commits|repos`, `run list|view`, `release list|view`, `label list`, `secret list`, `gist list|view`, `workflow list|view`, `cache list`, `alias list`, `extension list`, `auth status`, `config get`, and the bare `status`. A noun the table has never heard of is NOT a read: gh's nouns are the write-heavy ones (`pr`, `issue`, `repo`), so the unknown direction is the mutating one — the same conservative default an unrecognised command gets. `gh api` is the one noun whose verb is a flag, not a word: it defaults to GET, and a method flag (`-X POST`, `--method POST`, `--method=POST`) is the only thing that makes it write.
+
+**A TOOL THAT MIXES READS AND WRITES IS JUDGED PER OP.** The github tool searches and creates under one name; the hub lists and cancels under one name. Neither can carry a whole-tool "read-only" cap honestly — a cap that says "read" is a lie for `pr_create`, and a cap that says "write" is a lie for `search_prs`. So the tool declares its read-only OPS (`internal/tool/caps.go` — `OpReadOnly`), and the gate asks the op (`tool.CallIsReadOnly`). The github tool's read ops are `repo_view`, `file_read` and the five `search_*`; the hub's are `jobs`, `list`, `inbox`, `ps`, `logs`, `describe`, `result` and `wait`.
+
+**THE CONSERVATIVE DEFAULT IS UNCHANGED.** An UNDECLARED tool still counts as a mutation — the same default Decide makes for an unmodeled name, so an `ext_*`/`mcp_*` call keeps its keep-going. The gate's fail-closed direction did not move: a write reported as a read costs a turn that ends when it should not have, and that direction stays impossible.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (131,749 bash calls, `internal/tool/classifier_gh_corpus_test.go`): 5,700 calls carry a `gh` verb, 853 of them run a WRITING gh verb, and none of the writing ones is ever classified as a read. The verdict flips on 1,035 of the 5,700 — the read forms the table now models.
+
+**LIVE, THE TUI OVER TMUX, THE SAME QUESTION.** Print mode cannot reproduce it: `cmd/xdev/print.go` sets `ag.PromptContinuation = interactive`, so a non-interactive run can never receive the nudge. The field reports are TUI runs, so the probe is a TUI run.
+
+| | origin/main | with this fix |
+|---|---|---|
+| assistant turns | 37 | 14 |
+| tool calls | 36 | 15 |
+| wall clock | 7 min (rescued by the run-budget wrap-up) | 2 min 42 s |
+| answer delivered | **no** | **yes** |
+
+The one nudge the fixed run still received was CORRECT: that turn ran `git fetch` and wrote `/tmp/prs.json`, and both change the workspace.
+
+**Tests.** `internal/tool/readonly_gh_test.go` — `TestReadOnlyCommandClassifiesGh` (the read forms and the writing forms, both directions, including the three `gh api` method spellings). `internal/tool/caps_op_test.go` — `TestCallIsReadOnlyJudgesAMultiOpToolByItsOp` (the per-op verdict; an unparseable call, a call with no op and an undeclared tool are all not reads) and `TestTheGithubToolDeclaresItsReadOnlyOps` (the real tool's op set, so a typo cannot pass). `internal/agent/keep_going_read_tools_test.go` — `TestKeepGoingStaysOffAfterAGhReadOnlyTurn` and `TestKeepGoingStaysOffAfterAReadOnlyToolOp` (the field report: a research turn that only reads gets NO nudge), against `TestKeepGoingStillFiresForAGhWrite` and `TestKeepGoingStillFiresForAWriteToolOp` (the other direction: a merge and a PR creation still arm the gate). `internal/tool/classifier_gh_corpus_test.go` — `TestNoDestructiveGhSpellingIsEverClassifiedAsARead` replays the whole local store and asserts the one property that must never break.
+*Last updated: 2026-10-21 (fix/keep-going-gate-read-tools — a plain question is answered once: the read form of `gh` is a read, a tool that mixes reads and writes is judged per op, and the gate's conservative default for an undeclared tool is unchanged)*
+
+## The `&` in `2>&1` is a redirect, not a command (2026-10-21)
+
+The keep-going gate asks "did this run change anything?" and a "yes" pushes the model past the answer it has already given. The verdict comes from `tool.ReadOnlyCommand`, which splits a shell line into segments and asks whether EVERY segment is a read. The splitter cut the line at every unquoted `&` — including the `&` that belongs to a REDIRECT.
+
+`cmd 2>&1` therefore became two segments: `"cmd 2>"` and `"1"`. The second one is not a command, so it could not be classified, and the WHOLE line stopped being a read. `2>&1` is how a session captures stderr, so it appears in a large share of the calls a research turn makes.
+
+**THE FIELD REPORT, COUNTED.** Session 4c4addab (2026-10-21): the model answered "list me all pr urls openningin xdev" and the harness pushed it past its own answer in the same millisecond. Replaying that turn's 26 calls through the old and the new classifier: **16 armed the gate, 5 do**. The five that still do are correct — one writes `/tmp/open_prs.txt`, and three are shell loops the classifier does not model.
+
+**THE FIX IS IN THE SPLITTER, NOT IN THE CLASSIFIER.** `>&2`, `2>&1`, `&>f` and `&>>f` are redirect operators. The `&` in them starts no new command, so the splitter keeps it with the command it belongs to (`internal/tool/policy.go` — `isRedirectAmp`). A control `&` (backgrounding, or the first half of `&&`) still splits, and a quoted `&` is still data.
+
+**A REDIRECT IS NOT AN ARGUMENT TO THE COMMAND.** With the redirect intact in one segment, `git branch --contains 01671eb 2>&1` handed the classifier a third argument — and a bare argument after `git branch` is a branch name to CREATE, so a query read as a write. The classifier now cuts the segment at the redirect before it judges the arguments (`internal/tool/readonly.go` — `cutAtRedirect`), taking the file-descriptor number with it: the operator is `[n]>`, so "2>&1" is one redirect, not an argument "2" followed by a redirect. The write check is separate and runs on the WHOLE segment, so nothing is lost by cutting.
+
+**THE WRITE CHECK NO LONGER STOPS AT THE FIRST `>`.** `hasWriteRedirect` returned on the first `>`, and the first `>` of `cmd 2>&1 > out` is the one in the fd shuffle — so the line reported itself as a read while writing `out`. A write reported as a read is the one direction that must be impossible, so the scan now CONTINUES past an fd shuffle and finds the later redirect.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (132,019 bash calls, origin/main's classifier against this one):
+
+| | origin/main | this branch |
+|---|---|---|
+| classified read-only | 59,472 (45.0%) | 65,609 (**49.7%**) |
+| verdict flipped to read | — | **6,195** |
+
+6,195 is six times the `gh` table's own 1,035. The `2>&1` split was the larger hole.
+
+**STILL OPEN, MEASURED.** 1,999 calls are still a mutation ONLY because of shell-loop scaffolding — the segments `for x in ...`, `do ...` and `done` are not commands, so the classifier cannot classify them. Making them transparent is a shell parser, and the conservative default (an unrecognised construct is a mutation) is the safe direction; it is the next thing to close, and the number is known.
+
+**Tests.** `internal/tool/readonly_redirect_test.go` — `TestSplitCompoundKeepsARedirectIntact` (the four redirect forms stay with their command; a background `&` and `&&` still split; a quoted `&` is data) and `TestARedirectAfterAnFdShuffleStillWrites` (a write after an fd shuffle is a write; `git branch --contains sha 2>&1` is a query, while `git branch sha` still CREATES). `internal/tool/classifier_corpus_test.go` — the destructive-git detector learned the same rule, so the store-wide guard still holds: 1,912 segments running a destructive git verb, none of them a read.
+*Last updated: 2026-10-21 (fix/keep-going-gate-redirect-split — the `&` in `2>&1` is a redirect and not a command: 6,195 of the store's 132,019 bash calls change verdict, a redirection is not an argument to the command, and a write behind an fd shuffle is still a write)*
+
+## A loop's scaffolding is not a command (2026-10-21)
+
+The last measured hole in the keep-going gate's classifier: the shell's own words.
+
+`for x in a b`, `do`, `done`, `then`, `else`, `elif` and `fi` name no program, so a segment that is one of them cannot change anything — but the classifier read them as unknown commands, and an unknown command is a mutation. A research turn that enumerated a list with a `for` loop was therefore a mutating turn, and the keep-going gate armed on it. The two PRs before this one measured the size of the gap: **1,999** of the store's 132,019 bash calls were a mutation ONLY because of loop scaffolding.
+
+**THE BODY IS STILL A COMMAND.** "do rm -rf /" writes, and it must keep writing. The scaffolding is transparent; the body is judged as one. The header of a `for` loop cannot write either: the shell expands its word list, and a command substitution inside it is a segment of its own (the splitter cuts at `(`), so the command inside it is still judged.
+
+**A CONDITION IS A COMMAND.** `while COND` and `until COND` can name a command in the condition position, so they are judged like one rather than treated as scaffolding.
+
+**THE STORE-WIDE GUARD GOT STRONGER, NOT WEAKER.** The destructive-git detector in the corpus test learned the same rule, so it now sees inside a loop body: the segments running a destructive git verb went from 1,912 to **1,926**, and none of them is ever classified as a read. A guard that stopped looking at the calls it most needs to see would be a weaker guard, not a faster one.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (132,175 bash calls): classified read-only **66,916 (50.6%)**, up from 65,609 (49.7%) and from origin/main's 59,472 (45.0%).
+
+**THE FIELD REPORT, END TO END.** The 26 tool calls of session 4c4addab, replayed through the three classifiers:
+
+| | calls that arm the keep-going gate |
+|---|---|
+| origin/main | 16 |
+| after the `gh` read forms (#719) | 15 |
+| after the `2>&1` split (#720) | 5 |
+| after the loop scaffolding | **1** |
+
+The one that still arms writes `/tmp/open_prs.txt`. It is correct.
+
+**Tests.** `internal/tool/readonly_loop_test.go` — `TestShellLoopScaffoldingIsTransparent` (a read-only loop is a read; the body still writes when it writes, redirects when it redirects, commits when it commits, merges when it merges, and deletes a branch when it deletes one; a while or until condition is judged as a command). `internal/tool/classifier_corpus_test.go` — the destructive-git detector strips the same keyword, so the store-wide guard covers the calls inside a loop body.
+*Last updated: 2026-10-22 (fix/keep-going-gate-loop-scaffolding — a loop's scaffolding names no program: the body is still judged as a command, a condition is still judged as a command, and the store-wide destructive guard now sees inside a loop body: 1,926 destructive segments, none of them a read)*
+
+## A tool declares what it does, and the gate reads that (2026-10-21)
+
+The keep-going gate judged a tool call by NAME, through a table in `internal/tool/caps.go` — and the table cannot know what a tool in another package says about itself. So every tool that was not in the table counted as a MUTATION, and the model recalls on almost every run: it is how it finds out what it already knows. A turn that asked the memory bank a question and then answered it was a mutating turn, and the gate pushed the model past its own answer.
+
+**THE DECLARATION LIVES ON THE TOOL.** `tool.Capser` already existed — "the optional interface a Tool implements to declare Caps without going through the name table. Preferred for new tools" — but `callMutated` read the name table alone, so a tool that declared itself was read as undeclared. `tool.CallIsReadOnly` now resolves the tool from the registry and asks it (`CapsOf`), so the Capser path is reachable.
+
+**THE MEMORY TOOLS DECLARE THEMSELVES.** `recall` reads the bank and returns what it found; `reflect` asks the bank to answer a question from what it has stored. Neither writes anything — the same shape as the `todo` tool (session scratch) and `web_search` (network) — so both are `ReadOnly` with `SideEffect: ScopeNetwork`. `retain` STORES, and says so explicitly rather than leaning on the undeclared default.
+
+**THE CONSERVATIVE DEFAULT IS STILL THERE.** A tool this build has never heard of — an `ext_*` or `mcp_*` name — is still undeclared, still a mutation, still keeps its keep-going.
+
+**Tests.** `internal/memory/hindsight_caps_test.go` — `TestTheMemoryToolsDeclareWhatTheyDo` (recall and reflect are reads, retain is not, and the verdict the gate reads matches). `internal/tool/caps_op_test.go` — the per-op path is unchanged; the Capser path is a new third way to answer, and it is only consulted for a tool that is IN the registry.
+*Last updated: 2026-10-22 (fix/keep-going-gate-tool-caps — a tool declares what it does and the gate reads that: recall and reflect are reads, retain is not, and the conservative default for a tool this build has never heard of is unchanged)*
+

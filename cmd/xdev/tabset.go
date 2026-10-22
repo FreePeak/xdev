@@ -155,6 +155,52 @@ func (ts *tabset) open(s *session.Store) (int, error) {
 	return len(ts.tabs) - 1, nil
 }
 
+// replaceCurrent puts s in the CURRENT tab's slot: the session the user was
+// looking at leaves the open set and s takes its place, so the set does not
+// grow. The displaced session's FILE survives — it is still on disk and still
+// in /resume — but it is no longer open, and the persisted set (which the next
+// launch reopens) no longer names it.
+//
+// This is the shape a RESUME has: a switch to another conversation, not a new
+// conversation. Appending a tab on every resume grew the set without the user
+// asking for it, and a directory where five old sessions had been resumed
+// showed six tabs — five of them stale, none of them open on purpose.
+//
+// Two cases are not a replacement:
+//   - s is ALREADY open: it is focused and nothing changes. That is the /tabs
+//     row and the C-1..9 chords, not a resume.
+//   - the current tab is RUNNING: a resume never kills a turn. The running
+//     session stays open and s is parked beside it. This is the one case
+//     where a resume grows the set, and it is the tab set doing its job.
+func (ts *tabset) replaceCurrent(s *session.Store) (int, error) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if i := ts.indexOfLocked(s.ID()); i >= 0 {
+		// Title may have changed on disk since we last saw it.
+		if t := s.Title(); t != "" {
+			ts.tabs[i].title = t
+		}
+		return i, nil
+	}
+	if len(ts.tabs) == 0 {
+		ts.tabs = append(ts.tabs, &tab{id: s.ID(), title: s.Title(), store: s})
+		return 0, nil
+	}
+	cur := ts.tabs[ts.cur]
+	if cur.running {
+		// A live turn is never killed by a resume: park the running session
+		// and open the resumed one beside it.
+		ts.tabs = append(ts.tabs, &tab{id: s.ID(), title: s.Title(), store: s})
+		return len(ts.tabs) - 1, nil
+	}
+	// The displaced session leaves the open set; its file stays on disk. It
+	// is NOT pushed onto the closed stack: the user did not close it, it was
+	// displaced, and C-shift-T means "reopen what I closed".
+	_ = cur.store.Close()
+	ts.tabs[ts.cur] = &tab{id: s.ID(), title: s.Title(), store: s}
+	return ts.cur, nil
+}
+
 // activate makes tab i current and clears its badge. Nothing here touches the
 // App: the caller rebuilds the view, which keeps this testable without a
 // screen.
@@ -168,6 +214,16 @@ func (ts *tabset) activate(i int) *tab {
 	t := ts.tabs[i]
 	t.unread = false
 	return t
+}
+
+// isOpen reports whether a session is already open as a tab. It is the one
+// question a caller needs before it can say what a switch DID: a resume that
+// landed on an already-open session focused it, and a resume that landed on a
+// new one replaced the session the user was in.
+func (ts *tabset) isOpen(id string) bool {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.indexOfLocked(id) >= 0
 }
 
 // focus makes the tab with this id current, or nil when it is not open.
@@ -508,15 +564,30 @@ func (ts *tabset) setTitle(id, title string) {
 	}
 }
 
-// persistIDs returns the open session ids in tab order — the set a later
-// launch in the same directory should reopen. The path, not the id: a
-// session's file is what survives a restart, and a store that never
-// materialized has nothing to reopen.
-func (ts *tabset) persistIDs() []string {
+// persistTabs returns the paths of the open tabs EXCEPT the one the user is
+// in — the set a later launch in the same directory should reopen.
+//
+// The excluded tab is the whole point. A launch opens ONE session of its own,
+// and that session was persisted too: so every launch left its live session
+// in the set, the next launch restored it as a tab ON TOP of its own new
+// one, and the set grew by one per launch. Measured on the shipped binary:
+// launch 1 showed no count, launch 2 showed "2 tabs", launch 3 showed "3
+// tabs" — a directory where one conversation was being worked on ended up
+// with six tabs, five of them dead.
+//
+// The session the user is in is not lost by leaving the set: it is on disk,
+// `--continue` (the breadcrumb) resumes it and `/resume` lists it. What the
+// set carries is what the user kept OPEN BESIDE it — a session parked by
+// /new, a fork, an import, a reopen — which is the working set the set
+// exists for.
+func (ts *tabset) persistTabs() []string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	out := make([]string, 0, len(ts.tabs))
-	for _, t := range ts.tabs {
+	for i, t := range ts.tabs {
+		if i == ts.cur {
+			continue
+		}
 		if t.store != nil && t.store.Path() != "" {
 			out = append(out, t.store.Path())
 		}

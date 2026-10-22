@@ -76,6 +76,11 @@ type SubagentSpec struct {
 	// SpawnChild copies it onto the child's start event, which is how a TUI
 	// row learns which id to fetch.
 	TranscriptID string
+	// Parent names the child that spawned THIS one ("" = the top-level
+	// session spawned it). A chain is the only way a child has a parent,
+	// and the spawn is the only place that knows it — so the link rides
+	// the events out to the display, which is what draws the tree.
+	Parent string
 }
 
 // SubagentEventKind names one observable moment in a child's run.
@@ -114,6 +119,11 @@ type SubagentEvent struct {
 	// It rides the start event so a host can bind a click on the child's
 	// transcript row to the transcript it may fetch.
 	TranscriptID string
+	// Parent names the child that spawned this one ("" = the top-level
+	// session spawned it). It is the tree's edge: a display that shows
+	// children flat cannot say which child spawned which, and a chain is
+	// exactly the case a flat list reads wrong.
+	Parent string
 }
 
 // SubagentOutput is the yield payload contract.
@@ -293,7 +303,8 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 			spec.OnEvent(SubagentEvent{
 				Kind: SubagentTool, Label: spec.Name, Model: spec.Model,
 				Tool: m.ToolName, Args: args, Status: status,
-				Dur: time.Duration(m.DurationMS) * time.Millisecond,
+				Dur:    time.Duration(m.DurationMS) * time.Millisecond,
+				Parent: spec.Parent,
 			})
 		},
 	}
@@ -346,6 +357,7 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 			spec.OnEvent(SubagentEvent{
 				Kind: SubagentEnd, Label: spec.Name, Model: spec.Model,
 				Status: res.Status, Dur: time.Since(started),
+				Parent: spec.Parent,
 			})
 		}
 	}()
@@ -355,6 +367,7 @@ func SpawnChild(ctx context.Context, spec SubagentSpec) (*SubagentResult, error)
 			// The store is captured by now (OnRun fired above), so this is
 			// the first moment a host could fetch anything for this child.
 			TranscriptID: spec.TranscriptID,
+			Parent:       spec.Parent,
 		})
 	}
 	cctx, cancel := context.WithCancel(ctx)

@@ -263,9 +263,195 @@ func readOnlyGitWorktree(args []string) bool {
 	return readOnlyGitWorktreeSubs[args[0]]
 }
 
+// ghReadSubs are the `gh` subcommands that only READ, per noun.
+//
+// `gh` is the same shape as `git`: a small set of nouns, each with read forms
+// and write forms that share the first two words. `gh pr list` and `gh pr
+// merge` differ by one word, so the noun alone cannot decide — the subcommand
+// does.
+//
+// A noun that is not in this table is not a read. gh grows nouns, and a noun
+// this table has never heard of is more likely to be a write (`pr`, `issue`
+// and `repo` are the write-heavy ones), so the unknown direction is the
+// mutating one — the same conservative default an unrecognised command gets.
+var ghReadSubs = map[string]map[string]bool{
+	"pr":        {"list": true, "view": true, "status": true, "diff": true, "checks": true},
+	"issue":     {"list": true, "view": true, "status": true},
+	"repo":      {"list": true, "view": true},
+	"search":    {"prs": true, "issues": true, "code": true, "commits": true, "repos": true},
+	"run":       {"list": true, "view": true},
+	"release":   {"list": true, "view": true, "download": true},
+	"label":     {"list": true},
+	"secret":    {"list": true},
+	"gist":      {"list": true, "view": true},
+	"workflow":  {"list": true, "view": true},
+	"cache":     {"list": true},
+	"alias":     {"list": true},
+	"extension": {"list": true},
+	"auth":      {"status": true},
+	"config":    {"get": true},
+}
+
+// ghBareReadNouns are the `gh` nouns that read with no subcommand at all.
+var ghBareReadNouns = map[string]bool{"status": true, "browse": true}
+
+// readOnlyGh reports whether a `gh` invocation is a pure read.
+//
+// Live 2026-10-21 (session 4c4addab): the user asked "list me all pr urls
+// openningin xdev" and the model answered it — the open PR list, with the
+// URLs — and in the same millisecond the harness pushed it past its own
+// answer, because `gh` was not in the read-only table at all and every
+// `gh pr list` was therefore read as a mutation. The model then spent three
+// minutes reading the diffs of two unrelated worktrees.
+//
+// `gh api` is the one noun whose verb is a flag, not a word: it defaults to
+// GET and a method flag is the only thing that makes it write.
+func readOnlyGh(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	// gh's global flags come before the noun and take no value.
+	i := 0
+	for ; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") {
+			break
+		}
+	}
+	if i >= len(args) {
+		return false
+	}
+	noun := args[i]
+	rest := args[i+1:]
+	if noun == "api" {
+		return ghApiIsRead(rest)
+	}
+	if ghBareReadNouns[noun] {
+		return true
+	}
+	subs, ok := ghReadSubs[noun]
+	if !ok {
+		return false
+	}
+	// The subcommand is the first non-flag word after the noun.
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return subs[a]
+	}
+	return false
+}
+
+// ghApiIsRead reports whether a `gh api` call is a read.
+//
+// `gh api` sends a GET unless a method flag says otherwise, and the flag has
+// three spellings: `-X POST`, `--method POST` and `--method=POST`.
+func ghApiIsRead(args []string) bool {
+	method := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-X" || a == "--method":
+			if i+1 < len(args) {
+				method = strings.ToUpper(args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "--method="):
+			method = strings.ToUpper(strings.TrimPrefix(a, "--method="))
+		case strings.HasPrefix(a, "-X") && len(a) > 2:
+			method = strings.ToUpper(a[2:])
+		}
+	}
+	switch method {
+	case "", "GET", "HEAD", "OPTIONS":
+		return true
+	}
+	return false
+}
+
+// cutAtRedirect returns the segment up to the first unquoted '<' or '>'.
+//
+// A redirection is not an argument to the command. `git branch --contains
+// 01671eb 2>&1` passes --contains and 01671eb to git and 2>&1 to the shell,
+// but the classifier saw "2>&1" as a third argument — and a bare argument
+// after `git branch` is a branch name to CREATE, so the query became a
+// write. Cutting at the redirect leaves the command's own arguments, which
+// is what the caller wants.
+//
+// The cut takes the file-descriptor number with it: the operator is `[n]>`,
+// so "2>&1" is one redirect, not an argument "2" followed by a redirect.
+//
+// The write check is separate and runs on the WHOLE segment
+// (hasWriteRedirect), so nothing is lost by cutting here: a segment that
+// redirects is still a write.
+func cutAtRedirect(seg string) string {
+	var quote byte
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '>' || c == '<':
+			j := i
+			for j > 0 && seg[j-1] >= '0' && seg[j-1] <= '9' {
+				j-- // the file-descriptor number belongs to the operator
+			}
+			return seg[:j]
+		}
+	}
+	return seg
+}
+
+// shellKeywordScaffolding are the shell keywords that NAME no program, so a
+// segment that starts with one cannot change anything on its own.
+//
+//	"for x in a b"   the loop header: a variable and a word list
+//	"do"            the body's introducer
+//	"done"          the loop's end
+//	"then" "else"   the conditional's branches
+//	"elif" "fi"     the conditional's branches
+//
+// A loop's BODY is a command and is judged on its own — "do rm -rf /" is
+// still a write. The header of a for loop cannot write: the shell expands
+// its word list, and a command substitution inside it is a segment of its
+// own (the splitter cuts at `(`), so the command is still judged.
+var shellKeywordScaffolding = map[string]bool{
+	"for": true, "do": true, "done": true,
+	"then": true, "else": true, "elif": true, "fi": true,
+}
+
+// shellKeywordCommand are the shell keywords whose segment CONTINUES with a
+// command or an expression, so the rest of the segment is what has to be
+// judged.
+//
+//	"do rm -rf /"   the body
+//	"while COND"   the condition, which can name a command
+//	"until COND"   the condition
+//	"if COND"      the condition
+var shellKeywordCommand = map[string]bool{
+	"do": true, "while": true, "until": true, "if": true,
+}
+
+// stripShellKeyword removes a leading shell keyword from a segment's fields
+// and reports whether there was one. The keyword itself is not a command.
+func stripShellKeyword(fields []string) ([]string, string) {
+	if len(fields) == 0 {
+		return fields, ""
+	}
+	k := fields[0]
+	if shellKeywordScaffolding[k] || shellKeywordCommand[k] {
+		return fields[1:], k
+	}
+	return fields, ""
+}
+
 // readOnlySegment judges one already-split segment.
 func readOnlySegment(seg string) bool {
-	fields := strings.Fields(seg)
+	fields := strings.Fields(cutAtRedirect(seg))
 	// Leading VAR=value assignments do not change the command: `FOO=1 ls` is
 	// an ls. A segment that is ONLY assignments is a write (it exports state),
 	// so it falls through to the false below.
@@ -275,9 +461,22 @@ func readOnlySegment(seg string) bool {
 	if len(fields) == 0 {
 		return false
 	}
+	// A shell keyword is scaffolding, not a command. The body of a loop and
+	// the condition of a while are commands, so they are judged as one.
+	if rest, kw := stripShellKeyword(fields); kw != "" {
+		if len(rest) == 0 {
+			return true // the keyword alone names no program
+		}
+		if shellKeywordCommand[kw] {
+			return readOnlySegment(strings.Join(rest, " "))
+		}
+		return true
+	}
 	switch head := fields[0]; head {
 	case "git":
 		return readOnlyGit(fields[1:])
+	case "gh":
+		return readOnlyGh(fields[1:])
 	case "sed":
 		return !hasFlagContaining(fields[1:], 'i')
 	case "sort":
@@ -401,7 +600,14 @@ func hasWriteRedirect(seg string) bool {
 			}
 			if j < len(seg) && seg[j] == '&' {
 				// `>&1`, `2>&1`, `&>` — fd shuffle / merge, not a file write.
-				return false
+				//
+				// The scan CONTINUES: this operator is not the only one in
+				// the segment, and the line may still write a file later —
+				// "cmd 2>&1 > out" writes out. Returning here would report
+				// that line as a read, which is the one direction that must
+				// be impossible: a write read as a read costs a turn that
+				// ends when it should not have.
+				continue
 			}
 			for j < len(seg) && (seg[j] == ' ' || seg[j] == '\t') {
 				j++
