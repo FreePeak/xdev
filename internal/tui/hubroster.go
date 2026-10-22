@@ -509,7 +509,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		}
 	}
 	hubRosterBox(s, y, h, wid, a.th.Box(), brdSt)
-	drawText(s, 3, y+1, rosterSnippet("AGENT HUB — ↑↓ select · Enter transcript · k kill · p park · r revive · Esc close", printW(panelW, 3)), dimSt)
+	drawText(s, 3, y+1, rosterSnippet("Agent Hub · running 0 · idle 0 · parked 0 · aborted 0", printW(panelW, 3)), dimSt)
 	for i, text := range texts {
 		rowStyle := rowSt
 		if i == sel {
