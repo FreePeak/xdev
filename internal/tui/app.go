@@ -207,7 +207,7 @@ type App struct {
 	tabsNumbered bool
 	// onTabReopen reopens the most recently closed session (opencode
 	// session_tab_reopen). nil degrades the chord to a notice.
-	onTabReopen func() error
+	onTabReopen         func() error
 	loadSubagentItemsOp func() []SessionPickerItem
 	// The decode window of the message being streamed: the first and last
 	// delta. AddUsage closes the window and turns it into st.Rate;
@@ -5652,7 +5652,7 @@ func (a *App) composerAvail() int {
 // large paste showed NOTHING while the full draft sat in the buffer — the
 // "composer is empty but Enter sends it all" bug.
 func (a *App) composerBudget() int {
-	n := a.height - 5 - a.transcriptTop()
+	n := a.height - 7 - a.transcriptTop()
 	if n < 1 {
 		n = 1
 	}
@@ -5687,7 +5687,7 @@ func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
 // input rows, bottom divider).
 func (a *App) composerRows() int {
 	lines, _, _, _, _ := a.composerView()
-	return len(lines) + 2
+	return len(lines) + 4
 }
 
 // drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
@@ -5712,30 +5712,41 @@ func (a *App) drawComposer(yTop int) {
 	}
 	ms := a.mdStyle()
 
-	// Top border: ────── (full-width rule, no corners).
-	//
-	// It ramps from the accent ink to the border ink. This is the one
-	// full-width surface in the TUI that carries no text, so the ramp costs
-	// nothing legible — and the frame is where the eye lands when it comes
-	// back to type, so the accent belongs at the prompt end of it.
-	a.gradientRule(yTop-1, 1, w-2,
-		a.th.Get(theme.AccentAssistant), a.th.Get(theme.PromptBorderActive),
-		boxRune(box.Horizontal), bs)
+	// Top border: ╭─╮ on top, with the accent→border gradient across the rule.
+	drawText(a.scr, 1, yTop-1, box.TopLeft, bs)
+	a.gradientRule(yTop-1, 2, w-3, a.th.Get(theme.AccentAssistant), a.th.Get(theme.PromptBorderActive), boxRune(box.Horizontal), bs)
+	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
-	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
-	// above counts the draft rows the window hides, and says whether the ❯
-	// belongs on the first painted row (nothing is scrolled off the top) or
-	// belongs with the hidden head instead.
+	// Input rows: a blank pad, then │ ❯ first…│ and continuation rows
+	// aligned under the text, then a second blank pad. The pads are what make
+	// the box a field rather than a table row — the draft breathes inside the
+	// frame instead of touching it — and they are part of composerRows(), so
+	// the viewport and the overlays above already account for them.
 	lines, curRow, curCol, above, _ := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
-	for i, ln := range lines {
-		y := yTop + i
-		if i == 0 && above == 0 {
-			drawText(a.scr, 1, y, "❯ ", promptStyle)
-		} else {
-			drawText(a.scr, 1, y, "  ", promptStyle)
+	vert := boxRune(box.Vertical)
+	// yDraft is the first input row: one row below yTop, under the pad.
+	yDraft := yTop + 1
+	// padRow is one of the blank interior rows: side borders, no glyphs, and
+	// every cell filled so a previous frame's text cannot survive underneath.
+	padRow := func(y int) {
+		a.scr.SetContent(1, y, vert, nil, bs)
+		a.scr.SetContent(w-2, y, vert, nil, bs)
+		for x := 2; x < w-2; x++ {
+			a.scr.SetContent(x, y, ' ', nil, ms.body)
 		}
-		drawText(a.scr, 3, y, ln, ms.body)
+	}
+	padRow(yTop)
+	for i, ln := range lines {
+		y := yDraft + i
+		a.scr.SetContent(1, y, vert, nil, bs)
+		a.scr.SetContent(w-2, y, vert, nil, bs)
+		if i == 0 && above == 0 {
+			drawText(a.scr, 3, y, "❯ ", promptStyle)
+		} else {
+			drawText(a.scr, 3, y, "  ", promptStyle)
+		}
+		drawText(a.scr, 5, y, ln, ms.body)
 	}
 	// Blank the space between the last text row and the right border so a
 	// short line cannot leave stale cells from a previous longer draft. The
@@ -5743,28 +5754,24 @@ func (a *App) drawComposer(yTop int) {
 	// trailing pad composerAvail() reserves, so a full row's last rune keeps
 	// its air instead of touching the frame.
 	for i, ln := range lines {
-		x := 3 + width(ln)
-		if x == 3 && a.ed.Text() == "" {
+		y := yDraft + i
+		x := 5 + width(ln)
+		if x == 5 && a.ed.Text() == "" {
 			// grok's "Type a message…": an empty prompt is not a blank void.
 			// Drawn here, after the text row, because the fill below would
 			// otherwise blank it back to spaces.
 			ph := "Type a message…"
-			drawText(a.scr, 3, yTop+i, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
+			drawText(a.scr, 5, y, ph, ms.body.Foreground(a.cellColor(a.th.Get(theme.GrayDim))))
 			x += width(ph)
 		}
 		for ; x < w-3; x++ {
-			a.scr.SetContent(x, yTop+i, ' ', nil, ms.body)
+			a.scr.SetContent(x, y, ' ', nil, ms.body)
 		}
 	}
+	padRow(yDraft + len(lines))
 
-	// Info divider bottom border: ─ ⠋ model · high · plan ───────
-	//
-	// Each part wears its own ink: model, reasoning level and mode are three
-	// different questions (which model, how hard is it thinking, what is it
-	// allowed to do), and one status_line_model grey over all three answered
-	// none of them by colour. They stay one phrase with " · " between, so the
-	// row's geometry — and the hint's budget below — is unchanged.
-	yBottom := yTop + len(lines)
+	// Info divider bottom border: ╰─ ⠋ model · high · plan ─────── ╯
+	yBottom := yDraft + len(lines) + 1
 	infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
 	if hasInfoBg {
 		infoSt = infoSt.Background(a.cellColor(infoBg))
@@ -5781,26 +5788,17 @@ func (a *App) drawComposer(yTop int) {
 		return n
 	}
 	infoW := measure(parts)
-	for x := 1; x < w-1; x++ {
+	drawText(a.scr, 1, yBottom, box.BottomLeft, divSt)
+	for x := 2; x < w-2; x++ {
 		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
-	// infoX is where the phrase starts: the leading space the one-string
-	// version carried lives at 2, so the text itself begins at 3.
 	const infoX = 3
-	// The model is the one part that degrades instead of leaving: its
-	// "provider/" prefix is a routing detail the row never needed, so a
-	// narrow one keeps the name ("space-bunny-free"). Without this the tail
-	// drop below deleted the level AND the mode to make room for a prefix —
-	// the one part of the phrase a user cannot afford to lose.
 	for i := range parts {
 		if parts[i].name == "model" && infoX+infoW > w-2 {
 			parts[i].text = modelLeaf(parts[i].text)
 			infoW = measure(parts)
 		}
 	}
-	// Drop the tail that will not fit rather than overrun the border: a long
-	// model name must never push the mode off the row's right edge, and the
-	// mode is the one part of this phrase a user cannot afford to lose.
 	for len(parts) > 0 && infoX+infoW > w-2 {
 		parts = parts[:len(parts)-1]
 		infoW = measure(parts)
@@ -5817,28 +5815,13 @@ func (a *App) drawComposer(yTop int) {
 			x += width(p.text)
 		}
 	}
-	// The divider's right end is the frame's own: no count rides it. The ▲n▼n
-	// viewport hint that used to live here repeated what the "↓ n new" chip
-	// over the transcript already says (and says with a click on it), and
-	// "draft ▲n" put a second number in the corner of the one box the user is
-	// reading their own words in. A field that chatters about itself while you
-	// type is not a field.
+	drawText(a.scr, w-2, yBottom, box.BottomRight, divSt)
+
 	// Cursor: blinking block at the editor position inside the painted window.
-	//
-	// The SHAPE is the app's, not the terminal's default: a block cursor is
-	// what makes the input read as a prompt rather than a plain text field.
-	//
-	// The COLOUR is deliberately the terminal's. tcell paints a cursor colour
-	// as an OSC 12 sequence (ESC ] 12 ; #rrggbb BEL) on every frame, and a
-	// pane-style renderer that only speaks CSI reads that payload as
-	// printable text — the box's placeholder would arrive as
-	// "12;#bb9af7Type a message…". The block shape is a CSI sequence every
-	// renderer already understands, so the shape is taken and the colour is
-	// left alone.
-	cx := 3 + curCol
+	cx := 5 + curCol
 	a.cursorStyle = tcell.CursorStyleBlinkingBlock
 	a.scr.SetCursorStyle(a.cursorStyle)
-	a.scr.ShowCursor(min(cx, w-3), yTop+curRow)
+	a.scr.ShowCursor(min(cx, w-3), yDraft+curRow)
 }
 
 // drawJumpChip paints the "↓ n new" jump-to-latest button over the

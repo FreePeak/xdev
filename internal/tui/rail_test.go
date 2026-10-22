@@ -105,6 +105,7 @@ func TestMouseClickHitsTheCellUnderThePointer(t *testing.T) {
 	app.mu.Lock()
 	press(app, transcriptContentX, y)
 	release(app, transcriptContentX, y)
+	app.mu.Unlock()
 	app.mu.Lock()
 	press(app, transcriptContentX, y)
 	app.mu.Unlock()

@@ -12,7 +12,7 @@ import (
 // palette that left a band to the terminal would render a diff the user's own
 // colours decide, which is the bug the launch themes were fixed for.
 func TestShippedPalettesParse(t *testing.T) {
-	want := []string{"catppuccin", "dracula", "gruvbox", "nord", "one-dark", "one-light", "rose-pine", "tokyo-night"}
+	want := []string{"catppuccin", "dracula", "gruvbox", "nord", "omarchy", "one-dark", "one-light", "rose-pine", "tokyo-night"}
 
 	entries, err := builtinFS.ReadDir("builtin")
 	if err != nil {
