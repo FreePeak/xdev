@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -289,5 +290,32 @@ func TestHubRosterMouse(t *testing.T) {
 	app.mu.Unlock()
 	if sel != 0 {
 		t.Fatalf("wheel up left the selection at %d, want 0", sel)
+	}
+}
+
+func TestAgentHubPaint(t *testing.T) {
+	app, scr := newTestApp(t, 120, 40)
+	f := &hubFixture{rows: rosterRows()}
+	app.SetHubOps(f.ops())
+	dispatch(app, "/hub")
+	app.draw()
+	out := screenText(scr)
+	if !strings.Contains(out, "❯ ") {
+		t.Fatalf("missing cursor:\n%s", out)
+	}
+	if !strings.Contains(out, "├── ") && !strings.Contains(out, "└── ") {
+		t.Fatalf("missing connector:\n%s", out)
+	}
+	if !strings.Contains(out, "⟳") {
+		t.Fatalf("missing status glyph:\n%s", out)
+	}
+	if !strings.Contains(out, "hub-1") {
+		t.Fatalf("missing agent id:\n%s", out)
+	}
+	if !strings.Contains(out, "free") {
+		t.Fatalf("missing model:\n%s", out)
+	}
+	if !strings.Contains(out, "Agent Hub") {
+		t.Fatalf("missing title:\n%s", out)
 	}
 }
