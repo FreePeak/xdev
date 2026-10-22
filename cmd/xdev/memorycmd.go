@@ -25,8 +25,9 @@ func runMemoryCLI(args []string, settings *config.Settings) int {
 const memoryUsage = `usage: xdev memory <subcommand>
 
   show [--injected]        MEMORY.md (--injected: the block the prompt sees)
-  stats [--json]           on-disk sizes, lesson count, scratchpad
+  stats [--json]           on-disk sizes, lesson count, recipe count, scratchpad
   lessons [--json] [--limit N]   parsed learned.md entries (oldest first)
+  recipes [--json]         the tool-usage records (failures and their recipes)
   add [--context C] <text|->     append a lesson ("-" reads stdin)
   edit -                   replace MEMORY.md from stdin
   export [-o file]         JSON bundle to stdout or file
@@ -48,6 +49,13 @@ func memoryCmd(args []string, in io.Reader, out, errOut io.Writer, settings *con
 			return 2
 		}
 		return 0
+	}
+	// The tool-usage records are a local store beside MEMORY.md, not a
+	// backend's business: the verb reads them without asking which
+	// backend is configured (with hindsight on, the backend itself is on
+	// the server and the recipes are still here).
+	if sub == "recipes" {
+		return memoryRecipes(rest, out, errOut)
 	}
 	b, err := memoryCLIBackend(settings)
 	if err != nil {
@@ -222,6 +230,42 @@ func memoryLessons(b *memory.Backend, args []string, out, errOut io.Writer) int 
 	return 0
 }
 
+// memoryRecipes lists the tool-usage records: the calls that failed and,
+// where the agent found a way through, the recipe that made them work.
+// It reads the same store the prompt injection reads.
+func memoryRecipes(args []string, out, errOut io.Writer) int {
+	fs := flag.NewFlagSet("memory recipes", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	asJSON := fs.Bool("json", false, "machine-readable records")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	records := memory.SharedToolUse(toolUseDir()).Records()
+	if *asJSON {
+		if records == nil {
+			records = []memory.ToolUseRecord{}
+		}
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(records); err != nil {
+			fmt.Fprintln(errOut, "xdev memory:", err)
+			return 1
+		}
+		return 0
+	}
+	if len(records) == 0 {
+		fmt.Fprintln(out, "(no tool-usage records yet)")
+		return 0
+	}
+	for _, r := range records {
+		fmt.Fprintf(out, "%s (%d hit(s)): %s\n", r.Tool, r.Hits, r.Symptom)
+		if r.Fix != "" {
+			fmt.Fprintf(out, "        fixed by: %s\n", r.Fix)
+		}
+	}
+	return 0
+}
+
 func memoryAdd(b *memory.Backend, args []string, in io.Reader, out, errOut io.Writer) int {
 	fs := flag.NewFlagSet("memory add", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -364,8 +408,8 @@ func memoryImport(b *memory.Backend, args []string, in io.Reader, out, errOut io
 	if *merge {
 		mode = "merged"
 	}
-	fmt.Fprintf(out, "%s: summary %d B, %d lesson(s), scratchpad %d B\n",
-		mode, info.Summary.Bytes, info.LessonCount, info.Scratchpad.Bytes)
+	fmt.Fprintf(out, "%s: summary %d B, %d lesson(s), %d tool recipe(s), scratchpad %d B\n",
+		mode, info.Summary.Bytes, info.LessonCount, info.RecipeCount, info.Scratchpad.Bytes)
 	return 0
 }
 

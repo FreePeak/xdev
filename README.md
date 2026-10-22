@@ -351,6 +351,18 @@ search over the last message and will miss.
 | Slash commands | `<cwd>/.xdev/commands/*.md`, `~/.xdev/agent/commands/*.md` | when you type `/<name>`; project wins a collision |
 | Subagents | `<cwd>/.xdev/agents/`, `~/.xdev/agent/agents/` | when dispatched by the `task` tool |
 | **Recall (memory guidance)** | the configured backend (`memory: hindsight` → a bank over HTTP) | **ranked against the last user turn only, cached 60 s, capped at 1024 tokens, and labelled "not authoritative"** |
+| **Tool-usage recipes** | `<data dir>/memory/tool-use.jsonl` | **when a tool has failed here before: the recipe the agent's own recovery found, capped at 8 lines, filtered to the tools this session has** |
+
+A tool call that fails is recorded, and when the agent finds a form of that call
+that works, the difference between the two becomes a **recipe**: "read with
+`file_path` was refused — the working call passes `path`". The recipe is injected
+into the prompts of later sessions, so a mistake about a tool is paid for once
+instead of once per session. A recipe is written only when the two calls are the
+same call (a shared argument, a supplied argument, or a renamed one): a failure
+followed by a different call that happens to work says nothing about how to use
+the tool. `toolLessons: false` turns the loop off, and `xdev memory recipes`
+lists what was learned.
+[Rationale with the cases](docs/decisions/tool-use-recipes.md).
 
 So a "never do X" rule that only exists as a memory row is not policy: it competes
 for 4 KB with everything else the bank knows, and the block tells the model to
@@ -420,6 +432,15 @@ secrets are configured, and ship ad-hoc signed when they are not: a release
 never fails for want of credentials. See
 [`.github/workflows/release.yml`](.github/workflows/release.yml) (job
 `macos-sign`) for the five secret names.
+
+A push to `main` cuts the next version, and the version says what the commits
+say: a feature commit (`feat`, `feature`, `enhance`, `refactor`, `perf`, …)
+moves the minor (Y) and resets the patch (Z), anything else — a bug fix
+included — moves the patch (Z). The major (X) is yours: a breaking change in
+the range is reported as a warning, and the major release is cut by pushing a
+`vX.0.0` tag or dispatching the workflow with an explicit version.
+`scripts/release-version.sh` holds the rule and
+`scripts/release-version_test.sh` proves it.
 
 ## Design principles
 
