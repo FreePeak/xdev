@@ -4552,3 +4552,20 @@ The key is used for the NOTICE only. The tool-result cache keeps the exact key, 
 
 **Tests.** `internal/tool/canonical_test.go` — `TestCanonicalCommandGroupsTheSameWork` (the same work at two depths, with two projections, with two pipe targets, in two flag orders, groups alike; a different target, a different state, a different program and a different file range do NOT). `internal/agent/repeat_coarse_test.go` — `TestRepeatedWorkNoticeFiresOnARederivation` (five spellings of one question, interleaved with other work, and the fifth carries the notice), `TestRepeatedWorkNoticeStaysOffForDifferentWork`, `TestTheHardBreakStaysOnTheExactChain`. `internal/agent/run_budget_stop_test.go` — `TestTheRunBudgetsStopIsAuthoritative` (RED without the fix), `TestTheKeepGoingGateStillFiresForUnfinishedWork`, `TestTheKeepGoingGateDoesNotNudgeTwice`, `TestARealUserTurnEndsTheBudgetsAuthority`. `internal/config/runbudget_test.go` — `TestRunBudgetSetting`. `internal/agent/prompt_stop_test.go` — `TestBasePromptCarriesTheStopOnceYouHaveTheAnswer`.
 *Last updated: 2026-10-22 (fix/rederivation-loop — a question stops at the report: the prompt says to stop gathering once the answer is in hand, the run budget's stop is authoritative, the budget is configurable, and a canonical "same work" key finds 41% more within-run repeats for the notice — two detectors were measured and rejected)*
+
+## The shell's own words are not commands (2026-10-22)
+
+A live A/B of the previous batch found three more read-only shell patterns that the keep-going gate read as MUTATIONS, and each one armed the gate on a turn that had changed nothing.
+
+**A SHELL TEST IS A READ.** `[ "$n" != "0" ]` looks at values and returns a status. It changes no file, and a session that guards a loop with one is still only READING. Live 2026-10-22: *"do n=$(gh api …); if [ "$n" != "0" ]; then … fi"* was read as a mutation, armed the gate, and pushed the model past the answer it had.
+
+**THE SHELL'S CONTROL WORDS NAME NO PROGRAM.** `continue`, `break`, `read`, `exit` and `shift` are the shell's own words: a loop's jump, a line of stdin, the end of the shell. None of them is a program, so none of them can write.
+
+**`git branch --list <pattern>` IS A QUERY.** The list form takes a PATTERN, not a branch name to create — so the pattern was read as a create, and `git branch -r --list 'origin/*'` armed the gate. The list form is now modelled the way the six git verbs already were: judged by its arguments.
+
+**AND A BRANCH IS A COMMAND, NOT SCAFFOLDING.** The fix above exposed a bug in the batch before it: `if COND; then git worktree remove "$p"; else …; fi` was treated as scaffolding, and the `git worktree remove` inside the branch was never judged. The store-wide destructive-git guard caught it — 1,854 destructive segments, and one of them had gone dark. `then`, `else` and `elif` now carry their branch into the judgement, the way `do` carries a loop's body.
+
+Measured over this repo's own session store (134,296 bash calls): classified read-only **73,949 (55.1%)**, up from 73,053 (54.4%) and from origin/main's 59,472 (45.0%).
+
+**Tests.** `internal/tool/readonly_patterns_test.go` — `TestReadOnlyPatternsAreReads` (a test, a control word, and a branch listing are reads; a branch NAME still creates; a branch that removes a worktree is a write).
+*Last updated: 2026-10-22 (fix/keep-going-gate-read-patterns — a shell test, a control word and a branch listing are reads, and a branch is a command: 55.1% of the store's calls are reads)*
