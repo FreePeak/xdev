@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -21,6 +22,10 @@ import (
 // HubAgent is one roster row, preformatted by cmd from hub.Roster().
 type HubAgent struct {
 	ID, Name, Status, Model, Activity, Cost string
+	ParentID, Level, Kind, Outcome          string
+	Tokens                                  int64
+	Requests, Tools                         int
+	Elapsed                                 time.Duration
 }
 
 // HubTranscriptLine is one row of a child's transcript.
