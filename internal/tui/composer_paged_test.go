@@ -49,7 +49,7 @@ func TestLargePasteStaysOnScreen(t *testing.T) {
 	if strings.Contains(text, "draft ▲") {
 		t.Fatalf("the divider carries a draft count again:\n%s", text)
 	}
-	if got := app.composerRows(); got > app.composerBudget()+2 {
+	if got := app.composerRows(); got > app.composerBudget()+4 {
 		t.Fatalf("the box is %d rows against a %d budget: it grew past the screen", got, app.composerBudget())
 	}
 }
@@ -59,7 +59,7 @@ func TestLargePasteStaysOnScreen(t *testing.T) {
 func TestComposerTopNeverLeavesTheScreen(t *testing.T) {
 	app, _ := newTestApp(t, 100, 30)
 	app.AddSystemBlock("ready")
-	max := app.composerBudget() + 2 // painted rows + top border + divider
+	max := app.composerBudget() + 4 // painted rows + four chrome rows
 	for _, n := range []int{1, 2, max - 3, max - 2, max - 1, max, max + 1, 40, 200, 5000} {
 		setDraft(&app.ed, strings.Repeat("l\n", n), 2*n)
 		if got := app.composerRows(); got > max {
@@ -84,7 +84,7 @@ func TestArrowsScrollThePagedComposer(t *testing.T) {
 	app.ed.PushHistory("older prompt")
 
 	_, startRow, _ := app.composerInputLines()
-	if startRow < 23 {
+	if startRow < 21 {
 		t.Fatalf("cursor at the buffer end should sit on the window's last row, got %d", startRow)
 	}
 	for i := range 32 {

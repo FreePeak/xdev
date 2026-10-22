@@ -453,8 +453,8 @@ func TestComposerIsBoxed(t *testing.T) {
 	app, scr := drawnApp(t, 60, 14)
 	setDraft(&app.ed, "hello there", 11)
 	app.draw()
-	if got := app.composerRows(); got != 3 { // one draft row + two borders
-		t.Fatalf("one-row composer = %d rows, want 3", got)
+	if got := app.composerRows(); got != 5 { // one draft row + four chrome rows
+		t.Fatalf("one-row composer = %d rows, want 5", got)
 	}
 
 	text := screenText(scr)
@@ -464,9 +464,9 @@ func TestComposerIsBoxed(t *testing.T) {
 	if !strings.Contains(text, "test/free") {
 		t.Fatalf("model name left the divider:\n%s", text)
 	}
-	// No side borders or corners: the composer is a fill band framed by top/bottom rules.
-	if strings.Contains(text, "│ ❯") || strings.Contains(text, "╭") || strings.Contains(text, "╰") {
-		t.Fatalf("composer kept a boxed frame:\n%s", text)
+	// The composer is a boxed field: rounded corners frame the draft.
+	if !strings.Contains(text, "╭") || !strings.Contains(text, "╰") || !strings.Contains(text, "│ ❯") {
+		t.Fatalf("composer lost its boxed frame:\n%s", text)
 	}
 }
 

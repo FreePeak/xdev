@@ -160,7 +160,7 @@ func TestSelectionStaysHighlightedAfterRelease(t *testing.T) {
 // a user drags over before anything has been sent, and the one the transcript
 // painter never records in selRows.
 func composerRow(app *App) int {
-	return app.height - 1 - app.composerRows()
+	return app.height - 1 - app.composerRows() + 1
 }
 
 // TestSelectionHighlightsTheComposer pins the half of the mouse contract the
@@ -188,14 +188,14 @@ func TestSelectionHighlightsTheComposer(t *testing.T) {
 
 			y := composerRow(app)
 			app.mu.Lock()
-			drag(app, 3, y, 14, y)
+			drag(app, 5, y, 16, y)
 			app.mu.Unlock()
 			if got := string(scr.GetClipboardData()); got != "welcome text" {
 				t.Fatalf("clipboard = %q, want %q", got, "welcome text")
 			}
 			app.draw()
 
-			for x := 3; x <= 14; x++ {
+			for x := 5; x <= 16; x++ {
 				if _, _, attr := cellStyle(scr, x, y).Decompose(); attr&tcell.AttrReverse == 0 {
 					t.Fatalf("composer cell (%d,%d) is not highlighted after the release", x, y)
 				}

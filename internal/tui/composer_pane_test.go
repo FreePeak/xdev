@@ -138,7 +138,7 @@ func TestComposerBoxSurvivesAPaneReset(t *testing.T) {
 
 	grid := newPaneGrid(W, H)
 	grid.apply(ft.take())
-	row := app.height - 1 - app.composerRows()
+	row := app.height - 1 - app.composerRows() + 1
 
 	// The pane's grid is reset: a reattach, a cleared terminal, a resize that
 	// re-clears. xdev hears nothing, so the next frames are deltas.
