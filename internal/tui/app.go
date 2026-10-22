@@ -126,10 +126,10 @@ const (
 	animEvery  = 4 // 4 * 25ms = 100ms ≈ 10fps
 )
 
-// App is the xdev TUI: scrollback of blocks + editor + status line, drawn
-// with the Grok-style accent rail. The model thread mutates state through
-// the exported mutators (mutex-guarded); the UI loop redraws at ~40fps and
-// on every key event.
+// App is the xdev TUI: scrollback of blocks + editor + status line, drawn in
+// omp's shape — no left rail, plain markdown for an assistant turn. The model
+// thread mutates state through the exported mutators (mutex-guarded); the UI
+// loop redraws at ~40fps and on every key event.
 type App struct {
 	scr tcell.Screen
 	th  *theme.Theme
@@ -4112,11 +4112,15 @@ func (a *App) viewportLinesLocked() int {
 	return a.height - a.composerRows() - 2 - a.transcriptTop()
 }
 
-// contentWidth is the scrollback text width (rail + padding removed), and with
-// the context dock open everything to its right edge: the transcript's lines
+// contentWidth is the scrollback text width (pad removed), and with the
+// context dock open everything to its right edge: the transcript's lines
 // wrap where the panel begins, so no row is ever cut mid-glyph by the border.
+//
+// omp draws no left rail beside a block, so the pane's pad column is the
+// only gutter: the text starts at x=2 and the width is the pane less that
+// pad and the right pad.
 func (a *App) contentWidth() int {
-	w := a.rightEdge() - 4 // rail(1) + gap(1) + right pad(2)
+	w := a.rightEdge() - 3 // pad(2) + right pad(1)
 	if w < 10 {
 		w = 10
 	}
@@ -4690,7 +4694,7 @@ func (a *App) scrollThinkBox(m *tcell.EventMouse, down bool) bool {
 // exit code omp prints as `⟦Wall: 0.07s | Exit: 9⟧`, the truncation warning,
 // and the hidden-row notice with its Ctrl+O affordance. The top border names
 // the tool only when no call row above already did. Errors tint the frame.
-// The result block carries no rail (draw), so the border is the line.
+// The result block draws no chrome beside it, so the border is the line.
 func (a *App) toolBoxLines(i int, b *Block, w int) []line {
 	borderCol, bodyCol := theme.AccentTool, theme.TextSecondary
 	if b.Err {
@@ -5124,10 +5128,10 @@ func (a *App) paint() {
 	for row, r := range view {
 		y := row + top
 		// A banded row (user prompt / code fence) carries one background
-		// that the fill, the rail, the runs and the timestamp must all
-		// share: tcell's zero background is ColorDefault, so a style that
-		// omits it resets the cell under the glyphs to the terminal's own
-		// colour instead of the band.
+		// that the fill, the runs and the timestamp must all share: tcell's
+		// zero background is ColorDefault, so a style that omits it resets
+		// the cell under the glyphs to the terminal's own colour instead of
+		// the band.
 		//
 		// A band can float: one that carries a margin paints only between it
 		// and its mirror at the right edge, so the sent message reads as a
@@ -5142,16 +5146,9 @@ func (a *App) paint() {
 				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
 			}
 		}
-		x := 3 // rail(1) + pad(2); a band starts its own runs, where it says
+		x := 2 // pad(2); omp draws no left rail beside a block
 		if banded {
 			x = r.ln.inset
-		}
-		if r.rail != "" {
-			railS := r.railS
-			if banded {
-				railS = railS.Background(r.ln.bg)
-			}
-			drawText(s, 0, y, r.rail, railS)
 		}
 		// What this row contributes to a selection leaves the chrome out: a
 		// frame's border and padding are painted, never copied, and the copy

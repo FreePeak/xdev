@@ -40,9 +40,9 @@ func naiveRows(app *App, w int, start, end int32) []rowView {
 	var all []rowView
 	for i := range app.blocks {
 		b := app.blocks[i]
-		rail, railS, ts := app.rowChrome(b)
+		ts := app.rowChrome(b)
 		for j, ln := range app.blockLines(i, b, w) {
-			v := rowView{ln: ln, rail: rail, railS: railS}
+			v := rowView{ln: ln}
 			if j == 0 {
 				v.ts = ts
 			}
@@ -79,8 +79,8 @@ func joinedLines(lines []line) string {
 }
 
 // The row index is an optimization, so it is only correct if it paints exactly
-// what the old full rebuild painted — including the blank separator rows, the
-// rail, and the timestamp that belongs to a block's first row only.
+// what the old full rebuild painted — including the blank separator rows and
+// the timestamp that belongs to a block's first row only.
 func TestRowIndexAgreesWithFullRebuildAtEveryOffset(t *testing.T) {
 	app := idxApp(120, 40)
 	idxFill(app, 12, 300)
@@ -98,9 +98,9 @@ func TestRowIndexAgreesWithFullRebuildAtEveryOffset(t *testing.T) {
 			t.Fatalf("rows at %d: got %d, want %d", start, len(got), len(want))
 		}
 		for i := range got {
-			if rowText(got[i]) != rowText(want[i]) || got[i].rail != want[i].rail || got[i].ts != want[i].ts {
-				t.Fatalf("row %d (offset %d): got %q rail=%q ts=%q, want %q rail=%q ts=%q",
-					i, start, rowText(got[i]), got[i].rail, got[i].ts, rowText(want[i]), want[i].rail, want[i].ts)
+			if rowText(got[i]) != rowText(want[i]) || got[i].ts != want[i].ts {
+				t.Fatalf("row %d (offset %d): got %q ts=%q, want %q ts=%q",
+					i, start, rowText(got[i]), got[i].ts, rowText(want[i]), want[i].ts)
 			}
 		}
 	}

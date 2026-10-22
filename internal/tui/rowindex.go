@@ -3,10 +3,6 @@ package tui
 import (
 	"strings"
 	"time"
-
-	"github.com/gdamore/tcell/v2"
-
-	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // --- the row index -------------------------------------------------------
@@ -87,8 +83,6 @@ const (
 type blockRend struct {
 	key   blockKey
 	lines []line
-	rail  string
-	railS tcell.Style
 	ts    string // right-aligned timestamp, first row only
 	rows  int32
 	subs  []subHit
@@ -96,10 +90,8 @@ type blockRend struct {
 
 // rowView is one transcript row inside the viewport, ready to paint.
 type rowView struct {
-	ln    line
-	rail  string
-	railS tcell.Style
-	ts    string
+	ln line
+	ts string
 }
 
 // rowIndex is the flattened layout of the transcript. Guarded by App.mu, so
@@ -310,7 +302,7 @@ func (a *App) buildWindow(w int) int32 {
 		r := &x.rend[i]
 		r.lines = a.blockLines(i, b, w)
 		r.key = a.renderKey(i, b, w)
-		r.rail, r.railS, r.ts = a.rowChrome(b)
+		r.ts = a.rowChrome(b)
 		r.rows = int32(len(r.lines)) + 1
 		// The tail window is kept whole: the rows of the turn being written
 		// explain it, so they survive even when they overrun the cap.
@@ -368,7 +360,7 @@ func (a *App) reconcile(w int, from int32) int32 {
 		r := &x.rend[i]
 		r.lines = a.blockLines(int(i), b, w)
 		r.key = a.renderKey(int(i), b, w)
-		r.rail, r.railS, r.ts = a.rowChrome(b)
+		r.ts = a.rowChrome(b)
 		r.rows = int32(len(r.lines)) + 1
 		total += r.rows
 		x.start[i+1] = total
@@ -466,28 +458,21 @@ func (a *App) trimTranscript(total int32) {
 	x.dirty = 0
 }
 
-// rowChrome is the decoration a block's rows share: the accent rail, and the
-// right-aligned timestamp that lands on the block's first row.
-func (a *App) rowChrome(b *Block) (rail string, railS tcell.Style, ts string) {
-	railStyle := func(slot string) tcell.Style {
-		return tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(slot)))
-	}
-	switch b.Kind {
-	case KindTool:
-		rail, railS = "┃", railStyle(theme.AccentTool)
-	case KindSystem:
-		rail, railS = "┃", railStyle(theme.AccentError)
-	case KindAssistant:
-		rail, railS = "┃", railStyle(theme.AccentAssistant)
-	default:
-		// User rows carry their own ❯ band, and a finished result or a
-		// reasoning box draws its own rounded frame — a rail beside any of
-		// them would read as a doubled line.
-	}
+// rowChrome is the decoration a block's rows share: the right-aligned
+// timestamp that lands on the block's first row.
+//
+// omp draws NO left rail anywhere: an assistant message is plain markdown, a
+// tool call is a card frame, a user message a band, a system notice a box
+// (packages/tui/src/chat/assistant-message.ts:196-207,
+// render/output-block.ts:20-104, chat/user-message.ts:53-68,
+// chrome/message-frame.ts:113-118). Nothing draws a one-cell vertical rule
+// beside a block, so the rail is gone: the transcript's rows start at the
+// pane's pad column and the ink that used to paint the rail is unused.
+func (a *App) rowChrome(b *Block) (ts string) {
 	if !b.Ts.IsZero() && (b.Kind == KindUser || b.Kind == KindAssistant) {
 		ts = b.Ts.Format("3:04 PM")
 	}
-	return rail, railS, ts
+	return ts
 }
 
 // --- viewport ------------------------------------------------------------
@@ -528,7 +513,7 @@ func (a *App) viewRows(start, end int32) []rowView {
 		}
 		for k := off; k < int(r.rows) && y < n; k++ {
 			if k < len(r.lines) {
-				v := rowView{ln: r.lines[k], rail: r.rail, railS: r.railS}
+				v := rowView{ln: r.lines[k]}
 				if k == 0 {
 					v.ts = r.ts
 				}
