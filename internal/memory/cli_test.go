@@ -83,12 +83,22 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if err := b.SetScratchpad("half-finished thought"); err != nil {
 		t.Fatal(err)
 	}
+	store := SharedToolUse(b.Dir)
+	if err := store.NoteFailure("read", "file not found: a.md", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteFix("read", "file not found: a.md", "pass path=/abs/a.md", ""); err != nil {
+		t.Fatal(err)
+	}
 	want, err := b.Export()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want.Version != BundleVersion || want.Summary == "" || want.Lessons == "" || want.Scratchpad == "" {
 		t.Fatalf("bundle = %+v", want)
+	}
+	if want.ToolUse == "" {
+		t.Fatalf("the bundle must carry the tool-usage records: %+v", want)
 	}
 
 	if err := b.Clear(); err != nil {
@@ -110,6 +120,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	if n := len(b.Lessons()); n != 2 {
 		t.Errorf("lessons after import = %d, want 2", n)
+	}
+	if n := len(store.Recipes()); n != 1 {
+		t.Errorf("recipes after import = %d, want 1", n)
 	}
 }
 

@@ -106,6 +106,12 @@ type TaskTool struct {
 	// nil in print/rpc/acp leaves the path exactly as it was. Display
 	// only: the parent's context is unaffected.
 	OnEvent func(SubagentEvent)
+	// ToolLessons is the tool-usage learner the children inherit. A child
+	// does most of the session's tool work, and its failures are the ones
+	// the parent never sees: without this, a mistake only a child made
+	// is a mistake the next session makes again. nil leaves the children
+	// exactly as they were.
+	ToolLessons ToolLessonObserver
 }
 
 // TaskToolName is the tool name the model calls.
@@ -649,6 +655,14 @@ func (t *TaskTool) Execute(ctx context.Context, args json.RawMessage) (tool.Resu
 		// (""), a child owns the ones it spawns — and that is the edge the
 		// display draws the tree along.
 		Parent: t.ParentLabel,
+	}
+
+	// The foreground spawn composes onto spec.OnRun below, so the child's
+	// learner is chained here rather than assigned: both run, in order.
+	if t.ToolLessons != nil {
+		spec.OnRun = composeOnRun(spec.OnRun, func(ag *Agent) {
+			ag.ToolLessons = t.ToolLessons
+		})
 	}
 
 	// A foreground spawn is the one a user is watching: the TUI learns what

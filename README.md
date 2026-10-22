@@ -360,7 +360,8 @@ into the prompts of later sessions, so a mistake about a tool is paid for once
 instead of once per session. A recipe is written only when the two calls are the
 same call (a shared argument, a supplied argument, or a renamed one): a failure
 followed by a different call that happens to work says nothing about how to use
-the tool. `toolLessons: false` turns the loop off.
+the tool. `toolLessons: false` turns the loop off, and `xdev memory recipes`
+lists what was learned.
 [Rationale with the cases](docs/decisions/tool-use-recipes.md).
 
 So a "never do X" rule that only exists as a memory row is not policy: it competes
