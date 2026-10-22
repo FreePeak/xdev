@@ -4620,3 +4620,9 @@ The cause is the merge. `Settings.merge` is hand-written per field — every key
 
 *Last updated: 2026-10-22 (feat/tui-parity-phase1 rebased onto main: the TUI speaks omp's INK and omp's ALPHABET — the launch dark theme is omp's groknight token for token, the accent is omp's iris, and the spinner is omp's circle-braille; merged with main's read-commands section.)
 
+
+## Subagents' own sessions visible in the resume picker
+
+The resume picker gains a third scope (Tab cycles: current folder → all projects → subagents) listing child sessions from `<DataDir>/subagents`. Enter opens a read-only transcript overlay; Esc closes it. Lazy-loaded once per scope open.
+
+*Last updated: 2026-10-22 (feat/subagent-session-sessions — the subagents' own sessions are visible in the resume picker)*
