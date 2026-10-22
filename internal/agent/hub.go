@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/FreePeak/xdev/internal/ai"
 	"github.com/FreePeak/xdev/internal/session"
 )
 
@@ -34,6 +36,9 @@ type Hub struct {
 	// settleListeners fire on the same edge with the job snapshot resolved;
 	// see AddSettleListener.
 	settleListeners []func(JobInfo, *SubagentResult)
+	// agentChange fires when an agent's status or metrics change; see
+	// SetAgentChange.
+	agentChange func()
 }
 
 type hubJob struct {
@@ -51,6 +56,16 @@ type hubJob struct {
 	parent context.Context
 	parked bool
 	stores []*session.Store
+	// startedAt/endedAt bracket the child's run for the record's
+	// duration; endedAt is zero while the agent is live. elapsed banks the
+	// runs that already finished, so a revived agent's duration is the sum
+	// of its runs. canceled marks a run the user (or the session's end) cut
+	// short — the record reports it as aborted rather than as a plain
+	// failure.
+	startedAt time.Time
+	endedAt   time.Time
+	elapsed   time.Duration
+	canceled  bool
 }
 
 // JobInfo is the parent-visible snapshot of one job.
@@ -75,6 +90,289 @@ type TranscriptEntry struct {
 	Seq  int    `json:"seq"`
 	Role string `json:"role"`
 	Text string `json:"text"`
+}
+
+// AgentStatus is an agent's liveness, in omp's vocabulary.
+type AgentStatus string
+
+const (
+	// AgentRunning: the agent is live.
+	AgentRunning AgentStatus = "running"
+	// AgentIdle: the agent is settled and at rest; its Outcome says how it
+	// ended.
+	AgentIdle AgentStatus = "idle"
+	// AgentParked: the agent is settled and parked, waiting for a revive.
+	AgentParked AgentStatus = "parked"
+	// AgentAborted: the agent was canceled before it could finish.
+	AgentAborted AgentStatus = "aborted"
+)
+
+// AgentOutcome is how a settled agent ended ("" while it is still live).
+type AgentOutcome string
+
+const (
+	// AgentOutcomeDone: the agent finished its work.
+	AgentOutcomeDone AgentOutcome = "done"
+	// AgentOutcomeFailed: the agent ended without a result.
+	AgentOutcomeFailed AgentOutcome = "failed"
+)
+
+// AgentKind separates a background job from a foreground task child.
+type AgentKind string
+
+const (
+	// AgentKindJob: a background job the hub spawned.
+	AgentKindJob AgentKind = "job"
+	// AgentKindChild: a foreground child a task call spawned.
+	AgentKindChild AgentKind = "child"
+)
+
+// AgentMetrics is what one agent spent and did.
+type AgentMetrics struct {
+	Requests int
+	Tools    int
+	Tokens   int64
+	Cost     float64 // USD
+	Duration time.Duration
+}
+
+// AgentRecord is the hub's projection of one agent — a background job or a
+// foreground task child — for a host that renders an agent list.
+//
+// It is a VIEW, not a second registry: AgentRecords projects the same jobs
+// and foreground maps the roster reads, so a record can never disagree with
+// the roster about who exists or what state they are in.
+type AgentRecord struct {
+	ID       string // "hub-1" / "fg-1"
+	Name     string // the child's label
+	ParentID string // the parent's record id when the agent is a child
+	Model    string
+	Level    string // the effort rung the child was spawned with (spec.Thinking.Level)
+	Activity string
+	Status   AgentStatus
+	Outcome  AgentOutcome
+	Kind     AgentKind
+	Metrics  AgentMetrics
+}
+
+// AgentRecords projects every agent the hub knows — the background jobs
+// and the foreground children a task call spawned — into one flat list of
+// records, oldest first.
+//
+// It is a PROJECTION, not a second registry: the records are read out of
+// the same maps Roster and Foreground read, so a record can never disagree
+// with the roster about who exists or what state they are in.
+//
+// The status vocabulary is omp's: a live agent is running, a settled one is
+// idle (its Outcome says how it ended), a canceled one is aborted, and a
+// parked one is parked. xdev's own roster words — done and failed — are
+// outcomes here, not statuses.
+func (h *Hub) AgentRecords() []AgentRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// A parent is recorded by LABEL (SubagentSpec.Parent), not by id, so
+	// the label → id map is what turns that label into a parent id. The
+	// first record wearing a label wins; a duplicate label is a name
+	// collision, and the older agent is the likelier parent.
+	byLabel := map[string]string{}
+	for i := 1; i <= h.next; i++ {
+		if j, ok := h.jobs[fmt.Sprintf("hub-%d", i)]; ok {
+			if _, dup := byLabel[j.Label]; !dup && j.Label != "" {
+				byLabel[j.Label] = j.ID
+			}
+		}
+		if j, ok := h.foreground[fmt.Sprintf("fg-%d", i)]; ok {
+			if _, dup := byLabel[j.Label]; !dup && j.Label != "" {
+				byLabel[j.Label] = j.ID
+			}
+		}
+	}
+	out := make([]AgentRecord, 0, len(h.jobs)+len(h.foreground))
+	for i := 1; i <= h.next; i++ {
+		if j, ok := h.jobs[fmt.Sprintf("hub-%d", i)]; ok {
+			out = append(out, h.recordFor(j, AgentKindJob, byLabel))
+		}
+		if j, ok := h.foreground[fmt.Sprintf("fg-%d", i)]; ok {
+			out = append(out, h.recordFor(j, AgentKindChild, byLabel))
+		}
+	}
+	return out
+}
+
+// recordFor projects one job (background or foreground) into a record. The
+// caller holds h.mu.
+func (h *Hub) recordFor(j *hubJob, kind AgentKind, byLabel map[string]string) AgentRecord {
+	s := childStats(j)
+	rec := AgentRecord{
+		ID:       j.ID,
+		Name:     j.Label,
+		Model:    j.spec.Model,
+		Kind:     kind,
+		Activity: s.activity,
+		Metrics: AgentMetrics{
+			Requests: s.requests,
+			Tools:    s.tools,
+			Tokens:   s.tokens,
+			Cost:     s.cost,
+			Duration: j.duration(),
+		},
+	}
+	if j.spec.Thinking != nil {
+		rec.Level = j.spec.Thinking.Level
+	}
+	if p := j.spec.Parent; p != "" {
+		rec.ParentID = byLabel[p]
+	}
+	rec.Status, rec.Outcome = j.statusOutcome()
+	return rec
+}
+
+// statusOutcome maps a job's live state onto omp's status vocabulary. The
+// caller holds h.mu.
+func (j *hubJob) statusOutcome() (AgentStatus, AgentOutcome) {
+	settled := false
+	select {
+	case <-j.done:
+		settled = true
+	default:
+	}
+	switch {
+	case j.parked:
+		return AgentParked, j.settledOutcome()
+	case j.canceled || j.wasCanceled():
+		if !settled {
+			// Canceled but not yet wound down: the agent is aborted, and
+			// its outcome is still unknown.
+			return AgentAborted, ""
+		}
+		return AgentAborted, AgentOutcomeFailed
+	case settled:
+		return AgentIdle, j.settledOutcome()
+	}
+	return AgentRunning, ""
+}
+
+// settledOutcome is how a finished agent ended. The caller holds h.mu.
+func (j *hubJob) settledOutcome() AgentOutcome {
+	if j.Err != nil || j.Result == nil {
+		return AgentOutcomeFailed
+	}
+	switch j.Result.Status {
+	case "failed", "schema-mismatch":
+		return AgentOutcomeFailed
+	}
+	return AgentOutcomeDone
+}
+
+// wasCanceled reports whether a settled agent was cut short rather than
+// failing on its own. The caller holds h.mu.
+func (j *hubJob) wasCanceled() bool {
+	if j.canceled {
+		return true
+	}
+	if j.Err != nil && errors.Is(j.Err, context.Canceled) {
+		return true
+	}
+	return j.Result != nil && j.Result.Err != "" &&
+		strings.Contains(j.Result.Err, context.Canceled.Error())
+}
+
+// childStats is one walk over a job's child transcripts: the token and cost
+// sums the provider reported, the request and tool counts the child's own
+// messages carry, and the latest message snippet.
+//
+// The walk is the roster's own (rosterActivity reads the same stores); it
+// is factored out here so the record projection and the roster cannot
+// disagree about what a child spent.
+//
+// Requests counts the child's provider turns (each assistant message is one
+// turn) and Tools counts the tool calls those turns made. Both come from
+// the same store the hub already keeps, so neither costs a new dependency
+// or a new scan.
+func childStats(j *hubJob) (s jobStats) {
+	var count int
+	var last string
+	for _, st := range j.stores {
+		for _, e := range st.Entries() {
+			me, ok := e.(*session.MessageEntry)
+			if !ok {
+				continue
+			}
+			count++
+			if me.Message.Role == ai.RoleAssistant {
+				s.requests++
+				s.tools += len(me.Message.ToolCalls())
+			}
+			if me.Message.Usage != nil {
+				s.tokens += me.Message.Usage.TotalTokens
+				if me.Message.Usage.Cost != nil {
+					s.cost += me.Message.Usage.Cost.Total
+				}
+			}
+			if t := strings.TrimSpace(messageText(me.Message)); t != "" {
+				last = t
+			}
+		}
+	}
+	if last != "" {
+		r := []rune(last)
+		if len(r) > 40 {
+			r = append(r[:40], '…')
+		}
+		s.activity = string(r)
+	} else {
+		s.activity = fmt.Sprintf("%d msgs", count)
+	}
+	return s
+}
+
+// jobStats is what one child's transcript adds up to.
+type jobStats struct {
+	tokens   int64
+	cost     float64
+	requests int
+	tools    int
+	activity string
+}
+
+// duration is the agent's elapsed time: the run's own length once it has
+// settled, the time since it started while it is still live, plus whatever
+// earlier runs banked (a revived agent's duration is its whole life). The
+// caller holds h.mu.
+func (j *hubJob) duration() time.Duration {
+	d := j.elapsed
+	if !j.startedAt.IsZero() {
+		end := j.endedAt
+		if end.IsZero() {
+			end = time.Now()
+		}
+		d += end.Sub(j.startedAt)
+	}
+	return d
+}
+
+// SetAgentChange registers a callback that fires when an agent's status or
+// metrics change: a child starts, settles, is parked, is revived, or is
+// canceled. It is the seam an Agent Hub panel repaints on, so the panel
+// never has to poll the hub at frame rate.
+//
+// Contract, like SetNotify's: the callback fires from the hub's own
+// goroutine with no lock held, so it MAY read the hub (AgentRecords) but
+// must not block and must not mutate the hub. A single callback, set once
+// at startup.
+func (h *Hub) SetAgentChange(fn func()) {
+	h.mu.Lock()
+	h.agentChange = fn
+	h.mu.Unlock()
+}
+
+// fireChange calls an agent-change callback captured under the hub's lock.
+// The caller must hold no lock: the callback is what a panel calls to
+// re-read the hub, so it must never run with the hub's mutex held.
+func fireChange(fn func()) {
+	if fn != nil {
+		fn()
+	}
 }
 
 // RosterEntry is one row of the Agent Hub roster (TUI inspector + hub list
@@ -106,7 +404,7 @@ type RosterEntry struct {
 // The id is unique per spawn ("fg-N") so a child's transcript cannot collide
 // with a job's, and Transcript serves both from one store walk.
 func (h *Hub) TrackForeground(spec SubagentSpec) (string, func(*Agent)) {
-	job := &hubJob{Label: spec.Name, spec: spec, done: make(chan struct{})}
+	job := &hubJob{Label: spec.Name, spec: spec, done: make(chan struct{}), startedAt: time.Now()}
 	h.mu.Lock()
 	if h.foreground == nil {
 		h.foreground = map[string]*hubJob{}
@@ -115,7 +413,9 @@ func (h *Hub) TrackForeground(spec SubagentSpec) (string, func(*Agent)) {
 	id := fmt.Sprintf("fg-%d", h.next)
 	job.ID = id
 	h.foreground[id] = job
+	change := h.agentChange
 	h.mu.Unlock()
+	fireChange(change)
 	return id, func(ag *Agent) {
 		if ag == nil || ag.Store == nil {
 			return
@@ -139,13 +439,16 @@ func (h *Hub) SettleForeground(id string, res *SubagentResult, err error) {
 		return
 	}
 	j.Result, j.Err = res, err
+	j.endedAt = time.Now()
 	close(j.done)
-	if notify := h.notify; notify != nil {
-		h.mu.Unlock()
-		notify()
-		return
-	}
+	notify := h.notify
+	change := h.agentChange
 	h.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
+	// The child's status and metrics just changed.
+	fireChange(change)
 }
 
 // Foreground reports one roster row per tracked foreground child, so a panel
@@ -211,7 +514,11 @@ func (h *Hub) Start(parent context.Context, spec SubagentSpec) (string, error) {
 	job := &hubJob{ID: id, Label: spec.Name, done: make(chan struct{}), spec: spec, parent: context.WithoutCancel(parent)}
 	h.jobs[id] = job
 	h.launchLocked(job, spec.Prompt)
+	change := h.agentChange
 	h.mu.Unlock()
+	// A new agent exists: a panel showing the roster must learn about it
+	// now, not on the next settle.
+	fireChange(change)
 	return id, nil
 }
 
@@ -222,6 +529,13 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 	spec.Prompt = prompt
 	cctx, cancel := context.WithCancel(job.parent)
 	job.cancel = cancel
+	// A revived job's previous run is banked, so the record's duration is
+	// the agent's whole life rather than its last leg.
+	if !job.startedAt.IsZero() && !job.endedAt.IsZero() {
+		job.elapsed += job.endedAt.Sub(job.startedAt)
+	}
+	job.startedAt = time.Now()
+	job.endedAt = time.Time{}
 	userOnRun := spec.OnRun
 	spec.OnRun = func(child *Agent) {
 		h.mu.Lock()
@@ -246,7 +560,9 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 		if res != nil {
 			job.Result = res
 		}
+		job.endedAt = time.Now()
 		notify := h.notify
+		change := h.agentChange
 		listeners := append([]func(JobInfo, *SubagentResult){}, h.settleListeners...)
 		h.mu.Unlock()
 		// Close the settle edge before anyone is told about it: Roster() reads
@@ -260,6 +576,9 @@ func (h *Hub) launchLocked(job *hubJob, prompt string) {
 		if notify != nil {
 			notify()
 		}
+		// The agent's status and metrics just changed: a panel showing the
+		// roster has to learn about it now.
+		fireChange(change)
 		// Settle listeners get the snapshot rather than being told to go and
 		// fetch it: SetNotify's contract forbids re-entering the Hub from the
 		// callback, and building the notice needs the terminal status, which
@@ -397,38 +716,12 @@ func (h *Hub) Roster() []RosterEntry {
 }
 
 // rosterActivity summarizes a job's child transcripts: token/cost sums from
-// the usage the provider reported, and the latest message snippet.
+// the usage the provider reported, and the latest message snippet. It is
+// the same walk the agent record uses (childStats), so a roster row and a
+// record can never disagree about what a child spent.
 func rosterActivity(j *hubJob) (tokens int64, cost float64, activity string) {
-	var count int
-	var last string
-	for _, st := range j.stores {
-		for _, e := range st.Entries() {
-			me, ok := e.(*session.MessageEntry)
-			if !ok {
-				continue
-			}
-			count++
-			if me.Message.Usage != nil {
-				tokens += me.Message.Usage.TotalTokens
-				if me.Message.Usage.Cost != nil {
-					cost += me.Message.Usage.Cost.Total
-				}
-			}
-			if t := strings.TrimSpace(messageText(me.Message)); t != "" {
-				last = t
-			}
-		}
-	}
-	if last != "" {
-		r := []rune(last)
-		if len(r) > 40 {
-			r = append(r[:40], '…')
-		}
-		activity = string(r)
-	} else {
-		activity = fmt.Sprintf("%d msgs", count)
-	}
-	return tokens, cost, activity
+	s := childStats(j)
+	return s.tokens, s.cost, s.activity
 }
 
 // Transcript returns a child-session's messages with sequence >= fromSeq
@@ -544,14 +837,15 @@ func (h *Hub) Settled(ids []string) []string {
 // new instruction (issue #37).
 func (h *Hub) Send(id, text string) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	j, ok := h.jobs[id]
 	if !ok {
+		h.mu.Unlock()
 		return fmt.Errorf("unknown job %q", id)
 	}
 	select {
 	case <-j.done:
 		if !j.parked {
+			h.mu.Unlock()
 			return fmt.Errorf("job %q already finished (park it to revive)", id)
 		}
 		prior := ""
@@ -563,14 +857,20 @@ func (h *Hub) Send(id, text string) error {
 		j.done = make(chan struct{})
 		h.recordInboxLocked(id, text)
 		h.launchLocked(j, revivePrompt(prior, text))
+		change := h.agentChange
+		h.mu.Unlock()
+		// Sending to a parked job revives it: the agent is running again.
+		fireChange(change)
 		return nil
 	default:
 	}
 	if j.Agent == nil {
+		h.mu.Unlock()
 		return fmt.Errorf("job %q has not started yet", id)
 	}
 	h.recordInboxLocked(id, text)
 	j.Agent.Steer(text)
+	h.mu.Unlock()
 	return nil
 }
 
@@ -579,16 +879,21 @@ func (h *Hub) Send(id, text string) error {
 // refused.
 func (h *Hub) Park(id string) bool {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	j, ok := h.jobs[id]
 	if !ok {
+		h.mu.Unlock()
 		return false
 	}
 	select {
 	case <-j.done:
 		j.parked = true
+		change := h.agentChange
+		h.mu.Unlock()
+		// The agent's status just changed (parked).
+		fireChange(change)
 		return true
 	default:
+		h.mu.Unlock()
 		return false
 	}
 }
@@ -598,17 +903,19 @@ func (h *Hub) Park(id string) bool {
 // new instruction.
 func (h *Hub) Revive(id, text string) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	j, ok := h.jobs[id]
 	if !ok {
+		h.mu.Unlock()
 		return fmt.Errorf("unknown job %q", id)
 	}
 	select {
 	case <-j.done:
 	default:
+		h.mu.Unlock()
 		return fmt.Errorf("job %q is still running", id)
 	}
 	if !j.parked {
+		h.mu.Unlock()
 		return fmt.Errorf("job %q is not parked", id)
 	}
 	prior := ""
@@ -619,6 +926,10 @@ func (h *Hub) Revive(id, text string) error {
 	j.Agent, j.Result, j.Err = nil, nil, nil
 	j.done = make(chan struct{})
 	h.launchLocked(j, revivePrompt(prior, text))
+	change := h.agentChange
+	h.mu.Unlock()
+	// The agent is running again: its status and metrics changed.
+	fireChange(change)
 	return nil
 }
 
@@ -675,17 +986,25 @@ func (h *Hub) Close() {
 func (h *Hub) Cancel(id string) bool {
 	h.mu.Lock()
 	j, ok := h.jobs[id]
-	h.mu.Unlock()
 	if !ok {
+		h.mu.Unlock()
 		return false
 	}
 	select {
 	case <-j.done:
+		h.mu.Unlock()
 		return false
 	default:
 	}
-	if j.cancel != nil {
-		j.cancel()
+	// The child is cut short: the record reports it as aborted, not as a
+	// plain failure, and the panel must learn about it now.
+	j.canceled = true
+	change := h.agentChange
+	cancel := j.cancel
+	h.mu.Unlock()
+	fireChange(change)
+	if cancel != nil {
+		cancel()
 	}
 	return true
 }
