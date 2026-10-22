@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/tool"
 )
 
 // Repeat-call guard (ported from deepseek-harness
@@ -55,6 +56,26 @@ type repeatChain struct {
 	count int
 }
 
+// coarseChain is one run's REPEATED-WORK state: a per-key TOTAL over the
+// whole run, not a consecutive chain.
+//
+// It exists because the chain cannot see a re-derivation. Live 2026-10-22
+// (session adf5029b): a model answering "list me all pr urls opening xdev"
+// asked the same question in ten spellings — `gh pr list`, `gh api
+// repos/…/pulls`, `gh api graphql`, `gh search prs`, each with a different
+// projection, a different page size and a different pipe. Every spelling is
+// a different EXACT key, and the chain resets on each one, so 28 tool calls
+// looked like 28 first attempts.
+//
+// The key is the coarse one (tool.CanonicalCommand): the program's path and
+// its targets, with a projection's value dropped and a magnitude normalized.
+// It is coarse ON PURPOSE and it is used for the NOTICE only, never for the
+// hard break and never for the tool-result cache: a notice is text, and a
+// text notice cannot hand the model a wrong answer.
+type coarseChain struct {
+	counts map[string]int
+}
+
 // observe advances the chain for one completed call and returns the
 // consecutive count of the identical call, or 0 when the call does not
 // participate (a transparent call neither counts nor resets).
@@ -67,6 +88,52 @@ func (c *repeatChain) observe(name string, args json.RawMessage) int {
 	}
 	c.count++
 	return c.count
+}
+
+// coarseKey is the identity of a call's WORK, as opposed to its exact
+// arguments.
+//
+// A bash call is judged by its command's canonical form. Every other tool
+// keeps the exact key: their arguments are structured already, and there is
+// no shell to re-spell.
+//
+// An EMPTY command is not work — the bash tool refuses it ("command is
+// required") — so it is keyed by the call's own id and never groups with the
+// other refusals. Counting them would put "you have done the same thing
+// five times" in front of a model that only ever asked for nothing.
+func coarseKey(call ai.ToolCallBlock) string {
+	if call.Name == "bash" {
+		var a struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(call.Arguments, &a) == nil {
+			c := tool.CanonicalCommand(a.Command)
+			if c == "" {
+				return "bash\x00empty\x00" + call.ID
+			}
+			return "bash\x00" + c
+		}
+	}
+	return call.Name + "\x00" + canonicalArgs(call.Arguments)
+}
+
+// observe counts one call's work and returns the run's TOTAL for that key.
+//
+// It is a total, not a chain: the model's re-derivations were interleaved
+// with other work, and a chain would have been reset by every one of them.
+func (c *coarseChain) observe(call ai.ToolCallBlock) int {
+	if c.counts == nil {
+		c.counts = map[string]int{}
+	}
+	key := coarseKey(call)
+	c.counts[key]++
+	return c.counts[key]
+}
+
+// reset clears the per-run totals. A user interjection ends them: work that
+// was asked for again is compliance, not a loop.
+func (c *coarseChain) reset() {
+	c.counts = map[string]int{}
 }
 
 // canonicalArgs renders a call's arguments in a form two calls with the same
@@ -121,6 +188,48 @@ func repeatThresholdHit(count int) bool {
 	return false
 }
 
+// coarseThresholds are the run-totals that produce the REPEATED-WORK notice.
+//
+// The threshold matches the exact chain's first one. A coarse key groups
+// calls that are SIMILAR rather than identical, so it reaches 3 on more
+// runs than the exact chain does (measured over 799 of this repo's own
+// runs: 20.9% against 13.9%), and the extra runs it reaches are the ones
+// re-deriving. The notice it produces is a nudge, not a break.
+//
+// There is no hard break on a coarse count. The break at 8 stays on the
+// EXACT chain, where eight identical calls in a row really is a loop; a
+// coarse count of 8 can be a model reading a file in chunks, and breaking a
+// run for that would cost the user their work.
+var coarseThresholds = []int{3}
+
+// coarseThresholdHit reports whether a run-total is one of the notice
+// thresholds.
+func coarseThresholdHit(count int) bool {
+	for _, t := range coarseThresholds {
+		if count == t {
+			return true
+		}
+	}
+	return false
+}
+
+// coarseReminder is the notice for a call that re-derives work the run has
+// already done.
+//
+// It says the one thing the model needs: REPORT WHAT YOU HAVE. The live
+// failure this exists for is a model that had the answer at turn 5 and spent
+// 15 more turns corroborating it.
+func coarseReminder(name string, count int) string {
+	if !coarseThresholdHit(count) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Repeated work detected: this run has now done the same thing %d times, in %d different spellings.\n"+
+			"You are re-deriving something you already have. Stop gathering: if you have the answer, "+
+			"report it now, in prose. If you do not, say what is still missing and ask for it.",
+		count, count)
+}
+
 // previewArgs head-truncates the canonical arguments for quoting, marking what
 // was omitted so the model knows the quote is partial rather than the whole
 // call.
@@ -138,8 +247,13 @@ func (a *Agent) repeatNotice(msg *ai.Message, call ai.ToolCallBlock) {
 	if msg == nil || msg.Role != ai.RoleToolResult || len(msg.Content) == 0 {
 		return
 	}
+	// The COARSE count is observed first and independently: it is the one
+	// that sees a re-derivation, and it must not be shadowed by the exact
+	// chain's early return below.
+	coarse := a.coarseRepeats.observe(call)
+	coarseNotice := coarseReminder(call.Name, coarse)
 	count := a.repeats.observe(call.Name, call.Arguments)
-	if count == 0 {
+	if count == 0 && coarseNotice == "" {
 		return
 	}
 	// Veto: once the guard's highest threshold is reached, stop the run
@@ -147,10 +261,20 @@ func (a *Agent) repeatNotice(msg *ai.Message, call ai.ToolCallBlock) {
 	// is already stuck, so a hard break is required to end a tool-call loop.
 	// Retry/network-error handling lives in oneTurnWithRecovery and is
 	// unaffected: this only stops an identical-call loop.
+	//
+	// The break stays on the EXACT count. A coarse count of 8 can be a model
+	// reading a file in chunks, and breaking a run for that would cost the
+	// user their work.
 	if count >= repeatThresholds[len(repeatThresholds)-1] {
 		a.repeatBreak = true
 	}
 	notice := repeatReminder(call.Name, count, call.Arguments)
+	if coarseNotice != "" {
+		if notice != "" {
+			notice = notice + "\n\n"
+		}
+		notice = coarseNotice + notice
+	}
 	if notice == "" {
 		return
 	}
