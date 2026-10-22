@@ -159,7 +159,7 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | Collab depth (link formats + view-only tokens, guest select/editor answering, bus/agents frames, web-relay equivalent) | collab.md | NICE (NEW) | M14 |
 | Vibe mode detail (5 worker tools, fast\|good tiers, worker persistence/rehydration, plan/goal mutual exclusion) | vibe-mode.md | NICE (NEW) | M14 |
 | Advisor tails (`syncBacklog` off\|1\|3\|5, `immuneTurns`, `task.agentAdvisor` per-subagent) | advisor-watchdog.md, settings.md | NICE (NEW) | M11 |
-| Distribution polish (macos signing/notarization — **landed 2026-09-14 as `.github/workflows/release.yml`**: patch semver auto-bump on `main`, six-platform artifacts, Developer ID sign + notarize when the `APPLE_*` secrets exist, one GitHub Release with a merged `SHA256SUMS`; plus `scripts/install.sh`, the `curl \| sh` Linux/macOS installer that resolves the newest release every run, so re-running it is the upgrade; `xdev update` canary/stable, shell completions, `gc`, `bench` dashboard) | cli-reference.md, macos-signing-notarization.md | NICE (NEW) | M14 |
+| Distribution polish (macos signing/notarization — **landed 2026-09-14 as `.github/workflows/release.yml`**: semver auto-bump on `main` — a feature commit moves the minor (Y), anything else the patch (Z), the major (X) is the maintainer's —, six-platform artifacts, Developer ID sign + notarize when the `APPLE_*` secrets exist, one GitHub Release with a merged `SHA256SUMS`; plus `scripts/install.sh`, the `curl \| sh` Linux/macOS installer that resolves the newest release every run, so re-running it is the upgrade; `xdev update` canary/stable, shell completions, `gc`, `bench` dashboard) | cli-reference.md, macos-signing-notarization.md | NICE (NEW) | M14 |
 | `computer` desktop control (native screenshots/input) | computer-use.md | DEFERRED | M15 (parity requested 2026-09-11) |
 | Full DAP debug driver (adapter-based, `debug` tool) | debug.md | DEFERRED | M15 (parity requested) |
 | `security_scan` (OMP-native + Codex cloud) | security-scan.md | DEFERRED | M15 (parity requested) |
@@ -931,6 +931,7 @@ JSONL tree, and the subprocess trust boundary. Each phase ends with focused test
 same PR. A feature is not marked complete merely because a package or type exists: it needs a
 real consumer and evidence from a running xdev interaction.
 
+*Last updated: 2026-10-22 (ci(release) — the version says what the commits say):* `release.yml`'s `plan` job no longer bumps the patch on every merge — that made every version a lie (v0.4.368 said "one more fix" when the range held a feature). `scripts/release-version.sh` reads the commits that landed since the last release tag and moves the MINOR (Y) for a feature commit (`feat`, `feature`, `enhance`, `refactor`, `perf`, …) and the PATCH (Z) for everything else, a bug fix included; the range decides by its highest impact, so one feature among ten fixes is a minor release. The MAJOR (X) stays the maintainer's: a breaking change in the range (`feat(api)!:` or a `BREAKING CHANGE:` footer) is reported as a `::warning::` naming the commit, and the major release is cut by hand (push a `vX.0.0` tag, or dispatch the workflow with an explicit version). The rule lives in a script, `scripts/release-version_test.sh` proves it against fixture repositories, and the release job runs that test before it plans — the rule that ships a release is the rule that was tested. The dispatch input also stopped being spliced into the shell: it comes through the environment, so an input is a string, not code, and a malformed version fails the plan instead of publishing a tag nobody can resolve.
 *Last updated: 2026-10-19 (fix/open-subagent-session — F1–F5 + D1: same-process TaskTool subagent panel transcript):*
 *Last updated: 2026-10-13 (fix/failover-combo-alias — a gateway's own route names are never implicit failover legs):*
 #641/#642 landed the per-model `failover: false`, which fixes the symptom only when the operator
@@ -4528,6 +4529,74 @@ was a mutation on a turn that had only read. The loop's own scaffolding is trans
 
 **Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
 
+*Last updated: 2026-10-22 (fix/keep-going-gate-assignment-fragment — a bare assignment changes nothing because the call's shell dies with it, the fragment the splitter leaves behind no longer reads as an unknown command, and the command inside a substitution is still judged: 54.8% of the store's calls are reads, against 45.0% before this series)*
+
+## The run stops when the answer is in hand (2026-10-22)
+
+**A question is not a project.** Live 2026-10-22, session `adf5029b`: *"list me all pr urls opening xdev"* took **22 assistant turns and 28 tool calls over 6 minutes 19 seconds**, and the answer arrived only when the run-budget wrap-up forced it. The model had the answer at turn 5 and said so in its own reasoning — *"the answer is clear. There are ZERO open PRs in FreePeak/xdev"* — and then spent 15 more turns corroborating it, because it decided the answer was "too thin" and went looking for adjacent material to offer instead. Zero keep-going nudges: the gate was not the cause.
+
+**THE PROMPT NOW SAYS TO STOP.** `SystemPromptBase` already said *"a question gets an answer … do the reading, give the report and stop"*. That is about not OVER-delivering by starting to implement. It said nothing about the other half: **the answer was IN HAND and the model kept going.** The rule now says *"don't start implementing, and don't keep gathering once you have it"*. It is paid for by cutting prose, never by appending: the example *"Find the root cause and fix asks for a change; why is this slow? asks a question"* is now covered by the effort ladder and the question rule, and the base prompt sits at 1,846 of 2,000 runes with the assembled prompt at 981 of 1,000 tokens.
+
+**THE BUDGET'S STOP IS AUTHORITATIVE.** The wrap-up says *"answer now, in prose, and do not call any more tools"*. The model obeyed — and then the keep-going gate fired, because the gate's guard knew about the gate's OWN nudge and about nothing else, and the turn's earlier `git fetch` had armed it. The run continued for one more turn AFTER the clock had ended it. A stop that something else can override is not a stop. The gate's decision is now one function (`keepGoingNudge`), and it recognises the budget the same way it recognises its own nudge.
+
+**THE BUDGET IS CONFIGURABLE.** `runBudget` (seconds) rides the settings like every other knob: 0 is the shipped default (6 minutes), a negative value is unbounded. The default is measured, not guessed — the RCA's patched run of a "tell me where we are" question took 4 min 53 s, so a shorter default would truncate legitimate work — but the same question asked as "list me all pr urls" has a right answer in 30 seconds, and the clock is the only thing that ends a model that has decided to keep gathering.
+
+**A CANONICAL "SAME WORK" KEY, FOR THE NOTICE ONLY.** The repeat guard keys on the tool name plus `canonicalArgs`, which normalizes nothing but JSON key order — so a model that changes `--limit 100` to `--limit 2000`, or swaps `--jq 'length'` for `--jq '.[] | .url'`, or pipes into `head -40` instead of `head -50`, pays for the same work again. The canonical form (`internal/tool/canonical.go`) is the program's path plus its sorted targets, with a projection's value dropped and a pure-number magnitude normalized. It deliberately does NOT normalize a flag value that names the TARGET (`--repo A` vs `--repo B`), a range (`sed -n '1,50p'` vs `sed -n '200,250p'`), or the program path (`gh pr` vs `gh api`).
+
+| | within-run calls in a group of more than one |
+|---|---|
+| the exact key (today) | 4,634 |
+| the canonical key | **6,515** (+41%) |
+
+The key is used for the NOTICE only. The tool-result cache keeps the exact key, because a coarse key that merged `--repo A` with `--repo B` would hand the model the answer to a different question. The hard break at eight identical calls stays on the exact chain for the same reason: a coarse count of eight can be a model reading a file in chunks.
+
+**TWO DETECTORS WERE BUILT, MEASURED AND THROWN AWAY.** A tool-only streak guard looks perfect for the live shape (21 consecutive tool calls with no text) and is not: **54%** of this repo's 7,941 tool-only streaks are ≥ 6 long and 22% are ≥ 20, so the signal does not discriminate. A program-level counter ("you have run `gh` 12 times") is not either: **70%** of 791 runs call one program ≥ 6 times and half call one ≥ 20. Both would nag on legitimate work. The numbers are in `docs/research/2026-10-22-rederivation-loop-rca.md`, because the rejected detectors are the useful result: they say what the harness cannot see.
+
+**Tests.** `internal/tool/canonical_test.go` — `TestCanonicalCommandGroupsTheSameWork` (the same work at two depths, with two projections, with two pipe targets, in two flag orders, groups alike; a different target, a different state, a different program and a different file range do NOT). `internal/agent/repeat_coarse_test.go` — `TestRepeatedWorkNoticeFiresOnARederivation` (five spellings of one question, interleaved with other work, and the fifth carries the notice), `TestRepeatedWorkNoticeStaysOffForDifferentWork`, `TestTheHardBreakStaysOnTheExactChain`. `internal/agent/run_budget_stop_test.go` — `TestTheRunBudgetsStopIsAuthoritative` (RED without the fix), `TestTheKeepGoingGateStillFiresForUnfinishedWork`, `TestTheKeepGoingGateDoesNotNudgeTwice`, `TestARealUserTurnEndsTheBudgetsAuthority`. `internal/config/runbudget_test.go` — `TestRunBudgetSetting`. `internal/agent/prompt_stop_test.go` — `TestBasePromptCarriesTheStopOnceYouHaveTheAnswer`.
+*Last updated: 2026-10-22 (fix/rederivation-loop — a question stops at the report: the prompt says to stop gathering once the answer is in hand, the run budget's stop is authoritative, the budget is configurable, and a canonical "same work" key finds 41% more within-run repeats for the notice — two detectors were measured and rejected)*
+
+## The shell's own words are not commands (2026-10-22)
+
+A live A/B of the previous batch found three more read-only shell patterns that the keep-going gate read as MUTATIONS, and each one armed the gate on a turn that had changed nothing.
+
+**A SHELL TEST IS A READ.** `[ "$n" != "0" ]` looks at values and returns a status. It changes no file, and a session that guards a loop with one is still only READING. Live 2026-10-22: *"do n=$(gh api …); if [ "$n" != "0" ]; then … fi"* was read as a mutation, armed the gate, and pushed the model past the answer it had.
+
+**THE SHELL'S CONTROL WORDS NAME NO PROGRAM.** `continue`, `break`, `read`, `exit` and `shift` are the shell's own words: a loop's jump, a line of stdin, the end of the shell. None of them is a program, so none of them can write.
+
+**`git branch --list <pattern>` IS A QUERY.** The list form takes a PATTERN, not a branch name to create — so the pattern was read as a create, and `git branch -r --list 'origin/*'` armed the gate. The list form is now modelled the way the six git verbs already were: judged by its arguments.
+
+**AND A BRANCH IS A COMMAND, NOT SCAFFOLDING.** The fix above exposed a bug in the batch before it: `if COND; then git worktree remove "$p"; else …; fi` was treated as scaffolding, and the `git worktree remove` inside the branch was never judged. The store-wide destructive-git guard caught it — 1,854 destructive segments, and one of them had gone dark. `then`, `else` and `elif` now carry their branch into the judgement, the way `do` carries a loop's body.
+
+Measured over this repo's own session store (134,296 bash calls): classified read-only **73,949 (55.1%)**, up from 73,053 (54.4%) and from origin/main's 59,472 (45.0%).
+
+**Tests.** `internal/tool/readonly_patterns_test.go` — `TestReadOnlyPatternsAreReads` (a test, a control word, and a branch listing are reads; a branch NAME still creates; a branch that removes a worktree is a write).
+*Last updated: 2026-10-22 (fix/keep-going-gate-read-patterns — a shell test, a control word and a branch listing are reads, and a branch is a command: 55.1% of the store's calls are reads)*
+
+## The model's own labels are not the work (2026-10-22)
+
+The canonical "same work" key was still splitting a question into many keys, because the key included everything the command line contained — including the model's own section headings and the shaping of their output. A call that echoes `=== open PRs ===` and pipes into `head -40` is ONE question; the echo and the head are not part of it.
+
+The noise is now dropped from the key: `echo`, `printf`, `true`, `false`, `:`, `head`, `tail`, `wc`, `bc`, `sleep`, `continue`, `break` and `exit`. `cd` is NOT noise: it names the context the work happens in, and two commands in two repositories are two questions.
+
+| within-run calls in a group of more than one | |
+|---|---|
+| the exact key | 4,634 |
+| the canonical key | 6,515 |
+| the canonical key, without the noise | **9,967** (+53%) |
+
+**Tests.** `internal/tool/canonical_test.go` — `TestCanonicalCommandGroupsTheSameWork` (a call with a heading and a pipe groups with the bare call; a call in a different directory does not).
+*Last updated: 2026-10-22 (fix/keep-going-gate-canonical-noise — the model's own labels and the shaping of its output are not the work: 9,967 within-run repeats, against 4,634 for the exact key)*
+
+## A setting that is parsed is not a setting that is wired (2026-10-22)
+
+`runBudget` landed in the previous batch as a plain `int` on `Settings`, and it was **inert**: the file parsed, `xdev config get runBudget` printed the value, `xdev config list` showed the key — and the agent never saw it. A live run with `runBudget: 180` in the config took **4 min 11 s** against a 180-second budget, and the TUI never fired the wrap-up at all.
+
+The cause is the merge. `Settings.merge` is hand-written per field — every key a layer contributes has a line for it — and the budget had no line, so the value was decoded and then dropped on the floor. It is the same shape as the repo's own #82: *"the two compaction triggers were parsed, validated and listed in `config list`, but no build site copied them into CompactionConfig, so neither the idle boundary nor the async summarize could ever fire."* A setting is either wired or merely parsed, and the wiring is a per-field line that has to be written.
+
+**THE VALUE IS A POINTER, SO A CLOSER LAYER CAN RESET IT.** `runBudget *int`: unset means the shipped default applies, and a layer that SETS the key contributes it even when it sets it to 0. With a plain `int`, 0 is "unset" and a closer layer could never take a global budget back to the default.
+
+**Tests.** `internal/config/runbudget_test.go` — `TestRunBudgetSetting` (the key walks a real struct path; unset means the agent's default; a value is a wall clock in seconds; a negative value is unbounded), `TestRunBudgetReachesTheMergedSettings` (the merge carries it — RED without the merge line) and `TestRunBudgetCanBeResetByACloserLayer`.
+*Last updated: 2026-10-22 (fix/run-budget-merge — the run budget is wired: the merge carries it, the value is a pointer so a closer layer can reset it, and the live run that took 4 min 11 s against a 180-second budget is the one that found it)*
 
 ## The TUI speaks omp's INK and omp's ALPHABET (2026-10-21)
 
@@ -4552,4 +4621,28 @@ was a mutation on a turn that had only read. The loop's own scaffolding is trans
 **Evidence.** Two renders of the same TUI session, driven through a mock provider against a scratch repository: `/tmp/tui1/before.png` (the base branch) and `/tmp/tui1/after.png` (this branch). The tool rows read `●`/`✗`/`⠋` before and `✔`/`✘`/`⣽` after, the accent is magenta before and tan after, and the status row gains `● bash` — the indicator that used to reserve its space and paint nothing.
 
 *Last updated: 2026-10-22 (feat/tui-parity-phase1 rebased onto main: the TUI speaks omp's INK and omp's ALPHABET — the launch dark theme is omp's groknight token for token, the accent is omp's iris, and the spinner is omp's circle-braille; merged with main's read-commands section.)
+
+## The budget stops exploring, not acting (2026-10-22)
+
+The run budget's wrap-up said: *"answer now, in prose, with what you have found so far, and do not call any more tools."* That is right for a run that owes NOTHING — a question ends at the report — and wrong for a run that still owes a change: the clock turned a slow run into a run that **reported and changed nothing**.
+
+**MEASURED, ON A LADDER OF EIGHT ASKS**, from *"what does this project do?"* to *"the tests do not pass, find the cause and fix it"*:
+
+| step | wall | turns | calls | budget | the tree after |
+|---|---|---|---|---|---|
+| a question you could answer from memory | 29 s | 6 | 12 | 0 | clean |
+| one lookup | 14 s | 3 | 2 | 0 | clean |
+| a lookup and a comparison | 12 s | 2 | 1 | 0 | clean |
+| find the code that decides something | 50 s | 7 | 11 | 0 | clean |
+| **a small edit, one file** | 207 s | 16 | 19 | **1** | **clean — the edit did not happen** |
+| **an edit and a test run** | 202 s | 8 | 12 | **1** | **clean — the edit did not happen** |
+| diagnose a failure | 219 s | 8 | 13 | 1 | clean (right: a diagnosis changes nothing) |
+| **diagnose and fix** | 217 s | 14 | 13 | **1** | **clean — the fix did not happen** |
+
+Every step that had to CHANGE something ended with an untouched tree, and every one of them hit the budget. Every step that owed nothing was lean and finished in 12-29 seconds.
+
+**THE WRAP-UP NOW SAYS THE TWO THINGS THAT ARE TRUE AT ONCE**: *"Do not explore further. If your task was to make a change and you have not made it, make it now; then report in prose what you did or found."* The search ends; the work does not.
+
+**Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
+*Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 

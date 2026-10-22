@@ -87,11 +87,20 @@ func TestNoDestructiveGitSpellingIsEverClassifiedAsARead(t *testing.T) {
 			// letter is the bug this helper exists to avoid — "--show-current"
 			// carries a "c", and "c" is the copy flag.
 			valueNext := false
+			listForm := false
 			for _, a := range rest {
 				if !strings.HasPrefix(a, "-") {
 					if valueNext {
 						valueNext = false
 						continue // a query flag's value, not a branch name
+					}
+					// The LIST form: every word after --list is a
+					// PATTERN, not a branch to create. The helper must
+					// learn the same rule the classifier learned, or it
+					// would call a read destructive and the assertion
+					// would be wrong about the classifier.
+					if listForm {
+						return false
 					}
 					return true // a bare name creates a branch
 				}
@@ -103,6 +112,9 @@ func TestNoDestructiveGitSpellingIsEverClassifiedAsARead(t *testing.T) {
 					name := strings.SplitN(a, "=", 2)[0]
 					if gitBranchWriteLong[name] {
 						return true
+					}
+					if name == "--list" {
+						listForm = true
 					}
 					if gitBranchQueryValueFlags[name] && !strings.Contains(a, "=") {
 						valueNext = true

@@ -64,6 +64,16 @@ var readOnlyHeads = map[string]bool{
 	// sleep does nothing, and expr evaluates an expression and prints it.
 	// Neither can change anything.
 	"sleep": true, "expr": true,
+	// A shell TEST is a read: `[ "$n" != "0" ]` looks at values and returns
+	// a status. A session that guards a loop with one is still only
+	// READING, and a test classified as a write arms the keep-going gate
+	// on a turn that changed nothing — the live 2026-10-22 case: "do n=$(gh
+	// api …); if [ "$n" != "0" ]; then … fi" was read as a mutation.
+	"[": true, "[[": true,
+	// The shell's CONTROL WORDS name no program and change no file. `read`
+	// consumes a line of stdin, `continue` and `break` move the loop, `exit`
+	// ends the shell.
+	"continue": true, "break": true, "read": true, "exit": true, "shift": true,
 	// cd changes only the shell's own working directory, and the bash tool
 	// gives every call a fresh process (a caller sets one with the workdir
 	// argument), so it persists nothing across calls. It is also the single
@@ -215,11 +225,21 @@ var gitBranchQueryValueFlags = map[string]bool{
 // a short cluster is judged letter by letter, and a bare name is a create.
 func readOnlyGitBranch(args []string) bool {
 	valueNext := false
+	listForm := false
 	for _, a := range args {
 		if !strings.HasPrefix(a, "-") || a == "-" {
 			if valueNext {
 				valueNext = false
 				continue // this argument is the previous flag's value
+			}
+			// A bare name creates a branch — UNLESS --list is in play.
+			// `git branch --list 'origin/*'` LISTS the branches matching a
+			// pattern, and the pattern is not a name to create. Live
+			// 2026-10-22: `git branch -r --list 'origin/*'` was read as a
+			// CREATE, armed the keep-going gate on a turn that only read,
+			// and pushed the model past the answer it had.
+			if listForm {
+				return true
 			}
 			return false // a bare name creates a branch
 		}
@@ -234,6 +254,10 @@ func readOnlyGitBranch(args []string) bool {
 			}
 			if gitBranchWriteLong[name] {
 				return false
+			}
+			if name == "--list" {
+				// The list form: every word after it is a PATTERN.
+				listForm = true
 			}
 			if gitBranchQueryValueFlags[name] && !strings.Contains(a, "=") {
 				valueNext = true
@@ -409,44 +433,47 @@ func cutAtRedirect(seg string) string {
 	return seg
 }
 
-// shellKeywordScaffolding are the shell keywords that NAME no program, so a
-// segment that starts with one cannot change anything on its own.
+// shellKeywordNeutral are the shell keywords that name no program AND are
+// followed by nothing: a conditional's end, a loop's end, and a for loop's
+// header.
 //
 //	"for x in a b"   the loop header: a variable and a word list
-//	"do"            the body's introducer
-//	"done"          the loop's end
-//	"then" "else"   the conditional's branches
-//	"elif" "fi"     the conditional's branches
+//	"fi" "done"     the ends
 //
-// A loop's BODY is a command and is judged on its own — "do rm -rf /" is
-// still a write. The header of a for loop cannot write: the shell expands
-// its word list, and a command substitution inside it is a segment of its
-// own (the splitter cuts at `(`), so the command is still judged.
-var shellKeywordScaffolding = map[string]bool{
-	"for": true, "do": true, "done": true,
-	"then": true, "else": true, "elif": true, "fi": true,
+// The header of a for loop cannot write: the shell expands its word list,
+// and a command substitution inside it is a segment of its own (the splitter
+// cuts at `(`), so the command inside it is still judged.
+var shellKeywordNeutral = map[string]bool{
+	"for": true, "fi": true, "done": true, "end": true,
 }
 
 // shellKeywordCommand are the shell keywords whose segment CONTINUES with a
 // command or an expression, so the rest of the segment is what has to be
 // judged.
 //
-//	"do rm -rf /"   the body
-//	"while COND"   the condition, which can name a command
-//	"until COND"   the condition
-//	"if COND"      the condition
+//	"do rm -rf /"     the body of a loop
+//	"then git merge"  a branch of a conditional
+//	"while COND"      a condition, which can name a command
+//	"until COND"      the condition
+//	"if COND"         the condition
+//
+// "then" and "else" belong here, not with the neutral keywords: in
+// `if COND; then git worktree remove "$p"; else echo skipped; fi` the
+// branch IS the command, and treating it as scaffolding hid a real
+// `git worktree remove` from the classifier.
 var shellKeywordCommand = map[string]bool{
-	"do": true, "while": true, "until": true, "if": true,
+	"do": true, "then": true, "else": true, "elif": true,
+	"while": true, "until": true, "if": true,
 }
 
 // stripShellKeyword removes a leading shell keyword from a segment's fields
-// and reports whether there was one. The keyword itself is not a command.
+// and reports which kind it was. The keyword itself is not a command.
 func stripShellKeyword(fields []string) ([]string, string) {
 	if len(fields) == 0 {
 		return fields, ""
 	}
 	k := fields[0]
-	if shellKeywordScaffolding[k] || shellKeywordCommand[k] {
+	if shellKeywordNeutral[k] || shellKeywordCommand[k] {
 		return fields[1:], k
 	}
 	return fields, ""

@@ -35,8 +35,13 @@ func TestShellLoopScaffoldingIsTransparent(t *testing.T) {
 		{"for r in a b; do gh pr merge $r; done", false, "the body merges"},
 		{"for r in a b; do echo $r > out.txt; done", false, "the body redirects to a file"},
 		{"for r in a b; do git branch -d $r; done", false, "the body deletes a branch"},
-		{"while read line; do echo $line; done", false, "a while condition names a command"},
-		{"until [ -f x ]; do sleep 1; done", false, "a until condition is not a read the classifier can see"},
+		// A while/until condition that only READS is a read: `read` takes a
+		// line of stdin and `[ ... ]` is a test. Both changed when the
+		// shell's own words were classified as what they are.
+		{"while read line; do echo $line; done", true, "reading a line is a read"},
+		{"until [ -f x ]; do sleep 1; done", true, "a test is a read"},
+		// A condition that WRITES is still a write.
+		{"while git fetch origin; do sleep 1; done", false, "a while condition that writes is a write"},
 	} {
 		if got := ReadOnlyCommand(tc.cmd); got != tc.want {
 			t.Errorf("ReadOnlyCommand(%q) = %v, want %v — %s", tc.cmd, got, tc.want, tc.why)

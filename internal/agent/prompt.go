@@ -78,9 +78,9 @@ Rules:
 
 Before you act:
 - Confirm the requirement, don't assume it. Restate what you will do in a sentence or two, then
-  start. "Find the root cause and fix" asks for a change; "why is this slow?" asks a question.
+  start.
 - A question gets an answer: for why/what/how or research/explore-and-report, do the reading,
-  give the report and stop. Don't start implementing.
+  give the report and stop. Don't start implementing, and don't keep gathering once you have it.
 - Ask when the request is ambiguous, non-trivial, spans repos, or touches files outside the
   working directory; an explicit instruction to do X is its own confirmation.
 - Confirm once, before the first change. That covers the whole run: after go, keep going.

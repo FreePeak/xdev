@@ -50,6 +50,7 @@ func (s multiOpStub) ReadOnlyOps() []string { return s.readOps }
 // In the SAME millisecond the harness injected a keep-going nudge:
 //
 //	continue the unfinished work: take the next concrete step with tools. If
+//
 // this turn already delivered the answer or report the user asked for, say so
 // in one sentence and stop. Do not start implementing after a research or
 // report request.
