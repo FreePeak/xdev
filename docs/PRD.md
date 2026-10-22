@@ -4570,6 +4570,32 @@ Measured over this repo's own session store (134,296 bash calls): classified rea
 **Tests.** `internal/tool/readonly_patterns_test.go` — `TestReadOnlyPatternsAreReads` (a test, a control word, and a branch listing are reads; a branch NAME still creates; a branch that removes a worktree is a write).
 *Last updated: 2026-10-22 (fix/keep-going-gate-read-patterns — a shell test, a control word and a branch listing are reads, and a branch is a command: 55.1% of the store's calls are reads)*
 
+## The model's own labels are not the work (2026-10-22)
+
+The canonical "same work" key was still splitting a question into many keys, because the key included everything the command line contained — including the model's own section headings and the shaping of their output. A call that echoes `=== open PRs ===` and pipes into `head -40` is ONE question; the echo and the head are not part of it.
+
+The noise is now dropped from the key: `echo`, `printf`, `true`, `false`, `:`, `head`, `tail`, `wc`, `bc`, `sleep`, `continue`, `break` and `exit`. `cd` is NOT noise: it names the context the work happens in, and two commands in two repositories are two questions.
+
+| within-run calls in a group of more than one | |
+|---|---|
+| the exact key | 4,634 |
+| the canonical key | 6,515 |
+| the canonical key, without the noise | **9,967** (+53%) |
+
+**Tests.** `internal/tool/canonical_test.go` — `TestCanonicalCommandGroupsTheSameWork` (a call with a heading and a pipe groups with the bare call; a call in a different directory does not).
+*Last updated: 2026-10-22 (fix/keep-going-gate-canonical-noise — the model's own labels and the shaping of its output are not the work: 9,967 within-run repeats, against 4,634 for the exact key)*
+
+## A setting that is parsed is not a setting that is wired (2026-10-22)
+
+`runBudget` landed in the previous batch as a plain `int` on `Settings`, and it was **inert**: the file parsed, `xdev config get runBudget` printed the value, `xdev config list` showed the key — and the agent never saw it. A live run with `runBudget: 180` in the config took **4 min 11 s** against a 180-second budget, and the TUI never fired the wrap-up at all.
+
+The cause is the merge. `Settings.merge` is hand-written per field — every key a layer contributes has a line for it — and the budget had no line, so the value was decoded and then dropped on the floor. It is the same shape as the repo's own #82: *"the two compaction triggers were parsed, validated and listed in `config list`, but no build site copied them into CompactionConfig, so neither the idle boundary nor the async summarize could ever fire."* A setting is either wired or merely parsed, and the wiring is a per-field line that has to be written.
+
+**THE VALUE IS A POINTER, SO A CLOSER LAYER CAN RESET IT.** `runBudget *int`: unset means the shipped default applies, and a layer that SETS the key contributes it even when it sets it to 0. With a plain `int`, 0 is "unset" and a closer layer could never take a global budget back to the default.
+
+**Tests.** `internal/config/runbudget_test.go` — `TestRunBudgetSetting` (the key walks a real struct path; unset means the agent's default; a value is a wall clock in seconds; a negative value is unbounded), `TestRunBudgetReachesTheMergedSettings` (the merge carries it — RED without the merge line) and `TestRunBudgetCanBeResetByACloserLayer`.
+*Last updated: 2026-10-22 (fix/run-budget-merge — the run budget is wired: the merge carries it, the value is a pointer so a closer layer can reset it, and the live run that took 4 min 11 s against a 180-second budget is the one that found it)*
+
 ## The TUI speaks omp's INK and omp's ALPHABET (2026-10-21)
 
 **THE PARITY QUESTION WAS NEVER THE PALETTE.** xdev already implements omp's 66-token theme contract — the canonical tokens at `internal/theme/theme.go:91-237` and the required set at `internal/theme/custom.go:203-232` (`requiredSlots`) — and a theme file in omp's own on-disk format parses through the same `ParseTheme` (`internal/theme/custom.go:88-177`). So "xdev looks like omp" was a LAYOUT + COMPONENT question, not a palette one. This phase is the other half: the INK xdev paints with, and the ALPHABET it paints that ink with, become omp's.

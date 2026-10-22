@@ -538,9 +538,10 @@ type Settings struct {
 	DefaultModel string `yaml:"defaultModel"`
 	ApprovalMode string `yaml:"approvalMode"` // always-ask|write|yolo
 	// RunBudget is the wall clock ONE run may take, in seconds
-	// (runBudget). 0 means unset: the shipped default applies
-	// (agent.DefaultRunBudget, 6 minutes). A negative value is an
-	// explicit opt-out — an unbounded run.
+	// (runBudget). A POINTER, so "unset" and "set" are different things:
+	// unset means the shipped default applies (agent.DefaultRunBudget, 6
+	// minutes), and a layer that sets the key — even to 0 — contributes
+	// it. A negative value is an explicit opt-out — an unbounded run.
 	//
 	// The default is measured, not guessed: the RCA's patched run of a
 	// "tell me where we are" question took 4 min 53 s, so a shorter
@@ -549,7 +550,7 @@ type Settings struct {
 	// model does not know that — it kept gathering "useful adjacent info"
 	// for 20 turns. The clock is the only thing that ends that, so the
 	// clock is the thing to configure.
-	RunBudget int `yaml:"runBudget"`
+	RunBudget *int `yaml:"runBudget"`
 	// Prewalk turns the one-shot model handoff on for every run
 	// (prewalk.enabled); prewalk.into is the handoff target (a model ref,
 	// default: the session model). The -prewalk flag forces it on and
@@ -1378,14 +1379,14 @@ func (s *Settings) CompactionMethodOrder() string {
 
 // RunBudgetDuration returns the wall-clock budget for ONE run.
 //
-// 0 means unset: the agent's own default applies (agent.DefaultRunBudget).
+// nil means unset: the agent's own default applies (agent.DefaultRunBudget).
 // A negative value is unbounded. The agent reads the same three states, so
 // the setting is a pass-through rather than a second policy.
 func (s *Settings) RunBudgetDuration() time.Duration {
-	if s == nil || s.RunBudget == 0 {
+	if s == nil || s.RunBudget == nil {
 		return 0
 	}
-	return time.Duration(s.RunBudget) * time.Second
+	return time.Duration(*s.RunBudget) * time.Second
 }
 
 // CompactionIdleAfter reports the idle-compaction gap; 0 disables the
@@ -1816,6 +1817,19 @@ func (s *Settings) merge(layer *Settings) error {
 	}
 	if layer.DefaultModel != "" {
 		s.DefaultModel = layer.DefaultModel
+	}
+	// The run budget is a POINTER precisely so this line can exist: a layer
+	// that SETS the key contributes it, even to 0, so a closer layer can
+	// reset a global budget to the shipped default.
+	//
+	// It was missing here, and the setting was INERT: the file parsed, the
+	// key was listed by `xdev config get`, and the agent never saw it. That
+	// is the same shape as #82 — "the two compaction triggers were parsed,
+	// validated and listed in `config list`, but no build site copied them
+	// into CompactionConfig" — and the merge is where a setting is either
+	// wired or merely parsed.
+	if layer.RunBudget != nil {
+		s.RunBudget = layer.RunBudget
 	}
 	if layer.ApprovalMode != "" {
 		s.ApprovalMode = layer.ApprovalMode

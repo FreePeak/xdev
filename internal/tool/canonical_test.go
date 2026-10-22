@@ -23,6 +23,13 @@ func TestCanonicalCommandGroupsTheSameWork(t *testing.T) {
 		{`gh api "repos/FreePeak/xdev/pulls?state=open&per_page=100" --jq 'length'`, `gh api "repos/FreePeak/xdev/pulls?state=open&per_page=100" --jq '.[] | .url'`},
 		// The same command with a different pipe target.
 		{"gh pr list --state open | head -40", "gh pr list --state open | head -50"},
+		// The model's own LABELS and the shaping of its output are not the
+		// work: a call that echoes a heading and pipes into `head` is one
+		// question, and the noise must not be part of its identity.
+		{`echo "=== open PRs ==="; gh pr list --state open | head -40`, `gh pr list --state open`},
+		{`gh pr list --state open | head -40`, `gh pr list --state open | head -50`},
+		{"echo hi; echo bye; gh pr list --state open", "gh pr list --state open"},
+
 		// The same command with the flag order changed.
 		{"gh pr list --state open --author linhdmn", "gh pr list --author linhdmn --state open"},
 	}
@@ -47,6 +54,7 @@ func TestCanonicalCommandGroupsTheSameWork(t *testing.T) {
 		// A different DIRECTORY is a different context, even for the same
 		// command: the cd stays in the key.
 		{`cd /tmp && gh pr list --state open`, `gh pr list --state open`},
+		{`cd /a && gh pr list --state open`, `cd /b && gh pr list --state open`},
 	}
 	for _, p := range different {
 		a, b := CanonicalCommand(p[0]), CanonicalCommand(p[1])
