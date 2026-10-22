@@ -80,11 +80,50 @@ type GithubTool struct {
 	// ScratchDir is the parent directory for PR worktrees. Empty means
 	// <TMPDIR>/xdev-pr-worktrees (the session temp dir).
 	ScratchDir string
+	// Ask answers the scope question (github_scope.go): a search that would
+	// leave the current repository asks before it goes. Nil means there is
+	// no user to ask, and then the answer is "no".
+	Ask *AskTool
 
 	mu        sync.Mutex
 	checkouts map[string]githubCheckout // branch, PR number, and PR URL → record
 	order     []string                  // branch names in checkout order
 	cache     *githubCache
+
+	// repoOnce resolves the checkout's repository once per tool instance:
+	// every scoped search needs it, and `gh repo view` is a network call.
+	repoOnce sync.Once
+	repoName string
+	repoErr  error
+}
+
+// currentRepo is the checkout's GitHub repository, resolved once.
+//
+// A search that names no repository is scoped to THIS one, so the
+// resolution has to be right: an unresolvable checkout is an error,
+// never a licence to search everything.
+func (t *GithubTool) currentRepo(ctx context.Context) (string, error) {
+	t.repoOnce.Do(func() {
+		out, err := t.gh(ctx, "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+		if err != nil {
+			t.repoErr = err
+			return
+		}
+		t.repoName = strings.TrimSpace(out)
+		if t.repoName == "" {
+			t.repoErr = errors.New("github: cannot resolve the repository from the current checkout")
+		}
+	})
+	return t.repoName, t.repoErr
+}
+
+// askSink returns the sink that answers a scope question, or nil when
+// there is nobody to ask. A nil sink is a "no": the search stays inside.
+func (t *GithubTool) askSink() AskSink {
+	if t.Ask == nil {
+		return nil
+	}
+	return t.Ask.Sink
 }
 
 // NewGithubTool returns a GithubTool rooted at cwd.
@@ -111,7 +150,7 @@ func (t *GithubTool) Parameters() json.RawMessage {
       "enum": ["repo_view", "file_read", "pr_create", "pr_checkout", "pr_push", "search_issues", "search_prs", "search_code", "search_commits", "search_repos", "run_watch"],
       "description": "operation to run"
     },
-    "repo": {"type": "string", "description": "[host/]owner/repo override (default: the current checkout)"},
+    "repo": {"type": "string", "description": "[host/]owner/repo override (default: the current checkout; a search inside it needs no argument, and a search that leaves it asks the user first)"},
     "branch": {"type": "string", "description": "branch (repo_view, file_read, pr_push, run_watch default)"},
     "path": {"type": "string", "description": "repository-relative file path (file_read)"},
     "pr": {"type": "string", "description": "PR number, branch, or GitHub URL (pr_checkout; array also accepted); also selects the checkout for pr_push"},
@@ -911,18 +950,48 @@ const (
 	ghRunViewFields      = "databaseId,status,conclusion,url,headSha,headBranch,displayTitle,workflowName,jobs"
 )
 
+// search runs one gh search, scoped to the current repository unless the
+// user says otherwise.
+//
+// The scope is the whole point: `gh search prs` with no scope reaches every
+// repository the token can see, and the schema promised the default was the
+// current checkout. So an unnamed search is pinned to the checkout, and a
+// search that names somewhere else asks first.
 func (t *GithubTool) search(ctx context.Context, op string, a githubArgs) (Result, error) {
+	// The validation happens BEFORE the scope question: a call that cannot
+	// work must not cost the human an answer.
+	if _, err := searchArgs(op, a); err != nil {
+		return errResult(err), nil
+	}
+	current, err := t.currentRepo(ctx)
+	if err != nil {
+		// The boundary is unknown. That is not a licence to search
+		// everything: an unknown boundary is an outside search.
+		current = ""
+	}
+	scope, out := ghSearchScope(op, a, current)
+	if scope == ghScopeOutside {
+		if !t.confirmScope(ctx, current, out) {
+			return Result{Text: "github: " + op + " was not run: it reaches outside " +
+				ghScopeLabel(current) + " (" + out.Desc + "), and nobody approved it. " +
+				"Ask the user to approve the wider search, or scope the query to the current repository.", IsError: true}, nil
+		}
+	} else {
+		// Inside the checkout: pin it, so the search cannot wander.
+		a.Repo = current
+		a.Query = stripRepoQualifier(a.Query)
+	}
 	argv, err := searchArgs(op, a)
 	if err != nil {
 		return errResult(err), nil
 	}
-	out, err := t.gh(ctx, argv...)
+	out2, err := t.gh(ctx, argv...)
 	if err != nil {
 		return errResult(err), nil
 	}
-	text, err := renderSearch(op, out)
+	text, err := renderSearch(op, out2)
 	if err != nil {
-		return Result{Text: "github: " + op + ": unexpected gh output: " + capText(strings.TrimSpace(out), 512), IsError: true}, nil
+		return Result{Text: "github: " + op + ": unexpected gh output: " + capText(strings.TrimSpace(out2), 512), IsError: true}, nil
 	}
 	return Result{Text: text}, nil
 }
