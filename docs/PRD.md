@@ -4506,3 +4506,25 @@ Live 2026-10-22, a TUI run of "list me all pr urls openningin xdev": the model c
 
 **Tests.** `internal/tool/readonly_common_test.go` — `TestCommonReadCommandsAreReads` (a bounded read is a read, a bounded write is a write, `gofmt -w` writes, `sleep` and `expr` do nothing, and the redirect still writes).
 *Last updated: 2026-10-22 (fix/keep-going-gate-common-reads — timeout, gofmt, sleep and expr are the reads a research turn reaches for: 1,669 more of the store's calls are reads, and awk stays unknown on purpose because a program that writes a file and a program that compares a number look the same to a denylist)*
+
+## A variable set by a call dies with the call (2026-10-22)
+
+A bare assignment was pinned as a write: *"a bare assignment exports state"*. The bash tool gives every call a fresh process, so the export dies with the call — the same argument that puts `cd` in the read set, and `cd` is a bigger change to the workspace than an assignment is.
+
+What the pin could not see is the FRAGMENT. The splitter cuts a command substitution in half, so `d=$(git rev-list --count main..$b)` leaves a segment `d=$` behind — and `d=$` is not a command at all. It read as an unknown one, so the loop
+
+	for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
+	  d=$(git rev-list --count main..$b 2>/dev/null)
+	  echo "$b ahead=$d"
+	done
+
+was a mutation on a turn that had only read. The loop's own scaffolding is transparent (see above), the two commands inside it are reads, and the assignment between them was the one thing that said otherwise.
+
+**THE COMMAND INSIDE THE SUBSTITUTION IS STILL JUDGED.** The splitter cuts at `(`, so `d=$(cmd)` is an assignment segment and a `cmd` segment. `d=$(rm -rf /tmp/x)` is a write, and `FOO=1 rm -rf /tmp/x` is a write. The write check is separate and runs on the whole segment, so `FOO=1 > out` is a write too.
+
+**A PIN WAS CHANGED, AND HERE IS WHY.** `internal/tool/readonly_test.go` pinned `FOO=1` as a write. The pin's reason — "it exports state" — assumes a shell that outlives the call, and the bash tool does not give one. The pin is now the other way, with the reasoning written next to it rather than deleted.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,418 bash calls): classified read-only **73,053 (54.8%)**, up from 68,996 (51.8%) and from origin/main's 59,472 (45.0%).
+
+**Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
+*Last updated: 2026-10-22 (fix/keep-going-gate-assignment-fragment — a bare assignment changes nothing because the call's shell dies with it, the fragment the splitter leaves behind no longer reads as an unknown command, and the command inside a substitution is still judged: 54.8% of the store's calls are reads, against 45.0% before this series)*
