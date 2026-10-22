@@ -470,6 +470,7 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		panelW := min(w-2, hubPanelWidth(w, visible)+3)
 		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
 		hubRosterBox(s, y, h, hubPanelWidth(w, visible), a.th.Box(), brdSt)
+		drawText(s, 3, y+2, rosterSnippet("status · outcome · model · level · activity · elapsed · tokens · cost · requests · tools · parent", printW(panelW, 3)), dimSt)
 		drawText(s, 3, y+1, rosterSnippet("transcript · "+ui.viewTitle()+ui.viewID, printW(panelW, 3)), dimSt)
 		for i, ln := range visible {
 			drawText(s, 3, y+2+i, rosterLine(ln.Role, ln.Text, panelW), fgSt)
