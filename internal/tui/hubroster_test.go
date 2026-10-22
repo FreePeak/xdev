@@ -51,7 +51,7 @@ func (f *hubFixture) ops() *HubOps {
 
 func rosterRows() []HubAgent {
 	return []HubAgent{
-		{ID: "hub-1", Name: "scout", Status: "running", Model: "free", Activity: "reading", Cost: "$0.0100"},
+		{ID: "hub-1", Name: "free", Status: "running", Model: "free", Activity: "reading", Cost: "$0.0100"},
 		{ID: "hub-2", Name: "fixer", Status: "parked", Model: "smol", Activity: "2 msgs", Cost: "-"},
 	}
 }
@@ -172,7 +172,7 @@ func TestHubRosterOverlayRenders(t *testing.T) {
 	app.mu.Unlock()
 	scr.Show()
 
-	for _, want := range []string{"AGENT HUB", "hub-1", "scout", "running", "hub-2", "parked"} {
+	for _, want := range []string{"Agent Hub", "hub-1", "free", "running", "hub-2", "parked"} {
 		if !gridContains(scr, want) {
 			t.Fatalf("roster panel missing %q", want)
 		}
