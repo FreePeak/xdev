@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/gdamore/tcell/v2"
 )
@@ -439,7 +440,8 @@ const (
 
 type childPanel struct {
 	path    string
-	entries []string
+	entries []agent.TranscriptEntry
+	notice  string
 	scroll  int
 }
 
@@ -707,6 +709,12 @@ func (a *App) handleSessionPickerKey(key *tcell.EventKey) (handled bool) {
 		return true
 	case tcell.KeyEsc:
 		a.mu.Lock()
+		if a.spick != nil && a.spick.panel != nil {
+			a.spick.panel = nil
+			a.mu.Unlock()
+			a.poke()
+			return true
+		}
 		if a.spick.confirm != "" {
 			// First Esc cancels the armed delete, not the picker.
 			a.spick.confirm = ""
@@ -1004,6 +1012,42 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 		y++
 	}
 	drawText(s, 2, y, box.BottomLeft+strings.Repeat(box.Horizontal, inner)+box.BottomRight, borderSt)
+
+	// Read-only child transcript overlay.
+	if p.panel != nil {
+		panel := p.panel
+		px, py := 4, 2
+		pw := min(w-8, 60)
+		ph := min(12, yComposerTop-4)
+		if ph < 5 {
+			ph = 5
+		}
+		// border
+		drawText(s, px, py, box.TopLeft+" subagent transcript "+strings.Repeat(box.Horizontal, max(0, pw-22))+box.TopRight, borderSt)
+		for i := 1; i < ph-1; i++ {
+			for x := px; x < px+pw; x++ {
+				s.SetContent(x, py+i, ' ', nil, rowSt)
+			}
+			drawText(s, px, py+i, box.Vertical, borderSt)
+			drawText(s, px+pw-1, py+i, box.Vertical, borderSt)
+		}
+		// entries
+		ey := py + 1
+		if panel.notice != "" {
+			drawText(s, px+2, ey, panel.notice, dimSt)
+			ey++
+		}
+		for _, e := range panel.entries {
+			if ey >= py+ph-1 {
+				break
+			}
+			line := e.Role + ": " + e.Text
+			drawText(s, px+2, ey, line, rowSt.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
+			ey++
+		}
+		drawText(s, px, py+ph-1, box.BottomLeft+strings.Repeat(box.Horizontal, pw-2)+box.BottomRight, borderSt)
+		drawText(s, px+2, py+ph, "Esc close", dimSt)
+	}
 }
 
 func (a *App) SetLoadSubagentItems(fn func() []SessionPickerItem) {
@@ -1027,10 +1071,17 @@ func (a *App) loadSubagentItems() {
 }
 
 func (a *App) openSubagentTranscript(it SessionPickerItem) {
+	entries, err := agent.ReadChildTranscript(it.Path)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.spick == nil {
 		return
 	}
-	a.spick.panel = &childPanel{path: it.Path}
+	panel := &childPanel{path: it.Path, scroll: 0}
+	if err != nil {
+		panel.notice = err.Error()
+	} else {
+		panel.entries = entries
+	}
+	a.spick.panel = panel
 }
