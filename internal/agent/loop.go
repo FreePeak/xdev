@@ -215,11 +215,20 @@ const maxPromptContinuations = 2
 // long, say what you have".
 const DefaultRunBudget = 6 * time.Minute
 
-// RunBudgetPrompt is the wrap-up the budget sends. It asks for the report
-// the user asked for, in prose, and tells the model to stop calling tools —
-// the same shape as the turn-limit wrap-up, because a budget is a budget: it
-// ends the run, it does not merely advise it.
-const RunBudgetPrompt = "this run has reached its time budget — answer now, in prose, with what you have found so far, and do not call any more tools"
+// RunBudgetPrompt is the wrap-up the budget sends.
+//
+// It stops EXPLORING, not ACTING. The old text — "answer now, in prose,
+// with what you have found so far, and do not call any more tools" — forbade
+// tool calls, so a run that still OWED a change could not make it: the clock
+// turned a slow run into a run that reported and changed nothing.
+//
+// Measured 2026-10-22, a ladder of eight asks from "what does this project
+// do?" to "the tests do not pass, find the cause and fix it": every step
+// that had to CHANGE something ended with a report and an untouched tree,
+// and every one of them hit the budget. The read steps, which owe nothing,
+// were lean (12-29 s). The wrap-up now says the two things that are true at
+// once: stop looking, and finish what you owe.
+const RunBudgetPrompt = "this run has reached its time budget. Do not explore further. If your task was to make a change and you have not made it, make it now; then report in prose what you did or found."
 
 // RunBudgetAttribution tags the budget wrap-up as harness text: the user
 // never typed it.
