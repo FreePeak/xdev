@@ -4596,3 +4596,27 @@ The cause is the merge. `Settings.merge` is hand-written per field — every key
 
 **Tests.** `internal/config/runbudget_test.go` — `TestRunBudgetSetting` (the key walks a real struct path; unset means the agent's default; a value is a wall clock in seconds; a negative value is unbounded), `TestRunBudgetReachesTheMergedSettings` (the merge carries it — RED without the merge line) and `TestRunBudgetCanBeResetByACloserLayer`.
 *Last updated: 2026-10-22 (fix/run-budget-merge — the run budget is wired: the merge carries it, the value is a pointer so a closer layer can reset it, and the live run that took 4 min 11 s against a 180-second budget is the one that found it)*
+
+## The budget stops exploring, not acting (2026-10-22)
+
+The run budget's wrap-up said: *"answer now, in prose, with what you have found so far, and do not call any more tools."* That is right for a run that owes NOTHING — a question ends at the report — and wrong for a run that still owes a change: the clock turned a slow run into a run that **reported and changed nothing**.
+
+**MEASURED, ON A LADDER OF EIGHT ASKS**, from *"what does this project do?"* to *"the tests do not pass, find the cause and fix it"*:
+
+| step | wall | turns | calls | budget | the tree after |
+|---|---|---|---|---|---|
+| a question you could answer from memory | 29 s | 6 | 12 | 0 | clean |
+| one lookup | 14 s | 3 | 2 | 0 | clean |
+| a lookup and a comparison | 12 s | 2 | 1 | 0 | clean |
+| find the code that decides something | 50 s | 7 | 11 | 0 | clean |
+| **a small edit, one file** | 207 s | 16 | 19 | **1** | **clean — the edit did not happen** |
+| **an edit and a test run** | 202 s | 8 | 12 | **1** | **clean — the edit did not happen** |
+| diagnose a failure | 219 s | 8 | 13 | 1 | clean (right: a diagnosis changes nothing) |
+| **diagnose and fix** | 217 s | 14 | 13 | **1** | **clean — the fix did not happen** |
+
+Every step that had to CHANGE something ended with an untouched tree, and every one of them hit the budget. Every step that owed nothing was lean and finished in 12-29 seconds.
+
+**THE WRAP-UP NOW SAYS THE TWO THINGS THAT ARE TRUE AT ONCE**: *"Do not explore further. If your task was to make a change and you have not made it, make it now; then report in prose what you did or found."* The search ends; the work does not.
+
+**Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
+*Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
