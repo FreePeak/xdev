@@ -686,18 +686,20 @@ func (a *App) drawAgentPanel(queueTop int) {
 		if y >= queueTop {
 			break // the strip never paints over the queue or the composer
 		}
+
 		x := 1
 		// The tree's own column: the ancestor bars, then this row's branch.
 		drawText(s, x, y, r.prefix, dim)
 		x += width(r.prefix) + 1
-		// The status glyph: the shared spinner while the child works, so
-		// this row moves in step with the composer divider and the call
-		// row (spinFrame's whole point). A settled child wears a static
+		// The status glyph: the shared STATUS spinner while the child
+		// works, so this row moves in step with the composer divider and
+		// the call row (statusSpinFrame's whole point) — a child still
+		// working is a status, not an activity. A settled child wears a static
 		// tick instead — a finished row that kept spinning would say
 		// "still working" about work that is done.
 		mark, markSt := "✓", dim
 		if !r.Done {
-			mark, markSt = a.spinFrame(), runSt
+			mark, markSt = a.statusSpinFrame(), runSt
 		}
 		drawText(s, x, y, mark, markSt)
 		x += 2

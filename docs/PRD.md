@@ -931,28 +931,6 @@ JSONL tree, and the subprocess trust boundary. Each phase ends with focused test
 same PR. A feature is not marked complete merely because a package or type exists: it needs a
 real consumer and evidence from a running xdev interaction.
 
-## A variable set by a call dies with the call (2026-10-22)
-
-A bare assignment was pinned as a write: *"a bare assignment exports state"*. The bash tool gives every call a fresh process, so the export dies with the call — the same argument that puts `cd` in the read set, and `cd` is a bigger change to the workspace than an assignment is.
-
-What the pin could not see is the FRAGMENT. The splitter cuts a command substitution in half, so `d=$(git rev-list --count main..$b)` leaves a segment `d=$` behind — and `d=$` is not a command at all. It read as an unknown one, so the loop
-
-	for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
-	  d=$(git rev-list --count main..$b 2>/dev/null)
-	  echo "$b ahead=$d"
-	done
-
-was a mutation on a turn that had only read. The loop's own scaffolding is transparent (see above), the two commands inside it are reads, and the assignment between them was the one thing that said otherwise.
-
-**THE COMMAND INSIDE THE SUBSTITUTION IS STILL JUDGED.** The splitter cuts at `(`, so `d=$(cmd)` is an assignment segment and a `cmd` segment. `d=$(rm -rf /tmp/x)` is a write, and `FOO=1 rm -rf /tmp/x` is a write. The write check is separate and runs on the whole segment, so `FOO=1 > out` is a write too.
-
-**A PIN WAS CHANGED, AND HERE IS WHY.** `internal/tool/readonly_test.go` pinned `FOO=1` as a write. The pin's reason — "it exports state" — assumes a shell that outlives the call, and the bash tool does not give one. The pin is now the other way, with the reasoning written next to it rather than deleted.
-
-**MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,418 bash calls): classified read-only **73,053 (54.8%)**, up from 68,996 (51.8%) and from origin/main's 59,472 (45.0%).
-
-**Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
-*Last updated: 2026-10-22 (fix/keep-going-gate-assignment-fragment — a bare assignment changes nothing because the call's shell dies with it, the fragment the splitter leaves behind no longer reads as an unknown command, and the command inside a substitution is still judged: 54.8% of the store's calls are reads, against 45.0% before this series)*
-
 *Last updated: 2026-10-19 (fix/open-subagent-session — F1–F5 + D1: same-process TaskTool subagent panel transcript):*
 *Last updated: 2026-10-13 (fix/failover-combo-alias — a gateway's own route names are never implicit failover legs):*
 #641/#642 landed the per-model `failover: false`, which fixes the symptom only when the operator
@@ -1361,7 +1339,7 @@ One correction to the record above: `answer_confidence` is not "Jev-only". laya 
 
 **Verified live, not simulated.** `xdev print` against the local sidecar through the real tool registry: the rendered footer is `(answered by english, 80ms)`, with `local_ms` coming from the sidecar itself. Tests: `TestEvaluateWithInfoReportsTheAnsweringBackend` (the verbatim live envelope, asserting the footer, and asserting `0 tokens` never appears) and `TestToolSurfacesTheBackendThatAnswered` (the tool's own `Execute`, which fails with `tool dropped the answering checkpoint` on a build where the tool discards the `Info`). Both fail on the pre-fix code; the second was confirmed by reverting `tool.go` alone.
 
-One cleanup the full-suite run forced: this worktree's `internal/tui/statuspill_test.go` was left mid-merge by an unrelated `git stash pop` (six `<<<<<<< Updated upstream` blocks), failing `internal/tui` and the repo's own `TestNoConflictMarkersInTrackedFiles`. That file is untouched by any commit here and `git diff HEAD origin/main` on it is empty, so it was restored from HEAD. The foreign `stash@{0}` (`fix/status-pill-click`, dated 2026-09-30) is intact and was not popped, dropped, or modified. `go test ./internal/... ./cmd/...` is green.
+One cleanup the full-suite run forced: this worktree's `internal/tui/statuspill_test.go` was left mid-merge by an unrelated `git stash pop` (six `` blocks), failing `internal/tui` and the repo's own `TestNoConflictMarkersInTrackedFiles`. That file is untouched by any commit here and `git diff HEAD origin/main` on it is empty, so it was restored from HEAD. The foreign `stash@{0}` (`fix/status-pill-click`, dated 2026-09-30) is intact and was not popped, dropped, or modified. `go test ./internal/... ./cmd/...` is green.
 
 *Last updated: 2026-10-03 (`fix/typesafe-429-retry` — **a quota window used to be a hard tool failure mid-turn**).* The last finding left open by #557. `EvaluateWithInfo` sent one request and reported whatever status came back, so a `429 Too Many Requests` became `typesafe: 429 …` inside an agent turn: the request was valid, the answer is unchanged by the delay, and the model had to reason about a failure that was really a wait. `do` now re-sends on a `429` only, up to `maxAttempts = 3`, honouring `Retry-After` (seconds or HTTP-date, since the server knows its own quota window) and falling back to exponential 250ms → 500ms. Both are capped at `retryMaxDelay = 5s`, because a server asking for an hour must not produce an hour-long tool call, and the wait selects on `req.Context().Done()` so a caller that gives up stops immediately.
 
@@ -4410,6 +4388,7 @@ xdev's background summarizer existed, but it was armed at the wrong moment: the 
 
 **Tests.** `internal/agent/compact_spec_test.go` — `TestLeadWindowMatchesTheOmpFormula` (the formula, table-driven), `TestTheArmStartsInsideTheLeadWindow` / `TestTheArmDoesNotStartOutsideTheLeadWindow` (the arm's timing, both sides), `TestTheArmDoesNotStartWhenTheTokenTriggerIsDisabled` (a method order that disables the token trigger arms nothing: the arm asks the trigger's OWN question — `tokenTriggerEnabled` — so a session that never compacts on the token budget never spends a provider call on a speculative summary either), `TestTheArmedResultAppliesWhenTheCompactionBecomesDue` (the due boundary spends no provider round-trip), `TestTheArmedResultIsNotAppliedBelowTheThreshold` (the armed result WAITS), `TestTheArmedResultIsDroppedWhenTheSessionBranchesAway`, `...WhenTheContextIsRebuiltAfterTheArm`, `...WhenItsAnchorLeavesTheActivePath`, `...WhenTheCompactedContextWouldNotFit`, `...WhenItWouldNotShrinkTheContext` (one test per invalidation rule), `TestAFailedArmFallsBackToTheSynchronousCompaction`, `TestTheDefaultInstallNeverArms` (the shipped default spends nothing in the background), `TestAnIdleDueBoundaryStillCompactsUnderAsync` (a compaction deferred under the idle trigger still lands: the trigger is consumed by the attempt, the debt is not), `TestTheHeadRoomRuleIsStrict` / `TestTheNoShrinkRuleIsInclusive` (the boundary values: the compacted context exactly ON `floor(threshold*0.8)` is KEPT — the rule is strictly greater — and exactly ON the context size is DROPPED — that rule is inclusive — with the comparison taken against the CURRENT context, not the stored span cost). `internal/agent/compact_ladder_test.go` — `TestAsyncCompactionAppliesWhenDue` (the rewritten async trigger test).
 *Last updated: 2026-10-21 (feat/session-ownership-lease + feat/speculative-compaction — stacked on feat/omp-session-parity-batchD: the session ownership lease — a cross-process flock on `<state root>/session-owners/<sessionId>.lock`, taken when a session is opened for writing AND when it materialises (every session xdev creates — the run, the import, the rpc and acp servers — is leased too, or the prevention layer is absent for the common case); a write path that finds it held FORKS the session once (new id, `parentSession`, the original left byte-identical) and says so, `xdev compress` REFUSES instead; a lease root that is THERE but cannot host a TRUSTWORTHY lease (not private, another user's, a symlink, not a directory) REFUSES the write — and says what to do — while one the ENVIRONMENT cannot host degrades to no lease, loudly; read-only opens stay lease-free and are never refused; and the committed-byte boundary remains the authoritative layer, because the lease is advisory and a pathname lock; the compaction is armed BEFORE it is due, inside omp's lead window min(32000, max(8192, floor(threshold*0.125))), and the armed summary is consumed at the boundary where the compaction becomes DUE - so that boundary costs no provider round-trip; the arm rides the existing compaction.async setting (off by default), an arm that no longer applies is dropped and the boundary compacts synchronously, and a compaction DEFERRED to the background is owed to the next boundary so the idle trigger cannot swallow it)*
+
 ## A read is a read: the keep-going gate learns `gh` (2026-10-21)
 
 The keep-going gate asks one question — "did this run change anything?" — and a "yes" pushes the model past the answer it has already given, with the text "continue the unfinished work: take the next concrete step with tools". The gate's own history says the question is what matters: commit 89e06aa replaced the older "did any tool run" with "did anything change", because "a research session reads twenty files, so every one of them earned a nudge whose own text reads 'take the next concrete step now with tools': precisely what the request did not ask for".
@@ -4527,4 +4506,50 @@ Live 2026-10-22, a TUI run of "list me all pr urls openningin xdev": the model c
 
 **Tests.** `internal/tool/readonly_common_test.go` — `TestCommonReadCommandsAreReads` (a bounded read is a read, a bounded write is a write, `gofmt -w` writes, `sleep` and `expr` do nothing, and the redirect still writes).
 *Last updated: 2026-10-22 (fix/keep-going-gate-common-reads — timeout, gofmt, sleep and expr are the reads a research turn reaches for: 1,669 more of the store's calls are reads, and awk stays unknown on purpose because a program that writes a file and a program that compares a number look the same to a denylist)*
+
+## A variable set by a call dies with the call (2026-10-22)
+
+A bare assignment was pinned as a write: *"a bare assignment exports state"*. The bash tool gives every call a fresh process, so the export dies with the call — the same argument that puts `cd` in the read set, and `cd` is a bigger change to the workspace than an assignment is.
+
+What the pin could not see is the FRAGMENT. The splitter cuts a command substitution in half, so `d=$(git rev-list --count main..$b)` leaves a segment `d=$` behind — and `d=$` is not a command at all. It read as an unknown one, so the loop
+
+	for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
+	  d=$(git rev-list --count main..$b 2>/dev/null)
+	  echo "$b ahead=$d"
+	done
+
+was a mutation on a turn that had only read. The loop's own scaffolding is transparent (see above), the two commands inside it are reads, and the assignment between them was the one thing that said otherwise.
+
+**THE COMMAND INSIDE THE SUBSTITUTION IS STILL JUDGED.** The splitter cuts at `(`, so `d=$(cmd)` is an assignment segment and a `cmd` segment. `d=$(rm -rf /tmp/x)` is a write, and `FOO=1 rm -rf /tmp/x` is a write. The write check is separate and runs on the whole segment, so `FOO=1 > out` is a write too.
+
+**A PIN WAS CHANGED, AND HERE IS WHY.** `internal/tool/readonly_test.go` pinned `FOO=1` as a write. The pin's reason — "it exports state" — assumes a shell that outlives the call, and the bash tool does not give one. The pin is now the other way, with the reasoning written next to it rather than deleted.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,418 bash calls): classified read-only **73,053 (54.8%)**, up from 68,996 (51.8%) and from origin/main's 59,472 (45.0%).
+
+**Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
+
+
+## The TUI speaks omp's INK and omp's ALPHABET (2026-10-21)
+
+**THE PARITY QUESTION WAS NEVER THE PALETTE.** xdev already implements omp's 66-token theme contract — the canonical tokens at `internal/theme/theme.go:91-237` and the required set at `internal/theme/custom.go:203-232` (`requiredSlots`) — and a theme file in omp's own on-disk format parses through the same `ParseTheme` (`internal/theme/custom.go:88-177`). So "xdev looks like omp" was a LAYOUT + COMPONENT question, not a palette one. This phase is the other half: the INK xdev paints with, and the ALPHABET it paints that ink with, become omp's.
+
+**THE LAUNCH DARK THEME IS omp's groknight, TOKEN FOR TOKEN.** `internal/theme/theme.go:277-428` (`groknightSlots`) now carries omp's own tokens — the file omp ships at `~/.omp/agent/themes/groknight.json`, `vars` expanded — with the legacy names the TUI reads derived from them (`accent_assistant`, `accent_thinking`, `accent_running`, `status_line_mode` are the accent; `accent_error` is the error). The identity ink stops being magenta: the accent is omp's tan `#e0af68`, not `#bb9af7`. The tokens that move: the accent family (`#bb9af7` → `#e0af68`), the error (`#f7768e` → `#e15759`), the diff pair (`#9ccfd8`/`#eb6f92` → `#9ece6a`/`#e15759`), the diff context (`#908caa` → `#6c6c6c`), the nine syntax inks (`#f6c177` → `#73daca` for the string, `#ebbcba` → `#ff9e64` for the number, `#ebbcba` → `#e1e1e1` for the function, `#31748f` → `#e0af68` for the keyword, `#9ccfd8` → `#e1e1e1` for the type, `#e0def4` → `#c8c8c8` for the variable, `#6e6a86`/`#908caa` → `#6c6c6c` for the comment, the operator and the punctuation), the markdown inks (the three headings `#1abc9c`/`#7aa2f7`/`#9d7cd8` → `#e1e1e1`, the inline code `#3A95AB` → `#e0af68`, the link `#7aa6da` → `#e1e1e1`, the code band `#1c1c1c` → `#191919`), the thinking rail (`#333333` → `#e0af68` over the greys) and the status line (`status_line_sep` `#585858` → `#505058`, the model `#bb9af7` → `#6c6c6c`, the dirty tree `#f7768e` → `#e0af68`).
+
+**THE OLD PALETTE IS NOT THE NEW ONE UNDER A NEW NAME — IT IS GONE, AND ITS COUSIN SHIPS.** The table this one replaces claimed to be "the exact GrokNight palette from grok-build"; it was not omp's groknight, and the two share a name and nothing else. The launch theme is omp's now, and the pre-2026-10-21 palette survives only as the shipped `rose-pine` palette, which carries the same syntax and diff inks it did. The light launch theme (`grokdaySlots`, `internal/theme/theme.go:430-549`) keeps Rosé Pine Dawn's groups: omp ships no light counterpart of groknight, so the two launch themes are no longer a pair, and the table says so.
+
+**THE TOOL ROWS WEAR omp's STATUS GLYPHS.** `internal/tui/app.go:4232-4252` maps a call's state onto omp's set (`internal/theme/symbols.go:53-105` — `StatusGlyph`): `✔` ok, `✘` error, `⏳` queued, `●` enabled, `○` shadowed. The old `◈` / `✗` / `●` are gone: `✗` is not a glyph omp draws, and a filled circle beside a tool's name read as "enabled" rather than "done". The glyph is the information — a reader scans the left column for shape before hue — and the ascii preset substitutes bracketed forms (`[+]`, `[x]`, …) rather than a tofu box.
+
+**THE RUNNING SPINNER IS omp's STATUS SET, AND IT IS NOT THE ACTIVITY SET.** `internal/theme/symbols.go:43-48` adds the circle-braille frames (`⣾⣽⣻⢿⡿⣟⣯⣷`) and `:235-258` (`StatusSpinnerFrames`) exposes them; the running tool call (`internal/tui/app.go:4241`) and the running agent (`internal/tui/agentspanel.go:474`) wear them, while the composer's run dot and the reasoning header keep the braille activity frames. A status says "this is still going"; an activity says "this is still moving".
+
+**THE STATUS ROW NAMES THE RUNNING TOOL.** `internal/tui/app.go:6257-6269` adds the `command` case to `hudSegment`, so the running call's name (`● bash`) is painted with the rest of the metrics. It used to be dead code: the row RESERVED the space for the label (`drawStatusRow`, `internal/tui/app.go:5881-5892`) and nothing ever drew it, so the path gave up its cells to an empty gap and a long tool call was invisible.
+
+**THE DOCK'S SECTION HEADINGS WEAR THE ACCENT, NOT A SYNTAX COLOUR.** `internal/tui/dock.go:901-909` paints a heading in `theme.Accent` and a changed file's path in the status line's path ink: the panel's chrome was borrowing the code block's palette, which is a category error against omp, whose chrome uses accent / muted / borderMuted.
+
+**WHAT THIS PHASE DELIBERATELY DID NOT DO.** No layout moved: the transcript's left rails, the composer's gradient rule, the boxed thinking block, the tool card merge and the status band's fill are all later phases, and the status row stays transparent on purpose (omp's `statusLineBg` is the one token the launch theme does not carry — filling the band is a shape change, not a palette one). `NO_COLOR` keeps its meaning exactly as before: the syntax palette, the diff inks and the dock's inks degrade, and every glyph and every shape survives.
+
+**Tests.** `internal/theme/theme_test.go` — `TestGroknightIsOmpGroknight` (every omp token, pinned as a literal, plus the one token the launch theme deliberately leaves unset) and `TestGroknightLegacySlots` (the legacy names and the three that are xdev's own). `internal/theme/symbols_test.go` — `TestStatusGlyphSet`, `TestStatusGlyphAsciiPreset`, `TestStatusSpinnerFrames`, `TestStatusSpinnerFramesAsciiPreset`. `internal/tui/omp_parity_test.go` — `TestToolStatusGlyphs` (a finished call reads `✔`, a failed one `✘`, a running one the circle-braille frame), `TestToolStatusGlyphInk`, `TestStatusRowShowsTheRunningTool` (the indicator is painted, and empty once the call ends). `internal/tui/launch_palette_test.go` — the launch themes' syntax, diff and dock inks, pinned as literals (the file was `rosepine_test.go`; the dark theme is no longer Rosé Pine).
+
+**Evidence.** Two renders of the same TUI session, driven through a mock provider against a scratch repository: `/tmp/tui1/before.png` (the base branch) and `/tmp/tui1/after.png` (this branch). The tool rows read `●`/`✗`/`⠋` before and `✔`/`✘`/`⣽` after, the accent is magenta before and tan after, and the status row gains `● bash` — the indicator that used to reserve its space and paint nothing.
+
+*Last updated: 2026-10-22 (feat/tui-parity-phase1 rebased onto main: the TUI speaks omp's INK and omp's ALPHABET — the launch dark theme is omp's groknight token for token, the accent is omp's iris, and the spinner is omp's circle-braille; merged with main's read-commands section.)
 

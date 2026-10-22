@@ -50,7 +50,9 @@ func TestSubagentRowUsesTheSameGlyphAsTheCallRow(t *testing.T) {
 	if call < 0 || child < call {
 		t.Fatalf("the child row is not under the call row:\n%s", out)
 	}
-	frames := app.th.SpinnerFrames()
+	// A running child wears the STATUS spinner — the same set the call row
+	// above it wears, because both say "this is still going".
+	frames := app.th.StatusSpinnerFrames()
 	running := false
 	for _, f := range frames {
 		if strings.Contains(out, "  "+f+" reader") {
@@ -60,7 +62,7 @@ func TestSubagentRowUsesTheSameGlyphAsTheCallRow(t *testing.T) {
 	if !running {
 		t.Fatalf("a running child painted no spinner frame:\n%s", out)
 	}
-	if !strings.Contains(out, "  ◈ task") && !strings.Contains(out, "  "+frames[0]+" task") {
+	if !strings.Contains(out, "  "+frames[0]+" task") {
 		t.Fatalf("the call row lost its state bullet:\n%s", out)
 	}
 

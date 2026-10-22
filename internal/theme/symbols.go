@@ -36,11 +36,72 @@ var (
 	asciiBox     = BoxChars{"+", "+", "+", "+", "-", "|"}
 )
 
-// defaultSpinnerFrames is the shipped braille spinner (unicode/nerd).
+// defaultSpinnerFrames is the shipped braille spinner (unicode/nerd): the
+// ACTIVITY set — "this is moving".
 var defaultSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// defaultStatusSpinnerFrames is the shipped STATUS spinner: omp's circle-
+// braille set (theme__symbols.ts), the frames a RUNNING thing cycles — the
+// tool call still going, the agent still working. It is a different set from
+// the activity spinner above because the two say different things: one says
+// "this is still running", the other says "this is still moving".
+var defaultStatusSpinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
 
 // asciiSpinnerFrames is the preset default for terminals without braille.
 var asciiSpinnerFrames = []string{"|", "/", "-", "\\"}
+
+// The status glyphs: omp's status.* set (theme__symbols.ts) — the shapes a
+// reader scans a transcript's left column for. A reader looks at the SHAPE
+// first and the hue second, so the glyph is the information and the ink only
+// says which state it is: ✔ ok, ✘ error, ⏳ pending, ● enabled, ○ shadowed.
+//
+// The ascii preset substitutes bracketed forms, because a terminal that cannot
+// draw the glyph would rather read "[x]" than paint a tofu box. Themes
+// override them under symbols.overrides as "status.<key>".
+const (
+	StatusGlyphSuccess  = "success"
+	StatusGlyphError    = "error"
+	StatusGlyphPending  = "pending"
+	StatusGlyphEnabled  = "enabled"
+	StatusGlyphShadowed = "shadowed"
+)
+
+var (
+	statusGlyphsUnicode = map[string]string{
+		StatusGlyphSuccess:  "✔",
+		StatusGlyphError:    "✘",
+		StatusGlyphPending:  "⏳",
+		StatusGlyphEnabled:  "●",
+		StatusGlyphShadowed: "○",
+	}
+	statusGlyphsAscii = map[string]string{
+		StatusGlyphSuccess:  "[+]",
+		StatusGlyphError:    "[x]",
+		StatusGlyphPending:  "[~]",
+		StatusGlyphEnabled:  "[*]",
+		StatusGlyphShadowed: "[ ]",
+	}
+)
+
+// StatusGlyph returns the glyph a state is drawn with, under the theme's
+// symbol preset: the theme's own override, else the preset's form, else the
+// unicode set. A theme that overrides an unknown key is ignored (the same rule
+// the box, spinner and HUD-icon overrides follow).
+//
+// The unicode forms are one cell each; the ascii forms are three, and a
+// caller that measures a row must measure the glyph it got, not the one it
+// assumed.
+func (t *Theme) StatusGlyph(key string) string {
+	if t != nil {
+		if v, ok := t.Symbols.Overrides["status."+key]; ok && v != "" {
+			return v
+		}
+		if t.SymbolPreset() == "ascii" {
+			return statusGlyphsAscii[key]
+		}
+	}
+	return statusGlyphsUnicode[key]
+}
 
 // HUD icon families, borrowed from the deepseek harness's composer pills
 // (deepseek-harness StatsPills.tsx): IconGaugeOutline leads the timing
@@ -168,6 +229,31 @@ func (t *Theme) SpinnerFrames() []string {
 		}
 	}
 	return defaultSpinnerFrames
+}
+
+// StatusSpinnerFrames returns the frames the STATUS indicator cycles — the
+// running tool call, the running agent: symbols.status, then the flat
+// symbols.spinnerFrames list, then the preset default (omp's circle-braille
+// set, which is what a built-in theme runs on). Never empty.
+//
+// It is a separate accessor from SpinnerFrames because the two indicators say
+// different things: a status says "this is still going" and an activity says
+// "this is still moving", and omp keeps them in two different sets. The
+// built-in themes have no symbol overrides, so the difference is the shipped
+// default: the circle-braille set for a status, the braille set for an
+// activity.
+func (t *Theme) StatusSpinnerFrames() []string {
+	if t != nil {
+		for _, frames := range [][]string{t.Symbols.Status, t.Symbols.SpinnerFrames} {
+			if clean := nonEmptyFrames(frames); len(clean) > 0 {
+				return clean
+			}
+		}
+		if t.SymbolPreset() == "ascii" {
+			return asciiSpinnerFrames
+		}
+	}
+	return defaultStatusSpinnerFrames
 }
 
 // nonEmptyFrames drops blank entries so a stray "" never blanks the spinner.

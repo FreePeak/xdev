@@ -2,6 +2,97 @@ package theme
 
 import "testing"
 
+// TestStatusGlyphSet pins omp's status glyph set (theme__symbols.ts): the
+// shapes a reader scans a transcript's left column for. The values are
+// PINNED LITERALS — a glyph that drifts is a glyph a reader stops
+// recognising, and the shape is the information, not the hue.
+//
+// The set is the whole of omp's: ✔ ok, ✘ error, ⏳ pending, ● enabled, ○
+// shadowed. xdev's old ◈ / ✗ / ● are gone: ✗ is not a glyph omp draws, and a
+// filled circle beside a tool's name read as "enabled" rather than "done".
+func TestStatusGlyphSet(t *testing.T) {
+	th := Load("groknight")
+	want := map[string]string{
+		StatusGlyphSuccess:  "✔",
+		StatusGlyphError:    "✘",
+		StatusGlyphPending:  "⏳",
+		StatusGlyphEnabled:  "●",
+		StatusGlyphShadowed: "○",
+	}
+	for key, glyph := range want {
+		if got := th.StatusGlyph(key); got != glyph {
+			t.Errorf("status glyph %q = %q, want %q", key, got, glyph)
+		}
+	}
+	// An unknown key is not an error and not a glyph: the accessor is asked
+	// only by the states that own a key.
+	if got := th.StatusGlyph("nope"); got != "" {
+		t.Errorf("unknown key = %q, want empty", got)
+	}
+}
+
+// TestStatusGlyphAsciiPreset: the ascii preset substitutes bracketed forms,
+// because a terminal that cannot draw the glyph would rather read "[x]" than
+// paint a tofu box.
+func TestStatusGlyphAsciiPreset(t *testing.T) {
+	ascii, err := ParseTheme([]byte(validThemeJSON(t, func(doc map[string]any) {
+		doc["symbols"] = map[string]any{"preset": "ascii"}
+	})), "custom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		StatusGlyphSuccess:  "[+]",
+		StatusGlyphError:    "[x]",
+		StatusGlyphPending:  "[~]",
+		StatusGlyphEnabled:  "[*]",
+		StatusGlyphShadowed: "[ ]",
+	}
+	for key, glyph := range want {
+		if got := ascii.StatusGlyph(key); got != glyph {
+			t.Errorf("ascii status glyph %q = %q, want %q", key, got, glyph)
+		}
+	}
+}
+
+// TestStatusSpinnerFrames pins the STATUS spinner to omp's circle-braille
+// set, and keeps it apart from the activity spinner: a status says "this is
+// still running" and an activity says "this is still moving", and omp keeps
+// the two in two different frame sets.
+func TestStatusSpinnerFrames(t *testing.T) {
+	th := Load("groknight")
+	got := th.StatusSpinnerFrames()
+	want := []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+	if len(got) != len(want) {
+		t.Fatalf("status frames = %v, want %v", got, want)
+	}
+	for i, f := range want {
+		if got[i] != f {
+			t.Fatalf("status frames = %v, want %v", got, want)
+		}
+	}
+	// The activity spinner keeps the braille set it always had.
+	act := th.SpinnerFrames()
+	if len(act) == 0 || act[0] != "⠋" {
+		t.Errorf("activity frames = %v, want the braille set", act)
+	}
+}
+
+// TestStatusSpinnerFramesAsciiPreset: a terminal without braille falls back
+// to the ascii frames for the status spinner too.
+func TestStatusSpinnerFramesAsciiPreset(t *testing.T) {
+	ascii, err := ParseTheme([]byte(validThemeJSON(t, func(doc map[string]any) {
+		doc["symbols"] = map[string]any{"preset": "ascii"}
+	})), "custom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ascii.StatusSpinnerFrames()
+	if len(got) != 4 || got[0] != "|" {
+		t.Errorf("ascii status frames = %v, want |/-\\", got)
+	}
+}
+
 // TestHUDIconDefaults: the status row's icons are dsh's composer pills in
 // one cell each (StatsPills.tsx's IconGaugeOutline / IconDatabaseOutline).
 // A built-in theme carries no Symbols, so it must still answer — a missing
