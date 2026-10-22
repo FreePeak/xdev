@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -208,16 +209,15 @@ func TestIsNetworkOutage(t *testing.T) {
 		// wraps that in an *net.OpError inside a *url.Error.
 		{"ENETUNREACH wrapped twice", &url.Error{Op: "Post", URL: "http://x", Err: &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}}, true},
 		{"EHOSTUNREACH", &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}, true},
-		// Measured on this machine: dialing an unroutable v6 address
-		// returns EHOSTUNREACH ("connect: no route to host"), which is why
-		// both errnos are listed rather than ENETUNREACH alone.
-		{"the real no-route dial error", func() error {
-			c, err := net.Dial("tcp", "[2001:db8::1]:80")
-			if c != nil {
-				_ = c.Close()
-			}
-			return err
-		}(), true},
+		// The shape the kernel produced on this machine, built locally
+		// instead of dialled: "dial tcp: connect: no route to host" is
+		// *net.OpError over *os.SyscallError over EHOSTUNREACH. The live
+		// dial that used to stand in for it took 75 s on a host whose IPv6
+		// stack blackholes 2001:db8::1 instead of refusing it, so the case
+		// measured the HOST's routing rather than this classifier. The
+		// live probe survives as an opt-in check in errors_live_test.go
+		// (build tag: netlive).
+		{"the no-route dial error", &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.EHOSTUNREACH}}, true},
 		{"ENETDOWN", &net.OpError{Op: "dial", Err: syscall.ENETDOWN}, true},
 		{"message only (a proxy quoting the kernel)", errors.New("agent: stream start: dial tcp: connect: network is unreachable"), true},
 		{"resolver unreachable", &net.DNSError{Err: "read udp: connection refused", Server: "8.8.8.8:53"}, true},
