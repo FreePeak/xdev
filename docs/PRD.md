@@ -4487,3 +4487,22 @@ The keep-going gate judged a tool call by NAME, through a table in `internal/too
 **Tests.** `internal/memory/hindsight_caps_test.go` — `TestTheMemoryToolsDeclareWhatTheyDo` (recall and reflect are reads, retain is not, and the verdict the gate reads matches). `internal/tool/caps_op_test.go` — the per-op path is unchanged; the Capser path is a new third way to answer, and it is only consulted for a tool that is IN the registry.
 *Last updated: 2026-10-22 (fix/keep-going-gate-tool-caps — a tool declares what it does and the gate reads that: recall and reflect are reads, retain is not, and the conservative default for a tool this build has never heard of is unchanged)*
 
+## The read commands a research turn reaches for (2026-10-22)
+
+The keep-going gate's classifier knows a set of read commands, and a command it does not know is a mutation — the conservative default, and the right one for a command it has never seen. But the set it knew was missing the shapes a research turn actually uses, and each missing one armed the gate on a turn that had only read.
+
+Live 2026-10-22, a TUI run of "list me all pr urls openningin xdev": the model called `timeout 5 gh pr list ...`, `gofmt -l`, `awk` and `sleep`, and the gate fired on a turn that had changed nothing.
+
+**`timeout` IS A WRAPPER, AND THE WRAPPED COMMAND IS JUDGED ON ITS OWN.** `timeout 5 gh pr list` runs `gh pr list`; `timeout 5 rm -rf x` runs `rm -rf x`. The wrapper is modelled, the command inside it is not (internal/tool/readonly.go — readOnlyTimeout).
+
+**`gofmt` PRINTS UNLESS IT IS TOLD TO WRITE.** `gofmt -l` lists, `gofmt -d` diffs, `gofmt` prints — and `gofmt -w` rewrites the file. One flag is the whole of the write surface, so it is a denylist of one, the same shape as `sed -i`.
+
+**`sleep` DOES NOTHING AND `expr` ONLY EVALUATES.** Both are reads.
+
+**`awk` IS DELIBERATELY NOT MODELLED.** An awk program can write a file (`awk '{print > "out"}'`), and a `>` inside an awk program is also a comparison (`awk '$1 > 5'`). The two cannot be told apart without parsing the program, so awk stays unknown — which is the safe direction. It is the largest remaining gap, and it is left open on purpose rather than closed with a guess.
+
+**MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,276 bash calls): classified read-only **68,996 (51.8%)**, up from 66,916 (50.6%) and from origin/main's 59,472 (45.0%).
+
+**Tests.** `internal/tool/readonly_common_test.go` — `TestCommonReadCommandsAreReads` (a bounded read is a read, a bounded write is a write, `gofmt -w` writes, `sleep` and `expr` do nothing, and the redirect still writes).
+*Last updated: 2026-10-22 (fix/keep-going-gate-common-reads — timeout, gofmt, sleep and expr are the reads a research turn reaches for: 1,669 more of the store's calls are reads, and awk stays unknown on purpose because a program that writes a file and a program that compares a number look the same to a denylist)*
+
