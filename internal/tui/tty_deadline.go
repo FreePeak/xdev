@@ -92,7 +92,39 @@ func NewDeadlineScreen() (tcell.Screen, *atomic.Bool, error) {
 // made the whole TUI blank on macOS: the screen never entered the alt screen,
 // 14 bytes of output total, no frame ever landed, and a turn that really did
 // run its bash call and finish was invisible. That is both reports at once.
-// A missing bound is the older behaviour this file replaced; a missing frame
+func (d *deadlineTty) Write(p []byte) (int, error) {
+	if err := d.w.SetWriteDeadline(time.Now().Add(frameWriteTimeout)); err == nil {
+		n, err := d.w.Write(p)
+		if err != nil {
+			d.dropped.Store(true)
+		}
+		return n, err
+	}
+	// No deadline support on this fd (e.g. macOS /dev/tty): run the write in
+	// a goroutine bounded by a timer so a wedged tty cannot stall the loop.
+	type res struct{ n int; err error }
+	ch := make(chan res, 1)
+	go func() {
+		n, err := d.w.Write(p)
+		ch <- res{n, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			d.dropped.Store(true)
+		}
+		return r.n, r.err
+	case <-time.After(frameWriteTimeout):
+		d.dropped.Store(true)
+		if c, ok := d.w.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		if w, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			d.w = w
+		}
+		return 0, os.ErrDeadlineExceeded
+	}
+}
 // is worse than both, so the deadline is best-effort and the write always
 // happens.
 //
@@ -101,17 +133,6 @@ func NewDeadlineScreen() (tcell.Screen, *atomic.Bool, error) {
 // and the upgrade path is a write that can be cancelled at the fd rather than
 // timed. Ceiling: a pane that stops draining costs a session on such a tty,
 // not a frame.
-func (d *deadlineTty) Write(p []byte) (int, error) {
-	if err := d.w.SetWriteDeadline(time.Now().Add(frameWriteTimeout)); err != nil {
-		// No deadline on this fd: write unbounded, as stock tcell does.
-		return d.w.Write(p)
-	}
-	n, err := d.w.Write(p)
-	if err != nil {
-		d.dropped.Store(true)
-	}
-	return n, err
-}
 
 // Close releases our handle too; tcell closes only the Tty it was given.
 func (d *deadlineTty) Close() error {
