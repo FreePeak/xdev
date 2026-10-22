@@ -1,27 +1,49 @@
 package theme
 
-// The agent hub's status glyph table (omp's theme__symbols.ts:3-13): one
-// cell, one lifecycle state. The table is the whole contract — the paint
-// code asks for a mark by state and never draws one itself, so a theme (or a
-// test) can swap the marks without touching the TUI.
+// Agent status glyphs — omp's agent-hub glyph set (agent-hub-renderer.ts:
+// the four shapes a reader scans an agent row's left column for).
 //
-// The four states are the ones omp shows in a roster row: running, idle,
-// parked, aborted. A settled child is not a lifecycle state but an OUTCOME
-// (done, failed), which the roster's own row carries beside the mark.
+// A reader looks at the SHAPE first and the hue second, so the glyph is
+// the information and the ink only says which state it is. The shapes are
+// deliberately distinct from the transcript's own status set (theme's
+// success/error/pending/enabled/shadowed): a running AGENT is a spinner
+// arrow, not a pending clock, because the two never appear in the same
+// column.
+//
+// The unicode forms are one cell each. The ascii preset's substitutes are
+// not offered here: an agent row is a fixed-cell grid, and a bracketed
+// form would be three cells where the grid has one.
+const (
+	// AgentStatusRunning: the agent is live.
+	AgentStatusRunning = "running"
+	// AgentStatusIdle: the agent is settled and at rest.
+	AgentStatusIdle = "idle"
+	// AgentStatusParked: the agent is settled and parked, waiting for a revive.
+	AgentStatusParked = "parked"
+	// AgentStatusAborted: the agent was canceled before it could finish.
+	AgentStatusAborted = "aborted"
+)
+
+// StatusGlyphs is the agent-status glyph table: the shape a status is
+// drawn with, keyed by the status name. It is exported so a theme's
+// symbol preset can override a single shape later, without the table
+// having to be rebuilt.
+//
+// U+27F3 is the running arrow — NOT U+23F3, which is a double-width clock
+// face that would spill a second column over the name beside it.
 var StatusGlyphs = map[string]string{
-	"running": "⟳",
-	"idle":    "●",
-	"parked":  "○",
-	"aborted": "⏹",
+	AgentStatusRunning: "⟳",
+	AgentStatusIdle:    "●",
+	AgentStatusParked:  "○",
+	AgentStatusAborted: "⏹",
 }
 
-// StatusGlyph returns the one-cell mark for a lifecycle key ("running",
-// "idle", "parked", "aborted"). An unknown key has no mark: a row that
-// wears nothing is honest about a state this build does not know, where a
-// wrong mark would be a lie.
+// StatusGlyph returns the glyph an agent status is drawn with.
 //
-// One cell in EVERY terminal: the table holds no wide rune, so the mark
-// never shifts the columns to its right.
+// The status names are the hub's own vocabulary (agent.AgentStatus):
+// running, idle, parked, aborted. An unknown status draws nothing, so a
+// caller that gets a status it does not know leaves the cell blank rather
+// than painting a wrong shape.
 func StatusGlyph(status string) string {
 	return StatusGlyphs[status]
 }

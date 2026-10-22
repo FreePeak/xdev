@@ -139,7 +139,9 @@ type Info struct {
 	Summary       FileInfo `json:"summary"`
 	Lessons       FileInfo `json:"lessons"`
 	Scratchpad    FileInfo `json:"scratchpad"`
+	ToolUse       FileInfo `json:"toolUse"`
 	LessonCount   int      `json:"lessonCount"`
+	RecipeCount   int      `json:"recipeCount"`
 	ScratchpadCap int      `json:"scratchpadCap"`
 }
 
@@ -150,12 +152,15 @@ func (b *Backend) Info() Info {
 	}
 	summaryPath, lessonsPath := b.paths()
 	lessonsRaw := readFileOrEmpty(lessonsPath)
+	toolUseRaw := readFileOrEmpty(filepath.Join(b.Dir, toolUseFile))
 	return Info{
 		Dir:         b.Dir,
 		Summary:     fileInfo(summaryPath, readFileOrEmpty(summaryPath)),
 		Lessons:     fileInfo(lessonsPath, lessonsRaw),
 		Scratchpad:  fileInfo(b.ScratchpadPath(), b.Scratchpad()),
+		ToolUse:     fileInfo(filepath.Join(b.Dir, toolUseFile), toolUseRaw),
 		LessonCount: len(b.Lessons()),
+		RecipeCount: len(SharedToolUse(b.Dir).Recipes()),
 
 		ScratchpadCap: DefaultScratchpadCap,
 	}
@@ -181,6 +186,10 @@ type Bundle struct {
 	Summary    string `json:"summary,omitempty"`
 	Lessons    string `json:"lessons,omitempty"`
 	Scratchpad string `json:"scratchpad,omitempty"`
+	// ToolUse is the raw tool-usage records (JSONL). It is a field and
+	// not a file the bundle names: the records are a set, and a set
+	// round-trips as text without a second format.
+	ToolUse string `json:"toolUse,omitempty"`
 }
 
 // Export snapshots summary, lessons and scratchpad.
@@ -196,6 +205,7 @@ func (b *Backend) Export() (Bundle, error) {
 		Summary:    readFileOrEmpty(summaryPath),
 		Lessons:    b.LessonsRaw(),
 		Scratchpad: b.Scratchpad(),
+		ToolUse:    readFileOrEmpty(filepath.Join(b.Dir, toolUseFile)),
 	}, nil
 }
 
@@ -235,6 +245,15 @@ func (b *Backend) Import(bundle Bundle, merge bool) error {
 	}
 	if !merge || strings.TrimSpace(b.Scratchpad()) == "" {
 		if err := writeOrRemove(b.ScratchpadPath(), scratch); err != nil {
+			return err
+		}
+	}
+	// The tool-usage records are a set: a merge keeps what is already
+	// there (the local recipes are the ones this machine learned), and a
+	// full import replaces the file with the bundle's.
+	toolUsePath := filepath.Join(b.Dir, toolUseFile)
+	if !merge || strings.TrimSpace(readFileOrEmpty(toolUsePath)) == "" {
+		if err := writeOrRemove(toolUsePath, ensureNewline(bundle.ToolUse)); err != nil {
 			return err
 		}
 	}

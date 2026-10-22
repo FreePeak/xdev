@@ -194,6 +194,7 @@ func (b *Backend) SaveLesson(text, context string) error {
 //	memory://root              the injected summary (what the prompt saw)
 //	memory://root/MEMORY.md    the raw consolidated file
 //	memory://root/learned.md   the raw lesson log
+//	memory://root/tool-use.jsonl  the raw tool-usage records
 func (b *Backend) Read(uri string) (string, error) {
 	if b.Off() {
 		return "", fmt.Errorf("memory: backend off (set memory: local in settings)")
@@ -215,8 +216,10 @@ func (b *Backend) Read(uri string) (string, error) {
 		return readFileOrEmpty(summaryPath), nil
 	case "root/learned.md", "learned.md":
 		return readFileOrEmpty(lessonsPath), nil
+	case "root/" + toolUseFile, toolUseFile:
+		return readFileOrEmpty(filepath.Join(b.Dir, toolUseFile)), nil
 	default:
-		return "", fmt.Errorf("memory: unknown path %q (root, root/MEMORY.md, root/learned.md)", rest)
+		return "", fmt.Errorf("memory: unknown path %q (root, root/MEMORY.md, root/learned.md, root/%s)", rest, toolUseFile)
 	}
 }
 
@@ -234,8 +237,10 @@ func (b *Backend) WriteSummary(text string) error {
 	return os.WriteFile(summaryPath, []byte(strings.TrimSpace(text)+"\n"), 0o644)
 }
 
-// Clear removes both files (the /memory clear action). Missing files are
-// not an error.
+// Clear removes both files (the /memory clear action), and the tool-usage
+// records beside them: they are the same memory, and a clear that left
+// the recipes behind would keep injecting them into the next prompt.
+// Missing files are not an error.
 func (b *Backend) Clear() error {
 	if b.Off() {
 		return fmt.Errorf("memory: backend off")
@@ -243,7 +248,7 @@ func (b *Backend) Clear() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	summaryPath, lessonsPath := b.paths()
-	for _, p := range []string{summaryPath, lessonsPath} {
+	for _, p := range []string{summaryPath, lessonsPath, filepath.Join(b.Dir, toolUseFile)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -264,8 +269,13 @@ func (b *Backend) Stats() string {
 			nLessons++
 		}
 	}
-	return fmt.Sprintf("memory: local at %s\n  MEMORY.md %d B\n  learned.md %d B, %d lesson(s)",
-		b.Dir, sc, sl, nLessons)
+	recipes := 0
+	tuPath := filepath.Join(b.Dir, toolUseFile)
+	if _, err := os.Stat(tuPath); err == nil {
+		recipes = len(SharedToolUse(b.Dir).Recipes())
+	}
+	return fmt.Sprintf("memory: local at %s\n  MEMORY.md %d B\n  learned.md %d B, %d lesson(s)\n  %s %d B, %d recipe(s)",
+		b.Dir, sc, sl, nLessons, toolUseFile, fileSize(tuPath), recipes)
 }
 
 // Paths exposes the two file paths (for /memory view and diagnostics).
