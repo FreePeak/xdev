@@ -433,6 +433,14 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	hubRegMu.Unlock()
 	s := a.scr
 	w := a.rightEdge()
+	leftW := int(float64(w) * 0.58)
+	if leftW < 48 {
+		leftW = 48
+	}
+	if w < 96 {
+		leftW = w
+	}
+	_ = leftW
 	if len(ui.rows) == 0 {
 		// Empty roster: one panel line says so, with the chords that work.
 		h := 3
@@ -450,8 +458,8 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	selSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgHighlight)))
 	rowSt := tcell.StyleDefault.Background(a.cellColor(a.th.Get(theme.BgBase)))
 	brdSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.PromptBorderActive)))
-	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 	dimSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.Gray)))
+	fgSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary)))
 
 	if ui.viewID != "" {
 		lines := ui.view
@@ -494,6 +502,12 @@ func (a *App) drawHubRoster(yComposerTop int) {
 	// must not bleed through the overlay (same discipline as the picker).
 	panelW := min(w-2, wid+3)
 	fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
+	// Draw the split divider in dim ink when two panes are shown.
+	if w >= 96 {
+		for yy := y + 1; yy <= y+h; yy++ {
+			drawText(s, leftW, yy, "│", dimSt)
+		}
+	}
 	hubRosterBox(s, y, h, wid, a.th.Box(), brdSt)
 	drawText(s, 3, y+1, rosterSnippet("AGENT HUB — ↑↓ select · Enter transcript · k kill · p park · r revive · Esc close", printW(panelW, 3)), dimSt)
 	for i, text := range texts {
