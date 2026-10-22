@@ -167,7 +167,7 @@ type Manager struct {
 func NewManager(cfg Config, cwd string) *Manager {
 	return &Manager{
 		cfg:      cfg,
-		cwd:      cwd,
+		cwd:      canonicalPath(cwd),
 		servers:  map[string]*entry{},
 		starting: map[string]*startCall{},
 		start:    startServer,
