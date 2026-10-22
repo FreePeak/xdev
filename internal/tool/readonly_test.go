@@ -133,7 +133,15 @@ func TestReadOnlyCommandClassifiesShellLines(t *testing.T) {
 		{"bash -c 'rm -rf /'", false, "a nested shell is opaque"},
 		{"sh -c 'git status'", false, "even a nested read stays opaque"},
 		{"", false, "an empty command is not a read"},
-		{"FOO=1", false, "a bare assignment exports state"},
+		// A bare assignment used to be pinned as a WRITE, "it exports
+		// state". The bash tool gives every call a fresh process, so the
+		// export dies with the call — the same argument that puts `cd` in
+		// the read set above, and `cd` is a bigger change than an
+		// assignment. What the pin could not see is the FRAGMENT: the
+		// splitter cuts `d=$(cmd)` in half, and the half it leaves — "d=$"
+		// — is not a command at all, so it read as an unknown one.
+		{"FOO=1", true, "a variable set by a call dies with the call"},
+		{"FOO=1 > out", false, "the redirect still writes"},
 
 		// Quoting and substitution: the splitter is policy.go's, and these are
 		// the cases where a naive `strings.Contains(cmd, ">")` is wrong.
