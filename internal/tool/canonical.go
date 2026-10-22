@@ -57,6 +57,9 @@ func CanonicalCommand(command string) string {
 	segs := splitCompound(command)
 	out := make([]string, 0, len(segs))
 	for _, seg := range segs {
+		if fields := splitShellWords(seg); len(fields) > 0 && canonicalNoise[fields[0]] {
+			continue
+		}
 		if c := canonicalSegment(seg); c != "" {
 			out = append(out, c)
 		}
@@ -183,4 +186,18 @@ func splitShellWords(seg string) []string {
 		words = append(words, cur.String())
 	}
 	return words
+}
+
+// canonicalNoise are the commands that are NOT the work: the model's own
+// labels and the shaping of their output. A call that pipes into `head` and
+// labels its sections with `echo` is ONE question, and the noise must not be
+// part of its identity — or every spelling of it is a different key and
+// nothing groups.
+//
+// `cd` is NOT noise: it names the context the work happens in, and two
+// commands in two repositories are two questions.
+var canonicalNoise = map[string]bool{
+	"echo": true, "printf": true, "true": true, "false": true, ":": true,
+	"head": true, "tail": true, "wc": true, "bc": true, "sleep": true,
+	"continue": true, "break": true, "exit": true,
 }
