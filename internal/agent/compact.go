@@ -746,7 +746,6 @@ func (a *Agent) maybeCompact(ctx context.Context, history []ai.Message) []ai.Mes
 		}
 	}
 	if !due {
-
 		// Not due by trigger — but a compaction that WAS due may have been
 		// handed to the background, and it is still owed. The idle trigger
 		// fires once and is gone; without this the deferred compaction
