@@ -4529,6 +4529,7 @@ was a mutation on a turn that had only read. The loop's own scaffolding is trans
 **MEASURED OVER THIS REPO'S OWN SESSION STORE** (133,418 bash calls): classified read-only **73,053 (54.8%)**, up from 68,996 (51.8%) and from origin/main's 59,472 (45.0%).
 
 **Tests.** `internal/tool/readonly_assignment_test.go` — `TestAnAssignmentOnlySegmentChangesNothing` (a variable set by a call dies with the call; the assignment prefix does not change the command; the command inside a substitution still writes, and the redirect still writes).
+
 *Last updated: 2026-10-22 (fix/keep-going-gate-assignment-fragment — a bare assignment changes nothing because the call's shell dies with it, the fragment the splitter leaves behind no longer reads as an unknown command, and the command inside a substitution is still judged: 54.8% of the store's calls are reads, against 45.0% before this series)*
 
 ## The run stops when the answer is in hand (2026-10-22)
@@ -4624,6 +4625,12 @@ The cause is the merge. `Settings.merge` is hand-written per field — every key
 
 
 *Last updated: 2026-10-22 (feat/tui-parity-phase2 — the transcript rails are gone; content starts at the pad column)*
+## Subagents' own sessions visible in the resume picker
+
+The resume picker gains a third scope (Tab cycles: current folder → all projects → subagents) listing child sessions from `<DataDir>/subagents`. Enter opens a read-only transcript overlay; Esc closes it. Lazy-loaded once per scope open.
+
+*Last updated: 2026-10-22 (feat/subagent-session-sessions — the subagents' own sessions are visible in the resume picker)*
+*Last updated: 2026-10-22 (feat/agent-hub-ui — the agent hub is omp's agent hub: roster, metrics, and the detail pane)*
 ## The budget stops exploring, not acting (2026-10-22)
 
 The run budget's wrap-up said: *"answer now, in prose, with what you have found so far, and do not call any more tools."* That is right for a run that owes NOTHING — a question ends at the report — and wrong for a run that still owes a change: the clock turned a slow run into a run that **reported and changed nothing**.

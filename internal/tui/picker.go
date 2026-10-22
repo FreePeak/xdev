@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/FreePeak/xdev/internal/agent"
 	"github.com/FreePeak/xdev/internal/theme"
 	"github.com/gdamore/tcell/v2"
 )
@@ -406,6 +407,42 @@ type SessionPickerItem struct {
 	// "interrupted", "pending", "unknown" — plus xdev's "empty". Empty hides
 	// it (a caller that did not classify).
 	Status string
+	// Kind is the row's kind: "" (a user session — the default) or
+	// "subagent" (a child session the user cannot resume, only read).
+	Kind string
+	// Parent is the parent session's SHORT id — subagent rows only.
+	Parent string
+	// ParentTitle is the parent session's title when it resolved — subagent
+	// rows only. Empty when the parent is not in the top-level listing.
+	ParentTitle string
+	// Path is the child's session file — subagent rows only. It is what
+	// the read-only child transcript reads.
+	Path string
+}
+
+// The picker's row kinds. A user session is the default (Kind ""), so a
+// caller that knows nothing about children keeps working unchanged.
+const (
+	kindSession  = ""
+	kindSubagent = "subagent"
+)
+
+// pickerScope is which slice of the session tree the picker lists. The
+// order IS the Tab cycle: the current folder, every project, the subagents'
+// own sessions.
+type pickerScope int
+
+const (
+	scopeCurrentFolder pickerScope = iota // this folder's user sessions
+	scopeAllProjects                      // every project's user sessions
+	scopeSubagents                        // the subagent children
+)
+
+type childPanel struct {
+	path    string
+	entries []agent.TranscriptEntry
+	notice  string
+	scroll  int
 }
 
 type sessionPicker struct {
@@ -414,8 +451,22 @@ type sessionPicker struct {
 	view    []SessionPickerItem // rows for the current scope + query
 	sel     int
 	query   string
-	allProj bool
+	scope   pickerScope
 	confirm string // short id awaiting delete confirmation ("" = none)
+	// subsLoaded marks the subagents scope's ONE scan as done: the
+	// child tree is read when the scope is first opened and never again
+	// (476 child files on a busy machine — a per-keystroke scan would
+	// stall the picker).
+	subsLoaded bool
+	subItems   []SessionPickerItem
+	// childrenCount is how many child rows the scan produced (capped);
+	// childrenTotal is how many child sessions exist. The footer says so
+	// when the cap bites.
+	childrenCount int
+	childrenTotal int
+	// panel is the read-only child transcript overlay — open on Enter over
+	// a child row, closed by Esc (which returns to the picker).
+	panel *childPanel
 }
 
 func (p *sessionPicker) active() bool { return p != nil && p.open }
@@ -446,7 +497,7 @@ func (a *App) OpenSessionPicker(items []SessionPickerItem) {
 	// src keeps cmd's canonical order (newest first); pin-first ordering
 	// is applied per view so a pin toggle can re-sort without freezing it.
 	a.spick = &sessionPicker{open: true, src: items}
-	a.spick.view = pickerLocalView(items, false, "")
+	a.spick.view = pickerLocalView(items, scopeCurrentFolder, "")
 	a.mu.Unlock()
 	a.poke()
 }
@@ -479,14 +530,20 @@ func (a *App) CloseSessionPicker() {
 // pickerLocalView computes the visible rows for the local (no search
 // hook) path: scope filter, then token filter, pins floated first, and
 // the idle cap when not searching.
-func pickerLocalView(src []SessionPickerItem, allProj bool, query string) []SessionPickerItem {
-	view := scopeSessionPickerItems(src, allProj)
+func pickerLocalView(src []SessionPickerItem, scope pickerScope, query string) []SessionPickerItem {
+	view := scopeSessionPickerItems(src, scope)
 	if query != "" {
 		view = tokenFilterItems(view, query)
 	}
 	view = pinSortItems(view)
+	return capPickerRows(view, query != "")
+}
+
+// capPickerRows bounds the visible rows: a few when idle, the whole pool
+// while a query is active (the pool is what the search narrowed).
+func capPickerRows(view []SessionPickerItem, searching bool) []SessionPickerItem {
 	limit := pickerSearchCap
-	if query == "" {
+	if !searching {
 		limit = pickerIdleCap
 	}
 	if len(view) > limit {
@@ -495,16 +552,26 @@ func pickerLocalView(src []SessionPickerItem, allProj bool, query string) []Sess
 	return view
 }
 
-// scopeSessionPickerItems keeps all rows in all-projects scope, else only the
-// launcher's folder.
-func scopeSessionPickerItems(items []SessionPickerItem, allProj bool) []SessionPickerItem {
-	if allProj {
-		return items
-	}
+// scopeSessionPickerItems keeps the rows the scope shows: the launcher's
+// folder's user sessions, every project's user sessions, or the subagents'
+// own sessions. A child is NEVER a user session — it is listed in its own
+// scope and nowhere else.
+func scopeSessionPickerItems(items []SessionPickerItem, scope pickerScope) []SessionPickerItem {
 	out := make([]SessionPickerItem, 0, len(items))
 	for _, it := range items {
-		if it.InCwd {
-			out = append(out, it)
+		switch scope {
+		case scopeSubagents:
+			if it.Kind == kindSubagent {
+				out = append(out, it)
+			}
+		case scopeAllProjects:
+			if it.Kind != kindSubagent {
+				out = append(out, it)
+			}
+		default: // scopeCurrentFolder
+			if it.Kind != kindSubagent && it.InCwd {
+				out = append(out, it)
+			}
 		}
 	}
 	return out
@@ -562,18 +629,18 @@ func (a *App) pickerRefresh() {
 		a.mu.Unlock()
 		return
 	}
-	q, allProj, src := p.query, p.allProj, p.src
+	q, scope, src := p.query, p.scope, p.src
 	a.mu.Unlock()
 
 	var view []SessionPickerItem
 	switch {
 	case q == "":
-		view = pickerLocalView(src, allProj, "")
+		view = pickerLocalView(src, scope, "")
 	case a.onPickerSearch != nil:
 		// cmd ranks prompt-text matches; re-apply scope + pin-first.
-		view = pinSortItems(scopeSessionPickerItems(a.onPickerSearch(q), allProj))
+		view = pinSortItems(scopeSessionPickerItems(a.onPickerSearch(q), scope))
 	default:
-		view = pickerLocalView(src, allProj, q)
+		view = pickerLocalView(src, scope, q)
 	}
 
 	a.mu.Lock()
@@ -608,23 +675,46 @@ func (a *App) handleSessionPickerKey(key *tcell.EventKey) (handled bool) {
 		return true
 	case tcell.KeyTab:
 		a.mu.Lock()
-		a.spick.allProj = !a.spick.allProj
-		a.spick.sel = 0
+		p := a.spick
+		p.scope = (p.scope + 1) % 3
+		p.sel = 0
+		needSubs := p.scope == scopeSubagents && !p.subsLoaded
 		a.mu.Unlock()
+		if needSubs {
+			// The child scan reads every child session's head and tail —
+			// it runs ONCE, when the scope is first opened, and never per
+			// keystroke. It runs OUTSIDE a.mu: a slow disk must not hold
+			// the UI lock.
+			a.loadSubagentItems()
+		}
 		a.pickerRefresh()
 		return true
 	case tcell.KeyEnter:
 		it, ok := a.SessionPickerSelection()
-		a.CloseSessionPicker()
 		if !ok {
+			a.CloseSessionPicker()
 			return true
 		}
+		if it.Kind == kindSubagent {
+			// A child is NEVER resumed: resuming it would take the
+			// write lease and make the child's file the user's session.
+			// Enter opens its transcript READ-ONLY.
+			a.openSubagentTranscript(it)
+			return true
+		}
+		a.CloseSessionPicker()
 		if a.onPickerResume != nil {
 			a.onPickerResume(it.ID)
 		}
 		return true
 	case tcell.KeyEsc:
 		a.mu.Lock()
+		if a.spick != nil && a.spick.panel != nil {
+			a.spick.panel = nil
+			a.mu.Unlock()
+			a.poke()
+			return true
+		}
 		if a.spick.confirm != "" {
 			// First Esc cancels the armed delete, not the picker.
 			a.spick.confirm = ""
@@ -840,7 +930,7 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 	selIdx := p.sel - lo
 
 	label := " resume — current folder · Tab all projects · Ctrl+P pin "
-	if p.allProj {
+	if p.scope == scopeAllProjects {
 		label = " resume — all projects · Tab current folder · Ctrl+P pin "
 	}
 	var foot []string
@@ -850,7 +940,7 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 	switch {
 	case p.confirm != "":
 		foot = append(foot, "delete "+p.confirm+"? Backspace again confirms · Esc cancels")
-	case len(p.view) == 0 && p.allProj:
+	case len(p.view) == 0 && p.scope == scopeAllProjects:
 		foot = append(foot, "No matching sessions.")
 	case len(p.view) == 0:
 		foot = append(foot, "No sessions in current folder. Press Tab to view all.")
@@ -922,4 +1012,76 @@ func (a *App) drawSessionPicker(yComposerTop int) {
 		y++
 	}
 	drawText(s, 2, y, box.BottomLeft+strings.Repeat(box.Horizontal, inner)+box.BottomRight, borderSt)
+
+	// Read-only child transcript overlay.
+	if p.panel != nil {
+		panel := p.panel
+		px, py := 4, 2
+		pw := min(w-8, 60)
+		ph := min(12, yComposerTop-4)
+		if ph < 5 {
+			ph = 5
+		}
+		// border
+		drawText(s, px, py, box.TopLeft+" subagent transcript "+strings.Repeat(box.Horizontal, max(0, pw-22))+box.TopRight, borderSt)
+		for i := 1; i < ph-1; i++ {
+			for x := px; x < px+pw; x++ {
+				s.SetContent(x, py+i, ' ', nil, rowSt)
+			}
+			drawText(s, px, py+i, box.Vertical, borderSt)
+			drawText(s, px+pw-1, py+i, box.Vertical, borderSt)
+		}
+		// entries
+		ey := py + 1
+		if panel.notice != "" {
+			drawText(s, px+2, ey, panel.notice, dimSt)
+			ey++
+		}
+		for _, e := range panel.entries {
+			if ey >= py+ph-1 {
+				break
+			}
+			line := e.Role + ": " + e.Text
+			drawText(s, px+2, ey, line, rowSt.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))))
+			ey++
+		}
+		drawText(s, px, py+ph-1, box.BottomLeft+strings.Repeat(box.Horizontal, pw-2)+box.BottomRight, borderSt)
+		drawText(s, px+2, py+ph, "Esc close", dimSt)
+	}
+}
+
+func (a *App) SetLoadSubagentItems(fn func() []SessionPickerItem) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.loadSubagentItemsOp = fn
+}
+
+func (a *App) loadSubagentItems() {
+	var items []SessionPickerItem
+	if a.loadSubagentItemsOp != nil {
+		items = a.loadSubagentItemsOp()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.spick == nil {
+		return
+	}
+	a.spick.subItems = items
+	a.spick.subsLoaded = true
+}
+
+func (a *App) openSubagentTranscript(it SessionPickerItem) {
+	entries, err := agent.ReadChildTranscript(it.Path)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.spick == nil {
+		return
+	}
+	panel := &childPanel{path: it.Path, scroll: 0}
+	if err != nil {
+		panel.notice = err.Error()
+	} else {
+		panel.entries = entries
+	}
+	a.spick.panel = panel
 }
