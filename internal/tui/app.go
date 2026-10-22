@@ -126,6 +126,18 @@ const (
 	animEvery  = 4 // 4 * 25ms = 100ms ≈ 10fps
 )
 
+// transcriptContentX is the column the transcript's own text starts at.
+//
+// omp draws no left rail beside a block (chat/assistant-message.ts:196-207,
+// render/output-block.ts:20-104), so the pane's gutter is the pad alone: two
+// cells of air, then the text. It was three — a rail cell plus two of pad —
+// until the rail went.
+//
+// The number is a constant because it is load-bearing in more than one place:
+// the painter starts every row here, the wrap budget is measured from it, and
+// the mouse tests press on it to reach a row's first character.
+const transcriptContentX = 2
+
 // App is the xdev TUI: scrollback of blocks + editor + status line, drawn in
 // omp's shape — no left rail, plain markdown for an assistant turn. The model
 // thread mutates state through the exported mutators (mutex-guarded); the UI
@@ -4120,7 +4132,7 @@ func (a *App) viewportLinesLocked() int {
 // only gutter: the text starts at x=2 and the width is the pane less that
 // pad and the right pad.
 func (a *App) contentWidth() int {
-	w := a.rightEdge() - 3 // pad(2) + right pad(1)
+	w := a.rightEdge() - (transcriptContentX + 1) // the pad column + the right pad
 	if w < 10 {
 		w = 10
 	}
@@ -5146,7 +5158,7 @@ func (a *App) paint() {
 				s.SetContent(bx, y, ' ', nil, tcell.StyleDefault.Background(r.ln.bg))
 			}
 		}
-		x := 2 // pad(2); omp draws no left rail beside a block
+		x := transcriptContentX // the pane's pad; omp draws no left rail
 		if banded {
 			x = r.ln.inset
 		}

@@ -66,7 +66,7 @@ func contentRow(t *testing.T, app *App, text string) int {
 // TestSelectionCopyOnRelease pins the auto-copy contract end to end: press →
 // drag → release over transcript rows puts the covered text on the clipboard
 // (via tcell's OSC 52 SetClipboard, recorded by the simulation screen) and
-// leaves out the accent rail.
+// leaves out the pane's padding.
 func TestSelectionCopyOnRelease(t *testing.T) {
 	app, scr := newTestApp(t, 80, 24)
 	app.AddUserBlock("hello world")
@@ -74,7 +74,7 @@ func TestSelectionCopyOnRelease(t *testing.T) {
 	app.draw()
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	drag(app, 3, y, 3+len("copy me")-1, y)
+	drag(app, transcriptContentX, y, transcriptContentX+len("copy me")-1, y)
 	app.mu.Unlock()
 
 	if got := string(scr.GetClipboardData()); got != "copy me" {
@@ -95,7 +95,7 @@ func TestSelectionSpansRows(t *testing.T) {
 		t.Fatalf("expected alpha/bravo on consecutive rows, got %v", app.selRows)
 	}
 	app.mu.Lock()
-	drag(app, 5, y0, 5, y0+1) // press on "pha", release on the last "bra" cell
+	drag(app, 4, y0, 4, y0+1) // press on "pha", release on the last "bra" cell
 	app.mu.Unlock()
 
 	if got := string(scr.GetClipboardData()); got != "pha\nbra" {
@@ -132,7 +132,7 @@ func TestSelectionStaysHighlightedAfterRelease(t *testing.T) {
 
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	drag(app, 3, y, 9, y)
+	drag(app, transcriptContentX, y, transcriptContentX+6, y)
 	shown := app.selShown
 	down := app.selDown
 	app.mu.Unlock()
@@ -220,7 +220,7 @@ func TestClickWithoutDragKeepsClipboard(t *testing.T) {
 
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	drag(app, 3, y, 9, y)
+	drag(app, transcriptContentX, y, transcriptContentX+6, y)
 	app.mu.Unlock()
 	if got := string(scr.GetClipboardData()); got != "copy me" {
 		t.Fatalf("drag clipboard = %q, want %q", got, "copy me")
@@ -253,7 +253,7 @@ func TestCopyConfirmationIsAToast(t *testing.T) {
 
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	drag(app, 3, y, 9, y)
+	drag(app, transcriptContentX, y, transcriptContentX+6, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -314,7 +314,7 @@ func TestShiftCancelsAnInFlightSelection(t *testing.T) {
 
 	y := contentRow(t, app, "copy me please")
 	app.mu.Lock()
-	press(app, 3, y)
+	press(app, transcriptContentX, y)
 	dragTo(app, 10, y)
 	if !app.selDown {
 		app.mu.Unlock()
@@ -372,13 +372,14 @@ func TestDragPastTheEdgeScrollsAndStillCopies(t *testing.T) {
 	// row: each event scrolls one row, exactly like a terminal's edge drag.
 	hdr := app.transcriptTop()
 	app.mu.Lock()
-	press(app, 3, hdr)
+	press(app, transcriptContentX, hdr)
 	app.mu.Unlock()
 	app.draw()
 
 	// The far corner lands on the last cell of a row, so the far row is taken in
 	// full too and the expectation stays about rows rather than about columns.
-	const scrolls, far = 5, 3 + len("L000") - 1
+	const scrolls = 5
+	far := transcriptContentX + len("L000") - 1
 	for range scrolls {
 		app.mu.Lock()
 		dragTo(app, far, hdr+vp-1)
@@ -443,8 +444,8 @@ func TestDoubleClickSelectsWord(t *testing.T) {
 	y := contentRow(t, app, "hello world")
 	app.mu.Lock()
 	// First click: press + release (no motion = click, not drag).
-	press(app, 3, y)
-	release(app, 3, y)
+	press(app, transcriptContentX, y)
+	release(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -456,7 +457,7 @@ func TestDoubleClickSelectsWord(t *testing.T) {
 	// Second click within the window: press only — the double-click
 	// handler converts it to a word selection.
 	app.mu.Lock()
-	press(app, 3, y)
+	press(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -469,7 +470,7 @@ func TestDoubleClickSelectsWord(t *testing.T) {
 
 	// Release the gesture: the word "hello" is copied.
 	app.mu.Lock()
-	release(app, 3, y)
+	release(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -490,11 +491,11 @@ func TestTripleClickSelectsLine(t *testing.T) {
 
 	// Three rapid clicks at the same position.
 	app.mu.Lock()
-	press(app, 3, y)
-	release(app, 3, y)
-	press(app, 3, y)
-	release(app, 3, y)
-	press(app, 3, y)
+	press(app, transcriptContentX, y)
+	release(app, transcriptContentX, y)
+	press(app, transcriptContentX, y)
+	release(app, transcriptContentX, y)
+	press(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -503,7 +504,7 @@ func TestTripleClickSelectsLine(t *testing.T) {
 	}
 
 	app.mu.Lock()
-	release(app, 3, y)
+	release(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -524,8 +525,8 @@ func TestClickCountResetsOutsideWindow(t *testing.T) {
 
 	// First click.
 	app.mu.Lock()
-	press(app, 3, y)
-	release(app, 3, y)
+	press(app, transcriptContentX, y)
+	release(app, transcriptContentX, y)
 	app.mu.Unlock()
 
 	// Sleep past the window so the second click is not a double-click.
@@ -533,7 +534,7 @@ func TestClickCountResetsOutsideWindow(t *testing.T) {
 
 	// Second click: should be treated as count=1, not count=2.
 	app.mu.Lock()
-	press(app, 3, y)
+	press(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -544,7 +545,7 @@ func TestClickCountResetsOutsideWindow(t *testing.T) {
 	}
 
 	app.mu.Lock()
-	release(app, 3, y)
+	release(app, transcriptContentX, y)
 	app.mu.Unlock()
 	app.draw()
 
@@ -565,8 +566,8 @@ func TestClickCountResetsOnMove(t *testing.T) {
 
 	// First click at x=3.
 	app.mu.Lock()
-	press(app, 3, y)
-	release(app, 3, y)
+	press(app, transcriptContentX, y)
+	release(app, transcriptContentX, y)
 	app.mu.Unlock()
 
 	// Second click far away: should be treated as count=1.
