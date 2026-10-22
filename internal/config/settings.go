@@ -893,9 +893,9 @@ const (
 // not be able to hide — or conjure — the switcher by typo.
 func (s *Settings) TabsModeOn() bool {
 	if s == nil {
-		return false
+		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(s.Tui.Tabs.Mode), "on")
+	return !strings.EqualFold(strings.TrimSpace(s.Tui.Tabs.Mode), "off")
 }
 
 // TabsIndicators reports the strip's badge as the config spells it: "numbers"

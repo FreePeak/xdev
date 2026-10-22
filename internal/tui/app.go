@@ -617,11 +617,12 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		showThinking:  true,
 		renderMermaid: true,
 		width:         w, height: h,
-		// tabsStrip defaults OFF: the strip is opt-in through
-		// tui.tabs.mode, so a default install spends no row on the
-		// switcher. Every tab chord and /tabs keep working regardless —
-		// the strip is a view of the tabset, not the tabset.
-		tabsStrip: false,
+		// tabsStrip defaults ON: opencode paints the strip whenever more
+		// than one session is open, so a default install does too. The
+		// tui.tabs.mode policy can still hide it; every tab chord and
+		// /tabs keep working regardless — the strip is a view of the
+		// tabset, not the tabset.
+		tabsStrip: true,
 		keyq:      make(chan tcell.Event, 64),
 		dirty:     make(chan struct{}, 1),
 		quitCh:    make(chan struct{}),
