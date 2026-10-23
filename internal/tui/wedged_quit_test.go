@@ -140,6 +140,9 @@ func TestQuitChordIsNotServedOffTheLoopWhileItIsHealthy(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { defer close(done); app.Run() }()
+	// Two presses: the healthy loop asks for confirmation first, and the
+	// second one is what reaches the quit handler (quitconfirm_test).
+	scr.InjectKey(tcell.KeyCtrlC, 0, tcell.ModCtrl)
 	scr.InjectKey(tcell.KeyCtrlC, 0, tcell.ModCtrl)
 	select {
 	case <-done:

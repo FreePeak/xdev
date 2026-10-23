@@ -4655,3 +4655,15 @@ Every step that had to CHANGE something ended with an untouched tree, and every 
 **Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
 *Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 
+
+## Ctrl+C asks twice before it exits (2026-10-24)
+
+The quit chord was a single press: one reflex `C-c` on a half-typed prompt ended the session. `quit` now reaches the app in two steps **for the Ctrl+C chord only** — the first press paints `Press Ctrl + C again to exit!` as a toast and arms, the second press inside `quitConfirmWindow` (2s) exits through the same `quitOrCancel` every other exit uses.
+
+- **Everything else still exits on one press**: `C-d` on the last tab, `<leader>q`, `/quit`, and the welcome menu row. A remapped chord that resolves to `quit` is not `Ctrl+C`, so a user's own keybindings.yml keeps the single-press behaviour.
+- **The arming press does not abort the live turn.** With detach-on-quit on (the default) the exit is a hand-off, and cancelling on the way in would kill the work the hand-off exists to keep. Abort stays on Esc, and on the exit press when detach declines.
+- **A wedged loop still exits on one press.** The off-loop chord path (the 2026-09-30 deadlock) is unchanged: the loop that would paint "press again" is the wedged one, so a press that only armed would read as a dead key on a dead terminal.
+- **A stale arm is not consent**: an arm older than the window re-arms instead of exiting.
+
+**Tests.** `internal/tui/quitconfirm_test.go` — `TestCtrlCTakesTwoPresses` (arming press does not exit and says so; second press exits), `TestStaleCtrlCArmDoesNotExit`, `TestOtherQuitPathsStillTakeOnePress`. The existing quit tests were retargeted to the two-press chord (`quit_test.go`, `wedged_quit_test.go`, `draw_hang_test.go`).
+*Last updated: 2026-10-24 (feat/double-ctrl-c-exit — Ctrl+C asks twice before it exits, every other quit path keeps one press)*

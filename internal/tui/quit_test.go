@@ -38,9 +38,14 @@ func TestQuitChordExitsWhileATurnRuns(t *testing.T) {
 	app.SetHandlers(func(string) {}, func() { canceled = true }, func() { quit = true })
 	app.SetRunning(true) // the turn is live: `running` is what used to swallow the chord
 
-	for _, k := range []tcell.Key{tcell.KeyCtrlC, tcell.KeyCtrlD} {
+	// C-d is the single-press exit; C-c now wants a confirmation, so the
+	// second press is the one that must end the session (see quitconfirm_test).
+	for _, k := range []tcell.Key{tcell.KeyCtrlD, tcell.KeyCtrlC, tcell.KeyCtrlC} {
 		canceled, quit = false, false
 		app.handleKey(tcell.NewEventKey(k, 0, tcell.ModCtrl))
+		if k == tcell.KeyCtrlC && !quit {
+			continue // armed: the assertion is the press that follows
+		}
 		if !quit {
 			t.Fatalf("chord %v did not quit while a turn was running", k)
 		}
@@ -57,6 +62,8 @@ func TestQuitChordWhileIdleOnlyQuits(t *testing.T) {
 	var canceled, quit bool
 	app.SetHandlers(func(string) {}, func() { canceled = true }, func() { quit = true })
 
+	// Two presses: the idle chord confirms, then exits without cancelling.
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
 	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
 	if !quit || canceled {
 		t.Fatalf("idle quit chord: quit=%v canceled=%v", quit, canceled)
@@ -92,6 +99,7 @@ func TestQuitChordDetachesWhenConfigured(t *testing.T) {
 	app.SetRunning(true)
 
 	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
 	if !quit {
 		t.Fatal("detach quit chord did not quit")
 	}
@@ -109,6 +117,7 @@ func TestQuitChordFallsThroughWhenDetachDeclines(t *testing.T) {
 	app.SetQuitRunning(func() bool { return false })
 	app.SetRunning(true)
 
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
 	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
 	if !quit || !canceled {
 		t.Fatalf("decline detach: quit=%v canceled=%v", quit, canceled)
