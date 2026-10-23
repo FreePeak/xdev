@@ -128,7 +128,7 @@ func TestSubagentSummaryLineIsClaudeCodes(t *testing.T) {
 	app.AddTaskChild("c1", "scout", "", "m")
 	app.SetTaskChildTranscript("c1", "scout", "fg-1")
 	app.SetHubOps(&HubOps{
-		Roster: func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 3, Tokens: 1500, Elapsed: d}} },
+		Roster:     func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 3, Tokens: 1500, Elapsed: d}} },
 		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) { return nil, 0, false },
 	})
 	app.RefreshTaskChildStats("c1", "scout", "fg-1")
@@ -148,7 +148,7 @@ func TestSubagentSummaryLineIsClaudeCodes(t *testing.T) {
 	app2.AddTaskChild("c2", "scout2", "", "m")
 	app2.SetTaskChildTranscript("c2", "scout2", "fg-2")
 	app2.SetHubOps(&HubOps{
-		Roster: func() []HubAgent { return []HubAgent{{ID: "fg-2", Tools: 1, Tokens: 0, Elapsed: d}} },
+		Roster:     func() []HubAgent { return []HubAgent{{ID: "fg-2", Tools: 1, Tokens: 0, Elapsed: d}} },
 		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) { return nil, 0, false },
 	})
 	app2.RefreshTaskChildStats("c2", "scout2", "fg-2")
@@ -167,7 +167,7 @@ func TestSubagentSummaryLineLiveWhileRunning(t *testing.T) {
 	app.AddTaskChild("c1", "scout", "", "m")
 	app.SetTaskChildTranscript("c1", "scout", "fg-1")
 	app.SetHubOps(&HubOps{
-		Roster: func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 2, Tokens: 100, Elapsed: d}} },
+		Roster:     func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 2, Tokens: 100, Elapsed: d}} },
 		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) { return nil, 0, false },
 	})
 	app.RefreshTaskChildStats("c1", "scout", "fg-1")
@@ -177,7 +177,7 @@ func TestSubagentSummaryLineLiveWhileRunning(t *testing.T) {
 		t.Fatalf("not running: %s", out)
 	}
 	app.SetHubOps(&HubOps{
-		Roster: func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 5, Tokens: 200, Elapsed: d}} },
+		Roster:     func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 5, Tokens: 200, Elapsed: d}} },
 		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) { return nil, 0, false },
 	})
 	app.UpdateTaskChild("c1", "scout", "read", `{}`, "ok")
@@ -195,7 +195,7 @@ func TestSubagentNoTokensOmitsTheSegment(t *testing.T) {
 	app.AddTaskChild("c1", "scout", "", "m")
 	app.SetTaskChildTranscript("c1", "scout", "fg-1")
 	app.SetHubOps(&HubOps{
-		Roster: func() []HubAgent { return []HubAgent{} },
+		Roster:     func() []HubAgent { return []HubAgent{} },
 		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) { return nil, 0, false },
 	})
 	app.draw()
@@ -215,7 +215,7 @@ func TestSubagentFailedChildSaysFailed(t *testing.T) {
 	app.AddTaskChild("c1", "scout", "", "m")
 	app.SetTaskChildTranscript("c1", "scout", "fg-1")
 	app.SetHubOps(&HubOps{
-		Roster: func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 1, Tokens: 10, Elapsed: d}} },
+		Roster:     func() []HubAgent { return []HubAgent{{ID: "fg-1", Tools: 1, Tokens: 10, Elapsed: d}} },
 		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) { return nil, 0, false },
 	})
 	app.RefreshTaskChildStats("c1", "scout", "fg-1")
@@ -238,14 +238,13 @@ func TestSubagentLineExpandsInPlace(t *testing.T) {
 	app.SetHubOps(subAgentOps("fg-1"))
 	app.draw()
 	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlO, 0, tcell.ModNone))
+	app.draw()
 	// expanded state
-	app.mu.Lock()
 	b := runningTask(t, app, "c1")
 	expanded := false
-	if len(b.Sub) > 0 {
+	if b != nil && len(b.Sub) > 0 {
 		expanded = b.Sub[0].Expanded
 	}
-	app.mu.Unlock()
 	if !expanded {
 		t.Fatal("not expanded")
 	}
@@ -254,13 +253,11 @@ func TestSubagentLineExpandsInPlace(t *testing.T) {
 		t.Fatalf("transcript not painted: %s", out)
 	}
 	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlO, 0, tcell.ModNone))
-	app.mu.Lock()
 	b = runningTask(t, app, "c1")
 	expanded = true
-	if len(b.Sub) > 0 {
+	if b != nil && len(b.Sub) > 0 {
 		expanded = b.Sub[0].Expanded
 	}
-	app.mu.Unlock()
 	if expanded {
 		t.Fatal("still expanded")
 	}
@@ -283,7 +280,6 @@ func TestSubagentClickOnLineTogglesThatChild(t *testing.T) {
 	release(app, 6, y)
 	app.mu.Unlock()
 
-	app.mu.Lock()
 	b := runningTask(t, app, "c1")
 	var aExp, bExp bool
 	for _, s := range b.Sub {
@@ -294,7 +290,6 @@ func TestSubagentClickOnLineTogglesThatChild(t *testing.T) {
 			bExp = s.Expanded
 		}
 	}
-	app.mu.Unlock()
 	if !aExp {
 		t.Fatal("first not expanded")
 	}

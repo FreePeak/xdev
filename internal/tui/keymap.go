@@ -589,7 +589,8 @@ func (m *KeyMap) sortedChords() []string {
 func chordOf(ev *tcell.EventKey) string {
 	var parts []string
 	m := ev.Modifiers()
-	if m&tcell.ModCtrl != 0 {
+	ctrlKey := ev.Key() >= tcell.KeyCtrlA && ev.Key() <= tcell.KeyCtrlZ
+	if m&tcell.ModCtrl != 0 || ctrlKey {
 		parts = append(parts, "C")
 	}
 	// Shift distinguishes arrow/nav keys — and Enter on kitty/CSI-u
