@@ -138,7 +138,7 @@ func TestComposerBoxSurvivesAPaneReset(t *testing.T) {
 
 	grid := newPaneGrid(W, H)
 	grid.apply(ft.take())
-	row := app.height - 1 - app.composerRows() + 1
+	row := app.height - 1 - app.composerRows()
 
 	// The pane's grid is reset: a reattach, a cleared terminal, a resize that
 	// re-clears. xdev hears nothing, so the next frames are deltas.
@@ -179,7 +179,7 @@ func TestComposerBoxIsWholeOnTheWire(t *testing.T) {
 	app.draw()
 	ft.take()
 
-	row := app.height - 1 - app.composerRows() + 1 // 1-based, as the wire is
+	row := app.height - 1 - app.composerRows() // 1-based, as the wire is
 	if got := app.rightEdge(); got != W {
 		t.Fatalf("the box must span the pane for this measurement: rightEdge %d of %d", got, W)
 	}
