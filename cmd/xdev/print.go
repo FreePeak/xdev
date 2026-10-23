@@ -296,6 +296,17 @@ func wireAgentMode(ag *agent.Agent, cfg *config.Config, settings *config.Setting
 		// goes through this function, and the budget is what ends a run
 		// the model decided to keep extending. 0 means the shipped default.
 		ag.RunBudget = settings.RunBudgetDuration()
+		// The budget protects someone who is not watching: in an
+		// interactive (TUI) session the human is present and can interrupt,
+		// and a live session that stops at 6 minutes trains the user to press
+		// F5 (session 2a91a2dd, five stops at the wrap-up). So when no
+		// explicit runBudget: is configured, an interactive run is unbounded
+		// (-1); a headless run keeps the 6-minute default (0). An explicit
+		// positive runBudget: still wins in both modes, and a negative value
+		// stays the documented unbounded opt-out.
+		if interactive && settings.RunBudgetDuration() == 0 {
+			ag.RunBudget = -1
+		}
 	}
 	// #86: a compaction summary must carry the memories the remote backend
 	// recalled, or they are lost for the rest of the session.

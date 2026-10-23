@@ -4655,3 +4655,8 @@ Every step that had to CHANGE something ended with an untouched tree, and every 
 **Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
 *Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 
+
+## Interactive runs are not killed by the 6-minute budget
+
+An interactive TUI run is no longer killed by the shipped 6-minute wall-clock budget (`DefaultRunBudget`); only headless (print/RPC/ACP) runs keep it. In `wireAgentMode`, when `interactive` is true and `runBudget:` is unset (value 0), `ag.RunBudget` is set to -1 (unbounded). An explicit positive `runBudget:` still wins in both modes, and an explicit negative stays the documented unbounded opt-out. Evidence: session 2a91a2dd had five stops, every one at the budget wrap-up (`internal/agent/loop.go:830-843`), with no provider errors, max-turns, or panics. The budget protects someone who is not watching; in an interactive session the human is present and can interrupt, and a live session that stops at 6 minutes trains the user to press F5.
+*Last updated: 2026-10-24 (fix/run-budget-interactive — interactive TUI runs are unbounded unless configured)*
