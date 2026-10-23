@@ -262,6 +262,11 @@ type App struct {
 	subID    string
 	subLabel string
 
+	// subToggleID/subToggleLabel are the child armed by a click on its summary
+	// line; the toggle runs after handleMouse releases a.mu.
+	subToggleID    string
+	subToggleLabel string
+
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
@@ -1270,6 +1275,7 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		}
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
+		c.Lines = nil
 		b.subSeq++
 	}
 	a.mu.Unlock()
@@ -1288,6 +1294,94 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 	}
 	a.mu.Unlock()
 	a.poke()
+}
+
+// toggleNewestSubChild toggles the newest child of the newest task block.
+// Returns true if it found one.
+func (a *App) toggleNewestSubChild() bool {
+	a.mu.Lock()
+	var callID, label string
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != taskToolName {
+			continue
+		}
+		if len(b.Sub) == 0 {
+			continue
+		}
+		c := b.Sub[len(b.Sub)-1]
+		callID, label = b.CallID, c.Label
+		break
+	}
+	a.mu.Unlock()
+	if label == "" {
+		return false
+	}
+	return a.toggleSubChild(callID, label)
+}
+
+// runPendingSubToggle runs a click-armed inline toggle, if any.
+func (a *App) runPendingSubToggle() {
+	id, label := a.subToggleID, a.subToggleLabel
+	if id == "" {
+		return
+	}
+	a.subToggleID, a.subToggleLabel = "", ""
+	a.toggleSubChild(id, label)
+}
+
+// toggleSubChild flips a child's inline expansion. Lock discipline: state
+// flips under a.mu, then the lock is released BEFORE any hub call; fetched
+// rows are stored under a.mu afterwards.
+func (a *App) toggleSubChild(callID, label string) bool {
+	a.mu.Lock()
+	var child *SubActivity
+	var block *Block
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		bb := a.blocks[i]
+		if bb.Kind != KindTool || bb.ToolName != taskToolName {
+			continue
+		}
+		if callID != "" && bb.CallID != "" && bb.CallID != callID {
+			continue
+		}
+		if c := findSubLocked(bb, label); c != nil {
+			child = c
+			block = bb
+			break
+		}
+	}
+	if child == nil {
+		a.mu.Unlock()
+		return false
+	}
+	child.Expanded = !child.Expanded
+	wasEmpty := len(child.Lines) == 0
+	transcriptID := child.TranscriptID
+	a.mu.Unlock()
+	if child.Expanded && wasEmpty && transcriptID != "" {
+		st := a.hubState()
+		if st != nil && st.ops != nil && st.ops.Transcript != nil {
+			lines, _, ok := st.ops.Transcript(transcriptID, 0)
+			if ok {
+				a.mu.Lock()
+				// re-find by label
+				for i := len(a.blocks) - 1; i >= 0; i-- {
+					bb := a.blocks[i]
+					if bb != block {
+						continue
+					}
+					if c := findSubLocked(bb, label); c != nil {
+						c.Lines = lines
+						bb.subSeq++
+					}
+				}
+				a.mu.Unlock()
+			}
+		}
+	}
+	a.poke()
+	return true
 }
 
 // RefreshTaskChildStats pulls the hub's authoritative token/tool counts for a
@@ -1502,12 +1596,7 @@ func (a *App) subLines(b *Block, w, base int, hits *[]subHit) []line {
 			stats = append(stats, HumanTokens(c.Tokens)+" tokens")
 		}
 		stats = append(stats, humanDur(dur))
-		lineText := c.Label + " · " + state
-		if state != "Running..." {
-			lineText += " (" + strings.Join(stats, " · ") + ")"
-		} else {
-			lineText += " (" + strings.Join(stats, " · ") + ")"
-		}
+		lineText := c.Label + " · " + state + " (" + strings.Join(stats, " · ") + ")"
 		if budget := subRow(w); width(lineText) > budget {
 			lineText = truncateCells(lineText, budget, "…")
 		}
@@ -1515,6 +1604,28 @@ func (a *App) subLines(b *Block, w, base int, hits *[]subHit) []line {
 		emit(lineText, running)
 		if hits != nil && c.TranscriptID != "" {
 			*hits = append(*hits, subHit{offset: at, label: c.Label, id: c.TranscriptID})
+		}
+		if c.Expanded && len(c.Lines) > 0 {
+			lines := c.Lines
+			hidden := 0
+			if len(lines) > 12 {
+				hidden = len(lines) - 12
+				lines = lines[len(lines)-12:]
+			}
+			for _, tl := range lines {
+				txt := strings.TrimSpace(tl.Text)
+				if txt == "" {
+					continue
+				}
+				ln := textline("      ", dim)
+				ln.runs = append(ln.runs, cell{text: txt, style: nameSt})
+				out = append(out, ln)
+			}
+			if hidden > 0 {
+				ln := textline("      ", dim)
+				ln.runs = append(ln.runs, cell{text: fmt.Sprintf("… %d rows hidden", hidden), style: dim})
+				out = append(out, ln)
+			}
 		}
 	}
 	if more > 0 {
@@ -3396,6 +3507,7 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.handleMouse(m, press)
 				a.mu.Unlock()
 				a.runPendingMsgAction()
+				a.runPendingSubToggle()
 			}
 		}
 		return
@@ -3634,11 +3746,8 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 		return
 	case "app.subagent.transcript":
-		// The newest child a `task` call spawned, in its own transcript.
-		// Nothing tracked (no hub, or no `task` call this session) is
-		// silence, like ctrl+o on a transcript with no box: the chord must
-		// not claim to have opened something.
-		a.openNewestSubChildTranscript()
+		// Inline expansion of the newest child of the newest task block.
+		a.toggleNewestSubChild()
 		return
 	case "model-cycle":
 		// Unwired cycling is a no-op, not an error: the chord is bound by
@@ -3720,9 +3829,11 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.Invalidate()
 		return
 	case "expand":
-		// omp's ctrl+o. No result to reveal is silence, not a notice: the
-		// transcript must not claim to have expanded something.
-		a.ToggleBoxExpand()
+		// Ctrl+O: if a task block exists, toggle its newest child inline;
+		// otherwise fall back to the existing boxed-block expand.
+		if !a.toggleNewestSubChild() {
+			a.ToggleBoxExpand()
+		}
 		return
 	case "paste-image":
 		// omp's app.clipboard.pasteImage: the one paste no terminal can hand

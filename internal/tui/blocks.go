@@ -104,6 +104,8 @@ type SubActivity struct {
 	// TranscriptID is the id this child's own transcript is readable under
 	// (agent.Hub.TrackForeground hands one out). Empty when the host tracks
 	TranscriptID string
+	// Lines is the child's own transcript, fetched on first expand.
+	Lines []HubTranscriptLine
 	// Expanded toggles inline rendering of this child's own transcript.
 	Expanded bool
 }
