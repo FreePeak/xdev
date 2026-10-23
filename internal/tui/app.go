@@ -1290,6 +1290,63 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 	a.poke()
 }
 
+// RefreshTaskChildStats pulls the hub's authoritative token/tool counts for a
+// child into its SubActivity, so the summary line never calls the hub at
+// render time. Safe to call from a child goroutine: it never holds a.mu while
+// reading the hub.
+func (a *App) RefreshTaskChildStats(callID, label, transcriptID string) {
+	if transcriptID == "" {
+		return
+	}
+	st := a.hubState()
+	if st == nil || st.ops == nil || st.ops.Roster == nil {
+		return
+	}
+	// Read hub roster WITHOUT holding a.mu.
+	rows := st.ops.Roster()
+	var tok int64
+	var tools int
+	var elapsed time.Duration
+	found := false
+	for _, r := range rows {
+		if r.ID == transcriptID {
+			tok, tools, elapsed = r.Tokens, r.Tools, r.Elapsed
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if b == nil {
+		// settled: search all task blocks
+		for i := len(a.blocks) - 1; i >= 0; i-- {
+			if bb := a.blocks[i]; bb.Kind == KindTool && bb.ToolName == taskToolName {
+				if c := findSubLocked(bb, label); c != nil {
+					c.Tokens, c.Tools = tok, tools
+					if elapsed > 0 {
+						c.Dur = elapsed
+					}
+					bb.subSeq++
+					break
+				}
+			}
+		}
+	} else {
+		if c := findSubLocked(b, label); c != nil {
+			c.Tokens, c.Tools = tok, tools
+			if elapsed > 0 && c.Status != "running" {
+				c.Dur = elapsed
+			}
+			b.subSeq++
+		}
+	}
+	a.mu.Unlock()
+	a.poke()
+}
+
 // runningToolLocked is the running call row for callID/name, newest first.
 // Callers hold a.mu.
 func (a *App) runningToolLocked(callID, name string) *Block {

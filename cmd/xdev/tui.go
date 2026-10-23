@@ -3309,13 +3309,13 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 		}
 		s.mu.Unlock()
 		s.app.AddTaskChild(callID, ev.Label, ev.Agent, ev.Model)
-		s.app.AgentPanelStart(ev.Label, ev.Agent, ev.Model, ev.Parent, ev.TranscriptID)
+		s.app.RefreshTaskChildStats(callID, ev.Label, ev.TranscriptID)
 	case agent.SubagentTool:
 		s.app.UpdateTaskChild(callID, ev.Label, ev.Tool, string(ev.Args), ev.Status)
-		s.app.AgentPanelUpdate(ev.Label, ev.Tool, string(ev.Args))
+		s.app.RefreshTaskChildStats(callID, ev.Label, ev.TranscriptID)
 	case agent.SubagentEnd:
 		s.app.FinishTaskChild(callID, ev.Label, ev.Status, ev.Dur)
-		s.app.AgentPanelSettle(ev.Label)
+		s.app.RefreshTaskChildStats(callID, ev.Label, ev.TranscriptID)
 	}
 	// The id the child's own transcript is readable under, when a hub tracked
 	// it (every event carries it). Without one the row stays narration only:
