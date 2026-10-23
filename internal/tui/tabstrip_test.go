@@ -4,6 +4,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/FreePeak/xdev/internal/theme"
 )
 
 // TestTabStripPolicyHidesAndNumbers: the strip is OPT-IN (a default install
@@ -70,5 +74,44 @@ func TestTabStripPolicyHidesAndNumbers(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("selectTab never reached the host: the strip policy disabled the chords")
 		}
+	}
+}
+
+// TestTabStripDimmedBands: every tab chip paints on a dimmed band, and the
+// current session's chip is one step brighter than the rest — so the strip
+// still reads as a row when the terminal mutes its colours, and the eye finds
+// the current session without leaning on the underline alone.
+func TestTabStripDimmedBands(t *testing.T) {
+	app, scr := newTestApp(t, 100, 30)
+	app.SetTabs([]TabInfo{
+		{ID: "aaaa1111", Title: "alpha", Current: true},
+		{ID: "bbbb2222", Title: "beta"},
+	})
+	app.draw()
+	dimBg, ok := app.th.Slot(theme.BgHighlight)
+	if !ok {
+		t.Fatal("the test theme must set BgHighlight; without it the strip keeps terminal-default cells")
+	}
+	// The band under a chip's first label rune: 'a' opens the current chip,
+	// 'b' the inactive one. Two labels with no shared letters, so the probe
+	// cannot land on the other chip by accident.
+	chipBg := func(label rune) tcell.Color {
+		for x := 0; x < 100; x++ {
+			r, _, st, _ := scr.GetContent(x, tabStripRow)
+			if r == label {
+				_, bg, _ := st.Decompose()
+				return bg
+			}
+		}
+		t.Fatalf("chip %q is not painted on the strip row", string(label))
+		return tcell.ColorDefault
+	}
+	wantDim := app.cellColor(dimBg)
+	wantBright := app.cellColor(blendTowardWhite(dimBg, 0.2))
+	if got := chipBg('a'); got != wantBright {
+		t.Fatalf("current chip bg = %v, want the blended brighter band %v", got, wantBright)
+	}
+	if got := chipBg('b'); got != wantDim {
+		t.Fatalf("inactive chip bg = %v, want the BgHighlight dim band %v", got, wantDim)
 	}
 }
