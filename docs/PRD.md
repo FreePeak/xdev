@@ -4655,3 +4655,16 @@ Every step that had to CHANGE something ended with an untouched tree, and every 
 **Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
 *Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 
+
+## The composer is a frame, not a field with two blank rows (2026-10-24)
+
+The prompt box claimed five rows for a one-line draft: the top border, a blank pad row, the draft, a second blank pad row, and the model divider. #579 added the pads ("the composer field breathes inside its own frame") and #746 restored them along with the rounded box; the rows came out of the transcript's viewport every frame.
+
+The pads are gone and their rows went back to the transcript: `composerRows()` is `len(lines)+2` (top border, draft rows, divider), `composerBudget()` is `height-5-transcriptTop()` again, and `drawComposer`'s draft row starts at `yTop` so the divider sits at `yDraft+len(lines)`. No column moved: `composerAvail()` still reserves the trailing cell, the `❯ ` prefix still sits at column 3, and the placeholder, gradient top rule, divider segments and blinking cursor are untouched.
+
+Every consumer derives from `composerRows()`/`composerBudget()` (the viewport ceiling, `markComposerDirty`, overlay tops, the queue row, the tree/menu sizing), so no other site needed an edit; the geometry-dependent tests (`chrome_test`, `composer_multiline_test`, `composer_paged_test`, `composer_pane_test`, `composer_wire_test`, `gradient_test`, `selection_test`) moved with the counts.
+
+**Measured against the built binary in tmux** (100x26, groknight): stock paints 5 rows for an empty prompt and 7 for a wrapped two-row draft; this branch paints 3 and 5.
+
+**Tests.** `TestComposerIsBoxed` pins `composerRows() == 3` for a one-row draft with the frame intact, and `TestComposerTopNeverLeavesTheScreen`/`TestLargePasteStaysOnScreen` pin the paging ceiling at `composerBudget()+2`.
+*Last updated: 2026-10-24 (feat/composer-tight — the prompt box drops its two interior pad rows: 5 rows -> 3 for a one-line draft, the difference goes to the transcript)
