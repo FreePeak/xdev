@@ -166,14 +166,20 @@ func TestThinkingForModel(t *testing.T) {
 		"onegw": {Models: []config.ModelConfig{
 			{ID: "thinker", Reasoning: true},
 			{ID: "plain"},
-			// A model that announces a narrower ladder than the built-in one:
-			// this is the case the clamp exists for.
 			{ID: "narrow", Reasoning: true, Efforts: []string{"low", "medium", "high"}},
 			{ID: "tiny-ladder", Reasoning: true, Efforts: []string{"low"}},
 		}},
+		"pinned": {Models: []config.ModelConfig{{ID: "plain-pin"}}},
+		// Discovery is the ONLY source of a discovered row: the author's
+		// `models:` list stays empty, and the merged catalog the runtime
+		// sees is primed below exactly as mergeDiscovered would build it.
+		"disc": {Discovery: &config.DiscoveryConfig{Type: "openai-models-list"}},
 	}}
 	resetProviderModelCache()
 	defer resetProviderModelCache()
+	// A gateway's /models answer, as discovery merges it: a row with no
+	// reasoning declaration of any kind.
+	providerModelCache["disc"] = []config.ModelConfig{{ID: "plain-disc"}}
 	for _, tc := range []struct {
 		name            string
 		level, prov, mo string
@@ -182,6 +188,8 @@ func TestThinkingForModel(t *testing.T) {
 		{name: "pinned rung on a reasoning model rides through", level: "high", prov: "onegw", mo: "thinker", want: "high"},
 		{name: "a model that advertises no ladder keeps the rung", level: "max", prov: "onegw", mo: "thinker", want: "max"},
 		{name: "pinned rung on a non-reasoning model falls to auto", level: "high", prov: "onegw", mo: "plain", want: "auto"},
+		{name: "pinned non-reasoning model keeps the auto fallback", level: "high", prov: "pinned", mo: "plain-pin", want: "auto"},
+		{name: "a discovered row's reasoning:false is not the author's word", level: "high", prov: "disc", mo: "plain-disc", want: "high"},
 		{name: "xhigh/max are rungs too", level: "max", prov: "onegw", mo: "plain", want: "auto"},
 		{name: "off is not a rung — untouched", level: "off", prov: "onegw", mo: "plain", want: "off"},
 		{name: "minimal is not a rung — untouched", level: "minimal", prov: "onegw", mo: "plain", want: "minimal"},

@@ -4656,8 +4656,39 @@ Every step that had to CHANGE something ended with an untouched tree, and every 
 *Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 
 
-## Subagent session UI revamp (feat/subagent-ui)
+## The composer is a frame, not a field with two blank rows (2026-10-24)
 
-Single inline surface in transcript; deleted agentspanel strip; tests ...
+The prompt box claimed five rows for a one-line draft: the top border, a blank pad row, the draft, a second blank pad row, and the model divider. #579 added the pads ("the composer field breathes inside its own frame") and #746 restored them along with the rounded box; the rows came out of the transcript's viewport every frame.
 
-*Last updated: 2026-10-24 (feat/subagent-ui — inline expansion)*
+The pads are gone and their rows went back to the transcript: `composerRows()` is `len(lines)+2` (top border, draft rows, divider), `composerBudget()` is `height-5-transcriptTop()` again, and `drawComposer`'s draft row starts at `yTop` so the divider sits at `yDraft+len(lines)`. No column moved: `composerAvail()` still reserves the trailing cell, the `❯ ` prefix still sits at column 3, and the placeholder, gradient top rule, divider segments and blinking cursor are untouched.
+
+Every consumer derives from `composerRows()`/`composerBudget()` (the viewport ceiling, `markComposerDirty`, overlay tops, the queue row, the tree/menu sizing), so no other site needed an edit; the geometry-dependent tests (`chrome_test`, `composer_multiline_test`, `composer_paged_test`, `composer_pane_test`, `composer_wire_test`, `gradient_test`, `selection_test`) moved with the counts.
+
+**Measured against the built binary in tmux** (100x26, groknight): stock paints 5 rows for an empty prompt and 7 for a wrapped two-row draft; this branch paints 3 and 5.
+
+**Tests.** `TestComposerIsBoxed` pins `composerRows() == 3` for a one-row draft with the frame intact, and `TestComposerTopNeverLeavesTheScreen`/`TestLargePasteStaysOnScreen` pin the paging ceiling at `composerBudget()+2`.
+*Last updated: 2026-10-24 (feat/composer-tight — the prompt box drops its two interior pad rows: 5 rows -> 3 for a one-line draft, the difference goes to the transcript)
+
+
+## One surface for a subagent (feat/subagent-ui)
+
+A running child had three places to look at it: rows hanging under its `task` call, a floating strip above the composer (`internal/tui/agentspanel.go`, 1,049 lines), and the `/hub` overlay. The strip was the worst of the three: it duplicated the child's state, painted a second tree, and a click on one of its rows opened a transcript in a modal that looked like a second application. omp and Claude Code show a child where it was spawned.
+
+It is one surface now, in the transcript:
+
+- one summary line per child under its call row, in Claude Code's shape: `scout · Running... (3 tool uses · 4.2k tokens · 12s)`, settling to `Done`, `Failed` or `Canceled`;
+- the numbers come from the hub's child stats (authoritative) and fall back to the call's own count plus live elapsed when nothing tracked the child. Tokens are omitted at zero rather than printed as `0 tokens`, because a child that has spent nothing has nothing to say;
+- clicking the line — or Ctrl+O / Alt+B — expands that child's own transcript inline, indented under the line: assistant rows rendered as markdown, tool results as `tool: …`, the last 12 rows with `… N rows hidden` above them;
+- the expansion is LIVE. While it is open, every child event re-reads the transcript, so it is a view, not a snapshot taken at the click. A refresh does not depend on the hub roster having a row for that child — the roster feeds the numbers, the transcript feeds the rows;
+- with no `task` child to expand, Ctrl+O keeps its old job and toggles the newest boxed block;
+- the status row's `subagent` segment counts the children actually running (`subagent · 2`), not a strip that no longer exists.
+
+Deleted with the strip: `internal/tui/agentspanel.go` (1,049 lines), its test (555), the four wiring blocks in `cmd/xdev/tui.go`, the `app.agents.panel` and `app.agents.focus` chords, the `subagentPanel` setting, and the click-a-child-row-to-open-a-modal path `/hub` already owned. Net linear diff: 721 insertions, 2,122 deletions.
+
+A keyboard bug fell out of it: a raw Ctrl+O arrives as `tcell.KeyCtrlO` with `ModNone`, and `chordOf` called a chord "ctrl" only when `ModCtrl` was set, so the chord never resolved on that path. `chordOf` now treats `KeyCtrlA..KeyCtrlZ` as the ctrl modifier — the same class of bug the strip's own Alt+letter chords hid.
+
+**Tests.** `internal/tui/subagent_expand_test.go` — `TestSubagentSummaryLineIsClaudeCodes` (the pinned literal `Done (3 tool uses · 1.5k tokens · 4s)`), `TestSubagentSummaryLineLiveWhileRunning`, `TestSubagentNoTokensOmitsTheSegment`, `TestSubagentFailedChildSaysFailed`, `TestSubagentLineExpandsInPlace`, `TestSubagentClickOnLineTogglesThatChild`, `TestSubagentExpandLiveRefresh` (a new child event lands inside an open expansion), `TestSubagentExpandLiveRefreshNoRoster` (the refresh holds with no roster row for the child), `TestSubagentHUDSegment` (`subagent · 1` while one runs, `subagent · Alt+B` after it settles), `TestSubagentHitIsTheChildRowNotTheCallRow`, `TestUntrackedSubagentRowIsNotOpenable`, `TestSubagentRowDragStillSelects` (a drag over the line still selects text: the click target is the line, not the block).
+
+**Evidence.** A real-pty capture against the built binary: the running line paints under the call row, a click expands that child's transcript in place, and `Alt+P` is a no-op — the strip is gone. The settled `Done` line is proven by the pinned-literal test, not the capture: the mock provider never lands the child's final stream.
+
+*Last updated: 2026-10-24 (feat/subagent-ui — one inline surface for a subagent: the strip is deleted, the summary line and the live expansion replace it)*

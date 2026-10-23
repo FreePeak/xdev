@@ -5858,7 +5858,7 @@ func (a *App) composerAvail() int {
 // large paste showed NOTHING while the full draft sat in the buffer — the
 // "composer is empty but Enter sends it all" bug.
 func (a *App) composerBudget() int {
-	n := a.height - 7 - a.transcriptTop()
+	n := a.height - 5 - a.transcriptTop()
 	if n < 1 {
 		n = 1
 	}
@@ -5890,10 +5890,12 @@ func (a *App) composerInputLines() (lines []string, curRow, curCol int) {
 }
 
 // composerRows is the total height of the prompt box (top border, painted
-// input rows, bottom divider).
+// input rows, bottom divider). The box carries no interior padding rows: the
+// draft sits directly under the top border and directly on the divider, so
+// every row it claims is a row the transcript gets back.
 func (a *App) composerRows() int {
 	lines, _, _, _, _ := a.composerView()
-	return len(lines) + 4
+	return len(lines) + 2
 }
 
 // drawComposer renders the prompt box: themed outline (theme.Box), ❯ prefix,
@@ -5923,26 +5925,15 @@ func (a *App) drawComposer(yTop int) {
 	a.gradientRule(yTop-1, 2, w-3, a.th.Get(theme.AccentAssistant), a.th.Get(theme.PromptBorderActive), boxRune(box.Horizontal), bs)
 	drawText(a.scr, w-2, yTop-1, box.TopRight, bs)
 
-	// Input rows: a blank pad, then │ ❯ first…│ and continuation rows
-	// aligned under the text, then a second blank pad. The pads are what make
-	// the box a field rather than a table row — the draft breathes inside the
-	// frame instead of touching it — and they are part of composerRows(), so
-	// the viewport and the overlays above already account for them.
+	// Input rows: │ ❯ first…│ then continuation rows aligned under the text.
+	// The draft sits directly under the top border and directly on the divider
+	// — no blank pad rows of its own, so the box is as short as the draft and
+	// the rows go to the transcript instead.
 	lines, curRow, curCol, above, _ := a.composerView()
 	promptStyle := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentUser))).Bold(true)
 	vert := boxRune(box.Vertical)
-	// yDraft is the first input row: one row below yTop, under the pad.
-	yDraft := yTop + 1
-	// padRow is one of the blank interior rows: side borders, no glyphs, and
-	// every cell filled so a previous frame's text cannot survive underneath.
-	padRow := func(y int) {
-		a.scr.SetContent(1, y, vert, nil, bs)
-		a.scr.SetContent(w-2, y, vert, nil, bs)
-		for x := 2; x < w-2; x++ {
-			a.scr.SetContent(x, y, ' ', nil, ms.body)
-		}
-	}
-	padRow(yTop)
+	// yDraft is the first input row: the row right below the top border.
+	yDraft := yTop
 	for i, ln := range lines {
 		y := yDraft + i
 		a.scr.SetContent(1, y, vert, nil, bs)
@@ -5974,10 +5965,9 @@ func (a *App) drawComposer(yTop int) {
 			a.scr.SetContent(x, y, ' ', nil, ms.body)
 		}
 	}
-	padRow(yDraft + len(lines))
 
 	// Info divider bottom border: ╰─ ⠋ model · high · plan ─────── ╯
-	yBottom := yDraft + len(lines) + 1
+	yBottom := yDraft + len(lines)
 	infoSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.StatusLineModel)))
 	if hasInfoBg {
 		infoSt = infoSt.Background(a.cellColor(infoBg))

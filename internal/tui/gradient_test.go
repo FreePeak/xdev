@@ -107,7 +107,7 @@ func ruleRow(t *testing.T, scr tcell.SimulationScreen, h int) (int, []int) {
 	if draft < 0 {
 		t.Fatalf("no prompt row on the screen:\n%s", screenText(scr))
 	}
-	row := draft - 2
+	row := draft - 1
 	if row < 0 {
 		t.Fatalf("no row above the prompt row %d", draft)
 	}

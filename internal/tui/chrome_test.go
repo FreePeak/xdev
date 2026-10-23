@@ -453,8 +453,8 @@ func TestComposerIsBoxed(t *testing.T) {
 	app, scr := drawnApp(t, 60, 14)
 	setDraft(&app.ed, "hello there", 11)
 	app.draw()
-	if got := app.composerRows(); got != 5 { // one draft row + four chrome rows
-		t.Fatalf("one-row composer = %d rows, want 5", got)
+	if got := app.composerRows(); got != 3 { // one draft row + two borders
+		t.Fatalf("one-row composer = %d rows, want 3", got)
 	}
 
 	text := screenText(scr)

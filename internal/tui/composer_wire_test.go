@@ -198,7 +198,7 @@ func TestComposerRowIsCarriedAsADelta(t *testing.T) {
 	ft.take()
 
 	// 1-based, as the wire addresses it.
-	row := app.height - 1 - app.composerRows() + 1
+	row := app.height - 1 - app.composerRows()
 	carried, idle := 0, 0
 	const turns = 40
 	for i := 0; i < turns; i++ {
@@ -272,7 +272,7 @@ func TestComposerSurvivesASync(t *testing.T) {
 	app.width, app.height = W, H
 	app.AddUserBlock("hi")
 	app.draw()
-	row := app.height - 1 - app.composerRows() + 1
+	row := app.height - 1 - app.composerRows()
 	ft.take()
 
 	scr.Sync()
@@ -302,7 +302,7 @@ func TestComposerRowGlyphs(t *testing.T) {
 	app.draw()
 	prim, w, _ := scr.GetContents()
 	row := app.height - 1 - app.composerRows()
-	for y := row - 1; y <= row; y++ {
+	for y := row - 2; y <= row; y++ {
 		line := ""
 		for x := 0; x < w; x++ {
 			c := ' '

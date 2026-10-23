@@ -316,6 +316,13 @@ func thinkingLevel(settings *config.Settings, flagValue string) string {
 // never pinned, and reading "not listed" as "cannot reason" would silently
 // drop a budget the user asked for (modelReasoning reports that case as
 // unknown, not as unsupported).
+//
+// A DISCOVERED row is not such a statement. The discovery endpoint publishes
+// what it chooses to (onegw answers a bare {id, object, owned_by} for all 138
+// of its ids, measured 2026-10-23, so every row it injects reads
+// reasoning:false), and reading that as the model's capability folded the
+// rung away for an entire gateway lane. Only a models.yml `models:` pin that
+// says reasoning:false is the author's verdict — see modelPinned.
 func thinkingForModel(level, provider, model string, cfg *config.Config) string {
 	switch level {
 	case "low", "medium", "high", "xhigh", "max":
@@ -330,9 +337,42 @@ func thinkingForModel(level, provider, model string, cfg *config.Config) string 
 		return config.ClampEffort(level, advertised)
 	}
 	if supported, _ := modelReasoning(cfg, provider, model); !supported {
-		return "auto"
+		// A reasoning:false that the AUTHOR pinned is a statement and the
+		// fallback applies. A row discovery injected is not: a gateway
+		// answering a bare {id, object, owned_by} reads reasoning:false
+		// for every id it serves (onegw does for all 138, measured
+		// 2026-10-23), and folding those to "auto" would silently drop
+		// the rung the user chose on the whole lane. Discovered rows
+		// keep the level, exactly like a model the catalog does not
+		// list — the same "no opinion from the author" case.
+		if modelPinned(cfg, provider, model) {
+			return "auto"
+		}
 	}
 	return level
+}
+
+// modelPinned reports whether the catalog entry for this id came from a
+// models.yml `models:` pin (the author's own statement) rather than a
+// discovery response. A provider that both pins an id and discovers merges
+// the pin first, so reaching the pin loop with the id means the pin exists.
+func modelPinned(cfg *config.Config, provider, model string) bool {
+	if cfg == nil {
+		return false
+	}
+	pc, ok := cfg.Providers[provider]
+	if !ok {
+		return false
+	}
+	// A provider with no `discovery:` block only ever has pinned rows, so
+	// every id it serves is the author's word. With discovery on, the pin
+	// list is still the only source of an author's statement.
+	for _, m := range pc.Models {
+		if m.ID == model {
+			return true
+		}
+	}
+	return false
 }
 
 // settings default (nil = follow settings). Both drive the one showThinking
