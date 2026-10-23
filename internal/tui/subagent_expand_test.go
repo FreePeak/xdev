@@ -297,3 +297,82 @@ func TestSubagentClickOnLineTogglesThatChild(t *testing.T) {
 		t.Fatal("second expanded")
 	}
 }
+
+func TestSubagentExpandLiveRefresh(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.SetHubOps(subAgentOps("fg-7"))
+	app.AddToolBlock("c1", "task", `{"name":"scout","prompt":"map"}`)
+	app.AddTaskChild("c1", "scout", "", "free")
+	app.SetTaskChildTranscript("c1", "scout", "fg-7")
+	app.toggleSubChild("c1", "scout")
+	app.draw()
+	if !strings.Contains(screenText(app.scr.(tcell.SimulationScreen)), "src/hooks/useChat.ts") {
+		t.Fatal("line2 missing before")
+	}
+	// hub now returns 3 lines
+	app.SetHubOps(&HubOps{
+		Roster: func() []HubAgent { return rosterRows() },
+		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) {
+			return []HubTranscriptLine{
+				{Role: "user", Text: "map the app shell"},
+				{Role: "assistant", Text: "reading src/boot.tsx"},
+				{Role: "toolResult", Text: "src/hooks/useChat.ts"},
+				{Role: "assistant", Text: "NEW THIRD LINE"},
+			}, 4, true
+		},
+	})
+	app.UpdateTaskChild("c1", "scout", "task", "", "running")
+	app.RefreshTaskChildStats("c1", "scout", "fg-7")
+	app.draw()
+	if !strings.Contains(screenText(app.scr.(tcell.SimulationScreen)), "NEW THIRD LINE") {
+		t.Fatal("line3 missing")
+	}
+	app.mu.Lock()
+	b := app.runningToolLocked("c1", "task")
+	c := findSubLocked(b, "scout")
+	expanded := c != nil && c.Expanded
+	app.mu.Unlock()
+	if !expanded {
+		t.Fatal("not expanded")
+	}
+}
+
+func TestSubagentExpandLiveRefreshNoRoster(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	ops := subAgentOps("fg-7")
+	ops.Roster = func() []HubAgent { return nil }
+	app.SetHubOps(ops)
+	app.AddToolBlock("c1", "task", `{"name":"scout","prompt":"map"}`)
+	app.AddTaskChild("c1", "scout", "", "free")
+	app.SetTaskChildTranscript("c1", "scout", "fg-7")
+	app.toggleSubChild("c1", "scout")
+	app.draw()
+	app.SetHubOps(&HubOps{
+		Roster: func() []HubAgent { return nil },
+		Transcript: func(id string, fromSeq int) ([]HubTranscriptLine, int, bool) {
+			return []HubTranscriptLine{{Role: "assistant", Text: "REFRESHED"}}, 1, true
+		},
+	})
+	app.UpdateTaskChild("c1", "scout", "task", "", "running")
+	app.RefreshTaskChildStats("c1", "scout", "fg-7")
+	app.draw()
+	if !strings.Contains(screenText(app.scr.(tcell.SimulationScreen)), "REFRESHED") {
+		t.Fatal("no refresh")
+	}
+}
+
+func TestSubagentHUDSegment(t *testing.T) {
+	app, _ := newTestApp(t, 100, 30)
+	app.AddToolBlock("c1", "task", `{"name":"scout","prompt":"map"}`)
+	app.AddTaskChild("c1", "scout", "", "free")
+	app.recomputeSubagentRunningLocked()
+	txt, _ := app.hudSegment("subagent")
+	if txt != "subagent · 1" {
+		t.Fatalf("got %q", txt)
+	}
+	app.FinishTaskChild("c1", "scout", "done", time.Second)
+	txt, _ = app.hudSegment("subagent")
+	if txt != "subagent · Alt+B" {
+		t.Fatalf("got %q", txt)
+	}
+}

@@ -147,13 +147,14 @@ type App struct {
 	th  *theme.Theme
 	// md/mdFor/mdSet are mdStyle's memo (markdown.go). mdFor is the theme the
 	// memo was built from, so SetTheme — which swaps a.th — rebuilds it.
-	md     mdStyle
-	mdFor  *theme.Theme
-	mdSet  bool
-	mu     sync.Mutex
-	blocks []*Block
-	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
-	ed     Editor
+	md              mdStyle
+	mdFor           *theme.Theme
+	mdSet           bool
+	mu              sync.Mutex
+	blocks          []*Block
+	subagentRunning int
+	sm              scrollModel // transcript viewport (offset/follow), see scroll.go
+	ed              Editor
 	// escDraft is the prompt the last Esc took out of the composer and
 	// escUsed says that exact text has already been given back: the ladder is
 	// clear → restore → clear → open the selector, so repeated Esc always
@@ -1260,6 +1261,7 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
 		b.subSeq++
+		a.recomputeSubagentRunningLocked()
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1273,6 +1275,7 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 		if c := findSubLocked(b, label); c != nil {
 			c.Status, c.Dur = status, d
 			b.subSeq++
+			a.recomputeSubagentRunningLocked()
 		}
 	}
 	a.mu.Unlock()
@@ -1385,48 +1388,47 @@ func (a *App) RefreshTaskChildStats(callID, label, transcriptID string) {
 		return
 	}
 	st := a.hubState()
-	if st == nil || st.ops == nil || st.ops.Roster == nil {
+	if st == nil || st.ops == nil {
 		return
 	}
-	// Read hub roster WITHOUT holding a.mu.
-	rows := st.ops.Roster()
 	var tok int64
 	var tools int
 	var elapsed time.Duration
 	found := false
-	for _, r := range rows {
-		if r.ID == transcriptID {
-			tok, tools, elapsed = r.Tokens, r.Tools, r.Elapsed
-			found = true
-			break
+	if st.ops.Roster != nil {
+		rows := st.ops.Roster()
+		for _, r := range rows {
+			if r.ID == transcriptID {
+				tok, tools, elapsed = r.Tokens, r.Tools, r.Elapsed
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		return
 	}
 	a.mu.Lock()
 	b := a.runningToolLocked(callID, taskToolName)
-	if b == nil {
-		// settled: search all task blocks
-		for i := len(a.blocks) - 1; i >= 0; i-- {
-			if bb := a.blocks[i]; bb.Kind == KindTool && bb.ToolName == taskToolName {
-				if c := findSubLocked(bb, label); c != nil {
-					c.Tokens, c.Tools = tok, tools
-					if elapsed > 0 {
-						c.Dur = elapsed
+	if found {
+		if b == nil {
+			for i := len(a.blocks) - 1; i >= 0; i-- {
+				if bb := a.blocks[i]; bb.Kind == KindTool && bb.ToolName == taskToolName {
+					if c := findSubLocked(bb, label); c != nil {
+						c.Tokens, c.Tools = tok, tools
+						if elapsed > 0 {
+							c.Dur = elapsed
+						}
+						bb.subSeq++
+						break
 					}
-					bb.subSeq++
-					break
 				}
 			}
-		}
-	} else {
-		if c := findSubLocked(b, label); c != nil {
-			c.Tokens, c.Tools = tok, tools
-			if elapsed > 0 && c.Status != "running" {
-				c.Dur = elapsed
+		} else {
+			if c := findSubLocked(b, label); c != nil {
+				c.Tokens, c.Tools = tok, tools
+				if elapsed > 0 && c.Status != "running" {
+					c.Dur = elapsed
+				}
+				b.subSeq++
 			}
-			b.subSeq++
 		}
 	}
 	// Check expanded under lock.
@@ -1467,6 +1469,23 @@ func (a *App) RefreshTaskChildStats(callID, label, transcriptID string) {
 		}
 	}
 	a.poke()
+}
+
+// recomputeSubagentRunningLocked counts running sub-children; caller holds a.mu.
+func (a *App) recomputeSubagentRunningLocked() {
+	n := 0
+	for i := range a.blocks {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != taskToolName {
+			continue
+		}
+		for _, c := range b.Sub {
+			if c.Status == "running" {
+				n++
+			}
+		}
+	}
+	a.subagentRunning = n
 }
 
 // runningToolLocked is the running call row for callID/name, newest first.
@@ -3767,17 +3786,6 @@ func (a *App) handleKey(ev tcell.Event) {
 		// The same path /hub takes; an unwired hub says so in the
 		// transcript rather than swallowing the chord.
 		_ = a.HubRoster()
-		return
-	case "app.agents.focus":
-		// Put the keyboard on the strip: the newest row is the one a person
-		// watching would open, and from there arrows walk the list, Enter
-		// opens a child, and Esc leaves. Nothing to focus is silence, like
-		// ctrl+o on a transcript with no box — the chord must not claim to
-		// have done something.
-		if false {
-			a.AddSystemBlock("· no running child to focus")
-			return
-		}
 		return
 	case "app.subagent.transcript":
 		// Inline expansion of the newest child of the newest task block.
@@ -6441,20 +6449,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 		// holds a settled row to reopen. The chord is only worth advertising
 		// while there is something to open — a chip that reads "0" teaches
 		// nobody anything.
-		n := 0
-		a.mu.Lock()
-		for i := len(a.blocks) - 1; i >= 0; i-- {
-			bb := a.blocks[i]
-			if bb.Kind != KindTool || bb.ToolName != taskToolName {
-				continue
-			}
-			for _, c := range bb.Sub {
-				if c.Status == "running" {
-					n++
-				}
-			}
-		}
-		a.mu.Unlock()
+		n := a.subagentRunning
 		if n <= 0 {
 			return "subagent · Alt+B", theme.StatusLineSep
 		}
