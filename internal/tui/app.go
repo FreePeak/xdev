@@ -5519,11 +5519,9 @@ func (a *App) paint() {
 	// composer, so it goes after every overlay (an overlay is modal and owns
 	// its rows) and before the composer, whose top border must stay the edge
 	// of the box. It is chrome, not content, and publishes its own hit table.
-	// The subagent strip (agentspanel.go) goes above the queue for the same
-	// reason the queue goes above the composer: it is chrome over the
-	// transcript's tail, painted after every modal so a panel that owns its
-	// rows still wins, and before the queue so a running child's row is the
-	// one nearest the eye.
+	// The mid-turn queue is the only chrome between the transcript and the
+	// composer now: the subagent strip is gone, and each child paints as a
+	// summary line under its own call row.
 	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)

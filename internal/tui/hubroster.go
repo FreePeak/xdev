@@ -168,10 +168,9 @@ func (a *App) openNewestSubChildTranscript() bool {
 	return a.openSubChildTranscript(id, label)
 }
 
-// OpenSubChild shows one child's transcript in the panel surface, by id. It is
-// the exported form of the click path, for a host that has an id from
-// somewhere other than a painted transcript row (the live subagent strip,
-// agentspanel.go) and wants the SAME surface — one Esc contract, one renderer.
+// OpenSubChild shows one child's transcript in the panel surface, by id. It
+// is the exported form of the click path for a host that has an id from
+// somewhere other than a painted transcript row.
 func (a *App) OpenSubChild(id, label string) bool {
 	return a.openSubChildTranscript(id, label)
 }

@@ -4683,7 +4683,7 @@ It is one surface now, in the transcript:
 - with no `task` child to expand, Ctrl+O keeps its old job and toggles the newest boxed block;
 - the status row's `subagent` segment counts the children actually running (`subagent · 2`), not a strip that no longer exists.
 
-Deleted with the strip: `internal/tui/agentspanel.go` (1,049 lines), its test (555), the four wiring blocks in `cmd/xdev/tui.go`, the `app.agents.panel` and `app.agents.focus` chords, the `subagentPanel` setting, and the click-a-child-row-to-open-a-modal path `/hub` already owned. Net linear diff: 721 insertions, 2,122 deletions.
+Deleted with the strip: `internal/tui/agentspanel.go` (1,049 lines), its test (555), the four wiring blocks in `cmd/xdev/tui.go`, the `app.agents.panel` and `app.agents.focus` chords, the strip's `subagentPanel` key (kept, accepted and ignored, so a config that still sets it keeps loading), and the click-a-child-row-to-open-a-modal path `/hub` already owned. Net linear diff: 721 insertions, 2,122 deletions.
 
 A keyboard bug fell out of it: a raw Ctrl+O arrives as `tcell.KeyCtrlO` with `ModNone`, and `chordOf` called a chord "ctrl" only when `ModCtrl` was set, so the chord never resolved on that path. `chordOf` now treats `KeyCtrlA..KeyCtrlZ` as the ctrl modifier — the same class of bug the strip's own Alt+letter chords hid.
 

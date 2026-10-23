@@ -139,9 +139,6 @@ func TestSubagentSummaryLineIsClaudeCodes(t *testing.T) {
 	if !strings.Contains(out, "Done (3 tool uses · 1.5k tokens · ") {
 		t.Fatalf("missing summary: %s", out)
 	}
-	if !strings.Contains(out, "·") {
-		t.Fatal("no middot")
-	}
 	// second child singular
 	app2, scr2 := newTestApp(t, 100, 30)
 	app2.AddToolBlock("c2", "task", `{"name":"scout2","prompt":"x"}`)
@@ -184,7 +181,7 @@ func TestSubagentSummaryLineLiveWhileRunning(t *testing.T) {
 	app.RefreshTaskChildStats("c1", "scout", "fg-1")
 	app.draw()
 	out2 := screenText(scr)
-	if !strings.Contains(out2, "5") {
+	if !strings.Contains(out2, "5 tool uses") {
 		t.Fatalf("count not updated: %s", out2)
 	}
 }
