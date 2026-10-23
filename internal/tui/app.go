@@ -1259,7 +1259,6 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		}
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
-		c.Lines = nil
 		b.subSeq++
 	}
 	a.mu.Unlock()
@@ -1346,6 +1345,9 @@ func (a *App) toggleSubChild(callID, label string) bool {
 		return false
 	}
 	child.Expanded = !child.Expanded
+	if !child.Expanded {
+		child.Lines = nil
+	}
 	wasEmpty := len(child.Lines) == 0
 	transcriptID := child.TranscriptID
 	a.mu.Unlock()
@@ -1427,7 +1429,43 @@ func (a *App) RefreshTaskChildStats(callID, label, transcriptID string) {
 			b.subSeq++
 		}
 	}
+	// Check expanded under lock.
+	expanded := false
+	var childBlock *Block
+	if b == nil {
+		for i := len(a.blocks) - 1; i >= 0; i-- {
+			if bb := a.blocks[i]; bb.Kind == KindTool && bb.ToolName == taskToolName {
+				if c := findSubLocked(bb, label); c != nil && c.Expanded && c.TranscriptID != "" {
+					expanded = true
+					childBlock = bb
+					break
+				}
+			}
+		}
+	} else {
+		if c := findSubLocked(b, label); c != nil && c.Expanded && c.TranscriptID != "" {
+			expanded = true
+			childBlock = b
+		}
+	}
+	tid := ""
+	if expanded && childBlock != nil {
+		if c := findSubLocked(childBlock, label); c != nil {
+			tid = c.TranscriptID
+		}
+	}
 	a.mu.Unlock()
+	if expanded && tid != "" && st.ops.Transcript != nil {
+		lines, _, ok := st.ops.Transcript(tid, 0)
+		if ok {
+			a.mu.Lock()
+			if c := findSubLocked(childBlock, label); c != nil && c.Expanded {
+				c.Lines = lines
+				childBlock.subSeq++
+			}
+			a.mu.Unlock()
+		}
+	}
 	a.poke()
 }
 
@@ -6404,6 +6442,19 @@ func (a *App) hudSegment(name string) (text, token string) {
 		// while there is something to open — a chip that reads "0" teaches
 		// nobody anything.
 		n := 0
+		a.mu.Lock()
+		for i := len(a.blocks) - 1; i >= 0; i-- {
+			bb := a.blocks[i]
+			if bb.Kind != KindTool || bb.ToolName != taskToolName {
+				continue
+			}
+			for _, c := range bb.Sub {
+				if c.Status == "running" {
+					n++
+				}
+			}
+		}
+		a.mu.Unlock()
 		if n <= 0 {
 			return "subagent · Alt+B", theme.StatusLineSep
 		}

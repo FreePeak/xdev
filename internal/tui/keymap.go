@@ -176,7 +176,6 @@ func DefaultKeyMap() *KeyMap {
 			// and it is a different action from the toggle — toggling hides
 			// the rows, focusing puts the keyboard on them. A chord that
 			// does both would have to ask which state it is in.
-			"A-f": "app.agents.focus",
 			"C-r": "history-prev",
 			// omp's app.clipboard.pasteImage. This is NOT the ordinary paste —
 			// the terminal owns that and bracketed paste delivers it (see
