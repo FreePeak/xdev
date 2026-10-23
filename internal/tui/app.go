@@ -1466,28 +1466,53 @@ func (a *App) subLines(b *Block, w, base int, hits *[]subHit) []line {
 		return ln
 	}
 	for _, c := range rows {
-		phrase := c.Tool
-		if detail := toolDetail(c.Args); detail != "" {
-			if phrase == "" {
-				phrase = detail
-			} else {
-				phrase += " · " + detail
+		// Slice A: one connected Claude-Code-shaped line per child.
+		state := "Running..."
+		switch c.Status {
+		case "ok":
+			state = "Done"
+		case "error":
+			state = "Failed"
+		case "canceled", "cancelled", "aborted":
+			state = "Canceled"
+		}
+		running := c.Status == "running"
+		// numbers: hub child-stats (Tools/Tokens/Dur) authoritative; fall back
+		// to Calls + live elapsed for untracked children.
+		tools := c.Tools
+		if tools == 0 && c.Tokens == 0 {
+			tools = c.Calls
+		}
+		var dur time.Duration
+		if c.Status == "running" {
+			if !c.Ts.IsZero() {
+				dur = time.Since(c.Ts)
 			}
+		} else {
+			dur = c.Dur
 		}
-		if phrase == "" {
-			phrase = "starting"
+		// Build stats list: "N tool use(s)" always; tokens only if present.
+		stats := []string{}
+		if tools == 1 {
+			stats = append(stats, "1 tool use")
+		} else {
+			stats = append(stats, fmt.Sprintf("%d tool uses", tools))
 		}
-		row := c.Label + " · " + phrase
-		// No per-child elapsed while the call is in flight: the call row
-		// right above already counts the wall time, and two clocks on one
-		// row is noise. The settled summary carries the child's own time.
-		if budget := subRow(w); width(row) > budget {
-			row = truncateCells(row, budget, "…")
+		if c.Tokens > 0 {
+			stats = append(stats, HumanTokens(c.Tokens)+" tokens")
 		}
-		// base + len(out): the row's offset within the WHOLE block, not within
-		// the child slice.
+		stats = append(stats, humanDur(dur))
+		lineText := c.Label + " · " + state
+		if state != "Running..." {
+			lineText += " (" + strings.Join(stats, " · ") + ")"
+		} else {
+			lineText += " (" + strings.Join(stats, " · ") + ")"
+		}
+		if budget := subRow(w); width(lineText) > budget {
+			lineText = truncateCells(lineText, budget, "…")
+		}
 		at := base + len(out)
-		emit(row, c.Status == "running")
+		emit(lineText, running)
 		if hits != nil && c.TranscriptID != "" {
 			*hits = append(*hits, subHit{offset: at, label: c.Label, id: c.TranscriptID})
 		}
