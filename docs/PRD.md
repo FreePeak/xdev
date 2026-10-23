@@ -4655,3 +4655,9 @@ Every step that had to CHANGE something ended with an untouched tree, and every 
 **Tests.** `internal/agent/run_budget_wording_test.go` — `TestTheRunBudgetWrapUpStopsExploringNotActing` (the wrap-up ends the search, tells a run that owes a change to make it, and still asks for the report; and the old wording — "do not call any more tools" — is gone, because that phrase is what broke it).
 *Last updated: 2026-10-22 (fix/run-budget-exploring-not-acting — the budget stops exploring, not acting: on a ladder of eight asks, every step that had to change something ended with an untouched tree because the wrap-up forbade tool calls, and every read step was lean)*
 
+
+## Subagent session UI revamp (feat/subagent-ui)
+
+Single inline surface in transcript; deleted agentspanel strip; tests ...
+
+*Last updated: 2026-10-24 (feat/subagent-ui — inline expansion)*

@@ -560,10 +560,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	// cannot draw falls back to the code band, so turning it off changes how a
 	// message looks and never what it says.
 	app.SetRenderMermaid(lastSettings().RenderMermaidOn())
-	// The live subagent strip (settings subagentPanel, default on). Display
-	// only, the same shape showThinking/renderMermaid have: it changes what
-	// the user sees of a running child, never what the model receives.
-	app.SetAgentPanelEnabled(lastSettings().SubagentPanelOn())
 	// HUD segments (settings statusLine.segments): unknown names are
 	// skipped with a warning, unset keeps the shipped layout.
 	app.SetStatusSegments(lastSettings().StatusLineSegments())
@@ -971,13 +967,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		if tt, ok := reg.Get(agent.TaskToolName); ok {
 			if taskTool, isTask := tt.(*agent.TaskTool); isTask {
 				taskTool.OnEvent = (&taskChildSink{app: app}).onEvent
-			}
-		}
-		if ht, ok := reg.Get(agent.HubToolName); ok {
-			if hb, ok := ht.(*agent.HubTool); ok && hb.Hub != nil {
-				app.SetAgentPanelOps(&tui.AgentPanelOps{
-					OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
-				})
 			}
 		}
 		// A resumed session that still carries its mechanical
@@ -1406,17 +1395,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 		}
 	}
 	if sessionHub != nil {
-		// The strip hangs off the hub the same way the roster does: its click
-		// path (OpenSubChild) needs st.ops.Transcript, which is exactly what
-		// this ops block provides. Wired here, while the hub is configured, so
-		// a session without a hub never paints an agent panel it cannot open.
-		app.SetAgentPanelOps(&tui.AgentPanelOps{
-			OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
-		})
-		// An unused but always-on default: the strip still paints even with no
-		// hub, because its child events do not need one — the fork is the
-		// transcript, not the roster.
-		_ = len("")
 		// The dock's roster must move when a child settles after the turn that
 		// started it is long over — the only other thing that would repaint it is
 		// polling the panel at frame rate, which is the exact cost #283/#284 closed.
@@ -1453,13 +1431,6 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Park:   sessionHub.Park,
 			Kill:   sessionHub.Cancel,
 			Revive: func(id string) bool { return sessionHub.Revive(id, "") == nil },
-		})
-		// The live subagent strip (agentspanel.go) hangs off the hub only for
-		// its click path: a row opens the child's own transcript through the
-		// SAME surface /hub's Enter uses, so there is one Esc contract for "I
-		// am looking at a child" and no second renderer for the same rows.
-		app.SetAgentPanelOps(&tui.AgentPanelOps{
-			OpenChild: func(id, label string) bool { return app.OpenSubChild(id, label) },
 		})
 		// F1: assert single hub identity — the task tool and the session hub
 		// must share one *agent.Hub, otherwise Transcript(id) resolves to
@@ -3323,7 +3294,6 @@ func (s *taskChildSink) onEvent(ev agent.SubagentEvent) {
 	// open nothing.
 	if ev.TranscriptID != "" {
 		s.app.SetTaskChildTranscript(callID, ev.Label, ev.TranscriptID)
-		s.app.AgentPanelSetTranscript(ev.Label, ev.TranscriptID)
 	}
 }
 
