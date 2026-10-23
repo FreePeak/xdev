@@ -63,7 +63,16 @@ type hubRosterUI struct {
 	// title would read "fg-7".
 	viewName string
 	viewTop  int
-	msg      string // transient feedback line (kill/revive results)
+	// viewMax is the last scroll offset the painter had room for, published
+	// each frame so G can jump to the newest row without the key handler
+	// having to know the panel's geometry.
+	viewMax int
+	// full is the viewer's fullscreen flag (the `f` chord). The roster keeps
+	// its small anchored panel; the transcript, which is the thing you
+	// actually read, takes the whole pane above the composer and wraps its
+	// rows instead of clipping them to one line.
+	full bool
+	msg  string // transient feedback line (kill/revive results)
 	// hitY0 and hitIdx are the row map the painter publishes each frame — omp's
 	// lists do the same inside render() — so a click lands on exactly the agent
 	// row the user saw: hitIdx[i] is the index into rows of the painted row at
@@ -306,6 +315,35 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 			} else {
 				ui.msg = "park: " + id + " is still running"
 			}
+		case 'f':
+			// Fullscreen is the transcript's own display policy, not the
+			// roster's: a full-width list of names says nothing more than a
+			// short one, while a transcript gains every column it gets.
+			if ui.viewID == "" {
+				break
+			}
+			handled = true
+			ui.full = !ui.full
+			// A snapshot taken at open goes stale the moment the child
+			// writes again, and fullscreen is where you go to watch it —
+			// so the toggle re-reads instead of magnifying what it had.
+			reloadView(ui, ops)
+			refresh = false
+			refresh = false
+		case 'g':
+			if ui.viewID == "" {
+				break
+			}
+			handled = true
+			ui.viewTop = 0
+			refresh = false
+		case 'G':
+			if ui.viewID == "" {
+				break
+			}
+			handled = true
+			ui.viewTop = ui.viewMax
+			refresh = false
 		}
 	}
 	// Statuses are live: refresh the snapshot on every handled key that
@@ -322,8 +360,22 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 	return handled
 }
 
+// reloadView re-reads the open child's transcript from the hub. A nil
+// Transcript, a refusal, or an empty reply leaves the rows alone: an overlay
+// that blanked itself because the child had not written yet would be worse
+// than a stale one.
+func reloadView(ui *hubRosterUI, ops *HubOps) {
+	if ui.viewID == "" || ops == nil || ops.Transcript == nil {
+		return
+	}
+	if lines, _, ok := ops.Transcript(ui.viewID, 0); ok && len(lines) > 0 {
+		ui.view = lines
+	}
+}
+
 // rosterActivate is Enter's action on one agent row: open its transcript, or
 // close it when it is already the open view. The keyboard and the mouse share it
+// so a click cannot drift from the chord. Caller holds hubRegMu.
 // so a click cannot drift from the chord. Caller holds hubRegMu.
 func rosterActivate(st *hubRosterState, ui *hubRosterUI, ops *HubOps, row int) {
 	if row < 0 || row >= len(ui.rows) {
@@ -463,23 +515,63 @@ func (a *App) drawHubRoster(yComposerTop int) {
 
 	if ui.viewID != "" {
 		lines := ui.view
+		// Fullscreen (the `f` chord) takes the whole pane above the composer
+		// and wraps the rows; the small panel caps at hubViewRows and clips.
+		rows := hubViewRows
+		panelW := w - 2
+		if ui.full {
+			panelW = w - 4
+			rows = max(4, yComposerTop-4)
+		}
 		start := min(ui.viewTop, max(0, len(lines)-1))
-		visible := lines[start:min(len(lines), start+hubViewRows)]
+		visible := lines[start:min(len(lines), start+rows)]
 		h := len(visible) + 2
+		if h > yComposerTop-3 {
+			h = yComposerTop - 3
+			if h < 3 {
+				h = 3
+			}
+		}
 		y := yComposerTop - h - 2
-		panelW := min(w-2, hubPanelWidth(w, visible)+3)
+		if y < 1 {
+			y = 1
+		}
+		inner := panelW - 6
+		if inner < 20 {
+			inner = 20
+		}
 		fillPanelRows(s, y+1, y+h, 2, w-2, rowSt)
-		hubRosterBox(s, y, h, hubPanelWidth(w, visible), a.th.Box(), brdSt)
+		hubRosterBox(s, y, h, panelW-2, a.th.Box(), brdSt)
 		drawText(s, 3, y+2, rosterSnippet("status · outcome · model · level · activity · elapsed · tokens · cost · requests · tools · parent", printW(panelW, 3)), dimSt)
 		drawText(s, 3, y+1, rosterSnippet("transcript · "+ui.viewTitle()+ui.viewID, printW(panelW, 3)), dimSt)
-		for i, ln := range visible {
-			drawText(s, 3, y+2+i, rosterLine(ln.Role, ln.Text, panelW), fgSt)
+		row := y + 2
+		for _, ln := range visible {
+			if row >= y+h {
+				break
+			}
+			if ui.full {
+				for _, wl := range wrap(ln.Role+": "+ln.Text, inner) {
+					if row >= y+h {
+						break
+					}
+					drawText(s, 3, row, rosterSnippet(wl, printW(panelW, 3)), fgSt)
+					row++
+				}
+			} else {
+				drawText(s, 3, row, rosterLine(ln.Role, ln.Text, panelW), fgSt)
+				row++
+			}
 		}
-		foot := "Esc back · ↑↓ scroll"
+		foot := "Esc back · ↑↓ scroll · f fullscreen · g/G top/bottom"
 		if ui.msg != "" {
 			foot = ui.msg
 		}
 		drawText(s, 3, y+h, rosterSnippet(foot, printW(panelW, 3)), dimSt)
+		// Publish the last scroll offset the panel had room for, so G can
+		// jump to the newest row without re-deriving the geometry here.
+		if ui.viewTop < len(lines) {
+			ui.viewMax = max(0, len(lines)-rows)
+		}
 		return
 	}
 
