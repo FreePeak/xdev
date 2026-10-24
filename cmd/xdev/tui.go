@@ -1464,6 +1464,10 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 	ops := tui.DockOps{
 		Plan:  planMode.View,
 		Tasks: planMode.Todo,
+		// The same phases the TASKS rows render, typed: the strip above the
+		// composer picks which phase to expand, and reading the rows back apart
+		// would be a second copy of state the tool already holds.
+		Todo: planMode.TodoPhases,
 		// The panel's title slot. It reads through the `store` variable rather
 		// than capturing one store: /new, /resume and /fork all swap it, and a
 		// panel pinned to the session the process started with would show the

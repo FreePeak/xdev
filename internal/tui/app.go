@@ -5319,6 +5319,10 @@ func (a *App) paint() {
 		// composer: both are chrome over the transcript's tail, and the strip
 		// is the newer, transient one — a running child outranks a pending
 		// prompt for the rows nearest the eye.
+		// The task strip sits above the queue, closest to the composer: it is the
+		// chrome row that answers "what is left to do", and a welcome screen with a
+		// resumed plan still has one.
+		a.drawTodoPanel(a.queueTop(composerTop))
 		a.drawQueue(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
@@ -5583,7 +5587,11 @@ func (a *App) paint() {
 	// of the box. It is chrome, not content, and publishes its own hit table.
 	// The mid-turn queue is the only chrome between the transcript and the
 	// composer now: the subagent strip is gone, and each child paints as a
-	// summary line under its own call row.
+	// summary line under its own call row. The task strip (todopanel.go) sits
+	// directly above it — the plan is what a reader consults between turns, the
+	// queue what they are about to send, so the draft keeps the row nearest the
+	// composer.
+	a.drawTodoPanel(a.queueTop(composerTop))
 	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)

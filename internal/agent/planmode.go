@@ -153,6 +153,7 @@ func (pm *PlanMode) View() (pending string, active bool) {
 // tool.TodoTool satisfies it; a host with no todo tool leaves it unset.
 type TodoLister interface {
 	View() string
+	Snapshot() []tool.TodoPhase
 }
 
 // SetTodo registers the session's task list for the plan surfaces. The dock
@@ -164,6 +165,23 @@ func (pm *PlanMode) SetTodo(t TodoLister) {
 	pm.mu.Lock()
 	pm.todo = t
 	pm.mu.Unlock()
+}
+
+// TodoPhases returns the task list as phases — the strip above the composer
+// (internal/tui/todopanel.go) decides which phase to expand, and it must read the
+// state the tool holds rather than parse the rendered rows back apart. nil with
+// no list or no todo tool.
+func (pm *PlanMode) TodoPhases() []tool.TodoPhase {
+	if pm == nil {
+		return nil
+	}
+	pm.mu.RLock()
+	t := pm.todo
+	pm.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	return t.Snapshot()
 }
 
 // Todo returns the task list's rendered view ("" with no list or no tasks).
