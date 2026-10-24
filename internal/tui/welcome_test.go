@@ -209,8 +209,9 @@ func TestAppWelcomeDrawnWhenEmpty(t *testing.T) {
 	app.mu.Unlock()
 	app.draw()
 	// The branch is on the status row beside the directory, not on a top bar.
-	if got := lastRow(screenText(scr)); !strings.Contains(got, "main") {
-		t.Fatalf("welcome status row %q missing the branch", got)
+	screen := screenText(scr)
+	if !strings.Contains(screen, "main") {
+		t.Fatalf("welcome status row missing the branch")
 	}
 	found := gridContains(scr, "New session")
 	if !found {

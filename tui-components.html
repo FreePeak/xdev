@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenCode TUI Components + Session Lifecycle</title>
+<style>
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 1200px; margin: 40px auto; padding: 0 20px; color:#222; }
+h1 { border-bottom:2px solid #333; padding-bottom:8px; }
+h2 { margin-top:32px; color:#1a5; }
+h3 { margin-top:20px; color:#333; }
+.category { margin-bottom:24px; }
+.file { margin:6px 0; }
+.file b { color:#333; }
+.comps { color:#555; font-size:13px; }
+.mermaid { margin:20px 0; }
+.stats { background:#f5f5f5; padding:12px; border-radius:6px; }
+.card { background:#fafafa; border:1px solid #ddd; border-radius:8px; padding:16px; margin:16px 0; }
+ul { line-height:1.6; }
+table { border-collapse:collapse; width:100%; margin:12px 0; }
+th,td { border:1px solid #ddd; padding:8px; text-align:left; font-size:13px; }
+th { background:#f0f0f0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<h1>OpenCode TUI Components + Session Design &amp; Lifecycle</h1>
+<p>Part 1: TUI components extracted via REA over <code>packages/tui/src</code>. Part 2: session design &amp; lifecycle comparison across Claude Code, OpenCode, and oh-my-pi (omp).</p>
+<div class="stats">
+<b>TUI stats:</b> 281 parsed files · 819 module exports · 203 component-like exports · 142 files with components
+</div>
+
+<h2>Component Architecture</h2>
+<div class="mermaid">
+graph TD
+  TUI[OpenCode TUI] --> COMP[component/]
+  TUI --> CONFIG[config/]
+  TUI --> CTX[context/]
+  TUI --> FP[feature-plugins/]
+  TUI --> MINI[mini/]
+  TUI --> PROMPT[prompt/]
+  TUI --> ROUTES[routes/]
+  TUI --> UI[ui/]
+  COMP --> DIALOGS[Dialogs]
+  COMP --> PRIM[Primitives]
+  CTX --> PROV[Providers]
+  ROUTES --> SESSION[Session Views]
+</div>
+
+<h2>TUI Components by Directory</h2>
+<div class="category"><h2>component/ (49 files, 53 components)</h2><div class="file"><b>component/command-palette.tsx</b>: <span class="comps">CommandPaletteDialog</span></div><div class="file"><b>component/devtools-bar.tsx</b>: <span class="comps">DevToolsBar</span></div><div class="file"><b>component/dialog-agent.tsx</b>: <span class="comps">DialogAgent</span></div><div class="file"><b>component/dialog-config.tsx</b>: <span class="comps">DialogConfig</span></div><div class="file"><b>component/dialog-debug.tsx</b>: <span class="comps">DialogDebug</span></div><div class="file"><b>component/dialog-error-details.tsx</b>: <span class="comps">DialogErrorDetails</span></div><div class="file"><b>component/dialog-experiments.tsx</b>: <span class="comps">DialogExperiments</span></div><div class="file"><b>component/dialog-image-preview.tsx</b>: <span class="comps">DialogImagePreview</span></div><div class="file"><b>component/dialog-integration.tsx</b>: <span class="comps">DialogIntegration</span></div><div class="file"><b>component/dialog-mcp.tsx</b>: <span class="comps">DialogMcp</span></div><div class="file"><b>component/dialog-model.tsx</b>: <span class="comps">DialogModel</span></div><div class="file"><b>component/dialog-open.tsx</b>: <span class="comps">DialogOpen, DialogOpenKey</span></div><div class="file"><b>component/dialog-pair.tsx</b>: <span class="comps">DialogPair</span></div><div class="file"><b>component/dialog-session-list.tsx</b>: <span class="comps">DialogSessionList</span></div><div class="file"><b>component/dialog-session-rename.tsx</b>: <span class="comps">DialogSessionRename</span></div><div class="file"><b>component/dialog-shell-output.tsx</b>: <span class="comps">DialogShellOutput</span></div><div class="file"><b>component/dialog-skill.tsx</b>: <span class="comps">DialogSkill</span></div><div class="file"><b>component/dialog-stash.tsx</b>: <span class="comps">DialogStash</span></div><div class="file"><b>component/dialog-status.tsx</b>: <span class="comps">DialogStatus</span></div><div class="file"><b>component/dialog-theme-list.tsx</b>: <span class="comps">DialogThemeList</span></div><div class="file"><b>component/dialog-update.tsx</b>: <span class="comps">DialogUpdate</span></div><div class="file"><b>component/dialog-variant.tsx</b>: <span class="comps">DialogVariant</span></div><div class="file"><b>component/dialog-workspace-file-changes.tsx</b>: <span class="comps">DialogWorkspaceFileChanges</span></div><div class="file"><b>component/dialog-workspaces.tsx</b>: <span class="comps">DialogWorkspaces</span></div><div class="file"><b>component/dialog-worktree-name.tsx</b>: <span class="comps">DialogWorktreeName</span></div><div class="file"><b>component/error-component.tsx</b>: <span class="comps">ErrorComponent</span></div><div class="file"><b>component/fade-in-text.tsx</b>: <span class="comps">FadeInText</span></div><div class="file"><b>component/logo.tsx</b>: <span class="comps">Logo</span></div><div class="file"><b>component/masked-text.ts</b>: <span class="comps">MaskedTextRenderable</span></div><div class="file"><b>component/migration-overlay.tsx</b>: <span class="comps">MigrationOverlay</span></div><div class="file"><b>component/one-cell-spinner.tsx</b>: <span class="comps">OneCellSpinner</span></div><div class="file"><b>component/panel-host.tsx</b>: <span class="comps">PanelHost</span></div><div class="file"><b>component/patch-diff.tsx</b>: <span class="comps">PatchDiff</span></div><div class="file"><b>component/plugin-route-missing.tsx</b>: <span class="comps">PluginRouteMissing</span></div><div class="file"><b>component/prompt/autocomplete.tsx</b>: <span class="comps">Autocomplete</span></div><div class="file"><b>component/prompt/index.tsx</b>: <span class="comps">Prompt, PromptInterruptStatus</span></div><div class="file"><b>component/prompt/metadata.tsx</b>: <span class="comps">PromptMetadataRow</span></div><div class="file"><b>component/reconnecting.tsx</b>: <span class="comps">Reconnecting</span></div><div class="file"><b>component/retry-provider.tsx</b>: <span class="comps">RetryProvider, RetryProviderRenderable</span></div><div class="file"><b>component/session-frame.tsx</b>: <span class="comps">SessionFrame</span></div><div class="file"><b>component/session-tabs-rail.tsx</b>: <span class="comps">SessionTabHalfRow, SessionTabsRailControls</span></div><div class="file"><b>component/session-tabs.tsx</b>: <span class="comps">SessionTabs</span></div><div class="file"><b>component/shimmer-text.tsx</b>: <span class="comps">ShimmerText</span></div><div class="file"><b>component/spinner.tsx</b>: <span class="comps">Spinner</span></div><div class="file"><b>component/startup-loading.tsx</b>: <span class="comps">StartupLoading</span></div><div class="file"><b>component/tab-pulse.tsx</b>: <span class="comps">TabPulse</span></div><div class="file"><b>component/terminal-pane.tsx</b>: <span class="comps">TerminalPane</span></div><div class="file"><b>component/theme-error-toast.tsx</b>: <span class="comps">ThemeErrorToast</span></div><div class="file"><b>component/title-shimmer.tsx</b>: <span class="comps">TitleShimmerRenderable</span></div></div><div class="category"><h2>config/ (4 files, 39 components)</h2><div class="file"><b>config/index.tsx</b>: <span class="comps">AttentionSoundName, Config, ConfigProvider, Cursor, Info, MiniWorkSpinner, Plugin</span></div><div class="file"><b>config/keybind.ts</b>: <span class="comps">BindingValueSchema, Definitions, Descriptions, KeybindOverrides, Keybinds, LeaderDefault, TuiKeybind</span></div><div class="file"><b>config/v1/index.tsx</b>: <span class="comps">Attention, AttentionSoundName, AttentionSounds, Cursor, DiffStyle, Info, LeaderTimeout, LeaderTimeoutDefault, PluginOptions, PluginSpec, Prompt, ResolveOptions, ScrollAcceleration, ScrollSpeed, TuiConfig, TuiConfigProvider, TuiConfigV1</span></div><div class="file"><b>config/v1/keybind.ts</b>: <span class="comps">BindingValueSchema, CommandMap, Definitions, Descriptions, KeybindOverrides, Keybinds, LeaderDefault, TuiKeybind</span></div></div><div class="category"><h2>context/ (23 files, 28 components)</h2><div class="file"><b>context/args.tsx</b>: <span class="comps">ArgsProvider</span></div><div class="file"><b>context/attention.tsx</b>: <span class="comps">AttentionProvider</span></div><div class="file"><b>context/client.tsx</b>: <span class="comps">ClientProvider</span></div><div class="file"><b>context/clipboard.tsx</b>: <span class="comps">ClipboardProvider</span></div><div class="file"><b>context/data.tsx</b>: <span class="comps">DataProvider</span></div><div class="file"><b>context/editor.ts</b>: <span class="comps">EditorContextProvider</span></div><div class="file"><b>context/epilogue.tsx</b>: <span class="comps">EpilogueProvider</span></div><div class="file"><b>context/exit.tsx</b>: <span class="comps">ExitProvider</span></div><div class="file"><b>context/interactivity.tsx</b>: <span class="comps">InteractivityProvider</span></div><div class="file"><b>context/keymap.tsx</b>: <span class="comps">Keymap</span></div><div class="file"><b>context/local.tsx</b>: <span class="comps">LocalProvider</span></div><div class="file"><b>context/location.tsx</b>: <span class="comps">LocationProvider</span></div><div class="file"><b>context/log.tsx</b>: <span class="comps">LogProvider</span></div><div class="file"><b>context/panel.tsx</b>: <span class="comps">PanelProvider</span></div><div class="file"><b>context/permission.tsx</b>: <span class="comps">PermissionProvider</span></div><div class="file"><b>context/prompt.tsx</b>: <span class="comps">PromptRefProvider</span></div><div class="file"><b>context/route.tsx</b>: <span class="comps">RouteProvider</span></div><div class="file"><b>context/runtime.tsx</b>: <span class="comps">TuiAppProvider, TuiLifecycleProvider, TuiPathsProvider, TuiStartupProvider, TuiTerminalEnvironmentProvider</span></div><div class="file"><b>context/session-tabs.tsx</b>: <span class="comps">SessionTabsProvider</span></div><div class="file"><b>context/session-terminals.tsx</b>: <span class="comps">SessionTerminalsProvider</span></div><div class="file"><b>context/storage.tsx</b>: <span class="comps">StorageProvider</span></div><div class="file"><b>context/theme.tsx</b>: <span class="comps">ThemeContextProvider, ThemeProvider</span></div><div class="file"><b>context/update-notification.tsx</b>: <span class="comps">UpdateNotificationProvider</span></div></div><div class="category"><h2>devtools/ (1 files, 1 components)</h2><div class="file"><b>devtools/index.ts</b>: <span class="comps">DevTools</span></div></div><div class="category"><h2>editor-zed-sqlite.bun.ts/ (1 files, 1 components)</h2><div class="file"><b>editor-zed-sqlite.bun.ts</b>: <span class="comps">Database</span></div></div><div class="category"><h2>editor-zed-sqlite.node.ts/ (1 files, 1 components)</h2><div class="file"><b>editor-zed-sqlite.node.ts</b>: <span class="comps">Database</span></div></div><div class="category"><h2>feature-plugins/ (12 files, 12 components)</h2><div class="file"><b>feature-plugins/prompt/btw.tsx</b>: <span class="comps">Answer</span></div><div class="file"><b>feature-plugins/prompt/footer.tsx</b>: <span class="comps">PromptFooter</span></div><div class="file"><b>feature-plugins/sidebar/context.tsx</b>: <span class="comps">SidebarContext</span></div><div class="file"><b>feature-plugins/sidebar/footer.tsx</b>: <span class="comps">SidebarOnboarding</span></div><div class="file"><b>feature-plugins/sidebar/mcp.tsx</b>: <span class="comps">SidebarMcp</span></div><div class="file"><b>feature-plugins/system/diff-viewer-file-menu.tsx</b>: <span class="comps">DiffFileMenu</span></div><div class="file"><b>feature-plugins/system/diff-viewer-file-tree.tsx</b>: <span class="comps">DiffViewerFileTree</span></div><div class="file"><b>feature-plugins/system/diff-viewer-image.tsx</b>: <span class="comps">DiffViewerImage</span></div><div class="file"><b>feature-plugins/system/diff-viewer.tsx</b>: <span class="comps">DiffViewerContent</span></div><div class="file"><b>feature-plugins/system/plugins.tsx</b>: <span class="comps">PluginsDialog</span></div><div class="file"><b>feature-plugins/system/stats.tsx</b>: <span class="comps">StatsPoster</span></div><div class="file"><b>feature-plugins/system/storybook/footer.tsx</b>: <span class="comps">StoryFooter</span></div></div><div class="category"><h2>index.tsx/ (1 files, 1 components)</h2><div class="file"><b>index.tsx</b>: <span class="comps">LogProvider</span></div></div><div class="category"><h2>mini/ (10 files, 17 components)</h2><div class="file"><b>mini/footer.command.tsx</b>: <span class="comps">RunAgentSelectBody, RunCommandMenuBody, RunModelSelectBody, RunQueuedPromptSelectBody, RunSettingsBody, RunSubagentSelectBody, RunVariantSelectBody</span></div><div class="file"><b>mini/footer.form.tsx</b>: <span class="comps">RunFormBody</span></div><div class="file"><b>mini/footer.menu.tsx</b>: <span class="comps">RunFooterMenu</span></div><div class="file"><b>mini/footer.permission.tsx</b>: <span class="comps">RejectField, RunPermissionBody</span></div><div class="file"><b>mini/footer.prompt.tsx</b>: <span class="comps">RunPromptBody</span></div><div class="file"><b>mini/footer.subagent.tsx</b>: <span class="comps">RunFooterSubagentBody</span></div><div class="file"><b>mini/footer.ts</b>: <span class="comps">RunFooter</span></div><div class="file"><b>mini/footer.view.tsx</b>: <span class="comps">RunFooterView</span></div><div class="file"><b>mini/scrollback.surface.ts</b>: <span class="comps">RunScrollbackStream</span></div><div class="file"><b>mini/scrollback.writer.tsx</b>: <span class="comps">RunEntryContent</span></div></div><div class="category"><h2>plugin/ (2 files, 3 components)</h2><div class="file"><b>plugin/context.tsx</b>: <span class="comps">PluginProvider</span></div><div class="file"><b>plugin/render.tsx</b>: <span class="comps">PluginRoute, Slot</span></div></div><div class="category"><h2>prompt/ (3 files, 3 components)</h2><div class="file"><b>prompt/frecency.tsx</b>: <span class="comps">FrecencyProvider</span></div><div class="file"><b>prompt/history.tsx</b>: <span class="comps">PromptHistoryProvider</span></div><div class="file"><b>prompt/stash.tsx</b>: <span class="comps">PromptStashProvider</span></div></div><div class="category"><h2>routes/ (18 files, 24 components)</h2><div class="file"><b>routes/home.tsx</b>: <span class="comps">Home</span></div><div class="file"><b>routes/session/anchor-view.tsx</b>: <span class="comps">EntryAnchor, GroupAnchor</span></div><div class="file"><b>routes/session/composer/context.ts</b>: <span class="comps">ComposerContext</span></div><div class="file"><b>routes/session/composer/index.tsx</b>: <span class="comps">Composer</span></div><div class="file"><b>routes/session/composer/shell-tab.tsx</b>: <span class="comps">ShellTab</span></div><div class="file"><b>routes/session/composer/subagents-tab.tsx</b>: <span class="comps">SubagentsTab</span></div><div class="file"><b>routes/session/composer/terminals-tab.tsx</b>: <span class="comps">TerminalsTab</span></div><div class="file"><b>routes/session/dialog-execute.tsx</b>: <span class="comps">DialogExecute</span></div><div class="file"><b>routes/session/dialog-fork.tsx</b>: <span class="comps">DialogFork</span></div><div class="file"><b>routes/session/dialog-message.tsx</b>: <span class="comps">DialogMessage</span></div><div class="file"><b>routes/session/dialog-timeline.tsx</b>: <span class="comps">DialogTimeline</span></div><div class="file"><b>routes/session/form.tsx</b>: <span class="comps">FormPrompt</span></div><div class="file"><b>routes/session/group-view.tsx</b>: <span class="comps">SessionGroupView</span></div><div class="file"><b>routes/session/index.tsx</b>: <span class="comps">InlineToolRow, Session</span></div><div class="file"><b>routes/session/location-missing.tsx</b>: <span class="comps">SessionLocationMissing, SessionLocationUnavailable</span></div><div class="file"><b>routes/session/message-parts.tsx</b>: <span class="comps">InlineToolRow, ReasoningPart, TextPart</span></div><div class="file"><b>routes/session/permission.tsx</b>: <span class="comps">PermissionPrompt, SessionQuestion</span></div><div class="file"><b>routes/session/sidebar.tsx</b>: <span class="comps">Sidebar</span></div></div><div class="category"><h2>simulation/ (1 files, 1 components)</h2><div class="file"><b>simulation/semantics.ts</b>: <span class="comps">SimulationSemantics</span></div></div><div class="category"><h2>ui/ (13 files, 16 components)</h2><div class="file"><b>ui/border.ts</b>: <span class="comps">EmptyBorder, SplitBorder</span></div><div class="file"><b>ui/dialog-alert.tsx</b>: <span class="comps">DialogAlert</span></div><div class="file"><b>ui/dialog-confirm.tsx</b>: <span class="comps">DialogConfirm</span></div><div class="file"><b>ui/dialog-export-options.tsx</b>: <span class="comps">DialogExportOptions</span></div><div class="file"><b>ui/dialog-export-result.tsx</b>: <span class="comps">DialogExportResult</span></div><div class="file"><b>ui/dialog-help.tsx</b>: <span class="comps">DialogHelp</span></div><div class="file"><b>ui/dialog-prompt.tsx</b>: <span class="comps">DialogPrompt</span></div><div class="file"><b>ui/dialog-select.tsx</b>: <span class="comps">DialogSelect</span></div><div class="file"><b>ui/dialog.tsx</b>: <span class="comps">Dialog, DialogProvider</span></div><div class="file"><b>ui/file-path.tsx</b>: <span class="comps">FilePath</span></div><div class="file"><b>ui/link.tsx</b>: <span class="comps">Link</span></div><div class="file"><b>ui/pane-resize-handle.tsx</b>: <span class="comps">PaneResizeHandle</span></div><div class="file"><b>ui/toast.tsx</b>: <span class="comps">Toast, ToastProvider</span></div></div><div class="category"><h2>util/ (3 files, 3 components)</h2><div class="file"><b>util/locale.ts</b>: <span class="comps">Locale</span></div><div class="file"><b>util/scroll.ts</b>: <span class="comps">CustomSpeedScroll</span></div><div class="file"><b>util/selection.ts</b>: <span class="comps">Selection</span></div></div>
+<h1 style="margin-top:60px;">Session Design &amp; Lifecycle Comparison</h1>
+
+<h2>Claude Code</h2>
+<div class="card">
+<p>Claude Code is an agentic coding assistant in the terminal. Sessions are stored locally as append-only JSONL transcripts under <code>~/.claude/projects/</code>, enabling rewind/resume/fork. Each new session starts with a fresh context window.</p>
+<h3>Lifecycle phases (hooks)</h3>
+<ul>
+<li><b>Setup</b> — one-time project init/maintenance in headless mode (<code>--init</code>/<code>--maintenance</code>).</li>
+<li><b>SessionStart</b> — fires on startup/resume/clear/compact/fork; can inject context; matchers: startup, resume, clear, compact, fork.</li>
+<li><b>InstructionsLoaded</b> — when CLAUDE.md/rules are read into context.</li>
+<li><b>ConfigChange / CwdChanged</b> — mid-session config or directory changes.</li>
+<li><b>PreCompact / PostCompact</b> — before/after context compaction (manual or auto); PostCompact carries compact_summary.</li>
+<li><b>SessionEnd</b> — on exit with reason (clear, resume, logout, prompt_input_exit, other).</li>
+<li>Tool lifecycle: PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, PermissionDenied.</li>
+<li>Subagent lifecycle: SubagentStart/SubagentStop; agent coordination: TeammateIdle, TaskCreated, TaskCompleted.</li>
+</ul>
+<h3>Session operations</h3>
+<ul>
+<li><b>Resume</b> (<code>--resume</code>/<code>--continue</code>): rebuilds conversation by replaying transcript; session-scoped permissions are NOT carried (safety-conservative).</li>
+<li><b>Fork</b>: new session from existing one (<code>--fork-session</code>), inherits grants in-process.</li>
+<li><b>Compaction</b>: read-time projection over full history (non-destructive); transcript stays append-only.</li>
+<li><b>Subagents</b>: subordinate workers within one session, own context window, possibly different model.</li>
+</ul>
+<div class="mermaid">
+stateDiagram-v2
+  [*] --> Startup: SessionStart(startup)
+  Startup --> Active: ready
+  Active --> Compact: PreCompact/PostCompact
+  Compact --> Active
+  Active --> Resume: SessionStart(resume)
+  Active --> Fork: SessionStart(fork)
+  Active --> Clear: SessionStart(clear)
+  Active --> End: SessionEnd
+  End --> [*]
+</div>
+</div>
+
+<h2>OpenCode</h2>
+<div class="card">
+<p>OpenCode (SST) uses a client-server architecture: an HTTP server holds state, TUI/IDE clients connect. Sessions, messages, files, providers, tools, agents exposed via API. Stored in SQLite (modernc). Messages are arrays of typed <code>Part</code> objects.</p>
+<h3>Session model</h3>
+<ul>
+<li><b>Session.fork()</b> — copies conversation history up to a specified message, creating a child session with its own ID, lineage via <code>parentID</code>. Original unaffected.</li>
+<li><b>Parent-child relationships</b> — subagent sessions spawned by primary agent, own context window, own tools/system prompt, possibly different model.</li>
+<li><b>Instruction state</b> — AGENTS.md/CLAUDE.md loaded per session; nested files loaded nearest-first; moving a session retains instruction state; revert clears &amp; reloads.</li>
+<li><b>Compaction</b> — <code>experimental.session.compacting</code> hook; <code>session.idle</code> hook.</li>
+<li><b>Events over SSE</b> — persisted message parts emit events on a shared bus exposed over HTTP/SSE; real-time updates to any client.</li>
+<li><b>Permission system</b> — workflow safeguard; server mode needs <code>OPENCODE_SERVER_PASSWORD</code>.</li>
+</ul>
+<h3>Two-tier agents</h3>
+<ul>
+<li>Primary agents + subagents (Task tool spawns subagent session).</li>
+<li>Plan mode disables edits; suggests implementation.</li>
+</ul>
+<div class="mermaid">
+stateDiagram-v2
+  [*] --> NewSession: create session
+  NewSession --> Active: prompt
+  Active --> Fork: Session.fork(parentID)
+  Active --> Compact: session.compacting
+  Compact --> Active
+  Active --> Idle: session.idle
+  Idle --> Active
+  Active --> End: close
+  End --> [*]
+</div>
+</div>
+
+<h2>oh-my-pi (omp)</h2>
+<div class="card">
+<p>omp is a TypeScript+Rust terminal coding agent (fork of Pi) with 40+ providers, subagent orchestration across worktrees, hash-anchored edits, LSP/DAP integration. Sessions stored on disk under <code>~/.omp/agent/sessions</code> (or <code>PI_CODING_AGENT_DIR</code>).</p>
+<h3>Session lifecycle events (hooks)</h3>
+<ul>
+<li><b>session_start</b> — initial session load.</li>
+<li><b>session_switch</b> — reason (new/resume/fork), previousSessionFile; after a session becomes active.</li>
+<li><b>session_branch</b> — after branching.</li>
+<li><b>session_before_switch</b> — cancelable (cancel:true stops switch).</li>
+<li><b>session_before_branch</b> — cancelable; skipConversationRestore option.</li>
+<li><b>session_before_compact</b> — cancel or provide custom CompactionResult; first cancellation wins.</li>
+<li><b>session.compacting</b> — customize prompt/context/preserveData for default compaction.</li>
+<li><b>session_compact</b> — post-compaction notification with compactionEntry.</li>
+<li><b>session_before_tree / session_tree</b> — tree navigation.</li>
+</ul>
+<h3>Session operations</h3>
+<ul>
+<li><b>/new</b> fresh session, <b>/resume</b> picker, <b>--continue/-c</b> last session, <b>--no-session</b> ephemeral.</li>
+<li><b>/tree</b> in-place branch nav, <b>/branch /fork /clone</b> copy/branch sessions.</li>
+<li><b>/compact</b> summarize old context; compaction persists read/modified files.</li>
+<li><b>Subagents</b> — fork-based: detached pi processes, fork main conversation (full context inherited), child session visible in /resume.</li>
+<li><b>Collab</b> — shared live sessions via relay; resume/fork across devices.</li>
+<li><b>Memory</b> — Hindsight-backed: autoRecall/autoRetain, retainMode full-session/last-turn, per-project-tagged scoping.</li>
+<li><b>Model fallback</b> — retries and moves down chain on failure; switches back when primary available; advisor role reviews completed turns.</li>
+</ul>
+<div class="mermaid">
+stateDiagram-v2
+  [*] --> Load: session_start
+  Load --> Active
+  Active --> Switch: session_switch (new/resume/fork)
+  Active --> Branch: session_branch
+  Active --> Compact: session_before_compact
+  Compact --> Active: session_compact
+  Active --> Tree: session_tree
+  Active --> End
+  End --> [*]
+</div>
+</div>
+
+<h2>Comparison Summary</h2>
+<table>
+<tr><th>Aspect</th><th>Claude Code</th><th>OpenCode</th><th>oh-my-pi (omp)</th></tr>
+<tr><td>Storage</td><td>Append-only JSONL transcripts (~/.claude/projects/)</td><td>SQLite (modernc) + typed Part arrays</td><td>On-disk sessions (~/.omp/agent/sessions)</td></tr>
+<tr><td>Architecture</td><td>Single process, terminal</td><td>Client-server HTTP, multi-client</td><td>Terminal, extensible via TS hooks</td></tr>
+<tr><td>Resume</td><td>--resume/--continue (replay transcript)</td><td>API + TUI, fork via parentID</td><td>--resume/--continue, /resume picker</td></tr>
+<tr><td>Fork/Branch</td><td>--fork-session (in-process keeps grants)</td><td>Session.fork() with parentID lineage</td><td>/fork /branch /clone, /tree nav</td></tr>
+<tr><td>Compaction</td><td>Read-time projection, PreCompact/PostCompact hooks</td><td>session.compacting hook, SSE events</td><td>session_before_compact / session.compacting / session_compact</td></tr>
+<tr><td>Subagents</td><td>Subordinate workers, own context window</td><td>Task tool spawns child session</td><td>Fork-based detached processes, inherited context</td></tr>
+<tr><td>Memory</td><td>CLAUDE.md + SessionStart injection</td><td>AGENTS.md, instruction state per session</td><td>Hindsight: autoRecall/Retain, per-project-tagged</td></tr>
+<tr><td>Extensibility</td><td>27 hook events, MCP, skills</td><td>MCP, LSP, plugins, commands</td><td>TS hooks on lifecycle, packages, skills</td></tr>
+</table>
+
+<script>mermaid.initialize({startOnLoad:true});</script>
+
+<h1 style="margin-top:60px;">TUI Screen Mockups (ASCII)</h1>
+<p>What the OpenCode TUI should look like across key screens.</p>
+
+<h2>1. Coding Session Screen</h2>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow-x:auto;font-size:12px;">
++------------------------------------------------------------------------------------------------------+
+|  [Tab1: main]  [Tab2: refactor]  [Tab3: review]          (session tabs, shown when 2+ tabs)          |
++------------------------------------------------------------------------------------------------------+
+|                                                                                                      |
+|  +--------------------------------------------------------------+  +-------------------------------+  |
+|  |                                                              |  | SIDEBAR                       |  |
+|  |  [User] Explain the auth flow in @packages/functions/...      |  |  Session: abc123              |  |
+|  |                                                              |  |  Model: sonnet-4              |  |
+|  |  [Assistant] Let me look at the auth handling...             |  |  Tokens: 12.4k / 200k         |  |
+|  |  > read_file packages/functions/src/api/index.ts              |  |  Cost: $0.034                 |  |
+|  |  > grep "auth" packages/functions/src/api/index.ts           |  +-------------------------------+  |
+|  |                                                              |  | Files Changed                 |  |
+|  |  The auth flow uses middleware `requireAuth`...               |  |   * settings.ts +12 -3        |  |
+|  |                                                              |  |     index.ts +2               |  |
+|  |  [User] Add rate limiting to /settings like /notes            |  +-------------------------------+  |
+|  |                                                              |  | Subagents (2)                 |  |
+|  |  [Assistant] Plan:                                           |  |   > explore-1  running        |  |
+|  |  1. Import rateLimiter ...                                   |  |     test-run   done           |  |
+|  |  2. Wrap /settings handler ...                               |  +-------------------------------+  |
+|  |  > edit_file packages/functions/src/settings.ts               |  | Tools Used                    |  |
+|  |                                                              |  |   read_file x4  edit x1       |  |
+|  |  Applied 1 change. Running tests...                          |  |   bash x2  grep x1            |  |
+|  |  > bash: bun test packages/functions                         |  +-------------------------------+  |
+|  |  PASS (42 tests)                                             |  | Context                       |  |
+|  |                                                              |  |   AGENTS.md loaded            |  |
+|  |                                                              |  |   3 nested instructions       |  |
+|  |                                                              |  +-------------------------------+  |
+|  +--------------------------------------------------------------+                                    |
+|                                                                                                      |
++------------------------------------------------------------------------------------------------------+
+|  > _ (prompt input, static at bottom)                                                                |
++------------------------------------------------------------------------------------------------------+
+|  STATUS: model=sonnet-4 | tokens=12.4k/200k | cost=$0.034 | 3 tools | 2 subagents | branch=main      |
++------------------------------------------------------------------------------------------------------+
+|  Sessions (main + subagents):                                                                        |
+|   * main          [active]   sonnet-4   12.4k tok   2m      |
+|     explore-1     running    sonnet-4   4.2k tok    2m      |
+|     test-run      done       haiku-4     1.8k tok    5m      |
+|     review-1      queued     opus-4     0 tok       -       |
++------------------------------------------------------------------------------------------------------+
+|  [Enter] send  [Ctrl+C] cancel  [/] commands  [Tab] complete  [F2] sidebar  [F3] settings            |
++------------------------------------------------------------------------------------------------------+
+</pre>
+
+<h2>2. Sidebar</h2>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow-x:auto;font-size:12px;">
++-----------------------------+
+| SIDEBAR                     |
++-----------------------------+
+| Session                     |
+|  id: abc123                 |
+|  model: sonnet-4            |
+|  tokens: 12.4k / 200k       |
+|  cost: $0.034               |
++-----------------------------+
+| Files Changed               |
+|  * settings.ts  +12 -3      |
+|    index.ts     +2          |
+|    auth.ts      (read)      |
++-----------------------------+
+| Subagents (2)               |
+|  > explore-auth  running    |
+|  > test-runner   done       |
++-----------------------------+
+| Tools Used                  |
+|  read_file x4               |
+|  edit_file x1               |
+|  bash x2                    |
+|  grep x1                    |
++-----------------------------+
+| Context                     |
+|  AGENTS.md loaded           |
+|  3 nested instructions      |
++-----------------------------+
+| [Tab] toggle  [q] close     |
++-----------------------------+
+</pre>
+
+<h2>3. Settings Screen</h2>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow-x:auto;font-size:12px;">
++---------------------------------------------------------------+
+|  Settings                                              [Esc]  |
++---------------------------------------------------------------+
+|  Theme:         dark (default) / light / system               |
+|  Model:         anthropic/claude-sonnet-4   [change]           |
+|  Provider:      anthropic                 [change]           |
+|  Keybinds:      default                   [edit]              |
+|  LSP:           auto-detect (3 servers)   [configure]         |
+|  MCP servers:   2 connected               [manage]            |
+|  Permissions:   ask on write              [change]            |
+|  Auto-compact:  on (80% threshold)        [toggle]            |
+|  Diff style:    unified                   [change]            |
+|  Sidebar:       visible                   [toggle]            |
++---------------------------------------------------------------+
+|  [Enter] select   [Tab] next   [Esc] back   [/] search         |
++---------------------------------------------------------------+
+</pre>
+
+<h2>4. Select Models Screen</h2>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow-x:auto;font-size:12px;">
++---------------------------------------------------------------+
+|  Select Model                                        [Esc]    |
++---------------------------------------------------------------+
+|  Search: _                                                    |
++---------------------------------------------------------------+
+|  Provider: anthropic                                          |
+|   > claude-sonnet-4          (default)   ctx: 200k  $3/$15    |
+|     claude-opus-4            ctx: 200k  $15/$75              |
+|     claude-haiku-4           ctx: 200k  $0.8/$4              |
+|  Provider: openai                                             |
+|     gpt-4.1                  ctx: 1M    $2/$8                |
+|     gpt-4o                   ctx: 128k  $2.5/$10             |
+|  Provider: google                                             |
+|     gemini-2.5-pro           ctx: 1M    $1.25/$10            |
++---------------------------------------------------------------+
+|  [Enter] select   [Tab] provider   [Esc] cancel  [/] search    |
++---------------------------------------------------------------+
+</pre>
+
+<h2>5. List Subagents Screen</h2>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow-x:auto;font-size:12px;">
++---------------------------------------------------------------+
+|  Subagents                                           [Esc]    |
++---------------------------------------------------------------+
+|  ID            STATUS     TASK                          MODEL  |
+|  > explore-1   running    explore auth flow              sonnet |
+|    test-run    done       run test suite                 haiku  |
+|    review-1    queued     review PR #42                  opus   |
+|    refactor-2  failed     refactor db layer              sonnet |
++---------------------------------------------------------------+
+|  Selected: explore-1                                          |
+|  Tokens: 4.2k  |  Started: 2m ago  |  Files: 3 read          |
++---------------------------------------------------------------+
+|  [Enter] inspect  [k] kill  [r] rerun  [Esc] back             |
++---------------------------------------------------------------+
+</pre>
+
+<h2>6. Select Subagents Screen</h2>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow-x:auto;font-size:12px;">
++---------------------------------------------------------------+
+|  Select Subagent to Spawn                            [Esc]    |
++---------------------------------------------------------------+
+|  Type: explore   [Tab] change type                             |
++---------------------------------------------------------------+
+|  Presets:                                                     |
+|   > explore        - read-only codebase exploration            |
+|     general        - full tools, general purpose               |
+|     plan           - planning, no edits                        |
+|     build          - implementation focus                      |
++---------------------------------------------------------------+
+|  Model: anthropic/claude-sonnet-4   [change]                   |
+|  Worktree: auto-create isolated worktree  [toggle]             |
+|  Prompt: _                                                    |
++---------------------------------------------------------------+
+|  [Enter] spawn   [Tab] next field   [Esc] cancel               |
++---------------------------------------------------------------+
+</pre>
+
+</body>
+</html>
