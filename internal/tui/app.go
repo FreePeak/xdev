@@ -2120,7 +2120,19 @@ func (a *App) tickAnimate() bool {
 		return false
 	}
 	a.animTick = 0
-	if a.st.Running {
+	// A tab that is still running (even in the background) animates its
+	// spinner too, so the strip does not freeze while a non-current session
+	// works — matching opencode's per-tab running indicator.
+	running := a.st.Running
+	if !running {
+		for _, t := range a.tabs {
+			if t.Running {
+				running = true
+				break
+			}
+		}
+	}
+	if running {
 		a.st.spinnerIdx = (a.st.spinnerIdx + 1) % len(a.th.SpinnerFrames())
 		return true
 	}

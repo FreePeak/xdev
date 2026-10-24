@@ -59,21 +59,35 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 	}
 	runningSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.AccentRunning)))
 	labelSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary)))
+	unreadSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextSecondary))).Bold(true)
 	currentSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.TextPrimary))).Bold(true)
 	closeSt := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
 
 	// The bands: every chip wears BgHighlight (the dimmed one-step-up surface
-	// the transcript's text bands use); the current one is BgHighlight mixed
-	// 20% toward white, a chip that stands out on the palette itself. A theme
-	// with a terminal-default BgHighlight (Slot ok=false) keeps the old
-	// fg-only painting: a solid band we invented is worse than no band there.
+	// the transcript's text bands use); only the CURRENT chip is BgHighlight
+	// mixed 20% toward white, so it stands out on the palette itself. A
+	// running (but not current) tab keeps the dim band — its ink, not its
+	// surface, says it is working, matching opencode's selection-driven lift.
+	// A theme with a terminal-default BgHighlight (Slot ok=false) keeps the
+	// old fg-only painting: a solid band we invented is worse than no band.
 	dimBg, ok := a.th.Slot(theme.BgHighlight)
 	if ok {
 		brightBg := blendTowardWhite(dimBg, 0.2)
 		labelSt = labelSt.Background(a.cellColor(dimBg))
+		unreadSt = unreadSt.Background(a.cellColor(dimBg))
 		closeSt = closeSt.Background(a.cellColor(dimBg))
-		runningSt = runningSt.Background(a.cellColor(brightBg))
+		runningSt = runningSt.Background(a.cellColor(dimBg))
 		currentSt = currentSt.Background(a.cellColor(brightBg))
+	}
+
+	// The strip row carries the theme's base surface outside the chips, so
+	// the row does not flash the terminal default between/around them (which
+	// read as a different colour from opencode's base-filled title bar).
+	if baseBg, ok := a.th.Slot(theme.BgBase); ok {
+		fill := tcell.StyleDefault.Background(a.cellColor(baseBg))
+		for cx := 0; cx < w; cx++ {
+			s.SetContent(cx, tabStripRow, ' ', nil, fill)
+		}
 	}
 
 	y := tabStripRow
@@ -96,12 +110,16 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 		case a.tabsNumbered:
 			badge = fmt.Sprintf("%d", i+1)
 		case t.Running:
+			badge = a.spinFrame()
+		case t.Unread:
 			badge = "✦"
 		}
 		st := labelSt
 		switch {
 		case t.Running:
 			st = runningSt
+		case t.Unread:
+			st = unreadSt
 		case t.Current:
 			st = currentSt
 		}
@@ -121,7 +139,7 @@ func (a *App) drawTabStrip(s tcell.Screen, w int) {
 		// The × sits on the SAME band as its chip: a close glyph left on the
 		// dim band inside a bright chip cut a notch out of the current tab.
 		xs := closeSt
-		if _, chipBg, _ := st.Decompose(); chipBg != tcell.ColorDefault && (t.Running || t.Current) {
+		if _, chipBg, _ := st.Decompose(); chipBg != tcell.ColorDefault && (t.Running || t.Unread || t.Current) {
 			xs = xs.Background(chipBg)
 		}
 		drawText(s, x+1+1+paintedWidth(label)+1, y, "×", xs)
