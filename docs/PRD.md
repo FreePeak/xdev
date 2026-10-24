@@ -132,6 +132,7 @@ Classes per docs/research/parity-*.md scout reports (CORE = required for parity,
 | Marketplace + plugin manager | marketplace.md | NICE | M13 |
 | MCP config extensions (imports from claude/codex/gemini/cursor, `!command` secrets, per-server timeout) | mcp-config.md | CORE | M6 + M13 |
 | MCP `autoStart` (`internal/mcpclient/health.go`): probe → launch detached → wait for health. `command`/`args`/`cwd`/`env`/`healthUrl`/`healthTimeoutSec` | mcp-config.md | NICE | M6 — **shipped**: `AutoStartConfig` + `StartAuto` (PR #400), `env` since 2026-09-22, and since 2026-09-28 the probe + launch wait run inside `finishMCP` rather than inline in `attachMCP` — it was the last blo…[+150b] — and since 2026-10-02 the child is detached onto `/dev/null` for all three std streams (`fix/autostart-child-output`): a server's own startup banner was landing on the TUI's alt screen and overwriting the composer's cells, which is why the prompt read `Type a message…XXXX` and no repaint cleared it (#272's rule, same writer class, one level down)
+| `todo` sticky strip above the composer (omp HUD parity: one phase expanded, the rest one line, retires when closed) | omp `interactive-mode.ts` `#renderTodoList` | CORE | M4 — **shipped** (`internal/tui/todopanel.go`: `todoStripLines` holds the pure policy, `drawTodoPanel` paints above the subagent strip and the queue; `DockOps.Todo` + `PlanMode.TodoPhases` feed it the tool's own `Snapshot`; the dock's `TASKS` section is unchanged). Not ported: the spine-and-tail progress path, the strike animation, the auto-clear timer — PR #757 |
 | `todo` tool (9 ops, 5 statuses, phased init, TodoTracker reminders; transcript-persisted) | todo harness doc (omp v18) | CORE | M3 — **shipped** (`internal/tool/todo.go` 9 ops / 5 statuses incl. `blocked`+reason; `internal/agent/todo_tracker.go` engine: stop-time reminders, mid-run nudges, failed-todo reminder). Open tail (research TODO): a settings layer for `todo.reminders`/`todo.reminde…[+92b]
 | Session titles (`/rename`, ai-title generation, resolution cascade, picker metadata) | claude-code-internals.md | CORE | M2 + M10 |
 | File-freshness check (modified-since-read rejection) | claude-code-internals.md | CORE | M3 — **shipped**: `read` records a per-file snapshot (`internal/tool/read.go:270`) and `edit` consumes it in the registry (`internal/tool/edit.go:284`) |
@@ -4703,3 +4704,21 @@ A keyboard bug fell out of it: a raw Ctrl+O arrives as `tcell.KeyCtrlO` with `Mo
 **Evidence.** A real-pty capture against the built binary: the running line paints under the call row, a click expands that child's transcript in place, and `Alt+P` is a no-op — the strip is gone. The settled `Done` line is proven by the pinned-literal test, not the capture: the mock provider never lands the child's final stream.
 
 *Last updated: 2026-10-24 (feat/subagent-ui — one inline surface for a subagent: the strip is deleted, the summary line and the live expansion replace it)*
+## The task list rides above the composer, one phase expanded (feat/todo-strip)
+
+The dock already folded TASKS, but it is width-gated (`dockMinCols = 120`) and shares its row budget with PLAN and FILES — on a narrow terminal, exactly when a long task list costs most, it was not there at all. The strip takes the composer's width, which always exists.
+
+`internal/tui/todopanel.go`: `todoStripLines` decides the rows (pure, so the policy is testable without a screen) and `drawTodoPanel` paints them above the queue, which is the chrome row nearest the eye.
+
+- the ACTIVE phase — the one holding the in-progress task, else the first with open work — is expanded, its open tasks previewed to five with the in-progress row first and `… N more` for the rest;
+- every phase after it is one line with its `done/total`; closed phases AHEAD of the active one are not listed at all, because the strip is what is left to do;
+- the header carries the plan's `closed/total` and a progress run, both derived from that one label so they cannot disagree;
+- it retires itself when nothing is open (`todoStripLines` returns nil). No timer: omp removed the version that mutated canonical state from one for drift, and here there is no state to mutate.
+
+Not ported, deliberately: omp's spine-and-tail progress path (the marker inks in `todomarker.go` already carry state, so a second encoding paints the same fact twice), the completion strike animation, and the auto-clear timer.
+
+Sources are the tool's own: `tool.TodoMarker`/`tool.RomanNumeral` are now exported so the strip prints the glyphs and numerals the model was shown, and `DockOps.Todo` + `PlanMode.TodoPhases()` read `Snapshot()` rather than parsing the dock's rendered rows back apart.
+
+**Tests.** `internal/tui/todopanel_test.go` — active-phase expansion with following-phase collapse, retirement on a closed or dropped plan, the height-budget cut, and the on-screen position above the composer.
+
+*Last updated: 2026-10-24 (feat/todo-strip — the task list rides above the composer: omp's sticky-HUD shape, one phase expanded and the rest one line, retiring itself when nothing is open; PR #757)
