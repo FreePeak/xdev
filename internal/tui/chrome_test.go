@@ -824,7 +824,7 @@ func TestAskCardIsTheMainPaneNotAFullWidthOverlay(t *testing.T) {
 		}
 	}
 	if top < 0 {
-		t.Fatalf("the card is not on screen:\n%s", screenText(scr))
+		t.Fatalf("the card is not on screen:\n%s", lastRow(screenText(scr)))
 	}
 	accent := app.cellColor(app.th.Get(theme.AccentUser))
 	bottom := top
@@ -844,7 +844,7 @@ func TestAskCardIsTheMainPaneNotAFullWidthOverlay(t *testing.T) {
 		bottom = y
 	}
 	if bottom <= top {
-		t.Fatalf("the rail spans one row only (top=%d bottom=%d):\n%s", top, bottom, screenText(scr))
+		t.Fatalf("the rail spans one row only (top=%d bottom=%d):\n%s", top, bottom, lastRow(screenText(scr)))
 	}
 	// And the card stops at the pane's edge: nothing it paints reaches the
 	// panel's columns, which is the whole of the report.

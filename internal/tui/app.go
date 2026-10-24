@@ -5263,7 +5263,11 @@ func (a *App) markComposerDirty() {
 	buf := cells.GetCells()
 	bw, bh := buf.Size()
 	cols := min(a.rightEdge(), bw)
+	rows := a.sessionsListRows()
 	top := a.height - 1 - a.composerRows()
+	if rows > 0 {
+		top -= rows + 1
+	}
 	for y := max(top-1, 0); y < min(a.height-1, bh); y++ {
 		for x := range cols {
 			buf.SetDirty(x, y, true)
@@ -5301,7 +5305,7 @@ func (a *App) paint() {
 	// Empty transcript: the welcome screen (grok welcome/mod.rs — logo,
 	// menu, shortcuts) instead of a blank void.
 	if len(a.blocks) == 0 {
-		composerTop := h - 1 - a.composerRows()
+		composerTop := h - 1 - a.composerRows() - a.sessionsListRows()
 		// The session strip at row 0, then the welcome body — the strip owns
 		// its row whether or not the transcript exists, so the two screens
 		// cannot disagree about what is open.
@@ -5325,7 +5329,13 @@ func (a *App) paint() {
 		a.drawTodoPanel(a.queueTop(composerTop))
 		a.drawQueue(composerTop)
 		a.drawComposer(composerTop)
-		a.drawStatusRow(h - 1)
+		statusRow := composerTop + a.composerRows()
+		a.drawStatusRow(statusRow)
+		if a.tabStripVisible() {
+			if r := a.sessionsListRows(); r > 0 {
+				a.drawSessionsList(statusRow+1, r)
+			}
+		}
 		a.drawStatusPopup()
 		// A gesture made before the first block exists — the composer is the
 		// only selectable surface there — is highlighted here too; the branch
@@ -5563,7 +5573,7 @@ func (a *App) paint() {
 	// drops, and a toast fired on every trim is noise the reader cannot act on.
 	// The composer's first input row sits below the transcript; it occupies
 	// composerRows() rows above the status line.
-	composerTop := h - 1 - cRows
+	composerTop := h - 1 - cRows - a.sessionsListRows()
 	// The panel first, so every overlay below paints over it: the dock is chrome
 	// beside the transcript, never a surface a modal has to negotiate with.
 	if a.dockOn() {
@@ -5594,7 +5604,13 @@ func (a *App) paint() {
 	a.drawTodoPanel(a.queueTop(composerTop))
 	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
-	a.drawStatusRow(h - 1)
+	statusRow := composerTop + cRows
+	a.drawStatusRow(statusRow)
+	if a.tabStripVisible() {
+		if r := a.sessionsListRows(); r > 0 {
+			a.drawSessionsList(statusRow+1, r)
+		}
+	}
 	// The pill popup paints after the status row (it is anchored to it) and
 	// before the selection highlight, so a drag that ends over the panel does
 	// not shine through it.
@@ -6147,6 +6163,51 @@ func (a *App) drawStatusRow(y int) {
 	// run, so they claim the space first: the location is what shrinks.
 	end := a.drawStatusLocation(y, w-2-hudEssentialWidth(parts)-1)
 	a.drawHUD(y, w, end, parts)
+}
+
+// sessionsListRows is the number of rows the sessions strip below the status
+// line occupies: one header + one row per open session, capped so a long
+// session list cannot eat the transcript.
+func (a *App) sessionsListRows() int {
+	n := len(a.tabs)
+	if n == 0 {
+		return 0
+	}
+	if n > 6 {
+		n = 6
+	}
+	return n + 1
+}
+
+// drawSessionsList paints the main + subagent sessions below the status row.
+// Caller holds a.mu.
+func (a *App) drawSessionsList(y, rows int) {
+	_ = a.rightEdge()
+	st := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
+	drawText(a.scr, 0, y, " Sessions (main + subagents):", st)
+	rr := y + 1
+	for _, t := range a.tabs {
+		if rr >= y+rows {
+			break
+		}
+		label := t.ID
+		if t.Title != "" {
+			label = t.Title
+		}
+		status := "idle"
+		if t.Running {
+			status = "running"
+		}
+		if t.Current {
+			status = "active"
+		}
+		line := fmt.Sprintf("   %-12s %-9s", label, status)
+		drawText(a.scr, 0, rr, line, st)
+		rr++
+	}
+	if len(a.tabs) == 0 {
+		drawText(a.scr, 0, rr, "   (no open sessions)", st)
+	}
 }
 
 // statusLocation is the left side of the status row within budget cells: the
