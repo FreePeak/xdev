@@ -469,7 +469,9 @@ func (a *App) handleMouse(m *tcell.EventMouse, press bool) {
 				a.selCache = nil
 				if !opened {
 					if id, label := a.subChildAt(a.selAnchor.y); id != "" {
-						a.openSubChildTranscript(id, label)
+						a.mu.Unlock()
+						a.toggleSubChild(id, label)
+						a.mu.Lock()
 					}
 				}
 			}

@@ -26,9 +26,9 @@ func TestSubagentRowShowsEachChild(t *testing.T) {
 	if !strings.Contains(out, "task") {
 		t.Fatalf("no task row painted:\n%s", out)
 	}
-	// Each child is a named row, and the child's own last action is what the
-	// row says — the naming argument is toolDetail's job, so "read · path".
-	for _, want := range []string{"reader", "read", "internal/tui/app.go", "writer"} {
+	// Each child is a named summary line (last-action text is gone from the
+	// collapsed row; slice A shows the state + stats).
+	for _, want := range []string{"reader", "writer"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("child row missing %q:\n%s", want, out)
 		}

@@ -4668,3 +4668,27 @@ Every consumer derives from `composerRows()`/`composerBudget()` (the viewport ce
 
 **Tests.** `TestComposerIsBoxed` pins `composerRows() == 3` for a one-row draft with the frame intact, and `TestComposerTopNeverLeavesTheScreen`/`TestLargePasteStaysOnScreen` pin the paging ceiling at `composerBudget()+2`.
 *Last updated: 2026-10-24 (feat/composer-tight — the prompt box drops its two interior pad rows: 5 rows -> 3 for a one-line draft, the difference goes to the transcript)
+
+
+## One surface for a subagent (feat/subagent-ui)
+
+A running child had three places to look at it: rows hanging under its `task` call, a floating strip above the composer (`internal/tui/agentspanel.go`, 1,049 lines), and the `/hub` overlay. The strip was the worst of the three: it duplicated the child's state, painted a second tree, and a click on one of its rows opened a transcript in a modal that looked like a second application. omp and Claude Code show a child where it was spawned.
+
+It is one surface now, in the transcript:
+
+- one summary line per child under its call row, in Claude Code's shape: `scout · Running... (3 tool uses · 4.2k tokens · 12s)`, settling to `Done`, `Failed` or `Canceled`;
+- the numbers come from the hub's child stats (authoritative) and fall back to the call's own count plus live elapsed when nothing tracked the child. Tokens are omitted at zero rather than printed as `0 tokens`, because a child that has spent nothing has nothing to say;
+- clicking the line — or Ctrl+O / Alt+B — expands that child's own transcript inline, indented under the line: assistant rows rendered as markdown, tool results as `tool: …`, the last 12 rows with `… N rows hidden` above them;
+- the expansion is LIVE. While it is open, every child event re-reads the transcript, so it is a view, not a snapshot taken at the click. A refresh does not depend on the hub roster having a row for that child — the roster feeds the numbers, the transcript feeds the rows;
+- with no `task` child to expand, Ctrl+O keeps its old job and toggles the newest boxed block;
+- the status row's `subagent` segment counts the children actually running (`subagent · 2`), not a strip that no longer exists.
+
+Deleted with the strip: `internal/tui/agentspanel.go` (1,049 lines), its test (555), the four wiring blocks in `cmd/xdev/tui.go`, the `app.agents.panel` and `app.agents.focus` chords, the strip's `subagentPanel` key (kept, accepted and ignored, so a config that still sets it keeps loading), and the click-a-child-row-to-open-a-modal path `/hub` already owned. Net linear diff: 746 insertions, 2143 deletions.
+
+A keyboard bug fell out of it: a raw Ctrl+O arrives as `tcell.KeyCtrlO` with `ModNone`, and `chordOf` called a chord "ctrl" only when `ModCtrl` was set, so the chord never resolved on that path. `chordOf` now treats `KeyCtrlA..KeyCtrlZ` as the ctrl modifier — the same class of bug the strip's own Alt+letter chords hid.
+
+**Tests.** `internal/tui/subagent_expand_test.go` — `TestSubagentSummaryLineIsClaudeCodes` (the pinned literal `Done (3 tool uses · 1.5k tokens · 4s)`), `TestSubagentSummaryLineLiveWhileRunning`, `TestSubagentNoTokensOmitsTheSegment`, `TestSubagentFailedChildSaysFailed`, `TestSubagentLineExpandsInPlace`, `TestSubagentClickOnLineTogglesThatChild`, `TestSubagentExpandLiveRefresh` (a new child event lands inside an open expansion), `TestSubagentExpandLiveRefreshNoRoster` (the refresh holds with no roster row for the child), `TestSubagentHUDSegment` (`subagent · 1` while one runs, `subagent · Alt+B` after it settles), `TestSubagentHitIsTheChildRowNotTheCallRow`, `TestUntrackedSubagentRowIsNotOpenable`, `TestSubagentRowDragStillSelects` (a drag over the line still selects text: the click target is the line, not the block).
+
+**Evidence.** A real-pty capture against the built binary: the running line paints under the call row, a click expands that child's transcript in place, and `Alt+P` is a no-op — the strip is gone. The settled `Done` line is proven by the pinned-literal test, not the capture: the mock provider never lands the child's final stream.
+
+*Last updated: 2026-10-24 (feat/subagent-ui — one inline surface for a subagent: the strip is deleted, the summary line and the live expansion replace it)*

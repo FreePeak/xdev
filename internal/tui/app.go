@@ -147,13 +147,14 @@ type App struct {
 	th  *theme.Theme
 	// md/mdFor/mdSet are mdStyle's memo (markdown.go). mdFor is the theme the
 	// memo was built from, so SetTheme — which swaps a.th — rebuilds it.
-	md     mdStyle
-	mdFor  *theme.Theme
-	mdSet  bool
-	mu     sync.Mutex
-	blocks []*Block
-	sm     scrollModel // transcript viewport (offset/follow), see scroll.go
-	ed     Editor
+	md              mdStyle
+	mdFor           *theme.Theme
+	mdSet           bool
+	mu              sync.Mutex
+	blocks          []*Block
+	subagentRunning int
+	sm              scrollModel // transcript viewport (offset/follow), see scroll.go
+	ed              Editor
 	// escDraft is the prompt the last Esc took out of the composer and
 	// escUsed says that exact text has already been given back: the ladder is
 	// clear → restore → clear → open the selector, so repeated Esc always
@@ -262,6 +263,11 @@ type App struct {
 	subID    string
 	subLabel string
 
+	// subToggleID/subToggleLabel are the child armed by a click on its summary
+	// line; the toggle runs after handleMouse releases a.mu.
+	subToggleID    string
+	subToggleLabel string
+
 	// showThinking renders model reasoning blocks in the transcript
 	// (settings key `showThinking`, toggled by /settings; issue #20).
 	showThinking bool
@@ -368,21 +374,6 @@ type App struct {
 	queueSeq  int
 	queueHits []queueHit
 	queueFire func()
-	// agents is the live subagent strip above the composer (agentspanel.go):
-	// every running child at every depth, flat. agentHits is the last painted
-	// frame's click geometry (the queueHits contract), and agentOpen is an
-	// armed transcript open, run after a.mu is released — opening one takes
-	// the hub registry lock and fills the panel's view, which must not happen
-	// under the lock the transcript paints with.
-	agents *agentPanel
-	// agentPanelFocused is the keyboard's presence on the strip: while true
-	// the strip owns Up/Down/Enter/Esc and the editor's arrows do their
-	// usual work only after the strip is left. It is the App's half of the
-	// contract; the strip itself still decides WHICH row is focused.
-	agentPanelFocused bool
-	agentHits         []agentPanelHit
-	agentOpen         *agentPanelHit
-	agentPanelOps     *AgentPanelOps
 
 	keyq     chan tcell.Event
 	dirty    chan struct{}
@@ -631,7 +622,6 @@ func New(scr tcell.Screen, th *theme.Theme, model, sessionID string) *App {
 		// so the cost of the default is zero on every session that never
 		// delegates, and a user watching a spawn should not have to discover
 		// a chord to see it.
-		agents: newAgentPanel(true),
 		// transcript's from the first frame.
 		thinkFocus: -1,
 	}
@@ -1271,6 +1261,7 @@ func (a *App) UpdateTaskChild(callID, label, toolName, rawArgs, status string) {
 		c.Tool, c.Args, c.Status = toolName, rawArgs, status
 		c.Calls++
 		b.subSeq++
+		a.recomputeSubagentRunningLocked()
 	}
 	a.mu.Unlock()
 	a.poke()
@@ -1284,10 +1275,217 @@ func (a *App) FinishTaskChild(callID, label, status string, d time.Duration) {
 		if c := findSubLocked(b, label); c != nil {
 			c.Status, c.Dur = status, d
 			b.subSeq++
+			a.recomputeSubagentRunningLocked()
 		}
 	}
 	a.mu.Unlock()
 	a.poke()
+}
+
+// toggleNewestSubChild toggles the newest child of the newest task block.
+// Returns true if it found one.
+func (a *App) toggleNewestSubChild() bool {
+	a.mu.Lock()
+	var callID, label string
+	for i := len(a.blocks) - 1; i >= 0; i-- {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != taskToolName {
+			continue
+		}
+		if len(b.Sub) == 0 {
+			continue
+		}
+		c := b.Sub[len(b.Sub)-1]
+		callID, label = b.CallID, c.Label
+		break
+	}
+	a.mu.Unlock()
+	if label == "" {
+		return false
+	}
+	return a.toggleSubChild(callID, label)
+}
+
+// runPendingSubToggle runs a click-armed inline toggle, if any.
+func (a *App) runPendingSubToggle() {
+	id, label := a.subToggleID, a.subToggleLabel
+	if id == "" {
+		return
+	}
+	a.subToggleID, a.subToggleLabel = "", ""
+	a.toggleSubChild(id, label)
+}
+
+// toggleSubChild flips a child's inline expansion. Lock discipline: state
+// flips under a.mu, then the lock is released BEFORE any hub call; fetched
+// rows are stored under a.mu afterwards.
+func (a *App) toggleSubChild(callID, label string) bool {
+	a.mu.Lock()
+	var child *SubActivity
+	var block *Block
+	findBlock := func(filter bool) bool {
+		for i := len(a.blocks) - 1; i >= 0; i-- {
+			bb := a.blocks[i]
+			if bb.Kind != KindTool || bb.ToolName != taskToolName {
+				continue
+			}
+			if filter && callID != "" && bb.CallID != "" && bb.CallID != callID {
+				continue
+			}
+			if c := findSubLocked(bb, label); c != nil {
+				child = c
+				block = bb
+				return true
+			}
+		}
+		return false
+	}
+	if !findBlock(true) {
+		findBlock(false)
+	}
+	if child == nil {
+		a.mu.Unlock()
+		return false
+	}
+	child.Expanded = !child.Expanded
+	if !child.Expanded {
+		child.Lines = nil
+	}
+	wasEmpty := len(child.Lines) == 0
+	transcriptID := child.TranscriptID
+	a.mu.Unlock()
+	if child.Expanded && wasEmpty && transcriptID != "" {
+		st := a.hubState()
+		if st != nil && st.ops != nil && st.ops.Transcript != nil {
+			lines, _, ok := st.ops.Transcript(transcriptID, 0)
+			if ok {
+				a.mu.Lock()
+				// re-find by label
+				for i := len(a.blocks) - 1; i >= 0; i-- {
+					bb := a.blocks[i]
+					if bb != block {
+						continue
+					}
+					if c := findSubLocked(bb, label); c != nil {
+						c.Lines = lines
+						bb.subSeq++
+					}
+				}
+				a.mu.Unlock()
+			}
+		}
+	}
+	a.poke()
+	return true
+}
+
+// RefreshTaskChildStats pulls the hub's authoritative token/tool counts for a
+// child into its SubActivity, so the summary line never calls the hub at
+// render time. Safe to call from a child goroutine: it never holds a.mu while
+// reading the hub.
+func (a *App) RefreshTaskChildStats(callID, label, transcriptID string) {
+	if transcriptID == "" {
+		return
+	}
+	st := a.hubState()
+	if st == nil || st.ops == nil {
+		return
+	}
+	var tok int64
+	var tools int
+	var elapsed time.Duration
+	found := false
+	if st.ops.Roster != nil {
+		rows := st.ops.Roster()
+		for _, r := range rows {
+			if r.ID == transcriptID {
+				tok, tools, elapsed = r.Tokens, r.Tools, r.Elapsed
+				found = true
+				break
+			}
+		}
+	}
+	a.mu.Lock()
+	b := a.runningToolLocked(callID, taskToolName)
+	if found {
+		if b == nil {
+			for i := len(a.blocks) - 1; i >= 0; i-- {
+				if bb := a.blocks[i]; bb.Kind == KindTool && bb.ToolName == taskToolName {
+					if c := findSubLocked(bb, label); c != nil {
+						c.Tokens, c.Tools = tok, tools
+						if elapsed > 0 {
+							c.Dur = elapsed
+						}
+						bb.subSeq++
+						break
+					}
+				}
+			}
+		} else {
+			if c := findSubLocked(b, label); c != nil {
+				c.Tokens, c.Tools = tok, tools
+				if elapsed > 0 && c.Status != "running" {
+					c.Dur = elapsed
+				}
+				b.subSeq++
+			}
+		}
+	}
+	// Check expanded under lock.
+	expanded := false
+	var childBlock *Block
+	if b == nil {
+		for i := len(a.blocks) - 1; i >= 0; i-- {
+			if bb := a.blocks[i]; bb.Kind == KindTool && bb.ToolName == taskToolName {
+				if c := findSubLocked(bb, label); c != nil && c.Expanded && c.TranscriptID != "" {
+					expanded = true
+					childBlock = bb
+					break
+				}
+			}
+		}
+	} else {
+		if c := findSubLocked(b, label); c != nil && c.Expanded && c.TranscriptID != "" {
+			expanded = true
+			childBlock = b
+		}
+	}
+	tid := ""
+	if expanded && childBlock != nil {
+		if c := findSubLocked(childBlock, label); c != nil {
+			tid = c.TranscriptID
+		}
+	}
+	a.mu.Unlock()
+	if expanded && tid != "" && st.ops.Transcript != nil {
+		lines, _, ok := st.ops.Transcript(tid, 0)
+		if ok {
+			a.mu.Lock()
+			if c := findSubLocked(childBlock, label); c != nil && c.Expanded {
+				c.Lines = lines
+				childBlock.subSeq++
+			}
+			a.mu.Unlock()
+		}
+	}
+	a.poke()
+}
+
+// recomputeSubagentRunningLocked counts running sub-children; caller holds a.mu.
+func (a *App) recomputeSubagentRunningLocked() {
+	n := 0
+	for i := range a.blocks {
+		b := a.blocks[i]
+		if b.Kind != KindTool || b.ToolName != taskToolName {
+			continue
+		}
+		for _, c := range b.Sub {
+			if c.Status == "running" {
+				n++
+			}
+		}
+	}
+	a.subagentRunning = n
 }
 
 // runningToolLocked is the running call row for callID/name, newest first.
@@ -1409,30 +1607,102 @@ func (a *App) subLines(b *Block, w, base int, hits *[]subHit) []line {
 		return ln
 	}
 	for _, c := range rows {
-		phrase := c.Tool
-		if detail := toolDetail(c.Args); detail != "" {
-			if phrase == "" {
-				phrase = detail
-			} else {
-				phrase += " · " + detail
+		// Slice A: one connected Claude-Code-shaped line per child.
+		state := "Running..."
+		switch c.Status {
+		case "ok":
+			state = "Done"
+		case "error":
+			state = "Failed"
+		case "canceled", "cancelled", "aborted":
+			state = "Canceled"
+		}
+		running := c.Status == "running"
+		// numbers: hub child-stats (Tools/Tokens/Dur) authoritative; fall back
+		// to Calls + live elapsed for untracked children.
+		tools := c.Tools
+		if tools == 0 && c.Tokens == 0 {
+			tools = c.Calls
+		}
+		var dur time.Duration
+		if c.Status == "running" {
+			if !c.Ts.IsZero() {
+				dur = time.Since(c.Ts)
 			}
+		} else {
+			dur = c.Dur
 		}
-		if phrase == "" {
-			phrase = "starting"
+		// Build stats list: "N tool use(s)" always; tokens only if present.
+		stats := []string{}
+		if tools == 1 {
+			stats = append(stats, "1 tool use")
+		} else {
+			stats = append(stats, fmt.Sprintf("%d tool uses", tools))
 		}
-		row := c.Label + " · " + phrase
-		// No per-child elapsed while the call is in flight: the call row
-		// right above already counts the wall time, and two clocks on one
-		// row is noise. The settled summary carries the child's own time.
-		if budget := subRow(w); width(row) > budget {
-			row = truncateCells(row, budget, "…")
+		if c.Tokens > 0 {
+			stats = append(stats, HumanTokens(c.Tokens)+" tokens")
 		}
-		// base + len(out): the row's offset within the WHOLE block, not within
-		// the child slice.
+		stats = append(stats, humanDur(dur))
+		lineText := c.Label + " · " + state + " (" + strings.Join(stats, " · ") + ")"
+		if budget := subRow(w); width(lineText) > budget {
+			lineText = truncateCells(lineText, budget, "…")
+		}
 		at := base + len(out)
-		emit(row, c.Status == "running")
+		emit(lineText, running)
 		if hits != nil && c.TranscriptID != "" {
 			*hits = append(*hits, subHit{offset: at, label: c.Label, id: c.TranscriptID})
+		}
+		if c.Expanded && len(c.Lines) > 0 {
+			lines := c.Lines
+			hidden := 0
+			if len(lines) > 12 {
+				hidden = len(lines) - 12
+				lines = lines[len(lines)-12:]
+			}
+			for _, tl := range lines {
+				txt := strings.TrimSpace(tl.Text)
+				if txt == "" {
+					continue
+				}
+				role := tl.Role
+				if role == "" {
+					role = "assistant"
+				}
+				prefix := role + ":"
+				if role == "toolResult" {
+					prefix = "tool:"
+				}
+				indent := "      "
+				remW := w - 6
+				if remW < 10 {
+					remW = 10
+				}
+				if role == "assistant" {
+					mdLines := a.renderMarkdown(txt, remW)
+					for i, ml := range mdLines {
+						ln := textline(indent, dim)
+						if i == 0 {
+							ln.runs = append(ln.runs, cell{text: prefix + " ", style: dim})
+						} else {
+							ln.runs = append(ln.runs, cell{text: strings.Repeat(" ", len(prefix)+1), style: dim})
+						}
+						ln.runs = append(ln.runs, ml.runs...)
+						out = append(out, ln)
+					}
+				} else {
+					for _, seg := range wrap(txt, remW) {
+						ln := textline(indent, dim)
+						ln.runs = append(ln.runs, cell{text: prefix + " ", style: dim})
+						ln.runs = append(ln.runs, cell{text: seg, style: dim})
+						out = append(out, ln)
+					}
+				}
+			}
+			if hidden > 0 {
+				ln := textline("      ", dim)
+				ln.runs = append(ln.runs, cell{text: fmt.Sprintf("… %d rows hidden", hidden), style: dim})
+				out = append(out, ln)
+			}
 		}
 	}
 	if more > 0 {
@@ -3272,15 +3542,6 @@ func (a *App) handleKey(ev tcell.Event) {
 			if a.handleTabStripMouse(m, press) {
 				return
 			}
-			// The subagent strip sits directly above the queue, over the
-			// transcript's tail: a click on a child's row opens that child's
-			// own transcript instead of anchoring a selection on the text it
-			// covers. Asked before the queue because it paints above it, so
-			// the row a person aimed at is the row that answers.
-			if a.agentPanelMouse(m, press) {
-				a.runPendingAgentOpen()
-				return // the UI loop repaints after handleKey
-			}
 			// The mid-turn queue (#157) sits above the composer, over the
 			// transcript's tail. It is a surface, not content, so a click on a
 			// row spends itself on the row instead of anchoring a selection
@@ -3314,6 +3575,7 @@ func (a *App) handleKey(ev tcell.Event) {
 				a.handleMouse(m, press)
 				a.mu.Unlock()
 				a.runPendingMsgAction()
+				a.runPendingSubToggle()
 			}
 		}
 		return
@@ -3374,10 +3636,6 @@ func (a *App) handleKey(ev tcell.Event) {
 	// and the editor's arrows only reach the strip after every modal has had
 	// its say. The strip's own focus state decides WHICH row is on; this
 	// block only decides WHETHER the strip is on.
-	if a.handleAgentPanelKey(key) {
-		return
-	}
-
 	// The pill popup takes Esc before the double-Esc rewind ladder: a panel
 	// over the transcript is dismissed by the same chord every other panel
 	// answers, and Esc must not instead pull the draft out of the composer
@@ -3529,34 +3787,9 @@ func (a *App) handleKey(ev tcell.Event) {
 		// transcript rather than swallowing the chord.
 		_ = a.HubRoster()
 		return
-	case "app.agents.panel":
-		// The live strip above the composer. A toggle that is not wired (a
-		// headless host, a test) says so rather than swallowing the chord.
-		on, ok := a.AgentPanelToggle()
-		if !ok {
-			a.AddSystemBlock("· subagent panel is not wired in this session")
-			return
-		}
-		_, running := a.AgentPanelState()
-		a.AddSystemBlock("· " + agentPanelSummary(on, running))
-		return
-	case "app.agents.focus":
-		// Put the keyboard on the strip: the newest row is the one a person
-		// watching would open, and from there arrows walk the list, Enter
-		// opens a child, and Esc leaves. Nothing to focus is silence, like
-		// ctrl+o on a transcript with no box — the chord must not claim to
-		// have done something.
-		if !a.agentPanelFocus() {
-			a.AddSystemBlock("· no running child to focus")
-			return
-		}
-		return
 	case "app.subagent.transcript":
-		// The newest child a `task` call spawned, in its own transcript.
-		// Nothing tracked (no hub, or no `task` call this session) is
-		// silence, like ctrl+o on a transcript with no box: the chord must
-		// not claim to have opened something.
-		a.openNewestSubChildTranscript()
+		// Inline expansion of the newest child of the newest task block.
+		a.toggleNewestSubChild()
 		return
 	case "model-cycle":
 		// Unwired cycling is a no-op, not an error: the chord is bound by
@@ -3638,9 +3871,11 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.Invalidate()
 		return
 	case "expand":
-		// omp's ctrl+o. No result to reveal is silence, not a notice: the
-		// transcript must not claim to have expanded something.
-		a.ToggleBoxExpand()
+		// Ctrl+O: if a task block exists, toggle its newest child inline;
+		// otherwise fall back to the existing boxed-block expand.
+		if !a.toggleNewestSubChild() {
+			a.ToggleBoxExpand()
+		}
 		return
 	case "paste-image":
 		// omp's app.clipboard.pasteImage: the one paste no terminal can hand
@@ -3817,27 +4052,6 @@ func (a *App) handleKey(ev tcell.Event) {
 		}
 	}
 	// The live subagent strip takes the arrows while it is focused: it is a
-	// list, so Up/Down move the selection and Enter opens the focused
-	// child's transcript. It is checked before the editor's scroll block
-	// because a focused strip is a keyboard target, and the editor's arrows
-	// only do their usual work once the strip is left (Esc).
-	if a.agents != nil && a.agents.enabled() && a.agentPanelFocused {
-		switch key.Key() {
-		case tcell.KeyUp:
-			a.agents.focusMove(-1)
-			a.poke()
-			return
-		case tcell.KeyDown:
-			a.agents.focusMove(1)
-			a.poke()
-			return
-		case tcell.KeyEnter:
-			a.agentPanelOpen()
-			a.poke()
-			return
-		}
-	}
-
 	// Arrow-down from an empty composer with nothing to scroll: if the
 	// subagent strip has rows, the down arrow enters it instead of scrolling
 	// the transcript past its tail. This is the opencode shape — the strip
@@ -3848,12 +4062,6 @@ func (a *App) handleKey(ev tcell.Event) {
 	// and no history so that a draft or a recall still does their usual
 	// thing: the strip is chrome, and an arrow that already means
 	// something in the editor should not be stolen.
-	if !running && !menuOpen && strings.TrimSpace(a.ed.Text()) == "" && !a.ed.HasHistory() && a.agents != nil && a.agents.enabled() && a.agents.hasRows() && !a.agentPanelFocused && key.Key() == tcell.KeyDown {
-		if a.agentPanelFocus() {
-			a.poke()
-			return
-		}
-	}
 	// Empty editor with nothing to recall: arrows scroll the transcript.
 	// Once history exists, Up/Down belong to the editor (omp/Claude Code:
 	// Up recalls the previous prompt whether or not the box is empty);
@@ -5049,7 +5257,6 @@ func (a *App) paint() {
 		// composer: both are chrome over the transcript's tail, and the strip
 		// is the newer, transient one — a running child outranks a pending
 		// prompt for the rows nearest the eye.
-		a.drawAgentPanel(a.queueTop(composerTop))
 		a.drawQueue(composerTop)
 		a.drawComposer(composerTop)
 		a.drawStatusRow(h - 1)
@@ -5312,12 +5519,9 @@ func (a *App) paint() {
 	// composer, so it goes after every overlay (an overlay is modal and owns
 	// its rows) and before the composer, whose top border must stay the edge
 	// of the box. It is chrome, not content, and publishes its own hit table.
-	// The subagent strip (agentspanel.go) goes above the queue for the same
-	// reason the queue goes above the composer: it is chrome over the
-	// transcript's tail, painted after every modal so a panel that owns its
-	// rows still wins, and before the queue so a running child's row is the
-	// one nearest the eye.
-	a.drawAgentPanel(a.queueTop(composerTop))
+	// The mid-turn queue is the only chrome between the transcript and the
+	// composer now: the subagent strip is gone, and each child paints as a
+	// summary line under its own call row.
 	a.drawQueue(composerTop)
 	a.drawComposer(composerTop)
 	a.drawStatusRow(h - 1)
@@ -6233,7 +6437,7 @@ func (a *App) hudSegment(name string) (text, token string) {
 		// holds a settled row to reopen. The chord is only worth advertising
 		// while there is something to open — a chip that reads "0" teaches
 		// nobody anything.
-		n := a.AgentPanelForegroundCount()
+		n := a.subagentRunning
 		if n <= 0 {
 			return "subagent · Alt+B", theme.StatusLineSep
 		}

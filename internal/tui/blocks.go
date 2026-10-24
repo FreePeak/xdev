@@ -97,12 +97,17 @@ type SubActivity struct {
 	Args   string        // that call's raw JSON arguments
 	Status string        // "running" | "ok" | "error"
 	Calls  int           // finished tool calls, for the settled summary
+	Tools  int           // tool calls from hub child-stats (authoritative)
+	Tokens int64         // tokens from hub child-stats (authoritative)
 	Dur    time.Duration // terminal wall time, set when Status settles
 	Ts     time.Time     // when the child started, for its live elapsed
 	// TranscriptID is the id this child's own transcript is readable under
 	// (agent.Hub.TrackForeground hands one out). Empty when the host tracks
-	// nothing, which is exactly when the row must not offer to open one.
 	TranscriptID string
+	// Lines is the child's own transcript, fetched on first expand.
+	Lines []HubTranscriptLine
+	// Expanded toggles inline rendering of this child's own transcript.
+	Expanded bool
 }
 
 // subRowsMax is how many children a batch keeps on screen. ponytail: 3 + a
