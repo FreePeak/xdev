@@ -716,3 +716,35 @@ func TestSetTuiExitDetachRoundTrip(t *testing.T) {
 		t.Fatal("set true did not stick")
 	}
 }
+
+// A config.yml that still carries runBudget — the removed per-run wall clock —
+// must load clean, not be quarantined as *.broken-* and leave the user on
+// defaults. The key is DROPPED and nothing replaces it: an interactive run is
+// bounded by the turn cap and by the person watching it.
+func TestLegacyRunBudgetKeyIsDropped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := writeFile(t, GlobalSettingsPath(), "runBudget: 180\ndefaultModel: onegw/free\neffort: high\n")
+	s, err := LoadSettings(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("a legacy runBudget key must still load: %v", err)
+	}
+	if s.DefaultModel != "onegw/free" || s.Effort != "high" {
+		t.Fatalf("the migration ate its neighbours: defaultModel=%q effort=%q", s.DefaultModel, s.Effort)
+	}
+	// The file is rewritten on load, so a SECOND start sees the dropped key.
+	if s2, err := LoadSettings(t.TempDir(), nil); err != nil {
+		t.Fatalf("the second start rejected the file the first one left: %v", err)
+	} else if s2.DefaultModel != "onegw/free" {
+		t.Fatalf("second start came up on defaults: defaultModel=%q", s2.DefaultModel)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("the user's file must stay where it is: %v", statErr)
+	}
+	ents, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".broken-") {
+			t.Fatalf("a migrated file was treated as broken: %v", e.Name())
+		}
+	}
+}
