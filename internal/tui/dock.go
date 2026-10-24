@@ -10,6 +10,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/FreePeak/xdev/internal/theme"
+	"github.com/FreePeak/xdev/internal/tool"
 )
 
 // The context dock (issue #291 §1 + §2): a fixed-width column right of the
@@ -99,6 +100,13 @@ type DockOps struct {
 	// agent's state kept here.
 	Plan  func() (pending string, active bool)
 	Tasks func() string
+	// Todo is the task list as PHASES, for the strip above the composer
+	// (todopanel.go). It is the same snapshot Tasks renders, read through a
+	// typed accessor because the strip decides which phase to expand and the
+	// dock does not — parsing the rows back apart would be a second copy of
+	// the state the tool already holds. nil means no todo tool in this session,
+	// and the strip paints nothing.
+	Todo func() []tool.TodoPhase
 	// Agents is the hub roster, one row per child, heading included. It is the
 	// same snapshot /hub reads; the panel never holds a roster of its own.
 	Agents func() string

@@ -119,7 +119,7 @@ func TestStatusRowAndTopRowStayInTheMainPane(t *testing.T) {
 	// transcript on the left, the panel's title on the right — so the check is
 	// the panel's own gutter: the pane's text may not cross the boundary to
 	// reach the panel's text.
-	first := strings.SplitN(screenText(scr), "\n", 2)[0]
+	first := strings.SplitN(lastRow(screenText(scr)), "\n", 2)[0]
 	if strings.TrimSpace(first[edge:edge+dockPad]) != "" {
 		t.Fatalf("the transcript runs into the panel's gutter: %q", first[edge:edge+dockPad])
 	}

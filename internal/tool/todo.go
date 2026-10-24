@@ -451,7 +451,7 @@ func (t *TodoTool) View() string {
 		}
 		for j := range p.Tasks {
 			it := &p.Tasks[j]
-			fmt.Fprintf(&b, "\n%s %s", todoMarker(it.Status), it.Content)
+			fmt.Fprintf(&b, "\n%s %s", TodoMarker(it.Status), it.Content)
 			if it.Status == TodoBlocked && it.Blocker != "" {
 				fmt.Fprintf(&b, " (blocked: %s)", it.Blocker)
 			}
@@ -625,7 +625,7 @@ func renderTodoPhases(phases []TodoPhase) string {
 			continue
 		}
 		counted++
-		fmt.Fprintf(&b, "%s. %s\n", romanNumeral(counted), p.Name)
+		fmt.Fprintf(&b, "%s. %s\n", RomanNumeral(counted), p.Name)
 		for j := range p.Tasks {
 			it := &p.Tasks[j]
 			total++
@@ -638,7 +638,7 @@ func renderTodoPhases(phases []TodoPhase) string {
 			default:
 				open++
 			}
-			fmt.Fprintf(&b, "  %s %s", todoMarker(it.Status), it.Content)
+			fmt.Fprintf(&b, "  %s %s", TodoMarker(it.Status), it.Content)
 			if it.Status == TodoBlocked && it.Blocker != "" {
 				fmt.Fprintf(&b, " (blocked: %s)", it.Blocker)
 			}
@@ -655,7 +655,10 @@ func renderTodoPhases(phases []TodoPhase) string {
 	return strings.TrimRight(b.String(), "\n") + "\n(" + summary + ")"
 }
 
-func todoMarker(s TodoStatus) string {
+// TodoMarker is the glyph a status paints with: the model sees these in the
+// tool's own result, and every other surface (the dock, the strip above the
+// composer) reuses them so no two renderings can disagree about a state.
+func TodoMarker(s TodoStatus) string {
 	switch s {
 	case TodoInProgress:
 		return "[/]"
@@ -675,7 +678,9 @@ var romanNumerals = []string{
 	"XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX",
 }
 
-func romanNumeral(n int) string {
+// RomanNumeral is the phase numeral the tool's result prints ("I.", "II."), so
+// a surface that numbers phases numbers them the same way.
+func RomanNumeral(n int) string {
 	if n >= 1 && n <= len(romanNumerals) {
 		return romanNumerals[n-1]
 	}
