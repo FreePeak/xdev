@@ -537,20 +537,6 @@ type Settings struct {
 	// handoff — runs on it too: there is one model, no role aliases.
 	DefaultModel string `yaml:"defaultModel"`
 	ApprovalMode string `yaml:"approvalMode"` // always-ask|write|yolo
-	// RunBudget is the wall clock ONE run may take, in seconds
-	// (runBudget). A POINTER, so "unset" and "set" are different things:
-	// unset means the shipped default applies (agent.DefaultRunBudget, 6
-	// minutes), and a layer that sets the key — even to 0 — contributes
-	// it. A negative value is an explicit opt-out — an unbounded run.
-	//
-	// The default is measured, not guessed: the RCA's patched run of a
-	// "tell me where we are" question took 4 min 53 s, so a shorter
-	// default would truncate legitimate work. But the same question, asked
-	// as "list me all pr urls", has a right answer in 30 seconds, and the
-	// model does not know that — it kept gathering "useful adjacent info"
-	// for 20 turns. The clock is the only thing that ends that, so the
-	// clock is the thing to configure.
-	RunBudget *int `yaml:"runBudget"`
 	// Prewalk turns the one-shot model handoff on for every run
 	// (prewalk.enabled); prewalk.into is the handoff target (a model ref,
 	// default: the session model). The -prewalk flag forces it on and
@@ -1381,18 +1367,6 @@ func (s *Settings) CompactionMethodOrder() string {
 	return string(s.Compaction.MethodOrder)
 }
 
-// RunBudgetDuration returns the wall-clock budget for ONE run.
-//
-// nil means unset: the agent's own default applies (agent.DefaultRunBudget).
-// A negative value is unbounded. The agent reads the same three states, so
-// the setting is a pass-through rather than a second policy.
-func (s *Settings) RunBudgetDuration() time.Duration {
-	if s == nil || s.RunBudget == nil {
-		return 0
-	}
-	return time.Duration(*s.RunBudget) * time.Second
-}
-
 // CompactionIdleAfter reports the idle-compaction gap; 0 disables the
 // trigger (nil-safe; a malformed value never reaches storage — merge rejects
 // it).
@@ -1680,18 +1654,23 @@ func LoadSettings(cwd string, overlays []string) (*Settings, error) {
 
 // migrateLegacySettings rewrites a key this version removed but a settled
 // config file still carries. The layers are strict (KnownFields), so without
-// this the rename would move the user's file to .broken-<stamp> on the next
+// this the removal would move the user's file to .broken-<stamp> on the next
 // start and quietly run them on defaults.
 //
-// modelRoles is the one such key: the model-role aliases (@smol/@slow/…) are
-// gone, and modelRoles.default was the only binding that did real work — it
-// named the model a run uses, which is now defaultModel. The other roles
-// resolved to that same session model anyway, so dropping them changes
-// nothing a session could observe.
+// Two such keys:
 //
-// ponytail: it reads the "default" (or "main") scalar and discards the rest
-// of the block. A file that pinned several roles to *different* models loses
-// those pins; if per-role overrides come back, they need their own key here.
+//   - modelRoles: the model-role aliases (@smol/@slow/…) are gone, and
+//     modelRoles.default was the only binding that did real work — it named
+//     the model a run uses, which is now defaultModel. The other roles
+//     resolved to that same session model anyway, so dropping them changes
+//     nothing a session could observe. ponytail: it reads the "default" (or
+//     "main") scalar and discards the rest of the block; a file that pinned
+//     several roles to *different* models loses those pins.
+//   - runBudget: the per-run wall clock is gone (an interactive run is bounded
+//     by the person watching it, not by a stopwatch nobody can see). The key
+//     is DROPPED and nothing replaces it, so a file that tuned it loads clean
+//     instead of falling back to defaults.
+//
 // Any shape this cannot read is left alone, so the strict decode reports it
 // like any other typo instead of the shim guessing.
 func migrateLegacySettings(raw []byte) []byte {
@@ -1706,6 +1685,11 @@ func migrateLegacySettings(raw []byte) []byte {
 	changed := false
 	for i := 0; i+1 < len(body.Content); i += 2 {
 		key, val := body.Content[i], body.Content[i+1]
+		if key.Value == "runBudget" {
+			body.Content = append(body.Content[:i], body.Content[i+2:]...)
+			changed = true
+			break
+		}
 		if key.Value != "modelRoles" {
 			continue
 		}
@@ -1832,9 +1816,6 @@ func (s *Settings) merge(layer *Settings) error {
 	// validated and listed in `config list`, but no build site copied them
 	// into CompactionConfig" — and the merge is where a setting is either
 	// wired or merely parsed.
-	if layer.RunBudget != nil {
-		s.RunBudget = layer.RunBudget
-	}
 	if layer.ApprovalMode != "" {
 		s.ApprovalMode = layer.ApprovalMode
 	}

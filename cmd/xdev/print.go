@@ -291,11 +291,6 @@ func wireAgentMode(ag *agent.Agent, cfg *config.Config, settings *config.Setting
 		// and none of them set ag.Retry at all.
 		ag.Retry.RetryAllErrors = settings.RetryAllErrors()
 		ag.Retry.Infinite = settings.InfiniteRetry()
-		// The wall-clock budget of ONE run (runBudget, seconds). It rides
-		// here for the same reason: every build site (print/tui/rpc/acp)
-		// goes through this function, and the budget is what ends a run
-		// the model decided to keep extending. 0 means the shipped default.
-		ag.RunBudget = settings.RunBudgetDuration()
 	}
 	// #86: a compaction summary must carry the memories the remote backend
 	// recalled, or they are lost for the rest of the session.

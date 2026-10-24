@@ -1,59 +1,79 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/FreePeak/xdev/internal/ai"
+	"github.com/FreePeak/xdev/internal/session"
 )
 
-// Live 2026-10-22, session adf5029b: a TUI run of "list me all pr urls
-// opening xdev" went on for 22 assistant turns and 28 tool calls over 6
-// minutes 19 seconds, and the answer arrived only when the run-budget
-// wrap-up forced it.
+// A run ends when the MODEL stops calling tools, or when the turn cap is
+// reached — never on a stopwatch.
 //
-// The wrap-up worked: the model answered in prose. And then the keep-going
-// gate fired, because the gate's guard knew about the gate's OWN nudge
-// (lastWasPromptCont) and about nothing else — so the turn's earlier `git
-// fetch`, a genuine mutation, armed the gate, and the run continued for one
-// more turn AFTER the clock had already ended it.
-//
-// The budget is the run's STOP. A stop that something else can override is
-// not a stop.
-func TestTheRunBudgetsStopIsAuthoritative(t *testing.T) {
-	history := []ai.Message{
-		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "list me all pr urls"}}},
-		// The turn that mutated: `git fetch` is a write.
-		{Role: ai.RoleAssistant, Content: []ai.Block{ai.ToolCallBlock{
-			ID: "m1", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}},
-		// The budget fired, and the model answered in prose.
-		{Role: ai.RoleUser, Attribution: RunBudgetAttribution, Content: []ai.Block{ai.TextBlock{Text: RunBudgetPrompt}}},
-		{Role: ai.RoleAssistant, Content: []ai.Block{ai.TextBlock{Text: "here is the report"}}},
+// The shipped 6-minute DefaultRunBudget used to end productive runs: 97 wrap-ups
+// across 80 sessions in this repo's own transcript store, 48 of them answered by
+// a model that still wanted tools, so the run died at the next step boundary
+// with no error, no notice and no exit code (2026-10-24). Every guard against
+// it coming back is structural, so this pins the observable shape: a long run
+// of tool turns executes EVERY turn's call and ends on the model's own prose,
+// with no harness-authored user message anywhere in the middle.
+func TestARunRunsUntilTheModelStops(t *testing.T) {
+	const turns = 20
+	p := &fakeProvider{}
+	for i := 0; i < turns; i++ {
+		// Distinct args per turn: the repeat guard ends a run that issues the
+		// SAME call again, and that guard is not what this test is about.
+		p.calls = append(p.calls, toolScript("echo", fmt.Sprintf(`{"text":"step-%d"}`, i)))
 	}
-	if keepGoingNudge(history, 0, true) {
-		t.Fatal("a keep-going nudge fired AFTER the run budget ended the run — the budget's stop must be authoritative")
+	p.calls = append(p.calls, quietScript("done"))
+	a, s, _ := storeAgent(t, p, CompactionConfig{})
+	a.Retry = fastRetry()
+
+	msg, err := a.Run(context.Background(), "sys", submitHistory(t, s, "keep going"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if msg == nil || msg.Text() != "done" {
+		t.Fatalf("final message = %v, want the model's own answer", msg)
+	}
+	// Every turn's tool call got a result. A run cut short would leave the
+	// batch it fired on unanswered.
+	toolResults := 0
+	for _, e := range s.Entries() {
+		if me, ok := e.(*session.MessageEntry); ok && me.Message.Role == ai.RoleToolResult {
+			toolResults++
+		}
+	}
+	if toolResults < turns {
+		t.Fatalf("%d tool results for %d turns — the run ended before the model did", toolResults, turns)
+	}
+	// No synthetic wrap-up: the only user-role messages are the one the person
+	// typed and any keep-going nudge, which is a prompt continuation. A
+	// budget wrap-up would show up here with its own attribution.
+	for _, e := range s.Entries() {
+		me, ok := e.(*session.MessageEntry)
+		if !ok || me.Message.Role != ai.RoleUser {
+			continue
+		}
+		switch me.Message.Attribution {
+		case "", "user", PromptContinuationAttribution:
+		default:
+			t.Fatalf("a harness message %q reached the transcript — the run was ended by the harness, not the model",
+				me.Message.Attribution)
+		}
 	}
 }
 
-// The other direction, unchanged: a run that mutated and has NOT stopped
-// still gets the nudge. That is the feature the gate exists for.
-func TestTheKeepGoingGateStillFiresForUnfinishedWork(t *testing.T) {
-	history := []ai.Message{
-		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do it"}}},
-		{Role: ai.RoleAssistant, Content: []ai.Block{ai.ToolCallBlock{
-			ID: "e1", Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}},
-	}
-	if !keepGoingNudge(history, 0, true) {
-		t.Fatal("a run that mutated inside the current task got no keep-going nudge")
-	}
-	// And a read-only run never does.
-	if keepGoingNudge(history, 0, false) {
-		t.Fatal("a read-only run got a keep-going nudge")
-	}
+// toolScript is one turn that asks for a tool call with the given arguments.
+func toolScript(name, args string) fakeScript {
+	return fakeScript{events: toolCallEvents(name, args)}
 }
 
-// The gate's own nudge stops it too: a run that already nudged once and
-// then yielded again does not nudge a second time.
+// The keep-going gate still knows about its own nudge, and a real user turn
+// clears it. (The run-budget arm this used to carry is gone with the budget.)
 func TestTheKeepGoingGateDoesNotNudgeTwice(t *testing.T) {
 	history := []ai.Message{
 		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "do it"}}},
@@ -64,17 +84,11 @@ func TestTheKeepGoingGateDoesNotNudgeTwice(t *testing.T) {
 	if keepGoingNudge(history, 0, true) {
 		t.Fatal("the run was nudged twice")
 	}
-}
-
-// A REAL user turn after the budget ends the budget's authority: the person
-// asked for something new, and that new work can be nudged.
-func TestARealUserTurnEndsTheBudgetsAuthority(t *testing.T) {
-	history := []ai.Message{
-		{Role: ai.RoleUser, Content: []ai.Block{ai.TextBlock{Text: "list me all pr urls"}}},
-		{Role: ai.RoleUser, Attribution: RunBudgetAttribution, Content: []ai.Block{ai.TextBlock{Text: RunBudgetPrompt}}},
-		{Role: ai.RoleUser, Attribution: "user", Content: []ai.Block{ai.TextBlock{Text: "now merge them"}}},
-	}
+	// A real user turn is a new task boundary, so a run that mutated inside it
+	// can be nudged again.
+	history = append(history, ai.Message{Role: ai.RoleUser, Attribution: "user",
+		Content: []ai.Block{ai.TextBlock{Text: "now merge them"}}})
 	if !keepGoingNudge(history, 0, true) {
-		t.Fatal("a new real ask after the budget got no keep-going nudge")
+		t.Fatal("a new real ask after the nudge got no keep-going nudge")
 	}
 }
