@@ -40,6 +40,10 @@ const (
 	// ghSearchLimitDefault / ghSearchLimitMax mirror omp's search clamping.
 	ghSearchLimitDefault = 10
 	ghSearchLimitMax     = 50
+	// ghPRListLimitDefault / ghPRListLimitMax bound a PR listing. 30 is what
+	// `gh pr list` does on its own, so an unadorned listing looks unchanged.
+	ghPRListLimitDefault = 30
+	ghPRListLimitMax     = 100
 	// ghRunTailDefault / ghRunTailMax bound the failed-log tail of run_watch.
 	ghRunTailDefault = 15
 	ghRunTailMax     = 200
@@ -50,6 +54,7 @@ const (
 // githubOps is the dispatch surface; keep in sync with Execute's switch.
 var githubOps = []string{
 	"repo_view", "file_read", "pr_create", "pr_checkout", "pr_push",
+	"pr_list",
 	"search_issues", "search_prs", "search_code", "search_commits",
 	"search_repos", "run_watch",
 }
@@ -65,7 +70,7 @@ var githubOps = []string{
 // delivered.
 func (t *GithubTool) ReadOnlyOps() []string {
 	return []string{
-		"repo_view", "file_read",
+		"repo_view", "file_read", "pr_list",
 		"search_issues", "search_prs", "search_code", "search_commits", "search_repos",
 	}
 }
@@ -138,7 +143,7 @@ func NewGithubTool(cwd string) *GithubTool {
 func (t *GithubTool) Name() string { return "github" }
 
 func (t *GithubTool) Description() string {
-	return "GitHub via gh: repo_view, file_read, pr_create, pr_checkout (worktree), pr_push, search_issues/prs/code/commits/repos, run_watch; pr://<n> and issue://<n> read URLs"
+	return "GitHub via gh: repo_view, file_read, pr_create, pr_checkout (worktree), pr_push, pr_list, search_issues/prs/code/commits/repos, run_watch; pr://<n> and issue://<n> read URLs"
 }
 
 func (t *GithubTool) Parameters() json.RawMessage {
@@ -147,7 +152,7 @@ func (t *GithubTool) Parameters() json.RawMessage {
   "properties": {
     "op": {
       "type": "string",
-      "enum": ["repo_view", "file_read", "pr_create", "pr_checkout", "pr_push", "search_issues", "search_prs", "search_code", "search_commits", "search_repos", "run_watch"],
+      "enum": ["repo_view", "file_read", "pr_create", "pr_checkout", "pr_push", "pr_list", "search_issues", "search_prs", "search_code", "search_commits", "search_repos", "run_watch"],
       "description": "operation to run"
     },
     "repo": {"type": "string", "description": "[host/]owner/repo override (default: the current checkout; a search inside it needs no argument, and a search that leaves it asks the user first)"},
@@ -166,10 +171,11 @@ func (t *GithubTool) Parameters() json.RawMessage {
     "assignee": {"type": "string", "description": "pr_create assignee login (repeatable via array)"},
     "label": {"type": "string", "description": "pr_create label (repeatable via array)"},
     "query": {"type": "string", "description": "search query (required for search_code)"},
+    "state": {"type": "string", "enum": ["open", "closed", "merged", "all"], "description": "pr_list state filter (default open)"},
     "since": {"type": "string", "description": "lower date bound (3d, 2w, 2026-01-01, ISO) for search_* except search_code"},
     "until": {"type": "string", "description": "upper date bound (same formats)"},
     "dateField": {"type": "string", "enum": ["created", "updated"], "description": "date qualifier field (default created)"},
-    "limit": {"type": "integer", "description": "search result cap, 1..50 (default 10)"},
+    "limit": {"type": "integer", "description": "result cap (search 1..50 default 10; pr_list 1..100 default 30)"},
     "run": {"type": "string", "description": "Actions run id or run URL (run_watch; default: latest run on branch)"},
     "tail": {"type": "integer", "description": "run_watch failed-log tail lines, 1..200 (default 15)"}
   },
@@ -197,6 +203,7 @@ type githubArgs struct {
 	Assignee       ghStrings `json:"assignee,omitempty"`
 	Label          ghStrings `json:"label,omitempty"`
 	Query          string    `json:"query,omitempty"`
+	State          string    `json:"state,omitempty"`
 	Since          string    `json:"since,omitempty"`
 	Until          string    `json:"until,omitempty"`
 	DateField      string    `json:"dateField,omitempty"`
@@ -282,6 +289,8 @@ func (t *GithubTool) Execute(ctx context.Context, args json.RawMessage) (Result,
 		return t.prCheckout(ctx, a)
 	case "pr_push":
 		return t.prPush(ctx, a)
+	case "pr_list":
+		return t.prList(ctx, a)
 	case "search_issues", "search_prs", "search_code", "search_commits", "search_repos":
 		return t.search(ctx, op, a)
 	case "run_watch":
@@ -461,6 +470,76 @@ func (t *GithubTool) repoView(ctx context.Context, a githubArgs) (Result, error)
 		Text:    renderRepoView(v),
 		Details: map[string]any{"repo": v.NameWithOwner, "url": v.URL},
 	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// pr_list
+
+// ghPRListFields is what makes a listing readable: the number to cite, the
+// title to recognize, the URL to open, and the branch it comes from.
+const ghPRListFields = "number,title,url,headRefName,isDraft"
+
+// ghPRList is one row of `gh pr list --json`.
+type ghPRList struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	HeadRef string `json:"headRefName"`
+	IsDraft bool   `json:"isDraft"`
+}
+
+// prList lists ONE repository's pull requests.
+//
+// The question "list this repo's open PRs" had no op, so the model asked it
+// reached for search_prs — a global search — and got PRs from unrelated
+// repositories (live 2026-10-22, session 65ce60d7). The scope is the checkout
+// unless the caller names another repo; open is the state every caller means.
+func (t *GithubTool) prList(ctx context.Context, a githubArgs) (Result, error) {
+	state := strings.TrimSpace(a.State)
+	if state == "" {
+		state = "open"
+	}
+	switch state {
+	case "open", "closed", "merged", "all":
+	default:
+		return Result{Text: "github: pr_list: state must be open, closed, merged or all (got " + strconv.Quote(state) + ")", IsError: true}, nil
+	}
+	repo := normalizeRepo(a.Repo)
+	if repo == "" {
+		resolved, err := t.currentRepo(ctx)
+		if err != nil {
+			return errResult(err), nil
+		}
+		repo = resolved
+	}
+	limit := a.Limit
+	if limit <= 0 {
+		limit = ghPRListLimitDefault
+	}
+	if limit > ghPRListLimitMax {
+		limit = ghPRListLimitMax
+	}
+	out, err := t.gh(ctx, "pr", "list", "--repo", repo, "--state", state,
+		"--json", ghPRListFields, "--limit", strconv.Itoa(limit))
+	if err != nil {
+		return errResult(err), nil
+	}
+	var rows []ghPRList
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return Result{Text: "github: pr_list: unexpected gh output: " + capText(strings.TrimSpace(out), 512), IsError: true}, nil
+	}
+	if len(rows) == 0 {
+		return Result{Text: fmt.Sprintf("no %s pull requests in %s", state, repo)}, nil
+	}
+	lines := make([]string, 0, len(rows))
+	for _, r := range rows {
+		draft := ""
+		if r.IsDraft {
+			draft = " [draft]"
+		}
+		lines = append(lines, fmt.Sprintf("#%d %s%s %s (%s)", r.Number, r.Title, draft, r.URL, r.HeadRef))
+	}
+	return Result{Text: strings.Join(lines, "\n")}, nil
 }
 
 func renderRepoView(v ghRepoView) string {
