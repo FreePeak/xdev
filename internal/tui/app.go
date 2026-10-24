@@ -379,6 +379,11 @@ type App struct {
 	dirty    chan struct{}
 	quitCh   chan struct{}
 	quitOnce sync.Once
+	// quitArmed is the "did you mean it" half of Ctrl+C: the first press
+	// arms it and says so, the second press within quitConfirmWindow exits.
+	// UI-thread-only, like the editor — the chord is applied on the loop.
+	quitArmed   bool
+	quitArmedAt time.Time
 
 	// UI-loop stall detection (stall.go). loopBeat is written from the loop
 	// and read by the watchdog, so it is atomic rather than mutex-guarded: a
@@ -2193,9 +2198,50 @@ func (a *App) quitOrCancel(running bool) {
 	if running && a.onCancel != nil {
 		a.onCancel()
 	}
+
 	if a.onQuit != nil {
 		a.onQuit()
 	}
+}
+
+// quitConfirmWindow is how long the first Ctrl+C stays armed. Past it the
+// chord is a fresh "I want out" and arms again, so a C-c pressed minutes ago
+// cannot lend its meaning to one pressed now.
+const quitConfirmWindow = 2 * time.Second
+
+// quitChord is the "quit" action's half of the exit contract: Ctrl+C takes two
+// presses, and every other keyboard path to exit (C-d on the last tab,
+// <leader>q, /quit) still takes one.
+//
+// One press arms the chord and says how to leave; the second press inside
+// quitConfirmWindow exits, through the same quitOrCancel every other exit
+// uses. The arming press deliberately does NOT abort the turn: with detach-on-
+// quit on (the default) the exit is a hand-off, and cancelling on the way in
+// would kill the work the hand-off exists to keep. Abort stays on Esc, and on
+// the exit press when detach declines. A remapped chord that resolves to
+// "quit" is not Ctrl+C, so it keeps the single-press behaviour: the remap is
+// the user's own instruction.
+//
+// ponytail: the arm is a timestamp on the App, not a timer; staleness is
+// decided by the window check, so there is nothing to cancel on exit.
+// Upgrade path: a real timeout that repaints an "arm expired" frame, if a
+// stale arm ever confuses someone.
+func (a *App) quitChord(key *tcell.EventKey, running bool) {
+	if key == nil || key.Key() != tcell.KeyCtrlC {
+		a.quitArmed = false
+		a.quitOrCancel(running)
+		return
+	}
+	if a.quitArmed && time.Since(a.quitArmedAt) <= quitConfirmWindow {
+		a.quitArmed = false
+		a.quitOrCancel(running)
+		return
+	}
+	// Arm first, then the notice: an open modal hands the chord back and
+	// re-dispatches it through the keymap, and the press that re-arms must
+	// not look like the confirmation.
+	a.quitArmed, a.quitArmedAt = true, time.Now()
+	a.setNotice("Press Ctrl + C again to exit!")
 }
 
 // ForkSession implements CommandAPI by delegating to wired SessionOps.Fork.
@@ -3361,7 +3407,11 @@ func (a *App) Run() {
 			// by nobody and the session could not be exited. Only the chord
 			// and only while the loop is wedged: every other key is the
 			// loop's to apply, and a chord resolved through the keymap (a
-			// user remap) is left exactly as it was.
+			// user remap) is left exactly as it was. The confirm-twice arm is
+			// deliberately NOT applied here: the loop that would paint "press
+			// again" is the wedged one, so a press that only armed would look
+			// like a dead key on a dead terminal. A wedged session exits on
+			// one press.
 			if a.wedged.Load() {
 				if k, ok := ev.(*tcell.EventKey); ok && a.keyMap.Resolve(k) == "quit" {
 					a.quitOrCancel(true)
@@ -3797,7 +3847,7 @@ func (a *App) handleKey(ev tcell.Event) {
 		a.cycleModel()
 		return
 	case "quit":
-		a.quitOrCancel(running)
+		a.quitChord(key, running)
 		return
 	case "scroll-up":
 		if a.diffOverlayOpen() {
@@ -4121,7 +4171,7 @@ func (a *App) handleKey(ev tcell.Event) {
 			a.OpenTreeSelector()
 			return
 		case "quit":
-			a.quitOrCancel(running)
+			a.quitChord(key, running)
 			return
 		}
 	}

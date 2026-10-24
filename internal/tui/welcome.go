@@ -26,7 +26,7 @@ func welcomeMenuItems() []welcomeMenu {
 		{Label: "Resume session", Key: "/resume"},
 		{Label: "New session", Key: "/new"},
 		{Label: "Clear context", Key: "/clear"},
-		{Label: "Quit", Key: "ctrl+c"},
+		{Label: "Quit", Key: "ctrl+c ×2"},
 	}
 }
 

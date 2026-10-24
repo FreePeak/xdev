@@ -171,6 +171,7 @@ func TestTreeSelectorCannotTrapTheKeyboard(t *testing.T) {
 	quit := false
 	app.SetHandlers(func(string) {}, func() {}, func() { quit = true })
 	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	app.handleKey(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
 	if !quit {
 		t.Fatal("Ctrl+C did not reach the quit handler while the selector was open")
 	}
