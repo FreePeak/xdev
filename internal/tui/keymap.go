@@ -59,8 +59,7 @@ var BuiltinActions = []string{
 	"menu-prev", "menu-next", "menu-accept",
 	"history-prev", "history-next",
 	"redraw",
-	"expand",           // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
-	"app.agents.panel", // Alt+P: the live running-subagent strip above the composer
+	"expand", // Ctrl+O: reveal the newest boxed block (result or reasoning) in full (omp's ctrl+o)
 	"clear-input",
 	"app.session.tree",
 	"model-select",    // Alt+M: the /model selector (omp app.model.select)
@@ -158,11 +157,6 @@ func DefaultKeyMap() *KeyMap {
 			// is open (filter cycle); that branch is taken before this action
 			// is ever resolved.
 			"C-o": "expand",
-			// The live subagent strip (agentspanel.go): show or hide the
-			// running-children rows above the composer. Alt+P is the
-			// Alt+letter class the model / hub / dock selectors already use,
-			// and P is the initial that names this panel.
-			"A-p": "app.agents.panel",
 			// Model selector. omp parity chord (app.model.select); Alt+M
 			// is deliverable in every terminal we target.
 			"A-m": "model-select",
@@ -182,7 +176,6 @@ func DefaultKeyMap() *KeyMap {
 			// and it is a different action from the toggle — toggling hides
 			// the rows, focusing puts the keyboard on them. A chord that
 			// does both would have to ask which state it is in.
-			"A-f": "app.agents.focus",
 			"C-r": "history-prev",
 			// omp's app.clipboard.pasteImage. This is NOT the ordinary paste —
 			// the terminal owns that and bracketed paste delivers it (see
@@ -595,7 +588,8 @@ func (m *KeyMap) sortedChords() []string {
 func chordOf(ev *tcell.EventKey) string {
 	var parts []string
 	m := ev.Modifiers()
-	if m&tcell.ModCtrl != 0 {
+	ctrlKey := ev.Key() >= tcell.KeyCtrlA && ev.Key() <= tcell.KeyCtrlZ
+	if m&tcell.ModCtrl != 0 || ctrlKey {
 		parts = append(parts, "C")
 	}
 	// Shift distinguishes arrow/nav keys — and Enter on kitty/CSI-u

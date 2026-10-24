@@ -662,12 +662,10 @@ type Settings struct {
 	// zero-skip merge. Display only — the ":effort" budget controls
 	// whether the provider thinks at all.
 	ShowThinking *bool `yaml:"showThinking"`
-	// SubagentPanel renders the live running-subagent strip above the
-	// composer. A nil pointer means "unset in this layer", the same shape
-	// ShowThinking uses and for the same reason: the default is ON, and a
-	// plain bool could never express an explicit false through the zero-skip
-	// merge. Display only — it changes what the user sees of a child, never
-	// what the model receives (the yield-only contract is untouched).
+	// subagentPanel is accepted and ignored — the floating subagent strip is
+	// gone, and rejecting the key would make a config that still sets it
+	// un-loadable (KnownFields would move the file to .broken-<stamp>) for a
+	// setting that changes nothing here.
 	SubagentPanel *bool `yaml:"subagentPanel"`
 	// SidebarMode is the context dock's display policy (issue #291 §1):
 	// "auto" follows the width rule (open at >=120 columns), "show" pins it
@@ -1224,12 +1222,6 @@ func defaultSettings() *Settings {
 		// explicit opt-out.
 		Memory: "local",
 	}
-}
-
-// SubagentPanelOn reports whether the live subagent strip renders; unset
-// follows the schema default (on), the same shape ShowThinkingOn has.
-func (s *Settings) SubagentPanelOn() bool {
-	return s == nil || s.SubagentPanel == nil || *s.SubagentPanel
 }
 
 // ShowThinkingOn reports whether thinking output should be displayed;

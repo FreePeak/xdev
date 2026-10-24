@@ -160,7 +160,7 @@ func TestSelectionStaysHighlightedAfterRelease(t *testing.T) {
 // a user drags over before anything has been sent, and the one the transcript
 // painter never records in selRows.
 func composerRow(app *App) int {
-	return app.height - 1 - app.composerRows() + 1
+	return app.height - 1 - app.composerRows()
 }
 
 // TestSelectionHighlightsTheComposer pins the half of the mouse contract the
