@@ -49,7 +49,7 @@ func TestValidateKeyTheme(t *testing.T) {
 		{"builtin", "groknight", ""},
 		{"custom", "ocean", ""},
 		{"ported palette", "tokyo-night", ""},
-		{"unknown lists available", "nope", `unknown theme "nope" (available: auto, catppuccin, dracula, grokday, groknight, gruvbox, nord, one-dark, one-light, rose-pine, tokyo-night, ocean)`},
+		{"unknown lists available", "nope", `unknown theme "nope" (available: auto, catppuccin, dracula, grokday, groknight, gruvbox, nord, omarchy, one-dark, one-light, rose-pine, tokyo-night, ocean)`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
