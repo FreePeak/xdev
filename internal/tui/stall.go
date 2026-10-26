@@ -17,10 +17,10 @@ import (
 // and only a kill ends it. A starved loop is `[runnable]` in the scheduler, or
 // sitting in its own `select` with nothing to do, and it comes back on its own
 // the moment the machine gives it a slice. The exit below is the wrong answer
-// for the second kind, and the second kind is most of what is recorded: of 324
-// dumps under ~/.xdev/agent/dumps, 206 name a stall of 90s or more and
-// goroutine 1 is `[select]` in App.Run in 105 of those — a loop with nothing to
-// do, blamed for the machine being busy.
+// for the second kind, and the second kind is most of what is recorded: of the
+// 525 dumps under ~/.xdev/agent/dumps, 493 are a loop in `[runnable]`,
+// `[select]` or `[select, N minutes]` — the scheduler's, not a wedge's. Only
+// 32 are the blocked shapes that need the escape hatch.
 //
 // The check is a substring over the loop's own `runtime.Stack` output rather
 // than a new field: the dump already carries the answer, and a state this
@@ -54,9 +54,17 @@ func stackLooksStarved(stack string) bool {
 	// nothing to do), and a plain channel receive. Every one of them comes back
 	// on its own the moment the machine gives the process a slice. What is
 	// deliberately NOT here: `syscall` (parked in the tty write) and
-	// `sync.Mutex.Lock` — the two shapes that need the escape hatch, and 22 and
+	// `sync.Mutex.Lock` — the two shapes that need the escape hatch, and 23 and
 	// 8 of the recorded dumps.
-	for _, s := range []string{"[runnable]", "[select]", "[chan receive]"} {
+	//
+	// A bracketed state is matched by PREFIX, not by exact equality: the
+	// runtime decorates a long-blocked goroutine with its elapsed time
+	// ("goroutine 1 [select, 1 minutes]"), and 1 of the recorded dumps carries
+	// exactly that. An equality test against "[select]" called it wedged and
+	// would have killed a loop that was idle. The prefix still cannot confuse
+	// the states, because every one of them is a distinct word: "[select" never
+	// matches "[syscall", and "[runnable" never matches "[sync.Mutex.Lock".
+	for _, s := range []string{"[runnable", "[select", "[chan receive"} {
 		if strings.Contains(line, s) {
 			return true
 		}
