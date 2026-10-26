@@ -28,9 +28,9 @@ const setupStarterConfig = `# xdev configuration — written by "xdev setup".
 theme: auto             # groknight | grokday | catppuccin | dracula | gruvbox | nord
                        # | one-dark | one-light | rose-pine | tokyo-night | auto
 approvalMode: yolo      # always-ask | write | yolo
-maxTurns: 200          # agent turns per run — a hard cap: this is the default
-                       # value, and a 0 is treated as unset (the settings layer
-                       # refuses it), so it is never a run without a limit
+# maxTurns: 200         # opt-in hard cap on agent turns per run; UNSET (the
+#                       # default) means no cap — the model ends the run. Set
+#                       # it only for runs with nobody watching (scripts, --bg)
 memoryLimit: 1073741824  # bytes; live-heap backstop for forced compaction (default 1 GiB)
 showThinking: true      # render reasoning output
 personality: default    # default | friendly | pragmatic | none

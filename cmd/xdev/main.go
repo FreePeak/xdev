@@ -167,22 +167,20 @@ const rootUsage = `xdev %s — lightweight coding agent (Go)
 Flags:
 `
 
-// maxTurnsHelp is the --max-turns help text. It says what the code does:
-// the flag's 0 means "use the configured maxTurns" (200 by default) — NOT
-// "no cap". The agent layer treats a 0 as unbounded, but the CLI never
-// passes one on: it substitutes the configured value first, and the
-// configured value cannot be 0 either (the settings layer refuses it).
-const maxTurnsHelp = "max agent turns per run (0 = the maxTurns setting, 200 by default)"
+// maxTurnsHelp is the --max-turns help text. Zero is the shipped default and
+// the shipped default is UNBOUNDED: an interactive session ends when the model
+// stops calling tools or when the user stops it, not because a counter ran out.
+// The flag exists for the runs nobody is watching — a script, --bg, a served
+// session — where a runaway loop has no human to press Esc.
+const maxTurnsHelp = "hard cap on agent turns per run (0 = no cap, the default)"
 
-// effectiveMaxTurnsFlag resolves the --max-turns flag against the
-// configured default. The flag's zero value means "use the configured
-// maxTurns", so the help text has to name the CONFIGURED value — the
-// agent's own 0-means-unbounded is a number the CLI never passes on.
-func effectiveMaxTurnsFlag(flagValue, configured int) int {
-	if flagValue == 0 {
-		return configured
+// resolveMaxTurns applies the flag over the configured maxTurns: an explicit
+// flag wins, and 0 in either place means unbounded.
+func resolveMaxTurns(flagValue, configured int) int {
+	if flagValue != 0 {
+		return flagValue
 	}
-	return flagValue
+	return configured
 }
 
 // resumeFlagClash names the flags --resume cannot be combined with: it
@@ -511,9 +509,7 @@ func main() {
 	if *model == "" {
 		*model = settings.DefaultModel
 	}
-	if *maxTurns == 0 {
-		*maxTurns = effectiveMaxTurnsFlag(*maxTurns, settings.MaxTurns)
-	}
+	*maxTurns = resolveMaxTurns(*maxTurns, settings.MaxTurns)
 	if *personality == "" {
 		*personality = settings.Personality
 	}
@@ -878,10 +874,11 @@ func main() {
 				os.Exit(2)
 			}
 			// Default hang ceiling: 2h wall clock when the user set no --max-time.
-			// Stream watchdogs still bound a stalled provider; --max-turns bounds
-			// a runaway tool loop. An explicit --max-time 0 is not expressible
-			// today (parseMaxTime rejects non-positive), so "unset" is the only
-			// path that gets the default.
+			// Stream watchdogs still bound a stalled provider. There is no turn
+			// cap by default, so the wall clock is the unattended ceiling; add
+			// --max-turns if a runaway loop also needs bounding. An explicit
+			// --max-time 0 is not expressible today (parseMaxTime rejects
+			// non-positive), so "unset" is the only path that gets the default.
 			childArgv := stripBgFlag(os.Args[1:])
 			if launch.MaxTime == 0 {
 				childArgv = append([]string{"--max-time", "2h"}, childArgv...)

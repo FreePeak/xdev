@@ -31,9 +31,10 @@ import (
 // status files and the host process table.
 //
 // Hang protection is the same ladder a foreground print run already has:
-// stream first-progress + idle watchdogs (ai package), --max-turns (default
-// 200), and --max-time. --bg defaults --max-time to 2h when the user did not
-// set one, so a wedged provider cannot run forever unattended.
+// stream first-progress + idle watchdogs (ai package) and --max-time. --bg
+// defaults --max-time to 2h when the user did not set one, so a wedged provider
+// cannot run forever unattended. There is no turn cap by default; pass
+// --max-turns if you also want a ceiling on the loop itself.
 //
 // ponytail: no daemon, no PTY, no attach TUI. Upgrade path is a long-lived
 // supervisor that owns the children and an attach that replays the log +
@@ -752,8 +753,8 @@ func runBg(args []string) int {
   xdev bg rm <id>        delete a finished job's status + log
   xdev bg prune          delete every finished job past the retention window
                          (--older-than 168h, --dry-run, --json)
-
 A --bg run defaults --max-time to 2h when unset, so a wedged provider cannot
+run forever. Stream watchdogs still apply; --max-turns adds a turn cap on top.
 run forever. Stream watchdogs and --max-turns still apply.
 `)
 		return 0
