@@ -550,7 +550,17 @@ type Settings struct {
 	// target: set it below a real session's working set and the collector
 	// spends a core share chasing a goal it cannot reach.
 	MemoryLimit int64 `yaml:"memoryLimit"`
-	MaxTurns    int   `yaml:"maxTurns"`
+	// MaxTurns caps one run's agent turns. The default is 0 = unbounded: the
+	// run ends when the MODEL stops calling tools, or when the user stops it —
+	// not because a counter the session cannot see ran out. It stays as an
+	// opt-in ceiling for unattended runs (`xdev --bg`, print mode, serve), the
+	// one place a runaway loop has nobody watching it.
+	//
+	// It used to default to 200, and that cap was the wrong shape: it ended
+	// runs that were still working, with one wrap-up turn and no visible
+	// notice (see loop.go). A configured 0 now means unbounded, so the merge
+	// below reads the layer's presence, not its value.
+	MaxTurns int `yaml:"maxTurns"`
 	// BranchSummary tunes the note written when the tree selector abandons a
 	// branch (#83). Enabled defaults true (omp's branchSummary.enabled);
 	// ReserveTokens caps the summary request's output.
@@ -1191,7 +1201,7 @@ func defaultSettings() *Settings {
 		Theme:              "auto",
 		ApprovalMode:       "yolo",
 		MemoryLimit:        1 << 30,
-		MaxTurns:           200,
+		MaxTurns:           0, // unbounded: the model ends the run, not a counter
 		Compaction:         CompactionSettings{MethodOrder: DefaultCompactionMethodOrder},
 		ToolsApproval:      map[string]string{},
 		Hooks:              map[string]any{},

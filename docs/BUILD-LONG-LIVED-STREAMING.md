@@ -127,18 +127,17 @@ has a different answer in the TUI than in `xdev --print`.
 `effectiveMaxTurns()` returning `a.MaxTurns` verbatim
 (`loop.go:492-494`). Nothing else is in that condition.
 
-- `--max-turns 0` (the flag default) means **"use the configured
-  `maxTurns`"** — 200 by default — NOT unbounded: the CLI substitutes
-  `settings.MaxTurns` before the agent ever sees the number, and the
-  settings layer refuses a configured 0, so 0 can never reach the agent
-  from the command line. The agent layer itself treats a 0 as unbounded
-  (`effectiveMaxTurns()` returns `a.MaxTurns` verbatim), and the constant
-  `DefaultMaxTurns = 200` that used to name that default is **deleted** —
-  the value lives in the settings layer now
-  (`internal/config/settings.go`, `MaxTurns: 200`).
-- When the cap bites, the run does NOT error: it injects one wrap-up turn
-  ("turn limit reached — wrap up the current step and report status",
-  attributed `turn-limit`, `loop.go:909`) and returns normally.
+- `--max-turns 0` (the flag default) means **no cap**, and no cap is the
+  shipped default: `maxTurns` resolves to 0 unless a config layer or the flag
+  sets a number, and `effectiveMaxTurns()` returns `a.MaxTurns` verbatim, so a
+  0 is unbounded at the agent layer *and* all the way from the command line.
+  It used to be the opposite — the CLI substituted `settings.MaxTurns` (200)
+  and the settings layer refused a configured 0 — which is exactly the shape
+  `fix/no-turn-limit` removed. A cap is now an opt-in for unattended runs
+  (`--bg`, print mode, serve), not something the session imposes on itself.
+- When a cap IS set it bites the same way: the run does NOT error, it injects
+  one wrap-up turn ("turn limit reached — wrap up the current step and report
+  status", attributed `turn-limit`) and returns normally.
 
 ### 7.2 There is no session token budget — it was deliberately removed
 
@@ -164,20 +163,20 @@ are now moot for the budget itself:
 
 | Bound | Where | Effect |
 |---|---|---|
-| `--max-turns N` | `flag` → `loop.go:614` | the only run-ending gate |
+| `--max-turns N` / `maxTurns` | `flag` → `loop.go` | the only run-ending gate — **unset by default (no cap)** |
 | `--max-tokens N` | provider-side output cap | bounds one response, not the run |
 | `debug.SetMemoryLimit` 100 MB default | `internal/memlimit` | GC pressure, then compaction |
 | `memory-limit` config key | `memlimit.ApplyFrom` (main.go:334) | same, higher or lower |
 | goal token budget | `internal/agent/goal.go` | reminder only, non-terminal |
 
-The practical consequence for a long-lived streaming session: **the turn
-cap is the whole story.** A TUI session that you let run with
-`--max-turns 0` will keep turning as long as the model keeps calling tools,
-and compaction (not a budget) is what keeps the context — and therefore the
-per-request cost — from growing without bound. The compaction ladder is
-also the path that reacts to memory pressure (`HighPressure`,
-`internal/agent/compact.go:585,610`), which is why a memory limit and the
-turn cap together bound the two things a session can run out of.
+The practical consequence for a long-lived streaming session: **nothing in
+the harness ends it.** With the shipped default (`maxTurns: 0`, no cap) a TUI
+session keeps turning as long as the model keeps calling tools, and
+compaction (not a budget) is what keeps the context — and therefore the
+per-request cost — from growing without bound. The compaction ladder is also
+the path that reacts to memory pressure (`HighPressure`,
+`internal/agent/compact.go`), so the two things that actually bound a session
+are the memory limit and the model's own decision to stop.
 
 If you need a hard token stop, the loop condition itself has to consult a
 running spend and the provider call has to take a context that aborts when

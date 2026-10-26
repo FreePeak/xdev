@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -107,25 +106,31 @@ func TestMainIsolationIsActuallyInPlace(t *testing.T) {
 	}
 }
 
-// TestMaxTurnsHelpMatchesTheCode: the --max-turns help text must say what
-// the flag does. The CLI substitutes the CONFIGURED maxTurns when the flag
-// is 0, so the text has to name that value — "unbounded" is what the agent
-// layer does with a 0 the CLI never passes on.
-func TestMaxTurnsHelpMatchesTheCode(t *testing.T) {
+// TestMaxTurnsDefaultsToUnbounded: the shipped session has no turn cap, and
+// the --max-turns help says so. The cap used to default to 200, which ended
+// runs that were still working — an interactive session is ended by the model
+// finishing or by the user stopping it, not by a counter it cannot see.
+func TestMaxTurnsDefaultsToUnbounded(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDEV_AGENT_DIR", t.TempDir())
 	settings, err := config.LoadSettings(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The substitution the CLI does, read from the same place it reads it.
-	if got := effectiveMaxTurnsFlag(0, settings.MaxTurns); got != settings.MaxTurns {
-		t.Fatalf("--max-turns 0 resolved to %d, want the configured %d", got, settings.MaxTurns)
+	if settings.MaxTurns != 0 {
+		t.Fatalf("the default maxTurns is %d, want 0 (no cap)", settings.MaxTurns)
 	}
-	if !strings.Contains(maxTurnsHelp, strconv.Itoa(settings.MaxTurns)) {
-		t.Fatalf("--max-turns help %q must name the value the CLI substitutes (%d)", maxTurnsHelp, settings.MaxTurns)
+	// The flag resolves over the setting, and 0 in either place means no cap.
+	if got := resolveMaxTurns(0, 0); got != 0 {
+		t.Fatalf("an unset flag over an uncapped setting resolved to %d, want 0", got)
 	}
-	if strings.Contains(maxTurnsHelp, "unbounded") {
-		t.Fatalf("--max-turns help %q must not claim 0 is unbounded: the CLI substitutes %d", maxTurnsHelp, settings.MaxTurns)
+	if got := resolveMaxTurns(0, 50); got != 50 {
+		t.Fatalf("an unset flag must keep the configured cap: got %d", got)
+	}
+	if got := resolveMaxTurns(7, 50); got != 7 {
+		t.Fatalf("an explicit flag must win: got %d", got)
+	}
+	if !strings.Contains(maxTurnsHelp, "no cap") {
+		t.Fatalf("--max-turns help %q must say 0 is no cap, which is now the default", maxTurnsHelp)
 	}
 }

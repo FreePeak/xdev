@@ -71,7 +71,7 @@ func TestSetupStarterConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSettings on the starter config: %v", err)
 	}
-	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 200 || s.Memory != "local" {
+	if s.Theme != "auto" || s.ApprovalMode != "yolo" || s.MaxTurns != 0 || s.Memory != "local" {
 		t.Errorf("starter config resolved to %+v, want the shipped defaults", s)
 	}
 	if s.MemoryLimit != 1<<30 {
@@ -152,29 +152,24 @@ func TestSetupRejectsArguments(t *testing.T) {
 	}
 }
 
-// TestStarterConfigDoesNotPromiseACapItCannotDeliver: the starter file is
-// written into EVERY user's config, so a comment that promises "0 =
-// unbounded" is a lie in everyone's home directory — the settings layer
-// treats a 0 as unset, so the run gets the default 200 turns.
+// TestStarterConfigLeavesTheTurnCapOff: the starter file is written into EVERY
+// user's config, and the shipped session has no turn cap — the model ends the
+// run, not a counter. So the file must not write a maxTurns value, and the
+// comment it offers for the key must say that setting it is opt-in.
 //
-// The file must also carry the value the settings layer will actually
-// honour: a 0 in the file is silently discarded, so a file that says 0
-// says nothing.
-func TestStarterConfigDoesNotPromiseACapItCannotDeliver(t *testing.T) {
-	if strings.Contains(setupStarterConfig, "unbounded") {
-		t.Fatalf("the starter config promises a cap the settings layer refuses to give:\n%s", setupStarterConfig)
-	}
+// It used to be the opposite bug: the file wrote `maxTurns: 0 # unbounded`
+// while the settings layer discarded a configured 0 and ran 200 turns, so the
+// comment lied. The resolution is now 0 = no cap at both layers.
+func TestStarterConfigLeavesTheTurnCapOff(t *testing.T) {
 	var s config.Settings
 	dec := yaml.NewDecoder(strings.NewReader(setupStarterConfig))
 	dec.KnownFields(true)
 	if err := dec.Decode(&s); err != nil {
 		t.Fatal(err)
 	}
-	if s.MaxTurns == 0 {
-		t.Fatalf("the starter config writes maxTurns: 0, which the settings layer discards:\n%s", setupStarterConfig)
+	if s.MaxTurns != 0 {
+		t.Fatalf("the starter config caps turns at %d; the default must be no cap:\n%s", s.MaxTurns, setupStarterConfig)
 	}
-	// And the resolved value is the shipped default, not something the file
-	// silently changed.
 	_ = setupDataDir(t)
 	if code, _, errw := runSetup(t); code != 0 {
 		t.Fatalf("exit = %d, stderr = %s", code, errw)
@@ -183,7 +178,7 @@ func TestStarterConfigDoesNotPromiseACapItCannotDeliver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.MaxTurns != 200 {
-		t.Fatalf("the starter config resolves to %d turns, want the default 200", resolved.MaxTurns)
+	if resolved.MaxTurns != 0 {
+		t.Fatalf("the starter config resolves to %d turns, want no cap", resolved.MaxTurns)
 	}
 }

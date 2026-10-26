@@ -198,18 +198,23 @@ const PromptContinuationPrompt = "continue the unfinished work: take the next co
 // final sentence.
 const maxPromptContinuations = 2
 
-// A run is bounded by its turn cap (MaxTurns) and by the user, not by a
-// stopwatch.
+// A run ends when the MODEL stops calling tools, or when the user stops it. It
+// is not bounded by a stopwatch, and by default it is not bounded by a turn
+// count either (MaxTurns 0): an interactive session the human is watching does
+// not need a ceiling they cannot see, and one that fires reads as the model
+// giving up. A ceiling is still expressible per run for the case that does
+// need it — an unattended one (--bg, a script, a served session) with nobody
+// to press Esc.
 //
 // It used to be bounded by a 6-minute wall clock as well, and that clock was
 // wrong in the way that matters: it ended runs that were still working.
 // Measured on this repo's own transcript store (2026-10-24, 1220 session
 // files): 97 wrap-ups across 80 sessions, and 48 of them — half —
 // were answered by a model that still wanted tools, so the run died at the
-// next step boundary with no error, no notice and no exit code. In an
-// interactive session the human IS the clock, and a budget that nobody can see
-// is not a safety net: it reads as the model giving up. Claude Code, opencode
-// and omp all ship without one.
+// The guards that remain each name a failure they can print: the opt-in turn
+// cap, the repeat guard (the same call again), the coarse re-derivation break
+// (the same work re-spelled), the empty-turn nudge ladder (a model that answers
+// nothing), and the retry/failover ladders (a provider that fails).
 //
 // The guards that remain each name a failure they can print: the turn cap, the
 // repeat guard (the same call again), the coarse re-derivation break (the same
@@ -657,11 +662,11 @@ func (a *Agent) drainSteering() []Steering {
 }
 
 // Run executes turns until the model stops calling tools.
-// history is the
-// conversation so far (mutable within this run: assistant and toolResult
-// messages are appended as the run progresses).
-// Only the turn cap (MaxTurns) ends the run, and it does so with one
-// wrap-up message rather than an error.
+// history is the conversation so far (mutable within this run: assistant and
+// toolResult messages are appended as the run progresses).
+// A set MaxTurns ends the run at the cap, with one wrap-up message rather than
+// an error; the zero default (unbounded) leaves that branch unreachable, so the
+// model is what ends the run.
 // Returns the terminal assistant message.
 func (a *Agent) Run(ctx context.Context, system string, history []ai.Message) (final *ai.Message, runErr error) {
 	if a.Hooks == nil {

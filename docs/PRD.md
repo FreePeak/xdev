@@ -4718,7 +4718,7 @@ A keyboard bug fell out of it: a raw Ctrl+O arrives as `tcell.KeyCtrlO` with `Mo
 
 **Why.** Measured on this repo's own transcript store (2026-10-24, 1220 session files): **97 budget wrap-ups across 80 sessions**, and **48 of them — half — were answered by a model that still wanted tools**, so the run died at the next step boundary with **no error, no notice and no exit code**. It also fired more than once per session (`13c0b063`: wrap-ups at 18:09:45 and 18:17:13), because the clock is per-`Run`, i.e. per ask — which is exactly the ask that needs the time: a migration, a multi-file refactor, a root-cause sweep. In an interactive session the human IS the clock; a stopwatch nobody can see is not a safety net, it reads as the model giving up. Claude Code, opencode and omp all ship without one.
 
-**What still ends a run**, each for a reason it can print: the turn cap (`maxTurns`, default 200, with a wrap-up turn), the repeat guard (the same call again), the coarse re-derivation break (the same work re-spelled), the empty-turn nudge ladder (a model that answers nothing), and the retry/failover ladders (a provider that fails). The keep-going gate lost its `run-budget` arm with the budget; its own-nudge guard and the real-user-turn task boundary are unchanged.
+**What still ends a run**, each for a reason it can print: the repeat guard (the same call again), the coarse re-derivation break (the same work re-spelled), the empty-turn nudge ladder (a model that answers nothing), and the retry/failover ladders (a provider that fails). The keep-going gate lost its `run-budget` arm with the budget; its own-nudge guard and the real-user-turn task boundary are unchanged. The turn cap that survived that change is removed by default in `fix/no-turn-limit` (below).
 
 **Tests.** `internal/agent/run_budget_stop_test.go` — `TestTheRunHasNoWallClockBudget` (a source guard on `loop.go`: the field, the constant and the attribution must not come back) and `TestTheKeepGoingGateDoesNotNudgeTwice` (the gate's own guard plus a real user turn clearing it). `internal/config/runbudget_test.go` — `TestRunBudgetIsNoLongerASettingsKey`, `internal/config/settings_test.go` — `TestLegacyRunBudgetKeyIsDropped` (a file that still carries `runBudget: 3600` loads, keeps its sibling keys, is not quarantined as `*.broken-*`, and a second start still sees the migrated file).
 *Last updated: 2026-10-24 (fix/remove-run-budget — the per-run wall clock is removed: no auto-stop after 6 minutes, the setting is migrated away instead of breaking the config, and the guards that name a real failure remain)*
@@ -4743,3 +4743,49 @@ Sources are the tool's own: `tool.TodoMarker`/`tool.RomanNumeral` are now export
 *Last updated: 2026-10-24 (feat/todo-strip — the task list rides above the composer: omp's sticky-HUD shape, one phase expanded and the rest one line, retiring itself when nothing is open; PR #757)
 
 *Last updated: 2026-10-26 (feat/hub-deeper-orchestration — hub TUI roster now reads the hub's AgentRecords projection: status/outcome/kind/parent/level and tokens/requests/tools/cost/duration flow into rows; header counts are live; steer wired into HubOps and the roster (s key))*
+
+## The turn cap is gone by default: the model ends the run (fix/no-turn-limit, #768)
+
+`maxTurns` capped a run at **200** turns, and that cap was the wrong default for the
+same reason the 6-minute wall clock was (`fix/remove-run-budget`, above): it ended runs
+that were still working, and it did so at a step boundary with one synthetic wrap-up turn
+rather than an error. The user asked for the opposite contract — *"I want agent LLM model
+stop the session itself not by my xdev tool"* — and the codebase already had the
+mechanism: `Agent.MaxTurns == 0` has always meant unbounded (`internal/agent/loop.go`),
+and the CLI was the only thing that never passed a 0 on, substituting the settings value
+instead.
+
+What changed:
+
+- `internal/config/settings.go` — `defaultSettings()` ships `MaxTurns: 0`. A configured 0
+  is therefore no longer "unset, use the default"; it IS the default. The field's comment
+  says why, so the next reader does not "fix" it back to 200.
+- `cmd/xdev/main.go` — `effectiveMaxTurnsFlag` becomes `resolveMaxTurns(flag, configured)`:
+  the flag wins when set, and 0 in either place means no cap. `maxTurnsHelp` now says
+  "hard cap on agent turns per run (0 = no cap, the default)", so `xdev help` stops
+  promising a cap the session no longer has.
+- `internal/dist/setup.go` — the starter config no longer writes `maxTurns: 200`; the key
+  is offered as a commented opt-in, so every new user's `config.yml` starts uncapped.
+- Unchanged, deliberately: the `--max-turns` flag, the `maxTurns` setting, the agent-level
+  field and the wrap-up branch. They are the **opt-in** ceiling for the runs with nobody
+  watching them (`--bg`, print mode, a served session, a CI script), which is exactly
+  where a cap earns its keep. Deleting them would remove the only bound on a runaway loop
+  in an unattended run.
+- Unchanged, also deliberately: `DefaultSubagentMaxTurns = 30` for `task` children. A
+  child does one focused job and hands back; 30 is a spawn-chain guard, not a limit on the
+  session the user is driving.
+
+The guards that still bound a run are the ones that name a real failure they can print:
+the repeat guard (the same call again, break at 8 identical calls), the coarse
+re-derivation break, the empty-turn nudge ladder (2 nudges + 3 recoveries), and the
+retry/failover ladders (a provider that fails). None of them is a silent counter.
+
+**Tests.** `cmd/xdev/main_test.go` — `TestMaxTurnsDefaultsToUnbounded` (the resolved
+default is 0, `resolveMaxTurns` lets an explicit flag win and keeps a configured cap, and
+the help text says "no cap"). `internal/config/settings_test.go` — `TestSettingsAbsent…`
+now asserts the 0 default (the old assertion pinned 200, which is the failure mode the
+test exists to catch). `internal/dist/setup_test.go` — `TestStarterConfigLeavesTheTurnCapOff`
+replaces `TestStarterConfigDoesNotPromiseACapItCannotDeliver`: the starter file must decode
+to `MaxTurns == 0` and must resolve to 0.
+
+*Last updated: 2026-10-26 (fix/no-turn-limit — the session no longer caps itself at 200 agent turns: the model ends the run, and `--max-turns`/`maxTurns` remain as the opt-in ceiling for unattended runs)*
