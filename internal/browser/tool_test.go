@@ -584,20 +584,20 @@ func TestSanitizeText(t *testing.T) {
 // TestEndpointResolution pins the config → env → default precedence.
 func TestEndpointResolution(t *testing.T) {
 	t.Setenv(envEndpoint, "")
-	if got := resolveEndpoint(""); got != defaultEndpoint {
+	if got := resolveEndpoint("", false, ""); got != defaultEndpoint {
 		t.Errorf("default endpoint = %q", got)
 	}
-	if got := resolveEndpoint("127.0.0.1:9333"); got != "http://127.0.0.1:9333" {
+	if got := resolveEndpoint("127.0.0.1:9333", false, ""); got != "http://127.0.0.1:9333" {
 		t.Errorf("scheme-less endpoint = %q", got)
 	}
-	if got := resolveEndpoint("http://host:9222/"); got != "http://host:9222" {
+	if got := resolveEndpoint("http://host:9222/", false, ""); got != "http://host:9222" {
 		t.Errorf("trailing slash = %q", got)
 	}
 	t.Setenv(envEndpoint, "http://env:9222")
-	if got := resolveEndpoint(""); got != "http://env:9222" {
+	if got := resolveEndpoint("", false, ""); got != "http://env:9222" {
 		t.Errorf("env endpoint = %q", got)
 	}
-	if got := resolveEndpoint("http://cfg:9222"); got != "http://cfg:9222" {
+	if got := resolveEndpoint("http://cfg:9222", false, ""); got != "http://cfg:9222" {
 		t.Errorf("configured endpoint must win: %q", got)
 	}
 	if got := discoveryURL("http://h:9222"); got != "http://h:9222/json/list" {

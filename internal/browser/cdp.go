@@ -206,22 +206,36 @@ const defaultEndpoint = "http://127.0.0.1:9222"
 // envEndpoint overrides the endpoint for a session without editing config.
 const envEndpoint = "XDEV_BROWSER_CDP_URL"
 
-// resolveEndpoint applies the browser.cdpUrl → $XDEV_BROWSER_CDP_URL →
-// default precedence and normalizes the value to a discovery base URL.
-func resolveEndpoint(configured string) string {
+// resolveEndpoint applies browser.cdpUrl → $XDEV_BROWSER_CDP_URL →
+// auto-connect → the extension bridge → Chrome's default port, and
+// normalizes the value to a discovery base URL. autoConnect only contributes
+// when no endpoint was given explicitly: a caller who names a URL has already
+// chosen, and the real profile must never silently replace it.
+func resolveEndpoint(configured string, autoConnect bool, profileDir string) string {
 	base := strings.TrimSpace(configured)
 	if base == "" {
 		base = strings.TrimSpace(os.Getenv(envEndpoint))
 	}
-	if base == "" {
-		// Prefer the xdev Chrome extension bridge when it is already listening
-		// (personal profile via chrome.debugger). Fall back to Chrome's default
-		// remote-debugging port otherwise.
-		if chromeBridgeAlive() {
-			return chromeBridgeEndpoint
-		}
-		return defaultEndpoint
+	if base != "" {
+		return normalizeEndpoint(base)
 	}
+	if autoConnect {
+		if ep, ok := autoConnectEndpoint(profileDir); ok {
+			return ep
+		}
+	}
+	// Prefer the xdev Chrome extension bridge when it is already listening
+	// (personal profile via chrome.debugger). Fall back to Chrome's default
+	// remote-debugging port otherwise.
+	if chromeBridgeAlive() {
+		return chromeBridgeEndpoint
+	}
+	return defaultEndpoint
+}
+
+// normalizeEndpoint turns a host:port shorthand into a discovery base URL
+// and strips a trailing slash so callers can append /json/list safely.
+func normalizeEndpoint(base string) string {
 	if !strings.Contains(base, "://") {
 		base = "http://" + base
 	}
