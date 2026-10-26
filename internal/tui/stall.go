@@ -22,6 +22,14 @@ import (
 // `[select]` or `[select, N minutes]` — the scheduler's, not a wedge's. Only
 // 32 are the blocked shapes that need the escape hatch.
 //
+// The other half of the false-alarm story is the clock, and it is in watchStall:
+// of those 525 dumps, 348 have goroutine 1 parked in App.Run's own select — a
+// loop with nothing to do, reported as a stall — and of the 188 written while
+// `pmset -g log` still had the window, 185 have a machine wake inside the
+// beat->write span or within a minute of the write. A stalled loop and a
+// suspended machine look identical on the wall clock, so the verdict is now
+// reached on a clock a sleep cannot advance.
+//
 // The check is a substring over the loop's own `runtime.Stack` output rather
 // than a new field: the dump already carries the answer, and a state this
 // decision reads must be the same state the file records.
@@ -102,15 +110,6 @@ const (
 	// megabyte on a busy session; the head is where the stuck loop is, and a
 	// truncated tail is still worth more than no file.
 	stallStackCap = 1 << 20
-	// pollSkip is how far the wall clock may run between two watchdog polls
-	// before the gap is read as the machine having slept rather than the loop
-	// being stuck. A suspended Mac advances the wall clock but not the UI loop,
-	// and the loop cannot be blamed for time it never had: of the 165 dumps
-	// xdev wrote on 2026-09-28, 16 were exactly this — every one of them inside
-	// a `pmset -g log` sleep interval, the day's false alarms running 5s to
-	// 17m43s. A poll merely late by seconds is scheduling, not sleep, so the
-	// bound is generous.
-	pollSkip = 30 * time.Second
 )
 
 // SetStallDumpDir enables the UI-loop stall dump. dir is where
@@ -192,18 +191,44 @@ func (a *App) beatDone(phase string, start time.Time) {
 // seconds. Production never writes it.
 var slowIteration = stallSlowLog
 
+// awakeNow is how long THIS PROCESS has been running, system sleep excluded.
+//
+// It is the only honest scale for a stall: time.Since on a monotonic reading
+// reads mach_absolute_time, which does not advance while the machine is
+// suspended (measured on this Mac: mach_continuous_time - mach_absolute_time =
+// 72h19m of sleep). The wall clock, by contrast, charges the loop for every
+// second the lid was shut — and that is what the watchdog used to do.
+func awakeNow() time.Duration { return time.Since(awakeBase) }
+
+// awakeBase is the origin of awakeNow. Package-level and read-only, so every
+// caller measures from the same instant.
+var awakeBase = time.Now()
+
+// awakeNowFn is awakeNow behind a variable, so a test can suspend the process
+// it is measuring. Production never writes it.
+var awakeNowFn = awakeNow
+
 // beat records that the UI loop is making progress. Called from Run once per
-// iteration, so a hung handleKey/draw simply stops updating it.
-func (a *App) beat() { a.loopBeat.Store(time.Now().UnixNano()) }
+// iteration, so a hung handleKey/draw simply stops updating it. The stamp is
+// AWAKE time (see awakeNow): a machine that sleeps must not age the beat.
+func (a *App) beat() { a.loopBeat.Store(int64(awakeNowFn())) }
 
 // watchStall is the watchdog: it watches for the loop to stop beating and
 // writes the goroutine stacks that explain why. The thresholds and the stop
 // channel are arguments rather than package state, so the goroutine reads
 // nothing mutable — a test (and a future caller) can run one at a different
 // cadence without racing another. It exits when stop closes. now is time.Now in
-// production and a jumpable clock in a test: the one silence that is not a
-// stall can only be told from a stall by how the clock itself behaved across
-// the gap.
+// production and a jumpable clock in a test, used for the dump's own timestamps.
+//
+// STALENESS IS MEASURED ON THE AWAKE CLOCK, not on `now`. A machine that
+// suspends stops the UI loop without anything being wrong with it, and only
+// awake time tells that apart from a hang. The records say this is not a
+// corner: of 525 dumps under ~/.xdev/agent/dumps, 348 show goroutine 1 parked
+// in App.Run's own select — an idle loop, not a stuck one — and of the 188
+// written while pmset was logging, 185 have a sleep window inside the
+// beat->write span or within a minute of the write. The 112 whose last beat is
+// exactly 25s old are the clearest: the sleep began at the dump's own second,
+// so the loop was suspended for the 25s being blamed on it.
 func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop <-chan struct{}) {
 	if a.stallDir == "" {
 		return
@@ -216,49 +241,30 @@ func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop 
 	// first one). A NEW episode is a beat that has advanced past it, i.e. the
 	// loop did recover and hung again.
 	dumpedForBeat := int64(-1)
-	// Grace after a wake, so the loop gets to draw its first frame back before
-	// a beat that predates the sleep is condemned a second time. DarkWake brings
-	// the machine back without the user, and the beat it wakes into is stale by
-	// construction. Two stall windows is the whole allowance: past that the
-	// beat is a real stall, sleep or not, and it is reported.
-	graceUntil := time.Time{}
-	// condemnedAt is when this episode was first reported. A loop that never
-	// comes back must not keep the process alive forever: after stallExitAfter
-	// the watchdog restores the terminal and ends the session, because the
-	// user reported the dead end as "I cannot exit, Ctrl+C and Ctrl+D do
-	// nothing" (session 00b1c5a0, 2026-09-30) and no key can reach a loop
-	// that is wedged. A recovered loop clears it, so the next hang is judged
-	// on its own clock.
-	condemnedAt := time.Time{}
-	// prev is the previous poll's wall time; a skip shows up as one gap far
-	// wider than the poll interval.
-	prev := now()
+	// condemnedAt is when this episode was first reported, on the awake clock
+	// so the exit budget cannot be paid by a machine that slept through it. A
+	// loop that never comes back must not keep the process alive forever:
+	// after stallExitAfter the watchdog restores the terminal and ends the
+	// session, because the user reported the dead end as "I cannot exit,
+	// Ctrl+C and Ctrl+D do nothing" (session 00b1c5a0, 2026-09-30) and no key
+	// can reach a loop that is wedged. A recovered loop clears it, so the next
+	// hang is judged on its own clock.
+	condemnedAt := time.Duration(-1)
 	for {
 		select {
 		case <-stop:
 			return
 		case <-tick.C:
 			at := now()
-			// A skip arms the grace; it does not disarm the watchdog. A loop
-			// still stuck after a wake must still be reported.
-			if at.Sub(prev) > pollSkip {
-				graceUntil = at.Add(2 * after)
-			}
-			prev = at
-			if at.Before(graceUntil) {
-				continue
-			}
+			awake := awakeNowFn()
 			beat := a.loopBeat.Load()
-			if at.Sub(time.Unix(0, beat)) < after {
+			stale := awake - time.Duration(beat)
+			if stale < after {
 				// The loop came back: a new episode starts from scratch, and
 				// the chord belongs to the loop again.
-				condemnedAt = time.Time{}
+				condemnedAt = -1
 				a.wedged.Store(false)
 				continue
-			}
-			a.wedged.Store(true)
-			if condemnedAt.IsZero() {
-				condemnedAt = at
 			}
 			if beat == dumpedForBeat {
 				// Already reported for this beat, but the exit clock keeps
@@ -270,18 +276,20 @@ func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop 
 				// same starvation with a fresh MCP child set. So the exit is
 				// held for a loop that is blocked, and a starved one is left
 				// to recover (its own quit chord still works).
-				if a.stallExitAfter > 0 && at.Sub(condemnedAt) >= a.stallExitAfter && !loopStarvedFn() {
-					a.exitWedgedLoop(at.Sub(time.Unix(0, beat)))
+				if a.stallExitAfter > 0 && condemnedAt >= 0 && awake-condemnedAt >= a.stallExitAfter && !loopStarvedFn() {
+					a.exitWedgedLoop(stale)
 					return
 				}
 				continue
 			}
+			a.wedged.Store(true)
+			condemnedAt = awake
 			dumpedForBeat = beat
 			// stderr, never the screen: the loop is stuck so nothing can be
 			// drawn, and raw-mode output still lands where it can be read.
 			fmt.Fprintf(os.Stderr, "\nxdev: UI loop stalled for %s (pid %d)\n",
-				at.Sub(time.Unix(0, beat)).Truncate(time.Second), os.Getpid())
-			if path, err := a.dumpStall(at, beat); err != nil {
+				stale.Truncate(time.Second), os.Getpid())
+			if path, err := a.dumpStall(at, awake, stale); err != nil {
 				fmt.Fprintf(os.Stderr, "xdev: stall dump failed: %v\n", err)
 			} else {
 				fmt.Fprintf(os.Stderr, "xdev: stall dump written to %s\n", path)
@@ -290,8 +298,11 @@ func (a *App) watchStall(after, check time.Duration, now func() time.Time, stop 
 	}
 }
 
-// dumpStall captures every goroutine and writes it under the dumps dir.
-func (a *App) dumpStall(at time.Time, beat int64) (string, error) {
+// dumpStall captures every goroutine and writes it under the dumps dir. at is
+// the wall clock the file is named and stamped with; stale is how long the loop
+// had really been silent in AWAKE time, which is the number a reader needs —
+// and the one the old header got wrong whenever the machine had slept.
+func (a *App) dumpStall(at time.Time, awake, stale time.Duration) (string, error) {
 	buf := make([]byte, stallStackCap)
 	for {
 		n := runtime.Stack(buf, true)
@@ -311,13 +322,15 @@ func (a *App) dumpStall(at time.Time, beat int64) (string, error) {
 	}
 	defer f.Close()
 	// The header deliberately avoids App state: reading model/session needs
-	// the mutex the stuck loop may be holding.
+	// the mutex the stuck loop may be holding. It carries both clocks, because
+	// the difference between them is what answers "did the machine sleep
+	// through this?" long after pmset's own log has rolled over (24h here).
 	head := fmt.Sprintf("xdev UI loop stall\n"+
-		"written: %s\npid: %d\nlast loop beat: %s (%s ago)\n"+
-		"--- goroutine stacks ---\n",
+		"written: %s\npid: %d\nlast loop beat: %s (%s of awake time ago)\n"+
+		"process awake for: %s\n--- goroutine stacks ---\n",
 		at.Format(time.RFC3339), os.Getpid(),
-		time.Unix(0, beat).Format(time.RFC3339Nano),
-		at.Sub(time.Unix(0, beat)).Truncate(time.Millisecond))
+		at.Add(-stale).Format(time.RFC3339Nano), stale.Truncate(time.Millisecond),
+		awake.Truncate(time.Millisecond))
 	if _, err := f.WriteString(head); err != nil {
 		return "", err
 	}

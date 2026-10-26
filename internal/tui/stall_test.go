@@ -125,28 +125,32 @@ func TestStallWatchdogSilentWhenLoopHealthy(t *testing.T) {
 
 // A machine that was asleep is not a loop that hung. The 2026-09-28 dumps made
 // the point expensively: of 165 written that day, 16 were silence a `pmset -g
-// log` sleep interval accounted for exactly, reported as stalls of 5s to
-// 17m43s while goroutine 1 sat in the same idle select it always sits in. The
-// watchdog can tell a sleep from a hang only by the clock: it polls once a
-// second, and a sleep is one poll that is suddenly fifteen minutes wide.
+// log` sleep interval accounted for exactly, reported as stalls of 5s to 17m43s
+// while goroutine 1 sat in the same idle select it always sits in. The old
+// detector looked for a WIDE POLL — a wall-clock gap over pollSkip — which only
+// catches the long sleeps and never the short one that dominates the record.
+//
+// The verdict is now reached on the awake clock, so the test suspends exactly
+// the clock the machine suspends.
 func TestStallWatchdogIgnoresSilenceThatIsOnlyASleep(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dumps")
 	app, _ := loopApp(80, 24)
 	app.SetStallDumpDir(dir)
+	clock := newSleepClock(t)
 	app.beat()
 
-	// A clock the test can suspend, exactly as the machine's is: the wall
-	// reading jumps a long way while the beat stands still.
-	clock := &jumpClock{now: time.Now()}
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
 	go app.watchStall(50*time.Millisecond, 20*time.Millisecond, clock.Now, stop)
 
-	// Poll normally: healthy, so nothing is written.
+	// Poll normally: healthy, so nothing is written. The loop keeps beating,
+	// as a live one does every 25ms.
+	clock.advance(80 * time.Millisecond)
+	app.beat()
 	time.Sleep(80 * time.Millisecond)
-	// The lid closes. The next poll sees fifteen minutes of wall clock go by in
-	// one step, and the loop beat is to the watchdog fifteen minutes old.
-	clock.jump(15 * time.Minute)
+	// The lid closes. The wall clock jumps fifteen minutes; the awake clock,
+	// which is the one the loop is judged on, does not move at all.
+	clock.suspend(15 * time.Minute)
 	time.Sleep(200 * time.Millisecond)
 
 	if entries, err := readDirNames(dir); err == nil && len(entries) != 0 {
@@ -154,6 +158,7 @@ func TestStallWatchdogIgnoresSilenceThatIsOnlyASleep(t *testing.T) {
 	}
 
 	// The loop beats again once awake. Nothing stale is left to condemn.
+	clock.advance(time.Millisecond)
 	app.beat()
 	time.Sleep(200 * time.Millisecond)
 	if entries, err := readDirNames(dir); err == nil && len(entries) != 0 {
@@ -161,25 +166,54 @@ func TestStallWatchdogIgnoresSilenceThatIsOnlyASleep(t *testing.T) {
 	}
 }
 
-// The grace is a pause, not a pardon: a loop still stuck once the allowance
-// runs out is a real stall and must still be reported, asleep or not. Otherwise
-// the fix is a way to lose the report this whole mechanism exists for.
+// The 25-second case, which is the one that actually filled the dumps dir: 112
+// of 525 files have their last beat exactly 25s old, because that is how long
+// the machine had been suspended when the wake landed. It is below pollSkip, so
+// the wide-poll grace never armed and every one of them was written.
+func TestStallWatchdogIgnoresAShortSleepBelowThePollSkipBound(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dumps")
+	app, _ := loopApp(80, 24)
+	app.SetStallDumpDir(dir)
+	clock := newSleepClock(t)
+	app.beat()
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go app.watchStall(5*time.Second, 20*time.Millisecond, clock.Now, stop)
+
+	// A loop that is running beats on its 25ms tick; model that, or the test
+	// is a two-second stall rather than a suspension.
+	clock.advance(100 * time.Millisecond)
+	app.beat()
+	time.Sleep(100 * time.Millisecond)
+	// One 25s suspension: the wall clock moves, the loop did not run for any
+	// of it. On the old code this is a 25s stall and gets a file.
+	clock.suspend(25 * time.Second)
+	time.Sleep(200 * time.Millisecond)
+
+	if entries, err := readDirNames(dir); err == nil && len(entries) != 0 {
+		t.Fatalf("a 25s suspension produced stall dumps: %v", entries)
+	}
+}
+
+// The other half, and the reason the grace is not a pardon: a loop that is
+// still stuck once the machine is awake again is a real stall and is reported.
+// A suspension withholds only the time it took.
 func TestStallWatchdogStillReportsAStallAfterASleep(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dumps")
 	app, _ := loopApp(80, 24)
 	app.SetStallDumpDir(dir)
+	clock := newSleepClock(t)
 	app.beat()
 
-	clock := &jumpClock{now: time.Now()}
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
 	go app.watchStall(50*time.Millisecond, 20*time.Millisecond, clock.Now, stop)
 
 	// The loop is stuck: no beat after this one, through the sleep and past it.
-	clock.jump(15 * time.Minute)
-	// The grace is two stall windows; let several of them elapse.
+	clock.suspend(15 * time.Minute)
 	for range 12 {
-		clock.jump(50 * time.Millisecond)
+		clock.advance(50 * time.Millisecond)
 		time.Sleep(25 * time.Millisecond)
 	}
 
@@ -190,6 +224,52 @@ func TestStallWatchdogStillReportsAStallAfterASleep(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("a loop stuck across a sleep produced %d dumps, want 1: %v", len(entries), entries)
 	}
+}
+
+// sleepClock is the pair of clocks a suspended Mac really has: a wall clock
+// that jumps across the sleep, and an awake clock that does not. advanced
+// moves both; suspend moves only the wall one. Install it with newSleepClock,
+// which swaps awakeNowFn for the duration of the test.
+type sleepClock struct {
+	mu    sync.Mutex
+	wall  time.Time
+	awake time.Duration
+}
+
+func newSleepClock(t *testing.T) *sleepClock {
+	t.Helper()
+	c := &sleepClock{wall: time.Now()}
+	prev := awakeNowFn
+	awakeNowFn = c.Awake
+	t.Cleanup(func() { awakeNowFn = prev })
+	return c
+}
+
+func (c *sleepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.wall
+}
+
+func (c *sleepClock) Awake() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.awake
+}
+
+// advance is time passing with the machine awake: both clocks move.
+func (c *sleepClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wall = c.wall.Add(d)
+	c.awake += d
+}
+
+// suspend is the lid closing: the wall clock moves, the awake clock does not.
+func (c *sleepClock) suspend(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wall = c.wall.Add(d)
 }
 
 // jumpClock is a wall clock the test can suspend, standing in for a machine
@@ -240,4 +320,30 @@ func names(entries []os.DirEntry) []string {
 		out = append(out, e.Name())
 	}
 	return out
+}
+
+// The dump's own header is what a reader has instead of the machine, and its
+// staleness number must be the AWAKE silence. On the old header a 25s
+// suspension and a 25s hang were the same line, and the files are read days
+// later — pmset keeps 24h, so by then nothing can tell them apart.
+func TestStallDumpNamesAwakeSilenceNotWallSilence(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dumps")
+	app, _ := loopApp(80, 24)
+	app.SetStallDumpDir(dir)
+
+	path, err := app.dumpStall(time.Now(), 3*time.Minute, 7*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := string(data)
+	if !strings.Contains(head, "7s of awake time ago") {
+		t.Fatalf("the header does not say how long the loop was really silent:\n%.400s", head)
+	}
+	if !strings.Contains(head, "process awake for: 3m0s") {
+		t.Fatalf("the header does not say how long this process has been running:\n%.400s", head)
+	}
 }
