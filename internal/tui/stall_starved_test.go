@@ -16,6 +16,12 @@ func TestStackLooksStarvedOnRealDumpHeaders(t *testing.T) {
 	starved := []string{
 		"goroutine 1 [select]:\ngithub.com/FreePeak/xdev/internal/tui.(*App).Run(0x14000fe5608)\n\t.../app.go:3202 +0x140\n",
 		"goroutine 1 [runnable]:\ngithub.com/gdamore/tcell/v2.(*tScreen).drawCell(...)\n\t.../tscreen.go:497 +0xbb0\n",
+		// The runtime decorates a goroutine that has been blocked a while with
+		// its elapsed time. This header is copied from
+		// tui-stall-20261004-165809.txt, one of the 525 real dumps: an equality
+		// test against "[select]" read it as a wedge and would have killed an
+		// idle loop.
+		"goroutine 1 [select, 1 minutes]:\ngithub.com/FreePeak/xdev/internal/tui.(*App).Run(0x1400013e008)\n\t.../app.go:2854 +0x140\n",
 	}
 	wedged := []string{
 		// A loop parked in the tty write: only a kill ends this one.
@@ -31,6 +37,25 @@ func TestStackLooksStarvedOnRealDumpHeaders(t *testing.T) {
 	for _, s := range wedged {
 		if stackLooksStarved(s) {
 			t.Errorf("a wedged loop read as starved (it would never be exited):\n%s", s)
+		}
+	}
+}
+
+// The states are matched by PREFIX, so the three starved shapes stay distinct
+// however the runtime spells the decoration. A classifier loosened to a bare
+// "[" check would call every wedge starved and never exit a hung session; these
+// are the shapes that must still read as blocked.
+func TestStackLooksStarvedKeepsTheBlockedStatesApart(t *testing.T) {
+	blocked := []string{
+		"goroutine 1 [syscall, 17 minutes]:\nsyscall.write(...)\n",
+		"goroutine 1 [sync.Mutex.Lock, 2 minutes]:\nsync.(*Mutex).lockSlow(0x1)\n",
+		"goroutine 1 [chan send, 3 minutes]:\nchan.send(...)\n",
+		"goroutine 1 [IO wait]:\nruntime.netpollblock(...)\n",
+		"goroutine 1 [running]:\nmain.main()\n",
+	}
+	for _, s := range blocked {
+		if stackLooksStarved(s) {
+			t.Errorf("a blocked loop read as starved (it would never be exited):\n%s", s)
 		}
 	}
 }
