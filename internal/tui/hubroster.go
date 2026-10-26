@@ -42,6 +42,7 @@ type HubOps struct {
 	Kill       func(id string) bool
 	Park       func(id string) bool
 	Revive     func(id string) bool
+	Steer      func(id, text string) bool
 }
 
 // hubViewRows caps the transcript panel height (rows).
@@ -302,6 +303,17 @@ func (a *App) handleHubRosterKey(key *tcell.EventKey) (handled bool) {
 				ui.msg = "revived " + id
 			} else {
 				ui.msg = "revive: " + id + " is not parked"
+			}
+		case 's':
+			if len(ui.rows) == 0 {
+				return true
+			}
+			handled = true
+			id := ui.rows[ui.sel].ID
+			if ops.Steer != nil && ops.Steer(id, "") {
+				ui.msg = "steered " + id
+			} else {
+				ui.msg = "steer: " + id + " not running"
 			}
 		case 'p':
 			if len(ui.rows) == 0 {
@@ -601,7 +613,21 @@ func (a *App) drawHubRoster(yComposerTop int) {
 		}
 	}
 	hubRosterBox(s, y, h, wid, a.th.Box(), brdSt)
-	drawText(s, 3, y+1, rosterSnippet("Agent Hub · running 0 · idle 0 · parked 0 · aborted 0", printW(panelW, 3)), dimSt)
+		// Counts reflect the live roster, not a hardcoded zero.
+		running, idle, parked, aborted := 0, 0, 0, 0
+		for _, r := range ui.rows {
+			switch r.Status {
+			case "running":
+				running++
+			case "idle":
+				idle++
+			case "parked":
+				parked++
+			case "aborted":
+				aborted++
+			}
+		}
+		drawText(s, 3, y+1, rosterSnippet(fmt.Sprintf("Agent Hub · running %d · idle %d · parked %d · aborted %d", running, idle, parked, aborted), printW(panelW, 3)), dimSt)
 	for i, text := range texts {
 		rowStyle := rowSt
 		if i == sel {
@@ -668,7 +694,20 @@ func hubPanelWidth(w int, lines []HubTranscriptLine) int {
 }
 
 func hubAgentRow(mark string, r HubAgent) string {
-	return fmt.Sprintf("%s├── %s %s  %s", mark, theme.StatusGlyph(r.Status), r.ID, r.Model)
+	row := fmt.Sprintf("%s├── %s %s  %s", mark, theme.StatusGlyph(r.Status), r.ID, r.Model)
+	if r.Level != "" {
+		row += "  " + r.Level
+	}
+	if r.Tokens > 0 || r.Tools > 0 {
+		row += fmt.Sprintf("  ~%dk tok · %d tools", r.Tokens/1000, r.Tools)
+	}
+	if r.Elapsed > 0 {
+		row += "  " + r.Elapsed.Round(time.Second).String()
+	}
+	if r.Outcome != "" {
+		row += "  " + r.Outcome
+	}
+	return row
 }
 
 // rosterLine renders one transcript row: "role  text".

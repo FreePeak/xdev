@@ -4739,3 +4739,5 @@ Sources are the tool's own: `tool.TodoMarker`/`tool.RomanNumeral` are now export
 **Tests.** `internal/tui/todopanel_test.go` — active-phase expansion with following-phase collapse, retirement on a closed or dropped plan, the height-budget cut, and the on-screen position above the composer.
 
 *Last updated: 2026-10-24 (feat/todo-strip — the task list rides above the composer: omp's sticky-HUD shape, one phase expanded and the rest one line, retiring itself when nothing is open; PR #757)
+
+*Last updated: 2026-10-26 (feat/hub-deeper-orchestration — hub TUI roster now reads the hub's AgentRecords projection: status/outcome/kind/parent/level and tokens/requests/tools/cost/duration flow into rows; header counts are live; steer wired into HubOps and the roster (s key))*
