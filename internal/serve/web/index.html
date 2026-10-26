@@ -122,6 +122,10 @@ const conn = $("conn");
 let running = false;
 let lastID = "";
 let stream = null;
+// Whether the initial loadHistory() at boot has completed. The first
+// server.connected frame arrives after that load, so it must not trigger a
+// second one; every later connected frame is a reconnect that needs a resync.
+let booted = false;
 
 function auth(headers) {
   return Object.assign({ Authorization: "Bearer " + TOKEN }, headers || {});
@@ -299,7 +303,12 @@ function refreshState() {
 // --- transcript ------------------------------------------------------------
 
 function loadHistory() {
-  api("/history").then((doc) => {
+  // A reload re-derives the node map from the durable store, so any prompt id
+  // remembered from the previous (possibly dropped) stream is stale: tool
+  // results that arrive after the reload must not be routed into a node that
+  // no longer exists. Reset it here and let the next response frame repopulate.
+  lastID = "";
+  return api("/history").then((doc) => {
     transcript.innerHTML = "";
     nodes.clear();
     if (doc && doc.title) $("title").textContent = doc.title;
@@ -335,6 +344,15 @@ function connect() {
     conn.dataset.state = "live";
     conn.textContent = "live";
     showError("");
+    if (booted) {
+      // The stream came back (or the server restarted). The page may have
+      // missed frames while it was down; truth lives in the store, so
+      // re-read it instead of trusting whatever deltas did or did not arrive.
+      // This is what makes a dropped stream self-heal instead of needing a
+      // manual reload.
+      loadHistory();
+      refreshState();
+    }
   });
   stream.addEventListener("server.overflow", () => {
     conn.dataset.state = "lost";
@@ -482,7 +500,10 @@ promptBox.addEventListener("keydown", (e) => {
   }
 });
 
-loadHistory();
+// Mark the page as booted only once the initial transcript load has
+// resolved, so a server.connected frame arriving mid-boot does not trigger a
+// redundant reload (and a reconnect later does).
+loadHistory().then(() => { booted = true; });
 refreshState();
 connect();
 </script>
