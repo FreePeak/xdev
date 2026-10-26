@@ -4743,3 +4743,21 @@ Sources are the tool's own: `tool.TodoMarker`/`tool.RomanNumeral` are now export
 *Last updated: 2026-10-24 (feat/todo-strip — the task list rides above the composer: omp's sticky-HUD shape, one phase expanded and the rest one line, retiring itself when nothing is open; PR #757)
 
 *Last updated: 2026-10-26 (feat/hub-deeper-orchestration — hub TUI roster now reads the hub's AgentRecords projection: status/outcome/kind/parent/level and tokens/requests/tools/cost/duration flow into rows; header counts are live; steer wired into HubOps and the roster (s key))*
+
+## Auto-connect to the user's own Chrome profile (chrome-auto-connect)
+
+`browser.autoConnect` (opt-in, default off) and `browser.chromeProfileDir` let
+the `browser` tool attach to the default Chrome profile when the person enables
+remote debugging at `chrome://inspect/#remote-debugging` (Chrome 144+), the
+same path chrome-devtools-mcp calls `--autoConnect`. `internal/browser/autoconnect.go`
+reads `<profile>/DevToolsActivePort`, verifies the port with `/json/version`,
+and feeds the existing discovery base — no change to target listing or page
+driving. `xdev chrome connect|disconnect|status` manage the key. Auto-connect
+never launches a private browser on failure, never overrides an explicit
+`browser.cdpUrl`/`$XDEV_BROWSER_CDP_URL`, and reports stale ports and macOS TCC
+denials with actionable messages. Checks: `TestReadDevToolsActivePort`,
+`TestAutoConnectEndpointPrefersReachable`, `TestAutoConnectStalePortIsRejected`,
+`TestProbeAutoConnectUserEnabled`, `TestResolveEndpointAutoConnect`,
+`TestToolAutoConnectAttaches`, `TestToolAutoConnectUnreachableNamesInspect`,
+`TestBrowserAutoConnectLayer`.
+*Last updated: 2026-10-26 (feat/chrome-auto-connect — attach to the real Chrome profile via chrome://inspect/#remote-debugging, no extension or restart; `xdev chrome connect` turns it on)*

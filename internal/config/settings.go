@@ -2278,6 +2278,12 @@ func (s *Settings) merge(layer *Settings) error {
 	if layer.Browser.IdleExit != nil {
 		s.Browser.IdleExit = layer.Browser.IdleExit
 	}
+	if layer.Browser.AutoConnect != nil {
+		s.Browser.AutoConnect = layer.Browser.AutoConnect
+	}
+	if v := strings.TrimSpace(layer.Browser.ChromeProfileDir); v != "" {
+		s.Browser.ChromeProfileDir = v
+	}
 	if layer.Ask.Timeout != 0 {
 		s.Ask.Timeout = layer.Ask.Timeout
 	}

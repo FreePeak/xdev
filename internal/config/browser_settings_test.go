@@ -87,3 +87,25 @@ func TestBrowserSettingsRejectsBadEndpoint(t *testing.T) {
 		t.Fatalf("err = %v, want a browser.cdpUrl rejection", err)
 	}
 }
+
+func TestBrowserAutoConnectLayer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cwd := t.TempDir()
+	writeFile(t, GlobalSettingsPath(), "browser:\n  autoConnect: true\n  chromeProfileDir: /tmp/chrome\n")
+	s, err := LoadSettings(cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.BrowserConfig()
+	if !got.AutoConnectOn() {
+		t.Error("autoConnect should be on")
+	}
+	if got.ChromeProfileDir != "/tmp/chrome" {
+		t.Errorf("chromeProfileDir = %q", got.ChromeProfileDir)
+	}
+	// default stays off
+	var absent Settings
+	if absent.BrowserConfig().AutoConnectOn() {
+		t.Error("absent browser block must not auto-connect")
+	}
+}

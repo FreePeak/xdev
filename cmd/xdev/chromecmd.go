@@ -13,15 +13,20 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/FreePeak/xdev/internal/browser"
 	"github.com/FreePeak/xdev/internal/chromeext"
 	"github.com/FreePeak/xdev/internal/config"
+
+	"golang.org/x/term"
 )
 
 const chromeUsage = `xdev chrome — drive your real Chrome profile from the browser tool
 
   xdev chrome install     copy the extension, register the native host
   xdev chrome uninstall   remove native-host registration + data-dir copy
-  xdev chrome status      show install state
+  xdev chrome status      show install state (extension bridge + auto-connect)
+  xdev chrome connect     turn on auto-connect to your own Chrome (no extension)
+  xdev chrome disconnect  turn auto-connect off again
   xdev chrome host        run the native host in the foreground (Chrome launches this)
 
 After install:
@@ -51,6 +56,10 @@ func runChrome(args []string) int {
 		return chromeUninstall(args)
 	case "status":
 		return chromeStatus(args)
+	case "connect":
+		return chromeConnect(args)
+	case "disconnect":
+		return chromeDisconnect(args)
 	case "host":
 		return chromeHost(args)
 	case "help", "-h", "--help":
@@ -151,10 +160,161 @@ func chromeStatus(args []string) int {
 	fmt.Printf("native manifest:%s (%s)\n", st.NativeManifest, okStr(st.NativeOK))
 	if st.ExtensionOK && st.HostWrapperOK && st.NativeOK {
 		fmt.Println("status:         installed — load the unpacked extension if Chrome does not show it yet")
+	} else {
+		fmt.Println("status:         incomplete — run: xdev chrome install")
+	}
+
+	fmt.Println()
+	fmt.Println("auto-connect (browser.autoConnect):")
+	info := browser.ProbeAutoConnect(os.Getenv("XDEV_CHROME_PROFILE_DIR"))
+	fmt.Printf("  profile:        %s\n", info.Root)
+	if info.UserEnabled != nil {
+		fmt.Printf("  remote debug:   %v\n", *info.UserEnabled)
+	} else {
+		fmt.Printf("  remote debug:   unknown\n")
+	}
+	if info.Port > 0 {
+		status := "stale"
+		if info.Reachable {
+			status = "reachable"
+		}
+		fmt.Printf("  DevToolsPort:   %d (%s)\n", info.Port, status)
+	} else {
+		fmt.Printf("  DevToolsPort:   (none)\n")
+	}
+	if info.Err != "" && !info.Reachable {
+		fmt.Printf("  detail:         %s\n", info.Err)
+	}
+	if st.ExtensionOK && st.HostWrapperOK && st.NativeOK {
 		return 0
 	}
-	fmt.Println("status:         incomplete — run: xdev chrome install")
 	return 1
+}
+
+func chromeConnect(args []string) int {
+	fs := flag.NewFlagSet("chrome connect", flag.ContinueOnError)
+	off := fs.Bool("off", false, "turn auto-connect off instead of on")
+	noWrite := fs.Bool("no-write", false, "report state only; do not edit config")
+	asJSON := fs.Bool("json", false, "print JSON")
+	profile := fs.String("profile", "", "Chrome profile directory to examine (default: per-OS Chrome)")
+	noOpen := fs.Bool("no-open", false, "do not open chrome://inspect")
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "usage: xdev chrome connect [--off] [--profile DIR] [--json] [--no-write] [--no-open]\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	path := config.GlobalSettingsPath()
+	if *profile != "" {
+		abs, err := filepath.Abs(*profile)
+		if err == nil {
+			*profile = abs
+		}
+		os.Setenv("XDEV_CHROME_PROFILE_DIR", *profile)
+	}
+	if *off {
+		if !*noWrite {
+			if err := config.DeleteKey(path, "browser.autoConnect"); err != nil {
+				fmt.Fprintf(os.Stderr, "xdev chrome connect: %v\n", err)
+				return 1
+			}
+		}
+		info := browser.ProbeAutoConnect(*profile)
+		printChromeConnect(info, false, *asJSON, *noWrite)
+		return connectExitCode(info, false)
+	}
+	if *profile != "" && !*noWrite {
+		if err := config.Set(path, "browser.chromeProfileDir", *profile); err != nil {
+			fmt.Fprintf(os.Stderr, "xdev chrome connect: %v\n", err)
+			return 1
+		}
+	}
+	if !*noWrite {
+		if err := config.Set(path, "browser.autoConnect", "true"); err != nil {
+			fmt.Fprintf(os.Stderr, "xdev chrome connect: %v\n", err)
+			return 1
+		}
+	}
+	info := browser.ProbeAutoConnect(*profile)
+	printChromeConnect(info, true, *asJSON, *noWrite)
+	if !info.Ready() && !*noWrite && !*noOpen && stdoutIsTTY() {
+		_ = openURL(browser.InspectURL)
+	}
+	return connectExitCode(info, true)
+}
+
+func chromeDisconnect(args []string) int {
+	fs := flag.NewFlagSet("chrome disconnect", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print JSON")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, "usage: xdev chrome disconnect [--json]\n") }
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	path := config.GlobalSettingsPath()
+	if err := config.DeleteKey(path, "browser.autoConnect"); err != nil {
+		fmt.Fprintf(os.Stderr, "xdev chrome disconnect: %v\n", err)
+		return 1
+	}
+	fmt.Println("xdev chrome: auto-connect turned off (browser.autoConnect removed from " + path + ")")
+	if *asJSON {
+		fmt.Println(`{"autoConnect":false}`)
+	}
+	return 0
+}
+
+func connectExitCode(info browser.AutoConnectInfo, on bool) int {
+	if on && info.Ready() {
+		return 0
+	}
+	if !on {
+		return 0
+	}
+	return 1
+}
+
+func printChromeConnect(info browser.AutoConnectInfo, on, asJSON, noWrite bool) {
+	if asJSON {
+		b, _ := json.Marshal(info)
+		// embed the requested on/off state alongside the probe
+		fmt.Printf("{\"autoConnect\":%t,\"noWrite\":%t,\"probe\":%s}\n", on, noWrite, string(b))
+		return
+	}
+	state := "off"
+	if on {
+		state = "on"
+	}
+	fmt.Printf("auto-connect:    %s\n", state)
+	fmt.Printf("chrome profile:  %s\n", info.Root)
+	if info.UserEnabled != nil {
+		fmt.Printf("remote debugging: %v\n", *info.UserEnabled)
+	} else {
+		fmt.Printf("remote debugging: unknown (Local State unreadable or Chrome too old)\n")
+	}
+	if info.Port > 0 {
+		status := "stale (Chrome not answering)"
+		if info.Reachable {
+			status = "reachable"
+		}
+		fmt.Printf("DevToolsActivePort: %d (%s)\n", info.Port, status)
+		fmt.Printf("endpoint:        %s\n", info.Endpoint)
+	} else {
+		fmt.Printf("DevToolsActivePort: (none)\n")
+	}
+	if info.Err != "" && !info.Reachable {
+		fmt.Printf("detail:          %s\n", info.Err)
+	}
+	if on && !info.Ready() {
+		fmt.Println("\nNext:")
+		fmt.Println("  1. Open " + browser.InspectURL + " in Chrome 144+")
+		fmt.Println("  2. Enable remote debugging and allow xdev's connection prompt")
+		fmt.Println("  3. Keep Chrome running; xdev attaches on the next browser call")
+	} else if on && info.Ready() {
+		fmt.Println("\nReady: xdev will attach to your real Chrome profile on the next browser call.")
+	}
+}
+
+func stdoutIsTTY() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 func chromeHost(args []string) int {
