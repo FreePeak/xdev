@@ -23,6 +23,47 @@ func TestSessionsStripNoRowsWithoutChildren(t *testing.T) {
 	}
 }
 
+func TestSessionsStripNeverStarvesTheTranscript(t *testing.T) {
+	// Six children on a ten-row terminal: the fixed cap would claim every row
+	// below the composer and leave the stream nothing. The strip must retire
+	// instead, and whatever it does claim must leave the transcript its floor.
+	for _, h := range []int{10, 12, 14, 16, 20, 24, 40} {
+		app, _ := newTestApp(t, 80, h)
+		app.AddUserBlock("hello")
+		app.AddToolBlock("c1", taskToolName, `{"description":"scan"}`)
+		for i := 0; i < 6; i++ {
+			app.AddTaskChild("c1", "scan", "scout", "")
+		}
+		app.mu.Lock()
+		strip := app.sessionsListRows()
+		vp := app.viewportLinesLocked()
+		app.mu.Unlock()
+		if strip > sessionsListMaxRows {
+			t.Fatalf("h=%d: strip = %d rows, above the cap %d", h, strip, sessionsListMaxRows)
+		}
+		if strip > 0 && vp < transcriptFloorRows {
+			t.Fatalf("h=%d: strip takes %d rows and leaves the transcript %d (floor %d)",
+				h, strip, vp, transcriptFloorRows)
+		}
+	}
+}
+
+func TestSessionsStripKeepsTheCapOnATallTerminal(t *testing.T) {
+	app, _ := newTestApp(t, 80, 40)
+	app.AddUserBlock("hello")
+	app.AddToolBlock("c1", taskToolName, `{"description":"scan"}`)
+	for i := 0; i < 9; i++ {
+		app.AddTaskChild("c1", "scan", "scout", "")
+	}
+	app.mu.Lock()
+	strip := app.sessionsListRows()
+	app.mu.Unlock()
+	if strip != sessionsListMaxRows {
+		t.Fatalf("strip = %d on a 40-row terminal with 9 children, want the cap %d",
+			strip, sessionsListMaxRows)
+	}
+}
+
 func TestSessionsStripDoesNotOverlapTranscript(t *testing.T) {
 	app, _ := newTestApp(t, 80, 24)
 	app.AddUserBlock("hello")
