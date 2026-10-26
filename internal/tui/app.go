@@ -4406,10 +4406,12 @@ func (a *App) totalLinesLocked() int {
 
 func (a *App) viewportLinesLocked() int {
 	// session strip (transcript only) + scrollback + blank + composer (grows
-	// with the draft) + status row + the sessions strip below it. The strip is
-	// subtracted here, not only at paint time, or the transcript's last row
-	// would sit under it and the two surfaces would overlap.
-	return a.height - a.composerRows() - 2 - a.transcriptTop() - a.sessionsListRows()
+	// with the draft) + status row + the sessions strip below it + the todo
+	// strip above the composer. Every one of them is chrome over the stream,
+	// and each is subtracted here rather than only at paint time — otherwise
+	// the transcript's last rows sit under the surface that covers them.
+	return a.height - a.composerRows() - 2 - a.transcriptTop() -
+		a.sessionsListRows() - a.todoPanelRows()
 }
 
 // contentWidth is the scrollback text width (pad removed), and with the
@@ -5370,7 +5372,7 @@ func (a *App) paint() {
 	// under them.
 	top := a.transcriptTop()
 	cRows := a.composerRows()
-	vp := h - cRows - 2 - top - a.sessionsListRows()
+	vp := h - cRows - 2 - top - a.sessionsListRows() - a.todoPanelRows()
 	if vp < 1 {
 		vp = 1
 	}

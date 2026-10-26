@@ -281,6 +281,12 @@ func roman(n int) string { return tool.RomanNumeral(n) }
 
 // todoPanelRows is the strip's height in rows, 0 when it paints nothing.
 // Caller holds a.mu.
+//
+// It is the whole row budget the strip claims from the transcript — see
+// viewportLinesLocked, which subtracts exactly this. A strip that painted rows
+// the viewport already owns is the bug this number exists to prevent: measured
+// on a 24-row terminal with a three-task plan, the transcript's last rows sat
+// under the TODO header and its task rows.
 func (a *App) todoPanelRows() int {
 	if a.dock == nil || a.dock.ops.Todo == nil || a.width < todoStripMinW {
 		return 0
@@ -288,15 +294,14 @@ func (a *App) todoPanelRows() int {
 	return len(todoStripLines(a.dock.ops.Todo(), todoStripVisible(a.height)))
 }
 
-// todoPanelTop is the first screen row the strip occupies: above the subagent
-// strip and the queue, inside the main pane so the dock's columns stay the
-// panel's. It never rises into the session strip's row. Caller holds a.mu.
+// todoPanelTop is the first screen row the strip occupies: directly above the
+// queue and the composer, inside the main pane so the dock's columns stay the
+// panel's. It never rises into the session strip's row, and never into the
+// transcript: the rows it claims are rows the transcript no longer has.
+//
+// Caller holds a.mu.
 func (a *App) todoPanelTop(agentTop int) int {
-	y := agentTop - a.todoPanelRows()
-	if y < a.transcriptTop() {
-		return a.transcriptTop()
-	}
-	return y
+	return max(agentTop-a.todoPanelRows(), a.transcriptTop())
 }
 
 // drawTodoPanel paints the task strip and its progress.

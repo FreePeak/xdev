@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -143,7 +144,7 @@ func TestTodoStripPaintsAboveTheComposer(t *testing.T) {
 	// It is CHROME: above the composer's top border, and above the queue.
 	app.mu.Lock()
 	composerTop := app.height - 1 - app.composerRows()
-	want := app.todoPanelTop(app.queueTop(composerTop))
+	want := app.todoPanelTop(app.queueTop(composerTop - app.sessionsListRows()))
 	rows := app.todoPanelRows()
 	app.mu.Unlock()
 	if rows == 0 {
@@ -162,6 +163,82 @@ func TestTodoStripPaintsAboveTheComposer(t *testing.T) {
 	app.draw()
 	if s := screenText(scr); strings.Contains(s, "TODO ·") {
 		t.Fatalf("a closed plan must retire the strip:\n%s", s)
+	}
+}
+
+// The strip is chrome ABOVE the composer, and the transcript's viewport has to
+// end where the strip begins. It did not: viewportLinesLocked() subtracted the
+// sessions strip and the composer but not the todo strip, so on a 24-row
+// terminal with a three-task plan the transcript's last rows painted under
+// "TODO · 1/3" and its task rows — the "it covers my content" report, on the
+// one surface that had never claimed its rows.
+func TestTodoStripDoesNotOverlapTheTranscript(t *testing.T) {
+	for _, h := range []int{12, 14, 16, 20, 24, 30, 40} {
+		app, _ := newTestApp(t, 100, h)
+		app.SetDockMode(DockShow)
+		app.AddUserBlock("a prompt")
+		app.SetDockOps(DockOps{
+			Session: func() (string, string) { return "s", "sess" },
+			Todo: func() []tool.TodoPhase {
+				return []tool.TodoPhase{
+					{Name: "one", Tasks: []tool.TodoItem{
+						{Content: "alpha", Status: tool.TodoCompleted},
+						{Content: "beta", Status: tool.TodoInProgress},
+						{Content: "gamma", Status: tool.TodoPending},
+					}},
+					{Name: "two", Tasks: []tool.TodoItem{{Content: "delta", Status: tool.TodoPending}}},
+				}
+			},
+		})
+
+		app.mu.Lock()
+		top, vp, tr := app.transcriptTop(), app.viewportLinesLocked(), app.todoPanelRows()
+		composerTop := app.height - 1 - app.composerRows() - app.sessionsListRows()
+		todoTop := app.todoPanelTop(app.queueTop(composerTop))
+		app.mu.Unlock()
+
+		if tr == 0 {
+			t.Fatalf("h=%d: the strip paints nothing, so this case measures nothing", h)
+		}
+		// The viewport's last row must be strictly above the strip's first.
+		if last := top + vp - 1; last >= todoTop {
+			t.Fatalf("h=%d: transcript runs to row %d and the todo strip starts at %d (vp=%d todo=%d)",
+				h, last, todoTop, vp, tr)
+		}
+	}
+}
+
+// The same contract at the paint, not only in the arithmetic: the frame's rows
+// between the transcript's top and its last viewport row may not carry a TODO
+// row. A body that clamps the numbers but paints from a stale y would pass the
+// test above and still cover the stream.
+func TestTodoStripPaintsBelowTheTranscript(t *testing.T) {
+	app, scr := newTestApp(t, 100, 24)
+	app.SetDockMode(DockShow)
+	for i := range 40 {
+		app.AddUserBlock(fmt.Sprintf("prompt %d", i))
+	}
+	app.SetDockOps(DockOps{
+		Session: func() (string, string) { return "s", "sess" },
+		Todo: func() []tool.TodoPhase {
+			return []tool.TodoPhase{{Name: "one", Tasks: []tool.TodoItem{
+				{Content: "alpha", Status: tool.TodoInProgress},
+			}}}
+		},
+	})
+	app.draw()
+
+	app.mu.Lock()
+	top, vp := app.transcriptTop(), app.viewportLinesLocked()
+	app.mu.Unlock()
+	lines := strings.Split(screenText(scr), "\n")
+	for y := top; y < top+vp && y < len(lines); y++ {
+		if strings.Contains(lines[y], "TODO ·") {
+			t.Fatalf("the TODO header painted on transcript row %d:\n%s", y, strings.Join(lines, "\n"))
+		}
+	}
+	if !strings.Contains(screenText(scr), "TODO ·") {
+		t.Fatal("the strip is not on screen at all")
 	}
 }
 
