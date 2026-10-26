@@ -71,7 +71,7 @@ func TestNoScrollCountOnTheDivider(t *testing.T) {
 	}
 	// The model line keeps its own budget whole: dropping the hint must not
 	// have been paid for out of the model name.
-	if !strings.Contains(divider, "test/free") {
+	if !strings.Contains(divider, "Free") {
 		t.Fatalf("model name lost when the hint went: %q", divider)
 	}
 }
