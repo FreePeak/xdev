@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -6089,9 +6090,12 @@ func (a *App) drawComposer(yTop int) {
 		a.scr.SetContent(x, yBottom, boxRune(box.Horizontal), nil, divSt)
 	}
 	const infoX = 3
+	// The model is already its own name (modelDisplay), so the last thing
+	// short of dropping it is an ellipsis: a row too narrow for the whole name
+	// still says WHICH model, and the level beside it keeps its cells.
 	for i := range parts {
 		if parts[i].name == "model" && infoX+infoW > w-2 {
-			parts[i].text = modelLeaf(parts[i].text)
+			parts[i].text = truncateCells(parts[i].text, max(8, w-2-infoX-2), "…")
 			infoW = measure(parts)
 		}
 	}
@@ -6726,9 +6730,9 @@ func (a *App) thinkingToken() string {
 // a switch happened — the badge is the part that must survive the cut.
 func (a *App) dividerModel() string {
 	if a.st.ServedBy == "" {
-		return a.st.Model
+		return modelDisplay(a.st.Model)
 	}
-	return modelSwitchBadge + modelLeaf(a.st.ServedBy)
+	return modelSwitchBadge + modelDisplay(a.st.ServedBy)
 }
 
 // dividerModelToken paints the model segment: the serving leg wears the
@@ -6843,16 +6847,34 @@ func pathDisplay(cwd string, maxW int) string {
 	return truncateCells(cwd, maxW, "…")
 }
 
-// modelLeaf is a model id's own name, without the "provider/" prefix
-// ("onegw/opencode/space-bunny-free" → "space-bunny-free"). The prefix is a
-// routing detail: /model shows the whole id, and the composer divider on a
-// narrow row has cells for the name or for nothing. An id that is only a
-// name already comes back unchanged.
-func modelLeaf(id string) string {
-	if i := strings.LastIndex(id, "/"); i >= 0 && i < len(id)-1 {
-		return id[i+1:]
+// modelDisplay is a model id the way the chrome reads it: the id's own name,
+// with "-" and "_" as word breaks and each word's first letter raised
+// ("onegw/opencode/deepseek-v4.1-flash" → "Deepseek V4.1 Flash"). The
+// provider prefixes are routing detail /model already shows in full, and a raw
+// dash-and-dot id in the divider reads as a path rather than as a name. Only
+// the first letter is raised — nothing is lowered — so an id that is already a
+// name keeps its capitals ("gpt-5" → "Gpt 5", "GPT-5" → "GPT 5").
+func modelDisplay(id string) string {
+	name := id
+	if i := strings.LastIndex(name, "/"); i >= 0 && i < len(name)-1 {
+		name = name[i+1:]
 	}
-	return id
+	var b strings.Builder
+	b.Grow(len(name))
+	wordStart := true
+	for _, r := range name {
+		if r == '-' || r == '_' {
+			b.WriteRune(' ')
+			wordStart = true
+			continue
+		}
+		if wordStart {
+			r = unicode.ToUpper(r)
+			wordStart = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // boxRune is the first rune of a themed box glyph ("" = a space).

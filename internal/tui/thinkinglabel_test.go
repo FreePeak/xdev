@@ -42,7 +42,7 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 	app.AddSystemBlock("level set")
 	app.draw()
 	div := dividerRow(t, scr)
-	if !strings.Contains(div, "test/free · auto") {
+	if !strings.Contains(div, "Free · auto") {
 		t.Fatalf("divider %q must carry the model and the level together", div)
 	}
 	// The word is the command, not the label: "model · thinking auto" answered
@@ -57,7 +57,7 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.draw()
-	if div = dividerRow(t, scr); !strings.Contains(div, "test/free · high") {
+	if div = dividerRow(t, scr); !strings.Contains(div, "Free · high") {
 		t.Fatalf("divider %q did not follow the flip", div)
 	}
 	// …and off is a level, not the absence of one.
@@ -65,16 +65,17 @@ func TestThinkingLevelRidesTheComposerDivider(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.draw()
-	if div = dividerRow(t, scr); !strings.Contains(div, "test/free · off") {
+	if div = dividerRow(t, scr); !strings.Contains(div, "Free · off") {
 		t.Fatalf("divider %q must show off as a level", div)
 	}
 }
 
-// TestNarrowDividerKeepsTheModelLeaf pins the divider's degradation: the
-// model is the one part that shortens instead of leaving, because its
-// "provider/" prefix is routing the /model menu already shows — on a narrow
-// row the name is worth the level beside it.
-func TestNarrowDividerKeepsTheModelLeaf(t *testing.T) {
+// TestNarrowDividerKeepsTheModelName pins the divider's degradation: the model
+// is the one part that shortens instead of leaving, because the name beside a
+// level is what the row is for. Every width reads the same name — the
+// provider prefixes are routing the /model menu shows in full — so a narrow
+// row cuts the NAME, never the prefixes off a raw id.
+func TestNarrowDividerKeepsTheModelName(t *testing.T) {
 	app, scr := newTestApp(t, 40, 24)
 	app.AddSystemBlock("ready")
 	level := "high"
@@ -83,19 +84,19 @@ func TestNarrowDividerKeepsTheModelLeaf(t *testing.T) {
 	app.draw()
 	div := dividerRow(t, scr)
 	if strings.Contains(div, "onegw") {
-		t.Fatalf("a narrow row must drop the provider prefix: %q", div)
+		t.Fatalf("the provider prefix is not part of the model's name: %q", div)
 	}
-	if !strings.Contains(div, "space-bunny-free · high") {
-		t.Fatalf("the leaf name must buy the level its cells: %q", div)
+	if !strings.Contains(div, "Space Bunny Free · high") {
+		t.Fatalf("the name must buy the level its cells: %q", div)
 	}
 
-	// Wide enough for the whole id: the prefix is not a permanent omission.
-	app2, scr2 := newTestApp(t, 100, 24)
-	app2.AddSystemBlock("ready")
-	app2.SetStatusModel("onegw/opencode/space-bunny-free")
-	app2.draw()
-	if d := dividerRow(t, scr2); !strings.Contains(d, "onegw/opencode/space-bunny-free") {
-		t.Fatalf("a wide row must keep the whole model id: %q", d)
+	// A name too long for the row is ellipsised, not dropped: the level keeps
+	// its cells and the row still says which model.
+	long, scrLong := newTestApp(t, 40, 24)
+	long.SetStatusModel("onegw/" + strings.Repeat("very-long-", 6) + "model")
+	long.draw()
+	if d := dividerRow(t, scrLong); !strings.Contains(d, "…") || !strings.Contains(d, "Very Long") {
+		t.Fatalf("an overlong name must be ellipsised, got %q", d)
 	}
 }
 
@@ -125,7 +126,7 @@ func TestThinkingLevelRidesTheDockFooter(t *testing.T) {
 	f, ok := app.dockFooter()
 	rows := dockLines(f.rows)
 	app.mu.Unlock()
-	if !ok || !strings.Contains(rows, "test/free · medium") {
+	if !ok || !strings.Contains(rows, "Free · medium") {
 		t.Fatalf("footer rows = %q ok=%v", rows, ok)
 	}
 	// Under the branch, over the build: what the session is, then which build.
@@ -142,7 +143,7 @@ func TestDockFooterSeesAFlipOnTheNextFrame(t *testing.T) {
 	level := "auto"
 	app.SetThinkingOps(thinkWired(&level))
 	app.draw()
-	if !strings.Contains(screenText(scr), "test/free · auto") {
+	if !strings.Contains(screenText(scr), "Free · auto") {
 		t.Fatal("the drawn panel must already carry the request")
 	}
 
@@ -150,10 +151,10 @@ func TestDockFooterSeesAFlipOnTheNextFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.draw()
-	if !strings.Contains(screenText(scr), "test/free · low") {
+	if !strings.Contains(screenText(scr), "Free · low") {
 		t.Fatal("the panel did not repaint with the new level")
 	}
-	if !strings.Contains(dividerRow(t, scr), "test/free · low") {
+	if !strings.Contains(dividerRow(t, scr), "Free · low") {
 		t.Fatal("the divider did not repaint with the new level")
 	}
 }

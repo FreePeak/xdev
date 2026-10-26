@@ -164,7 +164,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	app.draw()
 
 	text := screenText(scr)
-	for _, want := range []string{"groknight", "test/free", "ctx 100k/200k", "↑50k │ ↓50k", "$0.0123"} {
+	for _, want := range []string{"groknight", "Free", "ctx 100k/200k", "↑50k │ ↓50k", "$0.0123"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("configured segment %q missing:\n%s", want, text)
 		}
@@ -172,7 +172,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	// Order is the configured order, left to right on the row.
 	row := lastRow(text)
 	at := -1
-	for _, seg := range []string{"groknight", "test/free", "ctx 100k/200k", "↑50k", "$0.0123"} {
+	for _, seg := range []string{"groknight", "Free", "ctx 100k/200k", "↑50k", "$0.0123"} {
 		i := strings.Index(row, seg)
 		if i < 0 || i < at {
 			t.Fatalf("segment %q out of order in %q", seg, row)
@@ -200,7 +200,7 @@ func TestHUDConfiguredSegments(t *testing.T) {
 	if strings.Contains(text, "hologram") {
 		t.Fatalf("unknown segment rendered:\n%s", text)
 	}
-	if !strings.Contains(text, "test/free") {
+	if !strings.Contains(text, "Free") {
 		t.Fatalf("known segment dropped with the unknown one:\n%s", text)
 	}
 	// A segment whose data is not wired hides instead of drawing an empty
@@ -340,7 +340,7 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 	app.st.spinnerIdx = 0
 	app.mu.Unlock()
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "X · test/free") {
+	if text := screenText(scr); !strings.Contains(text, "X · Free") {
 		t.Fatalf("theme frame 0 not drawn ahead of the model:\n%s", text)
 	}
 
@@ -348,7 +348,7 @@ func TestSpinnerFramesFromTheme(t *testing.T) {
 	app.st.spinnerIdx = 1
 	app.mu.Unlock()
 	app.draw()
-	if text := screenText(scr); !strings.Contains(text, "Y · test/free") {
+	if text := screenText(scr); !strings.Contains(text, "Y · Free") {
 		t.Fatalf("theme frame 1 not drawn ahead of the model:\n%s", text)
 	}
 }
@@ -461,7 +461,7 @@ func TestComposerIsBoxed(t *testing.T) {
 	if !strings.Contains(text, "❯ hello there") {
 		t.Fatalf("draft row is not framed by the prompt:\n%s", text)
 	}
-	if !strings.Contains(text, "test/free") {
+	if !strings.Contains(text, "Free") {
 		t.Fatalf("model name left the divider:\n%s", text)
 	}
 	// The composer is a boxed field: rounded corners frame the draft.
@@ -1287,7 +1287,7 @@ func TestNoTopBarAndBranchOnTheStatusRow(t *testing.T) {
 			t.Fatalf("a spinner frame leaked onto %s: %q", where.what, where.ln)
 		}
 	}
-	if !strings.Contains(text, "X · some-model") {
+	if !strings.Contains(text, "X · Some Model") {
 		t.Fatalf("the spinner belongs in the divider, not on a chrome row:\n%s", text)
 	}
 }

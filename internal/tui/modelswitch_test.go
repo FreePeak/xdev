@@ -15,8 +15,8 @@ func TestDividerShowsTheServingLeg(t *testing.T) {
 	app, scr := newTestApp(t, 100, 24)
 	app.AddSystemBlock("ready")
 	app.draw()
-	if div := dividerRow(t, scr); !strings.Contains(div, "test/free") {
-		t.Fatalf("divider %q must carry the pinned model before any switch", div)
+	if div := dividerRow(t, scr); !strings.Contains(div, "Free") {
+		t.Fatalf("divider %q must carry the model's own name before any switch", div)
 	}
 
 	app.SetServedBy("opencode-free/big-pickle")
@@ -25,10 +25,10 @@ func TestDividerShowsTheServingLeg(t *testing.T) {
 	if !strings.Contains(div, modelSwitchBadge) {
 		t.Fatalf("divider %q must badge a switched turn", div)
 	}
-	if !strings.Contains(div, "big-pickle") {
+	if !strings.Contains(div, "Big Pickle") {
 		t.Fatalf("divider %q must name the serving leg", div)
 	}
-	if strings.Contains(div, "test/free") {
+	if strings.Contains(div, "Free") {
 		t.Fatalf("divider %q still claims the pinned model answered", div)
 	}
 
@@ -36,7 +36,7 @@ func TestDividerShowsTheServingLeg(t *testing.T) {
 	// pinned reading: a divergence that no longer exists must not be painted.
 	app.SetServedBy("")
 	app.draw()
-	if div := dividerRow(t, scr); strings.Contains(div, modelSwitchBadge) || !strings.Contains(div, "test/free") {
+	if div := dividerRow(t, scr); strings.Contains(div, modelSwitchBadge) || !strings.Contains(div, "Free") {
 		t.Fatalf("divider %q must go back to the pinned model", div)
 	}
 }

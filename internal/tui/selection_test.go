@@ -112,12 +112,12 @@ func TestSelectionCoversRowsOutsideTheTranscript(t *testing.T) {
 	app.AddSystemBlock("copy me please")
 	app.draw()
 
-	y, x := rowWith(t, scr, "test/free")
+	y, x := rowWith(t, scr, "Free")
 	app.mu.Lock()
-	drag(app, x, y, x+len("test/free")-1, y)
+	drag(app, x, y, x+len("Free")-1, y)
 	app.mu.Unlock()
 
-	if got := string(scr.GetClipboardData()); !strings.Contains(got, "test/free") {
+	if got := string(scr.GetClipboardData()); !strings.Contains(got, "Free") {
 		t.Fatalf("clipboard = %q, want the divider's model name", got)
 	}
 }
@@ -263,7 +263,7 @@ func TestCopyConfirmationIsAToast(t *testing.T) {
 	if ty != 0 {
 		t.Fatalf("copy confirmation on row %d, want the top corner (row 0)", ty)
 	}
-	if line := rowContaining(scr, "Copied 7 chars"); strings.Contains(line, "test/free") {
+	if line := rowContaining(scr, "Copied 7 chars"); strings.Contains(line, "Free") {
 		t.Fatalf("confirmation row = %q, want it off the model's divider", line)
 	}
 
@@ -418,7 +418,7 @@ func TestOffThreadToastIsACornerNoticeAndExpires(t *testing.T) {
 	app.draw()
 	app.draw()
 
-	if line := rowContaining(scr, msg); line == "" || strings.Contains(line, "test/free") {
+	if line := rowContaining(scr, msg); line == "" || strings.Contains(line, "Free") {
 		t.Fatalf("notice row = %q, want it in the top-right corner, not on the divider", line)
 	}
 

@@ -25,11 +25,11 @@ func TestToastPaintsInTheCornerAndOffTheComposer(t *testing.T) {
 	if !strings.Contains(rows[0], "playwright unavailable") {
 		t.Fatalf("row 0 = %q, want the toast in the corner of the first transcript row", rows[0])
 	}
-	if strings.Contains(rows[0], "test/free") {
+	if strings.Contains(rows[0], "Free") {
 		t.Fatalf("row 0 = %q, want the toast clear of the composer's divider", rows[0])
 	}
 	for i, ln := range rows {
-		if strings.Contains(ln, "playwright") && strings.Contains(ln, "test/free") {
+		if strings.Contains(ln, "playwright") && strings.Contains(ln, "Free") {
 			t.Fatalf("row %d = %q, the toast must never share the divider", i, ln)
 		}
 	}

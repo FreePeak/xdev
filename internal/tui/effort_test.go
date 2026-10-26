@@ -119,7 +119,7 @@ func TestDividerDropsADuplicateEffortRung(t *testing.T) {
 	app.SetEffortOps(effortWired(&effort))
 	app.draw()
 	div := dividerRow(t, scr)
-	if !strings.Contains(div, "test/free · high") {
+	if !strings.Contains(div, "Free · high") {
 		t.Fatalf("divider %q must still carry the shared rung once", div)
 	}
 	if strings.Count(div, "high") != 1 {
@@ -129,7 +129,7 @@ func TestDividerDropsADuplicateEffortRung(t *testing.T) {
 
 // TestDividerFoldsTheTwoDialsIntoOneRung is the case #614 left open: with
 // `thinking: high` pinned AND `effort: max`, the divider painted
-// "test/free · high · max" — two rungs of the same ladder on one request.
+// "Free · high · max" — two rungs of the same ladder on one request.
 // One request has one reasoning posture, so the higher rung wins and the
 // lower word is gone.
 func TestDividerFoldsTheTwoDialsIntoOneRung(t *testing.T) {
@@ -141,7 +141,7 @@ func TestDividerFoldsTheTwoDialsIntoOneRung(t *testing.T) {
 	app.SetEffortOps(effortWired(&effort))
 	app.draw()
 	div := dividerRow(t, scr)
-	if !strings.Contains(div, "test/free · max") {
+	if !strings.Contains(div, "Free · max") {
 		t.Fatalf("divider %q must carry the higher rung once", div)
 	}
 	if strings.Count(div, "high") != 0 || strings.Count(div, "·") != 1 {
@@ -154,7 +154,7 @@ func TestDividerFoldsTheTwoDialsIntoOneRung(t *testing.T) {
 	effort = "low"
 	app.draw()
 	div = dividerRow(t, scr)
-	if div != "test/free · high" && !strings.Contains(div, "test/free · high") {
+	if div != "Free · high" && !strings.Contains(div, "Free · high") {
 		t.Fatalf("divider %q must keep only the higher rung", div)
 	}
 	if strings.Contains(div, "low") {
