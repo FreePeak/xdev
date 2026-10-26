@@ -1406,13 +1406,24 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			// OVER a child transcript its own ops could read — a click that opens
 			// the right rows under the title "nothing is running".
 			Roster: func() []tui.HubAgent {
-				rows := append(sessionHub.Roster(), sessionHub.Foreground()...)
-				out := make([]tui.HubAgent, len(rows))
-				for i, r := range rows {
-					// hub.AgentRecords() carries Tokens/Level/Requests/Tools/Elapsed/ParentID/Kind/Outcome — see internal/agent/hub.go:170
+				recs := sessionHub.AgentRecords()
+				out := make([]tui.HubAgent, len(recs))
+				for i, r := range recs {
 					out[i] = tui.HubAgent{
-						ID: r.ID, Name: r.Name, Status: r.Status, Model: r.Model,
-						Activity: r.Activity, Cost: hubCostLabel(r),
+						ID:       r.ID,
+						Name:     r.Name,
+						Status:   string(r.Status),
+						Model:    r.Model,
+						Level:    r.Level,
+						Activity: r.Activity,
+						ParentID: r.ParentID,
+						Kind:     string(r.Kind),
+						Outcome:  string(r.Outcome),
+						Tokens:   r.Metrics.Tokens,
+						Requests: r.Metrics.Requests,
+						Tools:    r.Metrics.Tools,
+						Elapsed:  r.Metrics.Duration,
+						Cost:     hubCostLabel(r),
 					}
 				}
 				return out
@@ -1431,6 +1442,7 @@ func runTUI(opts printOptions, themeName string) (exitCode int, err error) {
 			Park:   sessionHub.Park,
 			Kill:   sessionHub.Cancel,
 			Revive: func(id string) bool { return sessionHub.Revive(id, "") == nil },
+			Steer:  func(id, text string) bool { return sessionHub.Send(id, text) == nil },
 		})
 		// F1: assert single hub identity — the task tool and the session hub
 		// must share one *agent.Hub, otherwise Transcript(id) resolves to
@@ -4598,12 +4610,12 @@ func emitSwitchEvents(bus switchEmitter, before bool, to, title string) {
 
 // hubCostLabel renders the roster's cost column: USD when the provider
 // priced the run, otherwise a token estimate, otherwise "-".
-func hubCostLabel(r agent.RosterEntry) string {
-	if r.Cost > 0 {
-		return fmt.Sprintf("$%.4f", r.Cost)
+func hubCostLabel(r agent.AgentRecord) string {
+	if r.Metrics.Cost > 0 {
+		return fmt.Sprintf("$%.4f", r.Metrics.Cost)
 	}
-	if r.Tokens > 0 {
-		return fmt.Sprintf("~%.1fk tok", float64(r.Tokens)/1000)
+	if r.Metrics.Tokens > 0 {
+		return fmt.Sprintf("~%.1fk tok", float64(r.Metrics.Tokens)/1000)
 	}
 	return "-"
 }
