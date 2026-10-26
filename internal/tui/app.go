@@ -153,8 +153,11 @@ type App struct {
 	mu              sync.Mutex
 	blocks          []*Block
 	subagentRunning int
-	sm              scrollModel // transcript viewport (offset/follow), see scroll.go
-	ed              Editor
+	// sessionsSel is the sessions strip's cursor: 0 is the main session, 1..n
+	// the child rows in spawn order. ↑/↓ walk it.
+	sessionsSel int
+	sm          scrollModel // transcript viewport (offset/follow), see scroll.go
+	ed          Editor
 	// escDraft is the prompt the last Esc took out of the composer and
 	// escUsed says that exact text has already been given back: the ladder is
 	// clear → restore → clear → open the selector, so repeated Esc always
@@ -4129,6 +4132,17 @@ func (a *App) handleKey(ev tcell.Event) {
 	// Up recalls the previous prompt whether or not the box is empty);
 	// scrolling stays on Shift+arrow, PgUp/PgDn and the mouse wheel.
 	if !running && strings.TrimSpace(a.ed.Text()) == "" && !menuOpen && !a.ed.HasHistory() {
+		// The sessions strip below the status row takes the arrows first when
+		// it owns rows: it is a list the arrows walk into, and only a session
+		// with a child has one, so a session that never spawned one still
+		// scrolls the transcript on the same keys.
+		a.mu.Lock()
+		walked := a.sessionsListKey(key.Key())
+		a.mu.Unlock()
+		if walked {
+			a.poke()
+			return
+		}
 		switch key.Key() {
 		case tcell.KeyUp:
 			a.scroll(1, false)
@@ -4392,8 +4406,10 @@ func (a *App) totalLinesLocked() int {
 
 func (a *App) viewportLinesLocked() int {
 	// session strip (transcript only) + scrollback + blank + composer (grows
-	// with the draft) + status row.
-	return a.height - a.composerRows() - 2 - a.transcriptTop()
+	// with the draft) + status row + the sessions strip below it. The strip is
+	// subtracted here, not only at paint time, or the transcript's last row
+	// would sit under it and the two surfaces would overlap.
+	return a.height - a.composerRows() - 2 - a.transcriptTop() - a.sessionsListRows()
 }
 
 // contentWidth is the scrollback text width (pad removed), and with the
@@ -5266,7 +5282,7 @@ func (a *App) markComposerDirty() {
 	rows := a.sessionsListRows()
 	top := a.height - 1 - a.composerRows()
 	if rows > 0 {
-		top -= rows + 1
+		top -= rows
 	}
 	for y := max(top-1, 0); y < min(a.height-1, bh); y++ {
 		for x := range cols {
@@ -5331,10 +5347,8 @@ func (a *App) paint() {
 		a.drawComposer(composerTop)
 		statusRow := composerTop + a.composerRows()
 		a.drawStatusRow(statusRow)
-		if a.tabStripVisible() {
-			if r := a.sessionsListRows(); r > 0 {
-				a.drawSessionsList(statusRow+1, r)
-			}
+		if r := a.sessionsListRows(); r > 0 {
+			a.drawSessionsList(statusRow+1, r)
 		}
 		a.drawStatusPopup()
 		// A gesture made before the first block exists — the composer is the
@@ -5351,10 +5365,12 @@ func (a *App) paint() {
 	// Grok layout: scrollback, blank row, composer box (grows with the
 	// draft's wrapped line count), status row at the bottom. The transcript
 	// viewport starts at transcriptTop(), which is 0 unless the session
-	// strip claims a row.
+	// strip claims a row. The sessions strip below the status row is
+	// subtracted here too: it owns its rows, so the transcript must not paint
+	// under them.
 	top := a.transcriptTop()
 	cRows := a.composerRows()
-	vp := h - cRows - 2 - top
+	vp := h - cRows - 2 - top - a.sessionsListRows()
 	if vp < 1 {
 		vp = 1
 	}
@@ -5606,10 +5622,8 @@ func (a *App) paint() {
 	a.drawComposer(composerTop)
 	statusRow := composerTop + cRows
 	a.drawStatusRow(statusRow)
-	if a.tabStripVisible() {
-		if r := a.sessionsListRows(); r > 0 {
-			a.drawSessionsList(statusRow+1, r)
-		}
+	if r := a.sessionsListRows(); r > 0 {
+		a.drawSessionsList(statusRow+1, r)
 	}
 	// The pill popup paints after the status row (it is anchored to it) and
 	// before the selection highlight, so a drag that ends over the panel does
@@ -6163,51 +6177,6 @@ func (a *App) drawStatusRow(y int) {
 	// run, so they claim the space first: the location is what shrinks.
 	end := a.drawStatusLocation(y, w-2-hudEssentialWidth(parts)-1)
 	a.drawHUD(y, w, end, parts)
-}
-
-// sessionsListRows is the number of rows the sessions strip below the status
-// line occupies: one header + one row per open session, capped so a long
-// session list cannot eat the transcript.
-func (a *App) sessionsListRows() int {
-	n := len(a.tabs)
-	if n == 0 {
-		return 0
-	}
-	if n > 6 {
-		n = 6
-	}
-	return n + 1
-}
-
-// drawSessionsList paints the main + subagent sessions below the status row.
-// Caller holds a.mu.
-func (a *App) drawSessionsList(y, rows int) {
-	_ = a.rightEdge()
-	st := tcell.StyleDefault.Foreground(a.cellColor(a.th.Get(theme.GrayDim)))
-	drawText(a.scr, 0, y, " Sessions (main + subagents):", st)
-	rr := y + 1
-	for _, t := range a.tabs {
-		if rr >= y+rows {
-			break
-		}
-		label := t.ID
-		if t.Title != "" {
-			label = t.Title
-		}
-		status := "idle"
-		if t.Running {
-			status = "running"
-		}
-		if t.Current {
-			status = "active"
-		}
-		line := fmt.Sprintf("   %-12s %-9s", label, status)
-		drawText(a.scr, 0, rr, line, st)
-		rr++
-	}
-	if len(a.tabs) == 0 {
-		drawText(a.scr, 0, rr, "   (no open sessions)", st)
-	}
 }
 
 // statusLocation is the left side of the status row within budget cells: the
