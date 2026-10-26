@@ -7,8 +7,12 @@ import (
 )
 
 // sessionsListMaxRows caps the strip so a long list cannot eat the transcript.
-// The focused window keeps the rest of the screen.
 const sessionsListMaxRows = 6
+
+// transcriptFloorRows is the transcript's own floor: the strip is chrome over
+// the stream, so it retires rather than leave the reader with a screen of
+// session names and nothing they said. Two rows is a prompt and its answer.
+const transcriptFloorRows = 2
 
 // childrenLocked is every subagent child the session is tracking, in spawn
 // order: running and settled alike, because a settled child's transcript is
@@ -28,15 +32,23 @@ func (a *App) childrenLocked() []*SubActivity {
 // sessionsListRows is the rows the strip below the status line owns: one for
 // the focused main session, then one per child. Zero when the session never
 // spawned a child — a list of nothing is a line the transcript needed.
+//
+// The cap is MIN(the fixed maximum, the rows the screen can spare), so one
+// arithmetic answers both "a long list must not eat the transcript" and "a
+// short terminal must keep one". On a terminal with no room the strip retires
+// entirely rather than starve the stream it sits under — the same budget
+// viewportLinesLocked() subtracts, so the cap cannot re-introduce the overlap
+// this strip was fixed for.
 func (a *App) sessionsListRows() int {
-	n := len(a.childrenLocked()) + 1
-	if n > sessionsListMaxRows {
-		n = sessionsListMaxRows
-	}
-	if len(a.childrenLocked()) == 0 {
+	kids := len(a.childrenLocked())
+	if kids == 0 {
 		return 0
 	}
-	return n
+	n := min(kids+1, sessionsListMaxRows)
+	// What the screen keeps once the composer, the blank row above it, the
+	// session strip at row 0 and the transcript's own floor are paid for.
+	spare := a.height - a.composerRows() - 2 - a.transcriptTop() - transcriptFloorRows
+	return max(0, min(n, spare))
 }
 
 // drawSessionsList paints the sessions strip below the status row: the focused
