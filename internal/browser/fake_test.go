@@ -52,6 +52,7 @@ func newFakeCDP(t *testing.T, handler cdpHandler) *fakeCDP {
 	f := &fakeCDP{t: t, handler: handler, hangs: map[string]bool{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/json/list", f.serveList)
+	mux.HandleFunc("/json/version", f.serveVersion)
 	mux.HandleFunc("/devtools/page/", f.serveWS)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -154,6 +155,13 @@ func (f *fakeCDP) serveList(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(pages); err != nil {
 		f.t.Errorf("fake cdp: list encode: %v", err)
 	}
+}
+
+// serveVersion makes the fake endpoint look like a Chrome DevTools HTTP
+// server, so auto-connect probes (which check /json/version) accept it.
+func (f *fakeCDP) serveVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"Browser":"Chrome/155.0","Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://localhost/devtools/browser/test"}`))
 }
 
 func (f *fakeCDP) serveWS(w http.ResponseWriter, r *http.Request) {

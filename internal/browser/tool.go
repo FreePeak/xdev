@@ -90,6 +90,17 @@ type Settings struct {
 	// --user-data-dir a launched browser gets. It is not a config key:
 	// empty means the tool never launches one.
 	ProfileDir string `yaml:"-"`
+	// AutoConnect, when set, attaches to the user's own Chrome profile when
+	// Chrome has remote debugging enabled (chrome://inspect/#remote-debugging).
+	// It is opt-in: the real profile carries the user's logins and cookies,
+	// so xdev never silently attaches to it. When on, xdev does not launch
+	// its own browser — it either attaches or reports how to enable it.
+	AutoConnect *bool `yaml:"autoConnect"`
+	// ChromeProfileDir is the Chrome profile directory auto-connect examines.
+	// Empty means the per-OS default profile (macOS ~/Library/Application
+	// Support/Google/Chrome, etc.); set it for Chrome Beta or a custom data
+	// dir. It is not the launched browser's profile (that is ProfileDir).
+	ChromeProfileDir string `yaml:"chromeProfileDir"`
 }
 
 // idleExitDefault is how long a launched browser stays up with no browser op
@@ -100,6 +111,13 @@ const idleExitDefault = 300 // five minutes
 // is on, so only an explicit `autolaunch: false` turns it off.
 func (s Settings) AutolaunchOn() bool {
 	return s.Autolaunch == nil || *s.Autolaunch
+}
+
+// AutoConnectOn reports whether xdev should attach to the user's own Chrome
+// profile when Chrome has remote debugging enabled. Off unless a layer
+// explicitly opts in — the real profile carries the user's logins.
+func (s Settings) AutoConnectOn() bool {
+	return s.AutoConnect != nil && *s.AutoConnect
 }
 
 // IdleTimeoutOn is how long a launched browser sits idle before it is closed.
@@ -588,7 +606,11 @@ func (t *Tool) ensure(ctx context.Context, name string) (*tab, error) {
 		claimed[other.targetID] = n
 	}
 	endpoint := t.endpoint()
+	auto := t.autoConnect()
 	targets, err := ListTargets(ctx, endpoint, t.autolaunch())
+	if err != nil && auto {
+		return nil, autoConnectErr(t.Cfg.ChromeProfileDir, err)
+	}
 	if err != nil && t.autolaunch() && t.launchErr == nil && ctx.Err() == nil {
 		// Nothing is listening: start a browser on the endpoint, remember
 		// that xdev owns it, and retry once. A launch that fails is
@@ -615,6 +637,9 @@ func (t *Tool) ensure(ctx context.Context, name string) (*tab, error) {
 	}
 	c, err := dialCDP(ctx, tgt.WebSocketDebuggerURL)
 	if err != nil {
+		if auto {
+			return nil, autoConnectDialErr(err)
+		}
 		return nil, err
 	}
 	tb := &tab{name: name, targetID: tgt.ID, url: tgt.URL, title: tgt.Title, c: c}
@@ -623,7 +648,27 @@ func (t *Tool) ensure(ctx context.Context, name string) (*tab, error) {
 }
 
 // endpoint resolves the discovery base for this tool.
-func (t *Tool) endpoint() string { return resolveEndpoint(t.Cfg.CDPURL) }
+func (t *Tool) endpoint() string {
+	return resolveEndpoint(t.Cfg.CDPURL, t.autoConnect(), t.Cfg.ChromeProfileDir)
+}
+
+// autoConnect reports whether this tool is trying the user's own Chrome
+// profile instead of (or before) the configured endpoint. It is true only
+// when the key is explicitly on AND the caller gave no endpoint of their own
+// — an explicit cdpUrl or $XDEV_BROWSER_CDP_URL is a deliberate choice and
+// wins.
+func (t *Tool) autoConnect() bool {
+	if !t.Cfg.AutoConnectOn() {
+		return false
+	}
+	if strings.TrimSpace(t.Cfg.CDPURL) != "" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv(envEndpoint)) != "" {
+		return false
+	}
+	return true
+}
 
 // opTimeout resolves the per-op limit: the call's timeout argument, else the
 // configured browser.timeout, else 30s — clamped to 1..300s.
@@ -908,7 +953,12 @@ func isControl(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }
 // autolaunch reports whether this tool may start a browser itself: an
 // explicit browser.autolaunch: false, or no profile dir to launch one with,
 // means attach-only and the unreachable-endpoint error names starting Chrome
-// by hand.
+// by hand. Auto-connect mode never launches: it promises the person's own
+// profile, and a private headless browser would answer with a logged-out
+// stranger.
 func (t *Tool) autolaunch() bool {
+	if t.autoConnect() {
+		return false
+	}
 	return t.Cfg.AutolaunchOn() && t.ProfileDir != ""
 }
