@@ -74,7 +74,7 @@ func TestTheGithubToolDeclaresItsReadOnlyOps(t *testing.T) {
 	for _, o := range ops {
 		read[o] = true
 	}
-	for _, o := range []string{"repo_view", "file_read", "search_issues", "search_prs", "search_code", "search_commits", "search_repos"} {
+	for _, o := range []string{"repo_view", "file_read", "pr_list", "search_issues", "search_prs", "search_code", "search_commits", "search_repos"} {
 		if !read[o] {
 			t.Errorf("github op %q is a read but is not declared read-only", o)
 		}
